@@ -377,3 +377,158 @@ export class ClaudeUnknownEventItem extends ContextItem {
         }
     }
 }
+
+// ─── Orchestration control events (Mozaik-native Conductor) ─────────
+//
+// These items model orchestration control flow as bus events. The
+// Conductor is a pure event-driven state machine — `onContextItem`
+// is the only entry point, no `run()` method, no `await Promise.all`,
+// no `envRef`. Other participants can observe or even drive the run
+// by emitting these items.
+
+/** Emitted to start a run. Anyone can fire this; Conductor reacts. */
+export class RunStartRequestItem extends ContextItem {
+    readonly type = "run_start_request"
+    constructor(public readonly reason: string = "user request") {
+        super()
+    }
+    toJSON(): unknown {
+        return { type: this.type, reason: this.reason }
+    }
+}
+
+/** Conductor emits this once the PRD is loaded and ready. */
+export class RunStartedItem extends ContextItem {
+    readonly type = "run_started"
+    constructor(
+        public readonly project: string,
+        public readonly storyCount: number,
+    ) {
+        super()
+    }
+    toJSON(): unknown {
+        return { type: this.type, project: this.project, storyCount: this.storyCount }
+    }
+}
+
+/**
+ * Emitted by Conductor to request the next level be computed and
+ * launched. Internally a self-tick — keeps run() out of the picture.
+ */
+export class LevelComputeRequestItem extends ContextItem {
+    readonly type = "level_compute_request"
+    constructor(public readonly reason: string) {
+        super()
+    }
+    toJSON(): unknown {
+        return { type: this.type, reason: this.reason }
+    }
+}
+
+/** Emitted when a new level is starting. Story factories react to this. */
+export class LevelStartedItem extends ContextItem {
+    readonly type = "level_started"
+    constructor(
+        public readonly ordinal: number,
+        public readonly totalLevelsHint: number,
+        public readonly storyIds: readonly string[],
+    ) {
+        super()
+    }
+    toJSON(): unknown {
+        return {
+            type: this.type,
+            ordinal: this.ordinal,
+            totalLevelsHint: this.totalLevelsHint,
+            storyIds: this.storyIds,
+        }
+    }
+}
+
+/** Emitted when all stories in a level have completed (passed or failed). */
+export class LevelCompletedItem extends ContextItem {
+    readonly type = "level_completed"
+    constructor(
+        public readonly ordinal: number,
+        public readonly passed: readonly string[],
+        public readonly failed: readonly string[],
+    ) {
+        super()
+    }
+    toJSON(): unknown {
+        return {
+            type: this.type,
+            ordinal: this.ordinal,
+            passed: this.passed,
+            failed: this.failed,
+        }
+    }
+}
+
+/**
+ * Conductor emits this to ask a story factory participant to spawn a
+ * StoryAgent for `storyId`. The factory builds the agent and joins it
+ * to the bus. Conductor never imports StoryAgent directly.
+ */
+export class StorySpawnRequestItem extends ContextItem {
+    readonly type = "story_spawn_request"
+    constructor(
+        public readonly storyId: string,
+        public readonly prompt: string,
+        public readonly model: string,
+        public readonly retries: number,
+        public readonly timeoutSecs: number,
+    ) {
+        super()
+    }
+    toJSON(): unknown {
+        return {
+            type: this.type,
+            storyId: this.storyId,
+            promptLen: this.prompt.length,
+            model: this.model,
+            retries: this.retries,
+            timeoutSecs: this.timeoutSecs,
+        }
+    }
+}
+
+/** Factory emits this once a StoryAgent has joined the bus and started. */
+export class StorySpawnedItem extends ContextItem {
+    readonly type = "story_spawned"
+    constructor(public readonly storyId: string) {
+        super()
+    }
+    toJSON(): unknown {
+        return { type: this.type, storyId: this.storyId }
+    }
+}
+
+/**
+ * Final terminal event for a run. Conductor emits this when the loop
+ * exits — either all DAG levels drained or a level aborted.
+ */
+export class RunCompletedItem extends ContextItem {
+    readonly type = "run_completed"
+    constructor(
+        public readonly success: boolean,
+        public readonly completedStories: readonly string[],
+        public readonly failedStories: readonly string[],
+        public readonly totalDurationSecs: number,
+        public readonly totalAttempts: number,
+        public readonly abortReason: string | null = null,
+    ) {
+        super()
+    }
+    toJSON(): unknown {
+        return {
+            type: this.type,
+            success: this.success,
+            completedStories: this.completedStories,
+            failedStories: this.failedStories,
+            totalDurationSecs: this.totalDurationSecs,
+            totalAttempts: this.totalAttempts,
+            abortReason: this.abortReason,
+        }
+    }
+}

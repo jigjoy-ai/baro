@@ -37,8 +37,44 @@ import {
 import { tmpdir } from "os"
 import { join } from "path"
 
+import { ContextItem, Participant } from "@mozaik-ai/core"
+
 import { orchestrate } from "../src/orchestrate.js"
 import type { PrdFile } from "../src/main.js"
+import { ClaudeStreamChunkItem } from "../src/types.js"
+
+// Live logger: prints every bus event to stderr as it happens, so you
+// can see what each participant is doing in real time.
+class LiveLogger extends Participant {
+    constructor(private readonly label: string) {
+        super()
+    }
+    async onContextItem(source: Participant, item: ContextItem): Promise<void> {
+        // Skip token-by-token streaming chunks (too noisy)
+        if (item instanceof ClaudeStreamChunkItem) return
+
+        const sourceName = source.constructor.name
+        const agentId = (source as unknown as { agentId?: string }).agentId
+        const sourceLabel = agentId ? `${sourceName}:${agentId}` : sourceName
+
+        const itemJson = item.toJSON() as Record<string, unknown>
+        const itemType = (itemJson.type as string) ?? item.constructor.name
+
+        // Extract a short summary of interesting fields
+        const interesting: string[] = []
+        for (const k of ["storyId", "status", "decision", "reason", "level", "outcome", "removed", "added"]) {
+            const v = itemJson[k]
+            if (v !== undefined && v !== null) {
+                const s = typeof v === "string" ? v : JSON.stringify(v)
+                interesting.push(`${k}=${s.length > 60 ? s.slice(0, 57) + "..." : s}`)
+            }
+        }
+        const summary = interesting.length > 0 ? "  " + interesting.join(" ") : ""
+
+        const ts = new Date().toLocaleTimeString("en-GB")
+        process.stderr.write(`  [${this.label} ${ts}] ${sourceLabel} → ${itemType}${summary}\n`)
+    }
+}
 
 function git(cwd: string, args: string[]): string {
     return execFileSync("git", args, { cwd, encoding: "utf8" })
@@ -205,6 +241,7 @@ async function runPass(
         // not about Opus's planning skill.
         surgeonUseLlm: false,
         auditLogPath: auditLog,
+        extraParticipants: [new LiveLogger(label)],
     })
     const elapsed = Math.round((Date.now() - startedAt) / 1000)
     const files = checkFiles(cwd)

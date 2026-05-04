@@ -1,11 +1,39 @@
 /**
- * Conductor — top-level orchestrator participant. Reads a PRD, builds a
- * DAG, releases stories level by level (respecting `parallel` cap),
- * persists PRD updates as stories pass, emits run-level state events.
+ * Conductor — Mozaik-native event-driven orchestrator.
  *
- * This is the baro-specific glue: knows about PRD format, story IDs,
- * stories-as-DAG-nodes, and the on-disk prd.json. The participants it
- * spawns (StoryAgent → ClaudeCliParticipant) remain library-grade.
+ * No `run()` method. No `await Promise.all`. No imperative `while` loop.
+ * Conductor is a pure state machine: it observes bus events via
+ * `onContextItem` and emits orchestration events back. The Mozaik
+ * runtime drives the loop; Conductor just transitions state.
+ *
+ * State machine:
+ *
+ *   ┌──────────┐    RunStartRequest    ┌───────────┐
+ *   │   idle   │ ────────────────────► │ launching │
+ *   └──────────┘                       └─────┬─────┘
+ *                                            │ emit RunStartedItem
+ *                                            │ emit LevelComputeRequestItem
+ *                                            ▼
+ *                                      ┌───────────┐
+ *                       LevelComputeReq│ computing │
+ *                                ┌──────┤   level   │
+ *                                │      └─────┬─────┘
+ *                                │            │ buildDag → next level
+ *                                │            │ emit LevelStartedItem
+ *                                │            │ emit StorySpawnRequestItem* (for each story)
+ *                                │            ▼
+ *                                │      ┌───────────┐
+ *                                │      │  running  │ ←── StoryResultItem
+ *                                │      │   level   │     (one per story in level)
+ *                                │      └─────┬─────┘
+ *                                │            │ all stories in level done
+ *                                │            │ emit LevelCompletedItem
+ *                                │            │ apply pending replans
+ *                                │            │ emit LevelComputeRequestItem
+ *                                └────────────┘
+ *
+ *   When buildDag returns 0 levels → emit RunCompletedItem.
+ *   When a level has all-failed-no-replan → emit RunCompletedItem(success=false).
  */
 
 import { existsSync, readFileSync } from "fs"
@@ -26,59 +54,33 @@ import {
     markStoryPassed,
     savePrd,
 } from "../prd.js"
-import { ReplanItem } from "../types.js"
-import { StoryAgent, StoryOutcome } from "./story-agent.js"
+import {
+    LevelCompletedItem,
+    LevelComputeRequestItem,
+    LevelStartedItem,
+    ReplanItem,
+    RunCompletedItem,
+    RunStartRequestItem,
+    RunStartedItem,
+    StorySpawnRequestItem,
+} from "../types.js"
+import { StoryResultItem } from "./story-agent.js"
 
 export interface ConductorOptions {
-    /** Path to prd.json (read + write). */
     prdPath: string
-    /** Working directory passed to each story's Claude. */
     cwd: string
-    /** Max stories running concurrently within a level. 0 = unlimited. */
     parallel?: number
-    /** Per-story timeout in seconds. Default: 600. */
     timeoutSecs?: number
-    /** Override model for every story (ignores per-story PRD model). */
     overrideModel?: string
-    /** Default model when neither overrideModel nor PRD model is set. */
     defaultModel?: string
-    /**
-     * Optional CLAUDE.md / context content to prepend to the system
-     * prompt. Currently ignored at the orchestrator level since Claude
-     * CLI auto-loads CLAUDE.md from the cwd; passing it through is left
-     * for a future enhancement.
-     */
-    contextContent?: string
-    /** Optional path-builder for per-story prompt template overrides. */
     promptTemplatePath?: string
-    /**
-     * Optional callback fired after each story passes. Used by callers
-     * to tack on side-effects like git push or file-stat capture.
-     * Errors thrown here become non-fatal warnings.
-     */
     onStoryPassed?: (storyId: string) => Promise<void> | void
-    /**
-     * Optional callback fired before any story runs (after PRD load).
-     * Useful for setting up git branches.
-     */
     onRunStart?: (prd: PrdFile) => Promise<void> | void
-    /**
-     * Optional callback fired immediately before each story's
-     * StoryAgent is launched. Returns extra context (e.g. cross-agent
-     * findings from Librarian) to prepend to the story's prompt.
-     * Returning `null`/`undefined` leaves the prompt unchanged.
-     */
     onBeforeStoryLaunch?: (
         storyId: string,
         story: PrdStory,
     ) => Promise<string | null | undefined> | string | null | undefined
-    /**
-     * Optional callback fired after the entire run completes
-     * (regardless of success).
-     */
-    onRunComplete?: (
-        summary: ConductorRunSummary,
-    ) => Promise<void> | void
+    onRunComplete?: (summary: ConductorRunSummary) => Promise<void> | void
 }
 
 export interface ConductorRunSummary {
@@ -92,7 +94,12 @@ export class ConductorStateItem extends ContextItem {
     readonly type = "conductor_state"
 
     constructor(
-        public readonly phase: "loading" | "running_level" | "level_complete" | "done" | "failed",
+        public readonly phase:
+            | "loading"
+            | "running_level"
+            | "level_complete"
+            | "done"
+            | "failed",
         public readonly detail?: string,
         public readonly currentLevel?: number,
         public readonly totalLevels?: number,
@@ -113,6 +120,18 @@ export class ConductorStateItem extends ContextItem {
     }
 }
 
+type ConductorPhase = "idle" | "launching" | "computing" | "running" | "done"
+
+interface RunningLevelState {
+    ordinal: number
+    totalLevelsHint: number
+    storyIds: string[]
+    pending: Set<string>
+    passed: string[]
+    failed: string[]
+    perStoryAttempts: Map<string, number>
+}
+
 export class Conductor extends Participant {
     private readonly opts: Required<
         Pick<ConductorOptions, "parallel" | "timeoutSecs" | "defaultModel">
@@ -120,14 +139,30 @@ export class Conductor extends Participant {
         ConductorOptions
 
     private envRef: AgenticEnvironment | null = null
+    private phase: ConductorPhase = "idle"
+    private prd: PrdFile | null = null
+    private startedAt = 0
 
-    /**
-     * ReplanItem-s emitted while a level is in flight are buffered here
-     * and applied at the next level boundary. Mid-level mutation would
-     * leave running StoryAgents orphaned; level boundaries are the safe
-     * apply points.
-     */
+    /** All stories that have ever passed in this run. */
+    private readonly globalCompleted: string[] = []
+    /** All stories that have failed terminally (after retries) in this run. */
+    private readonly globalFailed: string[] = []
+    private totalAttempts = 0
+    private appliedReplans = 0
+
+    private currentLevel: RunningLevelState | null = null
+
+    /** ReplanItem-s emitted during a level. Applied at level boundary. */
     private readonly pendingReplans: ReplanItem[] = []
+
+    /** Stories that are queued to spawn but not yet launched (parallel cap). */
+    private readonly spawnQueue: PrdStory[] = []
+    /** Stories currently in flight in the active level. */
+    private readonly inFlight: Set<string> = new Set()
+
+    /** Resolved when the run terminates, exposed for callers that need it. */
+    public readonly done: Promise<ConductorRunSummary>
+    private resolveDone!: (summary: ConductorRunSummary) => void
 
     constructor(opts: ConductorOptions) {
         super()
@@ -137,269 +172,189 @@ export class Conductor extends Participant {
             defaultModel: "sonnet",
             ...opts,
         }
+        this.done = new Promise<ConductorRunSummary>((resolve) => {
+            this.resolveDone = resolve
+        })
     }
 
-    async onContextItem(_source: Participant, item: ContextItem): Promise<void> {
-        if (item instanceof ReplanItem) {
-            this.pendingReplans.push(item)
-        }
-    }
-
-    async run(environment: AgenticEnvironment): Promise<ConductorRunSummary> {
-        this.envRef = environment
-
-        let prd = loadPrd(this.opts.prdPath)
-        this.emit(new ConductorStateItem("loading", `${prd.userStories.length} stories`))
-
-        if (this.opts.onRunStart) {
-            try {
-                await this.opts.onRunStart(prd)
-            } catch (e) {
-                this.emit(
-                    new ConductorStateItem(
-                        "failed",
-                        `onRunStart hook failed: ${(e as Error)?.message ?? String(e)}`,
-                    ),
-                )
-                throw e
-            }
-        }
-
-        // Adaptive DAG: each iteration of the while-loop computes the
-        // remaining-incomplete DAG fresh from the PRD, runs the next
-        // level, then applies any ReplanItem-s buffered during that
-        // level. ReplanItem applications happen at level boundaries so
-        // running StoryAgents are never orphaned.
-        const completed: string[] = []
-        const failed: string[] = []
-        const startedAt = Date.now()
-        let totalAttempts = 0
-        let levelOrdinal = 0
-        let abortedReason: string | null = null
-        let appliedReplans = 0
-
-        while (true) {
-            const levels = buildDag(prd.userStories, { onlyIncomplete: true })
-            if (levels.length === 0) break
-
-            const level = levels[0]
-            levelOrdinal += 1
-            const totalLevelsHint = levelOrdinal + levels.length - 1
-            this.emit(
-                new ConductorStateItem(
-                    "running_level",
-                    undefined,
-                    levelOrdinal,
-                    totalLevelsHint,
-                    level.storyIds,
-                ),
-            )
-
-            const outcomes = await this.runLevel(prd, level.storyIds)
-            for (const outcome of outcomes) {
-                totalAttempts += outcome.attempts
-                if (outcome.success) {
-                    completed.push(outcome.storyId)
-                    prd = markStoryPassed(prd, outcome.storyId, outcome.durationSecs)
-                    savePrd(this.opts.prdPath, prd)
-                    if (this.opts.onStoryPassed) {
-                        try {
-                            await this.opts.onStoryPassed(outcome.storyId)
-                        } catch (e) {
-                            this.emit(
-                                new ConductorStateItem(
-                                    "running_level",
-                                    `onStoryPassed hook for ${outcome.storyId} failed: ${(e as Error)?.message ?? String(e)}`,
-                                    levelOrdinal,
-                                    totalLevelsHint,
-                                ),
-                            )
-                        }
-                    }
-                } else {
-                    failed.push(outcome.storyId)
-                }
-            }
-
-            this.emit(
-                new ConductorStateItem(
-                    "level_complete",
-                    `passed ${outcomes.filter((o) => o.success).length}/${outcomes.length}`,
-                    levelOrdinal,
-                    totalLevelsHint,
-                    level.storyIds,
-                ),
-            )
-
-            // Apply ReplanItem-s buffered during this level (Phase 4).
-            // PRD is mutated, persisted, and the next loop iteration
-            // recomputes the DAG from the updated PRD.
-            if (this.pendingReplans.length > 0) {
-                const drained = this.pendingReplans.splice(0)
-                for (const replan of drained) {
-                    prd = this.applyReplan(prd, replan)
-                    appliedReplans += 1
-                    this.emit(
-                        new ConductorStateItem(
-                            "running_level",
-                            `replan applied (source=${replan.source}, +${replan.addedStories.length}/-${replan.removedStoryIds.length}): ${replan.reason}`,
-                            levelOrdinal,
-                        ),
-                    )
-                }
-                savePrd(this.opts.prdPath, prd)
-            }
-
-            // If every story in the level failed terminally AND no replan
-            // mutated the plan in response, abort the remaining levels.
-            const anySuccess = outcomes.some((o) => o.success)
-            const replannedThisLevel = appliedReplans > 0
-            if (!anySuccess && outcomes.length > 0 && !replannedThisLevel) {
-                abortedReason =
-                    "all stories in level failed; aborting remaining levels"
-                this.emit(
-                    new ConductorStateItem(
-                        "failed",
-                        abortedReason,
-                        levelOrdinal,
-                        totalLevelsHint,
-                    ),
-                )
-                break
-            }
-        }
-
-        const totalDurationSecs = Math.round((Date.now() - startedAt) / 1000)
-        const phase = failed.length === 0 ? "done" : "failed"
-        this.emit(
-            new ConductorStateItem(
-                phase,
-                `${completed.length} passed, ${failed.length} failed in ${totalDurationSecs}s`,
-            ),
-        )
-
-        const summary: ConductorRunSummary = {
-            completedStories: completed,
-            failedStories: failed,
-            totalDurationSecs,
-            totalAttempts,
-        }
-
-        if (this.opts.onRunComplete) {
-            try {
-                await this.opts.onRunComplete(summary)
-            } catch (e) {
-                this.emit(
-                    new ConductorStateItem(
-                        "failed",
-                        `onRunComplete hook failed: ${(e as Error)?.message ?? String(e)}`,
-                    ),
-                )
-            }
-        }
-
-        return summary
+    setEnvironment(env: AgenticEnvironment): void {
+        this.envRef = env
     }
 
     /**
-     * Apply a ReplanItem to the in-memory PrdFile (returns a new copy):
-     *   - removes stories whose ids are in `removedStoryIds`, *unless*
-     *     they have already passed (we don't roll back commit work);
-     *   - adds new stories from `addedStories`, skipping ids that already
-     *     exist (replans are idempotent on accidental duplicates);
-     *   - rewrites `dependsOn` for stories in `modifiedDeps`.
+     * Single entry point. All state transitions happen here.
      *
-     * This method is pure: persistence is the caller's responsibility.
+     * Note: the Mozaik bus delivers items to every subscriber, INCLUDING
+     * the source. We rely on this — the Conductor self-ticks via
+     * LevelComputeRequestItem, so blocking self-delivery would break the
+     * state machine. Per-item type guards distinguish "from outside"
+     * (RunStartRequestItem from Operator, ReplanItem from Surgeon,
+     * StoryResultItem from StoryAgent) from "from self" (LevelCompute).
      */
-    private applyReplan(prd: PrdFile, replan: ReplanItem): PrdFile {
-        let stories = prd.userStories.slice()
-
-        if (replan.removedStoryIds.length > 0) {
-            const removeSet = new Set(replan.removedStoryIds)
-            stories = stories.filter((s) => !removeSet.has(s.id) || s.passes)
+    async onContextItem(_source: Participant, item: ContextItem): Promise<void> {
+        if (item instanceof RunStartRequestItem) {
+            await this.handleRunStart()
+            return
         }
 
-        if (replan.modifiedDeps.size > 0) {
-            stories = stories.map((s) => {
-                const newDeps = replan.modifiedDeps.get(s.id)
-                if (!newDeps) return s
-                return { ...s, dependsOn: [...newDeps] }
-            })
+        if (item instanceof LevelComputeRequestItem) {
+            await this.handleLevelCompute()
+            return
         }
 
-        if (replan.addedStories.length > 0) {
-            const existing = new Set(stories.map((s) => s.id))
-            for (const a of replan.addedStories) {
-                if (existing.has(a.id)) continue
-                stories.push({
-                    id: a.id,
-                    priority: a.priority,
-                    title: a.title,
-                    description: a.description,
-                    dependsOn: [...a.dependsOn],
-                    retries: a.retries ?? 2,
-                    acceptance: a.acceptance ? [...a.acceptance] : [],
-                    tests: a.tests ? [...a.tests] : [],
-                    passes: false,
-                    completedAt: null,
-                    durationSecs: null,
-                    model: a.model,
-                })
+        if (item instanceof StoryResultItem) {
+            await this.handleStoryResult(item)
+            return
+        }
+
+        if (item instanceof ReplanItem) {
+            this.pendingReplans.push(item)
+            return
+        }
+    }
+
+    private async handleRunStart(): Promise<void> {
+        if (this.phase !== "idle") return
+        this.phase = "launching"
+        this.startedAt = Date.now()
+
+        this.prd = loadPrd(this.opts.prdPath)
+        this.emit(
+            new ConductorStateItem(
+                "loading",
+                `${this.prd.userStories.length} stories`,
+            ),
+        )
+
+        if (this.opts.onRunStart) {
+            try {
+                await this.opts.onRunStart(this.prd)
+            } catch (e) {
+                this.terminateRun(
+                    false,
+                    `onRunStart hook failed: ${(e as Error)?.message ?? String(e)}`,
+                )
+                return
             }
         }
 
-        return { ...prd, userStories: stories }
+        this.emit(
+            new RunStartedItem(this.prd.project, this.prd.userStories.length),
+        )
+        this.phase = "computing"
+        this.emit(new LevelComputeRequestItem("initial"))
     }
 
-    private async runLevel(
-        prd: PrdFile,
-        storyIds: readonly string[],
-    ): Promise<StoryOutcome[]> {
-        const stories = storyIds
-            .map((id) => prd.userStories.find((s) => s.id === id))
+    private async handleLevelCompute(): Promise<void> {
+        if (this.phase !== "computing") return
+        if (!this.prd) return
+
+        const levels = buildDag(this.prd.userStories, { onlyIncomplete: true })
+
+        if (levels.length === 0) {
+            this.terminateRun(this.globalFailed.length === 0, null)
+            return
+        }
+
+        const level = levels[0]
+        const ordinal = (this.currentLevel?.ordinal ?? 0) + 1
+        const totalLevelsHint = ordinal + levels.length - 1
+
+        const stories = level.storyIds
+            .map((id) => this.prd!.userStories.find((s) => s.id === id))
             .filter((s): s is PrdStory => s !== undefined)
             .filter((s) => !s.passes)
 
-        if (stories.length === 0) return []
-
-        const cap = this.opts.parallel > 0 ? this.opts.parallel : stories.length
-        const outcomes: StoryOutcome[] = []
-        let cursor = 0
-
-        const runNext = async (): Promise<void> => {
-            while (cursor < stories.length) {
-                const idx = cursor++
-                const story = stories[idx]
-                const outcome = await this.runStory(story)
-                outcomes.push(outcome)
-            }
+        if (stories.length === 0) {
+            // Level is empty (all already-passing); skip to next.
+            this.emit(new LevelComputeRequestItem("empty level"))
+            return
         }
 
-        const workers = Array.from(
-            { length: Math.min(cap, stories.length) },
-            () => runNext(),
+        this.currentLevel = {
+            ordinal,
+            totalLevelsHint,
+            storyIds: stories.map((s) => s.id),
+            pending: new Set(stories.map((s) => s.id)),
+            passed: [],
+            failed: [],
+            perStoryAttempts: new Map(),
+        }
+
+        this.emit(
+            new LevelStartedItem(ordinal, totalLevelsHint, this.currentLevel.storyIds),
         )
-        await Promise.all(workers)
-        // Preserve story-id order in outcomes for deterministic output.
-        outcomes.sort(
-            (a, b) =>
-                stories.findIndex((s) => s.id === a.storyId) -
-                stories.findIndex((s) => s.id === b.storyId),
+        this.emit(
+            new ConductorStateItem(
+                "running_level",
+                undefined,
+                ordinal,
+                totalLevelsHint,
+                this.currentLevel.storyIds,
+            ),
         )
-        return outcomes
+
+        this.phase = "running"
+        this.spawnQueue.push(...stories)
+        await this.fillSpawnSlots()
     }
 
-    private async runStory(story: PrdStory): Promise<StoryOutcome> {
-        if (!this.envRef) {
-            return {
-                storyId: story.id,
-                success: false,
-                attempts: 0,
-                durationSecs: 0,
-                finalSummary: null,
-                error: "no environment",
+    private async handleStoryResult(item: StoryResultItem): Promise<void> {
+        if (this.phase !== "running") return
+        if (!this.currentLevel) return
+        if (!this.currentLevel.pending.has(item.storyId)) return
+
+        this.currentLevel.pending.delete(item.storyId)
+        this.inFlight.delete(item.storyId)
+        this.currentLevel.perStoryAttempts.set(item.storyId, item.attempts)
+        this.totalAttempts += item.attempts
+
+        if (item.success) {
+            this.currentLevel.passed.push(item.storyId)
+            this.globalCompleted.push(item.storyId)
+            if (this.prd) {
+                this.prd = markStoryPassed(this.prd, item.storyId, item.durationSecs)
+                savePrd(this.opts.prdPath, this.prd)
             }
+            if (this.opts.onStoryPassed) {
+                try {
+                    await this.opts.onStoryPassed(item.storyId)
+                } catch (e) {
+                    this.emit(
+                        new ConductorStateItem(
+                            "running_level",
+                            `onStoryPassed hook for ${item.storyId} failed: ${(e as Error)?.message ?? String(e)}`,
+                            this.currentLevel.ordinal,
+                            this.currentLevel.totalLevelsHint,
+                        ),
+                    )
+                }
+            }
+        } else {
+            this.currentLevel.failed.push(item.storyId)
+            this.globalFailed.push(item.storyId)
         }
+
+        // Try to fill freed parallel slots with queued stories.
+        await this.fillSpawnSlots()
+
+        // If all stories in this level are settled, transition to level boundary.
+        if (this.currentLevel.pending.size === 0) {
+            await this.completeLevel()
+        }
+    }
+
+    private async fillSpawnSlots(): Promise<void> {
+        if (!this.currentLevel) return
+        const cap =
+            this.opts.parallel > 0 ? this.opts.parallel : Number.MAX_SAFE_INTEGER
+        while (this.spawnQueue.length > 0 && this.inFlight.size < cap) {
+            const story = this.spawnQueue.shift()!
+            await this.requestStorySpawn(story)
+        }
+    }
+
+    private async requestStorySpawn(story: PrdStory): Promise<void> {
         const model =
             this.opts.overrideModel ?? story.model ?? this.opts.defaultModel
         let prompt = this.resolvePrompt(story)
@@ -420,21 +375,109 @@ export class Conductor extends Participant {
             }
         }
 
-        const agent = new StoryAgent({
-            id: story.id,
-            prompt,
-            cwd: this.opts.cwd,
-            model,
-            retries: story.retries,
-            timeoutSecs: this.opts.timeoutSecs,
-        })
-        agent.join(this.envRef)
-        try {
-            const outcome = await agent.run(this.envRef)
-            return outcome
-        } finally {
-            if (this.envRef) agent.leave(this.envRef)
+        this.inFlight.add(story.id)
+        this.emit(
+            new StorySpawnRequestItem(
+                story.id,
+                prompt,
+                model,
+                story.retries,
+                this.opts.timeoutSecs,
+            ),
+        )
+    }
+
+    private async completeLevel(): Promise<void> {
+        if (!this.currentLevel) return
+        const lvl = this.currentLevel
+
+        this.emit(
+            new LevelCompletedItem(lvl.ordinal, lvl.passed, lvl.failed),
+        )
+        this.emit(
+            new ConductorStateItem(
+                "level_complete",
+                `passed ${lvl.passed.length}/${lvl.passed.length + lvl.failed.length}`,
+                lvl.ordinal,
+                lvl.totalLevelsHint,
+                lvl.storyIds,
+            ),
+        )
+
+        // Apply ReplanItem-s buffered during this level.
+        let replannedThisLevel = false
+        if (this.pendingReplans.length > 0 && this.prd) {
+            const drained = this.pendingReplans.splice(0)
+            for (const replan of drained) {
+                this.prd = applyReplan(this.prd, replan)
+                this.appliedReplans += 1
+                replannedThisLevel = true
+                this.emit(
+                    new ConductorStateItem(
+                        "running_level",
+                        `replan applied (source=${replan.source}, +${replan.addedStories.length}/-${replan.removedStoryIds.length}): ${replan.reason}`,
+                        lvl.ordinal,
+                    ),
+                )
+            }
+            savePrd(this.opts.prdPath, this.prd)
         }
+
+        // If every story in the level failed terminally AND no replan
+        // mutated the plan in response, abort the run.
+        const anySuccess = lvl.passed.length > 0
+        const totalThisLevel = lvl.passed.length + lvl.failed.length
+        if (!anySuccess && totalThisLevel > 0 && !replannedThisLevel) {
+            this.terminateRun(
+                false,
+                "all stories in level failed; aborting remaining levels",
+            )
+            return
+        }
+
+        // Loop: ask for next level via the bus.
+        this.phase = "computing"
+        this.emit(new LevelComputeRequestItem("level boundary"))
+    }
+
+    private terminateRun(success: boolean, abortReason: string | null): void {
+        if (this.phase === "done") return
+        this.phase = "done"
+        const totalDurationSecs = Math.round((Date.now() - this.startedAt) / 1000)
+
+        this.emit(
+            new ConductorStateItem(
+                success ? "done" : "failed",
+                abortReason ??
+                    `${this.globalCompleted.length} passed, ${this.globalFailed.length} failed in ${totalDurationSecs}s`,
+            ),
+        )
+
+        const summary: ConductorRunSummary = {
+            completedStories: [...this.globalCompleted],
+            failedStories: [...this.globalFailed],
+            totalDurationSecs,
+            totalAttempts: this.totalAttempts,
+        }
+
+        this.emit(
+            new RunCompletedItem(
+                success,
+                summary.completedStories,
+                summary.failedStories,
+                totalDurationSecs,
+                this.totalAttempts,
+                abortReason,
+            ),
+        )
+
+        // onRunComplete hook is fired and-then-forget; the resolve happens
+        // synchronously so callers awaiting `done` aren't blocked by hook
+        // side-effects.
+        if (this.opts.onRunComplete) {
+            void Promise.resolve(this.opts.onRunComplete(summary)).catch(() => {})
+        }
+        this.resolveDone(summary)
     }
 
     private resolvePrompt(story: PrdStory): string {
@@ -452,6 +495,51 @@ export class Conductor extends Participant {
     private emit(item: ContextItem): void {
         this.envRef?.deliverContextItem(this, item)
     }
+}
+
+/**
+ * Pure: apply a ReplanItem to a PrdFile and return a new PrdFile.
+ * Removes pending stories, rewires deps, adds new stories.
+ * Stories that have already passed are never removed.
+ */
+export function applyReplan(prd: PrdFile, replan: ReplanItem): PrdFile {
+    let stories = prd.userStories.slice()
+
+    if (replan.removedStoryIds.length > 0) {
+        const removeSet = new Set(replan.removedStoryIds)
+        stories = stories.filter((s) => !removeSet.has(s.id) || s.passes)
+    }
+
+    if (replan.modifiedDeps.size > 0) {
+        stories = stories.map((s) => {
+            const newDeps = replan.modifiedDeps.get(s.id)
+            if (!newDeps) return s
+            return { ...s, dependsOn: [...newDeps] }
+        })
+    }
+
+    if (replan.addedStories.length > 0) {
+        const existing = new Set(stories.map((s) => s.id))
+        for (const a of replan.addedStories) {
+            if (existing.has(a.id)) continue
+            stories.push({
+                id: a.id,
+                priority: a.priority,
+                title: a.title,
+                description: a.description,
+                dependsOn: [...a.dependsOn],
+                retries: a.retries ?? 2,
+                acceptance: a.acceptance ? [...a.acceptance] : [],
+                tests: a.tests ? [...a.tests] : [],
+                passes: false,
+                completedAt: null,
+                durationSecs: null,
+                model: a.model,
+            })
+        }
+    }
+
+    return { ...prd, userStories: stories }
 }
 
 function readFileSyncSafe(path: string): string | null {

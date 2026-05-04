@@ -38,6 +38,7 @@ import { Critic } from "./participants/critic.js"
 import { Librarian } from "./participants/librarian.js"
 import { Operator } from "./participants/operator.js"
 import { Sentry } from "./participants/sentry.js"
+import { StoryFactory } from "./participants/story-factory.js"
 import { StoryResultItem, type StoryAgent } from "./participants/story-agent.js"
 import { Surgeon, type PrdSnapshot } from "./participants/surgeon.js"
 import { PrdFile, loadPrd } from "./prd.js"
@@ -47,6 +48,7 @@ import {
     ClaudeSystemItem,
     CoordinationItem,
     CritiqueItem,
+    RunStartRequestItem,
 } from "./types.js"
 import { emit } from "./tui-protocol.js"
 
@@ -118,6 +120,11 @@ export interface OrchestrateConfig {
         onAbortAll?: () => void
         onShutdown?: () => void
     }
+    /**
+     * Extra participants to attach to the bus before the run starts.
+     * Useful for live debugging, custom observers, or test harnesses.
+     */
+    extraParticipants?: import("@mozaik-ai/core").Participant[]
 }
 
 export interface OrchestrateResult {
@@ -141,6 +148,11 @@ export async function orchestrate(
     if (config.auditLogPath) {
         mkdirSync(dirname(config.auditLogPath), { recursive: true })
         new Auditor({ path: config.auditLogPath }).join(env)
+    }
+
+    // Extra observers (live loggers, custom debuggers, test harnesses).
+    if (config.extraParticipants) {
+        for (const p of config.extraParticipants) p.join(env)
     }
 
     // BaroEvent forwarder: watch the bus, translate to TUI protocol on stdout.
@@ -275,7 +287,16 @@ export async function orchestrate(
               }
             : undefined,
     })
+    conductor.setEnvironment(env)
     conductor.join(env)
+
+    // Story factory — Mozaik-native participant that spawns StoryAgent
+    // instances in response to StorySpawnRequestItem from Conductor.
+    // Replaces the old `new StoryAgent(...).run()` direct call inside
+    // Conductor; now Conductor doesn't import StoryAgent at all.
+    const storyFactory = new StoryFactory({ cwd: config.cwd })
+    storyFactory.setEnvironment(env)
+    storyFactory.join(env)
 
     // Emit `init` early so the TUI can render the story list before any
     // Claude process spawns.
@@ -292,7 +313,12 @@ export async function orchestrate(
         })
     }
 
-    const summary = await conductor.run(env)
+    // Mozaik-native: kick the run by emitting a RunStartRequestItem on
+    // the bus. Conductor's onContextItem handler picks it up and drives
+    // the state machine forward via further bus events. There is no
+    // `conductor.run()` call — the runtime is the loop.
+    env.deliverContextItem(operator, new RunStartRequestItem("orchestrate"))
+    const summary = await conductor.done
 
     // Drain in-flight async observers so all side effects (CritiqueItem,
     // ReplanItem) land in the audit log before this function returns.
