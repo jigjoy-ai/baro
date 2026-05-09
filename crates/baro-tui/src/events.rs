@@ -1,5 +1,9 @@
 use serde::Deserialize;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct StoryInfo {
     pub id: String,
@@ -113,6 +117,14 @@ pub enum BaroEvent {
     Done {
         total_time_secs: u64,
         stats: DoneStats,
+        /// True when every original story passed and nothing was dropped.
+        /// Optional for backwards compat with older orchestrators that
+        /// always emit Done as if successful. Default `true` if absent.
+        #[serde(default = "default_true")]
+        success: bool,
+        /// Reason for an abort/early-termination if `success` is false.
+        #[serde(default)]
+        abort_reason: Option<String>,
     },
 
     #[serde(rename = "notification_ready")]

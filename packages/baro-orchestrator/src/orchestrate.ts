@@ -337,9 +337,12 @@ export async function orchestrate(
         emit({
             type: "done",
             total_time_secs: summary.totalDurationSecs,
+            success: summary.success,
+            abort_reason: summary.abortReason ?? undefined,
             stats: {
                 stories_completed: summary.completedStories.length,
-                stories_skipped: 0,
+                stories_skipped:
+                    summary.failedStories.length + summary.droppedStories.length,
                 total_commits: 0,
                 files_created: filesCreated,
                 files_modified: filesModified,

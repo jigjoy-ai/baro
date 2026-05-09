@@ -717,10 +717,20 @@ impl App {
             BaroEvent::Done {
                 total_time_secs,
                 stats,
+                success,
+                abort_reason,
             } => {
                 self.done = true;
                 self.total_time_secs = total_time_secs;
                 self.final_stats = Some(stats);
+                if !success {
+                    // Surface the run-level failure on the completion
+                    // screen with the explicit reason instead of the
+                    // green "ALL STORIES COMPLETE" banner.
+                    self.exit_reason = Some(abort_reason.unwrap_or_else(|| {
+                        "Run did not complete the goal.".to_string()
+                    }));
+                }
             }
 
             BaroEvent::NotificationReady => {

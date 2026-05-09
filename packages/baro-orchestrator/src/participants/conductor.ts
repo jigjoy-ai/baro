@@ -84,6 +84,14 @@ export interface ConductorOptions {
 }
 
 export interface ConductorRunSummary {
+    /** True only when every original story passed and nothing was dropped. */
+    success: boolean
+    /**
+     * Reason a run terminated early (e.g. `onRunStart` hook failure, all
+     * stories in a level failed without a replan). Null on a clean
+     * end-of-DAG completion.
+     */
+    abortReason: string | null
     completedStories: string[]
     failedStories: string[]
     /**
@@ -504,6 +512,8 @@ export class Conductor extends Participant {
         )
 
         const summary: ConductorRunSummary = {
+            success,
+            abortReason,
             completedStories: [...this.globalCompleted],
             failedStories: [...this.globalFailed],
             droppedStories: [...this.globalDropped],

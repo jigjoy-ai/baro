@@ -68,7 +68,13 @@ export type BaroEvent =
     | { type: "push_status"; id: string; success: boolean; error: string | null }
     | { type: "finalize_start" }
     | { type: "finalize_complete"; pr_url: string | null }
-    | { type: "done"; total_time_secs: number; stats: DoneStats }
+    | {
+          type: "done"
+          total_time_secs: number
+          stats: DoneStats
+          success?: boolean
+          abort_reason?: string
+      }
     | { type: "notification_ready" }
     | {
           type: "token_usage"
