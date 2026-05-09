@@ -1010,9 +1010,14 @@ fn spawn_executor(
         Some("opus".to_string())
     };
 
-    // Default audit log path: <cwd>/.baro/runs/run-<unix-secs>.jsonl
+    // Default audit log path: <cwd>/.baro/runs/run-<unix-secs>.jsonl.
     // Always-on so post-mortems on stuck/abnormal runs are possible
-    // without rerunning. Cheap (line-delimited JSON, append-only).
+    // without rerunning. We pre-touch BOTH the audit JSONL and the
+    // stderr.txt sidecar before spawning the orchestrator so the
+    // diagnostic surface exists even if the JS process explodes inside
+    // its first 50ms — the previous implementation only created the
+    // dir, leaving us blind whenever the orchestrator died before its
+    // Auditor participant could open the file itself.
     let audit_log_default = cwd.join(".baro").join("runs").join(format!(
         "run-{}.jsonl",
         std::time::SystemTime::now()
@@ -1021,7 +1026,39 @@ fn spawn_executor(
             .unwrap_or(0)
     ));
     if let Some(parent) = audit_log_default.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!(
+                "[baro] warning: could not create audit dir {}: {}",
+                parent.display(),
+                e
+            );
+        }
+    }
+    // Pre-touch the JSONL so external watchers (and our own diagnostics)
+    // can rely on the file existing even before the Auditor opens it.
+    if let Err(e) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&audit_log_default)
+    {
+        eprintln!(
+            "[baro] warning: could not touch audit log {}: {}",
+            audit_log_default.display(),
+            e
+        );
+    }
+    // Pre-touch the stderr sidecar for the same reason.
+    let stderr_sidecar = audit_log_default.with_extension("stderr.txt");
+    if let Err(e) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_sidecar)
+    {
+        eprintln!(
+            "[baro] warning: could not touch stderr sidecar {}: {}",
+            stderr_sidecar.display(),
+            e
+        );
     }
 
     let orch_cfg = orchestrator_client::OrchestratorConfig {
