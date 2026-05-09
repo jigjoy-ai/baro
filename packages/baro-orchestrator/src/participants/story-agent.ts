@@ -142,7 +142,13 @@ export class StoryAgent extends Participant {
             retryDelayMs: 1500,
             quietTimeoutMs: 2000,
             maxTurns: 4,
-            hardTimeoutSecs: 300,
+            // hardTimeoutSecs <= 0 disables the absolute kill timer.
+            // The previous default of 300s was killing real refactor
+            // work mid-flight (e.g. "delete SEF module" touches dozens
+            // of files and routinely needs >5 minutes); we'd rather
+            // let the per-attempt timeoutSecs and the quiet-timer
+            // close out idle agents than guillotine a productive one.
+            hardTimeoutSecs: 0,
             ...spec,
         }
         this.done = new Promise<StoryOutcome>((res) => {
@@ -218,10 +224,17 @@ export class StoryAgent extends Participant {
         let lastError: string | null = null
         let hardTimedOut = false
 
-        const hardTimer = setTimeout(() => {
-            hardTimedOut = true
-            this.currentClaude?.abort()
-        }, this.spec.hardTimeoutSecs * 1000)
+        // hardTimeoutSecs <= 0 means "no absolute cap" — the timer is
+        // not started. The per-attempt timeoutSecs still bounds each
+        // individual Claude invocation, and the quiet timer still
+        // closes idle stdin streams.
+        const hardTimer =
+            this.spec.hardTimeoutSecs > 0
+                ? setTimeout(() => {
+                      hardTimedOut = true
+                      this.currentClaude?.abort()
+                  }, this.spec.hardTimeoutSecs * 1000)
+                : null
 
         try {
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -269,7 +282,7 @@ export class StoryAgent extends Participant {
                 }
             }
         } finally {
-            clearTimeout(hardTimer)
+            if (hardTimer !== null) clearTimeout(hardTimer)
         }
 
         const durationSecs = Math.round(
