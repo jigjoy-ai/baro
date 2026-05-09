@@ -12,9 +12,33 @@ use crate::theme;
 pub fn render_completion(f: &mut Frame, app: &App) {
     let area = f.area();
 
+    use crate::app::StoryStatus;
+    // Derive the totals from the stories list rather than the legacy
+    // level-based `app.completed/total` fields. The stale per-level
+    // numbers were showing things like "Total: 6 / Completed: 0" on
+    // a 19-story run that had passed 1.
+    let derived_completed = app
+        .stories
+        .iter()
+        .filter(|s| matches!(s.status, StoryStatus::Complete))
+        .count() as u32;
+    let derived_total = app.stories.len() as u32;
+    let derived_skipped = app
+        .stories
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.status,
+                StoryStatus::Skipped | StoryStatus::Failed | StoryStatus::Retrying(_)
+            )
+        })
+        .count() as u32;
+
     let stats = app.final_stats.as_ref();
-    let completed = stats.map(|s| s.stories_completed).unwrap_or(app.completed);
-    let skipped = stats.map(|s| s.stories_skipped).unwrap_or(0);
+    let completed = stats
+        .map(|s| s.stories_completed)
+        .unwrap_or(derived_completed);
+    let skipped = stats.map(|s| s.stories_skipped).unwrap_or(derived_skipped);
     let total_time = app.total_time_secs;
     let files_created: u32 = stats
         .map(|s| s.files_created)
@@ -124,7 +148,7 @@ pub fn render_completion(f: &mut Frame, app: &App) {
         Line::from(vec![
             Span::styled("  Total stories:  ", Style::default().fg(theme::MUTED)),
             Span::styled(
-                format!("{}", app.total),
+                format!("{}", derived_total),
                 Style::default()
                     .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD),

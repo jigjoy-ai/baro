@@ -28,6 +28,7 @@ import {
     isInsideGitRepo,
     safePullRebase,
 } from "./git.js"
+import { buildDag } from "./dag.js"
 import { Auditor } from "./participants/auditor.js"
 import {
     Conductor,
@@ -299,7 +300,8 @@ export async function orchestrate(
     storyFactory.join(env)
 
     // Emit `init` early so the TUI can render the story list before any
-    // Claude process spawns.
+    // Claude process spawns. Also emit `dag` so the DAG tab has something
+    // to draw — without this it sits on "Waiting for DAG data…" forever.
     if (emitTui) {
         const prd = loadPrd(config.prdPath)
         emit({
@@ -311,6 +313,10 @@ export async function orchestrate(
                 depends_on: s.dependsOn,
             })),
         })
+        const dagLevels = buildDag(prd.userStories).map((lvl) =>
+            lvl.storyIds.map((id) => ({ id })),
+        )
+        emit({ type: "dag", levels: dagLevels })
     }
 
     // Mozaik-native: kick the run by emitting a RunStartRequestItem on

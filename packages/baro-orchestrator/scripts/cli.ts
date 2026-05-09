@@ -216,6 +216,22 @@ async function main(): Promise<void> {
     }
 }
 
+// Catch-all guards so any async failure that isn't already inside
+// main()'s try/catch still gets a stack on stderr before the process
+// dies. Without these, an unhandled rejection in a Participant's
+// onContextItem handler kills the orchestrator silently and the TUI
+// is left in "Waiting for next story…" forever.
+process.on("unhandledRejection", (reason) => {
+    const stack = (reason as Error)?.stack ?? String(reason)
+    process.stderr.write(`[cli] unhandledRejection: ${stack}\n`)
+    process.exit(1)
+})
+process.on("uncaughtException", (err) => {
+    const stack = err?.stack ?? String(err)
+    process.stderr.write(`[cli] uncaughtException: ${stack}\n`)
+    process.exit(1)
+})
+
 main().catch((e: unknown) => {
     process.stderr.write(`[cli] unhandled: ${(e as Error)?.stack ?? String(e)}\n`)
     process.exit(1)

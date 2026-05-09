@@ -128,14 +128,36 @@ async fn run(
     });
 
     // Drain stderr: emit each line as a StoryLog under `_orchestrator`
-    // so the user can see what the subprocess is doing.
+    // so the user can see what the subprocess is doing AND tee every line
+    // to <audit_log>.stderr.txt next to the JSONL audit log so a crash's
+    // stack trace survives the orchestrator's death. Without that, an
+    // unhandled rejection kills the JS process and the stderr lines that
+    // describe the failure go nowhere — the TUI's logs panel is in-memory
+    // only and dies with the parent.
     let stderr_tx = tx.clone();
+    let stderr_log_path = cfg
+        .audit_log
+        .as_ref()
+        .map(|p| p.with_extension("stderr.txt"));
     let stderr_task = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut sink: Option<tokio::fs::File> = None;
+        if let Some(p) = &stderr_log_path {
+            if let Some(parent) = p.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            sink = tokio::fs::File::create(p).await.ok();
+        }
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
+            }
+            if let Some(f) = sink.as_mut() {
+                let _ = f.write_all(line.as_bytes()).await;
+                let _ = f.write_all(b"\n").await;
+                let _ = f.flush().await;
             }
             let _ = stderr_tx
                 .send(BaroEvent::StoryLog {
