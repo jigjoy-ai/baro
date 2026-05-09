@@ -2,12 +2,44 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{Block, Borders, Clear, Gauge, Paragraph},
     Frame,
 };
 
 use crate::app::{App, GlobalTab, StoryStatus};
 use crate::theme;
+
+/// Count stories by status for use in headers and progress widgets.
+/// Derived from `app.stories` directly so the counter reflects real
+/// per-story progress regardless of what the orchestrator emits over
+/// the legacy level-based `progress` event.
+struct StoryCounts {
+    total: u32,
+    passed: u32,
+    running: u32,
+    failed: u32,
+    skipped: u32,
+}
+
+fn count_stories(app: &App) -> StoryCounts {
+    let mut c = StoryCounts {
+        total: app.stories.len() as u32,
+        passed: 0,
+        running: 0,
+        failed: 0,
+        skipped: 0,
+    };
+    for s in &app.stories {
+        match s.status {
+            StoryStatus::Complete => c.passed += 1,
+            StoryStatus::Running => c.running += 1,
+            StoryStatus::Failed | StoryStatus::Retrying(_) => c.failed += 1,
+            StoryStatus::Skipped => c.skipped += 1,
+            StoryStatus::Pending => {}
+        }
+    }
+    c
+}
 
 use super::execute_completion::render_completion;
 use super::execute_dashboard::render_dashboard;
@@ -26,6 +58,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
         .split(f.area());
 
     render_header(f, app, chunks[0]);
+
+    // Clear the tab content area each frame so a previous tab's
+    // characters don't bleed through when the user switches tabs (or
+    // when the new tab renders less content than the old one).
+    f.render_widget(Clear, chunks[1]);
 
     match app.global_tab {
         GlobalTab::Dashboard => render_dashboard(f, app, chunks[1]),
@@ -53,6 +90,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     let elapsed = app.elapsed_secs();
+    let counts = count_stories(app);
 
     let info_line = Line::from(vec![
         Span::styled(
@@ -66,7 +104,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
         Span::styled(
-            format!("{}/{}", app.completed, app.total),
+            format!("{}/{}", counts.passed, counts.total),
             Style::default().fg(theme::SUCCESS),
         ),
         Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
@@ -124,16 +162,25 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
 // --- Shared: Progress Bar ---
 
 fn render_progress(f: &mut Frame, app: &App, area: Rect) {
-    let ratio = if app.total > 0 {
-        (app.completed as f64 / app.total as f64).min(1.0)
+    let counts = count_stories(app);
+    let ratio = if counts.total > 0 {
+        (counts.passed as f64 / counts.total as f64).min(1.0)
     } else {
         0.0
     };
+    let pct = (ratio * 100.0).round() as u32;
 
-    let label = format!(
-        "{}% ({}/{} stories)",
-        app.percentage, app.completed, app.total
-    );
+    let mut label = format!("{}% ({}/{} stories", pct, counts.passed, counts.total);
+    if counts.running > 0 {
+        label.push_str(&format!(", {} running", counts.running));
+    }
+    if counts.failed > 0 {
+        label.push_str(&format!(", {} failed", counts.failed));
+    }
+    if counts.skipped > 0 {
+        label.push_str(&format!(", {} skipped", counts.skipped));
+    }
+    label.push(')');
 
     let gauge = Gauge::default()
         .block(

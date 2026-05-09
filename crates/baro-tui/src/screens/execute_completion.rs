@@ -104,12 +104,20 @@ pub fn render_completion(f: &mut Frame, app: &App) {
 
     f.render_widget(Clear, popup_area);
 
+    let abnormal = app.exit_reason.is_some();
+    let banner_text = if abnormal {
+        "RUN ENDED EARLY"
+    } else {
+        "ALL STORIES COMPLETE"
+    };
+    let banner_color = if abnormal { theme::WARNING } else { theme::SUCCESS };
+
     let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            "ALL STORIES COMPLETE",
+            banner_text,
             Style::default()
-                .fg(theme::SUCCESS)
+                .fg(banner_color)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -246,16 +254,24 @@ pub fn render_completion(f: &mut Frame, app: &App) {
         ]));
     }
 
+    if let Some(ref reason) = app.exit_reason {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            reason.clone(),
+            Style::default().fg(theme::WARNING),
+        )));
+    }
+
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("q quit", Style::default().fg(theme::MUTED))));
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::SUCCESS))
+        .border_style(Style::default().fg(banner_color))
         .title(Span::styled(
-            " Complete ",
+            if abnormal { " Run ended " } else { " Complete " },
             Style::default()
-                .fg(theme::SUCCESS)
+                .fg(banner_color)
                 .add_modifier(Modifier::BOLD),
         ));
 

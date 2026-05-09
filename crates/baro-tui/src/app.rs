@@ -163,6 +163,10 @@ pub struct App {
     pub done: bool,
     pub final_stats: Option<DoneStats>,
     pub total_time_secs: u64,
+    /// Set when the orchestrator subprocess terminated without sending
+    /// a normal `Done` event. The completion screen surfaces this so
+    /// the user knows the run did not finish cleanly.
+    pub exit_reason: Option<String>,
 
     // Push tracking
     pub push_results: Vec<(String, bool, Option<String>)>,
@@ -255,6 +259,7 @@ impl App {
             done: false,
             final_stats: None,
             total_time_secs: 0,
+            exit_reason: None,
             push_results: Vec::new(),
             review_in_progress: false,
             review_level: 0,
@@ -728,6 +733,37 @@ impl App {
                 entry.1 += output_tokens;
                 self.total_input_tokens += input_tokens;
                 self.total_output_tokens += output_tokens;
+            }
+
+            BaroEvent::OrchestratorExited { code, reason } => {
+                // If a normal `Done` event already arrived, this is just
+                // a redundant terminator — keep the previous final state.
+                if !self.done {
+                    self.done = true;
+                    self.finalize_in_progress = false;
+                    if self.total_time_secs == 0 {
+                        self.total_time_secs = self.elapsed_secs();
+                    }
+                    let msg = match (code, reason) {
+                        (Some(0), _) => {
+                            "Orchestrator exited without a final summary. \
+                             Some stories may not have completed.".to_string()
+                        }
+                        (Some(c), Some(r)) => {
+                            format!("Orchestrator exited (code {}): {}", c, r)
+                        }
+                        (Some(c), None) => {
+                            format!("Orchestrator exited with code {}", c)
+                        }
+                        (None, Some(r)) => {
+                            format!("Orchestrator terminated: {}", r)
+                        }
+                        (None, None) => {
+                            "Orchestrator terminated unexpectedly.".to_string()
+                        }
+                    };
+                    self.exit_reason = Some(msg);
+                }
             }
         }
     }

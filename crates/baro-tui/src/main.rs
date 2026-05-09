@@ -1010,6 +1010,20 @@ fn spawn_executor(
         Some("opus".to_string())
     };
 
+    // Default audit log path: <cwd>/.baro/runs/run-<unix-secs>.jsonl
+    // Always-on so post-mortems on stuck/abnormal runs are possible
+    // without rerunning. Cheap (line-delimited JSON, append-only).
+    let audit_log_default = cwd.join(".baro").join("runs").join(format!(
+        "run-{}.jsonl",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    ));
+    if let Some(parent) = audit_log_default.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
     let orch_cfg = orchestrator_client::OrchestratorConfig {
         prd_path: cwd.join("prd.json"),
         cwd,
@@ -1018,7 +1032,7 @@ fn spawn_executor(
         override_model: config.override_model,
         default_model,
         skip_git: false,
-        audit_log: None,
+        audit_log: Some(audit_log_default),
         with_critic: config.with_critic,
         critic_model: config.critic_model,
         with_librarian: config.with_librarian,

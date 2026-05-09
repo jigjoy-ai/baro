@@ -52,16 +52,26 @@ pub fn spawn_orchestrator(
     tx: mpsc::Sender<BaroEvent>,
 ) {
     tokio::spawn(async move {
-        if let Err(err) = run(cfg, &tx).await {
-            let _ = tx
-                .send(BaroEvent::StoryError {
-                    id: "_orchestrator".to_string(),
-                    error: err,
-                    attempt: 1,
-                    max_retries: 1,
-                })
-                .await;
-        }
+        let result = run(cfg, &tx).await;
+        let (code, reason) = match result {
+            Ok(()) => (Some(0), None),
+            Err(err) => {
+                let _ = tx
+                    .send(BaroEvent::StoryError {
+                        id: "_orchestrator".to_string(),
+                        error: err.clone(),
+                        attempt: 1,
+                        max_retries: 1,
+                    })
+                    .await;
+                (None, Some(err))
+            }
+        };
+        // Always tell the TUI the orchestrator is gone, so it can break
+        // out of any in-flight "waiting" state and surface a banner.
+        let _ = tx
+            .send(BaroEvent::OrchestratorExited { code, reason })
+            .await;
     });
 }
 

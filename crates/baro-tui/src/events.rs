@@ -124,4 +124,15 @@ pub enum BaroEvent {
         input_tokens: u64,
         output_tokens: u64,
     },
+
+    /// Synthetic event the orchestrator client emits exactly once when
+    /// the orchestrator subprocess terminates — whether cleanly with a
+    /// preceding `Done` event or abruptly. Lets the TUI escape any
+    /// "waiting for next story" state and show a terminal banner.
+    /// Not produced by the TS orchestrator itself.
+    #[serde(rename = "orchestrator_exited")]
+    OrchestratorExited {
+        code: Option<i32>,
+        reason: Option<String>,
+    },
 }
