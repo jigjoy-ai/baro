@@ -86,6 +86,12 @@ export interface ConductorOptions {
 export interface ConductorRunSummary {
     completedStories: string[]
     failedStories: string[]
+    /**
+     * Stories the Surgeon dropped without a replacement. The PRD no
+     * longer contains them, but the run did not complete the original
+     * goal — these count against the success verdict.
+     */
+    droppedStories: string[]
     totalDurationSecs: number
     totalAttempts: number
 }
@@ -147,6 +153,14 @@ export class Conductor extends Participant {
     private readonly globalCompleted: string[] = []
     /** All stories that have failed terminally (after retries) in this run. */
     private readonly globalFailed: string[] = []
+    /**
+     * Stories removed from the PRD by a Surgeon replan without a
+     * replacement. These do NOT come back to globalFailed (the failing
+     * story is gone from the PRD and won't be retried) but they DO
+     * count against the run's success verdict — terminateRun(success)
+     * is true only when this list is empty.
+     */
+    private readonly globalDropped: string[] = []
     private totalAttempts = 0
     private appliedReplans = 0
 
@@ -252,7 +266,14 @@ export class Conductor extends Participant {
         const levels = buildDag(this.prd.userStories, { onlyIncomplete: true })
 
         if (levels.length === 0) {
-            this.terminateRun(this.globalFailed.length === 0, null)
+            // Run is "successful" only when every story currently in
+            // the PRD has passed. A story that was dropped by a Surgeon
+            // replan is no longer in the PRD; that's tracked separately
+            // in globalDropped and counts against the run's success.
+            const allPassed =
+                this.prd.userStories.every((s) => s.passes) &&
+                this.globalDropped.length === 0
+            this.terminateRun(allPassed, null)
             return
         }
 
@@ -412,14 +433,29 @@ export class Conductor extends Participant {
                 this.prd = applyReplan(this.prd, replan)
                 this.appliedReplans += 1
                 replannedThisLevel = true
-                // Removed stories are obsolete — drop them from
-                // globalFailed so they don't count against the run's
-                // success verdict. The replan has supplanted them.
+                // Track stories that were removed without a replacement.
+                // If the replan only removes (no addedStories), it's a
+                // drop — the work is gone and the run should NOT report
+                // success. If the replan also adds stories, it's a true
+                // replan; the failing story has been supplanted.
                 if (replan.removedStoryIds.length > 0) {
                     const removeSet = new Set(replan.removedStoryIds)
-                    for (let i = this.globalFailed.length - 1; i >= 0; i--) {
-                        if (removeSet.has(this.globalFailed[i])) {
-                            this.globalFailed.splice(i, 1)
+                    // Failing stories that the replan replaces should
+                    // come off globalFailed iff there's actually
+                    // replacement work to track instead.
+                    if (replan.addedStories.length > 0) {
+                        for (let i = this.globalFailed.length - 1; i >= 0; i--) {
+                            if (removeSet.has(this.globalFailed[i])) {
+                                this.globalFailed.splice(i, 1)
+                            }
+                        }
+                    } else {
+                        // Pure drop — record so terminateRun knows the
+                        // run did not actually complete the goal.
+                        for (const id of replan.removedStoryIds) {
+                            if (!this.globalDropped.includes(id)) {
+                                this.globalDropped.push(id)
+                            }
                         }
                     }
                 }
@@ -456,17 +492,21 @@ export class Conductor extends Participant {
         this.phase = "done"
         const totalDurationSecs = Math.round((Date.now() - this.startedAt) / 1000)
 
+        const droppedSegment = this.globalDropped.length > 0
+            ? `, ${this.globalDropped.length} dropped`
+            : ""
         this.emit(
             new ConductorStateItem(
                 success ? "done" : "failed",
                 abortReason ??
-                    `${this.globalCompleted.length} passed, ${this.globalFailed.length} failed in ${totalDurationSecs}s`,
+                    `${this.globalCompleted.length} passed, ${this.globalFailed.length} failed${droppedSegment} in ${totalDurationSecs}s`,
             ),
         )
 
         const summary: ConductorRunSummary = {
             completedStories: [...this.globalCompleted],
             failedStories: [...this.globalFailed],
+            droppedStories: [...this.globalDropped],
             totalDurationSecs,
             totalAttempts: this.totalAttempts,
         }

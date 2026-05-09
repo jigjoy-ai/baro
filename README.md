@@ -124,18 +124,23 @@ Options:
   --resume                     Resume from existing prd.json (also runs dry-run plans)
   --skip-context               Skip CLAUDE.md auto-generation
   --cwd <path>                 Working directory (default: current)
-  --with-critic                Enable live Critic — reviews each agent turn
-                               against acceptance criteria via `claude --model haiku`
-                               and injects corrective feedback (default: off)
+  --no-critic                  Disable live Critic (default: on). The Critic
+                               reviews each agent turn against acceptance
+                               criteria via `claude --model haiku` and injects
+                               corrective feedback when the turn doesn't pass.
   --critic-model <name>        Model for the Critic (default: haiku)
   --no-librarian               Disable cross-agent runtime memory (default: on)
   --no-sentry                  Disable file-touch conflict detector (default: on)
-  --with-surgeon               Enable adaptive DAG: drop / replace failing stories
-                               at level boundaries instead of stalling (default: off)
-  --surgeon-use-llm            Use `claude --model …` for richer Surgeon replans
-                               (default: deterministic skip-only)
-  --surgeon-model <name>       Model for Surgeon when --surgeon-use-llm is on
-                               (default: opus)
+  --no-surgeon                 Disable Surgeon (default: on). The Surgeon
+                               observes terminal story failures and proposes
+                               replans (split / prereq / rewire) so failed
+                               work gets done in a different shape rather
+                               than dropped.
+  --no-surgeon-llm             Use deterministic Surgeon (skip-only) instead
+                               of the LLM-driven replanner. The LLM Surgeon
+                               is on by default; it costs an Opus call per
+                               terminal failure but produces richer replans.
+  --surgeon-model <name>       Model for the Surgeon LLM (default: opus)
   -h, --help                   Print help
 ```
 
@@ -150,15 +155,22 @@ react to one another's bus events:
   redundant exploration. Measurable token savings on multi-story runs.
 - **Sentry** (default ON) — flags overlapping Edit/Write tool calls
   across concurrent stories.
-- **Critic** (`--with-critic`, default OFF) — Haiku evaluator reviews
-  each agent turn against acceptance criteria; on a fail verdict, an
-  inline corrective message lands as the agent's next turn so it
-  self-corrects before commit.
-- **Surgeon** (`--with-surgeon`, default OFF) — when a story fails its
-  retry budget, a ReplanItem is emitted on the bus and the Conductor
-  recomputes the DAG at the next level boundary. The simplest mode just
-  drops failing stories so dependents unblock; with `--surgeon-use-llm`
-  Opus proposes splits, prerequisite inserts, or dependency rewires.
+- **Critic** (default ON) — Haiku evaluator reviews each agent turn
+  against acceptance criteria; on a fail verdict, an inline corrective
+  message lands as the agent's next turn so it self-corrects before
+  commit. Disable with `--no-critic`.
+- **Surgeon** (default ON, with LLM) — when a story fails its retry
+  budget, the Surgeon asks Opus for a richer replan and emits a
+  ReplanItem the Conductor applies at the next level boundary. The LLM
+  is biased toward keeping the work done — it prefers splitting a too-
+  large story into smaller pieces, inserting a prerequisite, or
+  rewiring dependencies, over dropping outright. A run is reported as
+  successful only when every original story passes; if the Surgeon
+  drops a story without replacement, the run terminates with a clear
+  "did not complete the goal" verdict instead of a green tick. Disable
+  the LLM with `--no-surgeon-llm` to fall back to deterministic
+  skip-only behavior, or `--no-surgeon` to remove adaptive replans
+  entirely.
 
 ## Requirements
 

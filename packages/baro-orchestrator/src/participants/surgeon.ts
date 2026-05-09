@@ -60,7 +60,7 @@ export interface SurgeonOptions {
     useLlm?: boolean
     /** Model for LLM evaluations. Default: "opus". */
     model?: string
-    /** Max replans this Surgeon will emit per run. Default: 3. */
+    /** Max replans this Surgeon will emit per run. Default: 10. */
     maxReplans?: number
     /** Path to the `claude` binary. Default: "claude". */
     claudeBin?: string
@@ -76,18 +76,38 @@ DAG when stories fail. Given:
 2. The id, title, description, and FAILURE REASON of the story that just
    exhausted its retry budget.
 
-Decide ONE of:
-  (a) "skip"      — the failure isn't load-bearing; remove only this story.
-  (b) "split"     — replace the failing story with 2-3 smaller stories.
-  (c) "prereq"    — insert a NEW story that the failing one depends on,
-                    AND remove the failing one (it can be re-attempted
-                    later by re-introducing it manually).
-  (d) "abort"     — nothing useful can be salvaged; emit no replan.
+Decide ONE of, in this order of preference:
+  (a) "split"     — replace the failing story with 2-3 smaller stories
+                    that together cover its acceptance criteria. Use
+                    this whenever the failure looks like the story was
+                    too broad — too many files, too many concerns,
+                    too much for one Claude session. Strongly preferred
+                    over removal whenever the goal still needs the work.
+  (b) "prereq"    — insert ONE OR MORE new prerequisite stories that
+                    the failing story now depends on, then ALSO add a
+                    replacement of the failing story (with updated
+                    dependsOn) so the original work still gets done.
+                    Removing without replacement is NOT prereq.
+  (c) "rewire"    — keep the failing story BUT modifyDeps so it runs
+                    in a different order, or change its dependsOn to
+                    unblock dependents. Use when the failure was
+                    timing-related, not scope-related.
+  (d) "skip"      — last resort. Use ONLY when the story is genuinely
+                    infeasible (e.g., asks for a library that doesn't
+                    exist, references files that aren't there). When
+                    you skip, modifyDeps for any dependents so the
+                    rest of the run can still complete.
+  (e) "abort"     — only when the entire run cannot continue.
+
+Strong bias: the run is only successful when EVERY original goal item
+gets done. Splitting into smaller stories is almost always better than
+dropping. Don't drop just because one attempt failed — propose a
+different approach.
 
 Respond ONLY with a JSON object — no prose, no markdown fences — in
 exactly this shape:
 
-{"action":"skip"|"split"|"prereq"|"abort",
+{"action":"split"|"prereq"|"rewire"|"skip"|"abort",
  "reason":"…",
  "added":[ { "id":"S?","priority":N,"title":"…","description":"…",
              "dependsOn":["…"], "acceptance":["…"] } ],
@@ -117,9 +137,9 @@ export class Surgeon extends Participant {
     constructor(opts: SurgeonOptions) {
         super()
         this.opts = {
-            useLlm: opts.useLlm ?? false,
+            useLlm: opts.useLlm ?? true,
             model: opts.model ?? "opus",
-            maxReplans: opts.maxReplans ?? 3,
+            maxReplans: opts.maxReplans ?? 10,
             claudeBin: opts.claudeBin ?? "claude",
             timeoutMs: opts.timeoutMs ?? 90_000,
             snapshot: opts.snapshot,

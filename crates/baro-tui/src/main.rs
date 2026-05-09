@@ -128,13 +128,17 @@ struct Cli {
     #[arg(long)]
     dry_run: bool,
 
-    /// Enable the live Critic (Phase 3): evaluates each agent turn against
-    /// its acceptance criteria via `claude --model haiku` and injects
-    /// corrective feedback when a turn doesn't satisfy them.
+    /// Enable the live Critic: evaluates each agent turn against its
+    /// acceptance criteria via `claude --model haiku` and injects
+    /// corrective feedback when a turn doesn't satisfy them. Default: ON.
     #[arg(long)]
+    no_critic: bool,
+
+    /// (deprecated) Critic is on by default; use --no-critic to opt out.
+    #[arg(long, hide = true)]
     with_critic: bool,
 
-    /// Model used by the Critic when --with-critic is on. Default: "haiku".
+    /// Model used by the Critic. Default: "haiku".
     #[arg(long)]
     critic_model: Option<String>,
 
@@ -146,20 +150,28 @@ struct Cli {
     #[arg(long)]
     no_sentry: bool,
 
-    /// Enable the Surgeon (Phase 4): observes terminal story failures
-    /// and emits ReplanItem-s the Conductor applies at the next level
-    /// boundary. Default: OFF.
+    /// Disable the Surgeon: observes terminal story failures and proposes
+    /// replans (split / prereq / rewire) so failed work gets done in a
+    /// different shape rather than dropped. Default: ON.
     #[arg(long)]
+    no_surgeon: bool,
+
+    /// (deprecated) Surgeon is on by default; use --no-surgeon to opt out.
+    #[arg(long, hide = true)]
     with_surgeon: bool,
 
-    /// Use Claude (`claude --model …`) for Surgeon evaluation.
-    /// Default: deterministic (skip-only). Setting this on costs tokens
-    /// but lets Surgeon propose richer replans.
+    /// Use deterministic Surgeon (skip-only) instead of the LLM-driven
+    /// replanner. The LLM Surgeon is on by default — it produces richer
+    /// replans (split, prereq, rewire) at the cost of an Opus call per
+    /// terminal failure.
     #[arg(long)]
+    no_surgeon_llm: bool,
+
+    /// (deprecated) LLM Surgeon is on by default; use --no-surgeon-llm to opt out.
+    #[arg(long, hide = true)]
     surgeon_use_llm: bool,
 
-    /// Model for the Surgeon LLM (only used with --surgeon-use-llm).
-    /// Default: "opus".
+    /// Model for the Surgeon LLM. Default: "opus".
     #[arg(long)]
     surgeon_model: Option<String>,
 }
@@ -355,7 +367,12 @@ async fn run_app(
         app.model_routing = false;
     }
 
-    if cli.with_critic {
+    // Critic + Surgeon (with LLM) are now ON by default. The historical
+    // --with-critic / --with-surgeon / --surgeon-use-llm flags are still
+    // accepted (hidden) for backwards compatibility; --no-* flags opt out.
+    if cli.no_critic {
+        app.with_critic = false;
+    } else {
         app.with_critic = true;
     }
     if let Some(ref m) = cli.critic_model {
@@ -367,10 +384,14 @@ async fn run_app(
     if cli.no_sentry {
         app.with_sentry = false;
     }
-    if cli.with_surgeon {
+    if cli.no_surgeon {
+        app.with_surgeon = false;
+    } else {
         app.with_surgeon = true;
     }
-    if cli.surgeon_use_llm {
+    if cli.no_surgeon_llm {
+        app.surgeon_use_llm = false;
+    } else {
         app.surgeon_use_llm = true;
     }
     if let Some(ref m) = cli.surgeon_model {
