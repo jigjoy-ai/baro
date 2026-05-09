@@ -412,6 +412,17 @@ export class Conductor extends Participant {
                 this.prd = applyReplan(this.prd, replan)
                 this.appliedReplans += 1
                 replannedThisLevel = true
+                // Removed stories are obsolete — drop them from
+                // globalFailed so they don't count against the run's
+                // success verdict. The replan has supplanted them.
+                if (replan.removedStoryIds.length > 0) {
+                    const removeSet = new Set(replan.removedStoryIds)
+                    for (let i = this.globalFailed.length - 1; i >= 0; i--) {
+                        if (removeSet.has(this.globalFailed[i])) {
+                            this.globalFailed.splice(i, 1)
+                        }
+                    }
+                }
                 this.emit(
                     new ConductorStateItem(
                         "running_level",

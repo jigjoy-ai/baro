@@ -175,10 +175,35 @@ Rust binary distributed via npm. TUI built with ratatui, async execution
 with tokio. Each `baro` invocation spawns the bundled TypeScript
 [Mozaik](https://github.com/jigjoy-ai/mozaik) orchestrator as a
 subprocess; the orchestrator owns story execution and emits typed
-events into a shared `AgenticEnvironment` bus, where Librarian / Sentry
-/ Critic / Surgeon participants observe and react. Each story is one
+events into a shared `AgenticEnvironment` bus. Each story is one
 `claude` CLI subprocess (auth inherits from your Claude CLI session —
 no API key needed).
+
+The orchestrator is itself a Mozaik agentic environment: there is no
+imperative `run()` method, no top-level `Promise.all` loop. The
+**Conductor** is a state machine that reacts to typed bus events
+(`RunStartRequest` → `LevelComputeRequest` → `StorySpawnRequest` →
+`StoryResult` → `LevelCompleted` → …). Spawning a story, evaluating a
+turn, and replanning the DAG are all reactions, not steps in a loop.
+
+Ten participants share that bus:
+
+| Participant     | Role                                                              |
+| --------------- | ----------------------------------------------------------------- |
+| `Conductor`     | Orchestration state machine — drives the run by reacting          |
+| `StoryFactory`  | Spawns Story Agents on each `StorySpawnRequest`                   |
+| `StoryAgent`    | Runs one story via Claude CLI, with retries and timeout           |
+| `Librarian`     | Cross-agent memory — indexes outputs of exploration tools         |
+| `Sentry`        | Flags overlapping file writes across concurrent stories           |
+| `Critic`        | Per-turn acceptance-criteria evaluator (opt-in: `--with-critic`)  |
+| `Surgeon`       | Emits DAG replans when a story fails terminally (opt-in: `--with-surgeon`) |
+| `Operator`      | Bridges external user commands (TUI, web UI) into bus events      |
+| `Auditor`       | JSONL log of every event on the bus                               |
+| `Cartographer`  | Translates bus events into UI frames for the Rust TUI             |
+
+The bus is open. New participants — CI deployers, Slack notifiers,
+external ticket triggers — are subscribers and emitters with no changes
+to the orchestrator.
 
 ## License
 
