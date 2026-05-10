@@ -1010,21 +1010,37 @@ fn spawn_executor(
         Some("opus".to_string())
     };
 
-    // Default audit log path: <cwd>/.baro/runs/run-<unix-secs>.jsonl.
+    // Default audit log path: ~/.baro/runs/<project>-<unix-secs>.jsonl.
+    // Living under the user's home directory (not the project's <cwd>/.baro/)
+    // means the diagnostic trail survives anything that touches the
+    // project working tree: git checkouts, branch switches, manual
+    // cleanups, IDE indexers — none of those reach into ~. We had a
+    // run where 495 KB of audit data vanished from <cwd>/.baro/runs/
+    // between the run ending and the user kill; we still don't know
+    // what wiped it, but moving the file out of the project dir means
+    // we don't have to find out.
+    //
     // Always-on so post-mortems on stuck/abnormal runs are possible
     // without rerunning. We pre-touch BOTH the audit JSONL and the
     // stderr.txt sidecar before spawning the orchestrator so the
     // diagnostic surface exists even if the JS process explodes inside
-    // its first 50ms — the previous implementation only created the
-    // dir, leaving us blind whenever the orchestrator died before its
-    // Auditor participant could open the file itself.
-    let audit_log_default = cwd.join(".baro").join("runs").join(format!(
-        "run-{}.jsonl",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    ));
+    // its first 50ms.
+    let project_name = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.replace(['/', ' ', '\t', '\n'], "_"))
+        .unwrap_or_else(|| "project".to_string());
+    let unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let audit_root = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.clone())
+        .join(".baro")
+        .join("runs");
+    let audit_log_default =
+        audit_root.join(format!("{}-{}.jsonl", project_name, unix_secs));
     if let Some(parent) = audit_log_default.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!(
