@@ -128,7 +128,7 @@ pub fn render_stats_full(f: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("    ", Style::default()),
-            Span::styled("Skipped: ", Style::default().fg(theme::MUTED)),
+            Span::styled("Failed: ", Style::default().fg(theme::MUTED)),
             Span::styled(
                 format!(
                     "{}",
@@ -278,7 +278,7 @@ pub fn render_stats_full(f: &mut Frame, app: &App, area: Rect) {
                 StoryStatus::Running => ("Running", theme::WARNING),
                 StoryStatus::Failed => ("Failed", theme::ERROR),
                 StoryStatus::Retrying(_) => ("Retry", theme::WARNING),
-                StoryStatus::Skipped => ("Skipped", theme::MUTED),
+                StoryStatus::Skipped => ("Dropped", theme::MUTED),
                 StoryStatus::Pending => ("Pending", theme::MUTED),
             };
 

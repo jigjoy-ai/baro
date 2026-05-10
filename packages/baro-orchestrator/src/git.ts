@@ -122,39 +122,71 @@ export async function createOrCheckoutBranch(
 export async function safePullRebase(
     cwd: string,
     onLog?: (line: string) => void,
+    gate?: GitGate,
 ): Promise<void> {
-    if (!(await hasRemoteOrigin(cwd))) {
-        onLog?.("[git] no remote, skipping pull")
-        return
-    }
-
-    let branch: string
+    const release = gate ? await gate.acquire() : null
     try {
-        branch = await getCurrentBranch(cwd)
-    } catch {
-        onLog?.("[git] no branch, skipping pull")
-        return
+        if (!(await hasRemoteOrigin(cwd))) {
+            onLog?.("[git] no remote, skipping pull")
+            return
+        }
+
+        let branch: string
+        try {
+            branch = await getCurrentBranch(cwd)
+        } catch {
+            onLog?.("[git] no branch, skipping pull")
+            return
+        }
+
+        if (!(await hasRemoteBranch(cwd, branch))) {
+            onLog?.("[git] remote branch not found, skipping pull")
+            return
+        }
+
+        onLog?.("[git] pulling latest...")
+
+        // Stash tracked edits (e.g. prd.json) before rebasing. We use
+        // `stash create` (returns a SHA, does NOT push onto the named
+        // stack) instead of `stash push`/`stash pop` because concurrent
+        // story-passed callbacks would otherwise pop each other's
+        // entries and silently lose work. Untracked files are
+        // intentionally NOT stashed — they can't conflict with a rebase,
+        // and including them previously caused user-managed files (e.g.
+        // BARO_GOAL.md) to vanish whenever stash apply hit a conflict.
+        let stashSha: string | null = null
+        try {
+            const { stdout } = await exec("git", ["stash", "create"], { cwd })
+            stashSha = stdout.trim() || null
+            if (stashSha) {
+                await execSafe("git", ["reset", "--hard", "HEAD"], { cwd })
+            }
+        } catch {
+            // no tracked changes to stash; continue
+        }
+
+        try {
+            await exec("git", ["pull", "--rebase", "origin", branch], { cwd })
+            onLog?.("[git] pull ok")
+        } catch {
+            onLog?.("[git] pull conflict, continuing without pull")
+            await execSafe("git", ["rebase", "--abort"], { cwd })
+        }
+
+        if (stashSha) {
+            try {
+                await exec("git", ["stash", "apply", stashSha], { cwd })
+            } catch (e) {
+                onLog?.(
+                    `[git] could not re-apply stashed edits (sha ${stashSha.slice(0, 8)}): ${
+                        (e as Error)?.message ?? String(e)
+                    }`,
+                )
+            }
+        }
+    } finally {
+        release?.()
     }
-
-    if (!(await hasRemoteBranch(cwd, branch))) {
-        onLog?.("[git] remote branch not found, skipping pull")
-        return
-    }
-
-    onLog?.("[git] pulling latest...")
-
-    // Stash local edits (e.g. prd.json updates) before rebasing.
-    await execSafe("git", ["stash", "--include-untracked"], { cwd })
-
-    try {
-        await exec("git", ["pull", "--rebase", "origin", branch], { cwd })
-        onLog?.("[git] pull ok")
-    } catch {
-        onLog?.("[git] pull conflict, continuing without pull")
-        await execSafe("git", ["rebase", "--abort"], { cwd })
-    }
-
-    await execSafe("git", ["stash", "pop"], { cwd })
 }
 
 // ─── Push with retry ────────────────────────────────────────────────
@@ -174,8 +206,12 @@ export async function gitPushWithRetry(
         const max = options.maxAttempts ?? GIT_PUSH_MAX_ATTEMPTS
         let lastError = ""
 
+        // Only emit "pushing..." once at the start. Per-attempt lines
+        // turn into a wall of noise when many stories push back-to-back
+        // — the user just wants to see one line per push, with details
+        // only when the final attempt fails.
+        options.onLog?.("[git] pushing...")
         for (let attempt = 1; attempt <= max; attempt++) {
-            options.onLog?.("[git] pushing...")
             try {
                 await exec("git", ["push", "origin", branch], { cwd: options.cwd })
                 options.onLog?.("[git] push ok")
@@ -186,7 +222,12 @@ export async function gitPushWithRetry(
 
             if (attempt === max) break
 
-            options.onLog?.("[git] push failed, pulling and retrying...")
+            // One-liner per retry instead of dumping the full stderr
+            // each time. The full stderr is logged exactly once at the
+            // end if every attempt failed.
+            options.onLog?.(
+                `[git] push rejected (attempt ${attempt}/${max}), pulling and retrying...`,
+            )
             try {
                 await exec("git", ["pull", "--rebase", "origin", branch], {
                     cwd: options.cwd,
@@ -198,7 +239,10 @@ export async function gitPushWithRetry(
             }
         }
 
-        options.onLog?.(`[git] push failed after ${max} attempts`)
+        const compactErr = lastError.split("\n")[0]?.trim() || lastError
+        options.onLog?.(
+            `[git] push failed after ${max} attempts: ${compactErr}`,
+        )
         throw new Error(`Push failed after ${max} attempts: ${lastError}`)
     } finally {
         release()

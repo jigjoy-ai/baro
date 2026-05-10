@@ -3,7 +3,7 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
         ScrollbarState, Tabs,
     },
     Frame,
@@ -14,6 +14,12 @@ use crate::theme;
 use crate::utils::format_token_display;
 
 pub fn render_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
+    // Clear the whole dashboard area each frame so stale characters from
+    // a prior render — especially on a window resize or when a level
+    // header shrinks — get overwritten instead of bleeding through. This
+    // is what was producing the "vel 1:" garbled-header look.
+    f.render_widget(Clear, area);
+
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -39,11 +45,23 @@ fn render_story_list(f: &mut Frame, app: &mut App, area: Rect) {
             items.push(story_list_item(story, &app.push_results));
         }
     } else {
+        // Inner width of the story list block (panel - 2 borders - 1 for
+        // the optional scrollbar). We pad the level header out to this
+        // width so any stale characters left over from a prior, longer
+        // render frame get overwritten with spaces — without the pad,
+        // " Level 1:" sometimes ends up looking like "vel 1:" because
+        // an old line at that position still bleeds through.
+        let inner_w = area.width.saturating_sub(3) as usize;
         for (i, level) in app.dag_levels.iter().enumerate() {
-            items.push(ListItem::new(Line::from(Span::styled(
-                format!(" Level {}:", i),
-                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
-            ))));
+            let label = format!(" Level {}:", i);
+            let pad = inner_w.saturating_sub(label.chars().count());
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(
+                    label,
+                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" ".repeat(pad)),
+            ])));
 
             for story_id in level {
                 if let Some(story) = app.stories.iter().find(|s| s.id == *story_id) {

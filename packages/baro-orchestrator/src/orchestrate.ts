@@ -257,8 +257,11 @@ export async function orchestrate(
             : undefined,
         onStoryPassed: useGit
             ? async (storyId) => {
-                  await safePullRebase(config.cwd, (line) =>
-                      emitTui && emit({ type: "story_log", id: storyId, line }),
+                  await safePullRebase(
+                      config.cwd,
+                      (line) =>
+                          emitTui && emit({ type: "story_log", id: storyId, line }),
+                      gitGate,
                   )
                   try {
                       await gitPushWithRetry(gitGate, {

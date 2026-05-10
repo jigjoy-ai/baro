@@ -164,7 +164,7 @@ pub fn render_completion(f: &mut Frame, app: &App) {
             ),
         ]),
         Line::from(vec![
-            Span::styled("  Skipped:        ", Style::default().fg(theme::MUTED)),
+            Span::styled("  Failed:         ", Style::default().fg(theme::MUTED)),
             Span::styled(
                 format!("{}", skipped),
                 Style::default().fg(if skipped > 0 {

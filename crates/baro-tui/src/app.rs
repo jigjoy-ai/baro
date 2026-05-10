@@ -95,6 +95,12 @@ pub enum StoryStatus {
     Complete,
     Failed,
     Retrying(u32),
+    /// Reserved for stories the orchestrator decides to drop (e.g.
+    /// because a dependency failed terminally). Currently never
+    /// constructed — terminal retry-exhaustion now uses `Failed` so the
+    /// user isn't told their work was "skipped" when it was actually
+    /// attempted. Kept around for an upcoming `story_dropped` event.
+    #[allow(dead_code)]
     Skipped,
 }
 
@@ -634,13 +640,15 @@ impl App {
                 max_retries,
             } => {
                 if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
+                    // A terminal error after exhausted retries is a true
+                    // failure, not a "skipped" — the story actually ran
+                    // (often for many minutes) and could not be made
+                    // green. Show it as Failed so the user isn't told
+                    // their work was just skipped past.
+                    story.status = StoryStatus::Failed;
+                    story.error = Some(error);
                     if attempt >= max_retries {
-                        story.status = StoryStatus::Skipped;
-                        story.error = Some(error);
                         self.active_stories.remove(&id);
-                    } else {
-                        story.status = StoryStatus::Failed;
-                        story.error = Some(error);
                     }
                 }
             }

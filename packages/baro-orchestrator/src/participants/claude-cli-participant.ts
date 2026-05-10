@@ -67,6 +67,25 @@ export interface ClaudeRunSummary {
 }
 
 export class ClaudeCliParticipant extends Participant {
+    /**
+     * Process-wide registry of every Claude child currently running.
+     * Used by the orchestrator's SIGINT/SIGTERM handlers to nuke
+     * orphaned Claude processes so a killed baro doesn't leave a swarm
+     * of background agents burning quota.
+     */
+    private static readonly active = new Set<ClaudeCliParticipant>()
+
+    /** Send a signal to every active Claude child. Idempotent. */
+    static killAll(signal: NodeJS.Signals = "SIGTERM"): void {
+        for (const p of ClaudeCliParticipant.active) {
+            try {
+                p.proc?.kill(signal)
+            } catch {
+                // best-effort
+            }
+        }
+    }
+
     private readonly options: Required<
         Pick<
             ClaudeCliParticipantOptions,
@@ -150,6 +169,7 @@ export class ClaudeCliParticipant extends Participant {
         }
 
         this.proc = proc
+        ClaudeCliParticipant.active.add(this)
         this.transition("starting")
 
         proc.stdout!.setEncoding("utf8")
@@ -161,6 +181,7 @@ export class ClaudeCliParticipant extends Participant {
             this.rejectReady(err)
         })
         proc.on("exit", (code) => {
+            ClaudeCliParticipant.active.delete(this)
             this.exitCode = code
             const finalPhase: AgentPhase =
                 this.spawnError != null || (code != null && code !== 0)

@@ -178,7 +178,7 @@ fn render_progress(f: &mut Frame, app: &App, area: Rect) {
         label.push_str(&format!(", {} failed", counts.failed));
     }
     if counts.skipped > 0 {
-        label.push_str(&format!(", {} skipped", counts.skipped));
+        label.push_str(&format!(", {} dropped", counts.skipped));
     }
     label.push(')');
 
@@ -210,12 +210,17 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     } else if app.done {
         let stats = app.final_stats.as_ref();
         let completed = stats.map(|s| s.stories_completed).unwrap_or(0);
-        let skipped = stats.map(|s| s.stories_skipped).unwrap_or(0);
+        // Orchestrator field is `stories_skipped` for protocol-compat,
+        // but it counts failed + dropped. Show as "failed" — that's what
+        // it actually represents to the user (a story that was attempted
+        // but didn't make it green, or was dropped after dependency
+        // failure).
+        let failed = stats.map(|s| s.stories_skipped).unwrap_or(0);
         let elapsed = app.total_time_secs;
         format!(
-            " Done! {} completed, {} skipped in {}:{:02} | q:exit",
+            " Done! {} completed, {} failed in {}:{:02} | q:exit",
             completed,
-            skipped,
+            failed,
             elapsed / 60,
             elapsed % 60,
         )
@@ -235,7 +240,7 @@ pub(crate) fn status_icon_color(status: &StoryStatus) -> (&'static str, ratatui:
         StoryStatus::Running => ("▶", theme::WARNING),
         StoryStatus::Failed => ("✗", theme::ERROR),
         StoryStatus::Retrying(_) => ("↻", theme::WARNING),
-        StoryStatus::Skipped => ("⊘", theme::MUTED),
+        StoryStatus::Skipped => ("⊘", theme::MUTED), // dropped (e.g. dep failed)
         StoryStatus::Pending => ("○", theme::MUTED),
     }
 }

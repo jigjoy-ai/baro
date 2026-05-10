@@ -22,6 +22,7 @@ import { existsSync } from "fs"
 import { resolve } from "path"
 
 import { orchestrate, type OrchestrateConfig } from "../src/orchestrate.js"
+import { ClaudeCliParticipant } from "../src/participants/claude-cli-participant.js"
 
 interface CliArgs {
     prd: string
@@ -224,13 +225,52 @@ async function main(): Promise<void> {
 process.on("unhandledRejection", (reason) => {
     const stack = (reason as Error)?.stack ?? String(reason)
     process.stderr.write(`[cli] unhandledRejection: ${stack}\n`)
+    ClaudeCliParticipant.killAll("SIGTERM")
     process.exit(1)
 })
 process.on("uncaughtException", (err) => {
     const stack = err?.stack ?? String(err)
     process.stderr.write(`[cli] uncaughtException: ${stack}\n`)
+    ClaudeCliParticipant.killAll("SIGTERM")
     process.exit(1)
 })
+
+// Forward SIGINT/SIGTERM to every active Claude child so a killed baro
+// doesn't leave a swarm of background agents burning quota. The Rust
+// TUI sends SIGTERM on user-initiated shutdown; the user's own ctrl-c
+// in dev arrives as SIGINT.
+let shuttingDown = false
+function shutdown(signal: NodeJS.Signals): void {
+    if (shuttingDown) return
+    shuttingDown = true
+    process.stderr.write(`[cli] received ${signal}, killing in-flight Claude children...\n`)
+    ClaudeCliParticipant.killAll("SIGTERM")
+    // Give children a moment to die cleanly, then escalate.
+    setTimeout(() => {
+        ClaudeCliParticipant.killAll("SIGKILL")
+        process.exit(signal === "SIGINT" ? 130 : 143)
+    }, 1500).unref()
+}
+process.on("SIGINT", () => shutdown("SIGINT"))
+process.on("SIGTERM", () => shutdown("SIGTERM"))
+
+// Parent-death watchdog: if the Rust TUI is killed with SIGKILL it has
+// no chance to send us SIGTERM, and we'd be left running with our
+// Claude children alive. Detect re-parenting to PID 1 (init / launchd)
+// and self-terminate, killing our children on the way out. The
+// orchestrator only ever has one legit parent (the Rust baro-tui or a
+// dev tsx invocation), so any change is fatal.
+const initialPpid = process.ppid
+const orphanWatchdog = setInterval(() => {
+    if (process.ppid !== initialPpid) {
+        process.stderr.write(
+            `[cli] parent died (ppid ${initialPpid} → ${process.ppid}), shutting down\n`,
+        )
+        clearInterval(orphanWatchdog)
+        shutdown("SIGTERM")
+    }
+}, 1000)
+orphanWatchdog.unref()
 
 main().catch((e: unknown) => {
     process.stderr.write(`[cli] unhandled: ${(e as Error)?.stack ?? String(e)}\n`)

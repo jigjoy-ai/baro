@@ -84,6 +84,12 @@ async fn run(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     cmd.stdin(std::process::Stdio::null());
+    // If the Rust process dies before we can ask the orchestrator to
+    // shut down cleanly (panic, OS kill), at least make sure the
+    // orchestrator child gets SIGKILL'd via tokio's Drop impl rather
+    // than orphaning to init. The orchestrator's own ppid watchdog
+    // catches the orphan case if we somehow miss this.
+    cmd.kill_on_drop(true);
 
     let mut child = cmd
         .spawn()

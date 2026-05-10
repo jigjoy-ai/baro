@@ -33,16 +33,28 @@ export class Auditor extends Participant {
     private readonly path: string
     private readonly skipStreamChunks: boolean
     private readonly filter?: (source: Participant, item: ContextItem) => boolean
+    /**
+     * Flips to true the first time a write fails (e.g. EACCES because
+     * `~/.baro/runs/` is root-owned from a sudo install). Once disabled,
+     * subsequent items are dropped silently — losing the audit log is
+     * better than crashing the orchestrator on every bus event.
+     */
+    private disabled = false
 
     constructor(opts: AuditorOptions) {
         super()
         this.path = opts.path
         this.skipStreamChunks = opts.skipStreamChunks ?? true
         this.filter = opts.filter
-        mkdirSync(dirname(this.path), { recursive: true })
+        try {
+            mkdirSync(dirname(this.path), { recursive: true })
+        } catch (e) {
+            this.disable(`mkdir failed: ${(e as Error)?.message ?? String(e)}`)
+        }
     }
 
     async onContextItem(source: Participant, item: ContextItem): Promise<void> {
+        if (this.disabled) return
         if (this.skipStreamChunks && item instanceof ClaudeStreamChunkItem) {
             return
         }
@@ -54,7 +66,19 @@ export class Auditor extends Participant {
             source: this.sourceLabel(source),
             item: item.toJSON(),
         }
-        appendFileSync(this.path, JSON.stringify(entry) + "\n")
+        try {
+            appendFileSync(this.path, JSON.stringify(entry) + "\n")
+        } catch (e) {
+            this.disable(`append failed: ${(e as Error)?.message ?? String(e)}`)
+        }
+    }
+
+    private disable(reason: string): void {
+        if (this.disabled) return
+        this.disabled = true
+        process.stderr.write(
+            `[auditor] cannot write audit log at ${this.path}: ${reason} — continuing without audit\n`,
+        )
     }
 
     private sourceLabel(source: Participant): string {
