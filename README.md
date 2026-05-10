@@ -8,6 +8,17 @@ Give it a goal, it breaks it into stories, builds a dependency DAG, and runs the
 
 ![baro screenshot](assets/screenshot.png)
 
+> 📖 **Deep dive:** [Getting the Maximum Out of My Claude Code Subscription](https://jigjoy.ai/blog/getting-the-maximum-out-of-claude-code) — the story of why baro exists, how it pairs with Mozaik, and what it looks like in practice.
+
+## What's new (0.22–0.23)
+
+- **Opus as the default executor** — richer reasoning per story, still with routed Sonnet/Haiku available via `--model` or `.barorc`.
+- **Smaller-stories planner** — the planner now biases toward narrower, more independent stories that parallelize better on the DAG.
+- **Branch dedup** — reruns on the same goal reuse the existing `baro/<name>` branch instead of piling up duplicates.
+- **TUI: terminal-clear on tab switch** — cleaner transitions between story logs, DAG view, and stats.
+- **Audit log survives project resets** — JSONL event logs now live in `~/.baro/runs/` by default, so a wiped `node_modules` or a fresh clone doesn't lose history.
+- **Always-on audit + abnormal-exit banner** — every run is recorded, and the TUI surfaces an explicit banner when the orchestrator exits unexpectedly.
+
 ## Install
 
 ```
@@ -54,7 +65,7 @@ baro --cwd ~/projects/myapp "Add REST API"
 
 1. **Plan** — Claude (Opus) explores your codebase and generates a dependency graph of user stories
 2. **Review** — You review the plan, refine with feedback, accept or quit
-3. **Execute** — Stories run in parallel on a feature branch, each with its own Claude agent (Sonnet)
+3. **Execute** — Stories run in parallel on a feature branch, each with its own Claude agent (Opus by default in 0.23+; Sonnet/Haiku available via `--model` or `.barorc`)
 4. **Review Agent** — After each level, a review agent (Haiku) checks work against acceptance criteria and creates fix stories if needed
 5. **Finalize** — Runs build verification and creates a GitHub PR with full summary
 
@@ -62,24 +73,25 @@ baro --cwd ~/projects/myapp "Add REST API"
 
 - **Parallel execution** — independent stories run simultaneously, respecting dependency order
 - **DAG engine** — topological sort with level grouping, cycle detection
-- **Model routing** — Opus for planning, Sonnet for execution, Haiku for review (configurable)
+- **Model routing** — Opus for planning and execution (0.23+ default), Haiku for review (configurable)
 - **Live TUI** — dashboard with story status, live agent logs, DAG view, stats
 - **Review agent** — automated code review between levels with build detection and auto-fix
 - **Plan refinement** — press `r` on review screen to give feedback and regenerate the plan
 - **Build detection** — auto-detects project type (Cargo, npm, Go, Python, Make) and runs builds during review
 - **Git coordination** — mutex-protected commits, auto-push with retry, pull --rebase, conflict detection
-- **Branch per run** — creates `baro/<name>` branch, keeps main clean
+- **Branch per run** — creates `baro/<name>` branch, keeps main clean, reuses existing branches on rerun (0.23+)
 - **Dry run** — `--dry-run` generates plan and saves to `prd.json` without executing, then `--resume` to run it
 - **Resume** — detects `prd.json` and resumes incomplete executions
 - **PR creation** — creates GitHub PR with stories table, stats, time saved, and review summary
 - **Configurable parallelism** — `--parallel N` to limit concurrent story execution
-- **Story timeout** — `--timeout SECONDS` kills stuck agents (default: 10 minutes)
+- **Story timeout** — `--timeout SECONDS` kills stuck agents (default: 10 minutes, hard timeout disabled in 0.22+)
 - **Time saved** — shows parallel speedup vs sequential execution
 - **System notifications** — terminal bell + OS notification (macOS/Linux/Windows) when done
 - **Retry logic** — failed stories retry automatically (configurable per story)
 - **Interactive settings** — configure model, parallelism, timeout, context, and planner on the welcome screen with Tab/arrow keys
 - **Project config** — `.barorc` file in project root sets defaults (no CLI flags needed)
 - **Session lock** — prevents multiple baro instances from running in the same directory
+- **Audit log** — every bus event written to `~/.baro/runs/<run-id>.jsonl`
 
 ## Config file
 
@@ -207,15 +219,27 @@ Ten participants share that bus:
 | `StoryAgent`    | Runs one story via Claude CLI, with retries and timeout           |
 | `Librarian`     | Cross-agent memory — indexes outputs of exploration tools         |
 | `Sentry`        | Flags overlapping file writes across concurrent stories           |
-| `Critic`        | Per-turn acceptance-criteria evaluator (opt-in: `--with-critic`)  |
-| `Surgeon`       | Emits DAG replans when a story fails terminally (opt-in: `--with-surgeon`) |
+| `Critic`        | Per-turn acceptance-criteria evaluator (default ON, `--no-critic` to disable) |
+| `Surgeon`       | Emits DAG replans when a story fails terminally (default ON, `--no-surgeon` to disable) |
 | `Operator`      | Bridges external user commands (TUI, web UI) into bus events      |
-| `Auditor`       | JSONL log of every event on the bus                               |
+| `Auditor`       | JSONL log of every event on the bus (written to `~/.baro/runs/`)  |
 | `Cartographer`  | Translates bus events into UI frames for the Rust TUI             |
 
 The bus is open. New participants — CI deployers, Slack notifiers,
 external ticket triggers — are subscribers and emitters with no changes
 to the orchestrator.
+
+## Status & feedback
+
+baro is a work in progress. I'm actively adding things, testing ideas,
+and occasionally breaking them — if a run explodes, an [issue on
+GitHub](https://github.com/Lotus015/baro/issues) with the run's audit
+log from `~/.baro/runs/` is the fastest way to get it fixed.
+
+If you like the idea and want to help shape where it goes, PRs are
+welcome, and you can DM me on Twitter
+[@lotus_sbc](https://twitter.com/lotus_sbc) with ideas, use cases, or
+bug reports.
 
 ## License
 
