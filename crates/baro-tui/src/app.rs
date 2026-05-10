@@ -793,7 +793,7 @@ impl App {
         if self.model_routing {
             return match phase {
                 "planning" => Some("opus".to_string()),
-                "execution" => Some("sonnet".to_string()),
+                "execution" => Some("opus".to_string()),
                 "review" => Some("haiku".to_string()),
                 _ => None,
             };

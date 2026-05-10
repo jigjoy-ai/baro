@@ -229,10 +229,21 @@ Output ONLY valid JSON matching this exact schema (no markdown, no explanation, 
 }
 
 Rules:
-- Each story: single focused unit of work for one AI agent
-- If a story is complex enough to require the most capable model (opus with 1M context) for implementation, set its "model" field to "opus". Otherwise omit the field entirely (defaults to the routing default, typically sonnet)
+- Each story: ONE focused unit of work for one AI agent. Hard cap:
+    * touches at most ~10 files
+    * fits in a single Claude turn (a few minutes of execution, not an hour)
+  Stories that read like "Strip all X" / "Refactor everything that touches Y"
+  are TOO BIG. Split them by directory, by feature, or by file group:
+    "Delete backend SEF module"
+    "Delete frontend SEF wiring"
+    "Rename pib→taxId in schema + DTOs"
+    "Rename pib→taxId in services + frontend forms"
+  Prefer 12-15 small stories over 5 big ones.
+- Default execution model is "opus". Only set "model" if you want to
+  override (e.g. set to "sonnet" or "haiku" for trivial cosmetic stories
+  that don't need deep reasoning). For everything substantive, leave
+  the field out and let the default opus run it.
 - Use dependsOn for dependencies; same-priority stories with no deps run IN PARALLEL
-- Keep stories small (15-60 min of work each)
 - Include testable acceptance criteria and test commands
 - No circular dependencies
 - Start with foundational stories, build up
@@ -803,9 +814,26 @@ async fn run_app(
                     }},
                     Screen::Execute => match key.code {
                         KeyCode::Char('q') => return Ok(()),
-                        KeyCode::Char('1') => app.global_tab = app::GlobalTab::Dashboard,
-                        KeyCode::Char('2') => app.global_tab = app::GlobalTab::Dag,
-                        KeyCode::Char('3') => app.global_tab = app::GlobalTab::Stats,
+                        // Force a full terminal clear on every tab change.
+                        // ratatui's `Clear` widget only marks cells stale in
+                        // its own buffer and isn't reliably writing spaces to
+                        // every cell of the rect, so old tab content bleeds
+                        // through (the "es';"/"mon';" debris on the right
+                        // side, vertical bars in the stories panel, etc.).
+                        // terminal.clear() blanks the actual terminal cells;
+                        // the next render redraws from a clean slate.
+                        KeyCode::Char('1') => {
+                            app.global_tab = app::GlobalTab::Dashboard;
+                            let _ = terminal.clear();
+                        }
+                        KeyCode::Char('2') => {
+                            app.global_tab = app::GlobalTab::Dag;
+                            let _ = terminal.clear();
+                        }
+                        KeyCode::Char('3') => {
+                            app.global_tab = app::GlobalTab::Stats;
+                            let _ = terminal.clear();
+                        }
                         KeyCode::Tab => {
                             if key.modifiers.contains(KeyModifiers::SHIFT) { app.prev_log(); }
                             else { app.next_log(); }
@@ -1005,7 +1033,7 @@ fn spawn_executor(
     });
 
     let default_model = if config.model_routing {
-        Some("sonnet".to_string())
+        Some("opus".to_string())
     } else {
         Some("opus".to_string())
     };

@@ -89,6 +89,12 @@ export async function createOrCheckoutBranch(
     branchName: string,
     onLog?: (line: string) => void,
 ): Promise<void> {
+    // Strip accidental double-prefixes ("baro/baro/foo" → "baro/foo").
+    // Happens when the caller is already on a baro-prefixed branch from
+    // a previous run and prepends "baro/" again to the PRD-supplied name.
+    while (branchName.startsWith("baro/baro/")) {
+        branchName = branchName.slice("baro/".length)
+    }
     try {
         await exec("git", ["checkout", "-b", branchName], { cwd })
     } catch {

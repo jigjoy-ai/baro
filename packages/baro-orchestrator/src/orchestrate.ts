@@ -231,7 +231,7 @@ export async function orchestrate(
         parallel: config.parallel ?? 0,
         timeoutSecs: config.timeoutSecs ?? 600,
         overrideModel: config.overrideModel ?? undefined,
-        defaultModel: config.defaultModel ?? "sonnet",
+        defaultModel: config.defaultModel ?? "opus",
         onRunStart: useGit
             ? async (prd) => {
                   baseSha = await getHeadSha(config.cwd)
