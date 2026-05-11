@@ -75,7 +75,14 @@ export class Finalizer extends Participant {
     private startedAtMs: number | null = null
     private baseSha: string | null
     private branchName: string | null = null
-    private levels: string[][] = []
+    /**
+     * DAG levels keyed by their ordinal as emitted in
+     * LevelStartedItem. We use a Map rather than an array because
+     * Conductor's ordinals are 1-based and would otherwise leave a
+     * `levels[0] = undefined` hole that crashes any `for...of`
+     * iteration (it walks holes too).
+     */
+    private readonly levels = new Map<number, string[]>()
     private readonly stories = new Map<string, StoryRecord>()
     /**
      * Resolves once finalize() has completed (or been short-circuited).
@@ -114,7 +121,7 @@ export class Finalizer extends Participant {
         }
 
         if (item instanceof LevelStartedItem) {
-            this.levels[item.ordinal] = [...item.storyIds]
+            this.levels.set(item.ordinal, [...item.storyIds])
             for (const id of item.storyIds) {
                 if (!this.stories.has(id)) {
                     this.stories.set(id, {
@@ -150,11 +157,25 @@ export class Finalizer extends Participant {
         }
 
         if (item instanceof RunCompletedItem) {
-            // Track the in-flight finalize call so orchestrate.ts can
-            // await it before emitting the TUI `done` event.
-            this.finalizePromise = this.finalize(item)
+            // Wrap finalize() so a bug inside this participant never
+            // takes down the orchestrator. The whole run has already
+            // succeeded by the time we get here — losing the PR is a
+            // recoverable annoyance, killing the process and orphaning
+            // Claude children is not.
+            this.finalizePromise = this.safeFinalize(item)
             await this.finalizePromise
             return
+        }
+    }
+
+    private async safeFinalize(item: RunCompletedItem): Promise<void> {
+        try {
+            await this.finalize(item)
+        } catch (e) {
+            const msg = (e as Error)?.stack ?? String(e)
+            this.log(`[finalizer] internal error, skipping PR: ${msg.split("\n")[0]}`)
+            process.stderr.write(`[finalizer] crash: ${msg}\n`)
+            this.emit(new PrCreatedItem(null, this.branchName ?? "", ""))
         }
     }
 
@@ -279,14 +300,17 @@ export class Finalizer extends Participant {
 
     /**
      * Stories returned in DAG order so the table reads top-down the same
-     * way the run executed: level 0 first, then level 1, etc. Within a
-     * level we sort by id (stable) to keep the table deterministic.
+     * way the run executed: lowest-ordinal level first. Within a level
+     * we sort by id (stable) to keep the table deterministic.
      */
     private orderStories(): StoryRecord[] {
         const seen = new Set<string>()
         const ordered: StoryRecord[] = []
-        for (const lvl of this.levels) {
-            const sorted = [...lvl].sort()
+        const ordinals = [...this.levels.keys()].sort((a, b) => a - b)
+        for (const ord of ordinals) {
+            const ids = this.levels.get(ord)
+            if (!ids) continue
+            const sorted = [...ids].sort()
             for (const id of sorted) {
                 const rec = this.stories.get(id)
                 if (rec && !seen.has(id)) {
@@ -455,13 +479,14 @@ export class Finalizer extends Participant {
         }
 
         // DAG plan
-        if (this.levels.length > 0) {
+        if (this.levels.size > 0) {
             lines.push("## Plan")
             lines.push("")
             lines.push("```")
-            for (let i = 0; i < this.levels.length; i++) {
-                const ids = this.levels[i]
-                lines.push(`Level ${i} ─── ${ids.join(", ")}`)
+            const ordinals = [...this.levels.keys()].sort((a, b) => a - b)
+            for (const ord of ordinals) {
+                const ids = this.levels.get(ord) ?? []
+                lines.push(`Level ${ord} ─── ${ids.join(", ")}`)
             }
             lines.push("```")
             lines.push("")

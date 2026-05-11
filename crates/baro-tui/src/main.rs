@@ -87,7 +87,7 @@ use app::{App, Planner, ReviewStory, Screen};
 use events::BaroEvent;
 
 #[derive(Parser)]
-#[command(name = "baro", about = "AI-powered project execution")]
+#[command(name = "baro", version, about = "AI-powered project execution")]
 struct Cli {
     /// Project goal (if omitted, shows welcome screen)
     goal: Option<String>,
