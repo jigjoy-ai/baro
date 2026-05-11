@@ -87,7 +87,12 @@ use app::{App, Planner, ReviewStory, Screen};
 use events::BaroEvent;
 
 #[derive(Parser)]
-#[command(name = "baro", version, about = "AI-powered project execution")]
+#[command(
+    name = "baro",
+    version,
+    about = "AI-powered project execution",
+    after_help = "Issues:  https://github.com/Lotus015/baro/issues\nTwitter: @lotus_sbc",
+)]
 struct Cli {
     /// Project goal (if omitted, shows welcome screen)
     goal: Option<String>,
