@@ -2,6 +2,7 @@
 
 A concise list of every published version. For full release notes, see the corresponding commit on the v* tag.
 
+## v0.23.5 — release(0.23.5): CHANGELOG.md + `baro --help` issues/twitter footer
 ## v0.23.4 — release(0.23.4): docs cheat sheets + --version flag + Finalizer crash fix
 ## v0.23.3 — release(0.23.3): Finalizer — opens the PR at the end of a run
 ## v0.23.2 — release(0.23.2): real-world-test bug bash
