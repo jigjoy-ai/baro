@@ -505,6 +505,51 @@ export class StorySpawnedItem extends ContextItem {
 }
 
 /**
+ * Emitted by Finalizer the moment it starts composing + sending a PR
+ * (after RunCompletedItem, before `gh pr create`). Lets observers
+ * surface "finalizing…" UI without inspecting Finalizer's internals.
+ */
+export class FinalizeStartedItem extends ContextItem {
+    readonly type = "finalize_started"
+    constructor(public readonly branch: string) {
+        super()
+    }
+    toJSON(): unknown {
+        return { type: this.type, branch: this.branch }
+    }
+}
+
+/**
+ * Emitted by Finalizer once a pull request has been opened for the
+ * run's branch (or once an existing PR for that branch has been
+ * discovered). Observers can react — e.g. the Operator forwarding the
+ * URL to a TUI / Slack participant — without importing Finalizer.
+ *
+ * `url` is null when Finalizer ran but couldn't open a PR (no `gh`
+ * binary, no remote, all stories failed, etc.). Observers should treat
+ * a null url as "the run is over, no PR exists" rather than "still
+ * working."
+ */
+export class PrCreatedItem extends ContextItem {
+    readonly type = "pr_created"
+    constructor(
+        public readonly url: string | null,
+        public readonly branch: string,
+        public readonly baseBranch: string,
+    ) {
+        super()
+    }
+    toJSON(): unknown {
+        return {
+            type: this.type,
+            url: this.url,
+            branch: this.branch,
+            baseBranch: this.baseBranch,
+        }
+    }
+}
+
+/**
  * Final terminal event for a run. Conductor emits this when the loop
  * exits — either all DAG levels drained or a level aborted.
  */

@@ -36,6 +36,7 @@ import {
     ConductorStateItem,
 } from "./participants/conductor.js"
 import { Critic } from "./participants/critic.js"
+import { Finalizer } from "./participants/finalizer.js"
 import { Librarian } from "./participants/librarian.js"
 import { Operator } from "./participants/operator.js"
 import { Sentry } from "./participants/sentry.js"
@@ -49,6 +50,8 @@ import {
     ClaudeSystemItem,
     CoordinationItem,
     CritiqueItem,
+    FinalizeStartedItem,
+    PrCreatedItem,
     RunStartRequestItem,
 } from "./types.js"
 import { emit } from "./tui-protocol.js"
@@ -224,6 +227,24 @@ export async function orchestrate(
         critic.join(env)
     }
 
+    // Finalizer — opens the PR at the end of the run, listening on the
+    // bus for the canonical end-of-run signals. Only joins when we're
+    // doing git lifecycle (no point composing a PR for a no-commit run)
+    // — `gh` availability is checked inside Finalizer itself so the run
+    // still succeeds even on machines without it.
+    const finalizer = useGit
+        ? new Finalizer({
+              cwd: config.cwd,
+              prdPath: config.prdPath,
+              onLog: (line) =>
+                  emitTui && emit({ type: "story_log", id: "_finalizer", line }),
+          })
+        : null
+    if (finalizer) {
+        finalizer.setEnvironment(env)
+        finalizer.join(env)
+    }
+
     // Conductor — the work driver.
     const conductor = new Conductor({
         prdPath: config.prdPath,
@@ -333,6 +354,10 @@ export async function orchestrate(
     // ReplanItem) land in the audit log before this function returns.
     if (critic) await critic.idle()
     if (surgeon) await surgeon.idle()
+    // Wait for Finalizer to open (or knowingly skip) the PR before we
+    // emit the TUI `done` event, so the completion screen has the PR
+    // URL the moment it renders instead of after a race.
+    if (finalizer) await finalizer.complete()
 
     let filesCreated = 0
     let filesModified = 0
@@ -428,6 +453,16 @@ class BaroEventForwarder extends Participant {
 
         if (item instanceof CritiqueItem) {
             this.handleCritique(item)
+            return
+        }
+
+        if (item instanceof FinalizeStartedItem) {
+            emit({ type: "finalize_start" })
+            return
+        }
+
+        if (item instanceof PrCreatedItem) {
+            emit({ type: "finalize_complete", pr_url: item.url })
             return
         }
     }
