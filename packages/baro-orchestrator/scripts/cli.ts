@@ -40,6 +40,7 @@ interface CliArgs {
     withSurgeon: boolean
     surgeonUseLlm: boolean
     surgeonModel?: string
+    intraLevelDelaySecs?: number
     help: boolean
 }
 
@@ -110,6 +111,12 @@ function parseArgs(argv: string[]): CliArgs {
             case "--surgeon-model":
                 args.surgeonModel = required(argv, ++i, "--surgeon-model")
                 break
+            case "--intra-level-delay":
+                args.intraLevelDelaySecs = parseInt(
+                    required(argv, ++i, "--intra-level-delay"),
+                    10,
+                )
+                break
             default:
                 process.stderr.write(`[cli] unknown flag: ${a}\n`)
                 process.exit(2)
@@ -151,6 +158,7 @@ function printHelp(): void {
             "  --with-surgeon        Enable Surgeon (adaptive DAG mutation)",
             "  --surgeon-use-llm     Use LLM evaluation in Surgeon (default: deterministic)",
             "  --surgeon-model <name> Model for Surgeon LLM (default: opus)",
+            "  --intra-level-delay <secs>  Stagger story spawns within a level (default: 10, 0 disables)",
             "  -h, --help            Show this message",
             "",
         ].join("\n"),
@@ -188,6 +196,7 @@ async function main(): Promise<void> {
         withSurgeon: args.withSurgeon,
         surgeonUseLlm: args.surgeonUseLlm,
         surgeonModel: args.surgeonModel,
+        intraLevelDelaySecs: args.intraLevelDelaySecs,
     }
 
     process.stderr.write(

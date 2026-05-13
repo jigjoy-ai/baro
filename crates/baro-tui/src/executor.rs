@@ -70,6 +70,7 @@ pub struct ExecutorConfig {
     pub with_surgeon: bool,
     pub surgeon_use_llm: bool,
     pub surgeon_model: Option<String>,
+    pub intra_level_delay_secs: Option<u64>,
 }
 
 // ─── Helpers used by main.rs ────────────────────────────────────────

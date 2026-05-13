@@ -1,22 +1,34 @@
 /**
- * Librarian — cross-agent runtime memory observer.
+ * Librarian — cross-agent runtime memory observer with mid-flight
+ * broadcast.
  *
- * Listens to FunctionCallItem (the tool call) and FunctionCallOutputItem
- * (its result) on the bus, extracts knowledge from "exploration" tools
- * (Read, Grep, Bash, Glob, LSP), and indexes it by tags so future
- * stories can pick it up before they re-do the same work.
+ * Listens to FunctionCallItem / FunctionCallOutputItem on the bus,
+ * extracts knowledge from "exploration" tools (Read, Grep, Bash, Glob,
+ * LSP), and shares it three ways:
  *
- * Two consumption surfaces:
+ *   1. `gatherContext(storyId, hints?)` — at story launch. Conductor's
+ *      `onBeforeStoryLaunch` hook calls this and prepends the result
+ *      to the story's initial prompt. Same as before, just with much
+ *      bigger budget and a stronger authoritative framing.
  *
- *   1. `gatherContext(storyId, hints?)` — RPC-style accessor used by
- *      Conductor's `onBeforeStoryLaunch` hook to augment a story's
- *      initial prompt. Returns a single text blob suitable for
- *      prepending. This is the Phase-2 integration point: prompts
- *      pick up cross-agent findings without any timing dance.
+ *   2. `KnowledgeItem` bus events — emitted on every new finding so
+ *      other observers can react.
  *
- *   2. KnowledgeItem-s on the bus — emitted whenever a new finding is
- *      indexed, so other observers can react. (Phase-3 multi-turn
- *      agents will inject these mid-flight.)
+ *   3. **NEW**: `AgentTargetedMessageItem` mid-flight broadcasts.
+ *      When Story A indexes a finding, Librarian pushes a
+ *      just-in-time message into every other *in-flight* story
+ *      whose hints match the finding. Those messages reach the
+ *      receiving Claude process via its existing stdin user-message
+ *      route (ClaudeCliParticipant already handles
+ *      AgentTargetedMessageItem). The receiving Claude sees the
+ *      finding as authoritative codebase context on its next turn
+ *      and skips redundant Read/Grep calls.
+ *
+ * In-flight tracking:
+ *   - StorySpawnRequestItem → captures story hints (title tokens)
+ *     so we can match findings against them later.
+ *   - StorySpawnedItem      → mark story as in-flight.
+ *   - StoryResultItem       → clear story from in-flight set.
  *
  * Library-grade: no PRD knowledge, no story specifics.
  */
@@ -28,7 +40,13 @@ import {
     Participant,
 } from "@mozaik-ai/core"
 
-import { KnowledgeItem } from "../types.js"
+import {
+    AgentTargetedMessageItem,
+    KnowledgeItem,
+    StorySpawnRequestItem,
+    StorySpawnedItem,
+} from "../types.js"
+import { StoryResultItem } from "./story-agent.js"
 
 /** Tools whose results are worth capturing for cross-agent reuse. */
 const EXPLORATION_TOOLS = new Set([
@@ -40,6 +58,15 @@ const EXPLORATION_TOOLS = new Set([
     "WebFetch",
     "WebSearch",
 ])
+
+/**
+ * Tools whose findings we broadcast mid-flight. Bash is intentionally
+ * excluded from broadcast (its output is heterogeneous — sometimes a
+ * one-liner, sometimes a 50KB build log — and noise outweighs signal
+ * for cross-agent reuse). Bash findings still go into the on-launch
+ * `gatherContext` for the next level. Same for WebFetch/WebSearch.
+ */
+const BROADCAST_TOOLS = new Set(["Read", "Grep", "Glob", "LSP"])
 
 interface PendingCall {
     agentId: string
@@ -64,10 +91,16 @@ export interface LibrarianOptions {
      */
     maxContentChars?: number
     /**
-     * Cap the total injected context per story to this many characters.
-     * Default: 8000.
+     * Cap the total injected context per story at launch to this
+     * many characters. Default: 20000.
      */
     maxInjectedChars?: number
+    /**
+     * Cap the total mid-flight broadcast bytes pushed into any one
+     * story over the run, to keep a chatty Librarian from drowning
+     * a single agent in injected text. Default: 50000.
+     */
+    maxBroadcastBytesPerStory?: number
 }
 
 export class Librarian extends Participant {
@@ -75,11 +108,17 @@ export class Librarian extends Participant {
     private readonly pending = new Map<string, PendingCall>()
     private readonly knowledge: IndexedKnowledge[] = []
 
+    // Mid-flight bookkeeping
+    private readonly inFlight = new Set<string>()
+    private readonly storyHints = new Map<string, string[]>()
+    private readonly broadcastBytes = new Map<string, number>()
+
     constructor(opts: LibrarianOptions = {}) {
         super()
         this.opts = {
             maxContentChars: opts.maxContentChars ?? 4000,
-            maxInjectedChars: opts.maxInjectedChars ?? 8000,
+            maxInjectedChars: opts.maxInjectedChars ?? 20000,
+            maxBroadcastBytesPerStory: opts.maxBroadcastBytesPerStory ?? 50000,
         }
     }
 
@@ -129,9 +168,11 @@ export class Librarian extends Participant {
 
         if (lines.length === 0) return null
         return [
-            "[librarian] Findings from prior agents in this run that may save",
-            "you time. Do not re-fetch what's already here unless you suspect",
-            "the file changed.",
+            "## Codebase context (current as of this run)",
+            "",
+            "The following file contents and discovery results are authoritative",
+            "and up-to-date. Do not re-read or re-search unless you have specific",
+            "reason to suspect a file has changed since these were captured.",
             "",
             ...lines,
         ].join("\n")
@@ -144,6 +185,18 @@ export class Librarian extends Participant {
         }
         if (item instanceof FunctionCallOutputItem) {
             this.completeWithOutput(source, item)
+            return
+        }
+        if (item instanceof StorySpawnRequestItem) {
+            this.storyHints.set(item.storyId, tokenizeHints(item.prompt))
+            return
+        }
+        if (item instanceof StorySpawnedItem) {
+            this.inFlight.add(item.storyId)
+            return
+        }
+        if (item instanceof StoryResultItem) {
+            this.inFlight.delete(item.storyId)
             return
         }
     }
@@ -210,6 +263,75 @@ export class Librarian extends Participant {
                 ),
             )
         }
+
+        // Mid-flight broadcast: push this finding to every other
+        // in-flight story whose stored hints overlap with the
+        // finding's tags. The receiving ClaudeCliParticipant already
+        // routes AgentTargetedMessageItem into its agent's stdin as a
+        // user message, so the next turn opens with the finding
+        // already in context — and the agent skips its own Read.
+        if (BROADCAST_TOOLS.has(entry.tool)) {
+            this.broadcastFinding(entry)
+        }
+    }
+
+    private broadcastFinding(finding: IndexedKnowledge): void {
+        if (this.inFlight.size === 0) return
+        const envs = this.getEnvironments()
+        if (envs.length === 0) return
+
+        const findingTokens = new Set(
+            [...finding.tags, finding.summary]
+                .join(" ")
+                .toLowerCase()
+                .split(/[^a-z0-9_/.\\-]+/)
+                .filter((t) => t.length >= 3),
+        )
+
+        const block = formatEntry(finding)
+        const text = [
+            "## Just-in-time codebase context",
+            "",
+            `Another agent in this run (${finding.sourceAgentId}) just`,
+            "discovered the following. It is authoritative and current;",
+            "use it directly without re-fetching.",
+            "",
+            block,
+        ].join("\n")
+        const bytes = text.length
+
+        for (const recipientId of this.inFlight) {
+            if (recipientId === finding.sourceAgentId) continue
+
+            // Hint overlap: at least one finding token appears in the
+            // recipient's stored hints. Liberal threshold for v1.
+            const recipientHints = this.storyHints.get(recipientId) ?? []
+            if (recipientHints.length > 0) {
+                const overlap = recipientHints.some((h) =>
+                    findingTokens.has(h.toLowerCase()),
+                )
+                if (!overlap) continue
+            }
+            // If no hints were captured for this recipient, fall through
+            // and broadcast anyway — safer to over-share early than
+            // miss a relevant finding because hints weren't ready.
+
+            // Per-story broadcast budget.
+            const already = this.broadcastBytes.get(recipientId) ?? 0
+            if (already + bytes > this.opts.maxBroadcastBytesPerStory) continue
+            this.broadcastBytes.set(recipientId, already + bytes)
+
+            for (const env of envs) {
+                env.deliverContextItem(
+                    this,
+                    new AgentTargetedMessageItem(recipientId, text, {
+                        source: "librarian",
+                        finding: finding.summary,
+                        from_agent: finding.sourceAgentId,
+                    }),
+                )
+            }
+        }
     }
 }
 
@@ -272,4 +394,17 @@ function formatEntry(k: IndexedKnowledge): string {
         k.content,
         "",
     ].join("\n")
+}
+
+/**
+ * Pull short, lowercase tokens from a story prompt to use as
+ * broadcast-relevance hints. We grab anything alphanumeric with
+ * dots/slashes/dashes (so we catch filenames like `invoice.service.ts`),
+ * lowercase everything, and drop tokens shorter than 3 chars.
+ */
+function tokenizeHints(prompt: string): string[] {
+    return prompt
+        .toLowerCase()
+        .split(/[^a-z0-9_/.\-]+/)
+        .filter((t) => t.length >= 3)
 }

@@ -179,6 +179,13 @@ struct Cli {
     /// Model for the Surgeon LLM. Default: "opus".
     #[arg(long)]
     surgeon_model: Option<String>,
+
+    /// Seconds to wait between successive story spawns inside the same
+    /// DAG level. Gives Librarian a window to capture and broadcast
+    /// the first agent's exploratory tool calls so its peers don't
+    /// repeat the same Reads/Greps. Default: 10. Set to 0 to disable.
+    #[arg(long = "intra-level-delay")]
+    intra_level_delay: Option<u64>,
 }
 
 enum AppEvent {
@@ -412,6 +419,9 @@ async fn run_app(
     }
     if let Some(ref m) = cli.surgeon_model {
         app.surgeon_model = Some(m.clone());
+    }
+    if let Some(d) = cli.intra_level_delay {
+        app.intra_level_delay_secs = Some(d);
     }
 
     let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
@@ -724,6 +734,7 @@ async fn run_app(
                                         let wsg = app.with_surgeon;
                                         let sul = app.surgeon_use_llm;
                                         let sm = app.surgeon_model.clone();
+                                        let ild = app.intra_level_delay_secs;
                                         let err_tx = tx.clone();
                                         tokio::spawn(async move {
                                             if let Err(e) = git::create_or_checkout_branch(&branch_cwd, &branch_name_clone).await {
@@ -747,7 +758,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm });
+                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild });
                                         });
                                     }
                                     Err(e) => {
@@ -785,6 +796,7 @@ async fn run_app(
                                     let wsg = app.with_surgeon;
                                     let sul = app.surgeon_use_llm;
                                     let sm = app.surgeon_model.clone();
+                                    let ild = app.intra_level_delay_secs;
                                     let err_tx = tx.clone();
                                     tokio::spawn(async move {
                                         if let Err(e) = git::create_or_checkout_branch(&branch_cwd, &branch_name_clone).await {
@@ -808,7 +820,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm });
+                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild });
                                     });
                                 }
                             }
@@ -1126,6 +1138,7 @@ fn spawn_executor(
         with_surgeon: config.with_surgeon,
         surgeon_use_llm: config.surgeon_use_llm,
         surgeon_model: config.surgeon_model,
+        intra_level_delay_secs: config.intra_level_delay_secs,
     };
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
 }

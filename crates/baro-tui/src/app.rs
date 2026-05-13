@@ -209,6 +209,7 @@ pub struct App {
     pub with_surgeon: bool,
     pub surgeon_use_llm: bool,
     pub surgeon_model: Option<String>,
+    pub intra_level_delay_secs: Option<u64>,
 
     // Context building
     pub skip_context: bool,
@@ -287,6 +288,7 @@ impl App {
             with_surgeon: true,
             surgeon_use_llm: true,
             surgeon_model: None,
+            intra_level_delay_secs: None,
             skip_context: false,
             dry_run: false,
             token_usage: HashMap::new(),

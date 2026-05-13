@@ -42,6 +42,10 @@ pub struct OrchestratorConfig {
     pub surgeon_use_llm: bool,
     /// Model for Surgeon LLM (default "opus" inside the orchestrator).
     pub surgeon_model: Option<String>,
+    /// Seconds to wait between successive story spawns inside the
+    /// same DAG level. Default (when None): 10 inside the orchestrator.
+    /// Set to Some(0) to disable staggering.
+    pub intra_level_delay_secs: Option<u64>,
 }
 
 /// Spawn the orchestrator subprocess and return a channel that receives
@@ -239,6 +243,9 @@ fn build_command(entry: &EntryPoint, cfg: &OrchestratorConfig) -> Command {
     }
     if let Some(m) = &cfg.surgeon_model {
         cmd.arg("--surgeon-model").arg(m);
+    }
+    if let Some(d) = cfg.intra_level_delay_secs {
+        cmd.arg("--intra-level-delay").arg(d.to_string());
     }
     cmd
 }

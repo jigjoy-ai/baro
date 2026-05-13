@@ -118,6 +118,12 @@ export interface OrchestrateConfig {
     surgeonUseLlm?: boolean
     /** Model for the Surgeon LLM. Default: "opus". */
     surgeonModel?: string
+    /**
+     * Seconds to wait between successive story spawns inside the
+     * same DAG level. Passed through to Conductor. Default: 10.
+     * Set to 0 to disable staggering.
+     */
+    intraLevelDelaySecs?: number
     /** Hooks for receiving Operator commands externally (Rust TUI). */
     operatorHooks?: {
         onAbort?: (storyId: string) => void
@@ -253,6 +259,7 @@ export async function orchestrate(
         timeoutSecs: config.timeoutSecs ?? 600,
         overrideModel: config.overrideModel ?? undefined,
         defaultModel: config.defaultModel ?? "opus",
+        intraLevelDelaySecs: config.intraLevelDelaySecs,
         onRunStart: useGit
             ? async (prd) => {
                   baseSha = await getHeadSha(config.cwd)

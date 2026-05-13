@@ -81,6 +81,17 @@ export interface ConductorOptions {
         story: PrdStory,
     ) => Promise<string | null | undefined> | string | null | undefined
     onRunComplete?: (summary: ConductorRunSummary) => Promise<void> | void
+    /**
+     * Seconds to wait between successive story spawns inside the same
+     * DAG level. Lets early agents make a couple of exploratory Read /
+     * Grep calls before their siblings start, so Librarian can cache
+     * those findings and prime the later agents' prompts via
+     * mid-flight broadcast or on-launch context.
+     *
+     * 0 = original behaviour (spawn everything in the level at once).
+     * Default: 10 seconds.
+     */
+    intraLevelDelaySecs?: number
 }
 
 export interface ConductorRunSummary {
@@ -181,6 +192,12 @@ export class Conductor extends Participant {
     private readonly spawnQueue: PrdStory[] = []
     /** Stories currently in flight in the active level. */
     private readonly inFlight: Set<string> = new Set()
+    /**
+     * Timer handle when we're deliberately spacing out intra-level
+     * spawns. Re-entering `fillSpawnSlots` while this is set is a
+     * no-op; the timer callback resumes pumping.
+     */
+    private pendingNextSpawn: ReturnType<typeof setTimeout> | null = null
 
     /** Resolved when the run terminates, exposed for callers that need it. */
     public readonly done: Promise<ConductorRunSummary>
@@ -192,7 +209,12 @@ export class Conductor extends Participant {
             parallel: 0,
             timeoutSecs: 600,
             defaultModel: "sonnet",
+            intraLevelDelaySecs: 10,
             ...opts,
+        }
+        // Guard against an explicit `undefined` defeating the default.
+        if (this.opts.intraLevelDelaySecs == null) {
+            this.opts.intraLevelDelaySecs = 10
         }
         this.done = new Promise<ConductorRunSummary>((resolve) => {
             this.resolveDone = resolve
@@ -375,11 +397,42 @@ export class Conductor extends Participant {
 
     private async fillSpawnSlots(): Promise<void> {
         if (!this.currentLevel) return
+        // If a stagger timer is in flight, just return — the timer's
+        // callback re-invokes fillSpawnSlots once the gap elapses.
+        if (this.pendingNextSpawn) return
+
         const cap =
             this.opts.parallel > 0 ? this.opts.parallel : Number.MAX_SAFE_INTEGER
+        const delaySecs = this.opts.intraLevelDelaySecs ?? 0
+
         while (this.spawnQueue.length > 0 && this.inFlight.size < cap) {
             const story = this.spawnQueue.shift()!
             await this.requestStorySpawn(story)
+
+            // Stagger the next spawn so Librarian has a window to
+            // capture (and broadcast) the just-launched agent's first
+            // exploratory tool calls before the next agent in this
+            // level starts. Set delaySecs to 0 to keep the original
+            // simultaneous-spawn behaviour.
+            if (
+                this.spawnQueue.length > 0 &&
+                this.inFlight.size < cap &&
+                delaySecs > 0
+            ) {
+                this.pendingNextSpawn = setTimeout(() => {
+                    this.pendingNextSpawn = null
+                    // Skip if the run terminated while we were waiting.
+                    if (this.phase === "done") return
+                    this.fillSpawnSlots().catch((err: unknown) => {
+                        process.stderr.write(
+                            `[conductor] fillSpawnSlots resume failed: ${
+                                (err as Error)?.stack ?? String(err)
+                            }\n`,
+                        )
+                    })
+                }, delaySecs * 1000)
+                return
+            }
         }
     }
 
