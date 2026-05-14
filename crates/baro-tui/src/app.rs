@@ -164,6 +164,11 @@ pub struct App {
     // Planning screen
     pub planning_start: Option<Instant>,
     pub planning_error: Option<String>,
+    /// When the planner / architect fails, the path to the full
+    /// stdout+stderr log we persisted at the call site (see
+    /// claude_runner). Surfaced in the planning screen so users have
+    /// somewhere to look when the in-TUI error excerpt isn't enough.
+    pub planning_log_path: Option<std::path::PathBuf>,
 
     // Review screen
     pub branch_name: String,
@@ -259,6 +264,7 @@ impl App {
 
             planning_start: None,
             planning_error: None,
+            planning_log_path: None,
 
             branch_name: String::new(),
             description: String::new(),

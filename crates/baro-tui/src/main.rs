@@ -3,6 +3,7 @@ mod claude_runner;
 mod config;
 mod constants;
 mod context;
+mod doctor;
 mod events;
 mod executor;
 mod git;
@@ -178,6 +179,13 @@ struct Cli {
     /// repeat the same Reads/Greps. Default: 10. Set to 0 to disable.
     #[arg(long = "intra-level-delay")]
     intra_level_delay: Option<u64>,
+
+    /// Run a self-diagnostic and exit. Verifies the `claude` CLI is on
+    /// PATH, can return a version, can complete a trivial authenticated
+    /// call, plus checks for `gh` and a writable audit directory.
+    /// Use this when a baro run fails before any agents start.
+    #[arg(long)]
+    doctor: bool,
 }
 
 enum AppEvent {
@@ -186,7 +194,10 @@ enum AppEvent {
     ContextReady(String),
     ContextError(String),
     PlanReady(Vec<ReviewStory>, String, String, String),
-    PlanError(String),
+    /// Planner or Architect failed. Second tuple element is the path
+    /// to the full stdout+stderr log on disk (if claude_runner managed
+    /// to persist one). The planning screen surfaces both.
+    PlanError(String, Option<std::path::PathBuf>),
     RefineReady(Vec<ReviewStory>, String, String, String),
     RefineError(String),
     BranchError(String),
@@ -331,6 +342,14 @@ struct PrdStoryOutput {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    // `baro --doctor` short-circuits before any TUI setup. It's a
+    // diagnostic command, not a run, and it has to work even when the
+    // things a real run depends on (e.g. claude CLI auth) are broken
+    // — that's the whole point of it existing.
+    if cli.doctor {
+        std::process::exit(doctor::run().await);
+    }
 
     // Resolve cwd early so we can acquire the session lock before entering the TUI
     let cwd = std::fs::canonicalize(&cli.cwd)?;
@@ -557,8 +576,9 @@ async fn run_app(
                 app.description = description;
                 app.show_review(stories);
             }
-            Some(AppEvent::PlanError(err)) => {
+            Some(AppEvent::PlanError(err, log_path)) => {
                 app.planning_error = Some(err);
+                app.planning_log_path = log_path;
             }
             Some(AppEvent::RefineReady(stories, project, branch, description)) => {
                 app.refining = false;
@@ -965,7 +985,14 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
                     .await;
             }
             Err(e) => {
-                let _ = tx.send(AppEvent::PlanError(e.to_string())).await;
+                // If the error came from claude_runner, it carries the
+                // path to the persisted stdout+stderr log — surface it
+                // so the user can see the full diagnostic, not just the
+                // truncated headline.
+                let log_path = e
+                    .downcast_ref::<claude_runner::ClaudeRunError>()
+                    .and_then(|err| err.log_path.clone());
+                let _ = tx.send(AppEvent::PlanError(e.to_string(), log_path)).await;
             }
         }
     });
@@ -1028,6 +1055,7 @@ fn spawn_refiner(app: &App, feedback: &str, cwd: &Path, tx: mpsc::Sender<AppEven
                 prompt: prompt.clone(),
                 cwd: cwd.clone(),
                 model: model.clone(),
+                log_tag: Some("refine"),
             };
 
             let output = claude_runner::spawn_claude_json(&config).await?;
@@ -1209,6 +1237,7 @@ async fn run_claude_architect(
         prompt,
         cwd: cwd.to_path_buf(),
         model: model.map(|s| s.to_string()),
+        log_tag: Some("architect"),
     };
 
     let output = claude_runner::spawn_claude_json(&config).await?;
@@ -1254,6 +1283,7 @@ async fn run_claude_planner(
         prompt,
         cwd: cwd.to_path_buf(),
         model: model.map(|s| s.to_string()),
+        log_tag: Some("planner"),
     };
 
     let output = claude_runner::spawn_claude_json(&config).await?;
