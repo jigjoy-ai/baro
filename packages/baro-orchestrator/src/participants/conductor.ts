@@ -597,13 +597,40 @@ export class Conductor extends Participant {
     private resolvePrompt(story: PrdStory): string {
         const candidatePath =
             this.opts.promptTemplatePath ?? join(this.opts.cwd, "prompt.md")
+        let prompt: string
         if (existsSync(candidatePath)) {
             const tpl = readFileSyncSafe(candidatePath)
-            if (tpl) {
-                return applyTemplate(tpl, story)
-            }
+            prompt = tpl ? applyTemplate(tpl, story) : buildDefaultStoryPrompt(story)
+        } else {
+            prompt = buildDefaultStoryPrompt(story)
         }
-        return buildDefaultStoryPrompt(story)
+
+        // Prepend Architect's DecisionDocument so the agent sees the
+        // authoritative design spec before its task description. This
+        // is the single biggest lever against per-story decision drift
+        // (column names, file paths, API shapes, dependency choices,
+        // …): every agent receives the same upstream-pinned answers
+        // instead of each one improvising independently.
+        const doc = this.prd?.decisionDocument
+        if (doc && doc.trim().length > 0) {
+            const header = [
+                "## Design spec (authoritative — already decided)",
+                "",
+                "The Architect made these decisions before any story started.",
+                "Treat them as fixed: use these exact file paths, names,",
+                "schemas, API shapes, and dependency choices. Do NOT",
+                "improvise alternatives — your siblings are working from",
+                "the same spec and divergence breaks the build.",
+                "",
+                doc.trim(),
+                "",
+                "---",
+                "",
+            ].join("\n")
+            prompt = header + prompt
+        }
+
+        return prompt
     }
 
     private emit(item: ContextItem): void {

@@ -26,6 +26,14 @@ export interface PrdFile {
     branchName: string
     description: string
     userStories: PrdStory[]
+    /**
+     * Architect's DecisionDocument captured during the planning phase
+     * (Rust side). Authoritative spec for every Story Agent: file
+     * paths, schema/API shapes, naming conventions, dependency
+     * choices. Conductor prepends this verbatim to every story prompt
+     * so agents never re-decide things upstream already pinned down.
+     */
+    decisionDocument?: string
 }
 
 const STORY_DEFAULTS: Pick<PrdStory, "retries"> = { retries: 2 }
@@ -48,11 +56,16 @@ export function normalizePrd(input: Partial<PrdFile>, source: string): PrdFile {
     const branchName = typeof input.branchName === "string" ? input.branchName : ""
     const description = typeof input.description === "string" ? input.description : ""
     const stories = Array.isArray(input.userStories) ? input.userStories : []
+    const decisionDocument =
+        typeof input.decisionDocument === "string" && input.decisionDocument.trim().length > 0
+            ? input.decisionDocument
+            : undefined
     return {
         project,
         branchName,
         description,
         userStories: stories.map((s, i) => normalizeStory(s, i, source)),
+        decisionDocument,
     }
 }
 

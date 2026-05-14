@@ -125,14 +125,6 @@ struct Cli {
     #[arg(long = "no-model-routing")]
     no_model_routing: bool,
 
-    /// Skip the context building phase entirely
-    #[arg(long)]
-    skip_context: bool,
-
-    /// Generate plan only, do not execute stories
-    #[arg(long)]
-    dry_run: bool,
-
     /// Enable the live Critic: evaluates each agent turn against its
     /// acceptance criteria via `claude --model haiku` and injects
     /// corrective feedback when a turn doesn't satisfy them. Default: ON.
@@ -198,6 +190,9 @@ enum AppEvent {
     RefineReady(Vec<ReviewStory>, String, String, String),
     RefineError(String),
     BranchError(String),
+    ArchitectStarted,
+    ArchitectComplete(String), // decision document (markdown)
+    ArchitectSkipped(String),  // reason (not fatal — planner will still run)
     Tick,
 }
 
@@ -215,6 +210,50 @@ fn open_terminal_writer() -> io::Result<Box<dyn Write>> {
         Ok(Box::new(io::stdout()))
     }
 }
+
+const CLAUDE_ARCHITECT_PROMPT: &str = r#"You are the architect for this engineering run. ONE focused turn, before anyone writes code.
+
+Your job: read the relevant parts of the existing codebase, then pin down EVERY cross-cutting design decision the implementation agents would otherwise disagree on. They will all receive your output as authoritative spec. If you leave something vague, multiple agents will each pick a different answer and the run will produce inconsistent code that needs retroactive fixes.
+
+Use your tools (Read, Grep, Glob, Bash, LSP) actively. Look at:
+- The project's stack (package.json, Cargo.toml, pyproject.toml, go.mod, ...)
+- Existing naming conventions (file paths, casing, suffix patterns)
+- Existing infrastructure relevant to the goal (current schema, current API style, current frontend client pattern)
+- Migration / DDL conventions if DB work is involved
+- Test runner + lint setup
+
+Then output a SINGLE markdown document with these sections (omit a section ONLY if the goal genuinely doesn't touch that area):
+
+## Existing context
+Concrete facts you observed (NOT speculation): what stack, what conventions, what relevant infrastructure already exists. A few sentences each. This is what implementation agents will rely on to avoid re-reading these files.
+
+## File paths
+Every NEW file the run will create, by exact path. Every EXISTING file the run will modify, by exact path. No "etc." — be exhaustive within the bounds of the goal.
+
+## Schema decisions (if DB work)
+Exact table names, column names, types, indexes, constraints. Naming conventions for new columns (snake_case vs camelCase — match what's already in the repo). Migration filename pattern. Whether IF NOT EXISTS / ALTER ONLY / etc. is required.
+
+## API contracts (if backend work)
+Endpoint paths, HTTP methods, exact request shapes, exact response shapes (down to field names). Status codes. Cache headers.
+
+## Frontend integration (if frontend work)
+File location for new modules. Whether to introduce new dependencies or use what's already there (be explicit: "Do NOT add React Query — use native fetch" if that's the call). Cache strategy. Hook patterns.
+
+## Library/dependency choices
+Anything explicit. Each "do not add X" is as important as each "use Y".
+
+## Naming conventions
+Slug format, normalize function location, prefix/suffix patterns. Single source of truth for things like normalize() utilities — name the file.
+
+## Migration / shipping notes
+Anything that affects production safety: idempotent seeds, ON CONFLICT clauses, missing-data behavior.
+
+Rules:
+- Be SPECIFIC. "Column `slug` (varchar 100)" beats "column for the slug".
+- Be EXHAUSTIVE within scope. If two agents could disagree about something, you decide it here.
+- Reference exact existing files when leveraging current conventions.
+- Output ONLY the markdown document. No preamble, no "Here is the architecture:". Start with the first `##` heading.
+"#;
 
 const CLAUDE_PLANNER_PROMPT: &str = r#"You are an expert software architect. Break down the user's project goal into concrete user stories that form a dependency DAG.
 
@@ -313,7 +352,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(writer);
     let mut terminal = Terminal::new(backend)?;
 
-    let is_dry_run = cli.dry_run;
     let result = run_app(&mut terminal, cli).await;
 
     disable_raw_mode()?;
@@ -326,15 +364,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(err) = result {
         eprintln!("Error: {}", err);
         std::process::exit(1);
-    }
-
-    // Print dry-run message after TUI exits
-    if is_dry_run {
-        let prd_path = cwd.join("prd.json");
-        if prd_path.exists() {
-            println!("\x1b[32m\u{2713}\x1b[0m Dry run complete \u{2014} plan saved to prd.json");
-            println!("  Run \x1b[1mbaro --resume\x1b[0m to execute the saved plan.");
-        }
     }
 
     Ok(())
@@ -353,7 +382,6 @@ async fn run_app(
     // Apply config defaults, then CLI overrides
     app.parallel_limit = rc.parallel.unwrap_or(0);
     app.timeout_secs = rc.timeout.unwrap_or(600);
-    app.skip_context = rc.skip_context.unwrap_or(false);
 
     app.planner = match rc.planner.as_deref() {
         Some("openai") => Planner::OpenAI,
@@ -371,9 +399,6 @@ async fn run_app(
     // CLI args override config
     if cli.parallel != 0 { app.parallel_limit = cli.parallel; }
     if cli.timeout != 600 { app.timeout_secs = cli.timeout; }
-    if cli.skip_context { app.skip_context = true; }
-    if rc.dry_run == Some(true) { app.dry_run = true; }
-    if cli.dry_run { app.dry_run = true; }
 
     if cli.planner != "claude" {
         app.planner = match cli.planner.as_str() {
@@ -457,21 +482,16 @@ async fn run_app(
     if !entered_resume {
         if let Some(goal) = cli.goal {
             app.goal_input = goal;
-            if app.skip_context {
+            let claude_md_path = cwd.join("CLAUDE.md");
+            if claude_md_path.exists() {
+                if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
+                    app.claude_md_content = Some(content);
+                }
                 app.start_planning();
                 spawn_planner(&app, &cwd, tx.clone());
             } else {
-                let claude_md_path = cwd.join("CLAUDE.md");
-                if claude_md_path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
-                        app.claude_md_content = Some(content);
-                    }
-                    app.start_planning();
-                    spawn_planner(&app, &cwd, tx.clone());
-                } else {
-                    app.start_context();
-                    spawn_context_builder(&cwd, tx.clone());
-                }
+                app.start_context();
+                spawn_context_builder(&cwd, tx.clone());
             }
         }
     }
@@ -551,6 +571,17 @@ async fn run_app(
                 app.refining = false;
                 app.planning_error = Some(err);
             }
+            Some(AppEvent::ArchitectStarted) => {
+                app.architect_status = app::ArchitectStatus::Running;
+            }
+            Some(AppEvent::ArchitectComplete(doc)) => {
+                app.architect_status = app::ArchitectStatus::Complete;
+                app.decision_document = Some(doc);
+            }
+            Some(AppEvent::ArchitectSkipped(reason)) => {
+                app.architect_status = app::ArchitectStatus::Skipped(reason);
+                app.decision_document = None;
+            }
             Some(AppEvent::BranchError(err)) => {
                 app.planning_error = Some(err);
                 app.screen = Screen::Review;
@@ -576,21 +607,16 @@ async fn run_app(
                                 // Enter on non-goal fields = jump to goal
                                 app.welcome_field = app::WelcomeField::Goal;
                             } else if !app.goal_input.is_empty() {
-                                if app.skip_context {
+                                let claude_md_path = cwd.join("CLAUDE.md");
+                                if claude_md_path.exists() {
+                                    if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
+                                        app.claude_md_content = Some(content);
+                                    }
                                     app.start_planning();
                                     spawn_planner(&app, &cwd, tx.clone());
                                 } else {
-                                    let claude_md_path = cwd.join("CLAUDE.md");
-                                    if claude_md_path.exists() {
-                                        if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
-                                            app.claude_md_content = Some(content);
-                                        }
-                                        app.start_planning();
-                                        spawn_planner(&app, &cwd, tx.clone());
-                                    } else {
-                                        app.start_context();
-                                        spawn_context_builder(&cwd, tx.clone());
-                                    }
+                                    app.start_context();
+                                    spawn_context_builder(&cwd, tx.clone());
                                 }
                             }
                         }
@@ -632,9 +658,6 @@ async fn run_app(
                                     } else {
                                         app.timeout_secs = app.timeout_secs.saturating_sub(60).max(60);
                                     }
-                                }
-                                app::WelcomeField::Context => {
-                                    app.skip_context = !app.skip_context;
                                 }
                                 app::WelcomeField::Planner => {
                                     app.toggle_planner();
@@ -694,20 +717,6 @@ async fn run_app(
                         }
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                         KeyCode::Enter => {
-                            if app.dry_run {
-                                // Dry run: save prd.json and exit
-                                let prd = executor::prd_from_review(
-                                    &app.project,
-                                    &app.branch_name,
-                                    &app.description,
-                                    &app.review_stories,
-                                );
-                                let _ = executor::write_prd(&prd, &cwd);
-                                app.planning_error = Some(
-                                    "Dry run complete \u{2014} plan saved to prd.json. Run without --dry-run to execute.".to_string()
-                                );
-                                return Ok(());
-                            }
                             if app.is_resume {
                                 // Resume mode: read existing prd.json (has full acceptance/tests data)
                                 let prd_path = cwd.join("prd.json");
@@ -772,6 +781,7 @@ async fn run_app(
                                     &app.branch_name,
                                     &app.description,
                                     &app.review_stories,
+                                    app.decision_document.clone(),
                                 );
                                 if let Err(e) = executor::write_prd(&prd, &cwd) {
                                     app.planning_error = Some(format!("Failed to write prd.json: {}", e));
@@ -910,17 +920,49 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     let planner = app.planner;
     let cwd = cwd.to_path_buf();
     let model = app.model_for_phase("planning");
+    let architect_model = app.model_for_phase("architect");
     let context = app.claude_md_content.clone();
 
     tokio::spawn(async move {
+        // Phase 1 — Architect (Claude planner only; OpenAI planner is a
+        // legacy single-shot path that doesn't take a design spec).
+        let decision_doc = if matches!(planner, Planner::Claude) {
+            let _ = tx.send(AppEvent::ArchitectStarted).await;
+            match run_claude_architect(&goal, &cwd, architect_model.as_deref(), context.as_deref()).await {
+                Ok(doc) => {
+                    let _ = tx.send(AppEvent::ArchitectComplete(doc.clone())).await;
+                    Some(doc)
+                }
+                Err(e) => {
+                    // Non-fatal: planner runs without authoritative spec,
+                    // matching pre-0.25 behaviour. The TUI surfaces this
+                    // so the user knows why this run might drift.
+                    let _ = tx
+                        .send(AppEvent::ArchitectSkipped(format!(
+                            "Architect phase failed: {}. Falling back to planner-only flow.",
+                            e
+                        )))
+                        .await;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Phase 2 — Planner (now informed by the DecisionDocument when present).
         let result = match planner {
-            Planner::Claude => run_claude_planner(&goal, &cwd, model.as_deref(), context.as_deref()).await,
+            Planner::Claude => {
+                run_claude_planner(&goal, &cwd, model.as_deref(), context.as_deref(), decision_doc.as_deref()).await
+            }
             Planner::OpenAI => run_openai_planner(&goal, &cwd).await,
         };
 
         match result {
             Ok((stories, project, branch, description)) => {
-                let _ = tx.send(AppEvent::PlanReady(stories, project, branch, description)).await;
+                let _ = tx
+                    .send(AppEvent::PlanReady(stories, project, branch, description))
+                    .await;
             }
             Err(e) => {
                 let _ = tx.send(AppEvent::PlanError(e.to_string())).await;
@@ -1143,11 +1185,69 @@ fn spawn_executor(
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
 }
 
-async fn run_claude_planner(goal: &str, cwd: &Path, model: Option<&str>, context: Option<&str>) -> Result<(Vec<ReviewStory>, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
-    let base_prompt = format!("{}\n\nUser goal: {}", CLAUDE_PLANNER_PROMPT, goal);
+/// Runs the Architect phase: one Claude Opus turn (with tool access) that
+/// reads the existing codebase and emits a DecisionDocument — the
+/// authoritative spec every Story Agent will receive. Returns the
+/// markdown document on success.
+///
+/// Failure is non-fatal at the caller's discretion: if this returns Err,
+/// `spawn_planner` falls back to the legacy planner-only flow so the
+/// user never gets blocked by an Architect-side hiccup.
+async fn run_claude_architect(
+    goal: &str,
+    cwd: &Path,
+    model: Option<&str>,
+    context: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let base_prompt = format!("{}\n\nUser goal:\n{}", CLAUDE_ARCHITECT_PROMPT, goal);
     let prompt = match context {
-        Some(ctx) => format!("Here is the project context:\n{}\n\n{}", ctx, base_prompt),
+        Some(ctx) => format!("Project context (CLAUDE.md):\n{}\n\n{}", ctx, base_prompt),
         None => base_prompt,
+    };
+
+    let config = claude_runner::ClaudeRunConfig {
+        prompt,
+        cwd: cwd.to_path_buf(),
+        model: model.map(|s| s.to_string()),
+    };
+
+    let output = claude_runner::spawn_claude_json(&config).await?;
+
+    let claude_output: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|e| format!("Failed to parse Claude JSON wrapper: {}", e))?;
+
+    let decision_doc = claude_output
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or("Architect response missing 'result' field")?
+        .trim()
+        .to_string();
+
+    if decision_doc.is_empty() {
+        return Err("Architect returned an empty document".into());
+    }
+
+    Ok(decision_doc)
+}
+
+async fn run_claude_planner(
+    goal: &str,
+    cwd: &Path,
+    model: Option<&str>,
+    context: Option<&str>,
+    decision_doc: Option<&str>,
+) -> Result<(Vec<ReviewStory>, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
+    let base_prompt = format!("{}\n\nUser goal: {}", CLAUDE_PLANNER_PROMPT, goal);
+    let with_design = match decision_doc {
+        Some(doc) => format!(
+            "AUTHORITATIVE DESIGN SPEC (already decided by the Architect — every story you produce must implement THESE specific file paths, names, and shapes; do NOT invent alternatives):\n\n{}\n\n{}",
+            doc, base_prompt,
+        ),
+        None => base_prompt,
+    };
+    let prompt = match context {
+        Some(ctx) => format!("Here is the project context:\n{}\n\n{}", ctx, with_design),
+        None => with_design,
     };
 
     let config = claude_runner::ClaudeRunConfig {

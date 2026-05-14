@@ -22,6 +22,11 @@ pub struct PrdFile {
     pub description: String,
     #[serde(rename = "userStories")]
     pub user_stories: Vec<PrdStory>,
+    /// Architect's DecisionDocument captured during planning. The TS
+    /// orchestrator's Conductor prepends this to every story prompt as
+    /// authoritative spec. Omitted entirely from JSON when None.
+    #[serde(rename = "decisionDocument", default, skip_serializing_if = "Option::is_none")]
+    pub decision_document: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -81,6 +86,7 @@ pub fn prd_from_review(
     branch_name: &str,
     description: &str,
     stories: &[ReviewStory],
+    decision_document: Option<String>,
 ) -> PrdFile {
     PrdFile {
         project: project.to_string(),
@@ -104,6 +110,7 @@ pub fn prd_from_review(
                 model: s.model.clone(),
             })
             .collect(),
+        decision_document,
     }
 }
 

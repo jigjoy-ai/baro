@@ -226,14 +226,6 @@ pub fn render(f: &mut Frame, app: &App) {
         Style::default().fg(theme::ACCENT)
     };
 
-    let context_focused = focused == WelcomeField::Context;
-    let ctx_check = if app.skip_context { "\u{2610}" } else { "\u{2611}" };
-    let ctx_style = if context_focused {
-        Style::default().fg(theme::ACCENT_BRIGHT).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme::ACCENT)
-    };
-
     let planner_focused = focused == WelcomeField::Planner;
     let is_claude = app.planner == Planner::Claude;
 
@@ -251,10 +243,6 @@ pub fn render(f: &mut Frame, app: &App) {
             Span::styled(format!("[{}]", parallel_val), par_style),
             Span::styled("          Timeout: ", Style::default().fg(theme::MUTED)),
             Span::styled(format!("[{}s]", app.timeout_secs), timeout_style),
-        ]),
-        Line::from(vec![
-            Span::styled("  Context:  ", Style::default().fg(theme::MUTED)),
-            Span::styled(format!("{} Auto-generate CLAUDE.md", ctx_check), ctx_style),
         ]),
         Line::from(planner_spans),
     ];

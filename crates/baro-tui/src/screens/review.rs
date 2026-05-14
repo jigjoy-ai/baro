@@ -50,13 +50,7 @@ pub fn render(f: &mut Frame, app: &App) {
         ),
     ];
 
-    if app.dry_run {
-        header_spans.push(Span::styled(" | ", Style::default().fg(theme::BORDER)));
-        header_spans.push(Span::styled(
-            "DRY RUN",
-            Style::default().fg(theme::WARNING).add_modifier(Modifier::BOLD),
-        ));
-    } else if app.is_resume {
+    if app.is_resume {
         let done_count = app.review_stories.iter().filter(|s| s.completed).count();
         let remaining = story_count - done_count;
         header_spans.push(Span::styled(" | ", Style::default().fg(theme::BORDER)));
@@ -190,9 +184,7 @@ pub fn render(f: &mut Frame, app: &App) {
     }
 
     // Footer
-    let accept_label = if app.dry_run {
-        ":save & exit  "
-    } else if app.is_resume {
+    let accept_label = if app.is_resume {
         ":resume  "
     } else {
         ":accept  "

@@ -28,7 +28,6 @@ pub enum WelcomeField {
     Model,
     Parallel,
     Timeout,
-    Context,
     Planner,
 }
 
@@ -38,8 +37,7 @@ impl WelcomeField {
             Self::Goal => Self::Model,
             Self::Model => Self::Parallel,
             Self::Parallel => Self::Timeout,
-            Self::Timeout => Self::Context,
-            Self::Context => Self::Planner,
+            Self::Timeout => Self::Planner,
             Self::Planner => Self::Goal,
         }
     }
@@ -49,8 +47,7 @@ impl WelcomeField {
             Self::Model => Self::Goal,
             Self::Parallel => Self::Model,
             Self::Timeout => Self::Parallel,
-            Self::Context => Self::Timeout,
-            Self::Planner => Self::Context,
+            Self::Planner => Self::Timeout,
         }
     }
 }
@@ -86,6 +83,19 @@ impl GlobalTab {
             Self::Stats => 2,
         }
     }
+}
+
+/// Lifecycle of the pre-planner Architect phase. Reflected in the TUI
+/// welcome / planning view so the user knows whether they're waiting on
+/// the design pass, the decomposition pass, or both.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArchitectStatus {
+    Idle,
+    Running,
+    Complete,
+    /// Architect phase failed but we're continuing — the planner runs
+    /// without an authoritative spec (legacy behaviour).
+    Skipped(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,6 +155,11 @@ pub struct App {
 
     // Context building screen
     pub claude_md_content: Option<String>,
+    /// Architect's DecisionDocument for the current run, captured between
+    /// the Architect phase and write_prd. Persists into prd.json so the
+    /// orchestrator can prepend it to every story prompt.
+    pub decision_document: Option<String>,
+    pub architect_status: ArchitectStatus,
 
     // Planning screen
     pub planning_start: Option<Instant>,
@@ -211,12 +226,6 @@ pub struct App {
     pub surgeon_model: Option<String>,
     pub intra_level_delay_secs: Option<u64>,
 
-    // Context building
-    pub skip_context: bool,
-
-    // Dry run mode
-    pub dry_run: bool,
-
     // Notification flag
     pub notification_ready: bool,
 
@@ -245,6 +254,8 @@ impl App {
             welcome_field: WelcomeField::Goal,
 
             claude_md_content: None,
+            decision_document: None,
+            architect_status: ArchitectStatus::Idle,
 
             planning_start: None,
             planning_error: None,
@@ -289,8 +300,6 @@ impl App {
             surgeon_use_llm: true,
             surgeon_model: None,
             intra_level_delay_secs: None,
-            skip_context: false,
-            dry_run: false,
             token_usage: HashMap::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -802,6 +811,7 @@ impl App {
         }
         if self.model_routing {
             return match phase {
+                "architect" => Some("opus".to_string()),
                 "planning" => Some("opus".to_string()),
                 "execution" => Some("opus".to_string()),
                 "review" => Some("haiku".to_string()),

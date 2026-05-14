@@ -2,6 +2,7 @@
 
 A concise list of every published version. For full release notes, see the corresponding commit on the v* tag.
 
+## v0.25.0 — release(0.25.0): Architect phase — one mind decides, many hands execute
 ## v0.24.0 — release(0.24.0): Librarian mid-flight broadcasts + intra-level stagger
 ## v0.23.6 — release(0.23.6): pin @mozaik-ai/core to 3.6.5
 ## v0.23.5 — release(0.23.5): CHANGELOG.md + `baro --help` issues/twitter footer

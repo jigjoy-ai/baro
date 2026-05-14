@@ -6,9 +6,7 @@ pub struct BaroConfig {
     pub model: Option<String>,     // "routed", "opus", "sonnet", "haiku"
     pub parallel: Option<u32>,
     pub timeout: Option<u64>,
-    pub skip_context: Option<bool>,
     pub planner: Option<String>,   // "claude", "openai"
-    pub dry_run: Option<bool>,
 }
 
 impl Default for BaroConfig {
@@ -17,9 +15,7 @@ impl Default for BaroConfig {
             model: None,
             parallel: None,
             timeout: None,
-            skip_context: None,
             planner: None,
-            dry_run: None,
         }
     }
 }
@@ -41,8 +37,6 @@ pub fn load_config(cwd: &Path) -> BaroConfig {
         model: json.get("model").and_then(|v| v.as_str()).map(|s| s.to_string()),
         parallel: json.get("parallel").and_then(|v| v.as_u64()).map(|v| v as u32),
         timeout: json.get("timeout").and_then(|v| v.as_u64()),
-        skip_context: json.get("skipContext").and_then(|v| v.as_bool()),
         planner: json.get("planner").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        dry_run: json.get("dryRun").and_then(|v| v.as_bool()),
     }
 }
