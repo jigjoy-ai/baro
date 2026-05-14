@@ -1,6 +1,6 @@
 [package]
 name = "baro-tui"
-version = "0.25.0"
+version = "0.25.1"
 edition = "2021"
 
 [[bin]]
@@ -15,6 +15,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 chrono = "0.4"
+which = "6"
 
 [target.'cfg(unix)'.dependencies]
 crossterm = { version = "0.28", features = ["use-dev-tty"] }

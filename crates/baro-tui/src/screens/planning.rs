@@ -27,12 +27,19 @@ fn dots(tick: u64) -> &'static str {
 
 pub fn render(f: &mut Frame, app: &App) {
     let area = f.area();
+    let in_error = app.planning_error.is_some();
+
+    // When showing an error we need a much taller box for the full
+    // message + the troubleshooting links. Pre-existing layout used a
+    // fixed 7-row central area which is the source of the truncated
+    // error in issue #17 — bump it to 18 in the error path.
+    let central_height: u16 = if in_error { 18 } else { 7 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(2),
-            Constraint::Length(7),   // Central box
+            Constraint::Length(central_height),
             Constraint::Length(1),   // Spacer
             Constraint::Length(1),   // LineGauge
             Constraint::Length(1),   // Spacer
@@ -53,7 +60,13 @@ pub fn render(f: &mut Frame, app: &App) {
             .split(area)[1]
     };
 
-    let box_width = 50.min(area.width.saturating_sub(4));
+    // Error box is wider (80 cols) than the spinner box (50 cols) so
+    // long error lines don't soft-wrap into illegibility.
+    let box_width = if in_error {
+        80.min(area.width.saturating_sub(4))
+    } else {
+        50.min(area.width.saturating_sub(4))
+    };
     let box_area = center(chunks[1], box_width);
 
     let planner_name = match app.planner {
@@ -62,8 +75,11 @@ pub fn render(f: &mut Frame, app: &App) {
     };
 
     if let Some(ref err) = app.planning_error {
-        // Error state
-        let lines = vec![
+        // Header row + blank + wrapped error body + blank + actionable
+        // hints (doctor command, log path, docs link). Paragraph::wrap
+        // handles the multi-line case so we don't need to slice the
+        // string ourselves (no more `&err[..44]` UTF-8 panic risk).
+        let mut lines: Vec<Line> = vec![
             Line::from(""),
             Line::from(vec![
                 Span::styled(
@@ -76,11 +92,39 @@ pub fn render(f: &mut Frame, app: &App) {
                 ),
             ]),
             Line::from(""),
-            Line::from(Span::styled(
-                format!(" {}", if err.len() > 44 { &err[..44] } else { err }),
-                Style::default().fg(theme::TEXT_DIM),
-            )),
         ];
+        // Render the full error body, line by line. ratatui's Paragraph
+        // will wrap each Line as needed.
+        for body_line in err.lines() {
+            lines.push(Line::from(Span::styled(
+                format!(" {}", body_line),
+                Style::default().fg(theme::TEXT_DIM),
+            )));
+        }
+        lines.push(Line::from(""));
+        if let Some(ref log) = app.planning_log_path {
+            lines.push(Line::from(vec![
+                Span::styled(" full log: ", Style::default().fg(theme::MUTED)),
+                Span::styled(
+                    log.display().to_string(),
+                    Style::default().fg(theme::ACCENT),
+                ),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            Span::styled(" diagnose: ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                "baro --doctor",
+                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" docs:     ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                "https://docs.baro.rs/docs/troubleshooting",
+                Style::default().fg(theme::ACCENT),
+            ),
+        ]));
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -90,7 +134,9 @@ pub fn render(f: &mut Frame, app: &App) {
                 Style::default().fg(theme::ERROR).add_modifier(Modifier::BOLD),
             ));
 
-        let p = Paragraph::new(lines).block(block);
+        let p = Paragraph::new(lines)
+            .block(block)
+            .wrap(ratatui::widgets::Wrap { trim: false });
         f.render_widget(p, box_area);
 
         let hint = Paragraph::new(Line::from(vec![
