@@ -2,6 +2,7 @@
 
 A concise list of every published version. For full release notes, see the corresponding commit on the v* tag.
 
+## v0.26.0 — feat(0.26.0): scope discipline + planner/architect triage + `--quick` fast path
 ## v0.25.1 — fix(debuggability): baro --doctor, persisted planner logs, real error UI (#17)
 ## v0.25.0 — release(0.25.0): Architect phase — one mind decides, many hands execute
 ## v0.24.0 — release(0.24.0): Librarian mid-flight broadcasts + intra-level stagger
