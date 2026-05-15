@@ -186,6 +186,14 @@ struct Cli {
     /// Use this when a baro run fails before any agents start.
     #[arg(long)]
     doctor: bool,
+
+    /// Quick mode for trivial goals. Skips the Architect phase, forces
+    /// the Planner to emit exactly one story, and disables Critic +
+    /// Surgeon. Use this when you'd otherwise type your prompt directly
+    /// into Claude Code: `baro --quick "fix the typo on line 42"`.
+    /// One agent, tight scope, no design-document overhead.
+    #[arg(long)]
+    quick: bool,
 }
 
 enum AppEvent {
@@ -224,7 +232,43 @@ fn open_terminal_writer() -> io::Result<Box<dyn Write>> {
 
 const CLAUDE_ARCHITECT_PROMPT: &str = r#"You are the architect for this engineering run. ONE focused turn, before anyone writes code.
 
-Your job: read the relevant parts of the existing codebase, then pin down EVERY cross-cutting design decision the implementation agents would otherwise disagree on. They will all receive your output as authoritative spec. If you leave something vague, multiple agents will each pick a different answer and the run will produce inconsistent code that needs retroactive fixes.
+TRIAGE FIRST — DO NOT SKIP THIS STEP:
+Before you produce a design document, decide whether the goal actually needs one.
+
+The Architect exists to prevent multiple parallel agents from disagreeing on
+cross-cutting decisions (file paths, schemas, API shapes, naming, dependency
+choices). When a run has at most one or two agents and no cross-cutting choices,
+there is nothing to align, and a long design document is overhead the user
+doesn't want.
+
+If the goal is TRIVIAL — a single concept, a small focused edit, no new feature
+surface, no new schema, no new API, no new dependency — output ONLY this exact
+short document and stop:
+
+## Existing context
+(Optional, one sentence — only if there's a relevant convention worth noting.)
+
+## Scope
+This goal is trivial; no cross-cutting decisions are needed. The implementation
+agent should follow the user's goal as stated and the conventions already in the
+repo.
+
+Examples of TRIVIAL goals:
+  - "Fix the typo in the README footer"
+  - "Rename `getUser` to `fetchUser` in the auth module"
+  - "Bump axios to 1.7.x"
+  - "Add a created_at index on the orders table"
+
+If the goal is NON-TRIVIAL (introduces a feature, touches multiple modules,
+changes a schema or contract, picks a dependency, defines naming for something
+new), produce the full design document per the sections below.
+
+Do NOT produce a 500-line design doc for a one-line edit. Do NOT enumerate every
+file in the repo as a "file path" when the goal only touches one.
+
+---
+
+Your job (when the goal is NON-TRIVIAL): read the relevant parts of the existing codebase, then pin down EVERY cross-cutting design decision the implementation agents would otherwise disagree on. They will all receive your output as authoritative spec. If you leave something vague, multiple agents will each pick a different answer and the run will produce inconsistent code that needs retroactive fixes.
 
 Use your tools (Read, Grep, Glob, Bash, LSP) actively. Look at:
 - The project's stack (package.json, Cargo.toml, pyproject.toml, go.mod, ...)
@@ -269,6 +313,36 @@ Rules:
 const CLAUDE_PLANNER_PROMPT: &str = r#"You are an expert software architect. Break down the user's project goal into concrete user stories that form a dependency DAG.
 
 You MUST explore the existing codebase first using your tools (read files, list directories, etc.) before generating the plan.
+
+TRIAGE FIRST — DO NOT SKIP THIS STEP:
+Before you decompose, decide whether the goal is TRIVIAL or NON-TRIVIAL.
+
+A goal is TRIVIAL when ALL of these hold:
+  - It names a single concept (one bug, one rename, one typo, one small addition).
+  - It can plausibly be done by touching a small number of files in one focused
+    edit, with no cross-cutting decisions and no new dependencies.
+  - Splitting it would just create artificial seams (e.g. "Story 1: locate the typo,
+    Story 2: fix the typo" is wrong — that's one story).
+  - It does NOT introduce a new feature surface, schema, or API contract.
+
+Examples of TRIVIAL goals:
+  - "Fix the typo in the README footer"
+  - "Rename `getUser` to `fetchUser` across the auth module"
+  - "Bump axios to 1.7.x"
+  - "Add a `created_at` index on the orders table"
+  - "Fix the off-by-one in pagination.ts"
+
+If the goal is TRIVIAL: output EXACTLY ONE story. Set its description to the user's
+goal restated in implementation terms. Set acceptance to a single, tight criterion
+(e.g. "the typo is fixed in README.md"). Use the minimum useful test command
+(typically just `npm run build` or `cargo check`, not a full test suite). Do NOT
+decompose further. Do NOT invent a "verify" story — verification is part of the
+single story's acceptance.
+
+If the goal is NON-TRIVIAL: decompose normally per the rules below.
+
+When in doubt, prefer FEWER stories over more. A single 2-file story is better
+than two artificially-split 1-file stories.
 
 Output ONLY valid JSON matching this exact schema (no markdown, no explanation, just JSON):
 {
@@ -466,6 +540,17 @@ async fn run_app(
     }
     if let Some(d) = cli.intra_level_delay {
         app.intra_level_delay_secs = Some(d);
+    }
+
+    // --quick is the user telling us "this is trivial, don't ceremony it".
+    // We honour that on three fronts: skip Architect (no design doc),
+    // tell Planner to emit a 1-story DAG, and silence Critic + Surgeon
+    // (their value is in coordinating parallel work that --quick doesn't
+    // have). Librarian + Sentry stay on — they're cheap and harmless.
+    if cli.quick {
+        app.quick = true;
+        app.with_critic = false;
+        app.with_surgeon = false;
     }
 
     let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
@@ -942,11 +1027,22 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     let model = app.model_for_phase("planning");
     let architect_model = app.model_for_phase("architect");
     let context = app.claude_md_content.clone();
+    let quick = app.quick;
 
     tokio::spawn(async move {
-        // Phase 1 — Architect (Claude planner only; OpenAI planner is a
-        // legacy single-shot path that doesn't take a design spec).
-        let decision_doc = if matches!(planner, Planner::Claude) {
+        // Phase 1 — Architect. In quick mode we skip this entirely:
+        // the Architect's job is to align multiple parallel agents on
+        // cross-cutting decisions, and quick runs are single-agent. We
+        // still emit ArchitectSkipped so the TUI shows the user *why*
+        // there's no design document for this run.
+        let decision_doc = if quick {
+            let _ = tx
+                .send(AppEvent::ArchitectSkipped(
+                    "Quick mode — no design document needed for a single-story run.".to_string(),
+                ))
+                .await;
+            None
+        } else if matches!(planner, Planner::Claude) {
             let _ = tx.send(AppEvent::ArchitectStarted).await;
             match run_claude_architect(&goal, &cwd, architect_model.as_deref(), context.as_deref()).await {
                 Ok(doc) => {
@@ -971,9 +1067,10 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
         };
 
         // Phase 2 — Planner (now informed by the DecisionDocument when present).
+        // In quick mode, the planner is told to emit exactly one story.
         let result = match planner {
             Planner::Claude => {
-                run_claude_planner(&goal, &cwd, model.as_deref(), context.as_deref(), decision_doc.as_deref()).await
+                run_claude_planner(&goal, &cwd, model.as_deref(), context.as_deref(), decision_doc.as_deref(), quick).await
             }
             Planner::OpenAI => run_openai_planner(&goal, &cwd).await,
         };
@@ -1265,6 +1362,7 @@ async fn run_claude_planner(
     model: Option<&str>,
     context: Option<&str>,
     decision_doc: Option<&str>,
+    quick: bool,
 ) -> Result<(Vec<ReviewStory>, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
     let base_prompt = format!("{}\n\nUser goal: {}", CLAUDE_PLANNER_PROMPT, goal);
     let with_design = match decision_doc {
@@ -1274,9 +1372,19 @@ async fn run_claude_planner(
         ),
         None => base_prompt,
     };
+    // --quick: hard override. The triage in the planner prompt may still
+    // misjudge a goal as non-trivial; --quick is the user's vote and it wins.
+    let with_quick = if quick {
+        format!(
+            "{}\n\nQUICK MODE OVERRIDE — the user invoked `baro --quick`. They have told us this goal is trivial. You MUST output EXACTLY ONE story. Do not split. Do not decompose. Do not add a `verify` story. If you genuinely cannot do this in one story, emit the one story anyway with a description that explains what's missing; the user will rerun without --quick. One story, tight acceptance, minimum useful test command.",
+            with_design
+        )
+    } else {
+        with_design
+    };
     let prompt = match context {
-        Some(ctx) => format!("Here is the project context:\n{}\n\n{}", ctx, with_design),
-        None => with_design,
+        Some(ctx) => format!("Here is the project context:\n{}\n\n{}", ctx, with_quick),
+        None => with_quick,
     };
 
     let config = claude_runner::ClaudeRunConfig {

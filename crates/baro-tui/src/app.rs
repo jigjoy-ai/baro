@@ -231,6 +231,13 @@ pub struct App {
     pub surgeon_model: Option<String>,
     pub intra_level_delay_secs: Option<u64>,
 
+    /// Quick mode (`--quick`): user has told us this goal is trivial and they
+    /// want a surgical run. Skips the Architect phase entirely, instructs the
+    /// Planner to emit exactly one story, and disables Critic + Surgeon
+    /// (which are designed for multi-story runs and add latency the user
+    /// explicitly didn't sign up for). The fast path for "fix the typo" goals.
+    pub quick: bool,
+
     // Notification flag
     pub notification_ready: bool,
 
@@ -306,6 +313,7 @@ impl App {
             surgeon_use_llm: true,
             surgeon_model: None,
             intra_level_delay_secs: None,
+            quick: false,
             token_usage: HashMap::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
