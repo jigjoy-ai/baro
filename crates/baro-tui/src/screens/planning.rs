@@ -166,7 +166,7 @@ pub fn render(f: &mut Frame, app: &App) {
             _ => theme::LOGO_3,
         };
 
-        let lines = vec![
+        let mut lines = vec![
             Line::from(""),
             Line::from(vec![
                 Span::styled(
@@ -191,6 +191,16 @@ pub fn render(f: &mut Frame, app: &App) {
                 ),
             ]),
         ];
+
+        if app.quick {
+            lines.push(Line::from(vec![
+                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled(
+                    "quick mode — single story, no architect/critic/surgeon",
+                    Style::default().fg(theme::ACCENT),
+                ),
+            ]));
+        }
 
         let block = Block::default()
             .borders(Borders::ALL)
