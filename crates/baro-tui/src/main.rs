@@ -11,6 +11,7 @@ mod executor;
 mod git;
 mod notification;
 mod orchestrator_client;
+mod planner_runner;
 mod screens;
 mod subprocess;
 mod theme;
@@ -84,7 +85,6 @@ use crossterm::{
     },
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use app::{App, Planner, ReviewStory, Screen};
@@ -241,82 +241,6 @@ fn open_terminal_writer() -> io::Result<Box<dyn Write>> {
 }
 
 
-const CLAUDE_PLANNER_PROMPT: &str = r#"You are an expert software architect. Break down the user's project goal into concrete user stories that form a dependency DAG.
-
-You MUST explore the existing codebase first using your tools (read files, list directories, etc.) before generating the plan.
-
-TRIAGE FIRST — DO NOT SKIP THIS STEP:
-Before you decompose, decide whether the goal is TRIVIAL or NON-TRIVIAL.
-
-A goal is TRIVIAL when ALL of these hold:
-  - It names a single concept (one bug, one rename, one typo, one small addition).
-  - It can plausibly be done by touching a small number of files in one focused
-    edit, with no cross-cutting decisions and no new dependencies.
-  - Splitting it would just create artificial seams (e.g. "Story 1: locate the typo,
-    Story 2: fix the typo" is wrong — that's one story).
-  - It does NOT introduce a new feature surface, schema, or API contract.
-
-Examples of TRIVIAL goals:
-  - "Fix the typo in the README footer"
-  - "Rename `getUser` to `fetchUser` across the auth module"
-  - "Bump axios to 1.7.x"
-  - "Add a `created_at` index on the orders table"
-  - "Fix the off-by-one in pagination.ts"
-
-If the goal is TRIVIAL: output EXACTLY ONE story. Set its description to the user's
-goal restated in implementation terms. Set acceptance to a single, tight criterion
-(e.g. "the typo is fixed in README.md"). Use the minimum useful test command
-(typically just `npm run build` or `cargo check`, not a full test suite). Do NOT
-decompose further. Do NOT invent a "verify" story — verification is part of the
-single story's acceptance.
-
-If the goal is NON-TRIVIAL: decompose normally per the rules below.
-
-When in doubt, prefer FEWER stories over more. A single 2-file story is better
-than two artificially-split 1-file stories.
-
-Output ONLY valid JSON matching this exact schema (no markdown, no explanation, just JSON):
-{
-  "project": "short project name",
-  "branchName": "kebab-case-branch-name",
-  "description": "one-line description",
-  "userStories": [
-    {
-      "id": "S1",
-      "priority": 1,
-      "title": "short title",
-      "description": "what to implement",
-      "dependsOn": [],
-      "retries": 2,
-      "acceptance": ["testable criterion"],
-      "tests": ["npm test"],
-      "model": "opus"
-    }
-  ]
-}
-
-Rules:
-- Each story: ONE focused unit of work for one AI agent. Hard cap:
-    * touches at most ~10 files
-    * fits in a single Claude turn (a few minutes of execution, not an hour)
-  Stories that read like "Strip all X" / "Refactor everything that touches Y"
-  are TOO BIG. Split them by directory, by feature, or by file group:
-    "Delete backend SEF module"
-    "Delete frontend SEF wiring"
-    "Rename pib→taxId in schema + DTOs"
-    "Rename pib→taxId in services + frontend forms"
-  Prefer 12-15 small stories over 5 big ones.
-- Default execution model is "opus". Only set "model" if you want to
-  override (e.g. set to "sonnet" or "haiku" for trivial cosmetic stories
-  that don't need deep reasoning). For everything substantive, leave
-  the field out and let the default opus run it.
-- Use dependsOn for dependencies; same-priority stories with no deps run IN PARALLEL
-- Include testable acceptance criteria and test commands
-- No circular dependencies
-- Start with foundational stories, build up
-- IDs: S1, S2, S3...
-- Build on existing code, don't recreate what exists
-- Output ONLY the JSON, nothing else"#;
 
 #[derive(serde::Deserialize)]
 struct PrdOutput {
@@ -1093,30 +1017,58 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
             None
         };
 
-        // Phase 2 — Planner (now informed by the DecisionDocument when present).
-        // In quick mode, the planner is told to emit exactly one story.
-        let result = match planner {
-            Planner::Claude => {
-                run_claude_planner(&goal, &cwd, model.as_deref(), context.as_deref(), decision_doc.as_deref(), quick).await
-            }
-            Planner::OpenAI => run_openai_planner(&goal, &cwd).await,
-        };
+        // Phase 2 — Planner. TS subprocess decides Claude vs OpenAI
+        // based on --llm, prints the PRD JSON to stdout. The legacy
+        // `app.planner` enum is now redundant with `app.llm`; we
+        // route entirely off the latter.
+        let _ = planner; // legacy field kept on App for the welcome-screen wizard
+        let result = planner_runner::run_planner(
+            &goal,
+            &cwd,
+            llm,
+            model.as_deref(),
+            context.as_deref(),
+            decision_doc.as_deref(),
+            quick,
+            openai_api_key.as_deref(),
+        ).await;
 
-        match result {
+        match result.and_then(|raw_json| {
+            // Parse the PRD JSON the TS planner emitted. Same schema
+            // as the old Rust path consumed — Rust stays the single
+            // source of truth for `PrdOutput`.
+            let prd: PrdOutput = serde_json::from_str(&raw_json).map_err(|e| {
+                subprocess::ProcessRunError {
+                    message: format!(
+                        "Failed to parse PRD JSON from planner: {}\nRaw (first 500 chars): {}",
+                        e,
+                        &raw_json[..raw_json.len().min(500)],
+                    ),
+                    log_path: None,
+                }
+            })?;
+            let stories: Vec<ReviewStory> = prd.user_stories
+                .into_iter()
+                .map(|s| ReviewStory {
+                    id: s.id,
+                    title: s.title,
+                    description: s.description,
+                    depends_on: s.depends_on,
+                    completed: false,
+                    model: s.model,
+                })
+                .collect();
+            Ok((stories, prd.project, prd.branch_name, prd.description))
+        }) {
             Ok((stories, project, branch, description)) => {
                 let _ = tx
                     .send(AppEvent::PlanReady(stories, project, branch, description))
                     .await;
             }
-            Err(e) => {
-                // If the error came from claude_runner, it carries the
-                // path to the persisted stdout+stderr log — surface it
-                // so the user can see the full diagnostic, not just the
-                // truncated headline.
-                let log_path = e
-                    .downcast_ref::<subprocess::ProcessRunError>()
-                    .and_then(|err| err.log_path.clone());
-                let _ = tx.send(AppEvent::PlanError(e.to_string(), log_path)).await;
+            Err(err) => {
+                let _ = tx
+                    .send(AppEvent::PlanError(err.message.clone(), err.log_path))
+                    .await;
             }
         }
     });
@@ -1339,131 +1291,4 @@ fn spawn_executor(
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
 }
 
-async fn run_claude_planner(
-    goal: &str,
-    cwd: &Path,
-    model: Option<&str>,
-    context: Option<&str>,
-    decision_doc: Option<&str>,
-    quick: bool,
-) -> Result<(Vec<ReviewStory>, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
-    let base_prompt = format!("{}\n\nUser goal: {}", CLAUDE_PLANNER_PROMPT, goal);
-    let with_design = match decision_doc {
-        Some(doc) => format!(
-            "AUTHORITATIVE DESIGN SPEC (already decided by the Architect — every story you produce must implement THESE specific file paths, names, and shapes; do NOT invent alternatives):\n\n{}\n\n{}",
-            doc, base_prompt,
-        ),
-        None => base_prompt,
-    };
-    // --quick: hard override. The triage in the planner prompt may still
-    // misjudge a goal as non-trivial; --quick is the user's vote and it wins.
-    let with_quick = if quick {
-        format!(
-            "{}\n\nQUICK MODE OVERRIDE — the user invoked `baro --quick`. They have told us this goal is trivial. You MUST output EXACTLY ONE story. Do not split. Do not decompose. Do not add a `verify` story. If you genuinely cannot do this in one story, emit the one story anyway with a description that explains what's missing; the user will rerun without --quick. One story, tight acceptance, minimum useful test command.",
-            with_design
-        )
-    } else {
-        with_design
-    };
-    let prompt = match context {
-        Some(ctx) => format!("Here is the project context:\n{}\n\n{}", ctx, with_quick),
-        None => with_quick,
-    };
-
-    let config = claude_runner::ClaudeRunConfig {
-        prompt,
-        cwd: cwd.to_path_buf(),
-        model: model.map(|s| s.to_string()),
-        log_tag: Some("planner"),
-    };
-
-    let output = claude_runner::spawn_claude_json(&config).await?;
-
-    // Claude --output-format json wraps the result; extract the text content
-    let claude_output: serde_json::Value = serde_json::from_str(&output.stdout)
-        .map_err(|e| format!("Failed to parse Claude JSON wrapper: {}", e))?;
-
-    // The actual plan JSON is in the "result" field as a text string
-    let plan_text = claude_output
-        .get("result")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&output.stdout);
-
-    let json_str = extract_json(plan_text);
-
-    let prd: PrdOutput = serde_json::from_str(&json_str)
-        .map_err(|e| format!("Failed to parse PRD JSON: {}\nRaw: {}", e, &json_str[..json_str.len().min(500)]))?;
-
-    let stories: Vec<ReviewStory> = prd.user_stories
-        .into_iter()
-        .map(|s| ReviewStory {
-            id: s.id,
-            title: s.title,
-            description: s.description,
-            depends_on: s.depends_on,
-            completed: false,
-            model: s.model,
-        })
-        .collect();
-
-    Ok((stories, prd.project, prd.branch_name, prd.description))
-}
-
-async fn run_openai_planner(goal: &str, cwd: &Path) -> Result<(Vec<ReviewStory>, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
-    // Find the openai-planner.js relative to the binary or use node_modules
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-
-    // Try multiple locations for the planner script
-    let script_paths = [
-        exe_dir.as_ref().map(|d| d.join("openai-planner.js")),
-        Some(cwd.join("node_modules/baro-ai/dist/openai-planner.js")),
-        Some(cwd.join("openai-planner.js")),
-    ];
-
-    let script_path = script_paths
-        .iter()
-        .filter_map(|p| p.as_ref())
-        .find(|p| p.exists())
-        .ok_or("Could not find openai-planner.js")?
-        .clone();
-
-    let output = Command::new("node")
-        .args([
-            script_path.to_string_lossy().as_ref(),
-            goal,
-            "--cwd",
-            &cwd.to_string_lossy(),
-        ])
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?
-        .wait_with_output()
-        .await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("OpenAI planner failed: {}", stderr).into());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let prd: PrdOutput = serde_json::from_str(&stdout)
-        .map_err(|e| format!("Failed to parse OpenAI PRD: {}", e))?;
-
-    let stories: Vec<ReviewStory> = prd.user_stories
-        .into_iter()
-        .map(|s| ReviewStory {
-            id: s.id,
-            title: s.title,
-            description: s.description,
-            depends_on: s.depends_on,
-            completed: false,
-            model: s.model,
-        })
-        .collect();
-
-    Ok((stories, prd.project, prd.branch_name, prd.description))
-}
 

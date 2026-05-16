@@ -1,14 +1,17 @@
 import { defineConfig } from "tsup"
 
 /**
- * Two bundles ship inside the npm `baro-ai` package's `dist/` directory:
+ * One bundle ships inside the npm `baro-ai` package's `dist/`
+ * directory: `cli.mjs`, the Mozaik orchestrator CLI bundled with all
+ * its TS sources (including the @mozaik-ai/core framework). Spawned
+ * by `crates/baro-tui/src/orchestrator_client.rs` after a user runs
+ * `npm install -g baro-ai`. The Rust client looks for it at
+ * `node_modules/baro-ai/dist/cli.mjs`.
  *
- *   1. `openai-planner.js` — the existing standalone planner subprocess.
- *   2. `cli.mjs` — the Mozaik orchestrator CLI bundled with all its TS
- *      sources (including the @mozaik-ai/core framework). Spawned by
- *      crates/baro-tui/src/orchestrator_client.rs after a user runs
- *      `npm install -g baro-ai`. The Rust client looks for it at
- *      `node_modules/baro-ai/dist/cli.mjs`.
+ * (The legacy `openai-planner.js` bundle from `src/core/openai-planner.ts`
+ * was removed in 0.32: the standalone planner subprocess is replaced
+ * by `scripts/run-planner.ts` in the orchestrator package, which the
+ * Rust `planner_runner` spawns via tsx.)
  *
  * The orchestrator entry point lives in the sibling workspace package
  * `@baro/orchestrator`. tsup follows the imports across the workspace
@@ -16,13 +19,6 @@ import { defineConfig } from "tsup"
  * single ESM file with a node shebang.
  */
 export default defineConfig([
-    {
-        entry: { "openai-planner": "src/core/openai-planner.ts" },
-        format: ["esm"],
-        outDir: "dist",
-        clean: false,
-        sourcemap: true,
-    },
     {
         entry: { cli: "../baro-orchestrator/scripts/cli.ts" },
         format: ["esm"],

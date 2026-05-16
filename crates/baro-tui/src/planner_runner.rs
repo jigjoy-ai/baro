@@ -1,0 +1,113 @@
+//! Run the Planner phase by spawning the TS subprocess at
+//! `packages/baro-orchestrator/scripts/run-planner.ts`.
+//!
+//! Identical shape to `architect_runner` — Rust is a process
+//! supervisor, the actual Planner lives in TypeScript and decides
+//! Claude vs OpenAI internally based on the `--llm` arg. Returns the
+//! raw PRD JSON string; callers deserialise via `serde_json` into
+//! their `PrdOutput` shape (kept in `main.rs` so the schema stays
+//! one source of truth).
+//!
+//! CLAUDE.md and the Architect's DecisionDocument are passed via
+//! tempfiles so we don't trip over argv length limits with multi-KB
+//! context.
+
+use std::io::Write;
+use std::path::Path;
+
+use tokio::process::Command;
+
+use crate::app::LlmProvider;
+use crate::discovery;
+use crate::subprocess::{self, ProcessRunError};
+
+const SCRIPT_REL_PATH: &str = "packages/baro-orchestrator/scripts/run-planner.ts";
+
+pub async fn run_planner(
+    goal: &str,
+    cwd: &Path,
+    llm: LlmProvider,
+    model: Option<&str>,
+    context: Option<&str>,
+    decision_doc: Option<&str>,
+    quick: bool,
+    openai_api_key: Option<&str>,
+) -> Result<String, ProcessRunError> {
+    let repo = discovery::find_dev_repo(cwd).ok_or_else(|| ProcessRunError {
+        message:
+            "could not locate baro repo — no `packages/baro-orchestrator/` found upward \
+             from the binary or in the project cwd. Run from inside a baro checkout."
+                .into(),
+        log_path: None,
+    })?;
+    let tsx = discovery::find_tsx(&repo).ok_or_else(|| ProcessRunError {
+        message: format!(
+            "tsx not found at {}/node_modules/.bin/tsx — run `npm install` in the baro repo.",
+            repo.display()
+        ),
+        log_path: None,
+    })?;
+
+    let script = repo.join(SCRIPT_REL_PATH);
+
+    // Two optional context blobs, two tempfiles. Both kept alive
+    // until the child exits.
+    let ctx_tempfile = write_optional_tempfile("context", context)?;
+    let dec_tempfile = write_optional_tempfile("decision", decision_doc)?;
+
+    let mut cmd = Command::new(&tsx);
+    cmd.arg(&script)
+        .arg("--goal").arg(goal)
+        .arg("--cwd").arg(cwd)
+        .arg("--llm").arg(llm.as_str());
+    if let Some(m) = model {
+        cmd.arg("--model").arg(m);
+    }
+    if let Some(ref f) = ctx_tempfile {
+        cmd.arg("--context-file").arg(f.path());
+    }
+    if let Some(ref f) = dec_tempfile {
+        cmd.arg("--decision-file").arg(f.path());
+    }
+    if quick {
+        cmd.arg("--quick");
+    }
+    if matches!(llm, LlmProvider::OpenAI) {
+        if let Some(key) = openai_api_key {
+            cmd.env("OPENAI_API_KEY", key);
+        }
+    }
+
+    let captured = subprocess::spawn_and_capture(cmd, "planner").await?;
+    drop(ctx_tempfile);
+    drop(dec_tempfile);
+
+    let raw = captured.stdout.trim().to_string();
+    if raw.is_empty() {
+        return Err(ProcessRunError {
+            message: "planner returned an empty response".into(),
+            log_path: captured.log_path,
+        });
+    }
+    Ok(raw)
+}
+
+fn write_optional_tempfile(
+    label: &str,
+    body: Option<&str>,
+) -> Result<Option<tempfile::NamedTempFile>, ProcessRunError> {
+    match body {
+        Some(b) if !b.is_empty() => {
+            let mut f = tempfile::NamedTempFile::new().map_err(|e| ProcessRunError {
+                message: format!("could not create tempfile for planner {}: {}", label, e),
+                log_path: None,
+            })?;
+            f.write_all(b.as_bytes()).map_err(|e| ProcessRunError {
+                message: format!("could not write planner {} tempfile: {}", label, e),
+                log_path: None,
+            })?;
+            Ok(Some(f))
+        }
+        _ => Ok(None),
+    }
+}
