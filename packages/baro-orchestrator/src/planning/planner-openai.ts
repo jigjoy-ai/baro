@@ -43,7 +43,7 @@ export interface RunPlannerOpenAIOptions {
     goal: string
     /** Working directory the Planner explores in. */
     cwd: string
-    /** Mozaik model name. Default: "gpt-5.4" — Planner is mid-tier reasoning. */
+    /** Mozaik model name. Default: "gpt-5.5" — flagship reasoning across all five OpenAI phases. */
     model?: string
     /** Optional CLAUDE.md / project-context blob to prepend. */
     projectContext?: string
@@ -83,7 +83,7 @@ function pickModel(name: string): GenerativeModel {
 export async function runPlannerOpenAI(
     opts: RunPlannerOpenAIOptions,
 ): Promise<string> {
-    const model = pickModel(opts.model ?? "gpt-5.4")
+    const model = pickModel(opts.model ?? "gpt-5.5")
     const tools = createCodebaseTools(opts.cwd)
     setModelTools(model, tools)
 

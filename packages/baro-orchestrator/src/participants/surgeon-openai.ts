@@ -12,8 +12,9 @@
  *     so a flaky LLM call doesn't strand the run.
  *
  * Wired via `OrchestrateConfig.llm === "openai"` in `orchestrate.ts`.
- * Default model: `gpt-5.4` — Surgeon fires far less often than Critic
- * but each call needs more reasoning, so we step up from `mini`.
+ * Default model: `gpt-5.5` — every OpenAI phase routes through 5.5 now.
+ * Surgeon's reasoning load justifies the flagship even more than the
+ * higher-frequency Critic does.
  */
 
 import {
@@ -51,8 +52,7 @@ export interface SurgeonOpenAIOptions {
     maxReplans?: number
     /**
      * OpenAI model name. One of `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`,
-     * `gpt-5.4-nano`. Default: `gpt-5.4` — Surgeon reasoning benefits
-     * from the mid-tier model; mini works but loses nuance on splits.
+     * `gpt-5.4-nano`. Default: `gpt-5.5`.
      */
     model?: string
 }
@@ -87,7 +87,7 @@ export class SurgeonOpenAI extends BaroParticipant {
         super()
         this.opts = {
             maxReplans: opts.maxReplans ?? 10,
-            model: opts.model ?? "gpt-5.4",
+            model: opts.model ?? "gpt-5.5",
             snapshot: opts.snapshot,
         }
         this.model = pickModel(this.opts.model)

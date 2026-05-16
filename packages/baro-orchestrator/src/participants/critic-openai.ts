@@ -11,8 +11,11 @@
  *     running Claude session's stdin via `ClaudeCliParticipant`.
  *
  * Wired via `OrchestrateConfig.llm === "openai"` in `orchestrate.ts`.
- * Default model: `gpt-5.4-mini` (cheap, fast — Critic runs per turn
- * per agent and is the highest-volume LLM caller in a baro run).
+ * Default model: `gpt-5.4-mini`. Critic is the highest-volume LLM
+ * caller in a run (one verdict per agent per turn) and the verdict is
+ * a structured PASS/FAIL — mini handles it reliably without burning
+ * flagship-tier tokens on per-turn work. Every other OpenAI phase is
+ * 5.5 because they're one-shot or rare; Critic is the exception.
  */
 
 import {

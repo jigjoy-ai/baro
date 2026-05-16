@@ -487,6 +487,18 @@ async fn run_app(
         }
     }
 
+    // Pre-fill OpenAI key from env BEFORE the goal branching below.
+    // Was previously inside the no-goal else-branch — that meant
+    // `baro --llm openai "<goal>"` skipped both the env-read AND the
+    // API-key entry screen, so if the user didn't have OPENAI_API_KEY
+    // in their shell the planner subprocess started with no key and
+    // crashed on "OPENAI_API_KEY is not set".
+    if let Ok(env_key) = std::env::var("OPENAI_API_KEY") {
+        if !env_key.is_empty() {
+            app.openai_api_key = Some(env_key);
+        }
+    }
+
     // If goal provided via CLI (and not resuming), skip welcome and start context/planning.
     // Otherwise: if there's no goal and we're not resuming, start at the
     // ProviderPicker so the user picks Claude vs OpenAI before typing
@@ -495,27 +507,30 @@ async fn run_app(
     if !entered_resume {
         if let Some(goal) = cli.goal {
             app.goal_input = goal;
-            let claude_md_path = cwd.join("CLAUDE.md");
-            if claude_md_path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
-                    app.claude_md_content = Some(content);
-                }
-                app.start_planning();
-                spawn_planner(&app, &cwd, tx.clone());
+            // CLI-goal + --llm openai + no API key anywhere → detour
+            // through the ApiKeyInput screen first. The ApiKeyInput
+            // Enter handler sees `goal_input` is already set and jumps
+            // straight to planning after the key is captured, so the
+            // user never goes through Welcome.
+            if app.llm == app::LlmProvider::OpenAI && app.openai_api_key.is_none() {
+                app.screen = app::Screen::ApiKeyInput;
+                app.api_key_input.clear();
             } else {
-                app.start_context();
-                spawn_context_builder(&cwd, tx.clone());
+                let claude_md_path = cwd.join("CLAUDE.md");
+                if claude_md_path.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
+                        app.claude_md_content = Some(content);
+                    }
+                    app.start_planning();
+                    spawn_planner(&app, &cwd, tx.clone());
+                } else {
+                    app.start_context();
+                    spawn_context_builder(&cwd, tx.clone());
+                }
             }
         } else {
-            // No goal: show ProviderPicker first. Pre-fill openai_api_key
-            // from env so the OpenAI path skips the API-key screen when
-            // the user already has the secret in their shell.
+            // No goal: show ProviderPicker first.
             app.screen = app::Screen::ProviderPicker;
-            if let Ok(env_key) = std::env::var("OPENAI_API_KEY") {
-                if !env_key.is_empty() {
-                    app.openai_api_key = Some(env_key);
-                }
-            }
         }
     }
 
@@ -667,7 +682,26 @@ async fn run_app(
                             if !trimmed.is_empty() {
                                 app.openai_api_key = Some(trimmed.to_string());
                                 app.api_key_input.clear();
-                                app.screen = Screen::Welcome;
+                                // If the user invoked baro with a CLI
+                                // goal, they already finished the "what
+                                // should I do" step on the command line
+                                // — jump straight to planning instead of
+                                // dragging them through Welcome.
+                                if !app.goal_input.is_empty() {
+                                    let claude_md_path = cwd.join("CLAUDE.md");
+                                    if claude_md_path.exists() {
+                                        if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
+                                            app.claude_md_content = Some(content);
+                                        }
+                                        app.start_planning();
+                                        spawn_planner(&app, &cwd, tx.clone());
+                                    } else {
+                                        app.start_context();
+                                        spawn_context_builder(&cwd, tx.clone());
+                                    }
+                                } else {
+                                    app.screen = Screen::Welcome;
+                                }
                             }
                         }
                         KeyCode::Backspace => {
