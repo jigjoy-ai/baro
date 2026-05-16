@@ -906,12 +906,21 @@ impl App {
         if let Some(m) = per_phase {
             return Some(m.clone());
         }
-        // Finally the routed default (Claude side only; for OpenAI
-        // the TS planning modules pick gpt-5.x defaults).
+        // Routed default — must match the provider. Claude phases
+        // return Claude model names (`opus`, `haiku`); OpenAI
+        // phases return gpt-5.x names. Returning a Claude name on
+        // the OpenAI path (the pre-0.36.3 bug) made the TS planner
+        // throw "unknown model 'opus'" before any inference.
         if self.model_routing {
-            return match phase {
-                "architect" | "planning" | "execution" | "story" => Some("opus".to_string()),
-                "review" => Some("haiku".to_string()),
+            return match (self.llm, phase) {
+                (LlmProvider::Claude, "architect" | "planning" | "execution" | "story") => {
+                    Some("opus".to_string())
+                }
+                (LlmProvider::Claude, "review") => Some("haiku".to_string()),
+                (LlmProvider::OpenAI, "architect") => Some("gpt-5.5".to_string()),
+                (LlmProvider::OpenAI, "planning") => Some("gpt-5.4".to_string()),
+                (LlmProvider::OpenAI, "execution" | "story") => Some("gpt-5.5".to_string()),
+                (LlmProvider::OpenAI, "review") => Some("gpt-5.4-mini".to_string()),
                 _ => None,
             };
         }

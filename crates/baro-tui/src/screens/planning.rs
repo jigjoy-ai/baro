@@ -69,9 +69,13 @@ pub fn render(f: &mut Frame, app: &App) {
     };
     let box_area = center(chunks[1], box_width);
 
-    let planner_name = match app.planner {
-        crate::app::Planner::Claude => "Claude",
-        crate::app::Planner::OpenAI => "OpenAI",
+    // The label follows `app.llm` (set on the provider-picker
+    // screen or via --llm) so OpenAI runs don't sit under a "Claude"
+    // header. The legacy `app.planner` enum is now redundant with
+    // `app.llm` and the planning subprocess routes off `llm` exclusively.
+    let planner_name = match app.llm {
+        crate::app::LlmProvider::Claude => "Claude",
+        crate::app::LlmProvider::OpenAI => "OpenAI",
     };
 
     if let Some(ref err) = app.planning_error {
