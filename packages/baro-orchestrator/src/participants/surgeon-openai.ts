@@ -22,12 +22,16 @@ import {
     Gpt54Nano,
     Gpt55,
     ModelContext,
-    OpenAIInferenceRunner,
     SystemMessageItem,
     UserMessageItem,
     type GenerativeModel,
     type Participant,
 } from "@mozaik-ai/core"
+
+import {
+    UsageAccumulator,
+    runInferenceRound,
+} from "../planning/openai-runtime.js"
 
 import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 import { ReplanItem, ReplanStoryAdd } from "../types.js"
@@ -75,7 +79,6 @@ export class SurgeonOpenAI extends BaroParticipant {
     private readonly opts: Required<Pick<SurgeonOpenAIOptions, "maxReplans" | "model">> &
         SurgeonOpenAIOptions
     private readonly model: GenerativeModel
-    private readonly runner = new OpenAIInferenceRunner()
 
     private replansEmitted = 0
     private readonly pending = new Set<Promise<void>>()
@@ -128,9 +131,12 @@ export class SurgeonOpenAI extends BaroParticipant {
             .addContextItem(UserMessageItem.create(userPrompt))
 
         try {
+            const round = await runInferenceRound(context, this.model)
+            const usage = new UsageAccumulator()
+            usage.add(round.usage)
             let assistantText = ""
-            for await (const item of this.runner.run(context, this.model)) {
-                if (item.type === "message" && item.role === "assistant") {
+            for (const item of round.items) {
+                if (item.type === "message") {
                     const json = item.toJSON() as { content: Array<{ text: string }> }
                     assistantText += json.content?.[0]?.text ?? ""
                 }
@@ -138,6 +144,7 @@ export class SurgeonOpenAI extends BaroParticipant {
             if (!assistantText.trim()) {
                 throw new Error("OpenAI returned empty assistant text")
             }
+            process.stderr.write(`[surgeon-openai] ${usage.summary()}\n`)
 
             const verdictJson = extractJsonObject(assistantText)
             const parsed = JSON.parse(verdictJson) as {

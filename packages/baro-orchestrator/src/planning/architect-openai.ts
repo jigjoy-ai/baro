@@ -24,12 +24,16 @@ import {
     Gpt54Nano,
     Gpt55,
     ModelContext,
-    OpenAIInferenceRunner,
     SystemMessageItem,
     UserMessageItem,
     type GenerativeModel,
     type Tool,
 } from "@mozaik-ai/core"
+
+import {
+    UsageAccumulator,
+    runInferenceRound,
+} from "./openai-runtime.js"
 
 import {
     ARCHITECT_SYSTEM_PROMPT,
@@ -83,7 +87,6 @@ export async function runArchitectOpenAI(
     const tools = createCodebaseTools(opts.cwd)
     setModelTools(model, tools)
 
-    const runner = new OpenAIInferenceRunner()
     let context = ModelContext.create("architect")
         .addContextItem(SystemMessageItem.create(ARCHITECT_SYSTEM_PROMPT))
         .addContextItem(
@@ -92,14 +95,13 @@ export async function runArchitectOpenAI(
 
     const maxRounds = opts.maxRounds ?? 12
     const perRoundTimeoutMs = (opts.perRoundTimeoutSecs ?? 120) * 1000
+    const usage = new UsageAccumulator()
 
     for (let round = 1; round <= maxRounds; round++) {
-        // Per-round abort so a single hung inference can't lock the whole
-        // architect call. The next round will resume from the same context
-        // if anything had been emitted; otherwise we propagate the error.
-        const ac = new AbortController()
-        const timer = setTimeout(() => ac.abort(), perRoundTimeoutMs)
-
+        // Per-round timeout so a single hung inference can't lock
+        // the whole architect call. `runInferenceRound` doesn't
+        // expose AbortSignal (Mozaik's ModelRuntime.infer() doesn't
+        // either), so we wrap the promise in Promise.race instead.
         const newItems: Array<{
             type: string
             callId?: string
@@ -108,27 +110,31 @@ export async function runArchitectOpenAI(
             text?: string
         }> = []
 
-        try {
-            for await (const item of runner.run(context, model, ac.signal)) {
-                if (item.type === "function_call") {
-                    newItems.push({
-                        type: "function_call",
-                        callId: item.callId,
-                        name: item.name,
-                        args: item.args,
-                    })
-                    context = context.addContextItem(item)
-                } else if (item.type === "message" && item.role === "assistant") {
-                    const json = item.toJSON() as { content: Array<{ text: string }> }
-                    const text = json.content?.[0]?.text ?? ""
-                    newItems.push({ type: "message", text })
-                    context = context.addContextItem(item)
-                } else if (item.type === "reasoning") {
-                    context = context.addContextItem(item)
-                }
+        const roundPromise = runInferenceRound(context, model)
+        const timeoutPromise = new Promise<never>((_, rej) =>
+            setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs),
+        )
+        const result = await Promise.race([roundPromise, timeoutPromise])
+        usage.add(result.usage)
+
+        for (const item of result.items) {
+            if (item.type === "function_call") {
+                const fc = item as unknown as { callId: string; name: string; args: string }
+                newItems.push({
+                    type: "function_call",
+                    callId: fc.callId,
+                    name: fc.name,
+                    args: fc.args,
+                })
+                context = context.addContextItem(item)
+            } else if (item.type === "message") {
+                const json = item.toJSON() as { content: Array<{ text: string }> }
+                const text = json.content?.[0]?.text ?? ""
+                newItems.push({ type: "message", text })
+                context = context.addContextItem(item)
+            } else if (item.type === "reasoning") {
+                context = context.addContextItem(item)
             }
-        } finally {
-            clearTimeout(timer)
         }
 
         // If the model produced no items at all, we're stuck — error out.
@@ -164,6 +170,7 @@ export async function runArchitectOpenAI(
             if (!doc) {
                 throw new Error("ArchitectOpenAI: empty final document")
             }
+            process.stderr.write(`[architect-openai] ${usage.summary()}\n`)
             return doc
         }
     }

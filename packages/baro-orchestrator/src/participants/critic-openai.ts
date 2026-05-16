@@ -21,7 +21,6 @@ import {
     Gpt54Nano,
     Gpt55,
     ModelContext,
-    OpenAIInferenceRunner,
     SystemMessageItem,
     UserMessageItem,
     type GenerativeModel,
@@ -29,6 +28,10 @@ import {
 } from "@mozaik-ai/core"
 
 import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
+import {
+    UsageAccumulator,
+    runInferenceRound,
+} from "../planning/openai-runtime.js"
 import {
     AgentTargetedMessageItem,
     AgentResultItem,
@@ -76,7 +79,6 @@ function pickModel(name: string): GenerativeModel {
 export class CriticOpenAI extends BaroParticipant {
     private readonly opts: Required<CriticOpenAIOptions>
     private readonly model: GenerativeModel
-    private readonly runner = new OpenAIInferenceRunner()
 
     private readonly emissions = new Map<string, number>()
     private readonly turnCount = new Map<string, number>()
@@ -166,9 +168,12 @@ export class CriticOpenAI extends BaroParticipant {
             .addContextItem(UserMessageItem.create(userPrompt))
 
         try {
+            const round = await runInferenceRound(context, this.model)
+            const usage = new UsageAccumulator()
+            usage.add(round.usage)
             let assistantText = ""
-            for await (const item of this.runner.run(context, this.model)) {
-                if (item.type === "message" && item.role === "assistant") {
+            for (const item of round.items) {
+                if (item.type === "message") {
                     const json = item.toJSON() as { content: Array<{ text: string }> }
                     assistantText += json.content?.[0]?.text ?? ""
                 }
@@ -176,6 +181,7 @@ export class CriticOpenAI extends BaroParticipant {
             if (!assistantText.trim()) {
                 throw new Error("OpenAI returned empty assistant text")
             }
+            process.stderr.write(`[critic-openai] ${usage.summary()}\n`)
 
             const verdictJson = extractVerdictJson(assistantText)
             const parsed = JSON.parse(verdictJson) as {

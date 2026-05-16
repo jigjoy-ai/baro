@@ -21,12 +21,16 @@ import {
     Gpt54Nano,
     Gpt55,
     ModelContext,
-    OpenAIInferenceRunner,
     SystemMessageItem,
     UserMessageItem,
     type GenerativeModel,
     type Tool,
 } from "@mozaik-ai/core"
+
+import {
+    UsageAccumulator,
+    runInferenceRound,
+} from "./openai-runtime.js"
 
 import { createCodebaseTools } from "./codebase-tools.js"
 import {
@@ -83,7 +87,6 @@ export async function runPlannerOpenAI(
     const tools = createCodebaseTools(opts.cwd)
     setModelTools(model, tools)
 
-    const runner = new OpenAIInferenceRunner()
     let context = ModelContext.create("planner")
         .addContextItem(SystemMessageItem.create(PLANNER_SYSTEM_PROMPT))
         .addContextItem(
@@ -99,10 +102,9 @@ export async function runPlannerOpenAI(
 
     const maxRounds = opts.maxRounds ?? 8
     const perRoundTimeoutMs = (opts.perRoundTimeoutSecs ?? 120) * 1000
+    const usage = new UsageAccumulator()
 
     for (let round = 1; round <= maxRounds; round++) {
-        const ac = new AbortController()
-        const timer = setTimeout(() => ac.abort(), perRoundTimeoutMs)
         const newItems: Array<{
             type: string
             callId?: string
@@ -111,27 +113,31 @@ export async function runPlannerOpenAI(
             text?: string
         }> = []
 
-        try {
-            for await (const item of runner.run(context, model, ac.signal)) {
-                if (item.type === "function_call") {
-                    newItems.push({
-                        type: "function_call",
-                        callId: item.callId,
-                        name: item.name,
-                        args: item.args,
-                    })
-                    context = context.addContextItem(item)
-                } else if (item.type === "message" && item.role === "assistant") {
-                    const json = item.toJSON() as { content: Array<{ text: string }> }
-                    const text = json.content?.[0]?.text ?? ""
-                    newItems.push({ type: "message", text })
-                    context = context.addContextItem(item)
-                } else if (item.type === "reasoning") {
-                    context = context.addContextItem(item)
-                }
+        const roundPromise = runInferenceRound(context, model)
+        const timeoutPromise = new Promise<never>((_, rej) =>
+            setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs),
+        )
+        const result = await Promise.race([roundPromise, timeoutPromise])
+        usage.add(result.usage)
+
+        for (const item of result.items) {
+            if (item.type === "function_call") {
+                const fc = item as unknown as { callId: string; name: string; args: string }
+                newItems.push({
+                    type: "function_call",
+                    callId: fc.callId,
+                    name: fc.name,
+                    args: fc.args,
+                })
+                context = context.addContextItem(item)
+            } else if (item.type === "message") {
+                const json = item.toJSON() as { content: Array<{ text: string }> }
+                const text = json.content?.[0]?.text ?? ""
+                newItems.push({ type: "message", text })
+                context = context.addContextItem(item)
+            } else if (item.type === "reasoning") {
+                context = context.addContextItem(item)
             }
-        } finally {
-            clearTimeout(timer)
         }
 
         if (newItems.length === 0) {
@@ -158,6 +164,7 @@ export async function runPlannerOpenAI(
             }
             const raw = messages.map((m) => m.text ?? "").join("\n").trim()
             if (!raw) throw new Error("PlannerOpenAI: empty final response")
+            process.stderr.write(`[planner-openai] ${usage.summary()}\n`)
             return extractJsonObject(raw)
         }
     }
