@@ -20,10 +20,11 @@ use std::path::Path;
 use tokio::process::Command;
 
 use crate::app::LlmProvider;
-use crate::discovery;
+use crate::discovery::{self, ScriptEntry};
 use crate::subprocess::{self, ProcessRunError};
 
 const SCRIPT_REL_PATH: &str = "packages/baro-orchestrator/scripts/run-architect.ts";
+const BUNDLE_NAME: &str = "run-architect.mjs";
 
 /// Spawn the TS Architect, return the markdown decision document.
 ///
@@ -39,22 +40,9 @@ pub async fn run_architect(
     context: Option<&str>,
     openai_api_key: Option<&str>,
 ) -> Result<String, ProcessRunError> {
-    let repo = discovery::find_dev_repo(cwd).ok_or_else(|| ProcessRunError {
-        message:
-            "could not locate baro repo — no `packages/baro-orchestrator/` found upward \
-             from the binary or in the project cwd. Run from inside a baro checkout."
-                .into(),
-        log_path: None,
+    let entry = discovery::locate_script(cwd, SCRIPT_REL_PATH, BUNDLE_NAME).map_err(|e| {
+        ProcessRunError { message: e, log_path: None }
     })?;
-    let tsx = discovery::find_tsx(&repo).ok_or_else(|| ProcessRunError {
-        message: format!(
-            "tsx not found at {}/node_modules/.bin/tsx — run `npm install` in the baro repo.",
-            repo.display()
-        ),
-        log_path: None,
-    })?;
-
-    let script = repo.join(SCRIPT_REL_PATH);
 
     // Stash CLAUDE.md (or equivalent) in a tempfile so we can pass
     // `--context-file` rather than a multi-KB argv string. Tempfile
@@ -74,9 +62,19 @@ pub async fn run_architect(
         _ => None,
     };
 
-    let mut cmd = Command::new(&tsx);
-    cmd.arg(&script)
-        .arg("--goal").arg(goal)
+    let mut cmd = match &entry {
+        ScriptEntry::Tsx { tsx, script } => {
+            let mut c = Command::new(tsx);
+            c.arg(script);
+            c
+        }
+        ScriptEntry::NodeJs(mjs) => {
+            let mut c = Command::new("node");
+            c.arg(mjs);
+            c
+        }
+    };
+    cmd.arg("--goal").arg(goal)
         .arg("--cwd").arg(cwd)
         .arg("--llm").arg(llm.as_str());
     if let Some(m) = model {
