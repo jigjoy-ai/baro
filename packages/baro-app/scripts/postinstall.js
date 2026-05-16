@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PACKAGE_ROOT = path.resolve(__dirname, "..")
 const BARO_HOME = path.join(os.homedir(), ".baro", "bin")
 const BINARY_NAME = process.platform === "win32" ? "baro.exe" : "baro"
-const REPO = "Lotus015/baro"
+const REPO = "jigjoy-ai/baro"
 
 function getPlatformKey() {
     const platform = process.platform
