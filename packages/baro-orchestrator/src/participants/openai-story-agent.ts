@@ -52,7 +52,6 @@ import {
     Gpt55,
     ModelContext,
     ModelMessageItem,
-    OpenAIInferenceRunner,
     Participant,
     SystemMessageItem,
     UserMessageItem,
@@ -61,6 +60,10 @@ import {
 } from "@mozaik-ai/core"
 
 import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
+import {
+    UsageAccumulator,
+    runInferenceRound,
+} from "../planning/openai-runtime.js"
 import { createStoryTools } from "../planning/story-tools.js"
 import {
     AgentPhase,
@@ -130,7 +133,6 @@ export class OpenAIStoryAgent extends BaroParticipant {
         StorySpec
     private readonly opts: Required<OpenAIStoryAgentOptions>
     private readonly model: GenerativeModel
-    private readonly runner = new OpenAIInferenceRunner()
     private readonly tools: Tool[]
 
     private envRef: BaroEnvironment | null = null
@@ -288,6 +290,10 @@ export class OpenAIStoryAgent extends BaroParticipant {
             // Emit the end-of-turn AgentResultItem so Critic can fire.
             // For OpenAI the "subtype" maps loosely: success = the
             // assistant produced a message and the turn ended cleanly.
+            // `usage` carries the per-turn token totals Mozaik handed
+            // us on each inference round, summed; same shape Claude's
+            // stream-json mapper produces (snake_case keys).
+            const usageJson = turnResult.usage.isEmpty ? null : turnResult.usage.toJSON()
             this.envRef?.deliverBusEvent(
                 this,
                 new AgentResultItem(
@@ -296,12 +302,15 @@ export class OpenAIStoryAgent extends BaroParticipant {
                     null, // session id — not applicable for OpenAI
                     !turnResult.success,
                     turnResult.assistantText,
-                    null, // usage info — not surfaced this phase
+                    usageJson,
                     null,
                     null,
                     null,
                     {},
                 ),
+            )
+            process.stderr.write(
+                `[story-openai/${this.spec.id}] turn ${turn}: ${turnResult.usage.summary()}\n`,
             )
 
             if (!turnResult.success) {
@@ -338,26 +347,38 @@ export class OpenAIStoryAgent extends BaroParticipant {
      */
     private async runOneTurn(
         initialContext: ModelContext,
-    ): Promise<{ context: ModelContext; success: boolean; assistantText: string | null; error?: string }> {
+    ): Promise<{ context: ModelContext; success: boolean; assistantText: string | null; usage: UsageAccumulator; error?: string }> {
         let context = initialContext
         let assistantText: string | null = null
         const perRoundMs = this.opts.perRoundTimeoutSecs * 1000
+        // Per-turn token usage. Multiple inference rounds within
+        // one turn (tool-call → response → tool-call → …) all
+        // accumulate here; the final AgentResultItem ships the
+        // sum.
+        const usage = new UsageAccumulator()
 
         for (let round = 1; round <= this.opts.maxRoundsPerTurn; round++) {
-            const ac = new AbortController()
-            const timer = setTimeout(() => ac.abort(), perRoundMs)
-
             const calls: FunctionCallItem[] = []
             let sawMessage = false
             let lastMessageText: string | null = null
 
             try {
-                for await (const item of this.runner.run(context, this.model, ac.signal)) {
+                const roundPromise = runInferenceRound(context, this.model)
+                const timeoutPromise = new Promise<never>((_, rej) =>
+                    setTimeout(
+                        () => rej(new Error(`round ${round} timed out after ${perRoundMs}ms`)),
+                        perRoundMs,
+                    ),
+                )
+                const result = await Promise.race([roundPromise, timeoutPromise])
+                usage.add(result.usage)
+
+                for (const item of result.items) {
                     if (item.type === "function_call") {
                         await this.envRef?.deliverFunctionCall(this, item as FunctionCallItem)
                         context = context.addContextItem(item)
                         calls.push(item as FunctionCallItem)
-                    } else if (item.type === "message" && item.role === "assistant") {
+                    } else if (item.type === "message") {
                         await this.envRef?.deliverModelMessage(this, item as ModelMessageItem)
                         context = context.addContextItem(item)
                         const json = (item as ModelMessageItem).toJSON() as {
@@ -371,15 +392,13 @@ export class OpenAIStoryAgent extends BaroParticipant {
                     }
                 }
             } catch (e) {
-                clearTimeout(timer)
                 return {
                     context,
                     success: false,
                     assistantText,
+                    usage,
                     error: `inference round ${round} failed: ${(e as Error)?.message ?? String(e)}`,
                 }
-            } finally {
-                clearTimeout(timer)
             }
 
             // Execute any tool calls the model emitted this round.
@@ -401,6 +420,7 @@ export class OpenAIStoryAgent extends BaroParticipant {
                     context,
                     success: true,
                     assistantText: lastMessageText,
+                    usage,
                 }
             }
 
@@ -412,6 +432,7 @@ export class OpenAIStoryAgent extends BaroParticipant {
                     context,
                     success: false,
                     assistantText,
+                    usage,
                     error: `round ${round} returned no items`,
                 }
             }
@@ -424,6 +445,7 @@ export class OpenAIStoryAgent extends BaroParticipant {
             context,
             success: false,
             assistantText,
+            usage,
             error: `exceeded maxRoundsPerTurn=${this.opts.maxRoundsPerTurn}`,
         }
     }
