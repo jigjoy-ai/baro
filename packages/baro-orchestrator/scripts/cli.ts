@@ -41,6 +41,7 @@ interface CliArgs {
     surgeonUseLlm: boolean
     surgeonModel?: string
     intraLevelDelaySecs?: number
+    llm: "claude" | "openai"
     help: boolean
 }
 
@@ -57,6 +58,7 @@ function parseArgs(argv: string[]): CliArgs {
         noSentry: false,
         withSurgeon: false,
         surgeonUseLlm: false,
+        llm: "claude",
         help: false,
     }
     for (let i = 0; i < argv.length; i++) {
@@ -117,6 +119,15 @@ function parseArgs(argv: string[]): CliArgs {
                     10,
                 )
                 break
+            case "--llm": {
+                const v = required(argv, ++i, "--llm")
+                if (v !== "claude" && v !== "openai") {
+                    process.stderr.write(`[cli] --llm must be 'claude' or 'openai', got '${v}'\n`)
+                    process.exit(2)
+                }
+                args.llm = v
+                break
+            }
             default:
                 process.stderr.write(`[cli] unknown flag: ${a}\n`)
                 process.exit(2)
@@ -197,10 +208,19 @@ async function main(): Promise<void> {
         surgeonUseLlm: args.surgeonUseLlm,
         surgeonModel: args.surgeonModel,
         intraLevelDelaySecs: args.intraLevelDelaySecs,
+        llm: args.llm,
+    }
+
+    if (args.llm === "openai" && !process.env.OPENAI_API_KEY) {
+        process.stderr.write(
+            "[cli] WARNING: --llm openai requested but OPENAI_API_KEY is not set.\n" +
+            "[cli]          The current build falls through to Claude behaviour;\n" +
+            "[cli]          set OPENAI_API_KEY before phase 3+ OpenAI siblings ship.\n",
+        )
     }
 
     process.stderr.write(
-        `[cli] starting orchestrator: prd=${prdPath} cwd=${cwd} parallel=${args.parallel} timeout=${args.timeout}s\n`,
+        `[cli] starting orchestrator: prd=${prdPath} cwd=${cwd} parallel=${args.parallel} timeout=${args.timeout}s llm=${args.llm}\n`,
     )
 
     const startedAt = Date.now()

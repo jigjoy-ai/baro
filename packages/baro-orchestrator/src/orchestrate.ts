@@ -124,6 +124,16 @@ export interface OrchestrateConfig {
      * Set to 0 to disable staggering.
      */
     intraLevelDelaySecs?: number
+    /**
+     * Which LLM provider drives the agents. `"claude"` (the current
+     * default) uses the Claude Code CLI for Architect, Planner,
+     * StoryAgent, Critic, and Surgeon. `"openai"` is wired through
+     * end-to-end but no participant yet routes to Mozaik's native
+     * OpenAI runner — each subsequent phase replaces one fallback with
+     * a real OpenAI sibling. Until then, `"openai"` is a no-op
+     * placeholder that runs the Claude flow.
+     */
+    llm?: "claude" | "openai"
     /** Hooks for receiving Operator commands externally (Rust TUI). */
     operatorHooks?: {
         onAbort?: (storyId: string) => void
@@ -153,6 +163,19 @@ export async function orchestrate(
 ): Promise<OrchestrateResult> {
     const env = new BaroEnvironment()
     const emitTui = config.emitTuiEvents ?? true
+    const llm: "claude" | "openai" = config.llm ?? "claude"
+
+    // Phase 2 (0.28): --llm is plumbed but OpenAI siblings don't exist
+    // yet. Log the requested provider so audit logs reflect the
+    // (eventual) intent; subsequent phases will branch on this to
+    // construct OpenAI-backed Critic/Surgeon/Architect/Planner/StoryAgent
+    // siblings instead of the Claude CLI ones.
+    if (llm === "openai") {
+        process.stderr.write(
+            "[orchestrate] llm=openai requested — no native OpenAI siblings wired yet, " +
+            "falling through to Claude CLI flow. Coming in 0.29+.\n",
+        )
+    }
 
     // Optional audit log (resume + post-mortem).
     if (config.auditLogPath) {

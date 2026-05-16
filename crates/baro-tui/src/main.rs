@@ -194,6 +194,13 @@ struct Cli {
     /// One agent, tight scope, no design-document overhead.
     #[arg(long)]
     quick: bool,
+
+    /// Which LLM provider runs the agents. `claude` (default) uses the
+    /// Claude Code CLI as today. `openai` routes every phase through
+    /// Mozaik's native OpenAI participants. Hidden until OpenAI mode is
+    /// feature-complete end-to-end — currently a no-op placeholder.
+    #[arg(long, default_value = "claude", value_parser = ["claude", "openai"], hide = true)]
+    llm: String,
 }
 
 enum AppEvent {
@@ -553,6 +560,22 @@ async fn run_app(
         app.with_surgeon = false;
     }
 
+    // --llm picks the LLM provider for every phase. Default is the
+    // Claude CLI flow (existing). "openai" is wired through to the
+    // orchestrator but doesn't yet route any phase to native OpenAI
+    // participants — that comes online phase-by-phase in 0.29+. Until
+    // then, --llm openai is a no-op placeholder hidden from --help.
+    if let Some(provider) = app::LlmProvider::parse(&cli.llm) {
+        app.llm = provider;
+    }
+    if app.llm == app::LlmProvider::OpenAI && std::env::var("OPENAI_API_KEY").is_err() {
+        eprintln!(
+            "[baro] WARNING: --llm openai requested but OPENAI_API_KEY is not set. \
+             Set it before running: `export OPENAI_API_KEY=sk-...`. \
+             Continuing — current build silently falls through to Claude behaviour."
+        );
+    }
+
     let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
 
     // Resume detection: check for existing prd.json with incomplete stories
@@ -849,6 +872,7 @@ async fn run_app(
                                         let sul = app.surgeon_use_llm;
                                         let sm = app.surgeon_model.clone();
                                         let ild = app.intra_level_delay_secs;
+                                        let llm = app.llm;
                                         let err_tx = tx.clone();
                                         tokio::spawn(async move {
                                             if let Err(e) = git::create_or_checkout_branch(&branch_cwd, &branch_name_clone).await {
@@ -872,7 +896,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild });
+                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm });
                                         });
                                     }
                                     Err(e) => {
@@ -912,6 +936,7 @@ async fn run_app(
                                     let sul = app.surgeon_use_llm;
                                     let sm = app.surgeon_model.clone();
                                     let ild = app.intra_level_delay_secs;
+                                    let llm = app.llm;
                                     let err_tx = tx.clone();
                                     tokio::spawn(async move {
                                         if let Err(e) = git::create_or_checkout_branch(&branch_cwd, &branch_name_clone).await {
@@ -935,7 +960,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild });
+                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm });
                                     });
                                 }
                             }
@@ -1306,6 +1331,7 @@ fn spawn_executor(
         surgeon_use_llm: config.surgeon_use_llm,
         surgeon_model: config.surgeon_model,
         intra_level_delay_secs: config.intra_level_delay_secs,
+        llm: config.llm.as_str().to_string(),
     };
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
 }
