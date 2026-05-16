@@ -2,6 +2,7 @@
 
 A concise list of every published version. For full release notes, see the corresponding commit on the v* tag.
 
+## v0.36.2 — fix(0.36.2): two production-bundle bugs — stripped duplicate shebang from `run-architect.mjs` / `run-planner.mjs` (was double-shebang from tsup banner + source-side `#!/usr/bin/env tsx`); made `OpenAIResponses` construction lazy so loading the bundle no longer requires `OPENAI_API_KEY` even on the Claude path
 ## v0.36.1 — fix(0.36.1): production install — Architect/Planner subprocess discovery now finds bundled `run-architect.mjs` / `run-planner.mjs` next to the binary (matches the orchestrator's existing `cli.mjs` path); fixes "Planning failed: could not locate baro repo" when baro is installed via npm and run outside a dev checkout
 ## v0.36.0 — feat(0.36.0): commit + PR co-author trailer attributing every baro-run commit to the @baro-rs GitHub account
 ## v0.35.0 — feat(0.35.0): OpenAI telemetry — switch to Mozaik's OpenAIResponses (ModelRuntime layer) so each round's TokenUsage surfaces in stderr summaries and in AgentResultItem.usage on the bus

@@ -1,4 +1,3 @@
-#!/usr/bin/env tsx
 /**
  * Architect CLI — the Rust TUI invokes this as a subprocess instead
  * of shelling out to `claude` directly. Picks the right backend
