@@ -27,7 +27,7 @@ import {
     AgentPhase,
     AgentStateItem,
     AgentTargetedMessageItem,
-    ClaudeResultItem,
+    AgentResultItem,
     ClaudeSystemItem,
 } from "../types.js"
 
@@ -69,7 +69,7 @@ export interface ClaudeRunSummary {
     sessionId: string | null
     exitCode: number | null
     error: Error | null
-    lastResult: ClaudeResultItem | null
+    lastResult: AgentResultItem | null
 }
 
 export class ClaudeCliParticipant extends BaroParticipant {
@@ -105,7 +105,7 @@ export class ClaudeCliParticipant extends BaroParticipant {
     private envRef: BaroEnvironment | null = null
     private currentPhase: AgentPhase = "idle"
     private sessionId: string | null = null
-    private lastResult: ClaudeResultItem | null = null
+    private lastResult: AgentResultItem | null = null
     private exitCode: number | null = null
     private spawnError: Error | null = null
     private resolveDone!: (summary: ClaudeRunSummary) => void
@@ -314,7 +314,7 @@ export class ClaudeCliParticipant extends BaroParticipant {
                 this.transition("running", "claude init received")
                 this.resolveReady()
             }
-            if (item instanceof ClaudeResultItem) {
+            if (item instanceof AgentResultItem) {
                 this.lastResult = item
                 this.transition(item.isError ? "failed" : "done", `result:${item.subtype}`)
             }

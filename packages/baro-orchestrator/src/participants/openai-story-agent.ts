@@ -16,7 +16,7 @@
  *      returns a final assistant message with no tool calls.
  *      Tool calls are executed against `createStoryTools` and their
  *      outputs are appended to the context for the next round.
- *   3. After a turn ends, we emit `ClaudeResultItem`-shaped event
+ *   3. After a turn ends, we emit `AgentResultItem`-shaped event
  *      so Critic can evaluate (yes, the name still says "Claude" —
  *      a planned rename; observers all watch this exact class).
  *   4. We then wait `quietTimeoutMs` for an
@@ -36,7 +36,7 @@
  *   - AgentUserMessageItem for the initial story prompt + any
  *     mid-flight corrective messages (Cartographer renders them as
  *     `user_message` frames the user sees in the dashboard).
- *   - ClaudeResultItem at the end of each turn (Critic depends on
+ *   - AgentResultItem at the end of each turn (Critic depends on
  *     this to fire its verdict).
  *
  * Not emitted: Claude-specific stream chunks / rate-limit / system
@@ -67,7 +67,7 @@ import {
     AgentStateItem,
     AgentTargetedMessageItem,
     AgentUserMessageItem,
-    ClaudeResultItem,
+    AgentResultItem,
 } from "../types.js"
 import { StoryResultItem, type StoryOutcome, type StorySpec } from "./story-agent.js"
 
@@ -285,12 +285,12 @@ export class OpenAIStoryAgent extends BaroParticipant {
             const turnResult = await this.runOneTurn(context)
             context = turnResult.context
 
-            // Emit the end-of-turn ClaudeResultItem so Critic can fire.
+            // Emit the end-of-turn AgentResultItem so Critic can fire.
             // For OpenAI the "subtype" maps loosely: success = the
             // assistant produced a message and the turn ended cleanly.
             this.envRef?.deliverBusEvent(
                 this,
-                new ClaudeResultItem(
+                new AgentResultItem(
                     this.spec.id,
                     turnResult.success ? "success" : "error",
                     null, // session id — not applicable for OpenAI

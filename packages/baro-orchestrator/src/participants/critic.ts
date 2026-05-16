@@ -1,7 +1,7 @@
 /**
  * Critic — live acceptance-criteria evaluator.
  *
- * Observes ClaudeResultItem events on the bus. For each watched agent that
+ * Observes AgentResultItem events on the bus. For each watched agent that
  * completes a turn without error, the Critic spawns a short-lived
  * `claude --print --model <haiku-default>` subprocess to ask whether the
  * output satisfies the agent's acceptance criteria.
@@ -30,7 +30,7 @@ import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 
 import {
     AgentTargetedMessageItem,
-    ClaudeResultItem,
+    AgentResultItem,
     CritiqueItem,
 } from "../types.js"
 
@@ -98,7 +98,7 @@ export class Critic extends BaroParticipant {
     }
 
     override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
-        if (!(event instanceof ClaudeResultItem)) return
+        if (!(event instanceof AgentResultItem)) return
         if (event.isError || !event.resultText) return
 
         const criteria = this.opts.targets.get(event.agentId)

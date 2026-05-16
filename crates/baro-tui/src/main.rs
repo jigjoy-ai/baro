@@ -176,6 +176,23 @@ struct Cli {
     #[arg(long)]
     surgeon_model: Option<String>,
 
+    /// Model used for the Architect phase. Overrides the routed default
+    /// (opus) and any `--llm`-side default (gpt-5.5). Beaten only by
+    /// the global `--model` flag, which forces every phase to one model.
+    #[arg(long)]
+    architect_model: Option<String>,
+
+    /// Model used for the Planner phase. Same precedence rules as
+    /// `--architect-model`. Default: routed (opus) for Claude, gpt-5.4
+    /// for OpenAI.
+    #[arg(long)]
+    planner_model: Option<String>,
+
+    /// Model used for every Story Agent in the run. Same precedence
+    /// rules. Default: routed (opus) for Claude, gpt-5.5 for OpenAI.
+    #[arg(long)]
+    story_model: Option<String>,
+
     /// Seconds to wait between successive story spawns inside the same
     /// DAG level. Gives Librarian a window to capture and broadcast
     /// the first agent's exploratory tool calls so its peers don't
@@ -394,6 +411,15 @@ async fn run_app(
     }
     if let Some(ref m) = cli.surgeon_model {
         app.surgeon_model = Some(m.clone());
+    }
+    if let Some(ref m) = cli.architect_model {
+        app.architect_model = Some(m.clone());
+    }
+    if let Some(ref m) = cli.planner_model {
+        app.planner_model = Some(m.clone());
+    }
+    if let Some(ref m) = cli.story_model {
+        app.story_model = Some(m.clone());
     }
     if let Some(d) = cli.intra_level_delay {
         app.intra_level_delay_secs = Some(d);
@@ -790,6 +816,7 @@ async fn run_app(
                                         let ild = app.intra_level_delay_secs;
                                         let llm = app.llm;
                                         let oak = app.openai_api_key.clone();
+                                        let stm = app.story_model.clone();
                                         let err_tx = tx.clone();
                                         tokio::spawn(async move {
                                             if let Err(e) = git::create_or_checkout_branch(&branch_cwd, &branch_name_clone).await {
@@ -813,7 +840,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, openai_api_key: oak.clone() });
+                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, openai_api_key: oak.clone(), story_model: stm.clone() });
                                         });
                                     }
                                     Err(e) => {
@@ -855,6 +882,7 @@ async fn run_app(
                                     let ild = app.intra_level_delay_secs;
                                     let llm = app.llm;
                                     let oak = app.openai_api_key.clone();
+                                    let stm = app.story_model.clone();
                                     let err_tx = tx.clone();
                                     tokio::spawn(async move {
                                         if let Err(e) = git::create_or_checkout_branch(&branch_cwd, &branch_name_clone).await {
@@ -878,7 +906,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, openai_api_key: oak.clone() });
+                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, openai_api_key: oak.clone(), story_model: stm.clone() });
                                     });
                                 }
                             }
@@ -1288,6 +1316,7 @@ fn spawn_executor(
         intra_level_delay_secs: config.intra_level_delay_secs,
         llm: config.llm.as_str().to_string(),
         openai_api_key: config.openai_api_key,
+        story_model: config.story_model,
     };
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
 }

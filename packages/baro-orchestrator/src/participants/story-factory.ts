@@ -34,10 +34,18 @@ export interface StoryFactoryOptions {
     /**
      * Optional model name to pass to OpenAI agents. Default
      * `gpt-5.5` — StoryAgent's coding loop benefits from the largest
-     * context window + reasoning. Ignored for the Claude path; that
-     * one reads model per-story from `StorySpec.model`.
+     * context window + reasoning.
      */
     openaiModel?: string
+    /**
+     * If set, overrides EVERY story's `model` field at spawn time —
+     * for both Claude and OpenAI paths. Wins over the per-PRD-story
+     * `model`. `openaiModel` above is still applied when this is
+     * undefined and the path is OpenAI, since the PRD's `model`
+     * names ("opus", "sonnet", …) are Claude-flavoured and not
+     * meaningful for OpenAI.
+     */
+    storyModelOverride?: string
 }
 
 export class StoryFactory extends BaroParticipant {
@@ -79,6 +87,12 @@ export class StoryFactory extends BaroParticipant {
         // the OpenAI agent ignores `model` (uses its own gpt-5.x
         // mapping via openaiModel) and the Claude agent ignores the
         // OpenAI-specific timeouts.
+        // `storyModelOverride` (from `--story-model`) wins over the
+        // per-PRD model. Empty/absent → use the per-story value.
+        const claudeModel = this.opts.storyModelOverride ?? req.model
+        const openaiModel =
+            this.opts.storyModelOverride ?? this.opts.openaiModel ?? "gpt-5.5"
+
         const agent: StoryAgent | OpenAIStoryAgent =
             llm === "openai"
                 ? new OpenAIStoryAgent(
@@ -90,13 +104,13 @@ export class StoryFactory extends BaroParticipant {
                           retries: req.retries,
                           timeoutSecs: req.timeoutSecs,
                       },
-                      { model: this.opts.openaiModel ?? "gpt-5.5" },
+                      { model: openaiModel },
                   )
                 : new StoryAgent({
                       id: req.storyId,
                       prompt: req.prompt,
                       cwd: this.opts.cwd,
-                      model: req.model,
+                      model: claudeModel,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
                   })
