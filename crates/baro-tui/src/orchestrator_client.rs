@@ -9,13 +9,13 @@
 //! package, this module will look for a precompiled `dist/cli.mjs`
 //! before falling back to the dev tsx path.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::discovery;
+use crate::discovery::{self, ScriptEntry};
 use crate::events::BaroEvent;
 
 pub struct OrchestratorConfig {
@@ -100,7 +100,11 @@ async fn run(
     cfg: OrchestratorConfig,
     tx: &mpsc::Sender<BaroEvent>,
 ) -> Result<(), String> {
-    let entry = locate_entry(&cfg.cwd)?;
+    let entry = discovery::locate_script(
+        &cfg.cwd,
+        "packages/baro-orchestrator/scripts/cli.ts",
+        "cli.mjs",
+    )?;
     let mut cmd = build_command(&entry, &cfg);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -212,14 +216,14 @@ async fn run(
     Ok(())
 }
 
-fn build_command(entry: &EntryPoint, cfg: &OrchestratorConfig) -> Command {
+fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     let mut cmd = match entry {
-        EntryPoint::Tsx { tsx, script } => {
+        ScriptEntry::Tsx { tsx, script } => {
             let mut c = Command::new(tsx);
             c.arg(script);
             c
         }
-        EntryPoint::NodeJs(js) => {
+        ScriptEntry::NodeJs(js) => {
             let mut c = Command::new("node");
             c.arg(js);
             c
@@ -280,57 +284,7 @@ fn build_command(entry: &EntryPoint, cfg: &OrchestratorConfig) -> Command {
     cmd
 }
 
-enum EntryPoint {
-    /// Dev path: `tsx scripts/cli.ts`.
-    Tsx { tsx: PathBuf, script: PathBuf },
-    /// Production path: bundled JS ship-with-npm-package.
-    NodeJs(PathBuf),
-}
-
-/// Find the orchestrator entry. Searches in this order:
-///   1. Sibling of the running binary — i.e. `<exe-dir>/cli.mjs`. This is
-///      where baro-ai's postinstall copies the bundled orchestrator
-///      (typically `~/.baro/bin/cli.mjs`). Works for global, local, and
-///      npx installs because the launcher also lives there.
-///   2. Local-install bundle — `<cwd>/node_modules/baro-ai/dist/cli.mjs`.
-///      Useful when baro-ai is added as a dependency of the project
-///      being orchestrated, before the postinstall has run.
-///   3. Dev tsx script — `<repo>/packages/baro-orchestrator/scripts/cli.ts`,
-///      discovered by walking up from the binary's location or from cwd.
-fn locate_entry(cwd: &Path) -> Result<EntryPoint, String> {
-    // (1) Co-located bundle next to the binary itself.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let sibling = parent.join("cli.mjs");
-            if sibling.exists() {
-                return Ok(EntryPoint::NodeJs(sibling));
-            }
-        }
-    }
-
-    // (2) Local-install bundle in the project being orchestrated.
-    let bundled = cwd.join("node_modules/baro-ai/dist/cli.mjs");
-    if bundled.exists() {
-        return Ok(EntryPoint::NodeJs(bundled));
-    }
-
-    // (3) Dev tsx — let `discovery` walk up to find the baro repo,
-    // then point at the orchestrator entry script inside it. Same
-    // walk is reused by `architect_runner` (Phase 4) and will be by
-    // `planner_runner` (Phase 5+), so the duplication is gone.
-    let dev_repo = discovery::find_dev_repo(cwd).ok_or_else(|| {
-        "could not locate baro-orchestrator: no cli.mjs next to the binary, no \
-         node_modules/baro-ai/dist/cli.mjs in the project, and no dev tsx \
-         script found in a parent baro repo. Try `npm install -g baro-ai` \
-         (this triggers postinstall and stages the orchestrator)."
-            .to_string()
-    })?;
-    let tsx = discovery::find_tsx(&dev_repo).ok_or_else(|| {
-        format!(
-            "tsx not found at {}/node_modules/.bin/tsx — run `npm install` in the baro repo",
-            dev_repo.display()
-        )
-    })?;
-    let script = dev_repo.join("packages/baro-orchestrator/scripts/cli.ts");
-    Ok(EntryPoint::Tsx { tsx, script })
-}
+// EntryPoint + locate_entry moved to `discovery::ScriptEntry` /
+// `discovery::locate_script` — the architect_runner + planner_runner
+// share the same shape and the orchestrator now uses the common
+// helper to avoid a third copy of the same three-tier search.

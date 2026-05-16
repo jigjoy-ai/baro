@@ -93,20 +93,26 @@ async function main() {
         console.warn(`  Build manually: cargo build --release -p baro-tui`)
     }
 
-    // Copy the bundled Mozaik orchestrator CLI alongside the binary so
-    // the Rust client can find it regardless of how baro-ai was
-    // installed (local node_modules, npx, npm install -g …).
-    const orchestratorSrc = path.join(PACKAGE_ROOT, "dist", "cli.mjs")
-    const orchestratorDst = path.join(BARO_HOME, "cli.mjs")
-    try {
-        if (fs.existsSync(orchestratorSrc)) {
-            fs.copyFileSync(orchestratorSrc, orchestratorDst)
-            console.log(`mozaik orchestrator installed to ${orchestratorDst}`)
+    // Copy the bundled TS subprocess entry points alongside the binary
+    // so the Rust runners can find them regardless of how baro-ai was
+    // installed (local node_modules, npx, npm install -g …). These
+    // are the same `.mjs` files tsup produces in dist/ — staging them
+    // here lets architect_runner / planner_runner / orchestrator_client
+    // hit them via the production fast path (Node, no tsx).
+    const bundles = ["cli.mjs", "run-architect.mjs", "run-planner.mjs"]
+    for (const name of bundles) {
+        const src = path.join(PACKAGE_ROOT, "dist", name)
+        const dst = path.join(BARO_HOME, name)
+        try {
+            if (fs.existsSync(src)) {
+                fs.copyFileSync(src, dst)
+                console.log(`${name} installed to ${dst}`)
+            } else {
+                console.warn(`Warning: ${src} missing — skipping ${name}`)
+            }
+        } catch (err) {
+            console.warn(`Warning: Could not stage ${name}: ${err.message}`)
         }
-    } catch (err) {
-        console.warn(
-            `Warning: Could not stage orchestrator CLI: ${err.message}`,
-        )
     }
 }
 

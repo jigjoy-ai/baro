@@ -1,41 +1,59 @@
 import { defineConfig } from "tsup"
 
 /**
- * One bundle ships inside the npm `baro-ai` package's `dist/`
- * directory: `cli.mjs`, the Mozaik orchestrator CLI bundled with all
- * its TS sources (including the @mozaik-ai/core framework). Spawned
- * by `crates/baro-tui/src/orchestrator_client.rs` after a user runs
- * `npm install -g baro-ai`. The Rust client looks for it at
- * `node_modules/baro-ai/dist/cli.mjs`.
+ * Three bundles ship inside the npm `baro-ai` package's `dist/`
+ * directory:
  *
- * (The legacy `openai-planner.js` bundle from `src/core/openai-planner.ts`
- * was removed in 0.32: the standalone planner subprocess is replaced
- * by `scripts/run-planner.ts` in the orchestrator package, which the
- * Rust `planner_runner` spawns via tsx.)
+ *   - `cli.mjs`            — the Mozaik orchestrator CLI. Spawned by
+ *                            `orchestrator_client.rs` once a story
+ *                            execution starts.
+ *   - `run-architect.mjs`  — TS Architect dispatcher. Spawned by
+ *                            `architect_runner.rs` before planning.
+ *   - `run-planner.mjs`    — TS Planner dispatcher. Spawned by
+ *                            `planner_runner.rs` after the Architect.
  *
- * The orchestrator entry point lives in the sibling workspace package
- * `@baro/orchestrator`. tsup follows the imports across the workspace
- * boundary, bundles everything (including @mozaik-ai/core) into a
- * single ESM file with a node shebang.
+ * All three live next to the binary after `npm install -g baro-ai`
+ * (postinstall.js copies them from `dist/` to `~/.baro/bin/`). The
+ * Rust runners check that location first, then the cwd's
+ * `node_modules/baro-ai/dist/`, then fall back to running the
+ * TypeScript sources via `tsx` from a dev baro checkout.
+ *
+ * tsup follows imports across the workspace boundary so the
+ * `@baro/orchestrator` source AND its `@mozaik-ai/core` dep are
+ * bundled directly into each `.mjs` — published `.mjs` files have
+ * zero runtime deps beyond Node + the npm packages already required
+ * by baro-ai itself.
  */
+const sharedBundleConfig = {
+    format: ["esm" as const],
+    outDir: "dist",
+    outExtension: () => ({ js: ".mjs" as const }),
+    target: "node20" as const,
+    platform: "node" as const,
+    bundle: true,
+    // Force the Mozaik framework + the workspace orchestrator code
+    // *into* the bundle so the published package is self-contained
+    // (no runtime dependency on @mozaik-ai/core or @baro/orchestrator).
+    noExternal: [
+        /^@mozaik-ai\//,
+        /^@baro\//,
+    ],
+    clean: false,
+    sourcemap: true,
+    banner: { js: "#!/usr/bin/env node" },
+}
+
 export default defineConfig([
     {
         entry: { cli: "../baro-orchestrator/scripts/cli.ts" },
-        format: ["esm"],
-        outDir: "dist",
-        outExtension: () => ({ js: ".mjs" }),
-        target: "node20",
-        platform: "node",
-        bundle: true,
-        // Force the Mozaik framework + the workspace orchestrator code
-        // *into* the bundle so the published package is self-contained
-        // (no runtime dependency on @mozaik-ai/core or @baro/orchestrator).
-        noExternal: [
-            /^@mozaik-ai\//,
-            /^@baro\//,
-        ],
-        clean: false,
-        sourcemap: true,
-        banner: { js: "#!/usr/bin/env node" },
+        ...sharedBundleConfig,
+    },
+    {
+        entry: { "run-architect": "../baro-orchestrator/scripts/run-architect.ts" },
+        ...sharedBundleConfig,
+    },
+    {
+        entry: { "run-planner": "../baro-orchestrator/scripts/run-planner.ts" },
+        ...sharedBundleConfig,
     },
 ])
