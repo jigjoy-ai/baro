@@ -82,6 +82,10 @@ pub struct ExecutorConfig {
     /// as `--llm`; subsequent phases will use this to pick the right
     /// participant sibling per LLM-using role.
     pub llm: crate::app::LlmProvider,
+    /// OpenAI API key captured by the TUI (either from `OPENAI_API_KEY`
+    /// in the shell env or typed into the ApiKeyInput screen). Forwarded
+    /// to the orchestrator subprocess as an env var when `llm = OpenAI`.
+    pub openai_api_key: Option<String>,
 }
 
 // ─── Helpers used by main.rs ────────────────────────────────────────

@@ -2,6 +2,7 @@
 
 A concise list of every published version. For full release notes, see the corresponding commit on the v* tag.
 
+## v0.31.0 — feat(0.31.0): Architect moves Rust → TS with OpenAI sibling (Phase 4); welcome flow now picks Claude vs Mozaik-native OpenAI with in-memory API-key entry
 ## v0.30.1 — fix(0.30.1): postinstall.js downloads from jigjoy-ai/baro (was stale Lotus015/baro after org transfer; postinstall failed silently → "binary not installed")
 ## v0.30.0 — feat(0.30.0): CriticOpenAI + SurgeonOpenAI siblings (Phase 3 of dual-mode); --llm openai now routes verdict + replan reasoning through Mozaik's native OpenAI runner
 ## v0.29.0 — feat(0.29.0): --llm claude|openai flag plumbed end-to-end (Phase 2 of dual-mode); hidden, no behaviour change yet

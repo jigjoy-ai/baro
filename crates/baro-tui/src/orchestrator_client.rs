@@ -15,6 +15,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use crate::discovery;
 use crate::events::BaroEvent;
 
 pub struct OrchestratorConfig {
@@ -52,6 +53,12 @@ pub struct OrchestratorConfig {
     /// wired yet — a request for "openai" silently falls through to
     /// Claude behaviour until the per-phase siblings ship in 0.29+.
     pub llm: String,
+    /// OpenAI API key to inject as `OPENAI_API_KEY` into the
+    /// orchestrator subprocess when `llm == "openai"`. The TUI gathers
+    /// this from either the user's shell env or the ApiKeyInput
+    /// screen; it isn't written to disk. `None` is a no-op (any value
+    /// already in the parent env is inherited normally).
+    pub openai_api_key: Option<String>,
 }
 
 /// Spawn the orchestrator subprocess and return a channel that receives
@@ -254,6 +261,15 @@ fn build_command(entry: &EntryPoint, cfg: &OrchestratorConfig) -> Command {
         cmd.arg("--intra-level-delay").arg(d.to_string());
     }
     cmd.arg("--llm").arg(&cfg.llm);
+    // Only forward an explicitly-provided key. If openai_api_key is
+    // None the user might still have the variable in their shell env;
+    // tokio::Command inherits parent env by default, so it'll flow
+    // through naturally without us touching it.
+    if cfg.llm == "openai" {
+        if let Some(key) = &cfg.openai_api_key {
+            cmd.env("OPENAI_API_KEY", key);
+        }
+    }
     cmd
 }
 
@@ -291,46 +307,23 @@ fn locate_entry(cwd: &Path) -> Result<EntryPoint, String> {
         return Ok(EntryPoint::NodeJs(bundled));
     }
 
-    // (3) Dev tsx — find the baro repo root by walking up from this exe.
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("cannot read current exe: {}", e))?;
-    let mut search_root = exe.parent().map(|p| p.to_path_buf());
-    let mut found_repo: Option<PathBuf> = None;
-    while let Some(d) = search_root {
-        if d
-            .join("packages/baro-orchestrator/scripts/cli.ts")
-            .exists()
-        {
-            found_repo = Some(d);
-            break;
-        }
-        search_root = d.parent().map(|p| p.to_path_buf());
-    }
-
-    // Also try cwd-based discovery (when running from inside the baro repo).
-    let cwd_candidate = cwd.join("packages/baro-orchestrator/scripts/cli.ts");
-    let dev_repo = found_repo.or_else(|| {
-        if cwd_candidate.exists() {
-            Some(cwd.to_path_buf())
-        } else {
-            None
-        }
-    });
-
-    let dev_repo = dev_repo.ok_or_else(|| {
+    // (3) Dev tsx — let `discovery` walk up to find the baro repo,
+    // then point at the orchestrator entry script inside it. Same
+    // walk is reused by `architect_runner` (Phase 4) and will be by
+    // `planner_runner` (Phase 5+), so the duplication is gone.
+    let dev_repo = discovery::find_dev_repo(cwd).ok_or_else(|| {
         "could not locate baro-orchestrator: no cli.mjs next to the binary, no \
          node_modules/baro-ai/dist/cli.mjs in the project, and no dev tsx \
          script found in a parent baro repo. Try `npm install -g baro-ai` \
          (this triggers postinstall and stages the orchestrator)."
             .to_string()
     })?;
-    let tsx = dev_repo.join("node_modules/.bin/tsx");
+    let tsx = discovery::find_tsx(&dev_repo).ok_or_else(|| {
+        format!(
+            "tsx not found at {}/node_modules/.bin/tsx — run `npm install` in the baro repo",
+            dev_repo.display()
+        )
+    })?;
     let script = dev_repo.join("packages/baro-orchestrator/scripts/cli.ts");
-    if !tsx.exists() {
-        return Err(format!(
-            "tsx not found at {} — run `npm install` in the baro repo",
-            tsx.display()
-        ));
-    }
     Ok(EntryPoint::Tsx { tsx, script })
 }
