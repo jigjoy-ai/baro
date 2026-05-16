@@ -2,6 +2,7 @@
 
 A concise list of every published version. For full release notes, see the corresponding commit on the v* tag.
 
+## v0.36.0 — feat(0.36.0): commit + PR co-author trailer attributing every baro-run commit to the @baro-rs GitHub account
 ## v0.35.0 — feat(0.35.0): OpenAI telemetry — switch to Mozaik's OpenAIResponses (ModelRuntime layer) so each round's TokenUsage surfaces in stderr summaries and in AgentResultItem.usage on the bus
 ## v0.34.0 — feat(0.34.0): rename ClaudeResultItem → AgentResultItem (provider-agnostic); new --architect-model / --planner-model / --story-model per-phase override flags
 ## v0.33.0 — feat(0.33.0): OpenAIStoryAgent — full Mozaik-native coding loop (Phase 6, final); `--llm openai` is now end-to-end OpenAI and the flag is unhidden from `--help`
