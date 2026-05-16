@@ -36,6 +36,7 @@ import {
     ConductorStateItem,
 } from "./participants/conductor.js"
 import { Critic } from "./participants/critic.js"
+import { CriticOpenAI } from "./participants/critic-openai.js"
 import { Finalizer } from "./participants/finalizer.js"
 import { Librarian } from "./participants/librarian.js"
 import { Operator } from "./participants/operator.js"
@@ -43,6 +44,7 @@ import { Sentry } from "./participants/sentry.js"
 import { StoryFactory } from "./participants/story-factory.js"
 import { StoryResultItem, type StoryAgent } from "./participants/story-agent.js"
 import { Surgeon, type PrdSnapshot } from "./participants/surgeon.js"
+import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
 import { PrdFile, loadPrd } from "./prd.js"
 import {
     AgentStateItem,
@@ -165,15 +167,14 @@ export async function orchestrate(
     const emitTui = config.emitTuiEvents ?? true
     const llm: "claude" | "openai" = config.llm ?? "claude"
 
-    // Phase 2 (0.28): --llm is plumbed but OpenAI siblings don't exist
-    // yet. Log the requested provider so audit logs reflect the
-    // (eventual) intent; subsequent phases will branch on this to
-    // construct OpenAI-backed Critic/Surgeon/Architect/Planner/StoryAgent
-    // siblings instead of the Claude CLI ones.
+    // Phase 3 (0.30): Critic and Surgeon now route to Mozaik OpenAI
+    // siblings when llm=openai. Architect, Planner, and StoryAgent
+    // still use the Claude CLI path — those siblings land in 0.31+.
+    // Make the partial-transition status loud in the audit log.
     if (llm === "openai") {
         process.stderr.write(
-            "[orchestrate] llm=openai requested — no native OpenAI siblings wired yet, " +
-            "falling through to Claude CLI flow. Coming in 0.29+.\n",
+            "[orchestrate] llm=openai: Critic + Surgeon route to Mozaik OpenAI; " +
+            "Architect, Planner, StoryAgent still on Claude CLI (per-phase ports in 0.31+).\n",
         )
     }
 
@@ -215,33 +216,43 @@ export async function orchestrate(
     // Phase-4 observer — Surgeon (adaptive DAG mutation). Opt-in.
     // Joins early so it sees StoryResultItem-s from the moment the
     // Conductor starts running.
-    let surgeon: Surgeon | null = null
+    let surgeon: Surgeon | SurgeonOpenAI | null = null
     if (config.withSurgeon) {
-        surgeon = new Surgeon({
-            snapshot: (): PrdSnapshot => {
-                const current = loadPrd(config.prdPath)
-                return {
-                    project: current.project,
-                    description: current.description,
-                    stories: current.userStories.map((s) => ({
-                        id: s.id,
-                        title: s.title,
-                        description: s.description,
-                        dependsOn: s.dependsOn,
-                        passes: s.passes,
-                    })),
-                }
-            },
-            useLlm: config.surgeonUseLlm ?? false,
-            model: config.surgeonModel ?? "opus",
-        })
+        const snapshot = (): PrdSnapshot => {
+            const current = loadPrd(config.prdPath)
+            return {
+                project: current.project,
+                description: current.description,
+                stories: current.userStories.map((s) => ({
+                    id: s.id,
+                    title: s.title,
+                    description: s.description,
+                    dependsOn: s.dependsOn,
+                    passes: s.passes,
+                })),
+            }
+        }
+        // Factory: when llm=openai, route the LLM-backed Surgeon to
+        // Mozaik's native OpenAI runner instead of `claude --print`.
+        // The deterministic fallback path is shared between both — if
+        // OpenAI errors out, SurgeonOpenAI still emits a skip ReplanItem.
+        surgeon = llm === "openai"
+            ? new SurgeonOpenAI({
+                  snapshot,
+                  model: config.surgeonModel ?? "gpt-5.4",
+              })
+            : new Surgeon({
+                  snapshot,
+                  useLlm: config.surgeonUseLlm ?? false,
+                  model: config.surgeonModel ?? "opus",
+              })
         surgeon.join(env)
     }
 
     // Phase-3 observer — Critic (live acceptance-criteria evaluator).
     // Opt-in (default OFF). Spawns `claude --model haiku` subprocesses
     // for each evaluation, inheriting Claude CLI auth.
-    let critic: Critic | null = null
+    let critic: Critic | CriticOpenAI | null = null
     if (config.withCritic) {
         const prd = loadPrd(config.prdPath)
         const targets = new Map<string, readonly string[]>(
@@ -249,10 +260,20 @@ export async function orchestrate(
                 .filter((s) => s.acceptance && s.acceptance.length > 0)
                 .map((s) => [s.id, s.acceptance] as [string, readonly string[]]),
         )
-        critic = new Critic({
-            targets,
-            model: config.criticModel ?? "haiku",
-        })
+        // Factory: when llm=openai, Critic runs every per-turn verdict
+        // through Mozaik's OpenAI runner. The bus contract is identical
+        // — same CritiqueItem shape, same AgentTargetedMessageItem
+        // emission for corrective feedback — so downstream observers
+        // (Cartographer, Auditor) don't notice the swap.
+        critic = llm === "openai"
+            ? new CriticOpenAI({
+                  targets,
+                  model: config.criticModel ?? "gpt-5.4-mini",
+              })
+            : new Critic({
+                  targets,
+                  model: config.criticModel ?? "haiku",
+              })
         critic.join(env)
     }
 

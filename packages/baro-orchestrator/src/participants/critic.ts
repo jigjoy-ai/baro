@@ -36,7 +36,7 @@ import {
 
 const execFileAsync = promisify(execFile)
 
-const VERDICT_SYSTEM_PROMPT = `\
+export const VERDICT_SYSTEM_PROMPT = `\
 You are a strict acceptance-criteria evaluator. You will receive:
 1. A list of acceptance criteria that must ALL be satisfied.
 2. The output text produced by an agent.
@@ -218,7 +218,7 @@ export class Critic extends BaroParticipant {
     }
 }
 
-function buildEvalPrompt(
+export function buildEvalPrompt(
     criteria: readonly string[],
     resultText: string,
 ): string {
@@ -234,7 +234,7 @@ function buildEvalPrompt(
     ].join("\n")
 }
 
-function buildCorrectiveMessage(
+export function buildCorrectiveMessage(
     reasoning: string,
     violatedCriteria: string[],
 ): string {
@@ -259,7 +259,7 @@ function buildCorrectiveMessage(
  * leading/trailing sentence even with strict instructions. Tolerate that
  * by extracting the first balanced `{...}` block.
  */
-function extractVerdictJson(text: string): string {
+export function extractVerdictJson(text: string): string {
     const trimmed = text.trim()
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
         return trimmed
