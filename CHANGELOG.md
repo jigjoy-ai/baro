@@ -2,6 +2,7 @@
 
 A concise list of every published version. For full release notes, see the corresponding commit on the v* tag.
 
+## v0.28.0 — refactor(0.28.0): Mozaik 3.6.5 → 3.9.3 upgrade with BaroEnvironment/BusEvent adapter (Phase 1 of dual-mode native OpenAI support)
 ## v0.27.0 — chore(0.27.0): repository moved to jigjoy-ai/baro + fix broken screenshot on npm
 ## v0.26.0 — feat(0.26.0): scope discipline + planner/architect triage + `--quick` fast path
 ## v0.25.1 — fix(debuggability): baro --doctor, persisted planner logs, real error UI (#17)
