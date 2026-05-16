@@ -6,7 +6,7 @@ Give it a goal, it breaks it into stories, builds a dependency DAG, and runs the
 
 ![npm downloads](https://img.shields.io/npm/dt/baro-ai) ![npm downloads weekly](https://img.shields.io/npm/dw/baro-ai) ![npm version](https://img.shields.io/npm/v/baro-ai)
 
-![baro screenshot](assets/screenshot.png)
+![baro screenshot](https://raw.githubusercontent.com/jigjoy-ai/baro/main/assets/screenshot.png)
 
 ## Install
 

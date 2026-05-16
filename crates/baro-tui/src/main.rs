@@ -92,7 +92,7 @@ use events::BaroEvent;
     name = "baro",
     version,
     about = "AI-powered project execution",
-    after_help = "Issues:  https://github.com/Lotus015/baro/issues\nTwitter: @lotus_sbc",
+    after_help = "Issues:  https://github.com/jigjoy-ai/baro/issues\nTwitter: @lotus_sbc",
 )]
 struct Cli {
     /// Project goal (if omitted, shows welcome screen)

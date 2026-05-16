@@ -1,6 +1,6 @@
 {
   "name": "baro-ai",
-  "version": "0.26.0",
+  "version": "0.27.0",
   "description": "Autonomous parallel coding - plan and execute with AI",
   "type": "module",
   "bin": {
@@ -31,7 +31,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Lotus015/baro"
+    "url": "https://github.com/jigjoy-ai/baro"
   },
   "keywords": [
     "ai",

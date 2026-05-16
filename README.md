@@ -6,7 +6,7 @@ Give it a goal, it breaks it into stories, builds a dependency DAG, and runs the
 
 ![npm downloads](https://img.shields.io/npm/dt/baro-ai) ![npm downloads weekly](https://img.shields.io/npm/dw/baro-ai) ![npm version](https://img.shields.io/npm/v/baro-ai)
 
-![baro screenshot](assets/screenshot.png)
+![baro screenshot](https://raw.githubusercontent.com/jigjoy-ai/baro/main/assets/screenshot.png)
 
 > 📖 **Deep dive:** [Getting the Maximum Out of My Claude Code Subscription](https://jigjoy.ai/blog/getting-the-maximum-out-of-claude-code) — the story of why baro exists, how it pairs with Mozaik, and what it looks like in practice.
 
@@ -233,7 +233,7 @@ to the orchestrator.
 
 baro is a work in progress. I'm actively adding things, testing ideas,
 and occasionally breaking them — if a run explodes, an [issue on
-GitHub](https://github.com/Lotus015/baro/issues) with the run's audit
+GitHub](https://github.com/jigjoy-ai/baro/issues) with the run's audit
 log from `~/.baro/runs/` is the fastest way to get it fixed.
 
 If you like the idea and want to help shape where it goes, PRs are
