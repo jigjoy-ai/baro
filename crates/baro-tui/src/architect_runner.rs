@@ -37,6 +37,7 @@ pub async fn run_architect(
     llm: LlmProvider,
     model: Option<&str>,
     context: Option<&str>,
+    openai_api_key: Option<&str>,
 ) -> Result<String, ProcessRunError> {
     let repo = discovery::find_dev_repo(cwd).ok_or_else(|| ProcessRunError {
         message:
@@ -83,6 +84,14 @@ pub async fn run_architect(
     }
     if let Some(ref f) = ctx_tempfile {
         cmd.arg("--context-file").arg(f.path());
+    }
+    // Inject OPENAI_API_KEY only when llm=openai and we have one
+    // (either entered on the API-key screen or pre-loaded from the
+    // user's shell env). The Claude path ignores this var.
+    if matches!(llm, LlmProvider::OpenAI) {
+        if let Some(key) = openai_api_key {
+            cmd.env("OPENAI_API_KEY", key);
+        }
     }
 
     let captured = subprocess::spawn_and_capture(cmd, "architect").await?;

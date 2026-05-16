@@ -529,7 +529,11 @@ async fn run_app(
         }
     }
 
-    // If goal provided via CLI (and not resuming), skip welcome and start context/planning
+    // If goal provided via CLI (and not resuming), skip welcome and start context/planning.
+    // Otherwise: if there's no goal and we're not resuming, start at the
+    // ProviderPicker so the user picks Claude vs OpenAI before typing
+    // anything. They can still skip the picker by passing `--llm` (we
+    // honour the explicit choice and jump straight to Welcome).
     if !entered_resume {
         if let Some(goal) = cli.goal {
             app.goal_input = goal;
@@ -543,6 +547,16 @@ async fn run_app(
             } else {
                 app.start_context();
                 spawn_context_builder(&cwd, tx.clone());
+            }
+        } else {
+            // No goal: show ProviderPicker first. Pre-fill openai_api_key
+            // from env so the OpenAI path skips the API-key screen when
+            // the user already has the secret in their shell.
+            app.screen = app::Screen::ProviderPicker;
+            if let Ok(env_key) = std::env::var("OPENAI_API_KEY") {
+                if !env_key.is_empty() {
+                    app.openai_api_key = Some(env_key);
+                }
             }
         }
     }
@@ -650,6 +664,59 @@ async fn run_app(
                 }
 
                 match app.screen {
+                    Screen::ProviderPicker => match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            app.provider_picker_index = 0;
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.provider_picker_index = 1;
+                        }
+                        KeyCode::Enter => {
+                            if app.provider_picker_index == 0 {
+                                app.llm = app::LlmProvider::Claude;
+                                app.screen = Screen::Welcome;
+                            } else {
+                                app.llm = app::LlmProvider::OpenAI;
+                                // Skip the API-key screen if the user
+                                // already has the secret in their env.
+                                if app.openai_api_key.is_some() {
+                                    app.screen = Screen::Welcome;
+                                } else {
+                                    app.api_key_input.clear();
+                                    app.screen = Screen::ApiKeyInput;
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    Screen::ApiKeyInput => match key.code {
+                        KeyCode::Esc => {
+                            // Back to provider picker — let the user
+                            // change their mind without quitting the
+                            // whole TUI.
+                            app.api_key_input.clear();
+                            app.screen = Screen::ProviderPicker;
+                        }
+                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            return Ok(());
+                        }
+                        KeyCode::Enter => {
+                            let trimmed = app.api_key_input.trim();
+                            if !trimmed.is_empty() {
+                                app.openai_api_key = Some(trimmed.to_string());
+                                app.api_key_input.clear();
+                                app.screen = Screen::Welcome;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            app.api_key_input.pop();
+                        }
+                        KeyCode::Char(c) => {
+                            app.api_key_input.push(c);
+                        }
+                        _ => {}
+                    },
                     Screen::Welcome => match key.code {
                         KeyCode::Esc => return Ok(()),
                         KeyCode::Tab => { app.welcome_field = app.welcome_field.next(); }
@@ -797,6 +864,7 @@ async fn run_app(
                                         let sm = app.surgeon_model.clone();
                                         let ild = app.intra_level_delay_secs;
                                         let llm = app.llm;
+                                        let oak = app.openai_api_key.clone();
                                         let err_tx = tx.clone();
                                         tokio::spawn(async move {
                                             if let Err(e) = git::create_or_checkout_branch(&branch_cwd, &branch_name_clone).await {
@@ -820,7 +888,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm });
+                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, openai_api_key: oak.clone() });
                                         });
                                     }
                                     Err(e) => {
@@ -861,6 +929,7 @@ async fn run_app(
                                     let sm = app.surgeon_model.clone();
                                     let ild = app.intra_level_delay_secs;
                                     let llm = app.llm;
+                                    let oak = app.openai_api_key.clone();
                                     let err_tx = tx.clone();
                                     tokio::spawn(async move {
                                         if let Err(e) = git::create_or_checkout_branch(&branch_cwd, &branch_name_clone).await {
@@ -884,7 +953,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm });
+                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, openai_api_key: oak.clone() });
                                     });
                                 }
                             }
@@ -978,6 +1047,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     let context = app.claude_md_content.clone();
     let quick = app.quick;
     let llm = app.llm;
+    let openai_api_key = app.openai_api_key.clone();
 
     tokio::spawn(async move {
         // Phase 1 — Architect. In quick mode we skip this entirely:
@@ -994,7 +1064,14 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
             None
         } else if matches!(planner, Planner::Claude) {
             let _ = tx.send(AppEvent::ArchitectStarted).await;
-            match architect_runner::run_architect(&goal, &cwd, llm, architect_model.as_deref(), context.as_deref()).await {
+            match architect_runner::run_architect(
+                &goal,
+                &cwd,
+                llm,
+                architect_model.as_deref(),
+                context.as_deref(),
+                openai_api_key.as_deref(),
+            ).await {
                 Ok(doc) => {
                     let _ = tx.send(AppEvent::ArchitectComplete(doc.clone())).await;
                     Some(doc)
@@ -1257,6 +1334,7 @@ fn spawn_executor(
         surgeon_model: config.surgeon_model,
         intra_level_delay_secs: config.intra_level_delay_secs,
         llm: config.llm.as_str().to_string(),
+        openai_api_key: config.openai_api_key,
     };
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
 }

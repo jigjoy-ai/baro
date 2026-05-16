@@ -9,6 +9,14 @@ use crate::constants::MAX_LOG_LINES;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Screen {
+    /// First step (when invoked without a goal): pick Claude Code vs
+    /// Mozaik native (OpenAI) as the backend for every LLM-using
+    /// phase in this run.
+    ProviderPicker,
+    /// Shown only when the user picked the OpenAI backend AND
+    /// `OPENAI_API_KEY` was not already set in the environment.
+    /// Held in memory only; never written to disk.
+    ApiKeyInput,
     Welcome,
     Context,
     Planning,
@@ -175,6 +183,19 @@ pub struct App {
     pub screen: Screen,
     pub planner: Planner,
 
+    // Provider-picker screen (first step when invoked without a goal).
+    // 0 = Claude Code, 1 = Mozaik native (OpenAI). Stored as an index
+    // for trivial up/down handling; the chosen LlmProvider lands in
+    // `self.llm` on confirm.
+    pub provider_picker_index: usize,
+
+    // API-key input screen — buffer for the in-progress text. The
+    // confirmed key (whether from this input or the environment) is
+    // held in `openai_api_key` and passed to subprocesses via env, not
+    // written to disk.
+    pub api_key_input: String,
+    pub openai_api_key: Option<String>,
+
     // Welcome screen
     pub goal_input: String,
     pub welcome_field: WelcomeField,
@@ -295,6 +316,10 @@ impl App {
         Self {
             screen: Screen::Welcome,
             planner: Planner::Claude,
+
+            provider_picker_index: 0,
+            api_key_input: String::new(),
+            openai_api_key: None,
 
             goal_input: String::new(),
             welcome_field: WelcomeField::Goal,

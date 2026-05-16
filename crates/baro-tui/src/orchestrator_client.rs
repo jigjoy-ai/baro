@@ -53,6 +53,12 @@ pub struct OrchestratorConfig {
     /// wired yet — a request for "openai" silently falls through to
     /// Claude behaviour until the per-phase siblings ship in 0.29+.
     pub llm: String,
+    /// OpenAI API key to inject as `OPENAI_API_KEY` into the
+    /// orchestrator subprocess when `llm == "openai"`. The TUI gathers
+    /// this from either the user's shell env or the ApiKeyInput
+    /// screen; it isn't written to disk. `None` is a no-op (any value
+    /// already in the parent env is inherited normally).
+    pub openai_api_key: Option<String>,
 }
 
 /// Spawn the orchestrator subprocess and return a channel that receives
@@ -255,6 +261,15 @@ fn build_command(entry: &EntryPoint, cfg: &OrchestratorConfig) -> Command {
         cmd.arg("--intra-level-delay").arg(d.to_string());
     }
     cmd.arg("--llm").arg(&cfg.llm);
+    // Only forward an explicitly-provided key. If openai_api_key is
+    // None the user might still have the variable in their shell env;
+    // tokio::Command inherits parent env by default, so it'll flow
+    // through naturally without us touching it.
+    if cfg.llm == "openai" {
+        if let Some(key) = &cfg.openai_api_key {
+            cmd.env("OPENAI_API_KEY", key);
+        }
+    }
     cmd
 }
 
