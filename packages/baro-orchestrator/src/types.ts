@@ -263,7 +263,7 @@ export class ClaudeSystemItem extends BusEvent {
  * session_id (for `--resume`), usage, cost, num_turns, duration. This is
  * the single richest event in the stream and most observers care about it.
  */
-export class ClaudeResultItem extends BusEvent {
+export class AgentResultItem extends BusEvent {
     readonly type = "claude_result"
 
     constructor(

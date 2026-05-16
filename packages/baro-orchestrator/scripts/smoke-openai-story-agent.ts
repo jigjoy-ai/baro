@@ -9,7 +9,7 @@
  *   1. The agent reached a terminal `done` state.
  *   2. The typo is actually fixed on disk after the agent exits.
  *   3. The agent emitted at least one FunctionCallItem (it used a
- *      tool) and one ClaudeResultItem (turn completed cleanly).
+ *      tool) and one AgentResultItem (turn completed cleanly).
  *
  * Usage:
  *   export OPENAI_API_KEY=sk-...
@@ -26,7 +26,7 @@ import { FunctionCallItem, type Participant } from "@mozaik-ai/core"
 
 import { BaroEnvironment, BaroParticipant, BusEvent } from "../src/bus.js"
 import { OpenAIStoryAgent } from "../src/participants/openai-story-agent.js"
-import { AgentStateItem, ClaudeResultItem } from "../src/types.js"
+import { AgentStateItem, AgentResultItem } from "../src/types.js"
 
 class Collector extends BaroParticipant {
     public readonly busEvents: BusEvent[] = []
@@ -113,9 +113,9 @@ async function main(): Promise<void> {
         `${stateTransitions.length} state events`,
     )
 
-    const resultItems = collector.busEvents.filter((e) => e instanceof ClaudeResultItem)
+    const resultItems = collector.busEvents.filter((e) => e instanceof AgentResultItem)
     check(
-        "at least one ClaudeResultItem emitted (turn end)",
+        "at least one AgentResultItem emitted (turn end)",
         resultItems.length >= 1,
         `${resultItems.length} result events`,
     )

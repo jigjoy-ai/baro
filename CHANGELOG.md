@@ -2,6 +2,7 @@
 
 A concise list of every published version. For full release notes, see the corresponding commit on the v* tag.
 
+## v0.34.0 — feat(0.34.0): rename ClaudeResultItem → AgentResultItem (provider-agnostic); new --architect-model / --planner-model / --story-model per-phase override flags
 ## v0.33.0 — feat(0.33.0): OpenAIStoryAgent — full Mozaik-native coding loop (Phase 6, final); `--llm openai` is now end-to-end OpenAI and the flag is unhidden from `--help`
 ## v0.32.0 — feat(0.32.0): Planner moves Rust → TS with OpenAI sibling (Phase 5); main.rs drops below 1300 LoC for the first time
 ## v0.31.0 — feat(0.31.0): Architect moves Rust → TS with OpenAI sibling (Phase 4); welcome flow now picks Claude vs Mozaik-native OpenAI with in-memory API-key entry

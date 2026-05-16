@@ -13,7 +13,7 @@ export {
     AgentStateItem,
     type AgentPhase,
     ClaudeSystemItem,
-    ClaudeResultItem,
+    AgentResultItem,
     ClaudeStreamChunkItem,
     ClaudeRateLimitItem,
     ClaudeUnknownEventItem,

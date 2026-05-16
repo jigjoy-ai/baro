@@ -276,6 +276,15 @@ pub struct App {
     pub with_surgeon: bool,
     pub surgeon_use_llm: bool,
     pub surgeon_model: Option<String>,
+    /// Per-phase overrides. Each takes precedence over the routed
+    /// default for its phase, but is itself overridden by the
+    /// global `override_model` so `--model X` still wins. Plumbed
+    /// from `--architect-model` / `--planner-model` / `--story-model`
+    /// on the CLI; the per-phase Critic + Surgeon fields above
+    /// predate this group and stay separate for backwards compat.
+    pub architect_model: Option<String>,
+    pub planner_model: Option<String>,
+    pub story_model: Option<String>,
     pub intra_level_delay_secs: Option<u64>,
 
     /// Quick mode (`--quick`): user has told us this goal is trivial and they
@@ -371,6 +380,9 @@ impl App {
             with_surgeon: true,
             surgeon_use_llm: true,
             surgeon_model: None,
+            architect_model: None,
+            planner_model: None,
+            story_model: None,
             intra_level_delay_secs: None,
             quick: false,
             llm: LlmProvider::Claude,
@@ -880,14 +892,25 @@ impl App {
     }
 
     pub fn model_for_phase(&self, phase: &str) -> Option<String> {
+        // Global `--model` always wins.
         if let Some(ref model) = self.override_model {
             return Some(model.clone());
         }
+        // Then per-phase explicit overrides (`--architect-model`, etc.).
+        let per_phase = match phase {
+            "architect" => self.architect_model.as_ref(),
+            "planning" => self.planner_model.as_ref(),
+            "execution" | "story" => self.story_model.as_ref(),
+            _ => None,
+        };
+        if let Some(m) = per_phase {
+            return Some(m.clone());
+        }
+        // Finally the routed default (Claude side only; for OpenAI
+        // the TS planning modules pick gpt-5.x defaults).
         if self.model_routing {
             return match phase {
-                "architect" => Some("opus".to_string()),
-                "planning" => Some("opus".to_string()),
-                "execution" => Some("opus".to_string()),
+                "architect" | "planning" | "execution" | "story" => Some("opus".to_string()),
                 "review" => Some("haiku".to_string()),
                 _ => None,
             };

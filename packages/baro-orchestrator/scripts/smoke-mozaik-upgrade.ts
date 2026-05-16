@@ -27,7 +27,7 @@ import { BaroEnvironment, BaroParticipant, BusEvent } from "../src/bus.js"
 import {
     AgentStateItem,
     AgentUserMessageItem,
-    ClaudeResultItem,
+    AgentResultItem,
     StorySpawnRequestItem,
 } from "../src/types.js"
 
@@ -119,7 +119,7 @@ async function main(): Promise<void> {
     )
     env.deliverBusEvent(
         emitter,
-        new ClaudeResultItem("agent-1", "success", "session-1", false, "done", null, null, 1, 100, {}),
+        new AgentResultItem("agent-1", "success", "session-1", false, "done", null, null, 1, 100, {}),
     )
     env.deliverBusEvent(emitter, new AgentUserMessageItem("agent-1", "hello agent"))
 

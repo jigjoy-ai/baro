@@ -62,9 +62,9 @@ Wraps a single Claude CLI invocation for one story with retries, a
 per-attempt timeout, a quiet-timer for multi-turn sessions, and an
 optional hard cap. Each attempt spawns a fresh `ClaudeCliParticipant`,
 writes the prompt to stdin (leaving stdin open), then watches the bus
-for `ClaudeResultItem`s addressed to this story so it can count turns
+for `AgentResultItem`s addressed to this story so it can count turns
 and reset the quiet timer. Stdin is closed when either `maxTurns`
-`ClaudeResultItem`s have arrived or `quietTimeoutMs` of silence has
+`AgentResultItem`s have arrived or `quietTimeoutMs` of silence has
 elapsed. On success the retry loop exits early; otherwise it retries
 up to `retries + 1` attempts before giving up. Phase changes are
 broadcast as `AgentStateItem`s; the final verdict is broadcast as a
@@ -75,7 +75,7 @@ forwarding is owned by `ClaudeCliParticipant`, not by `StoryAgent`;
 - Subscribes to:
   - `AgentTargetedMessageItem` (when `recipientId` matches this story)
     — resets the multi-turn quiet timer.
-  - `ClaudeResultItem` (when `agentId` matches this story) —
+  - `AgentResultItem` (when `agentId` matches this story) —
     increments the turn counter and resets the quiet timer.
 - Emits:
   - `AgentStateItem` on every phase transition.

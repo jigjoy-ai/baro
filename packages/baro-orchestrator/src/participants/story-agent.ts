@@ -10,12 +10,12 @@
  *   1. Claude process starts; the initial prompt is written to stdin.
  *   2. Stdin stays OPEN so further user messages can be injected.
  *   3. A quiet timer (quietTimeoutMs, default 2 000 ms) starts after the
- *      first ClaudeResultItem arrives for this story. It resets whenever
- *      another ClaudeResultItem arrives or whenever an AgentTargetedMessageItem
+ *      first AgentResultItem arrives for this story. It resets whenever
+ *      another AgentResultItem arrives or whenever an AgentTargetedMessageItem
  *      addressed to this story is forwarded to Claude stdin.
  *   4. Stdin is closed (ending the turn stream) when EITHER:
  *      (a) the quiet timer fires — Claude has been silent for quietTimeoutMs, or
- *      (b) maxTurns ClaudeResultItems have been observed for this agentId.
+ *      (b) maxTurns AgentResultItems have been observed for this agentId.
  *   5. A per-story hard timeout (hardTimeoutSecs, default 300 s) caps the
  *      entire story across all attempts, aborting Claude unconditionally.
  *
@@ -33,7 +33,7 @@ import {
     AgentPhase,
     AgentStateItem,
     AgentTargetedMessageItem,
-    ClaudeResultItem,
+    AgentResultItem,
 } from "../types.js"
 import {
     ClaudeCliParticipant,
@@ -56,12 +56,12 @@ export interface StorySpec {
     /** Delay between retries in milliseconds. Default: 1500. */
     retryDelayMs?: number
     /**
-     * Milliseconds of silence (no ClaudeResultItem for this story) after which
+     * Milliseconds of silence (no AgentResultItem for this story) after which
      * stdin is closed to end the multi-turn session. Default: 2000.
      */
     quietTimeoutMs?: number
     /**
-     * Maximum number of ClaudeResultItem events (turns) to observe before
+     * Maximum number of AgentResultItem events (turns) to observe before
      * closing stdin unconditionally. Default: 4.
      */
     maxTurns?: number
@@ -195,7 +195,7 @@ export class StoryAgent extends BaroParticipant {
      * forwarding. ClaudeCliParticipant.onContextItem does NOT do this.
      */
     override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
-        // StoryAgent observes AgentTargetedMessageItem and ClaudeResultItem
+        // StoryAgent observes AgentTargetedMessageItem and AgentResultItem
         // for lifecycle/timing purposes only. The actual stdin forwarding
         // is owned by ClaudeCliParticipant.onExternalBusEvent to avoid
         // double-delivery.
@@ -203,7 +203,7 @@ export class StoryAgent extends BaroParticipant {
             this.notifyStoryMessage?.()
         }
 
-        if (event instanceof ClaudeResultItem && event.agentId === this.spec.id) {
+        if (event instanceof AgentResultItem && event.agentId === this.spec.id) {
             this.notifyStoryResult?.()
         }
     }

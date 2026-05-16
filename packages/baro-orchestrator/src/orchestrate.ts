@@ -48,7 +48,7 @@ import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
 import { PrdFile, loadPrd } from "./prd.js"
 import {
     AgentStateItem,
-    ClaudeResultItem,
+    AgentResultItem,
     ClaudeSystemItem,
     CoordinationItem,
     CritiqueItem,
@@ -136,6 +136,13 @@ export interface OrchestrateConfig {
      * placeholder that runs the Claude flow.
      */
     llm?: "claude" | "openai"
+    /**
+     * Per-phase model override for StoryAgent. When set, wins over
+     * each story's individual `model` field in the PRD as well as
+     * over the OpenAI default. Plumbed from the Rust CLI flag
+     * `--story-model`.
+     */
+    storyModel?: string
     /** Hooks for receiving Operator commands externally (Rust TUI). */
     operatorHooks?: {
         onAbort?: (storyId: string) => void
@@ -377,7 +384,8 @@ export async function orchestrate(
     const storyFactory = new StoryFactory({
         cwd: config.cwd,
         llm,
-        openaiModel: "gpt-5.5",
+        openaiModel: config.storyModel ?? "gpt-5.5",
+        storyModelOverride: config.storyModel,
     })
     storyFactory.setEnvironment(env)
     storyFactory.join(env)
@@ -489,7 +497,7 @@ class BaroEventForwarder extends BaroParticipant {
             return
         }
 
-        if (event instanceof ClaudeResultItem) {
+        if (event instanceof AgentResultItem) {
             this.handleClaudeResult(event)
             return
         }
@@ -581,7 +589,7 @@ class BaroEventForwarder extends BaroParticipant {
         }
     }
 
-    private handleClaudeResult(item: ClaudeResultItem): void {
+    private handleClaudeResult(item: AgentResultItem): void {
         const usage = item.usage as
             | { input_tokens?: number; output_tokens?: number }
             | null

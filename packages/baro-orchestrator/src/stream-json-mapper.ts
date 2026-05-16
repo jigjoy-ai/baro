@@ -25,7 +25,7 @@ import { BusEvent } from "./bus.js"
 import {
     AgentUserMessageItem,
     ClaudeRateLimitItem,
-    ClaudeResultItem,
+    AgentResultItem,
     ClaudeStreamChunkItem,
     ClaudeSystemItem,
     ClaudeUnknownEventItem,
@@ -134,7 +134,7 @@ export function mapClaudeEvent(
 
         case "result": {
             items.push(
-                new ClaudeResultItem(
+                new AgentResultItem(
                     agentId,
                     typeof event.subtype === "string" ? event.subtype : "unknown",
                     sessionId,

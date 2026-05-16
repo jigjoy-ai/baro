@@ -9,7 +9,7 @@ Date: 2026-05-03
 |---|---|
 | Multi-turn StoryAgent (keep stdin open across turns) | ✓ |
 | Quiet timer + max-turns budget + hard timeout for termination | ✓ |
-| Critic participant evaluates ClaudeResultItem against acceptance criteria | ✓ |
+| Critic participant evaluates AgentResultItem against acceptance criteria | ✓ |
 | CritiqueItem ContextItem published on bus, audit-trailed | ✓ |
 | AgentTargetedMessageItem corrective inject (with per-agent emission cap) | ✓ wired |
 | Phase-1+2 demos pass unchanged | ✓ |

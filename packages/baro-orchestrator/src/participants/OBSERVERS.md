@@ -24,7 +24,7 @@ to the agent as its next conversational turn, up to
 `maxEmissionsPerAgent` times, after which corrective messages are
 suppressed but critiques keep accumulating.
 
-- Subscribes to: `ClaudeResultItem`
+- Subscribes to: `AgentResultItem`
 - Emits: `CritiqueItem`, `AgentTargetedMessageItem`
 
 Source: [critic.ts](./critic.ts)

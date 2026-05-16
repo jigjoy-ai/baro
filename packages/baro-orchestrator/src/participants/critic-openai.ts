@@ -4,7 +4,7 @@
  * shelling out to `claude --print`.
  *
  * Same bus contract:
- *   - Observes `ClaudeResultItem` on the bus.
+ *   - Observes `AgentResultItem` on the bus.
  *   - Emits one `CritiqueItem` per evaluation (always).
  *   - Emits at most `maxEmissionsPerAgent` `AgentTargetedMessageItem`s
  *     when the verdict is "fail" — those get injected back into the
@@ -31,7 +31,7 @@ import {
 import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 import {
     AgentTargetedMessageItem,
-    ClaudeResultItem,
+    AgentResultItem,
     CritiqueItem,
 } from "../types.js"
 import {
@@ -98,7 +98,7 @@ export class CriticOpenAI extends BaroParticipant {
     }
 
     override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
-        if (!(event instanceof ClaudeResultItem)) return
+        if (!(event instanceof AgentResultItem)) return
         if (event.isError || !event.resultText) return
 
         const criteria = this.opts.targets.get(event.agentId)

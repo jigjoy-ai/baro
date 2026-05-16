@@ -24,7 +24,7 @@ import {
     AgentTargetedMessageItem,
     AgentUserMessageItem,
     ClaudeRateLimitItem,
-    ClaudeResultItem,
+    AgentResultItem,
     ClaudeStreamChunkItem,
     ClaudeSystemItem,
     ClaudeUnknownEventItem,
@@ -127,7 +127,7 @@ export class Cartographer extends BaroParticipant {
             return
         }
 
-        if (event instanceof ClaudeResultItem) {
+        if (event instanceof AgentResultItem) {
             this.sink({
                 kind: "result",
                 agentId: event.agentId,

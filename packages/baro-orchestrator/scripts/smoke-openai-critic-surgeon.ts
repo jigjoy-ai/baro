@@ -3,7 +3,7 @@
  * Integration smoke test for the Phase 3 OpenAI siblings.
  *
  * Spawns a BaroEnvironment with CriticOpenAI + SurgeonOpenAI joined,
- * emits a fake ClaudeResultItem (well-formed agent output, with a
+ * emits a fake AgentResultItem (well-formed agent output, with a
  * realistic acceptance-criteria mismatch) and a fake StoryResultItem
  * (terminal failure), then asserts that the OpenAI participants:
  *
@@ -31,7 +31,7 @@ import { type PrdSnapshot } from "../src/participants/surgeon.js"
 import { StoryResultItem } from "../src/participants/story-agent.js"
 import {
     AgentTargetedMessageItem,
-    ClaudeResultItem,
+    AgentResultItem,
     CritiqueItem,
     ReplanItem,
 } from "../src/types.js"
@@ -69,7 +69,7 @@ async function main(): Promise<void> {
     // Fake the kind of result a StoryAgent's Claude session would emit
     // — final message text that does NOT mention PONG so we get a
     // "fail" verdict with a corrective message back to the agent.
-    const fakeAgentResult = new ClaudeResultItem(
+    const fakeAgentResult = new AgentResultItem(
         "S1",
         "success",
         "fake-session",
@@ -82,7 +82,7 @@ async function main(): Promise<void> {
         {},
     )
 
-    console.log("→ Emitting fake ClaudeResultItem for S1 (no PONG in output)")
+    console.log("→ Emitting fake AgentResultItem for S1 (no PONG in output)")
     env.deliverBusEvent(new (class extends BaroParticipant {})(), fakeAgentResult)
     await critic.idle()
 

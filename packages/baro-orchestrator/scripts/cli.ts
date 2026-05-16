@@ -40,6 +40,7 @@ interface CliArgs {
     withSurgeon: boolean
     surgeonUseLlm: boolean
     surgeonModel?: string
+    storyModel?: string
     intraLevelDelaySecs?: number
     llm: "claude" | "openai"
     help: boolean
@@ -118,6 +119,9 @@ function parseArgs(argv: string[]): CliArgs {
                     required(argv, ++i, "--intra-level-delay"),
                     10,
                 )
+                break
+            case "--story-model":
+                args.storyModel = required(argv, ++i, "--story-model")
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
@@ -209,6 +213,7 @@ async function main(): Promise<void> {
         surgeonModel: args.surgeonModel,
         intraLevelDelaySecs: args.intraLevelDelaySecs,
         llm: args.llm,
+        storyModel: args.storyModel,
     }
 
     if (args.llm === "openai" && !process.env.OPENAI_API_KEY) {

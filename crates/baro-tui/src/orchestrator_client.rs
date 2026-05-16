@@ -59,6 +59,10 @@ pub struct OrchestratorConfig {
     /// screen; it isn't written to disk. `None` is a no-op (any value
     /// already in the parent env is inherited normally).
     pub openai_api_key: Option<String>,
+    /// Per-phase model override for StoryAgent — forwarded as
+    /// `--story-model X` to the orchestrator subprocess. Wins over
+    /// the per-PRD-story `model` field and over the OpenAI default.
+    pub story_model: Option<String>,
 }
 
 /// Spawn the orchestrator subprocess and return a channel that receives
@@ -269,6 +273,9 @@ fn build_command(entry: &EntryPoint, cfg: &OrchestratorConfig) -> Command {
         if let Some(key) = &cfg.openai_api_key {
             cmd.env("OPENAI_API_KEY", key);
         }
+    }
+    if let Some(m) = &cfg.story_model {
+        cmd.arg("--story-model").arg(m);
     }
     cmd
 }
