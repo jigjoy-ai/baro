@@ -46,6 +46,12 @@ pub struct OrchestratorConfig {
     /// same DAG level. Default (when None): 10 inside the orchestrator.
     /// Set to Some(0) to disable staggering.
     pub intra_level_delay_secs: Option<u64>,
+    /// LLM provider. "claude" (default) uses the Claude Code CLI;
+    /// "openai" routes through Mozaik 3.9's native OpenAI participants.
+    /// Currently plumbed end-to-end but the OpenAI siblings are not
+    /// wired yet — a request for "openai" silently falls through to
+    /// Claude behaviour until the per-phase siblings ship in 0.29+.
+    pub llm: String,
 }
 
 /// Spawn the orchestrator subprocess and return a channel that receives
@@ -247,6 +253,7 @@ fn build_command(entry: &EntryPoint, cfg: &OrchestratorConfig) -> Command {
     if let Some(d) = cfg.intra_level_delay_secs {
         cmd.arg("--intra-level-delay").arg(d.to_string());
     }
+    cmd.arg("--llm").arg(&cfg.llm);
     cmd
 }
 

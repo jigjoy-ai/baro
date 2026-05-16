@@ -76,6 +76,12 @@ pub struct ExecutorConfig {
     pub surgeon_use_llm: bool,
     pub surgeon_model: Option<String>,
     pub intra_level_delay_secs: Option<u64>,
+    /// LLM provider — "claude" routes every phase through the Claude
+    /// CLI (current behaviour); "openai" routes through Mozaik 3.9's
+    /// native OpenAI participants. Plumbed through to orchestrate.ts
+    /// as `--llm`; subsequent phases will use this to pick the right
+    /// participant sibling per LLM-using role.
+    pub llm: crate::app::LlmProvider,
 }
 
 // ─── Helpers used by main.rs ────────────────────────────────────────

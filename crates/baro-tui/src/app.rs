@@ -98,6 +98,32 @@ pub enum ArchitectStatus {
     Skipped(String),
 }
 
+/// Which LLM provider every phase routes its calls to. Claude (default)
+/// shells out to the Claude Code CLI. OpenAI uses Mozaik 3.9's native
+/// providers/openai inference runner. Selectable via `baro --llm <value>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmProvider {
+    Claude,
+    OpenAI,
+}
+
+impl LlmProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::OpenAI => "openai",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "claude" => Some(Self::Claude),
+            "openai" => Some(Self::OpenAI),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoryStatus {
     Pending,
@@ -238,6 +264,14 @@ pub struct App {
     /// explicitly didn't sign up for). The fast path for "fix the typo" goals.
     pub quick: bool,
 
+    /// Which LLM provider runs the agents. Set via `--llm claude|openai`.
+    /// `claude` (the default) uses the Claude Code CLI as today. `openai`
+    /// is a placeholder until the Mozaik-native OpenAI participants are
+    /// feature-complete — currently it falls through to Claude behaviour
+    /// but is plumbed through to the orchestrator so each subsequent
+    /// phase can opt individual participants into the OpenAI path.
+    pub llm: LlmProvider,
+
     // Notification flag
     pub notification_ready: bool,
 
@@ -314,6 +348,7 @@ impl App {
             surgeon_model: None,
             intra_level_delay_secs: None,
             quick: false,
+            llm: LlmProvider::Claude,
             token_usage: HashMap::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
