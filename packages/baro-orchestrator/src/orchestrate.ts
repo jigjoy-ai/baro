@@ -250,7 +250,7 @@ export async function orchestrate(
         surgeon = llm === "openai"
             ? new SurgeonOpenAI({
                   snapshot,
-                  model: config.surgeonModel ?? "gpt-5.4",
+                  model: config.surgeonModel ?? "gpt-5.5",
               })
             : new Surgeon({
                   snapshot,

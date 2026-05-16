@@ -917,9 +917,13 @@ impl App {
                     Some("opus".to_string())
                 }
                 (LlmProvider::Claude, "review") => Some("haiku".to_string()),
-                (LlmProvider::OpenAI, "architect") => Some("gpt-5.5".to_string()),
-                (LlmProvider::OpenAI, "planning") => Some("gpt-5.4".to_string()),
-                (LlmProvider::OpenAI, "execution" | "story") => Some("gpt-5.5".to_string()),
+                // Critic-style review work stays on mini — it's the
+                // highest-volume call in a run and the verdict is a
+                // structured PASS/FAIL that doesn't need flagship
+                // reasoning. Everything else gets 5.5.
+                (LlmProvider::OpenAI, "architect" | "planning" | "execution" | "story") => {
+                    Some("gpt-5.5".to_string())
+                }
                 (LlmProvider::OpenAI, "review") => Some("gpt-5.4-mini".to_string()),
                 _ => None,
             };
