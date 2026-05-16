@@ -16,6 +16,7 @@ tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 chrono = "0.4"
 which = "6"
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 crossterm = { version = "0.28", features = ["use-dev-tty"] }

@@ -1,8 +1,10 @@
 mod app;
+mod architect_runner;
 mod claude_runner;
 mod config;
 mod constants;
 mod context;
+mod discovery;
 mod doctor;
 mod events;
 mod executor;
@@ -10,6 +12,7 @@ mod git;
 mod notification;
 mod orchestrator_client;
 mod screens;
+mod subprocess;
 mod theme;
 mod ui;
 mod utils;
@@ -237,85 +240,6 @@ fn open_terminal_writer() -> io::Result<Box<dyn Write>> {
     }
 }
 
-const CLAUDE_ARCHITECT_PROMPT: &str = r#"You are the architect for this engineering run. ONE focused turn, before anyone writes code.
-
-TRIAGE FIRST — DO NOT SKIP THIS STEP:
-Before you produce a design document, decide whether the goal actually needs one.
-
-The Architect exists to prevent multiple parallel agents from disagreeing on
-cross-cutting decisions (file paths, schemas, API shapes, naming, dependency
-choices). When a run has at most one or two agents and no cross-cutting choices,
-there is nothing to align, and a long design document is overhead the user
-doesn't want.
-
-If the goal is TRIVIAL — a single concept, a small focused edit, no new feature
-surface, no new schema, no new API, no new dependency — output ONLY this exact
-short document and stop:
-
-## Existing context
-(Optional, one sentence — only if there's a relevant convention worth noting.)
-
-## Scope
-This goal is trivial; no cross-cutting decisions are needed. The implementation
-agent should follow the user's goal as stated and the conventions already in the
-repo.
-
-Examples of TRIVIAL goals:
-  - "Fix the typo in the README footer"
-  - "Rename `getUser` to `fetchUser` in the auth module"
-  - "Bump axios to 1.7.x"
-  - "Add a created_at index on the orders table"
-
-If the goal is NON-TRIVIAL (introduces a feature, touches multiple modules,
-changes a schema or contract, picks a dependency, defines naming for something
-new), produce the full design document per the sections below.
-
-Do NOT produce a 500-line design doc for a one-line edit. Do NOT enumerate every
-file in the repo as a "file path" when the goal only touches one.
-
----
-
-Your job (when the goal is NON-TRIVIAL): read the relevant parts of the existing codebase, then pin down EVERY cross-cutting design decision the implementation agents would otherwise disagree on. They will all receive your output as authoritative spec. If you leave something vague, multiple agents will each pick a different answer and the run will produce inconsistent code that needs retroactive fixes.
-
-Use your tools (Read, Grep, Glob, Bash, LSP) actively. Look at:
-- The project's stack (package.json, Cargo.toml, pyproject.toml, go.mod, ...)
-- Existing naming conventions (file paths, casing, suffix patterns)
-- Existing infrastructure relevant to the goal (current schema, current API style, current frontend client pattern)
-- Migration / DDL conventions if DB work is involved
-- Test runner + lint setup
-
-Then output a SINGLE markdown document with these sections (omit a section ONLY if the goal genuinely doesn't touch that area):
-
-## Existing context
-Concrete facts you observed (NOT speculation): what stack, what conventions, what relevant infrastructure already exists. A few sentences each. This is what implementation agents will rely on to avoid re-reading these files.
-
-## File paths
-Every NEW file the run will create, by exact path. Every EXISTING file the run will modify, by exact path. No "etc." — be exhaustive within the bounds of the goal.
-
-## Schema decisions (if DB work)
-Exact table names, column names, types, indexes, constraints. Naming conventions for new columns (snake_case vs camelCase — match what's already in the repo). Migration filename pattern. Whether IF NOT EXISTS / ALTER ONLY / etc. is required.
-
-## API contracts (if backend work)
-Endpoint paths, HTTP methods, exact request shapes, exact response shapes (down to field names). Status codes. Cache headers.
-
-## Frontend integration (if frontend work)
-File location for new modules. Whether to introduce new dependencies or use what's already there (be explicit: "Do NOT add React Query — use native fetch" if that's the call). Cache strategy. Hook patterns.
-
-## Library/dependency choices
-Anything explicit. Each "do not add X" is as important as each "use Y".
-
-## Naming conventions
-Slug format, normalize function location, prefix/suffix patterns. Single source of truth for things like normalize() utilities — name the file.
-
-## Migration / shipping notes
-Anything that affects production safety: idempotent seeds, ON CONFLICT clauses, missing-data behavior.
-
-Rules:
-- Be SPECIFIC. "Column `slug` (varchar 100)" beats "column for the slug".
-- Be EXHAUSTIVE within scope. If two agents could disagree about something, you decide it here.
-- Reference exact existing files when leveraging current conventions.
-- Output ONLY the markdown document. No preamble, no "Here is the architecture:". Start with the first `##` heading.
-"#;
 
 const CLAUDE_PLANNER_PROMPT: &str = r#"You are an expert software architect. Break down the user's project goal into concrete user stories that form a dependency DAG.
 
@@ -1053,6 +977,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     let architect_model = app.model_for_phase("architect");
     let context = app.claude_md_content.clone();
     let quick = app.quick;
+    let llm = app.llm;
 
     tokio::spawn(async move {
         // Phase 1 — Architect. In quick mode we skip this entirely:
@@ -1069,7 +994,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
             None
         } else if matches!(planner, Planner::Claude) {
             let _ = tx.send(AppEvent::ArchitectStarted).await;
-            match run_claude_architect(&goal, &cwd, architect_model.as_deref(), context.as_deref()).await {
+            match architect_runner::run_architect(&goal, &cwd, llm, architect_model.as_deref(), context.as_deref()).await {
                 Ok(doc) => {
                     let _ = tx.send(AppEvent::ArchitectComplete(doc.clone())).await;
                     Some(doc)
@@ -1112,7 +1037,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
                 // so the user can see the full diagnostic, not just the
                 // truncated headline.
                 let log_path = e
-                    .downcast_ref::<claude_runner::ClaudeRunError>()
+                    .downcast_ref::<subprocess::ProcessRunError>()
                     .and_then(|err| err.log_path.clone());
                 let _ = tx.send(AppEvent::PlanError(e.to_string(), log_path)).await;
             }
@@ -1334,52 +1259,6 @@ fn spawn_executor(
         llm: config.llm.as_str().to_string(),
     };
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
-}
-
-/// Runs the Architect phase: one Claude Opus turn (with tool access) that
-/// reads the existing codebase and emits a DecisionDocument — the
-/// authoritative spec every Story Agent will receive. Returns the
-/// markdown document on success.
-///
-/// Failure is non-fatal at the caller's discretion: if this returns Err,
-/// `spawn_planner` falls back to the legacy planner-only flow so the
-/// user never gets blocked by an Architect-side hiccup.
-async fn run_claude_architect(
-    goal: &str,
-    cwd: &Path,
-    model: Option<&str>,
-    context: Option<&str>,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let base_prompt = format!("{}\n\nUser goal:\n{}", CLAUDE_ARCHITECT_PROMPT, goal);
-    let prompt = match context {
-        Some(ctx) => format!("Project context (CLAUDE.md):\n{}\n\n{}", ctx, base_prompt),
-        None => base_prompt,
-    };
-
-    let config = claude_runner::ClaudeRunConfig {
-        prompt,
-        cwd: cwd.to_path_buf(),
-        model: model.map(|s| s.to_string()),
-        log_tag: Some("architect"),
-    };
-
-    let output = claude_runner::spawn_claude_json(&config).await?;
-
-    let claude_output: serde_json::Value = serde_json::from_str(&output.stdout)
-        .map_err(|e| format!("Failed to parse Claude JSON wrapper: {}", e))?;
-
-    let decision_doc = claude_output
-        .get("result")
-        .and_then(|v| v.as_str())
-        .ok_or("Architect response missing 'result' field")?
-        .trim()
-        .to_string();
-
-    if decision_doc.is_empty() {
-        return Err("Architect returned an empty document".into());
-    }
-
-    Ok(decision_doc)
 }
 
 async fn run_claude_planner(
