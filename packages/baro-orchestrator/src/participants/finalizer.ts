@@ -34,7 +34,7 @@ import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 
 import { buildDag } from "../dag.js"
 import { getHeadSha } from "../git.js"
-import { loadPrd, type PrdFile, type PrdStory } from "../prd.js"
+import { BARO_COAUTHOR_TRAILER, loadPrd, type PrdFile, type PrdStory } from "../prd.js"
 import {
     FinalizeStartedItem,
     LevelStartedItem,
@@ -543,6 +543,13 @@ export class Finalizer extends BaroParticipant {
         lines.push("---")
         lines.push("")
         lines.push("🤖 Plan. Parallelize. Review. Ship. — opened by baro")
+        // Co-author trailer on the PR body itself so a GitHub
+        // "Squash and merge" picks it up — the squashed commit's body
+        // is the PR body, so the trailer flows through to the merge
+        // commit and attributes the run to @baro-rs on top of the
+        // per-story commits agents already trailed.
+        lines.push("")
+        lines.push(BARO_COAUTHOR_TRAILER)
 
         return lines.join("\n")
     }

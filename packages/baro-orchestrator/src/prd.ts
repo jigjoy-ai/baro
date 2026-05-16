@@ -142,6 +142,21 @@ export function markStoryPassed(
 }
 
 /**
+ * Co-author trailer baro asks every story-side commit to carry, and
+ * that Finalizer drops at the bottom of every PR body so squash-merge
+ * commits inherit it too. Format is GitHub's canonical noreply email
+ * shape: `<numericUserId>+<login>@users.noreply.github.com`, which
+ * makes GitHub auto-attribute the commit to the @baro-rs account in
+ * the contributors view.
+ *
+ * Mirrors the Claude Code pattern (`Co-Authored-By: Claude … <noreply@
+ * anthropic.com>`): humans stay primary author; the bot is the
+ * co-author.
+ */
+export const BARO_COAUTHOR_TRAILER =
+    "Co-Authored-By: baro <285254893+baro-rs@users.noreply.github.com>"
+
+/**
  * Build the default story prompt from a PrdStory. Mirrors the inline
  * template fallback in baro's executor.rs `build_prompt`. If the project
  * directory contains a `prompt.md` template, callers should use that
@@ -185,5 +200,16 @@ export function buildDefaultStoryPrompt(story: PrdStory): string {
         "  - Otherwise: ensure linting/typecheck passes",
         "",
         "When done with the story, commit your changes with a clear message.",
+        "",
+        "COMMIT MESSAGE TRAILER (mandatory):",
+        "Every commit you create as part of this story MUST end with a blank line",
+        "followed by this exact trailer line — no edits, no surrounding text:",
+        "",
+        `    ${BARO_COAUTHOR_TRAILER}`,
+        "",
+        "Use `git commit -m \"…\" -m \"\" -m \"" + BARO_COAUTHOR_TRAILER + "\"` so the",
+        "trailer lands on its own paragraph at the bottom (git collapses the empty",
+        "middle `-m` to a blank line between the subject and the trailer). This",
+        "attributes the commit to the baro account in the contributors view.",
     ].join("\n")
 }
