@@ -174,14 +174,18 @@ export async function orchestrate(
     const emitTui = config.emitTuiEvents ?? true
     const llm: "claude" | "openai" = config.llm ?? "claude"
 
-    // Phase 3 (0.30): Critic and Surgeon now route to Mozaik OpenAI
-    // siblings when llm=openai. Architect, Planner, and StoryAgent
-    // still use the Claude CLI path — those siblings land in 0.31+.
-    // Make the partial-transition status loud in the audit log.
+    // Provider banner so the stderr / audit log makes the actual
+    // routing obvious. As of 0.33 every LLM-using phase (Architect,
+    // Planner, Critic, Surgeon, StoryAgent) routes end-to-end to the
+    // selected provider — no mixed-mode anymore.
     if (llm === "openai") {
         process.stderr.write(
-            "[orchestrate] llm=openai: Critic + Surgeon route to Mozaik OpenAI; " +
-            "Architect, Planner, StoryAgent still on Claude CLI (per-phase ports in 0.31+).\n",
+            "[orchestrate] llm=openai: Architect, Planner, Critic, Surgeon, StoryAgent " +
+            "all running through Mozaik's native OpenAI runner (gpt-5.x).\n",
+        )
+    } else {
+        process.stderr.write(
+            "[orchestrate] llm=claude: every LLM phase shells out to the Claude Code CLI.\n",
         )
     }
 
