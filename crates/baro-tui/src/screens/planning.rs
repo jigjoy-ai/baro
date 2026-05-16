@@ -157,8 +157,14 @@ pub fn render(f: &mut Frame, app: &App) {
         let spinner = SPINNER_FRAMES[frame_idx];
         let elapsed = app.planning_elapsed_secs();
 
-        let goal_display = if app.goal_input.len() > 42 {
-            format!("{}...", &app.goal_input[..39])
+        // Truncate by char count, not byte count — slicing &str at a raw
+        // byte index panics when the boundary falls inside a multi-byte
+        // character (em-dash, smart quotes, CJK, emoji). User goals
+        // routinely contain `—` which is 3 bytes, so the old `[..39]`
+        // crashed any goal where an em-dash crossed offset 39.
+        let goal_display = if app.goal_input.chars().count() > 42 {
+            let truncated: String = app.goal_input.chars().take(39).collect();
+            format!("{}...", truncated)
         } else {
             app.goal_input.clone()
         };

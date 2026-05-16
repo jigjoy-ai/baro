@@ -48,8 +48,11 @@ pub fn render(f: &mut Frame, app: &App) {
     let frame_idx = (app.tick_count / 2) as usize % SPINNER_FRAMES.len();
     let spinner = SPINNER_FRAMES[frame_idx];
 
-    let goal_display = if app.goal_input.len() > 42 {
-        format!("{}...", &app.goal_input[..39])
+    // See planning.rs: byte-index slicing panics on multi-byte chars
+    // (em-dash, etc.). Truncate by char count instead.
+    let goal_display = if app.goal_input.chars().count() > 42 {
+        let truncated: String = app.goal_input.chars().take(39).collect();
+        format!("{}...", truncated)
     } else {
         app.goal_input.clone()
     };
