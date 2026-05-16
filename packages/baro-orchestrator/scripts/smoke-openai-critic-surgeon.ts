@@ -97,7 +97,7 @@ async function main(): Promise<void> {
         failed = true
     } else {
         const c = critiqueEvents[0]!.event as CritiqueItem
-        console.log(`✓ CritiqueItem received — verdict=${c.verdict} model=${c.model}`)
+        console.log(`✓ CritiqueItem received — verdict=${c.verdict} model=${c.modelUsed}`)
         console.log(`  reasoning: ${c.reasoning.slice(0, 120)}…`)
         if (c.verdict !== "fail") {
             console.error(`  ✗ Expected verdict=fail (output had no PONG), got '${c.verdict}'`)
