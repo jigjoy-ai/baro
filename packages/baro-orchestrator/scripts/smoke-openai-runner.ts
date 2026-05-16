@@ -25,12 +25,11 @@ import {
     Gpt54Mini,
     Gpt54Nano,
     Gpt55,
-    InMemoryModelContextRepository,
+    ModelContext,
     OpenAIInferenceRunner,
     SystemMessageItem,
     UserMessageItem,
     type GenerativeModel,
-    type ModelContext,
 } from "@mozaik-ai/core"
 
 function pickModel(name: string): GenerativeModel {
@@ -65,13 +64,14 @@ async function main(): Promise<void> {
     console.log(`Testing Mozaik OpenAI runner with model=${modelName}`)
 
     const model = pickModel(modelName)
-    const repo = new InMemoryModelContextRepository()
-    const context: ModelContext = repo.create("smoke-test")
 
-    context.addContextItem(
-        SystemMessageItem.create("You are a smoke-test responder. Reply with exactly: PONG"),
-    )
-    context.addContextItem(UserMessageItem.create("ping"))
+    // ModelContext is immutable — every addContextItem returns a new
+    // instance, so chain them rather than expecting mutation.
+    const context = ModelContext.create("smoke-test")
+        .addContextItem(
+            SystemMessageItem.create("You are a smoke-test responder. Reply with exactly: PONG"),
+        )
+        .addContextItem(UserMessageItem.create("ping"))
 
     const runner = new OpenAIInferenceRunner()
     const start = Date.now()
