@@ -2,6 +2,7 @@
 
 A concise list of every published version. For full release notes, see the corresponding commit on the v* tag.
 
+## v0.30.0 — feat(0.30.0): CriticOpenAI + SurgeonOpenAI siblings (Phase 3 of dual-mode); --llm openai now routes verdict + replan reasoning through Mozaik's native OpenAI runner
 ## v0.29.0 — feat(0.29.0): --llm claude|openai flag plumbed end-to-end (Phase 2 of dual-mode); hidden, no behaviour change yet
 ## v0.28.0 — refactor(0.28.0): Mozaik 3.6.5 → 3.9.3 upgrade with BaroEnvironment/BusEvent adapter (Phase 1 of dual-mode native OpenAI support)
 ## v0.27.0 — chore(0.27.0): repository moved to jigjoy-ai/baro + fix broken screenshot on npm
