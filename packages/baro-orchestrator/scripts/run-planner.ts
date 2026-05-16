@@ -1,4 +1,3 @@
-#!/usr/bin/env tsx
 /**
  * Planner CLI — the Rust TUI invokes this as a subprocess instead of
  * shelling out to `claude` (or `node openai-planner.js`) directly.

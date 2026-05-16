@@ -23,7 +23,20 @@ import {
     type ModelContext,
 } from "@mozaik-ai/core"
 
-const runtime = new OpenAIResponses()
+/**
+ * Lazy because `new OpenAIResponses()` chains to `new OpenAI()`
+ * which throws if `OPENAI_API_KEY` isn't set. Module-level init
+ * would mean a Claude-mode run that just imports this file (planner
+ * / architect / story-agent all do, regardless of --llm) fails at
+ * bundle load. Constructing only on first call defers the check to
+ * the moment we actually need OpenAI — which by definition is also
+ * the moment the key is available.
+ */
+let _runtime: OpenAIResponses | null = null
+function getRuntime(): OpenAIResponses {
+    if (_runtime === null) _runtime = new OpenAIResponses()
+    return _runtime
+}
 
 export interface InferenceRound {
     items: ContextItem[]
@@ -39,7 +52,7 @@ export async function runInferenceRound(
     context: ModelContext,
     model: GenerativeModel,
 ): Promise<InferenceRound> {
-    const response = await runtime.infer(new InferenceRequest(model, context))
+    const response = await getRuntime().infer(new InferenceRequest(model, context))
     return {
         items: response.contextItems,
         usage: response.tokenUsage,
