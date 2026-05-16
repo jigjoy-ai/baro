@@ -9,12 +9,7 @@
  * canonical command shape and how to express it as ContextItems.
  */
 
-import {
-    AgenticEnvironment,
-    ContextItem,
-    Participant,
-} from "@mozaik-ai/core"
-
+import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 import { AgentTargetedMessageItem } from "../types.js"
 
 export type OperatorCommand =
@@ -32,21 +27,20 @@ export interface OperatorHooks {
     onShutdown?: () => void
 }
 
-export class Operator extends Participant {
-    private envRef: AgenticEnvironment | null = null
+export class Operator extends BaroParticipant {
+    private envRef: BaroEnvironment | null = null
 
     constructor(private readonly hooks: OperatorHooks = {}) {
         super()
     }
 
-    setEnvironment(env: AgenticEnvironment): void {
+    setEnvironment(env: BaroEnvironment): void {
         this.envRef = env
     }
 
-    async onContextItem(): Promise<void> {
-        // Operator is push-only: it emits in response to external
-        // commands, never reacts to bus events.
-    }
+    // Operator is push-only: it emits in response to external commands,
+    // never reacts to bus events. Default BaroParticipant no-op handlers
+    // cover everything.
 
     /** Translate an external command into bus action / hook callback. */
     dispatch(cmd: OperatorCommand): void {
@@ -74,7 +68,7 @@ export class Operator extends Participant {
         }
     }
 
-    private emit(item: ContextItem): void {
-        this.envRef?.deliverContextItem(this, item)
+    private emit(event: BusEvent): void {
+        this.envRef?.deliverBusEvent(this, event)
     }
 }

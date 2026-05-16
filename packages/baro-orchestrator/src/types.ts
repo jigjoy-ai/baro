@@ -6,7 +6,7 @@
  * Mozaik library package later.
  */
 
-import { ContextItem } from "@mozaik-ai/core"
+import { BusEvent } from "./bus.js"
 
 // ─── Bus routing ────────────────────────────────────────────────────
 
@@ -19,7 +19,7 @@ import { ContextItem } from "@mozaik-ai/core"
  *
  * Library-grade: payload + tags only, no agent-specific assumptions.
  */
-export class KnowledgeItem extends ContextItem {
+export class KnowledgeItem extends BusEvent {
     readonly type = "knowledge"
 
     constructor(
@@ -72,7 +72,7 @@ export interface ReplanStoryAdd {
     model?: string
 }
 
-export class ReplanItem extends ContextItem {
+export class ReplanItem extends BusEvent {
     readonly type = "replan"
 
     constructor(
@@ -105,7 +105,7 @@ export class ReplanItem extends ContextItem {
  * agent to wait, abort, or merge before stepping on another agent's
  * pending work.
  */
-export class CoordinationItem extends ContextItem {
+export class CoordinationItem extends BusEvent {
     readonly type = "coordination"
 
     constructor(
@@ -139,7 +139,7 @@ export class CoordinationItem extends ContextItem {
  * (review feedback), Surgeon (replan directive), Librarian (knowledge
  * injection), etc.
  */
-export class AgentTargetedMessageItem extends ContextItem {
+export class AgentTargetedMessageItem extends BusEvent {
     readonly type = "agent_targeted_message"
 
     constructor(
@@ -175,7 +175,7 @@ export type AgentPhase =
  * Heartbeat / state-change signal for an agent. Observers (Cartographer,
  * Auditor, Throttler) read these to track who's doing what.
  */
-export class AgentStateItem extends ContextItem {
+export class AgentStateItem extends BusEvent {
     readonly type = "agent_state"
 
     constructor(
@@ -199,16 +199,45 @@ export class AgentStateItem extends ContextItem {
 // ─── Claude CLI passthrough types ───────────────────────────────────
 //
 // These wrap Claude stream-json events that don't map cleanly onto Mozaik's
-// built-in ContextItem types (UserMessageItem, ModelMessageItem, etc).
-// They're intentionally close to the wire format so observers can do
-// detailed inspection, while the mapper still emits typed Mozaik items
-// alongside for the events that DO map.
+// built-in delivery channels. They're intentionally close to the wire
+// format so observers can do detailed inspection, while the mapper still
+// routes Mozaik-typed items (ModelMessageItem, FunctionCallItem,
+// FunctionCallOutputItem) through their dedicated typed delivery channels.
+
+/**
+ * User-side message in Claude's stream-json conversation history.
+ *
+ * Mozaik 3.9 ships `UserMessageItem` as a ModelContext content carrier,
+ * but its `AgenticEnvironment` does NOT expose a `deliverUserMessage`
+ * channel — bus delivery is reserved for assistant-side items (model
+ * messages, tool calls) and reasoning. baro emits this custom BusEvent
+ * instead so observers (Cartographer, Auditor) see Claude-side user
+ * turns the same way they see other agent activity.
+ */
+export class AgentUserMessageItem extends BusEvent {
+    readonly type = "agent_user_message"
+
+    constructor(
+        public readonly agentId: string,
+        public readonly text: string,
+    ) {
+        super()
+    }
+
+    toJSON(): unknown {
+        return {
+            type: this.type,
+            agentId: this.agentId,
+            text: this.text,
+        }
+    }
+}
 
 /**
  * Claude `system:*` events — init, status, task_started, task_notification,
  * etc. These describe the Claude session lifecycle, not its content.
  */
-export class ClaudeSystemItem extends ContextItem {
+export class ClaudeSystemItem extends BusEvent {
     readonly type = "claude_system"
 
     constructor(
@@ -234,7 +263,7 @@ export class ClaudeSystemItem extends ContextItem {
  * session_id (for `--resume`), usage, cost, num_turns, duration. This is
  * the single richest event in the stream and most observers care about it.
  */
-export class ClaudeResultItem extends ContextItem {
+export class ClaudeResultItem extends BusEvent {
     readonly type = "claude_result"
 
     constructor(
@@ -273,7 +302,7 @@ export class ClaudeResultItem extends ContextItem {
  * events when --include-partial-messages is on). Most observers should
  * filter these out unless they specifically render a streaming UI.
  */
-export class ClaudeStreamChunkItem extends ContextItem {
+export class ClaudeStreamChunkItem extends BusEvent {
     readonly type = "claude_stream_chunk"
 
     constructor(
@@ -296,7 +325,7 @@ export class ClaudeStreamChunkItem extends ContextItem {
  * Claude `rate_limit_event` — informational throttling notice from the
  * Claude API. Throttler participant uses this to back off.
  */
-export class ClaudeRateLimitItem extends ContextItem {
+export class ClaudeRateLimitItem extends BusEvent {
     readonly type = "claude_rate_limit"
 
     constructor(
@@ -320,7 +349,7 @@ export class ClaudeRateLimitItem extends ContextItem {
  * agent's output. Snake_case keys in toJSON() match the Rust BaroEnum
  * wire format.
  */
-export class CritiqueItem extends ContextItem {
+export class CritiqueItem extends BusEvent {
     readonly type = "critique"
 
     constructor(
@@ -357,7 +386,7 @@ export class CritiqueItem extends ContextItem {
  * recognize. Lets us forward-compatibly carry events without dropping
  * them; observers can still inspect them.
  */
-export class ClaudeUnknownEventItem extends ContextItem {
+export class ClaudeUnknownEventItem extends BusEvent {
     readonly type = "claude_unknown_event"
 
     constructor(
@@ -387,7 +416,7 @@ export class ClaudeUnknownEventItem extends ContextItem {
 // by emitting these items.
 
 /** Emitted to start a run. Anyone can fire this; Conductor reacts. */
-export class RunStartRequestItem extends ContextItem {
+export class RunStartRequestItem extends BusEvent {
     readonly type = "run_start_request"
     constructor(public readonly reason: string = "user request") {
         super()
@@ -398,7 +427,7 @@ export class RunStartRequestItem extends ContextItem {
 }
 
 /** Conductor emits this once the PRD is loaded and ready. */
-export class RunStartedItem extends ContextItem {
+export class RunStartedItem extends BusEvent {
     readonly type = "run_started"
     constructor(
         public readonly project: string,
@@ -415,7 +444,7 @@ export class RunStartedItem extends ContextItem {
  * Emitted by Conductor to request the next level be computed and
  * launched. Internally a self-tick — keeps run() out of the picture.
  */
-export class LevelComputeRequestItem extends ContextItem {
+export class LevelComputeRequestItem extends BusEvent {
     readonly type = "level_compute_request"
     constructor(public readonly reason: string) {
         super()
@@ -426,7 +455,7 @@ export class LevelComputeRequestItem extends ContextItem {
 }
 
 /** Emitted when a new level is starting. Story factories react to this. */
-export class LevelStartedItem extends ContextItem {
+export class LevelStartedItem extends BusEvent {
     readonly type = "level_started"
     constructor(
         public readonly ordinal: number,
@@ -446,7 +475,7 @@ export class LevelStartedItem extends ContextItem {
 }
 
 /** Emitted when all stories in a level have completed (passed or failed). */
-export class LevelCompletedItem extends ContextItem {
+export class LevelCompletedItem extends BusEvent {
     readonly type = "level_completed"
     constructor(
         public readonly ordinal: number,
@@ -470,7 +499,7 @@ export class LevelCompletedItem extends ContextItem {
  * StoryAgent for `storyId`. The factory builds the agent and joins it
  * to the bus. Conductor never imports StoryAgent directly.
  */
-export class StorySpawnRequestItem extends ContextItem {
+export class StorySpawnRequestItem extends BusEvent {
     readonly type = "story_spawn_request"
     constructor(
         public readonly storyId: string,
@@ -494,7 +523,7 @@ export class StorySpawnRequestItem extends ContextItem {
 }
 
 /** Factory emits this once a StoryAgent has joined the bus and started. */
-export class StorySpawnedItem extends ContextItem {
+export class StorySpawnedItem extends BusEvent {
     readonly type = "story_spawned"
     constructor(public readonly storyId: string) {
         super()
@@ -509,7 +538,7 @@ export class StorySpawnedItem extends ContextItem {
  * (after RunCompletedItem, before `gh pr create`). Lets observers
  * surface "finalizing…" UI without inspecting Finalizer's internals.
  */
-export class FinalizeStartedItem extends ContextItem {
+export class FinalizeStartedItem extends BusEvent {
     readonly type = "finalize_started"
     constructor(public readonly branch: string) {
         super()
@@ -530,7 +559,7 @@ export class FinalizeStartedItem extends ContextItem {
  * a null url as "the run is over, no PR exists" rather than "still
  * working."
  */
-export class PrCreatedItem extends ContextItem {
+export class PrCreatedItem extends BusEvent {
     readonly type = "pr_created"
     constructor(
         public readonly url: string | null,
@@ -553,7 +582,7 @@ export class PrCreatedItem extends ContextItem {
  * Final terminal event for a run. Conductor emits this when the loop
  * exits — either all DAG levels drained or a level aborted.
  */
-export class RunCompletedItem extends ContextItem {
+export class RunCompletedItem extends BusEvent {
     readonly type = "run_completed"
     constructor(
         public readonly success: boolean,

@@ -1,5 +1,5 @@
 /**
- * Auditor — passive observer that persists every ContextItem to a JSONL
+ * Auditor — passive observer that persists every bus event to a JSONL
  * file. Used for replay, post-mortem debugging, and (later) `--resume`
  * by replaying the log into a fresh environment.
  *
@@ -9,9 +9,28 @@
 import { appendFileSync, mkdirSync } from "fs"
 import { dirname } from "path"
 
-import { ContextItem, Participant } from "@mozaik-ai/core"
+import {
+    FunctionCallItem,
+    FunctionCallOutputItem,
+    ModelMessageItem,
+    Participant,
+    ReasoningItem,
+} from "@mozaik-ai/core"
 
+import { BaroParticipant, BusEvent } from "../bus.js"
 import { ClaudeStreamChunkItem } from "../types.js"
+
+/**
+ * Anything the auditor can log: baro's typed bus events plus Mozaik's
+ * built-in LLM items. They all expose `toJSON()` and that's the only
+ * shape Auditor needs.
+ */
+type AuditableItem =
+    | BusEvent
+    | ModelMessageItem
+    | FunctionCallItem
+    | FunctionCallOutputItem
+    | ReasoningItem
 
 export interface AuditorOptions {
     /** Path to the JSONL log file. Parent directories are created if needed. */
@@ -23,20 +42,20 @@ export interface AuditorOptions {
      */
     skipStreamChunks?: boolean
     /**
-     * Optional custom filter. If provided, an item is written iff this
+     * Optional custom filter. If provided, an event is written iff this
      * returns true. Runs after `skipStreamChunks`.
      */
-    filter?: (source: Participant, item: ContextItem) => boolean
+    filter?: (source: Participant, event: AuditableItem) => boolean
 }
 
-export class Auditor extends Participant {
+export class Auditor extends BaroParticipant {
     private readonly path: string
     private readonly skipStreamChunks: boolean
-    private readonly filter?: (source: Participant, item: ContextItem) => boolean
+    private readonly filter?: (source: Participant, event: AuditableItem) => boolean
     /**
      * Flips to true the first time a write fails (e.g. EACCES because
      * `~/.baro/runs/` is root-owned from a sudo install). Once disabled,
-     * subsequent items are dropped silently — losing the audit log is
+     * subsequent events are dropped silently — losing the audit log is
      * better than crashing the orchestrator on every bus event.
      */
     private disabled = false
@@ -53,14 +72,33 @@ export class Auditor extends Participant {
         }
     }
 
-    async onContextItem(source: Participant, item: ContextItem): Promise<void> {
+    override async onExternalBusEvent(source: Participant, event: BusEvent): Promise<void> {
+        this.write(source, event)
+    }
+
+    override async onExternalModelMessage(source: Participant, item: ModelMessageItem): Promise<void> {
+        this.write(source, item)
+    }
+
+    override async onExternalFunctionCall(source: Participant, item: FunctionCallItem): Promise<void> {
+        this.write(source, item)
+    }
+
+    override async onExternalFunctionCallOutput(
+        source: Participant,
+        item: FunctionCallOutputItem,
+    ): Promise<void> {
+        this.write(source, item)
+    }
+
+    override async onExternalReasoning(source: Participant, item: ReasoningItem): Promise<void> {
+        this.write(source, item)
+    }
+
+    private write(source: Participant, item: AuditableItem): void {
         if (this.disabled) return
-        if (this.skipStreamChunks && item instanceof ClaudeStreamChunkItem) {
-            return
-        }
-        if (this.filter && !this.filter(source, item)) {
-            return
-        }
+        if (this.skipStreamChunks && item instanceof ClaudeStreamChunkItem) return
+        if (this.filter && !this.filter(source, item)) return
         const entry = {
             ts: new Date().toISOString(),
             source: this.sourceLabel(source),

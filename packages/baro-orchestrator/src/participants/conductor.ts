@@ -39,11 +39,9 @@
 import { existsSync, readFileSync } from "fs"
 import { join } from "path"
 
-import {
-    AgenticEnvironment,
-    ContextItem,
-    Participant,
-} from "@mozaik-ai/core"
+import { Participant } from "@mozaik-ai/core"
+
+import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 
 import { buildDag } from "../dag.js"
 import {
@@ -115,7 +113,7 @@ export interface ConductorRunSummary {
     totalAttempts: number
 }
 
-export class ConductorStateItem extends ContextItem {
+export class ConductorStateItem extends BusEvent {
     readonly type = "conductor_state"
 
     constructor(
@@ -157,13 +155,13 @@ interface RunningLevelState {
     perStoryAttempts: Map<string, number>
 }
 
-export class Conductor extends Participant {
+export class Conductor extends BaroParticipant {
     private readonly opts: Required<
         Pick<ConductorOptions, "parallel" | "timeoutSecs" | "defaultModel">
     > &
         ConductorOptions
 
-    private envRef: AgenticEnvironment | null = null
+    private envRef: BaroEnvironment | null = null
     private phase: ConductorPhase = "idle"
     private prd: PrdFile | null = null
     private startedAt = 0
@@ -221,21 +219,30 @@ export class Conductor extends Participant {
         })
     }
 
-    setEnvironment(env: AgenticEnvironment): void {
+    setEnvironment(env: BaroEnvironment): void {
         this.envRef = env
     }
 
     /**
      * Single entry point. All state transitions happen here.
      *
-     * Note: the Mozaik bus delivers items to every subscriber, INCLUDING
-     * the source. We rely on this — the Conductor self-ticks via
-     * LevelComputeRequestItem, so blocking self-delivery would break the
-     * state machine. Per-item type guards distinguish "from outside"
-     * (RunStartRequestItem from Operator, ReplanItem from Surgeon,
-     * StoryResultItem from StoryAgent) from "from self" (LevelCompute).
+     * Note: the Conductor self-ticks via LevelComputeRequestItem, so it
+     * MUST receive its own emissions. Mozaik 3.9 splits self vs external
+     * delivery — we route both through the same handler so the state
+     * machine sees every event regardless of source. Per-event type
+     * guards distinguish "from outside" (RunStartRequestItem from
+     * Operator, ReplanItem from Surgeon, StoryResultItem from StoryAgent)
+     * from "from self" (LevelCompute).
      */
-    async onContextItem(_source: Participant, item: ContextItem): Promise<void> {
+    override async onBusEvent(event: BusEvent): Promise<void> {
+        await this.handle(event)
+    }
+
+    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
+        await this.handle(event)
+    }
+
+    private async handle(item: BusEvent): Promise<void> {
         if (item instanceof RunStartRequestItem) {
             await this.handleRunStart()
             return
@@ -633,8 +640,8 @@ export class Conductor extends Participant {
         return prompt
     }
 
-    private emit(item: ContextItem): void {
-        this.envRef?.deliverContextItem(this, item)
+    private emit(event: BusEvent): void {
+        this.envRef?.deliverBusEvent(this, event)
     }
 }
 

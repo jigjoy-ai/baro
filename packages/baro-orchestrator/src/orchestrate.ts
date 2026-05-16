@@ -11,13 +11,13 @@ import { mkdirSync } from "fs"
 import { dirname } from "path"
 
 import {
-    AgenticEnvironment,
-    ContextItem,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
     Participant,
 } from "@mozaik-ai/core"
+
+import { BaroEnvironment, BaroParticipant, BusEvent } from "./bus.js"
 
 import {
     GitGate,
@@ -151,7 +151,7 @@ export interface OrchestrateResult {
 export async function orchestrate(
     config: OrchestrateConfig,
 ): Promise<OrchestrateResult> {
-    const env = new AgenticEnvironment()
+    const env = new BaroEnvironment()
     const emitTui = config.emitTuiEvents ?? true
 
     // Optional audit log (resume + post-mortem).
@@ -351,10 +351,10 @@ export async function orchestrate(
     }
 
     // Mozaik-native: kick the run by emitting a RunStartRequestItem on
-    // the bus. Conductor's onContextItem handler picks it up and drives
+    // the bus. Conductor's onExternalBusEvent handler picks it up and drives
     // the state machine forward via further bus events. There is no
     // `conductor.run()` call — the runtime is the loop.
-    env.deliverContextItem(operator, new RunStartRequestItem("orchestrate"))
+    env.deliverBusEvent(operator, new RunStartRequestItem("orchestrate"))
     const summary = await conductor.done
 
     // Drain in-flight async observers so all side effects (CritiqueItem,
@@ -403,7 +403,7 @@ export async function orchestrate(
  * Rust TUI. Lives inside this module so callers don't have to wire
  * sinks themselves.
  */
-class BaroEventForwarder extends Participant {
+class BaroEventForwarder extends BaroParticipant {
     /** Story IDs that have already received a `story_start`. */
     private startedStories = new Set<string>()
     /** Number of in-flight retry attempts per story (for `story_retry`). */
@@ -411,65 +411,65 @@ class BaroEventForwarder extends Participant {
     /** Token-usage tally per story (incrementally updated from results). */
     private tokensByStory = new Map<string, { input: number; output: number }>()
 
-    async onContextItem(source: Participant, item: ContextItem): Promise<void> {
-        if (item instanceof ConductorStateItem) {
-            this.handleConductorState(item)
+    override async onExternalModelMessage(source: Participant, item: ModelMessageItem): Promise<void> {
+        this.handleModelMessage(source, item)
+    }
+
+    override async onExternalFunctionCall(source: Participant, item: FunctionCallItem): Promise<void> {
+        this.handleToolCall(source, item)
+    }
+
+    override async onExternalFunctionCallOutput(
+        source: Participant,
+        item: FunctionCallOutputItem,
+    ): Promise<void> {
+        this.handleToolResult(source, item)
+    }
+
+    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
+        if (event instanceof ConductorStateItem) {
+            this.handleConductorState(event)
             return
         }
 
-        if (item instanceof StoryResultItem) {
-            this.handleStoryResult(item)
+        if (event instanceof StoryResultItem) {
+            this.handleStoryResult(event)
             return
         }
 
-        if (item instanceof ClaudeResultItem) {
-            this.handleClaudeResult(item)
+        if (event instanceof ClaudeResultItem) {
+            this.handleClaudeResult(event)
             return
         }
 
-        if (item instanceof AgentStateItem) {
-            this.handleAgentState(item)
+        if (event instanceof AgentStateItem) {
+            this.handleAgentState(event)
             return
         }
 
-        if (item instanceof ClaudeSystemItem) {
+        if (event instanceof ClaudeSystemItem) {
             // Mostly noise; emit only init transitions (already covered
             // by AgentStateItem) — skip.
             return
         }
 
-        if (item instanceof ModelMessageItem) {
-            this.handleModelMessage(source, item)
+        if (event instanceof CoordinationItem) {
+            this.handleCoordination(event)
             return
         }
 
-        if (item instanceof FunctionCallItem) {
-            this.handleToolCall(source, item)
+        if (event instanceof CritiqueItem) {
+            this.handleCritique(event)
             return
         }
 
-        if (item instanceof FunctionCallOutputItem) {
-            this.handleToolResult(source, item)
-            return
-        }
-
-        if (item instanceof CoordinationItem) {
-            this.handleCoordination(item)
-            return
-        }
-
-        if (item instanceof CritiqueItem) {
-            this.handleCritique(item)
-            return
-        }
-
-        if (item instanceof FinalizeStartedItem) {
+        if (event instanceof FinalizeStartedItem) {
             emit({ type: "finalize_start" })
             return
         }
 
-        if (item instanceof PrCreatedItem) {
-            emit({ type: "finalize_complete", pr_url: item.url })
+        if (event instanceof PrCreatedItem) {
+            emit({ type: "finalize_complete", pr_url: event.url })
             return
         }
     }

@@ -17,12 +17,9 @@
  * Library-grade: no PRD knowledge.
  */
 
-import {
-    ContextItem,
-    FunctionCallItem,
-    Participant,
-} from "@mozaik-ai/core"
+import { FunctionCallItem, Participant } from "@mozaik-ai/core"
 
+import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 import { AgentStateItem, CoordinationItem } from "../types.js"
 
 const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"])
@@ -50,7 +47,7 @@ export interface SentryOptions {
     }) => void
 }
 
-export class Sentry extends Participant {
+export class Sentry extends BaroParticipant {
     private readonly opts: Required<Pick<SentryOptions, "emitNotice">> &
         SentryOptions
     /** path → set of agentIds that have touched it. */
@@ -74,67 +71,63 @@ export class Sentry extends Participant {
         return this.touches
     }
 
-    async onContextItem(source: Participant, item: ContextItem): Promise<void> {
-        if (item instanceof AgentStateItem) {
+    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
+        if (event instanceof AgentStateItem) {
             if (
-                item.phase === "done" ||
-                item.phase === "failed" ||
-                item.phase === "aborted"
+                event.phase === "done" ||
+                event.phase === "failed" ||
+                event.phase === "aborted"
             ) {
-                this.terminalPhase.set(item.agentId, item.phase)
+                this.terminalPhase.set(event.agentId, event.phase)
             }
-            return
         }
+    }
 
-        if (item instanceof FunctionCallItem) {
-            if (!WRITE_TOOLS.has(item.name)) return
-            const agentId = (source as unknown as { agentId?: string }).agentId
-            if (typeof agentId !== "string") return
-            const path = extractPath(item)
-            if (!path) return
+    override async onExternalFunctionCall(
+        source: Participant,
+        item: FunctionCallItem,
+    ): Promise<void> {
+        if (!WRITE_TOOLS.has(item.name)) return
+        const agentId = (source as unknown as { agentId?: string }).agentId
+        if (typeof agentId !== "string") return
+        const path = extractPath(item)
+        if (!path) return
 
-            const touch: PendingTouch = {
-                agentId,
-                path,
-                tool: item.name,
-                at: Date.now(),
-            }
-            this.touches.push(touch)
+        const touch: PendingTouch = {
+            agentId,
+            path,
+            tool: item.name,
+            at: Date.now(),
+        }
+        this.touches.push(touch)
 
-            const set = this.touchedBy.get(path) ?? new Set<string>()
-            set.add(agentId)
-            this.touchedBy.set(path, set)
+        const set = this.touchedBy.get(path) ?? new Set<string>()
+        set.add(agentId)
+        this.touchedBy.set(path, set)
 
-            // Flag overlap: another agent has already touched this path
-            // and hasn't reached a terminal phase, OR has reached a
-            // terminal phase but during this run.
-            const otherAgents = [...set].filter((a) => a !== agentId)
-            if (otherAgents.length === 0) return
+        const otherAgents = [...set].filter((a) => a !== agentId)
+        if (otherAgents.length === 0) return
 
-            this.opts.onOverlap?.({
-                path,
-                agents: [agentId, ...otherAgents],
-            })
+        this.opts.onOverlap?.({
+            path,
+            agents: [agentId, ...otherAgents],
+        })
 
-            if (!this.opts.emitNotice || this.noticedPaths.has(path)) {
-                return
-            }
-            this.noticedPaths.add(path)
+        if (!this.opts.emitNotice || this.noticedPaths.has(path)) return
+        this.noticedPaths.add(path)
 
-            const reason = `agents [${[agentId, ...otherAgents].join(", ")}] both touched ${path}`
-            for (const env of this.getEnvironments()) {
-                env.deliverContextItem(
-                    this,
-                    new CoordinationItem(
-                        agentId,
-                        otherAgents[0]!,
-                        "notice",
-                        reason,
-                        { path, agents: [agentId, ...otherAgents] },
-                    ),
-                )
-            }
-            return
+        const reason = `agents [${[agentId, ...otherAgents].join(", ")}] both touched ${path}`
+        for (const env of this.getEnvironments()) {
+            ;(env as BaroEnvironment).deliverBusEvent(
+                this,
+                new CoordinationItem(
+                    agentId,
+                    otherAgents[0]!,
+                    "notice",
+                    reason,
+                    { path, agents: [agentId, ...otherAgents] },
+                ),
+            )
         }
     }
 }

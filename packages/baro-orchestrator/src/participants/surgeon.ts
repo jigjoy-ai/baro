@@ -29,7 +29,9 @@
 import { execFile } from "child_process"
 import { promisify } from "util"
 
-import { ContextItem, Participant } from "@mozaik-ai/core"
+import { Participant } from "@mozaik-ai/core"
+
+import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 
 import { ReplanItem, ReplanStoryAdd } from "../types.js"
 import { StoryResultItem } from "./story-agent.js"
@@ -122,7 +124,7 @@ Rules:
 - "abort" → empty added/removed/modifiedDeps arrays.
 - Output ONLY the JSON object, nothing else.`
 
-export class Surgeon extends Participant {
+export class Surgeon extends BaroParticipant {
     private readonly opts: Required<
         Pick<
             SurgeonOptions,
@@ -151,19 +153,19 @@ export class Surgeon extends Participant {
         await Promise.allSettled([...this.pending])
     }
 
-    async onContextItem(_source: Participant, item: ContextItem): Promise<void> {
-        if (!(item instanceof StoryResultItem)) return
-        if (item.success) return
+    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
+        if (!(event instanceof StoryResultItem)) return
+        if (event.success) return
         if (this.replansEmitted >= this.opts.maxReplans) return
 
         const work = (async () => {
             const replan = this.opts.useLlm
-                ? await this.evaluateWithLlm(item)
-                : this.evaluateDeterministic(item)
+                ? await this.evaluateWithLlm(event)
+                : this.evaluateDeterministic(event)
             if (!replan) return
             this.replansEmitted += 1
             for (const env of this.getEnvironments()) {
-                env.deliverContextItem(this, replan)
+                ;(env as BaroEnvironment).deliverBusEvent(this, replan)
             }
         })()
 

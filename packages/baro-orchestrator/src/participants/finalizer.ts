@@ -28,7 +28,9 @@
 import { execFile } from "child_process"
 import { promisify } from "util"
 
-import { AgenticEnvironment, ContextItem, Participant } from "@mozaik-ai/core"
+import { Participant } from "@mozaik-ai/core"
+
+import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 
 import { buildDag } from "../dag.js"
 import { getHeadSha } from "../git.js"
@@ -67,10 +69,10 @@ interface StoryRecord {
     levelOrdinal: number | null
 }
 
-export class Finalizer extends Participant {
+export class Finalizer extends BaroParticipant {
     private readonly opts: Required<Omit<FinalizerOptions, "baseSha" | "onLog">> &
         Pick<FinalizerOptions, "onLog">
-    private envRef: AgenticEnvironment | null = null
+    private envRef: BaroEnvironment | null = null
 
     private startedAtMs: number | null = null
     private baseSha: string | null
@@ -102,11 +104,11 @@ export class Finalizer extends Participant {
         this.baseSha = opts.baseSha ?? null
     }
 
-    setEnvironment(env: AgenticEnvironment): void {
+    setEnvironment(env: BaroEnvironment): void {
         this.envRef = env
     }
 
-    async onContextItem(_source: Participant, item: ContextItem): Promise<void> {
+    override async onExternalBusEvent(_source: Participant, item: BusEvent): Promise<void> {
         if (item instanceof RunStartedItem) {
             this.startedAtMs = Date.now()
             // Capture base SHA at run start so we can later list commits
@@ -278,8 +280,8 @@ export class Finalizer extends Participant {
 
     // ─── Bus & env helpers ──────────────────────────────────────────
 
-    private emit(item: ContextItem): void {
-        this.envRef?.deliverContextItem(this, item)
+    private emit(event: BusEvent): void {
+        this.envRef?.deliverBusEvent(this, event)
     }
 
     private log(line: string): void {
