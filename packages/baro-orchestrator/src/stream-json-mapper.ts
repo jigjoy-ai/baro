@@ -1,25 +1,29 @@
 /**
- * Map Claude Code CLI stream-json events to Mozaik typed ContextItems.
+ * Map Claude Code CLI stream-json events to typed items for bus delivery.
  *
- * Strategy: where the event maps cleanly onto a Mozaik built-in
- * (ModelMessageItem, FunctionCallItem, FunctionCallOutputItem,
- * UserMessageItem) we emit that. Where it doesn't, we emit one of the
- * Claude-specific items defined in `./types`. Either way every input event
- * maps to a non-empty ContextItem array — we never silently drop data.
+ * Strategy: assistant-side messages and tool I/O map cleanly onto Mozaik
+ * built-in items (ModelMessageItem, FunctionCallItem,
+ * FunctionCallOutputItem), which `ClaudeCliParticipant` dispatches via
+ * the matching `env.deliverModelMessage` / `deliverFunctionCall` /
+ * `deliverFunctionCallOutput` channels in Mozaik 3.9+. The rest
+ * (user-side messages, system frames, result frames, rate-limits,
+ * stream chunks, unknowns) become baro-specific `BusEvent` subclasses
+ * because Mozaik 3.9 doesn't expose typed channels for them.
  *
- * Tested against real spike logs in
+ * Every input event still maps to a non-empty array — we never silently
+ * drop data. Tested against real spike logs in
  * `packages/baro-app/scripts/spike-logs/`.
  */
 
 import {
-    ContextItem,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
-    UserMessageItem,
 } from "@mozaik-ai/core"
 
+import { BusEvent } from "./bus.js"
 import {
+    AgentUserMessageItem,
     ClaudeRateLimitItem,
     ClaudeResultItem,
     ClaudeStreamChunkItem,
@@ -27,9 +31,19 @@ import {
     ClaudeUnknownEventItem,
 } from "./types.js"
 
+/**
+ * Union of every kind of item the mapper can produce. Mozaik built-in
+ * types are dispatched via their native bus channels; `BusEvent` ones
+ * via `deliverBusEvent`.
+ */
+export type MappedItem =
+    | ModelMessageItem
+    | FunctionCallItem
+    | FunctionCallOutputItem
+    | BusEvent
+
 export interface MapResult {
-    /** Typed ContextItems produced from this event. May be empty. */
-    items: ContextItem[]
+    items: MappedItem[]
     /** session_id observed on this event, if any. */
     sessionId: string | null
 }
@@ -40,7 +54,7 @@ export function mapClaudeEvent(
 ): MapResult {
     const sessionId =
         typeof event.session_id === "string" ? event.session_id : null
-    const items: ContextItem[] = []
+    const items: MappedItem[] = []
 
     switch (event.type) {
         case "system": {
@@ -70,7 +84,7 @@ export function mapClaudeEvent(
             //   2. a tool_result    (message.content: [{type:"tool_result",...}])
             const content = event?.message?.content
             if (typeof content === "string") {
-                items.push(UserMessageItem.create(content))
+                items.push(new AgentUserMessageItem(agentId, content))
             } else if (Array.isArray(content)) {
                 for (const block of content) {
                     if (

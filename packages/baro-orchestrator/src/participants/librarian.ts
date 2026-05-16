@@ -34,11 +34,12 @@
  */
 
 import {
-    ContextItem,
     FunctionCallItem,
     FunctionCallOutputItem,
     Participant,
 } from "@mozaik-ai/core"
+
+import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 
 import {
     AgentTargetedMessageItem,
@@ -103,7 +104,7 @@ export interface LibrarianOptions {
     maxBroadcastBytesPerStory?: number
 }
 
-export class Librarian extends Participant {
+export class Librarian extends BaroParticipant {
     private readonly opts: Required<LibrarianOptions>
     private readonly pending = new Map<string, PendingCall>()
     private readonly knowledge: IndexedKnowledge[] = []
@@ -178,26 +179,28 @@ export class Librarian extends Participant {
         ].join("\n")
     }
 
-    async onContextItem(source: Participant, item: ContextItem): Promise<void> {
-        if (item instanceof FunctionCallItem) {
-            this.recordPending(source, item)
+    override async onExternalFunctionCall(source: Participant, item: FunctionCallItem): Promise<void> {
+        this.recordPending(source, item)
+    }
+
+    override async onExternalFunctionCallOutput(
+        source: Participant,
+        item: FunctionCallOutputItem,
+    ): Promise<void> {
+        this.completeWithOutput(source, item)
+    }
+
+    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
+        if (event instanceof StorySpawnRequestItem) {
+            this.storyHints.set(event.storyId, tokenizeHints(event.prompt))
             return
         }
-        if (item instanceof FunctionCallOutputItem) {
-            this.completeWithOutput(source, item)
+        if (event instanceof StorySpawnedItem) {
+            this.inFlight.add(event.storyId)
             return
         }
-        if (item instanceof StorySpawnRequestItem) {
-            this.storyHints.set(item.storyId, tokenizeHints(item.prompt))
-            return
-        }
-        if (item instanceof StorySpawnedItem) {
-            this.inFlight.add(item.storyId)
-            return
-        }
-        if (item instanceof StoryResultItem) {
-            this.inFlight.delete(item.storyId)
-            return
+        if (event instanceof StoryResultItem) {
+            this.inFlight.delete(event.storyId)
         }
     }
 
@@ -252,7 +255,7 @@ export class Librarian extends Participant {
         // Surface as a bus event for any other observers (and Phase-3
         // mid-flight injectors).
         for (const env of this.getEnvironments()) {
-            env.deliverContextItem(
+            (env as BaroEnvironment).deliverBusEvent(
                 this,
                 new KnowledgeItem(
                     entry.sourceAgentId,
@@ -322,7 +325,7 @@ export class Librarian extends Participant {
             this.broadcastBytes.set(recipientId, already + bytes)
 
             for (const env of envs) {
-                env.deliverContextItem(
+                (env as BaroEnvironment).deliverBusEvent(
                     this,
                     new AgentTargetedMessageItem(recipientId, text, {
                         source: "librarian",

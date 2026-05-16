@@ -25,11 +25,9 @@
 
 import { setTimeout as setTimeoutPromise } from "timers/promises"
 
-import {
-    AgenticEnvironment,
-    ContextItem,
-    Participant,
-} from "@mozaik-ai/core"
+import { Participant } from "@mozaik-ai/core"
+
+import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 
 import {
     AgentPhase,
@@ -83,7 +81,7 @@ export interface StoryOutcome {
     error: string | null
 }
 
-export class StoryResultItem extends ContextItem {
+export class StoryResultItem extends BusEvent {
     readonly type = "story_result"
 
     constructor(
@@ -108,7 +106,7 @@ export class StoryResultItem extends ContextItem {
     }
 }
 
-export class StoryAgent extends Participant {
+export class StoryAgent extends BaroParticipant {
     private readonly spec: Required<
         Pick<
             StorySpec,
@@ -122,7 +120,7 @@ export class StoryAgent extends Participant {
     > &
         StorySpec
 
-    private envRef: AgenticEnvironment | null = null
+    private envRef: BaroEnvironment | null = null
     private currentClaude: ClaudeCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -177,7 +175,7 @@ export class StoryAgent extends Participant {
      * Begin executing the story. Idempotent. Returns the `done` promise
      * for the caller's convenience.
      */
-    run(environment: AgenticEnvironment): Promise<StoryOutcome> {
+    run(environment: BaroEnvironment): Promise<StoryOutcome> {
         if (this.startedAt != null) {
             return this.done
         }
@@ -196,18 +194,16 @@ export class StoryAgent extends Participant {
      * StoryAgent is the sole owner of AgentTargetedMessageItem → stdin
      * forwarding. ClaudeCliParticipant.onContextItem does NOT do this.
      */
-    async onContextItem(source: Participant, item: ContextItem): Promise<void> {
-        if (source === this) return
-
+    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
         // StoryAgent observes AgentTargetedMessageItem and ClaudeResultItem
         // for lifecycle/timing purposes only. The actual stdin forwarding
-        // is owned by ClaudeCliParticipant.onContextItem to avoid
+        // is owned by ClaudeCliParticipant.onExternalBusEvent to avoid
         // double-delivery.
-        if (item instanceof AgentTargetedMessageItem && item.recipientId === this.spec.id) {
+        if (event instanceof AgentTargetedMessageItem && event.recipientId === this.spec.id) {
             this.notifyStoryMessage?.()
         }
 
-        if (item instanceof ClaudeResultItem && item.agentId === this.spec.id) {
+        if (event instanceof ClaudeResultItem && event.agentId === this.spec.id) {
             this.notifyStoryResult?.()
         }
     }
@@ -434,7 +430,7 @@ export class StoryAgent extends Participant {
         error: string | null,
     ): void {
         if (!this.envRef) return
-        this.envRef.deliverContextItem(
+        this.envRef.deliverBusEvent(
             this,
             new StoryResultItem(this.spec.id, success, attempts, durationSecs, error),
         )
@@ -444,7 +440,7 @@ export class StoryAgent extends Participant {
         if (next === this.currentPhase) return
         this.currentPhase = next
         if (this.envRef) {
-            this.envRef.deliverContextItem(
+            this.envRef.deliverBusEvent(
                 this,
                 new AgentStateItem(this.spec.id, next, detail),
             )

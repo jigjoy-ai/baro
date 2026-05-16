@@ -14,8 +14,14 @@
 
 import { ChildProcess, spawn } from "child_process"
 
-import { AgenticEnvironment, ContextItem, Participant } from "@mozaik-ai/core"
+import {
+    FunctionCallItem,
+    FunctionCallOutputItem,
+    ModelMessageItem,
+    Participant,
+} from "@mozaik-ai/core"
 
+import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 import { mapClaudeEvent } from "../stream-json-mapper.js"
 import {
     AgentPhase,
@@ -66,7 +72,7 @@ export interface ClaudeRunSummary {
     lastResult: ClaudeResultItem | null
 }
 
-export class ClaudeCliParticipant extends Participant {
+export class ClaudeCliParticipant extends BaroParticipant {
     /**
      * Process-wide registry of every Claude child currently running.
      * Used by the orchestrator's SIGINT/SIGTERM handlers to nuke
@@ -96,7 +102,7 @@ export class ClaudeCliParticipant extends Participant {
 
     private proc: ChildProcess | null = null
     private buffer = ""
-    private envRef: AgenticEnvironment | null = null
+    private envRef: BaroEnvironment | null = null
     private currentPhase: AgentPhase = "idle"
     private sessionId: string | null = null
     private lastResult: ClaudeResultItem | null = null
@@ -144,7 +150,7 @@ export class ClaudeCliParticipant extends Participant {
      * Spawn the Claude process and start streaming its events into the
      * environment. Idempotent: subsequent calls are a no-op.
      */
-    start(environment: AgenticEnvironment): void {
+    start(environment: BaroEnvironment): void {
         if (this.proc) return
         this.envRef = environment
 
@@ -225,18 +231,17 @@ export class ClaudeCliParticipant extends Participant {
         this.proc?.kill(signal)
     }
 
-    async onContextItem(source: Participant, item: ContextItem): Promise<void> {
-        if (source === this) return
+    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
         // ClaudeCliParticipant owns bus → stdin forwarding for messages
         // addressed to its agentId. StoryAgent (when present) observes
-        // these items for lifecycle/timing purposes only — it does NOT
+        // these events for lifecycle/timing purposes only — it does NOT
         // also write to stdin, to avoid double-delivery.
         if (
-            item instanceof AgentTargetedMessageItem &&
-            item.recipientId === this.agentId
+            event instanceof AgentTargetedMessageItem &&
+            event.recipientId === this.agentId
         ) {
             if (!this.proc?.stdin) return
-            this.sendUserMessage(item.text)
+            this.sendUserMessage(event.text)
         }
     }
 
@@ -313,18 +318,40 @@ export class ClaudeCliParticipant extends Participant {
                 this.lastResult = item
                 this.transition(item.isError ? "failed" : "done", `result:${item.subtype}`)
             }
-            this.envRef?.deliverContextItem(this, item)
+            this.dispatch(item)
         }
+    }
+
+    /**
+     * Route a mapped stream-json item to the right Mozaik 3.9 delivery
+     * channel. Assistant-side LLM items get their dedicated typed
+     * channels so future Mozaik-native participants can listen
+     * idiomatically; everything else (user-side messages, system frames,
+     * result frames, custom Claude wrappers) rides our `BusEvent` bus.
+     */
+    private dispatch(item: ModelMessageItem | FunctionCallItem | FunctionCallOutputItem | BusEvent): void {
+        if (!this.envRef) return
+        if (item instanceof ModelMessageItem) {
+            this.envRef.deliverModelMessage(this, item)
+            return
+        }
+        if (item instanceof FunctionCallItem) {
+            this.envRef.deliverFunctionCall(this, item)
+            return
+        }
+        if (item instanceof FunctionCallOutputItem) {
+            this.envRef.deliverFunctionCallOutput(this, item)
+            return
+        }
+        this.envRef.deliverBusEvent(this, item)
     }
 
     private transition(next: AgentPhase, detail?: string): void {
         if (next === this.currentPhase) return
         this.currentPhase = next
-        if (this.envRef) {
-            this.envRef.deliverContextItem(
-                this,
-                new AgentStateItem(this.agentId, next, detail),
-            )
-        }
+        this.envRef?.deliverBusEvent(
+            this,
+            new AgentStateItem(this.agentId, next, detail),
+        )
     }
 }

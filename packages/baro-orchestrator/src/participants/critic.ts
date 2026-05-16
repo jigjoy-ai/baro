@@ -24,7 +24,9 @@
 import { execFile } from "child_process"
 import { promisify } from "util"
 
-import { ContextItem, Participant } from "@mozaik-ai/core"
+import { Participant } from "@mozaik-ai/core"
+
+import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 
 import {
     AgentTargetedMessageItem,
@@ -65,7 +67,7 @@ export interface CriticOptions {
     timeoutMs?: number
 }
 
-export class Critic extends Participant {
+export class Critic extends BaroParticipant {
     private readonly opts: Required<CriticOptions>
     /** agentId → number of AgentTargetedMessageItem-s emitted so far. */
     private readonly emissions = new Map<string, number>()
@@ -95,25 +97,25 @@ export class Critic extends Participant {
         await Promise.allSettled([...this.pending])
     }
 
-    async onContextItem(_source: Participant, item: ContextItem): Promise<void> {
-        if (!(item instanceof ClaudeResultItem)) return
-        if (item.isError || !item.resultText) return
+    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
+        if (!(event instanceof ClaudeResultItem)) return
+        if (event.isError || !event.resultText) return
 
-        const criteria = this.opts.targets.get(item.agentId)
+        const criteria = this.opts.targets.get(event.agentId)
         if (!criteria || criteria.length === 0) return
 
-        const turn = (this.turnCount.get(item.agentId) ?? 0) + 1
-        this.turnCount.set(item.agentId, turn)
+        const turn = (this.turnCount.get(event.agentId) ?? 0) + 1
+        this.turnCount.set(event.agentId, turn)
 
         const work = (async () => {
             const { verdict, reasoning, violatedCriteria } = await this.evaluate(
-                item.resultText!,
+                event.resultText!,
                 criteria,
             )
 
             // Always emit audit trail.
             const critiqueItem = new CritiqueItem(
-                item.agentId,
+                event.agentId,
                 verdict,
                 reasoning,
                 violatedCriteria,
@@ -121,22 +123,22 @@ export class Critic extends Participant {
                 this.opts.model,
             )
             for (const env of this.getEnvironments()) {
-                env.deliverContextItem(this, critiqueItem)
+                ;(env as BaroEnvironment).deliverBusEvent(this, critiqueItem)
             }
 
             // Emit corrective message only on fail and under the per-agent cap.
             if (verdict === "fail") {
-                const emitted = this.emissions.get(item.agentId) ?? 0
+                const emitted = this.emissions.get(event.agentId) ?? 0
                 if (emitted < this.opts.maxEmissionsPerAgent) {
-                    this.emissions.set(item.agentId, emitted + 1)
+                    this.emissions.set(event.agentId, emitted + 1)
                     const text = buildCorrectiveMessage(reasoning, violatedCriteria)
                     const msg = new AgentTargetedMessageItem(
-                        item.agentId,
+                        event.agentId,
                         text,
                         { criticTurn: turn, emissionIndex: emitted + 1 },
                     )
                     for (const env of this.getEnvironments()) {
-                        env.deliverContextItem(this, msg)
+                        ;(env as BaroEnvironment).deliverBusEvent(this, msg)
                     }
                 }
             }

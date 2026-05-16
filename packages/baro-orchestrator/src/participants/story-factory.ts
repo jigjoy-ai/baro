@@ -10,12 +10,9 @@
  * remote-execution variant) requires no changes to Conductor.
  */
 
-import {
-    AgenticEnvironment,
-    ContextItem,
-    Participant,
-} from "@mozaik-ai/core"
+import { Participant } from "@mozaik-ai/core"
 
+import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 import {
     StorySpawnRequestItem,
     StorySpawnedItem,
@@ -26,33 +23,31 @@ export interface StoryFactoryOptions {
     cwd: string
 }
 
-export class StoryFactory extends Participant {
-    private envRef: AgenticEnvironment | null = null
+export class StoryFactory extends BaroParticipant {
+    private envRef: BaroEnvironment | null = null
     private readonly active: Map<string, StoryAgent> = new Map()
 
     constructor(private readonly opts: StoryFactoryOptions) {
         super()
     }
 
-    setEnvironment(env: AgenticEnvironment): void {
+    setEnvironment(env: BaroEnvironment): void {
         this.envRef = env
     }
 
-    async onContextItem(source: Participant, item: ContextItem): Promise<void> {
-        if (source === this) return
-
-        if (item instanceof StorySpawnRequestItem) {
-            await this.spawn(item)
+    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
+        if (event instanceof StorySpawnRequestItem) {
+            await this.spawn(event)
             return
         }
 
         // When a story finishes (passes or fails), drop our reference so
         // we can clean up its bus membership.
-        if (item instanceof StoryResultItem) {
-            const agent = this.active.get(item.storyId)
+        if (event instanceof StoryResultItem) {
+            const agent = this.active.get(event.storyId)
             if (agent && this.envRef) {
                 agent.leave(this.envRef)
-                this.active.delete(item.storyId)
+                this.active.delete(event.storyId)
             }
         }
     }
@@ -81,6 +76,6 @@ export class StoryFactory extends Participant {
         // Emit the "yes, agent spawned" notification so observers can
         // see the lifecycle. Conductor doesn't actually need this, but
         // it makes audit logs/replays much clearer.
-        this.envRef.deliverContextItem(this, new StorySpawnedItem(req.storyId))
+        this.envRef.deliverBusEvent(this, new StorySpawnedItem(req.storyId))
     }
 }

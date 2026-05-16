@@ -12,17 +12,17 @@
  */
 
 import {
-    ContextItem,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
     Participant,
-    UserMessageItem,
 } from "@mozaik-ai/core"
 
+import { BaroParticipant, BusEvent } from "../bus.js"
 import {
     AgentStateItem,
     AgentTargetedMessageItem,
+    AgentUserMessageItem,
     ClaudeRateLimitItem,
     ClaudeResultItem,
     ClaudeStreamChunkItem,
@@ -52,7 +52,7 @@ export interface CartographerOptions {
     emitStreamChunks?: boolean
 }
 
-export class Cartographer extends Participant {
+export class Cartographer extends BaroParticipant {
     private readonly sink: (frame: Frame) => void
     private readonly emitStreamChunks: boolean
 
@@ -62,100 +62,111 @@ export class Cartographer extends Participant {
         this.emitStreamChunks = opts.emitStreamChunks ?? false
     }
 
-    async onContextItem(source: Participant, item: ContextItem): Promise<void> {
-        const agentId = this.extractAgentId(source, item)
+    // ─── Mozaik-typed assistant events (now on their dedicated channels) ──
 
-        if (item instanceof AgentStateItem) {
+    override async onExternalModelMessage(
+        source: Participant,
+        item: ModelMessageItem,
+    ): Promise<void> {
+        const agentId = this.extractAgentId(source, item)
+        const json = item.toJSON() as { content: Array<{ text: string }> }
+        const text = json.content?.[0]?.text ?? ""
+        this.sink({ kind: "model_message", agentId, text })
+    }
+
+    override async onExternalFunctionCall(
+        source: Participant,
+        item: FunctionCallItem,
+    ): Promise<void> {
+        const agentId = this.extractAgentId(source, item)
+        this.sink({
+            kind: "tool_call",
+            agentId,
+            callId: item.callId,
+            name: item.name,
+            args: item.args,
+        })
+    }
+
+    override async onExternalFunctionCallOutput(
+        source: Participant,
+        item: FunctionCallOutputItem,
+    ): Promise<void> {
+        const agentId = this.extractAgentId(source, item)
+        const json = item.toJSON() as { call_id: string; output: Array<{ text: string }> }
+        const output = json.output?.[0]?.text ?? ""
+        this.sink({ kind: "tool_result", agentId, callId: json.call_id, output })
+    }
+
+    // ─── baro custom bus events ───────────────────────────────────────
+
+    override async onExternalBusEvent(source: Participant, event: BusEvent): Promise<void> {
+        const agentId = this.extractAgentId(source, event)
+
+        if (event instanceof AgentStateItem) {
             this.sink({
                 kind: "agent_state",
-                agentId: item.agentId,
-                phase: item.phase,
-                detail: item.detail,
+                agentId: event.agentId,
+                phase: event.phase,
+                detail: event.detail,
             })
             return
         }
 
-        if (item instanceof UserMessageItem) {
-            const json = item.toJSON() as { content: Array<{ text: string }> }
-            const text = json.content?.[0]?.text ?? ""
-            this.sink({ kind: "user_message", agentId, text })
+        if (event instanceof AgentUserMessageItem) {
+            this.sink({ kind: "user_message", agentId: event.agentId, text: event.text })
             return
         }
 
-        if (item instanceof AgentTargetedMessageItem) {
+        if (event instanceof AgentTargetedMessageItem) {
             this.sink({
                 kind: "user_message",
-                agentId: item.recipientId,
-                text: item.text,
+                agentId: event.recipientId,
+                text: event.text,
             })
             return
         }
 
-        if (item instanceof ModelMessageItem) {
-            const json = item.toJSON() as { content: Array<{ text: string }> }
-            const text = json.content?.[0]?.text ?? ""
-            this.sink({ kind: "model_message", agentId, text })
-            return
-        }
-
-        if (item instanceof FunctionCallItem) {
-            this.sink({
-                kind: "tool_call",
-                agentId,
-                callId: item.callId,
-                name: item.name,
-                args: item.args,
-            })
-            return
-        }
-
-        if (item instanceof FunctionCallOutputItem) {
-            const json = item.toJSON() as { call_id: string; output: Array<{ text: string }> }
-            const output = json.output?.[0]?.text ?? ""
-            this.sink({ kind: "tool_result", agentId, callId: json.call_id, output })
-            return
-        }
-
-        if (item instanceof ClaudeResultItem) {
+        if (event instanceof ClaudeResultItem) {
             this.sink({
                 kind: "result",
-                agentId: item.agentId,
-                isError: item.isError,
-                text: item.resultText,
-                durationMs: item.durationMs,
-                costUsd: item.totalCostUsd,
-                numTurns: item.numTurns,
-                sessionId: item.sessionId,
+                agentId: event.agentId,
+                isError: event.isError,
+                text: event.resultText,
+                durationMs: event.durationMs,
+                costUsd: event.totalCostUsd,
+                numTurns: event.numTurns,
+                sessionId: event.sessionId,
             })
             return
         }
 
-        if (item instanceof ClaudeRateLimitItem) {
-            this.sink({ kind: "rate_limit", agentId: item.agentId, raw: item.raw })
+        if (event instanceof ClaudeRateLimitItem) {
+            this.sink({ kind: "rate_limit", agentId: event.agentId, raw: event.raw })
             return
         }
 
-        if (item instanceof ClaudeSystemItem) {
+        if (event instanceof ClaudeSystemItem) {
             this.sink({
                 kind: "system",
-                agentId: item.agentId,
-                subtype: item.subtype,
+                agentId: event.agentId,
+                subtype: event.subtype,
             })
             return
         }
 
-        if (item instanceof ClaudeStreamChunkItem) {
+        if (event instanceof ClaudeStreamChunkItem) {
             if (this.emitStreamChunks) {
-                this.sink({ kind: "stream_chunk", agentId: item.agentId })
+                this.sink({ kind: "stream_chunk", agentId: event.agentId })
             }
             return
         }
 
-        if (item instanceof ClaudeUnknownEventItem) {
+        if (event instanceof ClaudeUnknownEventItem) {
             this.sink({
                 kind: "unknown",
                 sourceLabel: source.constructor.name,
-                itemType: item.claudeType,
+                itemType: event.claudeType,
             })
             return
         }
@@ -165,12 +176,15 @@ export class Cartographer extends Participant {
         this.sink({
             kind: "unknown",
             sourceLabel: source.constructor.name,
-            itemType: (item as { type?: string }).type ?? "unspecified",
+            itemType: event.type ?? "unspecified",
         })
     }
 
-    private extractAgentId(source: Participant, item: ContextItem): string | null {
-        const fromItem = (item as unknown as { agentId?: string }).agentId
+    private extractAgentId(
+        source: Participant,
+        item: { agentId?: string } | object,
+    ): string | null {
+        const fromItem = (item as { agentId?: string }).agentId
         if (typeof fromItem === "string") return fromItem
         const fromSource = (source as unknown as { agentId?: string }).agentId
         return typeof fromSource === "string" ? fromSource : null
