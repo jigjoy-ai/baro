@@ -238,6 +238,13 @@ enum AppEvent {
     RefineReady(Vec<ReviewStory>, String, String, String),
     RefineError(String),
     BranchError(String),
+    /// Fresh branch creation succeeded. Payload is the suffixed full
+    /// branch name (e.g. `baro/add-anthropic-provider-12345`) that the
+    /// async git task settled on. The handler mutates `app.branch_name`
+    /// so the TUI and any later `_baro` snapshot reflect the actual
+    /// branch the orchestrator is working on. Without this the display
+    /// stays stuck on the pre-suffix name from the planner.
+    BranchReady(String),
     ArchitectStarted,
     ArchitectComplete(String), // decision document (markdown)
     ArchitectSkipped(String),  // reason (not fatal — planner will still run)
@@ -603,6 +610,9 @@ async fn run_app(
                 app.planning_error = Some(err);
                 app.screen = Screen::Review;
             }
+            Some(AppEvent::BranchReady(name)) => {
+                app.branch_name = name;
+            }
             Some(AppEvent::Key(key)) => {
                 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
                 if key.kind != KeyEventKind::Press {
@@ -819,9 +829,14 @@ async fn run_app(
                                         let stm = app.story_model.clone();
                                         let err_tx = tx.clone();
                                         tokio::spawn(async move {
-                                            if let Err(e) = git::create_or_checkout_branch(&branch_cwd, &branch_name_clone).await {
+                                            // Resume path: prd.json already holds the
+                                            // suffixed branch name from the prior fresh
+                                            // run, so just check it out — never create a
+                                            // new branch here (that would silently drift
+                                            // off the user's prior work).
+                                            if let Err(e) = git::checkout_existing_branch(&branch_cwd, &branch_name_clone).await {
                                                 let _ = err_tx.send(AppEvent::BranchError(
-                                                    format!("Branch creation failed: {}. Cannot proceed on main branch.", e)
+                                                    format!("Branch checkout failed: {}. Cannot resume run on this branch.", e)
                                                 )).await;
                                                 return;
                                             }
@@ -885,17 +900,42 @@ async fn run_app(
                                     let stm = app.story_model.clone();
                                     let err_tx = tx.clone();
                                     tokio::spawn(async move {
-                                        if let Err(e) = git::create_or_checkout_branch(&branch_cwd, &branch_name_clone).await {
+                                        // Fresh run: ALWAYS create a new suffixed branch
+                                        // (no fallback to checkout). Side-by-side runs
+                                        // from sibling clones with the same origin would
+                                        // otherwise collide on `git push`, and the user
+                                        // explicitly wants every run on its own branch.
+                                        let actual_full_branch = match git::create_fresh_branch(&branch_cwd, &branch_name_clone).await {
+                                            Ok(name) => name,
+                                            Err(e) => {
+                                                let _ = err_tx.send(AppEvent::BranchError(
+                                                    format!("Branch creation failed: {}. Cannot proceed on main branch.", e)
+                                                )).await;
+                                                return;
+                                            }
+                                        };
+                                        // Persist the suffixed name back to prd.json so
+                                        // the orchestrator's Finalizer pushes/PRs against
+                                        // the real branch, and a later `baro resume` picks
+                                        // up the same branch instead of generating a new
+                                        // suffix.
+                                        let mut exec_prd = exec_prd;
+                                        exec_prd.branch_name = actual_full_branch
+                                            .strip_prefix("baro/")
+                                            .unwrap_or(&actual_full_branch)
+                                            .to_string();
+                                        if let Err(e) = executor::write_prd(&exec_prd, &exec_cwd) {
                                             let _ = err_tx.send(AppEvent::BranchError(
-                                                format!("Branch creation failed: {}. Cannot proceed on main branch.", e)
+                                                format!("Failed to persist suffixed branch in prd.json: {}", e)
                                             )).await;
                                             return;
                                         }
+                                        let _ = err_tx.send(AppEvent::BranchReady(actual_full_branch.clone())).await;
                                         match git::get_current_branch(&exec_cwd).await {
-                                            Ok(ref actual) if actual == &branch_name_clone => {}
+                                            Ok(ref actual) if actual == &actual_full_branch => {}
                                             Ok(actual) => {
                                                 let _ = err_tx.send(AppEvent::BranchError(
-                                                    format!("Branch verification failed: expected '{}', got '{}'. Cannot proceed on main branch.", branch_name_clone, actual)
+                                                    format!("Branch verification failed: expected '{}', got '{}'. Cannot proceed on main branch.", actual_full_branch, actual)
                                                 )).await;
                                                 return;
                                             }

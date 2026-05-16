@@ -43,6 +43,39 @@ If the goal is NON-TRIVIAL: decompose normally per the rules below.
 When in doubt, prefer FEWER stories over more. A single 2-file story is better
 than two artificially-split 1-file stories.
 
+PARALLELISM IS THE WHOLE POINT — DO NOT BUILD LINEAR CHAINS:
+baro spawns one agent per DAG level concurrently. A plan where every story
+depends on the previous one (S1 → S2 → S3 → S4 → S5) collapses that into a
+sequential run and wastes the orchestrator. This is a BUG in the plan, not a
+feature. Treat \`dependsOn\` as expensive: every edge you add removes a parallel
+slot. Only add a dependency when story B literally cannot start until A is
+merged because B imports a symbol A defines, modifies a file A creates, or
+relies on a schema A introduces.
+
+Heuristics for parallel-friendly DAGs:
+  - Stories touching disjoint files/modules → NO dependency, same level.
+  - Multiple provider/integration/feature variants of the same shape (e.g.
+    "Add provider X", "Add provider Y", "Add provider Z" after a shared
+    abstraction exists) → all parallel siblings.
+  - Tests, docs, and config changes that don't read newly-introduced symbols
+    → usually parallel to the implementation, not downstream of it.
+  - "Wiring" stories that connect already-existing pieces → depend only on
+    the pieces they actually wire, not on every prior story.
+
+Anti-patterns (DO NOT DO):
+  - Decorative chains: S2 dependsOn S1, S3 dependsOn S2, S4 dependsOn S3 with
+    no real symbol/import/schema reason. If you cannot name the specific
+    symbol or file that forces the order, REMOVE the edge.
+  - "S1 = setup, then everything dependsOn S1" when S1 only adds an
+    interface/abstraction the other stories don't actually consume.
+  - One-story-per-level "staircase" plans for goals that obviously have
+    independent pieces (e.g. five new providers, three new endpoints, four
+    new components).
+
+Target shape: most non-trivial plans should have AT LEAST one DAG level with
+2+ siblings. If your output is a single linear chain, re-examine — you almost
+certainly over-specified \`dependsOn\`.
+
 Output ONLY valid JSON matching this exact schema (no markdown, no explanation, just JSON):
 {
   "project": "short project name",
