@@ -1,6 +1,6 @@
 {
   "name": "baro-ai",
-  "version": "0.36.2",
+  "version": "0.36.3",
   "description": "Autonomous parallel coding - plan and execute with AI",
   "type": "module",
   "bin": {
