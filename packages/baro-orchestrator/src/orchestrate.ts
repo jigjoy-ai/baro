@@ -370,7 +370,15 @@ export async function orchestrate(
     // instances in response to StorySpawnRequestItem from Conductor.
     // Replaces the old `new StoryAgent(...).run()` direct call inside
     // Conductor; now Conductor doesn't import StoryAgent at all.
-    const storyFactory = new StoryFactory({ cwd: config.cwd })
+    // When --llm openai is set, story execution runs through
+    // OpenAIStoryAgent (Mozaik OpenAIInferenceRunner + our tool layer);
+    // otherwise the Claude CLI subprocess path. StoryFactory dispatches
+    // per-spawn, so future per-story overrides could live there too.
+    const storyFactory = new StoryFactory({
+        cwd: config.cwd,
+        llm,
+        openaiModel: "gpt-5.5",
+    })
     storyFactory.setEnvironment(env)
     storyFactory.join(env)
 

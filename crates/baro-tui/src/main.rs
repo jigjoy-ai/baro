@@ -198,11 +198,13 @@ struct Cli {
     #[arg(long)]
     quick: bool,
 
-    /// Which LLM provider runs the agents. `claude` (default) uses the
-    /// Claude Code CLI as today. `openai` routes every phase through
-    /// Mozaik's native OpenAI participants. Hidden until OpenAI mode is
-    /// feature-complete end-to-end — currently a no-op placeholder.
-    #[arg(long, default_value = "claude", value_parser = ["claude", "openai"], hide = true)]
+    /// LLM provider for every phase of the run. `claude` (default)
+    /// drives Architect, Planner, Critic, Surgeon, and StoryAgent
+    /// through the Claude Code CLI. `openai` drives all five through
+    /// Mozaik's native OpenAI runner (gpt-5.x). `openai` requires
+    /// `OPENAI_API_KEY` to be set in the environment OR entered on
+    /// the provider-picker screen when running interactively.
+    #[arg(long, default_value = "claude", value_parser = ["claude", "openai"])]
     llm: String,
 }
 
@@ -408,11 +410,10 @@ async fn run_app(
         app.with_surgeon = false;
     }
 
-    // --llm picks the LLM provider for every phase. Default is the
-    // Claude CLI flow (existing). "openai" is wired through to the
-    // orchestrator but doesn't yet route any phase to native OpenAI
-    // participants — that comes online phase-by-phase in 0.29+. Until
-    // then, --llm openai is a no-op placeholder hidden from --help.
+    // --llm picks the LLM provider. `claude` (default) → Claude Code
+    // CLI for every phase. `openai` → Mozaik native OpenAI runner end
+    // to end (Architect + Planner + Critic + Surgeon + StoryAgent),
+    // as of 0.33.
     if let Some(provider) = app::LlmProvider::parse(&cli.llm) {
         app.llm = provider;
     }
