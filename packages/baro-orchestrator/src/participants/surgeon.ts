@@ -70,7 +70,7 @@ export interface SurgeonOptions {
     timeoutMs?: number
 }
 
-const SURGEON_SYSTEM_PROMPT = `\
+export const SURGEON_SYSTEM_PROMPT = `\
 You are the Surgeon — an autonomous planner that adapts a software-project
 DAG when stories fail. Given:
 1. A snapshot of the current PRD (project, story list with dependencies +
@@ -181,13 +181,7 @@ export class Surgeon extends BaroParticipant {
      * skipping (if their only dep is now gone, they become unreachable).
      */
     private evaluateDeterministic(failure: StoryResultItem): ReplanItem {
-        return new ReplanItem(
-            "surgeon",
-            `deterministic skip: ${failure.storyId} exhausted ${failure.attempts} attempts (${failure.error ?? "no reason"})`,
-            [],
-            [failure.storyId],
-            new Map(),
-        )
+        return surgeonDeterministicReplan(failure)
     }
 
     /**
@@ -265,7 +259,7 @@ export class Surgeon extends BaroParticipant {
     }
 }
 
-function buildSurgeonPrompt(
+export function buildSurgeonPrompt(
     snap: PrdSnapshot,
     failure: StoryResultItem,
 ): string {
@@ -295,7 +289,7 @@ function buildSurgeonPrompt(
     ].join("\n")
 }
 
-function extractJsonObject(text: string): string {
+export function extractJsonObject(text: string): string {
     const trimmed = text.trim()
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed
     const fenceMatch = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/)
@@ -314,4 +308,23 @@ function extractJsonObject(text: string): string {
         }
     }
     throw new Error("unbalanced JSON object in surgeon response")
+}
+
+/**
+ * Deterministic-skip ReplanItem for a terminal story failure. Removes
+ * the failing story so dependents either run unblocked (multiple deps)
+ * or get cascade-removed by buildDag's reachability check (sole dep).
+ *
+ * Exported so LLM-backed sibling Surgeons (e.g. `SurgeonOpenAI`) can
+ * use the same fallback when their inference call errors out — the
+ * shape is identical to what the Claude-backed Surgeon falls back to.
+ */
+export function surgeonDeterministicReplan(failure: StoryResultItem): ReplanItem {
+    return new ReplanItem(
+        "surgeon",
+        `deterministic skip: ${failure.storyId} exhausted ${failure.attempts} attempts (${failure.error ?? "no reason"})`,
+        [],
+        [failure.storyId],
+        new Map(),
+    )
 }
