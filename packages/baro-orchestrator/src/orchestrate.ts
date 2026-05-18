@@ -143,6 +143,20 @@ export interface OrchestrateConfig {
      * `--story-model`.
      */
     storyModel?: string
+    /**
+     * EXPERIMENTAL — when true, the Conductor passes the Architect's
+     * DecisionDocument to every Claude Code subprocess via
+     * `--append-system-prompt` instead of prepending it to each
+     * story's user prompt. The DD becomes part of the system prompt,
+     * which Anthropic's prompt cache hashes as the cache prefix — so
+     * once story 1 has paid the `cache_creation` cost for the DD,
+     * stories 2..N read it from cache at the 10× discount instead
+     * of each one re-paying the same ~5-10K token creation cost.
+     * Default: false. Toggled by the Rust CLI flag
+     * `--share-architect-cache`. Measure with audit log totals
+     * before flipping to default.
+     */
+    shareArchitectCache?: boolean
     /** Hooks for receiving Operator commands externally (Rust TUI). */
     operatorHooks?: {
         onAbort?: (storyId: string) => void
@@ -315,6 +329,7 @@ export async function orchestrate(
         overrideModel: config.overrideModel ?? undefined,
         defaultModel: config.defaultModel ?? "opus",
         intraLevelDelaySecs: config.intraLevelDelaySecs,
+        shareArchitectCache: config.shareArchitectCache ?? false,
         onRunStart: useGit
             ? async (prd) => {
                   baseSha = await getHeadSha(config.cwd)
