@@ -223,6 +223,17 @@ struct Cli {
     /// the provider-picker screen when running interactively.
     #[arg(long, default_value = "claude", value_parser = ["claude", "openai"])]
     llm: String,
+
+    /// EXPERIMENTAL — push the Architect's DecisionDocument into Claude
+    /// Code's system prompt (via `--append-system-prompt`) instead of
+    /// prepending it to each story's user prompt. Because Anthropic's
+    /// prompt cache is org-scoped and the cache key includes the entire
+    /// system prompt + tools, this lets all stories that follow story 1
+    /// READ the DecisionDocument from cache instead of each one paying
+    /// its own cache_creation. Default: off (DecisionDocument prepended
+    /// to user prompt as before). Measure before flipping.
+    #[arg(long = "share-architect-cache")]
+    share_architect_cache: bool,
 }
 
 enum AppEvent {
@@ -431,6 +442,7 @@ async fn run_app(
     if let Some(d) = cli.intra_level_delay {
         app.intra_level_delay_secs = Some(d);
     }
+    app.share_architect_cache = cli.share_architect_cache;
 
     // --quick is the user telling us "this is trivial, don't ceremony it".
     // We honour that on three fronts: skip Architect (no design doc),
@@ -870,6 +882,7 @@ async fn run_app(
                                         let ild = app.intra_level_delay_secs;
                                         let llm = app.llm;
                                         let oak = app.openai_api_key.clone();
+                                        let sac = app.share_architect_cache;
                                         let stm = app.story_model.clone();
                                         let err_tx = tx.clone();
                                         tokio::spawn(async move {
@@ -899,7 +912,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, openai_api_key: oak.clone(), story_model: stm.clone() });
+                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, openai_api_key: oak.clone(), story_model: stm.clone(), share_architect_cache: sac });
                                         });
                                     }
                                     Err(e) => {
@@ -941,6 +954,7 @@ async fn run_app(
                                     let ild = app.intra_level_delay_secs;
                                     let llm = app.llm;
                                     let oak = app.openai_api_key.clone();
+                                    let sac = app.share_architect_cache;
                                     let stm = app.story_model.clone();
                                     let err_tx = tx.clone();
                                     tokio::spawn(async move {
@@ -990,7 +1004,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, openai_api_key: oak.clone(), story_model: stm.clone() });
+                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, openai_api_key: oak.clone(), story_model: stm.clone(), share_architect_cache: sac });
                                     });
                                 }
                             }
@@ -1401,6 +1415,7 @@ fn spawn_executor(
         llm: config.llm.as_str().to_string(),
         openai_api_key: config.openai_api_key,
         story_model: config.story_model,
+        share_architect_cache: config.share_architect_cache,
     };
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
 }

@@ -286,6 +286,12 @@ pub struct App {
     pub planner_model: Option<String>,
     pub story_model: Option<String>,
     pub intra_level_delay_secs: Option<u64>,
+    /// EXPERIMENTAL — opt-in via `--share-architect-cache`. When true,
+    /// the orchestrator passes the Architect's DecisionDocument to
+    /// every Claude Code subprocess via `--append-system-prompt` so
+    /// stories after the first one read it from Anthropic's prompt
+    /// cache rather than each paying their own cache_creation cost.
+    pub share_architect_cache: bool,
 
     /// Quick mode (`--quick`): user has told us this goal is trivial and they
     /// want a surgical run. Skips the Architect phase entirely, instructs the
@@ -384,6 +390,7 @@ impl App {
             planner_model: None,
             story_model: None,
             intra_level_delay_secs: None,
+            share_architect_cache: false,
             quick: false,
             llm: LlmProvider::Claude,
             token_usage: HashMap::new(),

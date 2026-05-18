@@ -70,6 +70,13 @@ export interface StorySpec {
      * Claude process is aborted unconditionally when this fires. Default: 300.
      */
     hardTimeoutSecs?: number
+    /**
+     * Optional text passed to the spawned Claude Code subprocess via
+     * `--append-system-prompt`. Used by `--share-architect-cache` to
+     * route the Architect's DecisionDocument through the cached
+     * system-prompt prefix instead of per-story user prompts.
+     */
+    appendSystemPrompt?: string
 }
 
 export interface StoryOutcome {
@@ -308,6 +315,7 @@ export class StoryAgent extends BaroParticipant {
         const claude = new ClaudeCliParticipant(this.spec.id, {
             cwd: this.spec.cwd,
             model: this.spec.model,
+            appendSystemPrompt: this.spec.appendSystemPrompt,
         })
         this.currentClaude = claude
         claude.join(this.envRef)

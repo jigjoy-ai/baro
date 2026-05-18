@@ -90,6 +90,17 @@ export interface ConductorOptions {
      * Default: 10 seconds.
      */
     intraLevelDelaySecs?: number
+    /**
+     * EXPERIMENTAL — when true, `resolvePrompt` keeps the Architect's
+     * DecisionDocument OUT of the per-story user prompt and routes it
+     * to the spawned Claude CLI as `--append-system-prompt` (via the
+     * StorySpawnRequestItem.appendSystemPrompt channel + StoryFactory
+     * + StoryAgent + ClaudeCliParticipant). Lets Anthropic's
+     * org-scoped prompt cache hit on the shared system-prompt prefix
+     * across all stories. Default: false. Plumbed from the
+     * `--share-architect-cache` CLI flag.
+     */
+    shareArchitectCache?: boolean
 }
 
 export interface ConductorRunSummary {
@@ -446,7 +457,9 @@ export class Conductor extends BaroParticipant {
     private async requestStorySpawn(story: PrdStory): Promise<void> {
         const model =
             this.opts.overrideModel ?? story.model ?? this.opts.defaultModel
-        let prompt = this.resolvePrompt(story)
+        const resolved = this.resolvePrompt(story)
+        let prompt = resolved.userPrompt
+        const appendSystemPrompt = resolved.appendSystemPrompt
 
         if (this.opts.onBeforeStoryLaunch) {
             try {
@@ -472,6 +485,7 @@ export class Conductor extends BaroParticipant {
                 model,
                 story.retries,
                 this.opts.timeoutSecs,
+                appendSystemPrompt,
             ),
         )
     }
@@ -601,7 +615,10 @@ export class Conductor extends BaroParticipant {
         this.resolveDone(summary)
     }
 
-    private resolvePrompt(story: PrdStory): string {
+    private resolvePrompt(story: PrdStory): {
+        userPrompt: string
+        appendSystemPrompt?: string
+    } {
         const candidatePath =
             this.opts.promptTemplatePath ?? join(this.opts.cwd, "prompt.md")
         let prompt: string
@@ -612,32 +629,48 @@ export class Conductor extends BaroParticipant {
             prompt = buildDefaultStoryPrompt(story)
         }
 
-        // Prepend Architect's DecisionDocument so the agent sees the
-        // authoritative design spec before its task description. This
-        // is the single biggest lever against per-story decision drift
-        // (column names, file paths, API shapes, dependency choices,
-        // …): every agent receives the same upstream-pinned answers
-        // instead of each one improvising independently.
+        // Architect's DecisionDocument is the authoritative design spec.
+        // Two routing modes:
+        //
+        //   1) Default (`shareArchitectCache: false`): prepend to the
+        //      user prompt. Identical text every story sees BEFORE its
+        //      own task, but it sits in the user-message channel —
+        //      Anthropic's prompt cache prefix doesn't include user
+        //      messages, so each story pays its own cache_creation cost
+        //      for the DD on its first turn (≈5-10K tokens × N stories).
+        //
+        //   2) Cache-shared (`shareArchitectCache: true`): push the DD
+        //      to `--append-system-prompt`. It becomes part of every
+        //      Claude Code subprocess's system prompt, which IS in the
+        //      cache prefix. Story 1 pays cache_creation; stories 2..N
+        //      read it from cache at the 10× discount.
         const doc = this.prd?.decisionDocument
-        if (doc && doc.trim().length > 0) {
-            const header = [
-                "## Design spec (authoritative — already decided)",
-                "",
-                "The Architect made these decisions before any story started.",
-                "Treat them as fixed: use these exact file paths, names,",
-                "schemas, API shapes, and dependency choices. Do NOT",
-                "improvise alternatives — your siblings are working from",
-                "the same spec and divergence breaks the build.",
-                "",
-                doc.trim(),
-                "",
-                "---",
-                "",
-            ].join("\n")
-            prompt = header + prompt
+        if (!doc || doc.trim().length === 0) {
+            return { userPrompt: prompt }
         }
 
-        return prompt
+        const trimmedDoc = doc.trim()
+        const headerLines = [
+            "## Design spec (authoritative — already decided)",
+            "",
+            "The Architect made these decisions before any story started.",
+            "Treat them as fixed: use these exact file paths, names,",
+            "schemas, API shapes, and dependency choices. Do NOT",
+            "improvise alternatives — your siblings are working from",
+            "the same spec and divergence breaks the build.",
+            "",
+        ]
+
+        if (this.opts.shareArchitectCache) {
+            // Same framing text, but routed via the system prompt so
+            // it lands inside Claude Code's cached prefix. The user
+            // prompt stays per-story-unique (and uncached, but small).
+            const appendSystemPrompt = [...headerLines, trimmedDoc].join("\n")
+            return { userPrompt: prompt, appendSystemPrompt }
+        }
+
+        const header = [...headerLines, trimmedDoc, "", "---", ""].join("\n")
+        return { userPrompt: header + prompt }
     }
 
     private emit(event: BusEvent): void {
