@@ -647,17 +647,38 @@ impl App {
             BaroEvent::Init { project, stories } => {
                 self.project = project;
                 self.total = stories.len() as u32;
+                // On resume, review_stories was seeded from prd.json with
+                // each story's `completed` flag. The orchestrator emits
+                // Init with every story (not just incomplete ones) and
+                // doesn't replay StoryComplete for prior-run finishes, so
+                // without consulting review_stories here, already-done
+                // stories render as Pending forever and the dashboard
+                // counter starts at 0/N. Seed the initial status from
+                // review_stories when available; on fresh runs that map
+                // is empty and everything starts Pending as before.
                 self.stories = stories
                     .into_iter()
-                    .map(|s| StoryState {
-                        id: s.id,
-                        title: s.title,
-                        depends_on: s.depends_on,
-                        status: StoryStatus::Pending,
-                        duration_secs: None,
-                        error: None,
-                        files_created: 0,
-                        files_modified: 0,
+                    .map(|s| {
+                        let already_done = self
+                            .review_stories
+                            .iter()
+                            .find(|r| r.id == s.id)
+                            .map(|r| r.completed)
+                            .unwrap_or(false);
+                        StoryState {
+                            id: s.id,
+                            title: s.title,
+                            depends_on: s.depends_on,
+                            status: if already_done {
+                                StoryStatus::Complete
+                            } else {
+                                StoryStatus::Pending
+                            },
+                            duration_secs: None,
+                            error: None,
+                            files_created: 0,
+                            files_modified: 0,
+                        }
                     })
                     .collect();
                 self.start_time = Instant::now();
