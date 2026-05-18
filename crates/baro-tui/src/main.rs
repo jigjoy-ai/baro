@@ -630,7 +630,17 @@ async fn run_app(
             }
             Some(AppEvent::Key(key)) => {
                 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-                if key.kind != KeyEventKind::Press {
+                // Ghostty (and other terminals that enable the kitty
+                // keyboard protocol) emit Enter as a Release-only event
+                // or as a literal CR/LF Char. The general Press-only
+                // filter would swallow those. Let Enter-like events
+                // through any kind; everything else still requires
+                // Press so we don't double-fire on Release.
+                let is_enter_like = matches!(
+                    key.code,
+                    KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n')
+                );
+                if key.kind != KeyEventKind::Press && !is_enter_like {
                     continue;
                 }
 
@@ -648,7 +658,7 @@ async fn run_app(
                         KeyCode::Down | KeyCode::Char('j') => {
                             app.provider_picker_index = 1;
                         }
-                        KeyCode::Enter => {
+                        KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
                             if app.provider_picker_index == 0 {
                                 app.llm = app::LlmProvider::Claude;
                                 app.screen = Screen::Welcome;
@@ -677,7 +687,7 @@ async fn run_app(
                         KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             return Ok(());
                         }
-                        KeyCode::Enter => {
+                        KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
                             let trimmed = app.api_key_input.trim();
                             if !trimmed.is_empty() {
                                 app.openai_api_key = Some(trimmed.to_string());
@@ -716,7 +726,7 @@ async fn run_app(
                         KeyCode::Esc => return Ok(()),
                         KeyCode::Tab => { app.welcome_field = app.welcome_field.next(); }
                         KeyCode::BackTab => { app.welcome_field = app.welcome_field.prev(); }
-                        KeyCode::Enter => {
+                        KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
                             if app.welcome_field != app::WelcomeField::Goal {
                                 // Enter on non-goal fields = jump to goal
                                 app.welcome_field = app::WelcomeField::Goal;
@@ -810,7 +820,7 @@ async fn run_app(
                         // Overlay is open — handle overlay keys only
                         match key.code {
                             KeyCode::Esc => { app.refine_input = None; }
-                            KeyCode::Enter => {
+                            KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
                                 let feedback = app.refine_input.as_ref().unwrap().clone();
                                 if !feedback.is_empty() {
                                     app.refining = true;
@@ -830,7 +840,7 @@ async fn run_app(
                             }
                         }
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                        KeyCode::Enter => {
+                        KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
                             if app.is_resume {
                                 // Resume mode: read existing prd.json (has full acceptance/tests data)
                                 let prd_path = cwd.join("prd.json");
