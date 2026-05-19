@@ -63,9 +63,6 @@ pub struct OrchestratorConfig {
     /// `--story-model X` to the orchestrator subprocess. Wins over
     /// the per-PRD-story `model` field and over the OpenAI default.
     pub story_model: Option<String>,
-    /// EXPERIMENTAL — forwards `--share-architect-cache` to the
-    /// orchestrator subprocess. See main.rs Cli docstring for context.
-    pub share_architect_cache: bool,
 }
 
 /// Spawn the orchestrator subprocess and return a channel that receives
@@ -283,9 +280,6 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     }
     if let Some(m) = &cfg.story_model {
         cmd.arg("--story-model").arg(m);
-    }
-    if cfg.share_architect_cache {
-        cmd.arg("--share-architect-cache");
     }
     cmd
 }

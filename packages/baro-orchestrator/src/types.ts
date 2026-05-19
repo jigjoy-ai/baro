@@ -507,14 +507,6 @@ export class StorySpawnRequestItem extends BusEvent {
         public readonly model: string,
         public readonly retries: number,
         public readonly timeoutSecs: number,
-        /**
-         * Optional text appended to the Claude Code system prompt via
-         * `--append-system-prompt`. Carries the Architect's
-         * DecisionDocument when `Conductor.shareArchitectCache` is on,
-         * so the spawned subprocess's cache prefix is identical across
-         * stories (Anthropic's prompt cache hits after story 1).
-         */
-        public readonly appendSystemPrompt?: string,
     ) {
         super()
     }
@@ -526,7 +518,6 @@ export class StorySpawnRequestItem extends BusEvent {
             model: this.model,
             retries: this.retries,
             timeoutSecs: this.timeoutSecs,
-            appendSystemPromptLen: this.appendSystemPrompt?.length ?? 0,
         }
     }
 }

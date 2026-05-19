@@ -43,7 +43,6 @@ interface CliArgs {
     storyModel?: string
     intraLevelDelaySecs?: number
     llm: "claude" | "openai"
-    shareArchitectCache: boolean
     help: boolean
 }
 
@@ -61,7 +60,6 @@ function parseArgs(argv: string[]): CliArgs {
         withSurgeon: false,
         surgeonUseLlm: false,
         llm: "claude",
-        shareArchitectCache: false,
         help: false,
     }
     for (let i = 0; i < argv.length; i++) {
@@ -134,9 +132,6 @@ function parseArgs(argv: string[]): CliArgs {
                 args.llm = v
                 break
             }
-            case "--share-architect-cache":
-                args.shareArchitectCache = true
-                break
             default:
                 process.stderr.write(`[cli] unknown flag: ${a}\n`)
                 process.exit(2)
@@ -219,7 +214,6 @@ async function main(): Promise<void> {
         intraLevelDelaySecs: args.intraLevelDelaySecs,
         llm: args.llm,
         storyModel: args.storyModel,
-        shareArchitectCache: args.shareArchitectCache,
     }
 
     if (args.llm === "openai" && !process.env.OPENAI_API_KEY) {

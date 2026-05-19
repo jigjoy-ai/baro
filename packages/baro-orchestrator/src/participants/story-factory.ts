@@ -113,7 +113,6 @@ export class StoryFactory extends BaroParticipant {
                       model: claudeModel,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
-                      appendSystemPrompt: req.appendSystemPrompt,
                   })
 
         agent.join(this.envRef)

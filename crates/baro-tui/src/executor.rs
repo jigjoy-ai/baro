@@ -92,12 +92,6 @@ pub struct ExecutorConfig {
     /// flow through their existing function-arg paths in spawn_planner
     /// and don't need an executor-side field.
     pub story_model: Option<String>,
-    /// EXPERIMENTAL — when true, the orchestrator pushes the Architect's
-    /// DecisionDocument into the Claude Code system prompt instead of
-    /// prepending it to the per-story user prompt. Lets all stories
-    /// after the first read the DecisionDocument from Anthropic's
-    /// org-scoped prompt cache. Default: false.
-    pub share_architect_cache: bool,
 }
 
 // ─── Helpers used by main.rs ────────────────────────────────────────

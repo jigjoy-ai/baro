@@ -63,14 +63,6 @@ export interface ClaudeCliParticipantOptions {
      * multi-turn agents that survive across multiple infer() calls.
      */
     resumeSessionId?: string
-    /**
-     * If provided, pass `--append-system-prompt <text>` so the spawned
-     * Claude subprocess's system prompt includes this string in its
-     * cached prefix. baro's `--share-architect-cache` flag routes the
-     * Architect's DecisionDocument through here so multiple parallel
-     * story subprocesses share the same prompt cache prefix.
-     */
-    appendSystemPrompt?: string
 }
 
 export interface ClaudeRunSummary {
@@ -275,9 +267,6 @@ export class ClaudeCliParticipant extends BaroParticipant {
         }
         if (this.options.resumeSessionId) {
             args.push("--resume", this.options.resumeSessionId)
-        }
-        if (this.options.appendSystemPrompt && this.options.appendSystemPrompt.length > 0) {
-            args.push("--append-system-prompt", this.options.appendSystemPrompt)
         }
         if (this.options.extraArgs && this.options.extraArgs.length > 0) {
             args.push(...this.options.extraArgs)
