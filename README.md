@@ -4,11 +4,13 @@
 
 ![npm downloads](https://img.shields.io/npm/dt/baro-ai) ![npm downloads weekly](https://img.shields.io/npm/dw/baro-ai) ![npm version](https://img.shields.io/npm/v/baro-ai)
 
-![baro screenshot](https://raw.githubusercontent.com/jigjoy-ai/baro/main/assets/screenshot.png)
-
 ```bash
 npm install -g baro-ai
 ```
+
+![baro TUI at the end of a real run — 33 of 33 stories complete on a NestJS service, 2.2× parallel speedup, 32 files modified, PR opened](https://raw.githubusercontent.com/jigjoy-ai/baro/main/assets/screenshot.png)
+
+<sub>baro TUI at the end of an [actual run](https://jigjoy.ai/blog/baro-808-nestjs-jest-tests) — one prompt → 33-story DAG → 32 files modified → PR opened. The summary panel shows wall time (33:23), parallel speedup (2.2×), token usage, and the PR URL.</sub>
 
 ## Parallel coding agents, no central coordinator
 
