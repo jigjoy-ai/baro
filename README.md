@@ -1,215 +1,148 @@
 # baro
 
-## Background Agent Runtime Orchestrator
-
-Give it a goal, it breaks it into stories, builds a dependency DAG, and runs them in parallel — each story gets its own AI agent.
+> Type a goal in your repo. Walk away. Come back to a pull request.
 
 ![npm downloads](https://img.shields.io/npm/dt/baro-ai) ![npm downloads weekly](https://img.shields.io/npm/dw/baro-ai) ![npm version](https://img.shields.io/npm/v/baro-ai)
 
 ![baro screenshot](https://raw.githubusercontent.com/jigjoy-ai/baro/main/assets/screenshot.png)
 
-> 📖 **Deep dive:** [Getting the Maximum Out of My Claude Code Subscription](https://jigjoy.ai/blog/getting-the-maximum-out-of-claude-code) — the story of why baro exists, how it pairs with Mozaik, and what it looks like in practice.
-
-> 📊 **Recent post:** [How baro generated 808 NestJS Jest tests autonomously in 71 minutes](https://jigjoy.ai/blog/baro-808-nestjs-jest-tests) — one prompt, 33-story DAG, two sessions because of the Anthropic usage cap, 83.5% branch coverage, zero filed bug issues.
-
-## What's new in 0.39
-
-- **`--share-architect-cache` (experimental)** — routes the Architect's DecisionDocument through Claude Code's `--append-system-prompt` instead of prepending it to each story's user prompt. Anthropic's prompt cache hashes system + tools as the cache key, so with the flag on stories 2..N read the DD from cache at the 10× discount instead of each re-paying its own `cache_creation`. Default OFF; measure with audit-log token totals before flipping.
-
-## What's new in 0.30–0.38 (the bigger shifts)
-
-- **Dual-mode LLM**: `--llm openai` is fully end-to-end now (Architect / Planner / StoryAgent / Critic / Surgeon all route through Mozaik's native OpenAI runner). Defaults: gpt-5.5 for code-shaped phases, gpt-5.4-mini for Critic.
-- **Architect phase**: an upstream agent that fixes cross-cutting design decisions (column names, file paths, API shapes, library choices) **before** any Story Agent starts, so 30 parallel agents don't each invent their own. See [baro vs Claude Code post](https://jigjoy.ai/blog/baro-vs-claude-code) for the architecture.
-- **`--quick`** — skip Architect, force 1-story plan, silence Critic + Surgeon. For trivial goals (`baro --quick "fix the typo on line 42"`) where the design-doc + multi-agent ceremony is overhead.
-- **Per-phase model overrides**: `--architect-model`, `--planner-model`, `--story-model`, `--critic-model`, `--surgeon-model` — pin any individual role to a specific model without forcing the rest with the global `--model`.
-- **Branch per run**: every fresh run creates a new suffixed `baro/<slug>-<id>` branch, never falls back to checkout. Side-by-side runs from sibling clones can't collide on `git push`.
-- **`baro --doctor`** — pre-flight self-check that verifies the `claude` CLI is on PATH and authenticated, the audit dir is writable, and `gh` exists. First thing to run when a baro run fails before any agents start.
-- **Repo moved** to [jigjoy-ai/baro](https://github.com/jigjoy-ai/baro). npm package name unchanged (`baro-ai`).
-- **gpt-5.5 defaults** + UTF-8 panic fix + Ghostty/kitty-keyboard Enter handling + Execute-screen 0/N resume fix (0.38.x).
-
-## Install
-
-```
+```bash
 npm install -g baro-ai
 ```
 
-Requires [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) installed and authenticated for `--llm claude` (the default). For `--llm openai`, set `OPENAI_API_KEY` in your shell env or enter it on the welcome screen.
+## Parallel coding agents, no central coordinator
 
-## Usage
+Most multi-agent setups have one orchestrator function in the middle that drives N agents. The orchestrator becomes the bottleneck the moment you push past a handful of concurrent agents — and adding a new behaviour means editing its control flow.
+
+baro doesn't have that shape. Every part of the run is an independent **participant** on a shared event bus ([Mozaik](https://github.com/jigjoy-ai/mozaik)). N parallel story agents are N independent subprocesses, each emitting and consuming typed events. There is no central `run()` to bottleneck on, and adding a new behaviour is a new participant — not an orchestrator rewrite.
+
+```mermaid
+flowchart LR
+    subgraph A["Typical multi-agent orchestrator"]
+        direction TB
+        C{{Coordinator}}
+        C --> A1[Agent 1]
+        C --> A2[Agent 2]
+        C --> A3[Agent N]
+    end
+    subgraph B["baro on Mozaik"]
+        direction TB
+        Bus[(shared event bus)]
+        P1[Conductor] -.-> Bus
+        P2[Story Agent 1] -.-> Bus
+        P3[Story Agent N] -.-> Bus
+        P4[Critic / Surgeon / ...] -.-> Bus
+    end
+```
+
+That's the architectural lever. Everything else baro does — Architect, Planner, Critic, Surgeon, Librarian — is a participant on that bus. They don't call each other; they react to events.
+
+## What a run looks like
 
 ```bash
-# Interactive — opens the welcome screen
-baro
+cd your-repo
+baro "Add JWT authentication with role-based access control"
+```
 
-# Direct — skip to planning
-baro "Add authentication with JWT and role-based access control"
+```
+→ Architect (45s)   — design decisions pinned for every story
+→ Planner   (38s)   — 7 stories in 3 levels
+→ Executing — 4 parallel Claude Code agents on baro/jwt-auth branch
+→ Critic    — per-turn acceptance evaluation, self-corrects on fail
+→ Finalizer — PR #142 opened ✓
+```
 
-# Route every phase through GPT-5.5 (Mozaik-native OpenAI runner)
+```mermaid
+flowchart LR
+    Goal([your goal]) --> A[Architect<br/><sub>~45s — emits<br/>DecisionDocument</sub>]
+    A --> P[Planner<br/><sub>~60s — emits DAG</sub>]
+    P --> S1[Story 1]
+    P --> S2[Story 2]
+    P --> S3[Story 3]
+    S1 --> S4[Story 4]
+    S2 --> S4
+    S3 --> S5[Story 5]
+    S4 --> F[Finalizer<br/><sub>opens PR</sub>]
+    S5 --> F
+    F --> PR([Pull Request])
+```
+
+Every story is one **Claude Code subprocess** (or one Mozaik-native OpenAI session) — auth inherits from your existing setup, no API key plumbing.
+
+## Recent real run
+
+[**How baro generated 808 NestJS Jest tests autonomously in 71 minutes**](https://jigjoy.ai/blog/baro-808-nestjs-jest-tests) — one prompt, 33-story DAG, two sessions because of the Anthropic 3am usage cap, 64 test suites, 83.5% branch coverage, +13,606 lines of test code, zero phantom bug issues filed.
+
+## What each participant does
+
+| Participant | Role |
+|---|---|
+| **Architect** | One Opus call before planning — emits a `DecisionDocument` that pins every cross-cutting design decision (file paths, schemas, API shapes, library choices) so 30 parallel agents don't each invent their own |
+| **Planner** | Decomposes the goal into a story DAG, with the DecisionDocument already pinned |
+| **Conductor** | State machine that drives the run by reacting to bus events |
+| **StoryAgent** | One Claude Code subprocess per story; multi-turn loop until story completes |
+| **Critic** | Per-turn evaluator (Haiku). On fail verdict, injects corrective feedback as the agent's next turn |
+| **Sentry** | Flags overlapping Edit/Write tool calls across concurrent stories |
+| **Librarian** | Indexes one agent's Read/Grep findings so siblings don't redo the exploration |
+| **Surgeon** | On terminal failure, asks Opus for a richer replan (split / prereq / rewire) |
+| **Finalizer** | Runs build verification, opens the GitHub PR with stories table + stats |
+
+Bus is open. CI deployers, Slack notifiers, ticket triggers — all new participants, no orchestrator changes. Architecture deep-dive: [I tested Claude Code's new /goal feature against my parallel agent setup](https://jigjoy.ai/blog/baro-vs-claude-code).
+
+## Try it
+
+```bash
+npm install -g baro-ai
+
+# Full run (default — Architect + Planner + parallel Story Agents)
+baro "Migrate the hardcoded category data to a backend dictionary"
+
+# Trivial goal — skip Architect + Critic + Surgeon, single story
+baro --quick "fix the typo on line 42 of README.md"
+
+# Route every phase through GPT-5.5 instead of Claude
 OPENAI_API_KEY=sk-... baro --llm openai "Refactor the database layer"
 
-# Limit parallelism to 3 concurrent stories
-baro --parallel 3 "Refactor database layer"
+# Limit parallelism (Anthropic plan tiers cap concurrency)
+baro --parallel 3 "Add unit tests for the auth module"
 
-# Set per-story timeout (default: 600s)
-baro --timeout 300 "Add unit tests"
-
-# Force one model everywhere — wins over per-phase routing
-baro --model opus "Complex architecture redesign"
-
-# Pin a single phase to a specific model
-baro --story-model sonnet "Add WebSocket support"
-
-# Dry-run — generate plan, save to prd.json, don't execute
-baro --dry-run "Add REST API"
-
-# Resume an interrupted run (also runs dry-run plans)
+# Dry-run first, execute later
+baro --dry-run "Add WebSocket support"
 baro --resume
 
-# Quick fast-path — skip Architect + Critic + Surgeon, single-story plan
-baro --quick "fix the typo on line 42"
-
-# EXPERIMENTAL — push Architect's DecisionDocument through Claude Code's
-# cached system-prompt prefix so stories 2..N hit cache for the DD
-baro --share-architect-cache "Add comprehensive test coverage"
-
-# Specify working directory
-baro --cwd ~/projects/myapp "Add REST API"
-
-# Self-diagnostic and exit
+# Self-diagnostic
 baro --doctor
 ```
 
-## How it works
+Full options + `.barorc` config + per-phase model overrides: [**docs.baro.rs**](https://docs.baro.rs).
 
-1. **Architect** (Opus by default, or gpt-5.5 with `--llm openai`) — reads the codebase and writes a `DecisionDocument`: the file paths, names, schemas, API shapes, and library choices every story will use.
-2. **Planner** — decomposes the goal into a dependency DAG of stories, with the DecisionDocument pinned.
-3. **Review** — you accept the plan, or press `r` to refine it with feedback.
-4. **Execute** — stories run in parallel on a fresh `baro/<slug>-<id>` branch. Each story is one Claude Code subprocess (or one Mozaik-native OpenAI session).
-5. **Critic** (per-turn) — Haiku evaluator scores each agent turn against its acceptance criteria. On a fail verdict, an inline corrective lands as the agent's next turn so it self-corrects before the next tool call.
-6. **Sentry + Librarian** (run-wide) — Sentry flags overlapping Edit/Write tool calls; Librarian indexes one agent's Read/Grep so the next agent doesn't redo the exploration.
-7. **Surgeon** (on terminal failure) — asks Opus for a richer replan (split / prereq / rewire) instead of dropping a failed story outright.
-8. **Finalize** — runs the project's build verification and opens a GitHub PR with stories table, stats, time saved, and a summary of every story's commits.
+## How it compares
 
-## Config file
+| | Single Claude Code session | DIY `Promise.all` of subprocesses | baro |
+|---|---|---|---|
+| **Plans the work** | you | you | Planner agent |
+| **Pins design decisions** | implicit, drifts | n/a | Architect agent (`DecisionDocument`) |
+| **Parallel agents** | no — one session | yes, you coordinate | yes, on Mozaik bus |
+| **Mid-flight peer awareness** | n/a | implement yourself | Librarian broadcasts |
+| **Replan on failure** | manual | manual | Surgeon agent |
+| **Opens the PR** | manual | manual | Finalizer |
+| **Adding a new behaviour** | new prompt | refactor orchestrator | new bus participant |
 
-Create a `.barorc` in your project root to set defaults:
-
-```json
-{
-  "model": "routed",
-  "parallel": 3,
-  "timeout": 600,
-  "skipContext": false,
-  "planner": "claude"
-}
-```
-
-All fields are optional. CLI flags override `.barorc`, and interactive changes on the welcome screen override both.
-
-| Field | Values | Default |
-|-------|--------|---------|
-| `model` | `"routed"`, `"opus"`, `"sonnet"`, `"haiku"` | `"routed"` |
-| `parallel` | `0` (unlimited) or any number | `0` |
-| `timeout` | seconds per story | `600` |
-| `skipContext` | `true` / `false` | `false` |
-| `planner` | `"claude"`, `"openai"` | `"claude"` |
-| `dryRun` | `true` / `false` | `false` |
-
-## Options
-
-```
-baro [goal] [options]
-
-Arguments:
-  goal                          Project goal (opens welcome screen if omitted)
-
-Provider:
-  --llm <name>                  Provider for every phase: claude (default) or openai.
-                                openai routes through Mozaik's native OpenAI runner
-                                (gpt-5.x); requires OPENAI_API_KEY.
-
-Model selection:
-  --model <name>                Override ALL phases: opus, sonnet, haiku
-  --no-model-routing            Equivalent to --model opus
-  --architect-model <name>      Pin only the Architect phase
-  --planner-model <name>        Pin only the Planner phase
-  --story-model <name>          Pin every Story Agent in the run
-  --critic-model <name>         Model for the Critic (default: haiku)
-  --surgeon-model <name>        Model for the Surgeon LLM (default: opus)
-
-Run shape:
-  --parallel <N>                Max concurrent stories per level (0 = unlimited)
-  --timeout <seconds>           Per-story timeout (default: 600)
-  --intra-level-delay <secs>    Stagger story spawns within a level so Librarian
-                                can broadcast first agent's findings (default: 10)
-  --quick                       Trivial-goal fast path — skip Architect, force
-                                1-story plan, disable Critic + Surgeon
-  --dry-run                     Generate plan only, save to prd.json
-  --resume                      Resume from existing prd.json
-  --share-architect-cache       EXPERIMENTAL — route DecisionDocument through
-                                Claude Code's --append-system-prompt so stories
-                                2..N read it from the prompt cache
-  --skip-context                Skip CLAUDE.md auto-generation
-  --cwd <path>                  Working directory (default: current)
-
-Observers:
-  --no-critic                   Disable live Critic (default: ON)
-  --no-librarian                Disable cross-agent runtime memory (default: ON)
-  --no-sentry                   Disable file-touch conflict detector (default: ON)
-  --no-surgeon                  Disable Surgeon (default: ON)
-  --no-surgeon-llm              Use deterministic Surgeon (skip-only) instead
-                                of the LLM-driven replanner
-
-Diagnostics:
-  --doctor                      Run self-diagnostic and exit
-  -h, --help                    Print help
-```
-
-### The participants (Mozaik bus)
-
-Every story runs through a TypeScript Mozaik orchestrator. The orchestrator is itself a Mozaik agentic environment: there is no imperative `run()` method, no top-level `Promise.all` loop. The `Conductor` is a state machine that reacts to typed bus events. Spawning a story, evaluating a turn, replanning the DAG — all reactions on the bus, not steps in a loop.
-
-| Participant     | Role                                                              |
-| --------------- | ----------------------------------------------------------------- |
-| `Architect`     | One Opus (or gpt-5.5) turn before planning — emits a `DecisionDocumentItem` that pins every cross-cutting design decision |
-| `Planner`       | Decomposes the goal into a story DAG, with the DecisionDocument pinned |
-| `Conductor`     | Orchestration state machine — drives the run by reacting          |
-| `StoryFactory`  | Spawns Story Agents on each `StorySpawnRequest`                   |
-| `StoryAgent`    | Runs one story via Claude CLI subprocess (or Mozaik OpenAI session) |
-| `Librarian`     | Cross-agent memory — indexes outputs of exploration tools         |
-| `Sentry`        | Flags overlapping file writes across concurrent stories           |
-| `Critic`        | Per-turn acceptance-criteria evaluator (default ON, `--no-critic` to disable) |
-| `Surgeon`       | Emits DAG replans when a story fails terminally (default ON, `--no-surgeon` to disable) |
-| `Finalizer`     | Runs build verification, opens the GitHub PR with stories table + stats |
-| `Operator`      | Bridges external user commands (TUI, web UI) into bus events      |
-| `Auditor`       | JSONL log of every event on the bus (written to `~/.baro/runs/`)  |
-| `Cartographer`  | Translates bus events into UI frames for the Rust TUI             |
-
-The bus is open. New participants — CI deployers, Slack notifiers, external ticket triggers — are subscribers and emitters with no changes to the orchestrator. (Adding the Architect was a 200-line change because of this shape; see the [Mozaik post](https://jigjoy.ai/blog/baro-vs-claude-code).)
+For a deeper side-by-side on a real refactor, see [baro vs Claude Code `/goal`](https://jigjoy.ai/blog/baro-vs-claude-code).
 
 ## Requirements
 
-- [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) installed and authenticated (for `--llm claude`, the default), OR `OPENAI_API_KEY` set (for `--llm openai`)
-- macOS (arm64/x64), Linux (x64/arm64), or Windows (x64)
-- **Node.js 20+** (orchestrator runtime)
+- [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) authenticated (for `--llm claude`, the default) **or** `OPENAI_API_KEY` set (for `--llm openai`)
+- Node.js 20+
+- macOS (arm64/x64), Linux (x64/arm64), Windows (x64)
 - `gh` CLI (optional, for automatic PR creation)
-
-> **Windows note:** Windows 10+ is required. For best TUI experience, use [Windows Terminal](https://aka.ms/terminal) or another modern terminal emulator.
-
-## Architecture
-
-Rust binary distributed via npm. TUI built with ratatui, async execution with tokio. Each `baro` invocation spawns the bundled TypeScript [Mozaik](https://github.com/jigjoy-ai/mozaik) orchestrator as a subprocess; the orchestrator owns story execution and emits typed events into a shared `AgenticEnvironment` bus.
 
 ## Status & feedback
 
-baro is a work in progress. I'm actively adding things, testing ideas, and occasionally breaking them — if a run explodes, an [issue on GitHub](https://github.com/jigjoy-ai/baro/issues) with the run's audit log from `~/.baro/runs/` is the fastest way to get it fixed.
+baro is a work in progress. If a run explodes, the audit log at `~/.baro/runs/<run-id>.jsonl` is the fastest way to get it fixed — open an [issue](https://github.com/jigjoy-ai/baro/issues) with that file attached.
 
-If you like the idea and want to help shape where it goes, PRs are welcome, you can DM me on Twitter [@lotus_sbc](https://twitter.com/lotus_sbc), or jump into the [JigJoy Discord](https://discord.gg/dvxY9J2kWX) where the people building baro and Mozaik hang out.
+Ideas, use cases, bug reports — Discord: [**discord.gg/dvxY9J2kWX**](https://discord.gg/dvxY9J2kWX) · Twitter: [**@lotus_sbc**](https://twitter.com/lotus_sbc)
 
 ## License
 
-MIT
-
----
-
-Made by [Lotus](https://github.com/Lotus015) from [JigJoy](https://jigjoy.ai) team
+MIT — [JigJoy](https://jigjoy.ai/) team
