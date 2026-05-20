@@ -1,6 +1,6 @@
 /**
  * StoryFactory — Mozaik-native participant that spawns StoryAgent
- * instances in response to StorySpawnRequestItem events on the bus.
+ * instances in response to StorySpawnRequest events on the bus.
  *
  * Why a factory? It removes the direct coupling between Conductor and
  * StoryAgent. The Conductor only emits "I'd like a story to run with
@@ -10,15 +10,21 @@
  * remote-execution variant) requires no changes to Conductor.
  */
 
-import { Participant } from "@mozaik-ai/core"
-
-import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 import {
-    StorySpawnRequestItem,
-    StorySpawnedItem,
-} from "../types.js"
+    BaseObserver,
+    Participant,
+    SemanticEvent,
+} from "@mozaik-ai/core"
+
+import { BaroEnvironment } from "../bus.js"
+import {
+    StoryResult,
+    StorySpawnRequest,
+    StorySpawned,
+    type StorySpawnRequestData,
+} from "../semantic-events.js"
 import { OpenAIStoryAgent } from "./openai-story-agent.js"
-import { StoryAgent, StoryResultItem } from "./story-agent.js"
+import { StoryAgent } from "./story-agent.js"
 
 export interface StoryFactoryOptions {
     cwd: string
@@ -48,7 +54,10 @@ export interface StoryFactoryOptions {
     storyModelOverride?: string
 }
 
-export class StoryFactory extends BaroParticipant {
+export class StoryFactory extends BaseObserver {
+    // Typed as BaroEnvironment because StoryAgent.run() / join() still
+    // expect the old environment type. Once StoryAgent migrates, this
+    // narrows to vanilla AgenticEnvironment.
     private envRef: BaroEnvironment | null = null
     private readonly active: Map<string, StoryAgent | OpenAIStoryAgent> = new Map()
 
@@ -60,24 +69,27 @@ export class StoryFactory extends BaroParticipant {
         this.envRef = env
     }
 
-    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
-        if (event instanceof StorySpawnRequestItem) {
-            await this.spawn(event)
+    override async onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
+        if (StorySpawnRequest.is(event)) {
+            await this.spawn(event.data)
             return
         }
 
         // When a story finishes (passes or fails), drop our reference so
         // we can clean up its bus membership.
-        if (event instanceof StoryResultItem) {
-            const agent = this.active.get(event.storyId)
+        if (StoryResult.is(event)) {
+            const agent = this.active.get(event.data.storyId)
             if (agent && this.envRef) {
                 agent.leave(this.envRef)
-                this.active.delete(event.storyId)
+                this.active.delete(event.data.storyId)
             }
         }
     }
 
-    private async spawn(req: StorySpawnRequestItem): Promise<void> {
+    private async spawn(req: StorySpawnRequestData): Promise<void> {
         if (!this.envRef) return
         if (this.active.has(req.storyId)) return // idempotent
 
@@ -119,7 +131,7 @@ export class StoryFactory extends BaroParticipant {
         this.active.set(req.storyId, agent)
 
         // The agent's run() returns a Promise but we don't await it
-        // here — the StoryResultItem will arrive on the bus when it
+        // here — the StoryResult event will arrive on the bus when it
         // settles, and Conductor reacts to that. Pure fire-and-forget
         // event-driven flow.
         void agent.run(this.envRef)
@@ -127,6 +139,9 @@ export class StoryFactory extends BaroParticipant {
         // Emit the "yes, agent spawned" notification so observers can
         // see the lifecycle. Conductor doesn't actually need this, but
         // it makes audit logs/replays much clearer.
-        this.envRef.deliverBusEvent(this, new StorySpawnedItem(req.storyId))
+        this.envRef.deliverSemanticEvent(
+            this,
+            StorySpawned.create({ storyId: req.storyId }),
+        )
     }
 }
