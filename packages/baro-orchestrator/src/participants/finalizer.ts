@@ -30,7 +30,7 @@ import { promisify } from "util"
 
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
-import { BaroEnvironment } from "../bus.js"
+import { AgenticEnvironment } from "@mozaik-ai/core"
 import { buildDag } from "../dag.js"
 import { getHeadSha } from "../git.js"
 import { BARO_COAUTHOR_TRAILER, loadPrd, type PrdFile, type PrdStory } from "../prd.js"
@@ -72,7 +72,7 @@ interface StoryRecord {
 export class Finalizer extends BaseObserver {
     private readonly opts: Required<Omit<FinalizerOptions, "baseSha" | "onLog">> &
         Pick<FinalizerOptions, "onLog">
-    private envRef: BaroEnvironment | null = null
+    private envRef: AgenticEnvironment | null = null
 
     private startedAtMs: number | null = null
     private baseSha: string | null
@@ -104,7 +104,7 @@ export class Finalizer extends BaseObserver {
         this.baseSha = opts.baseSha ?? null
     }
 
-    setEnvironment(env: BaroEnvironment): void {
+    setEnvironment(env: AgenticEnvironment): void {
         this.envRef = env
     }
 

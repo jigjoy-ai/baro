@@ -16,7 +16,7 @@ import {
     SemanticEvent,
 } from "@mozaik-ai/core"
 
-import { BaroEnvironment } from "../bus.js"
+import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
     StoryResult,
     StorySpawnRequest,
@@ -58,14 +58,14 @@ export class StoryFactory extends BaseObserver {
     // Typed as BaroEnvironment because StoryAgent.run() / join() still
     // expect the old environment type. Once StoryAgent migrates, this
     // narrows to vanilla AgenticEnvironment.
-    private envRef: BaroEnvironment | null = null
+    private envRef: AgenticEnvironment | null = null
     private readonly active: Map<string, StoryAgent | OpenAIStoryAgent> = new Map()
 
     constructor(private readonly opts: StoryFactoryOptions) {
         super()
     }
 
-    setEnvironment(env: BaroEnvironment): void {
+    setEnvironment(env: AgenticEnvironment): void {
         this.envRef = env
     }
 

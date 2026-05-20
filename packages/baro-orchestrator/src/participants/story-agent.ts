@@ -27,7 +27,7 @@ import { setTimeout as setTimeoutPromise } from "timers/promises"
 
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
-import { BaroEnvironment } from "../bus.js"
+import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
     AgentResult,
     AgentState,
@@ -99,7 +99,7 @@ export class StoryAgent extends BaseObserver {
     > &
         StorySpec
 
-    private envRef: BaroEnvironment | null = null
+    private envRef: AgenticEnvironment | null = null
     private currentClaude: ClaudeCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -154,7 +154,7 @@ export class StoryAgent extends BaseObserver {
      * Begin executing the story. Idempotent. Returns the `done` promise
      * for the caller's convenience.
      */
-    run(environment: BaroEnvironment): Promise<StoryOutcome> {
+    run(environment: AgenticEnvironment): Promise<StoryOutcome> {
         if (this.startedAt != null) {
             return this.done
         }

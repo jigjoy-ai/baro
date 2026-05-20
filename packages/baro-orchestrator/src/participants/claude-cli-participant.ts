@@ -23,7 +23,7 @@ import {
     SemanticEvent,
 } from "@mozaik-ai/core"
 
-import { BaroEnvironment } from "../bus.js"
+import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
     AgentResult,
     AgentState,
@@ -111,7 +111,7 @@ export class ClaudeCliParticipant extends BaseObserver {
 
     private proc: ChildProcess | null = null
     private buffer = ""
-    private envRef: BaroEnvironment | null = null
+    private envRef: AgenticEnvironment | null = null
     private currentPhase: AgentPhase = "idle"
     private sessionId: string | null = null
     private lastResult: AgentResultData | null = null
@@ -159,7 +159,7 @@ export class ClaudeCliParticipant extends BaseObserver {
      * Spawn the Claude process and start streaming its events into the
      * environment. Idempotent: subsequent calls are a no-op.
      */
-    start(environment: BaroEnvironment): void {
+    start(environment: AgenticEnvironment): void {
         if (this.proc) return
         this.envRef = environment
 

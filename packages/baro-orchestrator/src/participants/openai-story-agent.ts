@@ -61,7 +61,7 @@ import {
     type Tool,
 } from "@mozaik-ai/core"
 
-import { BaroEnvironment } from "../bus.js"
+import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
     UsageAccumulator,
     runInferenceRound,
@@ -138,7 +138,7 @@ export class OpenAIStoryAgent extends BaseObserver {
     private readonly model: GenerativeModel
     private readonly tools: Tool[]
 
-    private envRef: BaroEnvironment | null = null
+    private envRef: AgenticEnvironment | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
     private resolveDone!: (outcome: StoryOutcome) => void
@@ -185,7 +185,7 @@ export class OpenAIStoryAgent extends BaseObserver {
         return this.currentPhase
     }
 
-    run(env: BaroEnvironment): Promise<StoryOutcome> {
+    run(env: AgenticEnvironment): Promise<StoryOutcome> {
         if (this.startedAt != null) return this.done
         this.envRef = env
         this.startedAt = Date.now()

@@ -19,7 +19,7 @@ import {
     SemanticEvent,
 } from "@mozaik-ai/core"
 
-import { BaroEnvironment } from "./bus.js"
+import { AgenticEnvironment } from "@mozaik-ai/core"
 
 import {
     GitGate,
@@ -177,7 +177,7 @@ export interface OrchestrateResult {
 export async function orchestrate(
     config: OrchestrateConfig,
 ): Promise<OrchestrateResult> {
-    const env = new BaroEnvironment()
+    const env = new AgenticEnvironment()
     const emitTui = config.emitTuiEvents ?? true
     const llm: "claude" | "openai" = config.llm ?? "claude"
 

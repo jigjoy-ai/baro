@@ -9,15 +9,15 @@
  */
 
 export {
-    AgentTargetedMessageItem,
-    AgentStateItem,
+    AgentTargetedMessage,
+    AgentState,
     type AgentPhase,
-    ClaudeSystemItem,
-    AgentResultItem,
-    ClaudeStreamChunkItem,
-    ClaudeRateLimitItem,
-    ClaudeUnknownEventItem,
-} from "./types.js"
+    ClaudeSystem,
+    AgentResult,
+    ClaudeStreamChunk,
+    ClaudeRateLimit,
+    ClaudeUnknownEvent,
+} from "./semantic-events.js"
 
 export { mapClaudeEvent, type MapResult } from "./stream-json-mapper.js"
 
@@ -109,12 +109,12 @@ export {
 } from "./participants/sentry.js"
 
 export {
-    KnowledgeItem,
-    CoordinationItem,
-    CritiqueItem,
-    ReplanItem,
+    Knowledge,
+    Coordination,
+    Critique,
+    Replan,
     type ReplanStoryAdd,
-} from "./types.js"
+} from "./semantic-events.js"
 
 export {
     Critic,

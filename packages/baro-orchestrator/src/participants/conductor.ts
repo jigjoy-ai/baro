@@ -41,7 +41,7 @@ import { join } from "path"
 
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
-import { BaroEnvironment } from "../bus.js"
+import { AgenticEnvironment } from "@mozaik-ai/core"
 import { buildDag } from "../dag.js"
 import {
     PrdFile,
@@ -138,7 +138,7 @@ export class Conductor extends BaseObserver {
     > &
         ConductorOptions
 
-    private envRef: BaroEnvironment | null = null
+    private envRef: AgenticEnvironment | null = null
     private phase: ConductorPhase = "idle"
     private prd: PrdFile | null = null
     private startedAt = 0
@@ -196,7 +196,7 @@ export class Conductor extends BaseObserver {
         })
     }
 
-    setEnvironment(env: BaroEnvironment): void {
+    setEnvironment(env: AgenticEnvironment): void {
         this.envRef = env
     }
 
