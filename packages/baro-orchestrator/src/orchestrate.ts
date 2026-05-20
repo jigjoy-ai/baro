@@ -43,7 +43,8 @@ import { Librarian } from "./participants/librarian.js"
 import { Operator } from "./participants/operator.js"
 import { Sentry } from "./participants/sentry.js"
 import { StoryFactory } from "./participants/story-factory.js"
-import { StoryResultItem, type StoryAgent } from "./participants/story-agent.js"
+import { type StoryAgent } from "./participants/story-agent.js"
+import { StoryResult, type StoryResultData } from "./semantic-events.js"
 import { Surgeon, type PrdSnapshot } from "./participants/surgeon.js"
 import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
 import { PrdFile, loadPrd } from "./prd.js"
@@ -501,10 +502,7 @@ class BaroEventForwarder extends BaroParticipant {
         // both channels via BaroEnvironment.
         // ConductorState handling moved out of this handler.
 
-        if (event instanceof StoryResultItem) {
-            this.handleStoryResult(event)
-            return
-        }
+        // StoryResult moved to SemanticEvent — handled in onExternalEvent.
 
         if (event instanceof AgentResultItem) {
             this.handleClaudeResult(event)
@@ -567,6 +565,10 @@ class BaroEventForwarder extends BaroParticipant {
             this.handleConductorState(event.data)
             return
         }
+        if (StoryResult.is(event)) {
+            this.handleStoryResult(event.data)
+            return
+        }
     }
 
     private handleConductorState(item: ConductorStateData): void {
@@ -588,7 +590,7 @@ class BaroEventForwarder extends BaroParticipant {
         }
     }
 
-    private handleStoryResult(item: StoryResultItem): void {
+    private handleStoryResult(item: StoryResultData): void {
         if (item.success) {
             emit({
                 type: "story_complete",

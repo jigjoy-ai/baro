@@ -37,10 +37,10 @@ export {
 
 export {
     StoryAgent,
-    StoryResultItem,
     type StorySpec,
     type StoryOutcome,
 } from "./participants/story-agent.js"
+export { StoryResult } from "./semantic-events.js"
 
 export {
     Conductor,

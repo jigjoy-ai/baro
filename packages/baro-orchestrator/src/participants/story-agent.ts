@@ -25,16 +25,16 @@
 
 import { setTimeout as setTimeoutPromise } from "timers/promises"
 
-import { Participant } from "@mozaik-ai/core"
+import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
-import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
-
+import { BaroEnvironment } from "../bus.js"
 import {
-    AgentPhase,
-    AgentStateItem,
-    AgentTargetedMessageItem,
-    AgentResultItem,
-} from "../types.js"
+    AgentResult,
+    AgentState,
+    AgentTargetedMessage,
+    StoryResult,
+    type AgentPhase,
+} from "../semantic-events.js"
 import {
     ClaudeCliParticipant,
     ClaudeRunSummary,
@@ -81,32 +81,11 @@ export interface StoryOutcome {
     error: string | null
 }
 
-export class StoryResultItem extends BusEvent {
-    readonly type = "story_result"
+// StoryResultItem (was a BusEvent subclass defined here) moves to
+// semantic-events.ts as `StoryResult` (defineSemanticEvent factory). The
+// wire `type` string stays "story_result".
 
-    constructor(
-        public readonly storyId: string,
-        public readonly success: boolean,
-        public readonly attempts: number,
-        public readonly durationSecs: number,
-        public readonly error: string | null,
-    ) {
-        super()
-    }
-
-    toJSON(): unknown {
-        return {
-            type: this.type,
-            storyId: this.storyId,
-            success: this.success,
-            attempts: this.attempts,
-            durationSecs: this.durationSecs,
-            error: this.error,
-        }
-    }
-}
-
-export class StoryAgent extends BaroParticipant {
+export class StoryAgent extends BaseObserver {
     private readonly spec: Required<
         Pick<
             StorySpec,
@@ -194,16 +173,22 @@ export class StoryAgent extends BaroParticipant {
      * StoryAgent is the sole owner of AgentTargetedMessageItem → stdin
      * forwarding. ClaudeCliParticipant.onContextItem does NOT do this.
      */
-    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
-        // StoryAgent observes AgentTargetedMessageItem and AgentResultItem
-        // for lifecycle/timing purposes only. The actual stdin forwarding
-        // is owned by ClaudeCliParticipant.onExternalBusEvent to avoid
+    override async onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
+        // StoryAgent observes AgentTargetedMessage and AgentResult for
+        // lifecycle/timing purposes only. The actual stdin forwarding is
+        // owned by ClaudeCliParticipant.onExternalEvent to avoid
         // double-delivery.
-        if (event instanceof AgentTargetedMessageItem && event.recipientId === this.spec.id) {
+        if (
+            AgentTargetedMessage.is(event) &&
+            event.data.recipientId === this.spec.id
+        ) {
             this.notifyStoryMessage?.()
         }
 
-        if (event instanceof AgentResultItem && event.agentId === this.spec.id) {
+        if (AgentResult.is(event) && event.data.agentId === this.spec.id) {
             this.notifyStoryResult?.()
         }
     }
@@ -430,9 +415,15 @@ export class StoryAgent extends BaroParticipant {
         error: string | null,
     ): void {
         if (!this.envRef) return
-        this.envRef.deliverBusEvent(
+        this.envRef.deliverSemanticEvent(
             this,
-            new StoryResultItem(this.spec.id, success, attempts, durationSecs, error),
+            StoryResult.create({
+                storyId: this.spec.id,
+                success,
+                attempts,
+                durationSecs,
+                error,
+            }),
         )
     }
 
@@ -440,9 +431,13 @@ export class StoryAgent extends BaroParticipant {
         if (next === this.currentPhase) return
         this.currentPhase = next
         if (this.envRef) {
-            this.envRef.deliverBusEvent(
+            this.envRef.deliverSemanticEvent(
                 this,
-                new AgentStateItem(this.spec.id, next, detail),
+                AgentState.create({
+                    agentId: this.spec.id,
+                    phase: next,
+                    detail,
+                }),
             )
         }
     }

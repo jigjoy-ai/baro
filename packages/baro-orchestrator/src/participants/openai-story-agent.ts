@@ -44,6 +44,7 @@
  */
 
 import {
+    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     Gpt54,
@@ -53,26 +54,28 @@ import {
     ModelContext,
     ModelMessageItem,
     Participant,
+    SemanticEvent,
     SystemMessageItem,
     UserMessageItem,
     type GenerativeModel,
     type Tool,
 } from "@mozaik-ai/core"
 
-import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
+import { BaroEnvironment } from "../bus.js"
 import {
     UsageAccumulator,
     runInferenceRound,
 } from "../planning/openai-runtime.js"
 import { createStoryTools } from "../planning/story-tools.js"
 import {
-    AgentPhase,
-    AgentStateItem,
-    AgentTargetedMessageItem,
-    AgentUserMessageItem,
-    AgentResultItem,
-} from "../types.js"
-import { StoryResultItem, type StoryOutcome, type StorySpec } from "./story-agent.js"
+    AgentResult,
+    AgentState,
+    AgentTargetedMessage,
+    AgentUserMessage,
+    StoryResult,
+    type AgentPhase,
+} from "../semantic-events.js"
+import { type StoryOutcome, type StorySpec } from "./story-agent.js"
 
 const STORY_SYSTEM_PROMPT = `\
 You are an autonomous coding agent. The user will hand you exactly one
@@ -118,7 +121,7 @@ export interface OpenAIStoryAgentOptions {
     perRoundTimeoutSecs?: number
 }
 
-export class OpenAIStoryAgent extends BaroParticipant {
+export class OpenAIStoryAgent extends BaseObserver {
     private readonly spec: Required<
         Pick<
             StorySpec,
@@ -195,12 +198,15 @@ export class OpenAIStoryAgent extends BaroParticipant {
         this.transition("aborted", "external abort")
     }
 
-    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
+    override async onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
         if (
-            event instanceof AgentTargetedMessageItem &&
-            event.recipientId === this.spec.id
+            AgentTargetedMessage.is(event) &&
+            event.data.recipientId === this.spec.id
         ) {
-            this.pendingMessage = event.text
+            this.pendingMessage = event.data.text
             this.notifyMessage?.()
         }
     }
@@ -252,9 +258,15 @@ export class OpenAIStoryAgent extends BaroParticipant {
             : 0
         const success = this.currentPhase === "done"
 
-        this.envRef?.deliverBusEvent(
+        this.envRef?.deliverSemanticEvent(
             this,
-            new StoryResultItem(this.spec.id, success, attempts, durationSecs, lastError),
+            StoryResult.create({
+                storyId: this.spec.id,
+                success,
+                attempts,
+                durationSecs,
+                error: lastError,
+            }),
         )
 
         this.resolveDone({
@@ -272,9 +284,12 @@ export class OpenAIStoryAgent extends BaroParticipant {
         // on the bus as an AgentUserMessageItem so Cartographer renders
         // it the same way it renders the Claude side's user echoes.
         const userMessageText = this.spec.prompt
-        this.envRef?.deliverBusEvent(
+        this.envRef?.deliverSemanticEvent(
             this,
-            new AgentUserMessageItem(this.spec.id, userMessageText),
+            AgentUserMessage.create({
+                agentId: this.spec.id,
+                text: userMessageText,
+            }),
         )
 
         let context = ModelContext.create(this.spec.id)
@@ -294,20 +309,19 @@ export class OpenAIStoryAgent extends BaroParticipant {
             // us on each inference round, summed; same shape Claude's
             // stream-json mapper produces (snake_case keys).
             const usageJson = turnResult.usage.isEmpty ? null : turnResult.usage.toJSON()
-            this.envRef?.deliverBusEvent(
+            this.envRef?.deliverSemanticEvent(
                 this,
-                new AgentResultItem(
-                    this.spec.id,
-                    turnResult.success ? "success" : "error",
-                    null, // session id — not applicable for OpenAI
-                    !turnResult.success,
-                    turnResult.assistantText,
-                    usageJson,
-                    null,
-                    null,
-                    null,
-                    {},
-                ),
+                AgentResult.create({
+                    agentId: this.spec.id,
+                    subtype: turnResult.success ? "success" : "error",
+                    sessionId: null,
+                    isError: !turnResult.success,
+                    resultText: turnResult.assistantText,
+                    usage: usageJson,
+                    totalCostUsd: null,
+                    numTurns: null,
+                    durationMs: null,
+                }),
             )
             process.stderr.write(
                 `[story-openai/${this.spec.id}] turn ${turn}: ${turnResult.usage.summary()}\n`,
@@ -329,9 +343,12 @@ export class OpenAIStoryAgent extends BaroParticipant {
             context = context.addContextItem(
                 UserMessageItem.create(this.pendingMessage ?? ""),
             )
-            this.envRef?.deliverBusEvent(
+            this.envRef?.deliverSemanticEvent(
                 this,
-                new AgentUserMessageItem(this.spec.id, this.pendingMessage ?? ""),
+                AgentUserMessage.create({
+                    agentId: this.spec.id,
+                    text: this.pendingMessage ?? "",
+                }),
             )
             this.pendingMessage = null
         }
@@ -473,9 +490,13 @@ export class OpenAIStoryAgent extends BaroParticipant {
     private transition(next: AgentPhase, detail?: string): void {
         if (next === this.currentPhase) return
         this.currentPhase = next
-        this.envRef?.deliverBusEvent(
+        this.envRef?.deliverSemanticEvent(
             this,
-            new AgentStateItem(this.spec.id, next, detail),
+            AgentState.create({
+                agentId: this.spec.id,
+                phase: next,
+                detail,
+            }),
         )
     }
 }
