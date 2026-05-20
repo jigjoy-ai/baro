@@ -1,6 +1,6 @@
 {
   "name": "baro-ai",
-  "version": "0.40.0",
+  "version": "0.41.0",
   "description": "Autonomous parallel coding - plan and execute with AI",
   "type": "module",
   "bin": {
@@ -23,7 +23,7 @@
     "zod-to-json-schema": "^3.25.1"
   },
   "devDependencies": {
-    "@mozaik-ai/core": "3.9.3",
+    "@mozaik-ai/core": "3.10.2",
     "@types/node": "^22.0.0",
     "tsup": "^8.0.2",
     "tsx": "^4.21.0",
