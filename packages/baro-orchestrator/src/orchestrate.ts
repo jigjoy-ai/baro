@@ -11,6 +11,7 @@ import { mkdirSync } from "fs"
 import { dirname } from "path"
 
 import {
+    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
@@ -18,7 +19,7 @@ import {
     SemanticEvent,
 } from "@mozaik-ai/core"
 
-import { BaroEnvironment, BaroParticipant, BusEvent } from "./bus.js"
+import { BaroEnvironment } from "./bus.js"
 
 import {
     GitGate,
@@ -49,15 +50,19 @@ import { Surgeon, type PrdSnapshot } from "./participants/surgeon.js"
 import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
 import { PrdFile, loadPrd } from "./prd.js"
 import {
-    AgentStateItem,
-    AgentResultItem,
-    ClaudeSystemItem,
-    CoordinationItem,
-    CritiqueItem,
-    FinalizeStartedItem,
-    PrCreatedItem,
-    RunStartRequestItem,
-} from "./types.js"
+    AgentResult,
+    AgentState,
+    ClaudeSystem,
+    Coordination,
+    Critique,
+    FinalizeStarted,
+    PrCreated,
+    RunStartRequest,
+    type AgentResultData,
+    type AgentStateData,
+    type CoordinationData,
+    type CritiqueData,
+} from "./semantic-events.js"
 import { emit } from "./tui-protocol.js"
 
 export interface OrchestrateConfig {
@@ -420,7 +425,10 @@ export async function orchestrate(
     // the bus. Conductor's onExternalBusEvent handler picks it up and drives
     // the state machine forward via further bus events. There is no
     // `conductor.run()` call — the runtime is the loop.
-    env.deliverBusEvent(operator, new RunStartRequestItem("orchestrate"))
+    env.deliverSemanticEvent(
+        operator,
+        RunStartRequest.create({ reason: "orchestrate" }),
+    )
     const summary = await conductor.done
 
     // Drain in-flight async observers so all side effects (CritiqueItem,
@@ -469,7 +477,7 @@ export async function orchestrate(
  * Rust TUI. Lives inside this module so callers don't have to wire
  * sinks themselves.
  */
-class BaroEventForwarder extends BaroParticipant {
+class BaroEventForwarder extends BaseObserver {
     /** Story IDs that have already received a `story_start`. */
     private startedStories = new Set<string>()
     /** Number of in-flight retry attempts per story (for `story_retry`). */
@@ -492,71 +500,6 @@ class BaroEventForwarder extends BaroParticipant {
         this.handleToolResult(source, item)
     }
 
-    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
-        // ConductorState moved off BusEvent to SemanticEvent — receivers
-        // for it run through the BaseObserver `onExternalEvent` channel
-        // in fully-migrated participants. orchestrate.ts's
-        // BaroEventForwarder will migrate to that channel in a
-        // follow-up; for now the rest of this handler stays on the
-        // legacy BusEvent path while migrated emitters route through
-        // both channels via BaroEnvironment.
-        // ConductorState handling moved out of this handler.
-
-        // StoryResult moved to SemanticEvent — handled in onExternalEvent.
-
-        if (event instanceof AgentResultItem) {
-            this.handleClaudeResult(event)
-            return
-        }
-
-        if (event instanceof AgentStateItem) {
-            this.handleAgentState(event)
-            return
-        }
-
-        if (event instanceof ClaudeSystemItem) {
-            // Mostly noise; emit only init transitions (already covered
-            // by AgentStateItem) — skip.
-            return
-        }
-
-        if (event instanceof CoordinationItem) {
-            this.handleCoordination(event)
-            return
-        }
-
-        if (event instanceof CritiqueItem) {
-            this.handleCritique(event)
-            return
-        }
-
-        if (event instanceof FinalizeStartedItem) {
-            emit({ type: "finalize_start" })
-            return
-        }
-
-        if (event instanceof PrCreatedItem) {
-            emit({ type: "finalize_complete", pr_url: event.url })
-            return
-        }
-    }
-
-    private handleCoordination(item: CoordinationItem): void {
-        emit({
-            type: "story_log",
-            id: item.recipientId,
-            line: `[sentry/${item.kind}] ${item.reason}`,
-        })
-    }
-
-    private handleCritique(item: CritiqueItem): void {
-        emit({
-            type: "story_log",
-            id: item.agentId,
-            line: `[critic/${item.verdict}] ${item.reasoning}`,
-        })
-    }
-
     override async onExternalEvent(
         _source: Participant,
         event: SemanticEvent<unknown>,
@@ -569,6 +512,51 @@ class BaroEventForwarder extends BaroParticipant {
             this.handleStoryResult(event.data)
             return
         }
+        if (AgentResult.is(event)) {
+            this.handleClaudeResult(event.data)
+            return
+        }
+        if (AgentState.is(event)) {
+            this.handleAgentState(event.data)
+            return
+        }
+        if (ClaudeSystem.is(event)) {
+            // Mostly noise; emit only init transitions (already covered
+            // by AgentState) — skip.
+            return
+        }
+        if (Coordination.is(event)) {
+            this.handleCoordination(event.data)
+            return
+        }
+        if (Critique.is(event)) {
+            this.handleCritique(event.data)
+            return
+        }
+        if (FinalizeStarted.is(event)) {
+            emit({ type: "finalize_start" })
+            return
+        }
+        if (PrCreated.is(event)) {
+            emit({ type: "finalize_complete", pr_url: event.data.url })
+            return
+        }
+    }
+
+    private handleCoordination(item: CoordinationData): void {
+        emit({
+            type: "story_log",
+            id: item.recipientId,
+            line: `[sentry/${item.kind}] ${item.reason}`,
+        })
+    }
+
+    private handleCritique(item: CritiqueData): void {
+        emit({
+            type: "story_log",
+            id: item.agentId,
+            line: `[critic/${item.verdict}] ${item.reasoning}`,
+        })
     }
 
     private handleConductorState(item: ConductorStateData): void {
@@ -610,7 +598,7 @@ class BaroEventForwarder extends BaroParticipant {
         }
     }
 
-    private handleClaudeResult(item: AgentResultItem): void {
+    private handleClaudeResult(item: AgentResultData): void {
         const usage = item.usage as
             | { input_tokens?: number; output_tokens?: number }
             | null
@@ -632,7 +620,7 @@ class BaroEventForwarder extends BaroParticipant {
         })
     }
 
-    private handleAgentState(item: AgentStateItem): void {
+    private handleAgentState(item: AgentStateData): void {
         if (item.phase === "running" && !this.startedStories.has(item.agentId)) {
             this.startedStories.add(item.agentId)
             emit({ type: "story_start", id: item.agentId, title: item.agentId })
