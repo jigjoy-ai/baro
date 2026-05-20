@@ -44,10 +44,10 @@ export {
 
 export {
     Conductor,
-    ConductorStateItem,
     type ConductorOptions,
     type ConductorRunSummary,
 } from "./participants/conductor.js"
+export { ConductorState } from "./semantic-events.js"
 
 export {
     type PrdFile,

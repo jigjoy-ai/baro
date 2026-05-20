@@ -39,10 +39,9 @@
 import { existsSync, readFileSync } from "fs"
 import { join } from "path"
 
-import { Participant } from "@mozaik-ai/core"
+import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
-import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
-
+import { BaroEnvironment } from "../bus.js"
 import { buildDag } from "../dag.js"
 import {
     PrdFile,
@@ -53,16 +52,19 @@ import {
     savePrd,
 } from "../prd.js"
 import {
-    LevelCompletedItem,
-    LevelComputeRequestItem,
-    LevelStartedItem,
-    ReplanItem,
-    RunCompletedItem,
-    RunStartRequestItem,
-    RunStartedItem,
-    StorySpawnRequestItem,
-} from "../types.js"
-import { StoryResultItem } from "./story-agent.js"
+    ConductorState,
+    LevelCompleted,
+    LevelComputeRequest,
+    LevelStarted,
+    Replan,
+    RunCompleted,
+    RunStartRequest,
+    RunStarted,
+    StoryResult,
+    StorySpawnRequest,
+    type ReplanData,
+    type StoryResultData,
+} from "../semantic-events.js"
 
 export interface ConductorOptions {
     prdPath: string
@@ -113,35 +115,10 @@ export interface ConductorRunSummary {
     totalAttempts: number
 }
 
-export class ConductorStateItem extends BusEvent {
-    readonly type = "conductor_state"
-
-    constructor(
-        public readonly phase:
-            | "loading"
-            | "running_level"
-            | "level_complete"
-            | "done"
-            | "failed",
-        public readonly detail?: string,
-        public readonly currentLevel?: number,
-        public readonly totalLevels?: number,
-        public readonly storyIds?: readonly string[],
-    ) {
-        super()
-    }
-
-    toJSON(): unknown {
-        return {
-            type: this.type,
-            phase: this.phase,
-            detail: this.detail,
-            currentLevel: this.currentLevel,
-            totalLevels: this.totalLevels,
-            storyIds: this.storyIds,
-        }
-    }
-}
+// ConductorStateItem (was a BusEvent subclass defined here) moves to
+// semantic-events.ts as `ConductorState` (defineSemanticEvent factory). The
+// wire `type` string stays "conductor_state" so audit-log consumers still
+// recognise the same event name.
 
 type ConductorPhase = "idle" | "launching" | "computing" | "running" | "done"
 
@@ -155,7 +132,7 @@ interface RunningLevelState {
     perStoryAttempts: Map<string, number>
 }
 
-export class Conductor extends BaroParticipant {
+export class Conductor extends BaseObserver {
     private readonly opts: Required<
         Pick<ConductorOptions, "parallel" | "timeoutSecs" | "defaultModel">
     > &
@@ -183,8 +160,8 @@ export class Conductor extends BaroParticipant {
 
     private currentLevel: RunningLevelState | null = null
 
-    /** ReplanItem-s emitted during a level. Applied at level boundary. */
-    private readonly pendingReplans: ReplanItem[] = []
+    /** Replan payloads emitted during a level. Applied at level boundary. */
+    private readonly pendingReplans: ReplanData[] = []
 
     /** Stories that are queued to spawn but not yet launched (parallel cap). */
     private readonly spawnQueue: PrdStory[] = []
@@ -226,40 +203,43 @@ export class Conductor extends BaroParticipant {
     /**
      * Single entry point. All state transitions happen here.
      *
-     * Note: the Conductor self-ticks via LevelComputeRequestItem, so it
-     * MUST receive its own emissions. Mozaik 3.9 splits self vs external
-     * delivery — we route both through the same handler so the state
-     * machine sees every event regardless of source. Per-event type
-     * guards distinguish "from outside" (RunStartRequestItem from
-     * Operator, ReplanItem from Surgeon, StoryResultItem from StoryAgent)
-     * from "from self" (LevelCompute).
+     * Note: the Conductor self-ticks via LevelComputeRequest, so it
+     * MUST receive its own emissions. Mozaik routes self vs external
+     * to onInternalEvent vs onExternalEvent — we forward both into the
+     * same handler so the state machine sees every event regardless of
+     * source. Per-event-type guards distinguish "from outside"
+     * (RunStartRequest from Operator, Replan from Surgeon, StoryResult
+     * from StoryAgent) from "from self" (LevelComputeRequest).
      */
-    override async onBusEvent(event: BusEvent): Promise<void> {
+    override async onInternalEvent(event: SemanticEvent<unknown>): Promise<void> {
         await this.handle(event)
     }
 
-    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
+    override async onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
         await this.handle(event)
     }
 
-    private async handle(item: BusEvent): Promise<void> {
-        if (item instanceof RunStartRequestItem) {
+    private async handle(event: SemanticEvent<unknown>): Promise<void> {
+        if (RunStartRequest.is(event)) {
             await this.handleRunStart()
             return
         }
 
-        if (item instanceof LevelComputeRequestItem) {
+        if (LevelComputeRequest.is(event)) {
             await this.handleLevelCompute()
             return
         }
 
-        if (item instanceof StoryResultItem) {
-            await this.handleStoryResult(item)
+        if (StoryResult.is(event)) {
+            await this.handleStoryResult(event.data)
             return
         }
 
-        if (item instanceof ReplanItem) {
-            this.pendingReplans.push(item)
+        if (Replan.is(event)) {
+            this.pendingReplans.push(event.data)
             return
         }
     }
@@ -271,10 +251,10 @@ export class Conductor extends BaroParticipant {
 
         this.prd = loadPrd(this.opts.prdPath)
         this.emit(
-            new ConductorStateItem(
-                "loading",
-                `${this.prd.userStories.length} stories`,
-            ),
+            ConductorState.create({
+                phase: "loading",
+                detail: `${this.prd.userStories.length} stories`,
+            }),
         )
 
         if (this.opts.onRunStart) {
@@ -290,10 +270,13 @@ export class Conductor extends BaroParticipant {
         }
 
         this.emit(
-            new RunStartedItem(this.prd.project, this.prd.userStories.length),
+            RunStarted.create({
+                project: this.prd.project,
+                storyCount: this.prd.userStories.length,
+            }),
         )
         this.phase = "computing"
-        this.emit(new LevelComputeRequestItem("initial"))
+        this.emit(LevelComputeRequest.create({ reason: "initial" }))
     }
 
     private async handleLevelCompute(): Promise<void> {
@@ -325,7 +308,7 @@ export class Conductor extends BaroParticipant {
 
         if (stories.length === 0) {
             // Level is empty (all already-passing); skip to next.
-            this.emit(new LevelComputeRequestItem("empty level"))
+            this.emit(LevelComputeRequest.create({ reason: "empty level" }))
             return
         }
 
@@ -340,16 +323,19 @@ export class Conductor extends BaroParticipant {
         }
 
         this.emit(
-            new LevelStartedItem(ordinal, totalLevelsHint, this.currentLevel.storyIds),
-        )
-        this.emit(
-            new ConductorStateItem(
-                "running_level",
-                undefined,
+            LevelStarted.create({
                 ordinal,
                 totalLevelsHint,
-                this.currentLevel.storyIds,
-            ),
+                storyIds: this.currentLevel.storyIds,
+            }),
+        )
+        this.emit(
+            ConductorState.create({
+                phase: "running_level",
+                currentLevel: ordinal,
+                totalLevels: totalLevelsHint,
+                storyIds: this.currentLevel.storyIds,
+            }),
         )
 
         this.phase = "running"
@@ -357,7 +343,7 @@ export class Conductor extends BaroParticipant {
         await this.fillSpawnSlots()
     }
 
-    private async handleStoryResult(item: StoryResultItem): Promise<void> {
+    private async handleStoryResult(item: StoryResultData): Promise<void> {
         if (this.phase !== "running") return
         if (!this.currentLevel) return
         if (!this.currentLevel.pending.has(item.storyId)) return
@@ -379,12 +365,12 @@ export class Conductor extends BaroParticipant {
                     await this.opts.onStoryPassed(item.storyId)
                 } catch (e) {
                     this.emit(
-                        new ConductorStateItem(
-                            "running_level",
-                            `onStoryPassed hook for ${item.storyId} failed: ${(e as Error)?.message ?? String(e)}`,
-                            this.currentLevel.ordinal,
-                            this.currentLevel.totalLevelsHint,
-                        ),
+                        ConductorState.create({
+                            phase: "running_level",
+                            detail: `onStoryPassed hook for ${item.storyId} failed: ${(e as Error)?.message ?? String(e)}`,
+                            currentLevel: this.currentLevel.ordinal,
+                            totalLevels: this.currentLevel.totalLevelsHint,
+                        }),
                     )
                 }
             }
@@ -456,23 +442,23 @@ export class Conductor extends BaroParticipant {
                 }
             } catch (e) {
                 this.emit(
-                    new ConductorStateItem(
-                        "running_level",
-                        `onBeforeStoryLaunch hook for ${story.id} failed: ${(e as Error)?.message ?? String(e)}`,
-                    ),
+                    ConductorState.create({
+                        phase: "running_level",
+                        detail: `onBeforeStoryLaunch hook for ${story.id} failed: ${(e as Error)?.message ?? String(e)}`,
+                    }),
                 )
             }
         }
 
         this.inFlight.add(story.id)
         this.emit(
-            new StorySpawnRequestItem(
-                story.id,
+            StorySpawnRequest.create({
+                storyId: story.id,
                 prompt,
                 model,
-                story.retries,
-                this.opts.timeoutSecs,
-            ),
+                retries: story.retries,
+                timeoutSecs: this.opts.timeoutSecs,
+            }),
         )
     }
 
@@ -481,16 +467,20 @@ export class Conductor extends BaroParticipant {
         const lvl = this.currentLevel
 
         this.emit(
-            new LevelCompletedItem(lvl.ordinal, lvl.passed, lvl.failed),
+            LevelCompleted.create({
+                ordinal: lvl.ordinal,
+                passed: lvl.passed,
+                failed: lvl.failed,
+            }),
         )
         this.emit(
-            new ConductorStateItem(
-                "level_complete",
-                `passed ${lvl.passed.length}/${lvl.passed.length + lvl.failed.length}`,
-                lvl.ordinal,
-                lvl.totalLevelsHint,
-                lvl.storyIds,
-            ),
+            ConductorState.create({
+                phase: "level_complete",
+                detail: `passed ${lvl.passed.length}/${lvl.passed.length + lvl.failed.length}`,
+                currentLevel: lvl.ordinal,
+                totalLevels: lvl.totalLevelsHint,
+                storyIds: lvl.storyIds,
+            }),
         )
 
         // Apply ReplanItem-s buffered during this level.
@@ -528,11 +518,11 @@ export class Conductor extends BaroParticipant {
                     }
                 }
                 this.emit(
-                    new ConductorStateItem(
-                        "running_level",
-                        `replan applied (source=${replan.source}, +${replan.addedStories.length}/-${replan.removedStoryIds.length}): ${replan.reason}`,
-                        lvl.ordinal,
-                    ),
+                    ConductorState.create({
+                        phase: "running_level",
+                        detail: `replan applied (source=${replan.source}, +${replan.addedStories.length}/-${replan.removedStoryIds.length}): ${replan.reason}`,
+                        currentLevel: lvl.ordinal,
+                    }),
                 )
             }
             savePrd(this.opts.prdPath, this.prd)
@@ -552,7 +542,7 @@ export class Conductor extends BaroParticipant {
 
         // Loop: ask for next level via the bus.
         this.phase = "computing"
-        this.emit(new LevelComputeRequestItem("level boundary"))
+        this.emit(LevelComputeRequest.create({ reason: "level boundary" }))
     }
 
     private terminateRun(success: boolean, abortReason: string | null): void {
@@ -564,11 +554,12 @@ export class Conductor extends BaroParticipant {
             ? `, ${this.globalDropped.length} dropped`
             : ""
         this.emit(
-            new ConductorStateItem(
-                success ? "done" : "failed",
-                abortReason ??
+            ConductorState.create({
+                phase: success ? "done" : "failed",
+                detail:
+                    abortReason ??
                     `${this.globalCompleted.length} passed, ${this.globalFailed.length} failed${droppedSegment} in ${totalDurationSecs}s`,
-            ),
+            }),
         )
 
         const summary: ConductorRunSummary = {
@@ -582,14 +573,14 @@ export class Conductor extends BaroParticipant {
         }
 
         this.emit(
-            new RunCompletedItem(
+            RunCompleted.create({
                 success,
-                summary.completedStories,
-                summary.failedStories,
+                completedStories: summary.completedStories,
+                failedStories: summary.failedStories,
                 totalDurationSecs,
-                this.totalAttempts,
+                totalAttempts: this.totalAttempts,
                 abortReason,
-            ),
+            }),
         )
 
         // onRunComplete hook is fired and-then-forget; the resolve happens
@@ -640,17 +631,17 @@ export class Conductor extends BaroParticipant {
         return prompt
     }
 
-    private emit(event: BusEvent): void {
-        this.envRef?.deliverBusEvent(this, event)
+    private emit(event: SemanticEvent<unknown>): void {
+        this.envRef?.deliverSemanticEvent(this, event)
     }
 }
 
 /**
- * Pure: apply a ReplanItem to a PrdFile and return a new PrdFile.
+ * Pure: apply a Replan payload to a PrdFile and return a new PrdFile.
  * Removes pending stories, rewires deps, adds new stories.
  * Stories that have already passed are never removed.
  */
-export function applyReplan(prd: PrdFile, replan: ReplanItem): PrdFile {
+export function applyReplan(prd: PrdFile, replan: ReplanData): PrdFile {
     let stories = prd.userStories.slice()
 
     if (replan.removedStoryIds.length > 0) {
@@ -658,9 +649,10 @@ export function applyReplan(prd: PrdFile, replan: ReplanItem): PrdFile {
         stories = stories.filter((s) => !removeSet.has(s.id) || s.passes)
     }
 
-    if (replan.modifiedDeps.size > 0) {
+    const modifiedDepsKeys = Object.keys(replan.modifiedDeps)
+    if (modifiedDepsKeys.length > 0) {
         stories = stories.map((s) => {
-            const newDeps = replan.modifiedDeps.get(s.id)
+            const newDeps = replan.modifiedDeps[s.id]
             if (!newDeps) return s
             return { ...s, dependsOn: [...newDeps] }
         })

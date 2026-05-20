@@ -15,6 +15,7 @@ import {
     FunctionCallOutputItem,
     ModelMessageItem,
     Participant,
+    SemanticEvent,
 } from "@mozaik-ai/core"
 
 import { BaroEnvironment, BaroParticipant, BusEvent } from "./bus.js"
@@ -29,11 +30,11 @@ import {
     safePullRebase,
 } from "./git.js"
 import { buildDag } from "./dag.js"
+import { ConductorState, type ConductorStateData } from "./semantic-events.js"
 import { Auditor } from "./participants/auditor.js"
 import {
     Conductor,
     ConductorRunSummary,
-    ConductorStateItem,
 } from "./participants/conductor.js"
 import { Critic } from "./participants/critic.js"
 import { CriticOpenAI } from "./participants/critic-openai.js"
@@ -491,10 +492,14 @@ class BaroEventForwarder extends BaroParticipant {
     }
 
     override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
-        if (event instanceof ConductorStateItem) {
-            this.handleConductorState(event)
-            return
-        }
+        // ConductorState moved off BusEvent to SemanticEvent — receivers
+        // for it run through the BaseObserver `onExternalEvent` channel
+        // in fully-migrated participants. orchestrate.ts's
+        // BaroEventForwarder will migrate to that channel in a
+        // follow-up; for now the rest of this handler stays on the
+        // legacy BusEvent path while migrated emitters route through
+        // both channels via BaroEnvironment.
+        // ConductorState handling moved out of this handler.
 
         if (event instanceof StoryResultItem) {
             this.handleStoryResult(event)
@@ -554,7 +559,17 @@ class BaroEventForwarder extends BaroParticipant {
         })
     }
 
-    private handleConductorState(item: ConductorStateItem): void {
+    override async onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
+        if (ConductorState.is(event)) {
+            this.handleConductorState(event.data)
+            return
+        }
+    }
+
+    private handleConductorState(item: ConductorStateData): void {
         // Mirror conductor lifecycle as a `progress` event the existing
         // Rust TUI understands — it doesn't yet know `conductor_state`.
         if (
