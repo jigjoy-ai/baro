@@ -19,27 +19,28 @@
  */
 
 import {
+    BaseObserver,
     Gpt54,
     Gpt54Mini,
     Gpt54Nano,
     Gpt55,
     ModelContext,
+    SemanticEvent,
     SystemMessageItem,
     UserMessageItem,
     type GenerativeModel,
     type Participant,
 } from "@mozaik-ai/core"
 
-import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
 import {
     UsageAccumulator,
     runInferenceRound,
 } from "../planning/openai-runtime.js"
 import {
-    AgentTargetedMessageItem,
-    AgentResultItem,
-    CritiqueItem,
-} from "../types.js"
+    AgentResult,
+    AgentTargetedMessage,
+    Critique,
+} from "../semantic-events.js"
 import {
     VERDICT_SYSTEM_PROMPT,
     buildCorrectiveMessage,
@@ -79,7 +80,7 @@ function pickModel(name: string): GenerativeModel {
     }
 }
 
-export class CriticOpenAI extends BaroParticipant {
+export class CriticOpenAI extends BaseObserver {
     private readonly opts: Required<CriticOpenAIOptions>
     private readonly model: GenerativeModel
 
@@ -102,45 +103,53 @@ export class CriticOpenAI extends BaroParticipant {
         await Promise.allSettled([...this.pending])
     }
 
-    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
-        if (!(event instanceof AgentResultItem)) return
-        if (event.isError || !event.resultText) return
+    override async onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
+        if (!AgentResult.is(event)) return
+        const { agentId, isError, resultText } = event.data
+        if (isError || !resultText) return
 
-        const criteria = this.opts.targets.get(event.agentId)
+        const criteria = this.opts.targets.get(agentId)
         if (!criteria || criteria.length === 0) return
 
-        const turn = (this.turnCount.get(event.agentId) ?? 0) + 1
-        this.turnCount.set(event.agentId, turn)
+        const turn = (this.turnCount.get(agentId) ?? 0) + 1
+        this.turnCount.set(agentId, turn)
 
         const work = (async () => {
             const { verdict, reasoning, violatedCriteria } = await this.evaluate(
-                event.resultText!,
+                resultText,
                 criteria,
             )
 
-            const critiqueItem = new CritiqueItem(
-                event.agentId,
+            const critiqueEvent = Critique.create({
+                agentId,
                 verdict,
                 reasoning,
                 violatedCriteria,
                 turn,
-                this.opts.model,
-            )
+                modelUsed: this.opts.model,
+            })
             for (const env of this.getEnvironments()) {
-                ;(env as BaroEnvironment).deliverBusEvent(this, critiqueItem)
+                env.deliverSemanticEvent(this, critiqueEvent)
             }
 
             if (verdict === "fail") {
-                const emitted = this.emissions.get(event.agentId) ?? 0
+                const emitted = this.emissions.get(agentId) ?? 0
                 if (emitted < this.opts.maxEmissionsPerAgent) {
-                    this.emissions.set(event.agentId, emitted + 1)
+                    this.emissions.set(agentId, emitted + 1)
                     const text = buildCorrectiveMessage(reasoning, violatedCriteria)
-                    const msg = new AgentTargetedMessageItem(event.agentId, text, {
-                        criticTurn: turn,
-                        emissionIndex: emitted + 1,
+                    const msg = AgentTargetedMessage.create({
+                        recipientId: agentId,
+                        text,
+                        metadata: {
+                            criticTurn: turn,
+                            emissionIndex: emitted + 1,
+                        },
                     })
                     for (const env of this.getEnvironments()) {
-                        ;(env as BaroEnvironment).deliverBusEvent(this, msg)
+                        env.deliverSemanticEvent(this, msg)
                     }
                 }
             }
