@@ -15,21 +15,24 @@
 import { ChildProcess, spawn } from "child_process"
 
 import {
+    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
     Participant,
+    SemanticEvent,
 } from "@mozaik-ai/core"
 
-import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
-import { mapClaudeEvent } from "../stream-json-mapper.js"
+import { BaroEnvironment } from "../bus.js"
 import {
-    AgentPhase,
-    AgentStateItem,
-    AgentTargetedMessageItem,
-    AgentResultItem,
-    ClaudeSystemItem,
-} from "../types.js"
+    AgentResult,
+    AgentState,
+    AgentTargetedMessage,
+    ClaudeSystem,
+    type AgentPhase,
+    type AgentResultData,
+} from "../semantic-events.js"
+import { mapClaudeEvent } from "../stream-json-mapper.js"
 
 export interface ClaudeCliParticipantOptions {
     /** Working directory for the Claude process. Required. */
@@ -69,10 +72,16 @@ export interface ClaudeRunSummary {
     sessionId: string | null
     exitCode: number | null
     error: Error | null
-    lastResult: AgentResultItem | null
+    /**
+     * Last `result` event observed for this agent. Stored as the
+     * SemanticEvent payload shape (AgentResultData), not the live
+     * SemanticEvent instance, so callers don't have to peel `.data` to
+     * read out `.isError`, `.resultText` etc.
+     */
+    lastResult: AgentResultData | null
 }
 
-export class ClaudeCliParticipant extends BaroParticipant {
+export class ClaudeCliParticipant extends BaseObserver {
     /**
      * Process-wide registry of every Claude child currently running.
      * Used by the orchestrator's SIGINT/SIGTERM handlers to nuke
@@ -105,7 +114,7 @@ export class ClaudeCliParticipant extends BaroParticipant {
     private envRef: BaroEnvironment | null = null
     private currentPhase: AgentPhase = "idle"
     private sessionId: string | null = null
-    private lastResult: AgentResultItem | null = null
+    private lastResult: AgentResultData | null = null
     private exitCode: number | null = null
     private spawnError: Error | null = null
     private resolveDone!: (summary: ClaudeRunSummary) => void
@@ -231,17 +240,20 @@ export class ClaudeCliParticipant extends BaroParticipant {
         this.proc?.kill(signal)
     }
 
-    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
+    override async onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
         // ClaudeCliParticipant owns bus → stdin forwarding for messages
         // addressed to its agentId. StoryAgent (when present) observes
         // these events for lifecycle/timing purposes only — it does NOT
         // also write to stdin, to avoid double-delivery.
         if (
-            event instanceof AgentTargetedMessageItem &&
-            event.recipientId === this.agentId
+            AgentTargetedMessage.is(event) &&
+            event.data.recipientId === this.agentId
         ) {
             if (!this.proc?.stdin) return
-            this.sendUserMessage(event.text)
+            this.sendUserMessage(event.data.text)
         }
     }
 
@@ -310,26 +322,40 @@ export class ClaudeCliParticipant extends BaroParticipant {
         }
 
         for (const item of items) {
-            if (item instanceof ClaudeSystemItem && item.subtype === "init") {
-                this.transition("running", "claude init received")
-                this.resolveReady()
-            }
-            if (item instanceof AgentResultItem) {
-                this.lastResult = item
-                this.transition(item.isError ? "failed" : "done", `result:${item.subtype}`)
+            // SemanticEvent instances carry our typed payload events.
+            // LLM items (FunctionCallItem etc.) take the dedicated
+            // delivery channels and aren't inspected here.
+            if (item instanceof SemanticEvent) {
+                if (ClaudeSystem.is(item) && item.data.subtype === "init") {
+                    this.transition("running", "claude init received")
+                    this.resolveReady()
+                }
+                if (AgentResult.is(item)) {
+                    this.lastResult = item.data
+                    this.transition(
+                        item.data.isError ? "failed" : "done",
+                        `result:${item.data.subtype}`,
+                    )
+                }
             }
             this.dispatch(item)
         }
     }
 
     /**
-     * Route a mapped stream-json item to the right Mozaik 3.9 delivery
-     * channel. Assistant-side LLM items get their dedicated typed
-     * channels so future Mozaik-native participants can listen
-     * idiomatically; everything else (user-side messages, system frames,
-     * result frames, custom Claude wrappers) rides our `BusEvent` bus.
+     * Route a mapped stream-json item to the right Mozaik delivery channel.
+     * Assistant-side LLM items get Mozaik's dedicated typed channels
+     * (deliverModelMessage/FunctionCall/FunctionCallOutput); everything
+     * else (user-side messages, system frames, result frames, custom
+     * Claude wrappers) goes through Mozaik's `deliverSemanticEvent`.
      */
-    private dispatch(item: ModelMessageItem | FunctionCallItem | FunctionCallOutputItem | BusEvent): void {
+    private dispatch(
+        item:
+            | ModelMessageItem
+            | FunctionCallItem
+            | FunctionCallOutputItem
+            | SemanticEvent<unknown>,
+    ): void {
         if (!this.envRef) return
         if (item instanceof ModelMessageItem) {
             this.envRef.deliverModelMessage(this, item)
@@ -343,15 +369,19 @@ export class ClaudeCliParticipant extends BaroParticipant {
             this.envRef.deliverFunctionCallOutput(this, item)
             return
         }
-        this.envRef.deliverBusEvent(this, item)
+        this.envRef.deliverSemanticEvent(this, item)
     }
 
     private transition(next: AgentPhase, detail?: string): void {
         if (next === this.currentPhase) return
         this.currentPhase = next
-        this.envRef?.deliverBusEvent(
+        this.envRef?.deliverSemanticEvent(
             this,
-            new AgentStateItem(this.agentId, next, detail),
+            AgentState.create({
+                agentId: this.agentId,
+                phase: next,
+                detail,
+            }),
         )
     }
 }

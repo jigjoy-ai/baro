@@ -5,10 +5,10 @@
  * built-in items (ModelMessageItem, FunctionCallItem,
  * FunctionCallOutputItem), which `ClaudeCliParticipant` dispatches via
  * the matching `env.deliverModelMessage` / `deliverFunctionCall` /
- * `deliverFunctionCallOutput` channels in Mozaik 3.9+. The rest
- * (user-side messages, system frames, result frames, rate-limits,
- * stream chunks, unknowns) become baro-specific `BusEvent` subclasses
- * because Mozaik 3.9 doesn't expose typed channels for them.
+ * `deliverFunctionCallOutput` channels. The rest (user-side messages,
+ * system frames, result frames, rate-limits, stream chunks, unknowns)
+ * become `SemanticEvent<T>` payloads wrapped via the factories defined
+ * in `semantic-events.ts`.
  *
  * Every input event still maps to a non-empty array — we never silently
  * drop data. Tested against real spike logs in
@@ -19,28 +19,28 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
+    SemanticEvent,
 } from "@mozaik-ai/core"
 
-import { BusEvent } from "./bus.js"
 import {
-    AgentUserMessageItem,
-    ClaudeRateLimitItem,
-    AgentResultItem,
-    ClaudeStreamChunkItem,
-    ClaudeSystemItem,
-    ClaudeUnknownEventItem,
-} from "./types.js"
+    AgentResult,
+    AgentUserMessage,
+    ClaudeRateLimit,
+    ClaudeStreamChunk,
+    ClaudeSystem,
+    ClaudeUnknownEvent,
+} from "./semantic-events.js"
 
 /**
  * Union of every kind of item the mapper can produce. Mozaik built-in
- * types are dispatched via their native bus channels; `BusEvent` ones
- * via `deliverBusEvent`.
+ * types are dispatched via their native bus channels; `SemanticEvent`
+ * ones via `deliverSemanticEvent`.
  */
 export type MappedItem =
     | ModelMessageItem
     | FunctionCallItem
     | FunctionCallOutputItem
-    | BusEvent
+    | SemanticEvent<unknown>
 
 export interface MapResult {
     items: MappedItem[]
@@ -59,22 +59,23 @@ export function mapClaudeEvent(
     switch (event.type) {
         case "system": {
             items.push(
-                new ClaudeSystemItem(
+                ClaudeSystem.create({
                     agentId,
-                    typeof event.subtype === "string" ? event.subtype : "unknown",
-                    event,
-                ),
+                    subtype:
+                        typeof event.subtype === "string" ? event.subtype : "unknown",
+                    raw: event,
+                }),
             )
             break
         }
 
         case "rate_limit_event": {
-            items.push(new ClaudeRateLimitItem(agentId, event))
+            items.push(ClaudeRateLimit.create({ agentId, raw: event }))
             break
         }
 
         case "stream_event": {
-            items.push(new ClaudeStreamChunkItem(agentId, event))
+            items.push(ClaudeStreamChunk.create({ agentId, raw: event }))
             break
         }
 
@@ -84,7 +85,7 @@ export function mapClaudeEvent(
             //   2. a tool_result    (message.content: [{type:"tool_result",...}])
             const content = event?.message?.content
             if (typeof content === "string") {
-                items.push(new AgentUserMessageItem(agentId, content))
+                items.push(AgentUserMessage.create({ agentId, text: content }))
             } else if (Array.isArray(content)) {
                 for (const block of content) {
                     if (
@@ -134,22 +135,26 @@ export function mapClaudeEvent(
 
         case "result": {
             items.push(
-                new AgentResultItem(
+                AgentResult.create({
                     agentId,
-                    typeof event.subtype === "string" ? event.subtype : "unknown",
+                    subtype:
+                        typeof event.subtype === "string" ? event.subtype : "unknown",
                     sessionId,
-                    Boolean(event.is_error),
-                    typeof event.result === "string" ? event.result : null,
-                    event.usage ?? null,
-                    typeof event.total_cost_usd === "number"
-                        ? event.total_cost_usd
-                        : null,
-                    typeof event.num_turns === "number" ? event.num_turns : null,
-                    typeof event.duration_ms === "number"
-                        ? event.duration_ms
-                        : null,
-                    event,
-                ),
+                    isError: Boolean(event.is_error),
+                    resultText:
+                        typeof event.result === "string" ? event.result : null,
+                    usage: event.usage ?? null,
+                    totalCostUsd:
+                        typeof event.total_cost_usd === "number"
+                            ? event.total_cost_usd
+                            : null,
+                    numTurns:
+                        typeof event.num_turns === "number" ? event.num_turns : null,
+                    durationMs:
+                        typeof event.duration_ms === "number"
+                            ? event.duration_ms
+                            : null,
+                }),
             )
             break
         }
@@ -157,7 +162,13 @@ export function mapClaudeEvent(
         default: {
             const unknownType =
                 typeof event.type === "string" ? event.type : "unspecified"
-            items.push(new ClaudeUnknownEventItem(agentId, unknownType, event))
+            items.push(
+                ClaudeUnknownEvent.create({
+                    agentId,
+                    claudeType: unknownType,
+                    raw: event,
+                }),
+            )
         }
     }
 
