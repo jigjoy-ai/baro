@@ -10,23 +10,26 @@ import { appendFileSync, mkdirSync } from "fs"
 import { dirname } from "path"
 
 import {
+    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
     Participant,
     ReasoningItem,
+    SemanticEvent,
 } from "@mozaik-ai/core"
 
-import { BaroParticipant, BusEvent } from "../bus.js"
-import { ClaudeStreamChunkItem } from "../types.js"
+import { ClaudeStreamChunk } from "../semantic-events.js"
 
 /**
- * Anything the auditor can log: baro's typed bus events plus Mozaik's
- * built-in LLM items. They all expose `toJSON()` and that's the only
- * shape Auditor needs.
+ * Anything the auditor can log: baro's typed semantic bus events plus
+ * Mozaik's built-in LLM items. Auditor doesn't call `.toJSON()` itself;
+ * `JSON.stringify` walks the value and invokes per-item `.toJSON()`
+ * automatically where it exists (`ModelMessageItem` etc.) and falls
+ * back to enumerable-property serialisation for `SemanticEvent`.
  */
 type AuditableItem =
-    | BusEvent
+    | SemanticEvent<unknown>
     | ModelMessageItem
     | FunctionCallItem
     | FunctionCallOutputItem
@@ -36,7 +39,7 @@ export interface AuditorOptions {
     /** Path to the JSONL log file. Parent directories are created if needed. */
     path: string
     /**
-     * If true, ClaudeStreamChunkItem events are skipped. Default: true,
+     * If true, `claude_stream_chunk` events are skipped. Default: true,
      * because partial-message chunks dominate volume and rarely add audit
      * value.
      */
@@ -48,7 +51,7 @@ export interface AuditorOptions {
     filter?: (source: Participant, event: AuditableItem) => boolean
 }
 
-export class Auditor extends BaroParticipant {
+export class Auditor extends BaseObserver {
     private readonly path: string
     private readonly skipStreamChunks: boolean
     private readonly filter?: (source: Participant, event: AuditableItem) => boolean
@@ -72,7 +75,10 @@ export class Auditor extends BaroParticipant {
         }
     }
 
-    override async onExternalBusEvent(source: Participant, event: BusEvent): Promise<void> {
+    override async onExternalEvent(
+        source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
         this.write(source, event)
     }
 
@@ -97,12 +103,18 @@ export class Auditor extends BaroParticipant {
 
     private write(source: Participant, item: AuditableItem): void {
         if (this.disabled) return
-        if (this.skipStreamChunks && item instanceof ClaudeStreamChunkItem) return
+        if (
+            this.skipStreamChunks &&
+            item instanceof SemanticEvent &&
+            ClaudeStreamChunk.is(item)
+        ) {
+            return
+        }
         if (this.filter && !this.filter(source, item)) return
         const entry = {
             ts: new Date().toISOString(),
             source: this.sourceLabel(source),
-            item: item.toJSON(),
+            item,
         }
         try {
             appendFileSync(this.path, JSON.stringify(entry) + "\n")
