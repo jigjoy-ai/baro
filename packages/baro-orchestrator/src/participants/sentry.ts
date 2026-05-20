@@ -4,7 +4,7 @@
  * Listens to FunctionCallItem (Edit/Write/MultiEdit) on the bus and
  * tracks which files each running agent has touched. When a second
  * agent issues a write to the same path while another agent is still
- * "active" on it, Sentry emits a CoordinationItem("notice") on the bus
+ * "active" on it, Sentry emits a Coordination("notice") on the bus
  * so observers (Cartographer, future Critic) can see the overlap and
  * a warning lands in the audit log.
  *
@@ -17,10 +17,14 @@
  * Library-grade: no PRD knowledge.
  */
 
-import { FunctionCallItem, Participant } from "@mozaik-ai/core"
+import {
+    BaseObserver,
+    FunctionCallItem,
+    Participant,
+    SemanticEvent,
+} from "@mozaik-ai/core"
 
-import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
-import { AgentStateItem, CoordinationItem } from "../types.js"
+import { AgentState, Coordination } from "../semantic-events.js"
 
 const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"])
 
@@ -33,7 +37,7 @@ interface PendingTouch {
 
 export interface SentryOptions {
     /**
-     * If true, emit a CoordinationItem with kind="notice" the first
+     * If true, emit a Coordination event with kind="notice" the first
      * time two agents touch the same file in this run. Default: true.
      */
     emitNotice?: boolean
@@ -47,7 +51,7 @@ export interface SentryOptions {
     }) => void
 }
 
-export class Sentry extends BaroParticipant {
+export class Sentry extends BaseObserver {
     private readonly opts: Required<Pick<SentryOptions, "emitNotice">> &
         SentryOptions
     /** path → set of agentIds that have touched it. */
@@ -71,14 +75,14 @@ export class Sentry extends BaroParticipant {
         return this.touches
     }
 
-    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
-        if (event instanceof AgentStateItem) {
-            if (
-                event.phase === "done" ||
-                event.phase === "failed" ||
-                event.phase === "aborted"
-            ) {
-                this.terminalPhase.set(event.agentId, event.phase)
+    override async onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
+        if (AgentState.is(event)) {
+            const { agentId, phase } = event.data
+            if (phase === "done" || phase === "failed" || phase === "aborted") {
+                this.terminalPhase.set(agentId, phase)
             }
         }
     }
@@ -118,15 +122,15 @@ export class Sentry extends BaroParticipant {
 
         const reason = `agents [${[agentId, ...otherAgents].join(", ")}] both touched ${path}`
         for (const env of this.getEnvironments()) {
-            ;(env as BaroEnvironment).deliverBusEvent(
+            env.deliverSemanticEvent(
                 this,
-                new CoordinationItem(
-                    agentId,
-                    otherAgents[0]!,
-                    "notice",
+                Coordination.create({
+                    fromAgentId: agentId,
+                    recipientId: otherAgents[0]!,
+                    kind: "notice",
                     reason,
-                    { path, agents: [agentId, ...otherAgents] },
-                ),
+                    payload: { path, agents: [agentId, ...otherAgents] },
+                }),
             )
         }
     }
