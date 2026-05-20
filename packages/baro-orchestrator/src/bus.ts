@@ -19,12 +19,13 @@
 
 import {
     AgenticEnvironment,
-    BaseAgentParticipant,
+    BaseAgent,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
     Participant,
     ReasoningItem,
+    SemanticEvent,
 } from "@mozaik-ai/core"
 
 /**
@@ -107,6 +108,14 @@ export abstract class BaroParticipant extends Participant {
 
     onBusEvent(_event: BusEvent): Promise<void> | void {}
     onExternalBusEvent(_source: Participant, _event: BusEvent): Promise<void> | void {}
+
+    // Mozaik 3.10 added a generic typed-event channel (SemanticEvent<T>) to
+    // every Participant. baro still routes its own typed events through the
+    // BaroParticipant.onBusEvent path for now — these stubs satisfy the new
+    // abstract contract until the BusEvent → SemanticEvent migration lands
+    // commit-by-commit in this branch.
+    onInternalEvent(_event: SemanticEvent<unknown>): Promise<void> | void {}
+    onExternalEvent(_source: Participant, _event: SemanticEvent<unknown>): Promise<void> | void {}
 }
 
 /**
@@ -117,7 +126,9 @@ export abstract class BaroParticipant extends Participant {
  * here so the LLM-side adapter shape is established alongside the
  * non-LLM one and the two share the same `onBusEvent` channel.
  */
-export abstract class BaroAgentParticipant extends BaseAgentParticipant {
+export abstract class BaroAgentParticipant extends BaseAgent {
     onBusEvent(_event: BusEvent): Promise<void> | void {}
     onExternalBusEvent(_source: Participant, _event: BusEvent): Promise<void> | void {}
+    onInternalEvent(_event: SemanticEvent<unknown>): Promise<void> | void {}
+    onExternalEvent(_source: Participant, _event: SemanticEvent<unknown>): Promise<void> | void {}
 }

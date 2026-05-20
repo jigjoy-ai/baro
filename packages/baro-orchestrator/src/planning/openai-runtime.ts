@@ -1,42 +1,36 @@
 /**
- * Thin wrapper over Mozaik 3.9's `OpenAIResponses` ModelRuntime.
+ * OpenAI inference runtime wrapper — temporarily stubbed during the
+ * Mozaik 3.10 migration.
  *
- * Why not `OpenAIInferenceRunner`? Both are Mozaik public exports.
- * The runner is a convenience for callers who plug into
- * `BaseAgentParticipant`'s inference loop — it yields items as an
- * AsyncIterable and discards the `TokenUsage` from each response.
- * Our participants drive their own multi-round loops directly, so
- * we use the lower-level `OpenAIResponses` (which Mozaik's
- * `ModelRuntime` interface formalises) to keep the usage data
- * Mozaik already extracts on every call.
+ * Background: in Mozaik 3.9.x this file wrapped `OpenAIResponses`
+ * (the lower-level ModelRuntime) so baro could drive its own multi-
+ * round inference loops while still receiving per-call `TokenUsage`
+ * — usage data that `OpenAIInferenceRunner` (the convenience layer)
+ * deliberately discards.
  *
- * Same HTTP call either way; same item deserialisation. Just one
- * more field in the return value.
+ * Mozaik 3.10 consolidated the public OpenAI inference API: it
+ * removed `OpenAIResponses`, `InferenceRequest`, `InferenceResponse`,
+ * and `InputStream` from the public exports. The migration plan
+ * (memory: mozaik-3-10-blocker.md, "Blocker 2") is to either:
+ *   (a) ask Mozaik to re-expose those internals, or
+ *   (b) rewrite this file against the new `OpenAIInferenceRunner`
+ *       once Mozaik exposes a per-call `TokenUsage` channel for it.
+ *
+ * Until that decision is made, calling `runInferenceRound` throws.
+ * This is an explicit gap, not a workaround — the `--llm claude`
+ * path through `claude-cli-participant.ts` is unaffected.
+ *
+ * `UsageAccumulator` is still useful (it just sums TokenUsage shapes,
+ * doesn't depend on the removed classes) and stays exported so its
+ * call sites don't break.
  */
 
 import {
     ContextItem,
-    InferenceRequest,
-    OpenAIResponses,
     TokenUsage,
     type GenerativeModel,
     type ModelContext,
 } from "@mozaik-ai/core"
-
-/**
- * Lazy because `new OpenAIResponses()` chains to `new OpenAI()`
- * which throws if `OPENAI_API_KEY` isn't set. Module-level init
- * would mean a Claude-mode run that just imports this file (planner
- * / architect / story-agent all do, regardless of --llm) fails at
- * bundle load. Constructing only on first call defers the check to
- * the moment we actually need OpenAI — which by definition is also
- * the moment the key is available.
- */
-let _runtime: OpenAIResponses | null = null
-function getRuntime(): OpenAIResponses {
-    if (_runtime === null) _runtime = new OpenAIResponses()
-    return _runtime
-}
 
 export interface InferenceRound {
     items: ContextItem[]
@@ -44,19 +38,19 @@ export interface InferenceRound {
 }
 
 /**
- * One inference call against the OpenAI Responses API. Returns both
- * the deserialised context items (function calls, model messages,
- * reasoning) and the token usage Mozaik extracted from the response.
+ * One inference call against the OpenAI Responses API. Throws during
+ * the Mozaik 3.10 migration — see file header.
  */
 export async function runInferenceRound(
-    context: ModelContext,
-    model: GenerativeModel,
+    _context: ModelContext,
+    _model: GenerativeModel,
 ): Promise<InferenceRound> {
-    const response = await getRuntime().infer(new InferenceRequest(model, context))
-    return {
-        items: response.contextItems,
-        usage: response.tokenUsage,
-    }
+    throw new Error(
+        "OpenAI inference path is temporarily disabled during the " +
+            "Mozaik 3.10 migration (see Blocker 2). Use `--llm claude` " +
+            "until OpenAIResponses / InferenceRequest are restored to " +
+            "the @mozaik-ai/core public API.",
+    )
 }
 
 /**
