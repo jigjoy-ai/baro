@@ -18,11 +18,13 @@
  */
 
 import {
+    BaseObserver,
     Gpt54,
     Gpt54Mini,
     Gpt54Nano,
     Gpt55,
     ModelContext,
+    SemanticEvent,
     SystemMessageItem,
     UserMessageItem,
     type GenerativeModel,
@@ -34,9 +36,13 @@ import {
     runInferenceRound,
 } from "../planning/openai-runtime.js"
 
-import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
-import { ReplanItem, ReplanStoryAdd } from "../types.js"
-import { StoryResultItem } from "./story-agent.js"
+import {
+    Replan,
+    type ReplanData,
+    type ReplanStoryAdd,
+    StoryResult,
+    type StoryResultData,
+} from "../semantic-events.js"
 import {
     SURGEON_SYSTEM_PROMPT,
     buildSurgeonPrompt,
@@ -75,7 +81,7 @@ function pickModel(name: string): GenerativeModel {
     }
 }
 
-export class SurgeonOpenAI extends BaroParticipant {
+export class SurgeonOpenAI extends BaseObserver {
     private readonly opts: Required<Pick<SurgeonOpenAIOptions, "maxReplans" | "model">> &
         SurgeonOpenAIOptions
     private readonly model: GenerativeModel
@@ -97,17 +103,20 @@ export class SurgeonOpenAI extends BaroParticipant {
         await Promise.allSettled([...this.pending])
     }
 
-    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
-        if (!(event instanceof StoryResultItem)) return
-        if (event.success) return
+    override async onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
+        if (!StoryResult.is(event)) return
+        if (event.data.success) return
         if (this.replansEmitted >= this.opts.maxReplans) return
 
         const work = (async () => {
-            const replan = await this.evaluate(event)
+            const replan = await this.evaluate(event.data)
             if (!replan) return
             this.replansEmitted += 1
             for (const env of this.getEnvironments()) {
-                ;(env as BaroEnvironment).deliverBusEvent(this, replan)
+                env.deliverSemanticEvent(this, Replan.create(replan))
             }
         })()
 
@@ -118,12 +127,12 @@ export class SurgeonOpenAI extends BaroParticipant {
 
     /**
      * One-shot OpenAI inference call asking the model for a structured
-     * replan. Returns `null` on the "abort" action (no ReplanItem
-     * emitted, run ends). Returns a deterministic-skip `ReplanItem` on
-     * any inference or JSON-parse error so the run still has a chance
-     * to recover.
+     * replan. Returns `null` on the "abort" action (no Replan event
+     * emitted, run ends). Returns a deterministic-skip data shape on any
+     * inference or JSON-parse error so the run still has a chance to
+     * recover.
      */
-    private async evaluate(failure: StoryResultItem): Promise<ReplanItem | null> {
+    private async evaluate(failure: StoryResultData): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
         const userPrompt = buildSurgeonPrompt(snap, failure)
         const context = ModelContext.create("surgeon")
@@ -157,28 +166,25 @@ export class SurgeonOpenAI extends BaroParticipant {
 
             if (parsed.action === "abort") return null
 
-            const modifiedDeps = new Map<string, readonly string[]>()
+            const modifiedDeps: Record<string, readonly string[]> = {}
             for (const m of parsed.modifiedDeps ?? []) {
                 if (typeof m.id === "string" && Array.isArray(m.newDependsOn)) {
-                    modifiedDeps.set(m.id, [...m.newDependsOn])
+                    modifiedDeps[m.id] = [...m.newDependsOn]
                 }
             }
-            return new ReplanItem(
-                "surgeon",
-                `${parsed.action}: ${parsed.reason ?? ""}`,
-                parsed.added ?? [],
-                parsed.removed ?? [],
+            return {
+                source: "surgeon",
+                reason: `${parsed.action}: ${parsed.reason ?? ""}`,
+                addedStories: parsed.added ?? [],
+                removedStoryIds: parsed.removed ?? [],
                 modifiedDeps,
-            )
+            }
         } catch (err) {
             const fallback = surgeonDeterministicReplan(failure)
-            return new ReplanItem(
-                fallback.source,
-                `${fallback.reason} (openai-llm fallback after error: ${(err as Error)?.message ?? String(err)})`,
-                fallback.addedStories,
-                fallback.removedStoryIds,
-                fallback.modifiedDeps,
-            )
+            return {
+                ...fallback,
+                reason: `${fallback.reason} (openai-llm fallback after error: ${(err as Error)?.message ?? String(err)})`,
+            }
         }
     }
 }

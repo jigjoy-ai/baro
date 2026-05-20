@@ -29,12 +29,15 @@
 import { execFile } from "child_process"
 import { promisify } from "util"
 
-import { Participant } from "@mozaik-ai/core"
+import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
-import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
-
-import { ReplanItem, ReplanStoryAdd } from "../types.js"
-import { StoryResultItem } from "./story-agent.js"
+import {
+    Replan,
+    type ReplanData,
+    type ReplanStoryAdd,
+    StoryResult,
+    type StoryResultData,
+} from "../semantic-events.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -124,7 +127,7 @@ Rules:
 - "abort" → empty added/removed/modifiedDeps arrays.
 - Output ONLY the JSON object, nothing else.`
 
-export class Surgeon extends BaroParticipant {
+export class Surgeon extends BaseObserver {
     private readonly opts: Required<
         Pick<
             SurgeonOptions,
@@ -153,19 +156,22 @@ export class Surgeon extends BaroParticipant {
         await Promise.allSettled([...this.pending])
     }
 
-    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
-        if (!(event instanceof StoryResultItem)) return
-        if (event.success) return
+    override async onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
+        if (!StoryResult.is(event)) return
+        if (event.data.success) return
         if (this.replansEmitted >= this.opts.maxReplans) return
 
         const work = (async () => {
             const replan = this.opts.useLlm
-                ? await this.evaluateWithLlm(event)
-                : this.evaluateDeterministic(event)
+                ? await this.evaluateWithLlm(event.data)
+                : this.evaluateDeterministic(event.data)
             if (!replan) return
             this.replansEmitted += 1
             for (const env of this.getEnvironments()) {
-                ;(env as BaroEnvironment).deliverBusEvent(this, replan)
+                env.deliverSemanticEvent(this, Replan.create(replan))
             }
         })()
 
@@ -180,7 +186,7 @@ export class Surgeon extends BaroParticipant {
      * deps) or get cascade-removed by buildDag's cycle-detection
      * skipping (if their only dep is now gone, they become unreachable).
      */
-    private evaluateDeterministic(failure: StoryResultItem): ReplanItem {
+    private evaluateDeterministic(failure: StoryResultData): ReplanData {
         return surgeonDeterministicReplan(failure)
     }
 
@@ -190,8 +196,8 @@ export class Surgeon extends BaroParticipant {
      * deterministic on parsing or subprocess error.
      */
     private async evaluateWithLlm(
-        failure: StoryResultItem,
-    ): Promise<ReplanItem | null> {
+        failure: StoryResultData,
+    ): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
         const prompt = buildSurgeonPrompt(snap, failure)
         try {
@@ -231,37 +237,34 @@ export class Surgeon extends BaroParticipant {
 
             if (parsed.action === "abort") return null
 
-            const modifiedDeps = new Map<string, readonly string[]>()
+            const modifiedDeps: Record<string, readonly string[]> = {}
             for (const m of parsed.modifiedDeps ?? []) {
                 if (typeof m.id === "string" && Array.isArray(m.newDependsOn)) {
-                    modifiedDeps.set(m.id, [...m.newDependsOn])
+                    modifiedDeps[m.id] = [...m.newDependsOn]
                 }
             }
-            return new ReplanItem(
-                "surgeon",
-                `${parsed.action}: ${parsed.reason ?? ""}`,
-                parsed.added ?? [],
-                parsed.removed ?? [],
+            return {
+                source: "surgeon",
+                reason: `${parsed.action}: ${parsed.reason ?? ""}`,
+                addedStories: parsed.added ?? [],
+                removedStoryIds: parsed.removed ?? [],
                 modifiedDeps,
-            )
+            }
         } catch (err) {
             // Fall back to deterministic on any LLM-side failure so the
             // run still has a chance to recover.
             const fallback = this.evaluateDeterministic(failure)
-            return new ReplanItem(
-                fallback.source,
-                `${fallback.reason} (llm fallback after error: ${(err as Error)?.message ?? String(err)})`,
-                fallback.addedStories,
-                fallback.removedStoryIds,
-                fallback.modifiedDeps,
-            )
+            return {
+                ...fallback,
+                reason: `${fallback.reason} (llm fallback after error: ${(err as Error)?.message ?? String(err)})`,
+            }
         }
     }
 }
 
 export function buildSurgeonPrompt(
     snap: PrdSnapshot,
-    failure: StoryResultItem,
+    failure: StoryResultData,
 ): string {
     const storyLines = snap.stories
         .map(
@@ -319,12 +322,12 @@ export function extractJsonObject(text: string): string {
  * use the same fallback when their inference call errors out — the
  * shape is identical to what the Claude-backed Surgeon falls back to.
  */
-export function surgeonDeterministicReplan(failure: StoryResultItem): ReplanItem {
-    return new ReplanItem(
-        "surgeon",
-        `deterministic skip: ${failure.storyId} exhausted ${failure.attempts} attempts (${failure.error ?? "no reason"})`,
-        [],
-        [failure.storyId],
-        new Map(),
-    )
+export function surgeonDeterministicReplan(failure: StoryResultData): ReplanData {
+    return {
+        source: "surgeon",
+        reason: `deterministic skip: ${failure.storyId} exhausted ${failure.attempts} attempts (${failure.error ?? "no reason"})`,
+        addedStories: [],
+        removedStoryIds: [failure.storyId],
+        modifiedDeps: {},
+    }
 }
