@@ -11,43 +11,43 @@
  *      to the story's initial prompt. Same as before, just with much
  *      bigger budget and a stronger authoritative framing.
  *
- *   2. `KnowledgeItem` bus events — emitted on every new finding so
+ *   2. `Knowledge` SemanticEvent — emitted on every new finding so
  *      other observers can react.
  *
- *   3. **NEW**: `AgentTargetedMessageItem` mid-flight broadcasts.
+ *   3. `AgentTargetedMessage` SemanticEvent — mid-flight broadcasts.
  *      When Story A indexes a finding, Librarian pushes a
  *      just-in-time message into every other *in-flight* story
  *      whose hints match the finding. Those messages reach the
  *      receiving Claude process via its existing stdin user-message
  *      route (ClaudeCliParticipant already handles
- *      AgentTargetedMessageItem). The receiving Claude sees the
+ *      `AgentTargetedMessage`). The receiving Claude sees the
  *      finding as authoritative codebase context on its next turn
  *      and skips redundant Read/Grep calls.
  *
  * In-flight tracking:
- *   - StorySpawnRequestItem → captures story hints (title tokens)
+ *   - StorySpawnRequest → captures story hints (title tokens)
  *     so we can match findings against them later.
- *   - StorySpawnedItem      → mark story as in-flight.
- *   - StoryResultItem       → clear story from in-flight set.
+ *   - StorySpawned      → mark story as in-flight.
+ *   - StoryResult       → clear story from in-flight set.
  *
  * Library-grade: no PRD knowledge, no story specifics.
  */
 
 import {
+    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     Participant,
+    SemanticEvent,
 } from "@mozaik-ai/core"
 
-import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
-
 import {
-    AgentTargetedMessageItem,
-    KnowledgeItem,
-    StorySpawnRequestItem,
-    StorySpawnedItem,
-} from "../types.js"
-import { StoryResultItem } from "./story-agent.js"
+    AgentTargetedMessage,
+    Knowledge,
+    StoryResult,
+    StorySpawnRequest,
+    StorySpawned,
+} from "../semantic-events.js"
 
 /** Tools whose results are worth capturing for cross-agent reuse. */
 const EXPLORATION_TOOLS = new Set([
@@ -104,7 +104,7 @@ export interface LibrarianOptions {
     maxBroadcastBytesPerStory?: number
 }
 
-export class Librarian extends BaroParticipant {
+export class Librarian extends BaseObserver {
     private readonly opts: Required<LibrarianOptions>
     private readonly pending = new Map<string, PendingCall>()
     private readonly knowledge: IndexedKnowledge[] = []
@@ -190,17 +190,23 @@ export class Librarian extends BaroParticipant {
         this.completeWithOutput(source, item)
     }
 
-    override async onExternalBusEvent(_source: Participant, event: BusEvent): Promise<void> {
-        if (event instanceof StorySpawnRequestItem) {
-            this.storyHints.set(event.storyId, tokenizeHints(event.prompt))
+    override async onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
+        if (StorySpawnRequest.is(event)) {
+            this.storyHints.set(
+                event.data.storyId,
+                tokenizeHints(event.data.prompt),
+            )
             return
         }
-        if (event instanceof StorySpawnedItem) {
-            this.inFlight.add(event.storyId)
+        if (StorySpawned.is(event)) {
+            this.inFlight.add(event.data.storyId)
             return
         }
-        if (event instanceof StoryResultItem) {
-            this.inFlight.delete(event.storyId)
+        if (StoryResult.is(event)) {
+            this.inFlight.delete(event.data.storyId)
         }
     }
 
@@ -255,22 +261,22 @@ export class Librarian extends BaroParticipant {
         // Surface as a bus event for any other observers (and Phase-3
         // mid-flight injectors).
         for (const env of this.getEnvironments()) {
-            (env as BaroEnvironment).deliverBusEvent(
+            env.deliverSemanticEvent(
                 this,
-                new KnowledgeItem(
-                    entry.sourceAgentId,
-                    entry.tags,
-                    entry.summary,
-                    entry.content,
-                    entry.tool,
-                ),
+                Knowledge.create({
+                    sourceAgentId: entry.sourceAgentId,
+                    tags: entry.tags,
+                    summary: entry.summary,
+                    content: entry.content,
+                    tool: entry.tool,
+                }),
             )
         }
 
         // Mid-flight broadcast: push this finding to every other
         // in-flight story whose stored hints overlap with the
         // finding's tags. The receiving ClaudeCliParticipant already
-        // routes AgentTargetedMessageItem into its agent's stdin as a
+        // routes AgentTargetedMessage into its agent's stdin as a
         // user message, so the next turn opens with the finding
         // already in context — and the agent skips its own Read.
         if (BROADCAST_TOOLS.has(entry.tool)) {
@@ -325,12 +331,16 @@ export class Librarian extends BaroParticipant {
             this.broadcastBytes.set(recipientId, already + bytes)
 
             for (const env of envs) {
-                (env as BaroEnvironment).deliverBusEvent(
+                env.deliverSemanticEvent(
                     this,
-                    new AgentTargetedMessageItem(recipientId, text, {
-                        source: "librarian",
-                        finding: finding.summary,
-                        from_agent: finding.sourceAgentId,
+                    AgentTargetedMessage.create({
+                        recipientId,
+                        text,
+                        metadata: {
+                            source: "librarian",
+                            finding: finding.summary,
+                            from_agent: finding.sourceAgentId,
+                        },
                     }),
                 )
             }
