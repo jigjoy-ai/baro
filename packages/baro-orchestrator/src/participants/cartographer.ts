@@ -12,23 +12,24 @@
  */
 
 import {
+    BaseObserver,
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
     Participant,
+    SemanticEvent,
 } from "@mozaik-ai/core"
 
-import { BaroParticipant, BusEvent } from "../bus.js"
 import {
-    AgentStateItem,
-    AgentTargetedMessageItem,
-    AgentUserMessageItem,
-    ClaudeRateLimitItem,
-    AgentResultItem,
-    ClaudeStreamChunkItem,
-    ClaudeSystemItem,
-    ClaudeUnknownEventItem,
-} from "../types.js"
+    AgentResult,
+    AgentState,
+    AgentTargetedMessage,
+    AgentUserMessage,
+    ClaudeRateLimit,
+    ClaudeStreamChunk,
+    ClaudeSystem,
+    ClaudeUnknownEvent,
+} from "../semantic-events.js"
 
 export type Frame =
     | { kind: "agent_state"; agentId: string; phase: string; detail?: string }
@@ -52,7 +53,7 @@ export interface CartographerOptions {
     emitStreamChunks?: boolean
 }
 
-export class Cartographer extends BaroParticipant {
+export class Cartographer extends BaseObserver {
     private readonly sink: (frame: Frame) => void
     private readonly emitStreamChunks: boolean
 
@@ -98,75 +99,84 @@ export class Cartographer extends BaroParticipant {
         this.sink({ kind: "tool_result", agentId, callId: json.call_id, output })
     }
 
-    // ─── baro custom bus events ───────────────────────────────────────
+    // ─── baro custom semantic events ──────────────────────────────────
 
-    override async onExternalBusEvent(source: Participant, event: BusEvent): Promise<void> {
-        const agentId = this.extractAgentId(source, event)
-
-        if (event instanceof AgentStateItem) {
+    override async onExternalEvent(
+        source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
+        if (AgentState.is(event)) {
             this.sink({
                 kind: "agent_state",
-                agentId: event.agentId,
-                phase: event.phase,
-                detail: event.detail,
+                agentId: event.data.agentId,
+                phase: event.data.phase,
+                detail: event.data.detail,
             })
             return
         }
 
-        if (event instanceof AgentUserMessageItem) {
-            this.sink({ kind: "user_message", agentId: event.agentId, text: event.text })
-            return
-        }
-
-        if (event instanceof AgentTargetedMessageItem) {
+        if (AgentUserMessage.is(event)) {
             this.sink({
                 kind: "user_message",
-                agentId: event.recipientId,
-                text: event.text,
+                agentId: event.data.agentId,
+                text: event.data.text,
             })
             return
         }
 
-        if (event instanceof AgentResultItem) {
+        if (AgentTargetedMessage.is(event)) {
+            this.sink({
+                kind: "user_message",
+                agentId: event.data.recipientId,
+                text: event.data.text,
+            })
+            return
+        }
+
+        if (AgentResult.is(event)) {
             this.sink({
                 kind: "result",
-                agentId: event.agentId,
-                isError: event.isError,
-                text: event.resultText,
-                durationMs: event.durationMs,
-                costUsd: event.totalCostUsd,
-                numTurns: event.numTurns,
-                sessionId: event.sessionId,
+                agentId: event.data.agentId,
+                isError: event.data.isError,
+                text: event.data.resultText,
+                durationMs: event.data.durationMs,
+                costUsd: event.data.totalCostUsd,
+                numTurns: event.data.numTurns,
+                sessionId: event.data.sessionId,
             })
             return
         }
 
-        if (event instanceof ClaudeRateLimitItem) {
-            this.sink({ kind: "rate_limit", agentId: event.agentId, raw: event.raw })
+        if (ClaudeRateLimit.is(event)) {
+            this.sink({
+                kind: "rate_limit",
+                agentId: event.data.agentId,
+                raw: event.data.raw,
+            })
             return
         }
 
-        if (event instanceof ClaudeSystemItem) {
+        if (ClaudeSystem.is(event)) {
             this.sink({
                 kind: "system",
-                agentId: event.agentId,
-                subtype: event.subtype,
+                agentId: event.data.agentId,
+                subtype: event.data.subtype,
             })
             return
         }
 
-        if (event instanceof ClaudeStreamChunkItem) {
+        if (ClaudeStreamChunk.is(event)) {
             if (this.emitStreamChunks) {
-                this.sink({ kind: "stream_chunk", agentId: event.agentId })
+                this.sink({ kind: "stream_chunk", agentId: event.data.agentId })
             }
             return
         }
 
-        if (event instanceof ClaudeUnknownEventItem) {
+        if (ClaudeUnknownEvent.is(event)) {
             this.sink({
                 kind: "unknown",
                 sourceLabel: source.constructor.name,
-                itemType: event.claudeType,
+                itemType: event.data.claudeType,
             })
             return
         }

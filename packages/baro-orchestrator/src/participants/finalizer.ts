@@ -28,21 +28,21 @@
 import { execFile } from "child_process"
 import { promisify } from "util"
 
-import { Participant } from "@mozaik-ai/core"
+import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
-import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
-
+import { BaroEnvironment } from "../bus.js"
 import { buildDag } from "../dag.js"
 import { getHeadSha } from "../git.js"
 import { BARO_COAUTHOR_TRAILER, loadPrd, type PrdFile, type PrdStory } from "../prd.js"
 import {
-    FinalizeStartedItem,
-    LevelStartedItem,
-    PrCreatedItem,
-    RunCompletedItem,
-    RunStartedItem,
-} from "../types.js"
-import { StoryResultItem } from "./story-agent.js"
+    FinalizeStarted,
+    LevelStarted,
+    PrCreated,
+    RunCompleted,
+    RunStarted,
+    StoryResult,
+    type RunCompletedData,
+} from "../semantic-events.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -69,7 +69,7 @@ interface StoryRecord {
     levelOrdinal: number | null
 }
 
-export class Finalizer extends BaroParticipant {
+export class Finalizer extends BaseObserver {
     private readonly opts: Required<Omit<FinalizerOptions, "baseSha" | "onLog">> &
         Pick<FinalizerOptions, "onLog">
     private envRef: BaroEnvironment | null = null
@@ -108,8 +108,11 @@ export class Finalizer extends BaroParticipant {
         this.envRef = env
     }
 
-    override async onExternalBusEvent(_source: Participant, item: BusEvent): Promise<void> {
-        if (item instanceof RunStartedItem) {
+    override async onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
+        if (RunStarted.is(event)) {
             this.startedAtMs = Date.now()
             // Capture base SHA at run start so we can later list commits
             // produced by the run regardless of how many branches Conductor
@@ -122,9 +125,10 @@ export class Finalizer extends BaroParticipant {
             return
         }
 
-        if (item instanceof LevelStartedItem) {
-            this.levels.set(item.ordinal, [...item.storyIds])
-            for (const id of item.storyIds) {
+        if (LevelStarted.is(event)) {
+            const { ordinal, storyIds } = event.data
+            this.levels.set(ordinal, [...storyIds])
+            for (const id of storyIds) {
                 if (!this.stories.has(id)) {
                     this.stories.set(id, {
                         id,
@@ -132,52 +136,59 @@ export class Finalizer extends BaroParticipant {
                         success: null,
                         durationSecs: null,
                         attempts: 0,
-                        levelOrdinal: item.ordinal,
+                        levelOrdinal: ordinal,
                     })
                 } else {
                     const rec = this.stories.get(id)!
-                    rec.levelOrdinal = item.ordinal
+                    rec.levelOrdinal = ordinal
                 }
             }
             return
         }
 
-        if (item instanceof StoryResultItem) {
-            const existing = this.stories.get(item.storyId) ?? {
-                id: item.storyId,
+        if (StoryResult.is(event)) {
+            const d = event.data
+            const existing = this.stories.get(d.storyId) ?? {
+                id: d.storyId,
                 title: "",
                 success: null,
                 durationSecs: null,
                 attempts: 0,
                 levelOrdinal: null,
             }
-            existing.success = item.success
-            existing.durationSecs = item.durationSecs
-            existing.attempts = item.attempts
-            this.stories.set(item.storyId, existing)
+            existing.success = d.success
+            existing.durationSecs = d.durationSecs
+            existing.attempts = d.attempts
+            this.stories.set(d.storyId, existing)
             return
         }
 
-        if (item instanceof RunCompletedItem) {
+        if (RunCompleted.is(event)) {
             // Wrap finalize() so a bug inside this participant never
             // takes down the orchestrator. The whole run has already
             // succeeded by the time we get here — losing the PR is a
             // recoverable annoyance, killing the process and orphaning
             // Claude children is not.
-            this.finalizePromise = this.safeFinalize(item)
+            this.finalizePromise = this.safeFinalize(event.data)
             await this.finalizePromise
             return
         }
     }
 
-    private async safeFinalize(item: RunCompletedItem): Promise<void> {
+    private async safeFinalize(run: RunCompletedData): Promise<void> {
         try {
-            await this.finalize(item)
+            await this.finalize(run)
         } catch (e) {
             const msg = (e as Error)?.stack ?? String(e)
             this.log(`[finalizer] internal error, skipping PR: ${msg.split("\n")[0]}`)
             process.stderr.write(`[finalizer] crash: ${msg}\n`)
-            this.emit(new PrCreatedItem(null, this.branchName ?? "", ""))
+            this.emit(
+                PrCreated.create({
+                    url: null,
+                    branch: this.branchName ?? "",
+                    baseBranch: "",
+                }),
+            )
         }
     }
 
@@ -190,46 +201,58 @@ export class Finalizer extends BaroParticipant {
         return this.finalizePromise ?? Promise.resolve()
     }
 
-    private async finalize(run: RunCompletedItem): Promise<void> {
+    private async finalize(run: RunCompletedData): Promise<void> {
         if (!this.opts.createPr) return
 
         if (!run.success && run.completedStories.length === 0) {
             this.log("[finalizer] run failed before producing any commits; skipping PR")
-            this.emit(new PrCreatedItem(null, this.branchName ?? "", ""))
+            this.emit(
+                PrCreated.create({
+                    url: null,
+                    branch: this.branchName ?? "",
+                    baseBranch: "",
+                }),
+            )
             return
         }
 
         if (!(await this.hasGhBinary())) {
             this.log("[finalizer] `gh` not found on PATH; skipping PR creation")
-            this.emit(new PrCreatedItem(null, this.branchName ?? "", ""))
+            this.emit(
+                PrCreated.create({
+                    url: null,
+                    branch: this.branchName ?? "",
+                    baseBranch: "",
+                }),
+            )
             return
         }
 
         const branch = this.branchName ?? (await this.detectBranch())
         if (!branch) {
             this.log("[finalizer] could not determine branch; skipping PR")
-            this.emit(new PrCreatedItem(null, "", ""))
+            this.emit(PrCreated.create({ url: null, branch: "", baseBranch: "" }))
             return
         }
 
         const baseBranch = await this.detectDefaultBaseBranch()
         if (!baseBranch) {
             this.log("[finalizer] could not determine base branch; skipping PR")
-            this.emit(new PrCreatedItem(null, branch, ""))
+            this.emit(PrCreated.create({ url: null, branch, baseBranch: "" }))
             return
         }
         if (branch === baseBranch) {
             this.log(
                 `[finalizer] branch '${branch}' matches base; skipping PR (run committed straight to main?)`,
             )
-            this.emit(new PrCreatedItem(null, branch, baseBranch))
+            this.emit(PrCreated.create({ url: null, branch, baseBranch }))
             return
         }
 
         // Tell observers we're now in the "composing + sending PR" phase
         // so a UI can show a spinner / progress block instead of jumping
         // straight to the completion screen.
-        this.emit(new FinalizeStartedItem(branch))
+        this.emit(FinalizeStarted.create({ branch }))
 
         // Hydrate story titles from the canonical PRD that Conductor was
         // working from at the moment the run ended. This is important
@@ -275,13 +298,13 @@ export class Finalizer extends BaroParticipant {
         if (url) {
             this.log(`[finalizer] PR opened: ${url}`)
         }
-        this.emit(new PrCreatedItem(url, branch, baseBranch))
+        this.emit(PrCreated.create({ url, branch, baseBranch }))
     }
 
     // ─── Bus & env helpers ──────────────────────────────────────────
 
-    private emit(event: BusEvent): void {
-        this.envRef?.deliverBusEvent(this, event)
+    private emit(event: SemanticEvent<unknown>): void {
+        this.envRef?.deliverSemanticEvent(this, event)
     }
 
     private log(line: string): void {
@@ -455,7 +478,7 @@ export class Finalizer extends BaroParticipant {
 
     private buildPrBody(args: {
         prd: PrdFile | null
-        run: RunCompletedItem
+        run: RunCompletedData
         orderedStories: StoryRecord[]
         passed: StoryRecord[]
         failed: StoryRecord[]

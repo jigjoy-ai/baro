@@ -6,11 +6,12 @@
  * into bus events.
  *
  * Library-grade: knows nothing about TUI specifics, only about the
- * canonical command shape and how to express it as ContextItems.
+ * canonical command shape and how to express it as bus events.
  */
 
-import { BaroEnvironment, BaroParticipant, BusEvent } from "../bus.js"
-import { AgentTargetedMessageItem } from "../types.js"
+import { AgenticEnvironment, BaseObserver, SemanticEvent } from "@mozaik-ai/core"
+
+import { AgentTargetedMessage } from "../semantic-events.js"
 
 export type OperatorCommand =
     | { kind: "redirect"; storyId: string; message: string }
@@ -27,19 +28,19 @@ export interface OperatorHooks {
     onShutdown?: () => void
 }
 
-export class Operator extends BaroParticipant {
-    private envRef: BaroEnvironment | null = null
+export class Operator extends BaseObserver {
+    private envRef: AgenticEnvironment | null = null
 
     constructor(private readonly hooks: OperatorHooks = {}) {
         super()
     }
 
-    setEnvironment(env: BaroEnvironment): void {
+    setEnvironment(env: AgenticEnvironment): void {
         this.envRef = env
     }
 
     // Operator is push-only: it emits in response to external commands,
-    // never reacts to bus events. Default BaroParticipant no-op handlers
+    // never reacts to bus events. Default BaseObserver no-op handlers
     // cover everything.
 
     /** Translate an external command into bus action / hook callback. */
@@ -47,8 +48,10 @@ export class Operator extends BaroParticipant {
         switch (cmd.kind) {
             case "redirect": {
                 this.emit(
-                    new AgentTargetedMessageItem(cmd.storyId, cmd.message, {
-                        source: "operator",
+                    AgentTargetedMessage.create({
+                        recipientId: cmd.storyId,
+                        text: cmd.message,
+                        metadata: { source: "operator" },
                     }),
                 )
                 return
@@ -68,7 +71,7 @@ export class Operator extends BaroParticipant {
         }
     }
 
-    private emit(event: BusEvent): void {
-        this.envRef?.deliverBusEvent(this, event)
+    private emit(event: SemanticEvent<unknown>): void {
+        this.envRef?.deliverSemanticEvent(this, event)
     }
 }
