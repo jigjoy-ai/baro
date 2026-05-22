@@ -39,6 +39,12 @@ export {
     type CodexRunSummary,
 } from "./participants/codex-cli-participant.js"
 
+export {
+    CodexStoryAgent,
+    type CodexStorySpec,
+    type CodexStoryOutcome,
+} from "./participants/codex-story-agent.js"
+
 export { Auditor, type AuditorOptions } from "./participants/auditor.js"
 
 export {

@@ -25,7 +25,14 @@ import { runArchitectOpenAI } from "../src/planning/architect-openai.js"
 interface Args {
     goal: string
     cwd: string
-    llm: "claude" | "openai"
+    /**
+     * "codex" is accepted at the boundary but currently routes through
+     * the Claude architect path — codex-architect.ts is a planned v2
+     * follow-up to the codex story-agent backend. v1's positioning is:
+     * Codex covers the Story phase (which dominates token spend);
+     * Architect and Planner stay on Claude.
+     */
+    llm: "claude" | "openai" | "codex"
     model?: string
     contextFile?: string
 }
@@ -33,7 +40,7 @@ interface Args {
 function parseArgs(argv: string[]): Args {
     let goal: string | undefined
     let cwd: string | undefined
-    let llm: "claude" | "openai" | undefined
+    let llm: "claude" | "openai" | "codex" | undefined
     let model: string | undefined
     let contextFile: string | undefined
 
@@ -48,10 +55,10 @@ function parseArgs(argv: string[]): Args {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai") {
-                    fatal(`--llm must be 'claude' or 'openai', got '${v}'`)
+                if (v !== "claude" && v !== "openai" && v !== "codex") {
+                    fatal(`--llm must be 'claude' | 'openai' | 'codex', got '${v}'`)
                 }
-                llm = v as "claude" | "openai"
+                llm = v as "claude" | "openai" | "codex"
                 break
             }
             case "--model":
@@ -95,12 +102,21 @@ async function main(): Promise<void> {
         }
     }
 
-    process.stderr.write(`[run-architect] llm=${args.llm} model=${args.model ?? "(default)"}\n`)
+    // Codex is accepted at the boundary but routes to the Claude
+    // architect path in v1 — codex-architect.ts is a follow-up. Log
+    // explicitly so it's clear from the audit log which backend
+    // actually ran the architect phase, even when `--llm codex` was
+    // requested at the CLI.
+    const architectBackend =
+        args.llm === "openai" ? "openai" : "claude"
+    process.stderr.write(
+        `[run-architect] requested=${args.llm} → architect-backend=${architectBackend} model=${args.model ?? "(default)"}\n`,
+    )
 
     let doc: string
     const t0 = Date.now()
     try {
-        if (args.llm === "openai") {
+        if (architectBackend === "openai") {
             if (!process.env.OPENAI_API_KEY) {
                 fatal("--llm openai requires OPENAI_API_KEY to be set")
             }
