@@ -42,7 +42,7 @@ interface CliArgs {
     surgeonModel?: string
     storyModel?: string
     intraLevelDelaySecs?: number
-    llm: "claude" | "openai"
+    llm: "claude" | "openai" | "codex"
     help: boolean
 }
 
@@ -125,8 +125,10 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai") {
-                    process.stderr.write(`[cli] --llm must be 'claude' or 'openai', got '${v}'\n`)
+                if (v !== "claude" && v !== "openai" && v !== "codex") {
+                    process.stderr.write(
+                        `[cli] --llm must be 'claude' | 'openai' | 'codex', got '${v}'\n`,
+                    )
                     process.exit(2)
                 }
                 args.llm = v

@@ -113,6 +113,14 @@ pub enum ArchitectStatus {
 pub enum LlmProvider {
     Claude,
     OpenAI,
+    /// OpenAI Codex CLI subprocess. Same subscription-arbitrage shape
+    /// as Claude (subprocess wrapping a vendor CLI billed against a
+    /// consumer ChatGPT plan rather than per-token API), but a
+    /// different binary, different JSONL event schema, and one-shot
+    /// non-interactive invocation per turn (no stdin streaming).
+    /// Implementation: `packages/baro-orchestrator/src/participants/
+    /// codex-cli-participant.ts`.
+    Codex,
 }
 
 impl LlmProvider {
@@ -120,6 +128,7 @@ impl LlmProvider {
         match self {
             Self::Claude => "claude",
             Self::OpenAI => "openai",
+            Self::Codex => "codex",
         }
     }
 
@@ -127,6 +136,7 @@ impl LlmProvider {
         match raw {
             "claude" => Some(Self::Claude),
             "openai" => Some(Self::OpenAI),
+            "codex" => Some(Self::Codex),
             _ => None,
         }
     }

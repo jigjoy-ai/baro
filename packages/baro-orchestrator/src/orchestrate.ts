@@ -141,8 +141,13 @@ export interface OrchestrateConfig {
      * OpenAI runner — each subsequent phase replaces one fallback with
      * a real OpenAI sibling. Until then, `"openai"` is a no-op
      * placeholder that runs the Claude flow.
+     *
+     * `"codex"` is the subscription-arbitrage path via OpenAI Codex CLI
+     * (ChatGPT Plus/Pro billing). v1: covers the Story phase; Architect
+     * + Planner + Critic + Surgeon fall back to Claude (codex-* siblings
+     * for those phases are a v2 follow-up).
      */
-    llm?: "claude" | "openai"
+    llm?: "claude" | "openai" | "codex"
     /**
      * Per-phase model override for StoryAgent. When set, wins over
      * each story's individual `model` field in the PRD as well as
@@ -179,7 +184,7 @@ export async function orchestrate(
 ): Promise<OrchestrateResult> {
     const env = new AgenticEnvironment()
     const emitTui = config.emitTuiEvents ?? true
-    const llm: "claude" | "openai" = config.llm ?? "claude"
+    const llm: "claude" | "openai" | "codex" = config.llm ?? "claude"
 
     // Provider banner so the stderr / audit log makes the actual
     // routing obvious. As of 0.33 every LLM-using phase (Architect,
@@ -189,6 +194,12 @@ export async function orchestrate(
         process.stderr.write(
             "[orchestrate] llm=openai: Architect, Planner, Critic, Surgeon, StoryAgent " +
             "all running through Mozaik's native OpenAI runner (gpt-5.x).\n",
+        )
+    } else if (llm === "codex") {
+        process.stderr.write(
+            "[orchestrate] llm=codex: Story phase shells out to `codex exec --json` " +
+            "(ChatGPT subscription path). Architect / Planner / Critic / Surgeon " +
+            "fall back to Claude in v1 — codex-* siblings for those phases are a v2 follow-up.\n",
         )
     } else {
         process.stderr.write(

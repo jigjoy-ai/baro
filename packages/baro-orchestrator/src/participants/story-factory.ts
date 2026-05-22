@@ -23,20 +23,23 @@ import {
     StorySpawned,
     type StorySpawnRequestData,
 } from "../semantic-events.js"
+import { CodexStoryAgent } from "./codex-story-agent.js"
 import { OpenAIStoryAgent } from "./openai-story-agent.js"
 import { StoryAgent } from "./story-agent.js"
 
 export interface StoryFactoryOptions {
     cwd: string
     /**
-     * Which LLM provider every story uses. When `"openai"`, spawned
-     * agents are `OpenAIStoryAgent`-s driving Mozaik's native OpenAI
-     * runner with our codebase tool layer. When `"claude"` (default),
-     * agents are the legacy `StoryAgent` wrapping a `claude` CLI
-     * subprocess. Same bus contract either way — Conductor, Critic,
-     * Surgeon, Sentry, Librarian, Cartographer don't notice the swap.
+     * Which LLM provider every story uses.
+     *   "claude"  — StoryAgent wrapping a `claude` CLI subprocess
+     *   "openai"  — OpenAIStoryAgent driving Mozaik's native OpenAI
+     *               runner with our codebase tool layer
+     *   "codex"   — CodexStoryAgent wrapping a `codex exec --json`
+     *               subprocess (ChatGPT subscription billing path)
+     * Same bus contract for all three — Conductor, Critic, Surgeon,
+     * Sentry, Librarian, Cartographer don't notice the swap.
      */
-    llm?: "claude" | "openai"
+    llm?: "claude" | "openai" | "codex"
     /**
      * Optional model name to pass to OpenAI agents. Default
      * `gpt-5.5` — StoryAgent's coding loop benefits from the largest
@@ -59,7 +62,10 @@ export class StoryFactory extends BaseObserver {
     // expect the old environment type. Once StoryAgent migrates, this
     // narrows to vanilla AgenticEnvironment.
     private envRef: AgenticEnvironment | null = null
-    private readonly active: Map<string, StoryAgent | OpenAIStoryAgent> = new Map()
+    private readonly active: Map<
+        string,
+        StoryAgent | OpenAIStoryAgent | CodexStoryAgent
+    > = new Map()
 
     constructor(private readonly opts: StoryFactoryOptions) {
         super()
@@ -104,28 +110,41 @@ export class StoryFactory extends BaseObserver {
         const claudeModel = this.opts.storyModelOverride ?? req.model
         const openaiModel =
             this.opts.storyModelOverride ?? this.opts.openaiModel ?? "gpt-5.5"
+        // Codex uses its own model nomenclature (gpt-5.5 by default on
+        // accounts with Plus+ access). Honour storyModelOverride first;
+        // otherwise let Codex pick.
+        const codexModel = this.opts.storyModelOverride
 
-        const agent: StoryAgent | OpenAIStoryAgent =
-            llm === "openai"
-                ? new OpenAIStoryAgent(
-                      {
-                          id: req.storyId,
-                          prompt: req.prompt,
-                          cwd: this.opts.cwd,
-                          model: req.model,
-                          retries: req.retries,
-                          timeoutSecs: req.timeoutSecs,
-                      },
-                      { model: openaiModel },
-                  )
-                : new StoryAgent({
+        const agent: StoryAgent | OpenAIStoryAgent | CodexStoryAgent =
+            llm === "codex"
+                ? new CodexStoryAgent({
                       id: req.storyId,
                       prompt: req.prompt,
                       cwd: this.opts.cwd,
-                      model: claudeModel,
+                      model: codexModel,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
                   })
+                : llm === "openai"
+                    ? new OpenAIStoryAgent(
+                          {
+                              id: req.storyId,
+                              prompt: req.prompt,
+                              cwd: this.opts.cwd,
+                              model: req.model,
+                              retries: req.retries,
+                              timeoutSecs: req.timeoutSecs,
+                          },
+                          { model: openaiModel },
+                      )
+                    : new StoryAgent({
+                          id: req.storyId,
+                          prompt: req.prompt,
+                          cwd: this.opts.cwd,
+                          model: claudeModel,
+                          retries: req.retries,
+                          timeoutSecs: req.timeoutSecs,
+                      })
 
         agent.join(this.envRef)
         this.active.set(req.storyId, agent)

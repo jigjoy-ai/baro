@@ -45,6 +45,7 @@ pub async fn run() -> i32 {
     results.push(check_claude_on_path().await);
     results.push(check_claude_version().await);
     results.push(check_claude_print_call().await);
+    results.push(check_codex_on_path().await);
     results.push(check_gh_on_path().await);
     results.push(check_audit_dir_writable().await);
 
@@ -183,6 +184,24 @@ async fn check_claude_print_call() -> CheckResult {
 /// `gh` is only required for the Finalizer (PR creation). A failing
 /// gh check is a warning, not a fatal error — the run will still
 /// complete, the user just won't get an auto-PR.
+/// Verify `codex` binary is reachable (optional — only needed for
+/// `baro --llm codex`). Soft failure: codex is optional infrastructure
+/// for the third backend; not having it doesn't block Claude or
+/// OpenAI workflows.
+async fn check_codex_on_path() -> CheckResult {
+    match which::which("codex") {
+        Ok(path) => CheckResult::pass(
+            "codex on PATH (optional, used for --llm codex)",
+            format!("{}", path.display()),
+        ),
+        Err(_) => CheckResult::fail(
+            "codex on PATH (optional, used for --llm codex)",
+            "binary not found",
+            "Install OpenAI Codex CLI from https://developers.openai.com/codex/cli if you want the `--llm codex` subscription path; otherwise this check is informational and Claude / OpenAI routes still work.",
+        ),
+    }
+}
+
 async fn check_gh_on_path() -> CheckResult {
     match which::which("gh") {
         Ok(path) => CheckResult::pass(

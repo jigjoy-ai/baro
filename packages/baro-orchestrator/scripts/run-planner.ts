@@ -26,7 +26,13 @@ import { runPlannerOpenAI } from "../src/planning/planner-openai.js"
 interface Args {
     goal: string
     cwd: string
-    llm: "claude" | "openai"
+    /**
+     * "codex" is accepted at the boundary but currently routes through
+     * the Claude planner path — codex-planner.ts is a v2 follow-up.
+     * v1 positioning: Codex covers the Story phase; Architect and
+     * Planner stay on Claude.
+     */
+    llm: "claude" | "openai" | "codex"
     model?: string
     contextFile?: string
     decisionFile?: string
@@ -36,7 +42,7 @@ interface Args {
 function parseArgs(argv: string[]): Args {
     let goal: string | undefined
     let cwd: string | undefined
-    let llm: "claude" | "openai" | undefined
+    let llm: "claude" | "openai" | "codex" | undefined
     let model: string | undefined
     let contextFile: string | undefined
     let decisionFile: string | undefined
@@ -53,10 +59,10 @@ function parseArgs(argv: string[]): Args {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai") {
-                    fatal(`--llm must be 'claude' or 'openai', got '${v}'`)
+                if (v !== "claude" && v !== "openai" && v !== "codex") {
+                    fatal(`--llm must be 'claude' | 'openai' | 'codex', got '${v}'`)
                 }
-                llm = v as "claude" | "openai"
+                llm = v as "claude" | "openai" | "codex"
                 break
             }
             case "--model":
@@ -117,14 +123,19 @@ async function main(): Promise<void> {
     const projectContext = tryRead(args.contextFile)
     const decisionDocument = tryRead(args.decisionFile)
 
+    // Codex is accepted at the boundary but routes to the Claude
+    // planner path in v1 — codex-planner.ts is a v2 follow-up. v1
+    // positioning: Codex covers the Story phase (the token-heavy
+    // one); Architect + Planner stay on Claude.
+    const plannerBackend = args.llm === "openai" ? "openai" : "claude"
     process.stderr.write(
-        `[run-planner] llm=${args.llm} model=${args.model ?? "(default)"} quick=${args.quick}\n`,
+        `[run-planner] requested=${args.llm} → planner-backend=${plannerBackend} model=${args.model ?? "(default)"} quick=${args.quick}\n`,
     )
 
     let prdJson: string
     const t0 = Date.now()
     try {
-        if (args.llm === "openai") {
+        if (plannerBackend === "openai") {
             if (!process.env.OPENAI_API_KEY) {
                 fatal("--llm openai requires OPENAI_API_KEY to be set")
             }
