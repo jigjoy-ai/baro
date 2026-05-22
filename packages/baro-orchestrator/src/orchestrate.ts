@@ -12,9 +12,6 @@ import { dirname } from "path"
 
 import {
     BaseObserver,
-    FunctionCallItem,
-    FunctionCallOutputItem,
-    ModelMessageItem,
     Participant,
     SemanticEvent,
 } from "@mozaik-ai/core"
@@ -42,6 +39,7 @@ import { CriticOpenAI } from "./participants/critic-openai.js"
 import { Finalizer } from "./participants/finalizer.js"
 import { Librarian } from "./participants/librarian.js"
 import { Operator } from "./participants/operator.js"
+import { AgentLogForwarder } from "./participants/forwarders/agent-log.js"
 import { CoordinationForwarder } from "./participants/forwarders/coordination.js"
 import { ProgressForwarder } from "./participants/forwarders/progress.js"
 import { Sentry } from "./participants/sentry.js"
@@ -223,6 +221,7 @@ export async function orchestrate(
     if (emitTui) {
         new CoordinationForwarder().join(env)
         new ProgressForwarder().join(env)
+        new AgentLogForwarder().join(env)
         new BaroEventForwarder().join(env)
     }
 
@@ -513,20 +512,6 @@ class BaroEventForwarder extends BaseObserver {
     /** Token-usage tally per story (incrementally updated from results). */
     private tokensByStory = new Map<string, { input: number; output: number }>()
 
-    override async onExternalModelMessage(source: Participant, item: ModelMessageItem): Promise<void> {
-        this.handleModelMessage(source, item)
-    }
-
-    override async onExternalFunctionCall(source: Participant, item: FunctionCallItem): Promise<void> {
-        this.handleToolCall(source, item)
-    }
-
-    override async onExternalFunctionCallOutput(
-        source: Participant,
-        item: FunctionCallOutputItem,
-    ): Promise<void> {
-        this.handleToolResult(source, item)
-    }
 
     override async onExternalEvent(
         _source: Participant,
@@ -665,52 +650,6 @@ class BaroEventForwarder extends BaseObserver {
         }
     }
 
-    private handleModelMessage(source: Participant, item: ModelMessageItem): void {
-        const agentId = (source as unknown as { agentId?: string }).agentId
-        if (typeof agentId !== "string") return
-        const json = item.toJSON() as { content: Array<{ text: string }> }
-        const text = json.content?.[0]?.text ?? ""
-        if (!text.trim()) return
-        emitMultiline(agentId, text)
-    }
-
-    private handleToolCall(source: Participant, item: FunctionCallItem): void {
-        const agentId = (source as unknown as { agentId?: string }).agentId
-        if (typeof agentId !== "string") return
-        // Tool args can themselves contain newlines (multi-line file
-        // contents in a Write call, embedded code blocks, etc). Split.
-        emitMultiline(agentId, `[tool_call] ${item.name} ${item.args}`)
-    }
-
-    private handleToolResult(
-        source: Participant,
-        item: FunctionCallOutputItem,
-    ): void {
-        const agentId = (source as unknown as { agentId?: string }).agentId
-        if (typeof agentId !== "string") return
-        const json = item.toJSON() as {
-            call_id: string
-            output: Array<{ text: string }>
-        }
-        const text = json.output?.[0]?.text ?? ""
-        emitMultiline(agentId, `[tool_result ${json.call_id}] ${text}`)
-    }
-}
-
-/**
- * Emit a story_log per source line. Keeps the TUI clean (no embedded
- * `\n` rendered as ⏎ literals) and lets the log scrollbar work as
- * intended on long tool outputs.
- */
-function emitMultiline(agentId: string, text: string): void {
-    if (!text) return
-    const lines = text.split("\n")
-    for (const line of lines) {
-        // Skip purely empty trailing lines but keep blank rows mid-block
-        // so structure (e.g. paragraph breaks) survives.
-        if (line.length === 0 && lines.length === 1) continue
-        emit({ type: "story_log", id: agentId, line })
-    }
 }
 
 /**
