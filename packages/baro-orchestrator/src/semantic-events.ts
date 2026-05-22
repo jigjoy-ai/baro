@@ -176,6 +176,55 @@ export interface ClaudeRateLimitData {
 export const ClaudeRateLimit =
     defineSemanticEvent<ClaudeRateLimitData>("claude_rate_limit")
 
+// ─── Codex CLI passthrough types ──────────────────────────────────────
+// Codex emits a stream of JSONL events under three families:
+//   - thread.*  → lifecycle of the whole codex exec session
+//   - turn.*    → lifecycle of a single agent turn inside the session
+//   - item.*    → individual artefacts produced by a turn (messages,
+//                 reasoning, command executions, file changes, MCP tool
+//                 calls, plan updates …)
+//
+// All three families fall back to opaque `raw` payloads in our event
+// objects — the mapper extracts known fields (text, tool name, exit
+// code) into dedicated Mozaik typed items where it can, and otherwise
+// passes the whole event through so downstream observers (audit log,
+// kaleidoskop replay, debug consoles) still see everything.
+
+export interface CodexSystemData {
+    agentId: string
+    /** "thread.started" | "thread.completed" | "error" */
+    subtype: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const CodexSystem = defineSemanticEvent<CodexSystemData>("codex_system")
+
+export interface CodexTurnEventData {
+    agentId: string
+    /** "started" | "completed" | "failed" */
+    phase: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const CodexTurnEvent =
+    defineSemanticEvent<CodexTurnEventData>("codex_turn_event")
+
+export interface CodexItemEventData {
+    agentId: string
+    /** e.g. "agent_message", "reasoning", "command_execution",
+     *  "file_change", "mcp_tool_call", "web_search", "plan_update". */
+    itemType: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const CodexItemEvent =
+    defineSemanticEvent<CodexItemEventData>("codex_item_event")
+
+export interface CodexUnknownEventData {
+    agentId: string
+    codexType: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const CodexUnknownEvent =
+    defineSemanticEvent<CodexUnknownEventData>("codex_unknown_event")
+
 /**
  * Verdict from the Critic participant. Wire JSON uses snake_case keys
  * (`agent_id`, `violated_criteria`, `model_used`) to match the Rust TUI
