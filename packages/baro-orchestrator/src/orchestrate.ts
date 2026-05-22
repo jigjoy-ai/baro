@@ -31,7 +31,6 @@ import {
     safePullRebase,
 } from "./git.js"
 import { buildDag } from "./dag.js"
-import { ConductorState, type ConductorStateData } from "./semantic-events.js"
 import { Auditor } from "./participants/auditor.js"
 import {
     Conductor,
@@ -43,6 +42,7 @@ import { CriticOpenAI } from "./participants/critic-openai.js"
 import { Finalizer } from "./participants/finalizer.js"
 import { Librarian } from "./participants/librarian.js"
 import { Operator } from "./participants/operator.js"
+import { ProgressForwarder } from "./participants/forwarders/progress.js"
 import { Sentry } from "./participants/sentry.js"
 import { StoryFactory } from "./participants/story-factory.js"
 import { type StoryAgent } from "./participants/story-agent.js"
@@ -224,6 +224,7 @@ export async function orchestrate(
 
     // BaroEvent forwarder: watch the bus, translate to TUI protocol on stdout.
     if (emitTui) {
+        new ProgressForwarder().join(env)
         new BaroEventForwarder().join(env)
     }
 
@@ -533,10 +534,6 @@ class BaroEventForwarder extends BaseObserver {
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        if (ConductorState.is(event)) {
-            this.handleConductorState(event.data)
-            return
-        }
         if (StoryResult.is(event)) {
             this.handleStoryResult(event.data)
             return
@@ -590,25 +587,6 @@ class BaroEventForwarder extends BaseObserver {
             id: item.agentId,
             line: `[critic/${item.verdict}] ${item.reasoning}`,
         })
-    }
-
-    private handleConductorState(item: ConductorStateData): void {
-        // Mirror conductor lifecycle as a `progress` event the existing
-        // Rust TUI understands — it doesn't yet know `conductor_state`.
-        if (
-            item.phase === "running_level" &&
-            item.currentLevel != null &&
-            item.totalLevels != null
-        ) {
-            emit({
-                type: "progress",
-                completed: item.currentLevel - 1,
-                total: item.totalLevels,
-                percentage: Math.round(
-                    ((item.currentLevel - 1) / Math.max(1, item.totalLevels)) * 100,
-                ),
-            })
-        }
     }
 
     private handleStoryResult(item: StoryResultData): void {
