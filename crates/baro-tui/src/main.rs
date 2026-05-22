@@ -526,6 +526,7 @@ async fn run_app(
                 let claude_md_path = cwd.join("CLAUDE.md");
                 if claude_md_path.exists() {
                     if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
+                        ensure_agents_md_mirror(&cwd, &content);
                         app.claude_md_content = Some(content);
                     }
                     app.start_planning();
@@ -708,6 +709,7 @@ async fn run_app(
                                     let claude_md_path = cwd.join("CLAUDE.md");
                                     if claude_md_path.exists() {
                                         if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
+                                            ensure_agents_md_mirror(&cwd, &content);
                                             app.claude_md_content = Some(content);
                                         }
                                         app.start_planning();
@@ -741,6 +743,7 @@ async fn run_app(
                                 let claude_md_path = cwd.join("CLAUDE.md");
                                 if claude_md_path.exists() {
                                     if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
+                                        ensure_agents_md_mirror(&cwd, &content);
                                         app.claude_md_content = Some(content);
                                     }
                                     app.start_planning();
@@ -1192,6 +1195,22 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
             }
         }
     });
+}
+
+/// Mirror CLAUDE.md content into AGENTS.md so subprocess backends
+/// that follow the AGENTS.md convention (OpenAI Codex CLI) pick up
+/// the same project context Claude Code reads from CLAUDE.md.
+///
+/// Idempotent: only writes if AGENTS.md doesn't already exist (so a
+/// hand-curated AGENTS.md from the user is never overwritten). Soft-
+/// fail: any write error is silently ignored — CLAUDE.md path stays
+/// authoritative.
+fn ensure_agents_md_mirror(cwd: &Path, content: &str) {
+    let agents_md_path = cwd.join("AGENTS.md");
+    if agents_md_path.exists() {
+        return;
+    }
+    let _ = std::fs::write(&agents_md_path, content);
 }
 
 fn spawn_context_builder(cwd: &Path, tx: mpsc::Sender<AppEvent>) {
