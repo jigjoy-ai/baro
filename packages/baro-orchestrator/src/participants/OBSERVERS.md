@@ -1,9 +1,10 @@
 # Observer participants
 
-This cheat sheet documents the six TypeScript-side observer participants
-in the orchestrator: passive bus listeners that watch bus traffic and
-(optionally) emit their own events back onto the bus. Cartographer is
-**not** covered here — it lives Rust-side under `crates/baro-tui/`.
+This cheat sheet documents the TypeScript-side observer participants in
+the orchestrator: passive bus listeners that watch bus traffic and
+(optionally) emit their own events back onto the bus or stdout protocol.
+Cartographer is **not** covered here — it lives Rust-side under
+`crates/baro-tui/`.
 
 Every observer extends Mozaik's `BaseObserver`. They subscribe via
 `onExternalEvent(source, event: SemanticEvent<unknown>)` and gate per
@@ -125,3 +126,33 @@ defined in [../semantic-events.ts](../semantic-events.ts).
 - Emits: `FinalizeStarted`, `PrCreated`
 
 Source: [finalizer.ts](./finalizer.ts)
+
+---
+
+## TUI Forwarders
+
+Stdout protocol adapters that translate Mozaik bus events and LLM item
+callbacks into Rust TUI `BaroEvent` JSON. They are split by event family
+under [forwarders/](./forwarders/) so each file owns one responsibility
+and one set of mutable state. The old aggregate forwarder kept a
+`tokensByStory` map, but that state was written and never read, so the
+split drops it.
+
+- [story-lifecycle.ts](./forwarders/story-lifecycle.ts): subscribes to
+  `AgentState` and `StoryResult`; emits story start, retry, completion,
+  and error events.
+- [token-usage.ts](./forwarders/token-usage.ts): subscribes to
+  `AgentResult` and completed `CodexTurnEvent`; emits token usage
+  events.
+- [progress.ts](./forwarders/progress.ts): subscribes to
+  `ConductorState`; emits level progress events.
+- [coordination.ts](./forwarders/coordination.ts): subscribes to
+  `Coordination` and `Critique`; emits story log lines.
+- [finalization.ts](./forwarders/finalization.ts): subscribes to
+  `FinalizeStarted` and `PrCreated`; emits finalization lifecycle
+  events.
+- [agent-log.ts](./forwarders/agent-log.ts): subscribes to
+  `ModelMessageItem`, `FunctionCallItem`, and `FunctionCallOutputItem`
+  through Mozaik item hooks; emits model and tool story log lines.
+
+These forwarders emit nothing back onto the Mozaik bus.
