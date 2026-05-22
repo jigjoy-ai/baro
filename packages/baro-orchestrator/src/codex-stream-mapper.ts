@@ -3,24 +3,37 @@
  * for bus delivery. Sibling of `stream-json-mapper.ts` (the Claude
  * mapper).
  *
- * Codex stream shape (per OpenAI's docs at developers.openai.com/codex):
+ * Codex stream shape — observed against real `codex exec --json` output
+ * (M1 probe 2026-05-22, codex v0.133.0 on gpt-5.5). The docs use
+ * `item.<type>` envelope names in prose, but the actual wire format is:
  *
- *   {"type":"thread.started", "thread_id":"…", …}
- *   {"type":"turn.started",   "turn_id":"…", …}
- *   {"type":"item.agent_message",     "text":"…", …}
- *   {"type":"item.reasoning",         "text":"…", …}
- *   {"type":"item.command_execution", "command":"…", "exit_code":0, …}
- *   {"type":"item.file_change",       "path":"…", "diff":"…", …}
- *   {"type":"item.mcp_tool_call",     "tool_name":"…", "arguments":{…}, …}
- *   {"type":"item.web_search",        "query":"…", "results":[…], …}
- *   {"type":"item.plan_update",       "plan":[…], …}
- *   {"type":"turn.completed",         …}
- *   {"type":"turn.failed",            "error":"…", …}
- *   {"type":"thread.completed",       …}
- *   {"type":"error",                  "message":"…", …}
+ *   {"type":"thread.started", "thread_id":"…"}
+ *   {"type":"turn.started"}
+ *   {"type":"item.started",   "item":{"id":"…","type":"<itemtype>", …}}
+ *   {"type":"item.updated",   "item":{"id":"…", …}}        — for streaming
+ *   {"type":"item.completed", "item":{"id":"…","type":"agent_message",
+ *                                      "text":"…"}}
+ *   {"type":"turn.completed", "usage":{
+ *      "input_tokens":N,"cached_input_tokens":N,
+ *      "output_tokens":N,"reasoning_output_tokens":N}}
+ *   {"type":"thread.completed"}  — observed only on multi-turn sessions;
+ *                                  one-shot exec ends at turn.completed
+ *   {"type":"turn.failed",    "error":"…"}
+ *   {"type":"error",          "message":"…"}
  *
- * Mapping strategy (intentionally conservative for first pass — refined
- * as real Codex output is captured during M1–M3 probes):
+ * The real `item.type` lives at `event.item.type`, not at envelope-level.
+ * Inner item shape (per observed agent_message, plus inferred from docs
+ * for the other subtypes — refined as we capture each kind):
+ *
+ *   agent_message:     {id, type, text}
+ *   reasoning:         {id, type, text}                       (per docs)
+ *   command_execution: {id, type, command, exit_code?, output?, aggregated_output?}
+ *   file_change:       {id, type, path, diff?}
+ *   mcp_tool_call:     {id, type, tool_name, arguments?, result?}
+ *   web_search:        {id, type, query, results?}
+ *   plan_update:       {id, type, plan: […]}
+ *
+ * Mapping strategy:
  *
  *   - Assistant-side messages map to Mozaik's `ModelMessageItem`.
  *   - Tool-shaped items (command_execution, file_change, mcp_tool_call,
@@ -121,63 +134,81 @@ export function mapCodexEvent(
     }
 
     // ─── item.* family ─────────────────────────────────────────────
-    if (type.startsWith("item.")) {
-        const itemType = type.slice("item.".length)
+    // Envelopes: item.started | item.updated | item.completed.
+    // The inner item carries the real subtype + content.
+    //
+    // Mapping policy: emit Mozaik typed channels (ModelMessageItem,
+    // FunctionCallItem, FunctionCallOutputItem) ONLY on item.completed.
+    // item.started / item.updated are fired during streaming and either
+    // carry partial state or just the envelope shell; we'd double-count
+    // if we mapped them to typed channels too. They still go through
+    // CodexItemEvent so observers see the streaming lifecycle.
+    if (type === "item.started" || type === "item.updated") {
+        const inner =
+            event.item && typeof event.item === "object"
+                ? (event.item as Record<string, unknown>)
+                : {}
+        const innerType =
+            typeof inner.type === "string" ? inner.type : "unknown"
+        items.push(
+            CodexItemEvent.create({
+                agentId,
+                itemType: `${type.slice("item.".length)}:${innerType}`,
+                raw: event,
+            }),
+        )
+        return { items, threadId }
+    }
+
+    if (type === "item.completed") {
+        const inner =
+            event.item && typeof event.item === "object"
+                ? (event.item as Record<string, any>)
+                : {}
+        const innerType =
+            typeof inner.type === "string" ? inner.type : "unknown"
 
         // Assistant message → ModelMessageItem.
-        if (itemType === "agent_message" || itemType === "message") {
-            const text = typeof event.text === "string" ? event.text : ""
+        if (innerType === "agent_message" || innerType === "message") {
+            const text = typeof inner.text === "string" ? inner.text : ""
             if (text) {
                 items.push(ModelMessageItem.rehydrate({ text }))
             }
-            // Always emit the raw event too so observers see the full
-            // envelope (metadata, role, etc.) — Mozaik's typed message
-            // channel intentionally narrows the payload.
             items.push(
                 CodexItemEvent.create({
                     agentId,
-                    itemType,
+                    itemType: innerType,
                     raw: event,
                 }),
             )
             return { items, threadId }
         }
 
-        // Reasoning chunks. Could map to ModelMessageItem with a
-        // distinguishing flag, but Mozaik doesn't yet have a "reasoning"
-        // semantic channel. For first pass: emit as a typed item event
-        // and let observers decide. Future: introduce a ReasoningItem
-        // upstream.
-        if (itemType === "reasoning") {
+        // Reasoning. No Mozaik ReasoningItem yet — surface as typed event.
+        if (innerType === "reasoning") {
             items.push(
                 CodexItemEvent.create({
                     agentId,
-                    itemType,
+                    itemType: innerType,
                     raw: event,
                 }),
             )
             return { items, threadId }
         }
 
-        // Tool-shaped items. Codex represents shell exec, file edits,
-        // MCP calls, and web searches as item.* envelopes. We model each
-        // as a FunctionCallItem (invocation) optionally followed by a
-        // FunctionCallOutputItem (result). Whether one envelope carries
-        // both, or they arrive as two separate envelopes, is something
-        // M1–M3 probes will pin down — for now we treat each as a self-
-        // contained invocation+result and hand the raw event along.
+        // Tool-shaped items.
         if (
-            itemType === "command_execution" ||
-            itemType === "file_change" ||
-            itemType === "mcp_tool_call" ||
-            itemType === "web_search"
+            innerType === "command_execution" ||
+            innerType === "file_change" ||
+            innerType === "mcp_tool_call" ||
+            innerType === "web_search"
         ) {
-            const callId = stringifyId(event)
-            const name = inferToolName(itemType, event)
-            const args = inferToolArgs(event)
+            const callId = stringifyId(inner)
+            const name = inferToolName(innerType, inner)
+            const args = inferToolArgs(inner)
             items.push(FunctionCallItem.rehydrate({ callId, name, args }))
 
-            const output = inferToolOutput(itemType, event)
+            const output = inferToolOutput(innerType, inner)
             if (output !== null) {
                 items.push(FunctionCallOutputItem.create(callId, output))
             }
@@ -185,20 +216,18 @@ export function mapCodexEvent(
             items.push(
                 CodexItemEvent.create({
                     agentId,
-                    itemType,
+                    itemType: innerType,
                     raw: event,
                 }),
             )
             return { items, threadId }
         }
 
-        // plan_update and any other item.* subtype → generic
-        // CodexItemEvent so observers can react without us claiming we
-        // understand the structure yet.
+        // plan_update and anything else → typed CodexItemEvent.
         items.push(
             CodexItemEvent.create({
                 agentId,
-                itemType,
+                itemType: innerType,
                 raw: event,
             }),
         )

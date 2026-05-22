@@ -278,11 +278,15 @@ export class CodexCliParticipant extends BaseObserver {
 
         for (const item of items) {
             if (item instanceof SemanticEvent) {
-                // Lifecycle signals: ready when we see thread.started,
-                // done/failed when we see a terminal turn or thread
-                // event. The participant doesn't try to be clever about
-                // success/failure beyond this — Critic + Surgeon
-                // observers downstream do the verdict work.
+                // Lifecycle signals. Real Codex stream shape (observed
+                // 2026-05-22, codex v0.133.0):
+                //   thread.started   → ready
+                //   turn.started     → no-op (we're already running)
+                //   turn.completed   → success terminal for one-shot
+                //                      exec (thread.completed is only
+                //                      emitted on multi-turn sessions)
+                //   turn.failed      → failure terminal
+                //   thread.completed → process is shutting down cleanly
                 if (
                     CodexSystem.is(item) &&
                     item.data.subtype === "thread.started"
@@ -296,13 +300,9 @@ export class CodexCliParticipant extends BaseObserver {
                         this.transition("failed", "codex turn failed")
                     }
                 }
-                if (
-                    CodexSystem.is(item) &&
-                    item.data.subtype === "thread.completed"
-                ) {
-                    // Don't transition to "done" yet — wait for the
-                    // process exit to confirm clean shutdown.
-                }
+                // Don't transition to "done" on thread.completed either —
+                // the process-exit listener owns that, so we observe the
+                // real exit code before locking in the AgentPhase.
             }
             this.dispatch(item)
         }
