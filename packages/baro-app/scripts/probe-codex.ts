@@ -66,6 +66,7 @@ interface ProbeArgs {
     cwd: string
     model?: string
     fullAuto: boolean
+    skipGitRepoCheck: boolean
 }
 
 function parseArgs(): ProbeArgs {
@@ -74,6 +75,7 @@ function parseArgs(): ProbeArgs {
     let cwd = process.cwd()
     let model: string | undefined
     let fullAuto = false
+    let skipGitRepoCheck = false
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i]
         switch (a) {
@@ -89,10 +91,13 @@ function parseArgs(): ProbeArgs {
             case "--full-auto":
                 fullAuto = true
                 break
+            case "--skip-git-repo-check":
+                skipGitRepoCheck = true
+                break
             case "--help":
             case "-h":
                 process.stdout.write(
-                    `usage: probe-codex.ts --prompt <text> [--cwd <path>] [--model <name>] [--full-auto]\n`,
+                    `usage: probe-codex.ts --prompt <text> [--cwd <path>] [--model <name>] [--full-auto] [--skip-git-repo-check]\n`,
                 )
                 process.exit(0)
         }
@@ -101,7 +106,7 @@ function parseArgs(): ProbeArgs {
         process.stderr.write("error: --prompt is required\n")
         process.exit(2)
     }
-    return { prompt, cwd, model, fullAuto }
+    return { prompt, cwd, model, fullAuto, skipGitRepoCheck }
 }
 
 function summarize(item: Loggable): string {
@@ -172,7 +177,7 @@ class LoggingObserver extends BaseObserver {
 }
 
 async function main(): Promise<void> {
-    const { prompt, cwd, model, fullAuto } = parseArgs()
+    const { prompt, cwd, model, fullAuto, skipGitRepoCheck } = parseArgs()
 
     const logsDir = join(process.cwd(), "packages/baro-app/scripts/spike-logs")
     mkdirSync(logsDir, { recursive: true })
@@ -191,6 +196,7 @@ async function main(): Promise<void> {
         prompt,
         model,
         fullAuto,
+        skipGitRepoCheck,
     })
     codex.join(env)
     codex.start(env)
@@ -209,12 +215,15 @@ main().catch((err) => {
 
 /* ─── M1 & M2: one-liner shell commands (no Node wiring needed) ──────
  *
- * M1 — context-free baseline (run from /tmp/empty):
+ * M1 — context-free baseline (non-repo dir needs --skip-git-repo-check
+ *      because Codex refuses to run outside a trusted git repo by
+ *      default):
  *   mkdir -p /tmp/codex-probe && cd /tmp/codex-probe
- *   codex exec --json "print the word hello and exit" \
+ *   codex exec --json --skip-git-repo-check \
+ *     "print the word hello and exit" \
  *     | tee ~/Desktop/codex-probe-M1.jsonl
  *
- * M2 — baro-repo indexing cost:
+ * M2 — baro-repo indexing cost (no flag needed; baro is a git repo):
  *   cd ~/Desktop/baro
  *   codex exec --json "print the word hello and exit" \
  *     | tee ~/Desktop/codex-probe-M2.jsonl

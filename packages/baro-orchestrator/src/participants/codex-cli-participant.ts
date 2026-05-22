@@ -53,6 +53,14 @@ export interface CodexCliParticipantOptions {
      * default, which prompts on first invocation).
      */
     fullAuto?: boolean
+    /**
+     * If true, pass `--skip-git-repo-check`. Required when the cwd is
+     * not a git repo (Codex refuses to run otherwise). baro's
+     * story workers always run inside per-story git worktrees, so the
+     * default is false — set this only when wiring up tests or one-off
+     * runs from /tmp.
+     */
+    skipGitRepoCheck?: boolean
     /** Extra CLI arguments appended after the standard set. */
     extraArgs?: string[]
     /** Path to the `codex` binary. Default: "codex" (resolved via PATH). */
@@ -86,7 +94,10 @@ export class CodexCliParticipant extends BaseObserver {
     }
 
     private readonly options: Required<
-        Pick<CodexCliParticipantOptions, "codexBin" | "fullAuto">
+        Pick<
+            CodexCliParticipantOptions,
+            "codexBin" | "fullAuto" | "skipGitRepoCheck"
+        >
     > &
         CodexCliParticipantOptions
 
@@ -114,6 +125,7 @@ export class CodexCliParticipant extends BaseObserver {
         this.options = {
             codexBin: "codex",
             fullAuto: false,
+            skipGitRepoCheck: false,
             ...opts,
         }
         this.ready = new Promise<void>((res, rej) => {
@@ -221,6 +233,7 @@ export class CodexCliParticipant extends BaseObserver {
     private buildArgs(): string[] {
         // `codex exec --json` — non-interactive JSONL stream.
         const args = ["exec", "--json"]
+        if (this.options.skipGitRepoCheck) args.push("--skip-git-repo-check")
         if (this.options.fullAuto) args.push("--full-auto")
         if (this.options.model) args.push("--model", this.options.model)
         if (this.options.extraArgs?.length) args.push(...this.options.extraArgs)
