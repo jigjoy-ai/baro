@@ -42,6 +42,7 @@ import { CriticOpenAI } from "./participants/critic-openai.js"
 import { Finalizer } from "./participants/finalizer.js"
 import { Librarian } from "./participants/librarian.js"
 import { Operator } from "./participants/operator.js"
+import { CoordinationForwarder } from "./participants/forwarders/coordination.js"
 import { ProgressForwarder } from "./participants/forwarders/progress.js"
 import { Sentry } from "./participants/sentry.js"
 import { StoryFactory } from "./participants/story-factory.js"
@@ -56,16 +57,12 @@ import {
     AgentState,
     ClaudeSystem,
     CodexTurnEvent,
-    Coordination,
-    Critique,
     FinalizeStarted,
     PrCreated,
     RunStartRequest,
     type AgentResultData,
     type AgentStateData,
     type CodexTurnEventData,
-    type CoordinationData,
-    type CritiqueData,
 } from "./semantic-events.js"
 import { emit } from "./tui-protocol.js"
 
@@ -224,6 +221,7 @@ export async function orchestrate(
 
     // BaroEvent forwarder: watch the bus, translate to TUI protocol on stdout.
     if (emitTui) {
+        new CoordinationForwarder().join(env)
         new ProgressForwarder().join(env)
         new BaroEventForwarder().join(env)
     }
@@ -555,14 +553,6 @@ class BaroEventForwarder extends BaseObserver {
             // by AgentState) — skip.
             return
         }
-        if (Coordination.is(event)) {
-            this.handleCoordination(event.data)
-            return
-        }
-        if (Critique.is(event)) {
-            this.handleCritique(event.data)
-            return
-        }
         if (FinalizeStarted.is(event)) {
             emit({ type: "finalize_start" })
             return
@@ -571,22 +561,6 @@ class BaroEventForwarder extends BaseObserver {
             emit({ type: "finalize_complete", pr_url: event.data.url })
             return
         }
-    }
-
-    private handleCoordination(item: CoordinationData): void {
-        emit({
-            type: "story_log",
-            id: item.recipientId,
-            line: `[sentry/${item.kind}] ${item.reason}`,
-        })
-    }
-
-    private handleCritique(item: CritiqueData): void {
-        emit({
-            type: "story_log",
-            id: item.agentId,
-            line: `[critic/${item.verdict}] ${item.reasoning}`,
-        })
     }
 
     private handleStoryResult(item: StoryResultData): void {
