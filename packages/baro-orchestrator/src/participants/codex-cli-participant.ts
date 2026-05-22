@@ -47,12 +47,20 @@ export interface CodexCliParticipantOptions {
      */
     model?: string
     /**
-     * Permission flag for Codex. Codex's flags differ from Claude's —
-     * `--full-auto` is the closest analogue to Claude's
-     * `bypassPermissions`. Default: undefined (let Codex use its own
-     * default, which prompts on first invocation).
+     * Bypass Codex's sandbox AND approval prompts. Equivalent to
+     * `--dangerously-bypass-approvals-and-sandbox` (alias `--yolo`)
+     * on the CLI. Replaces the deprecated `--full-auto` flag —
+     * which was just sandbox=workspace-write + no-approvals, but
+     * workspace-write blocks writes to `.git/` so the agent can't
+     * commit. Baro story workers run in per-story git worktrees
+     * (already isolated from the rest of the filesystem) so the
+     * "danger" is bounded; the agent NEEDS .git/ writes to land
+     * commits and let Finalizer push.
+     *
+     * Default: false. Callers that don't need autonomous .git
+     * writes (e.g. read-only probes) should leave it off.
      */
-    fullAuto?: boolean
+    bypassSandbox?: boolean
     /**
      * If true, pass `--skip-git-repo-check`. Required when the cwd is
      * not a git repo (Codex refuses to run otherwise). baro's
@@ -96,7 +104,7 @@ export class CodexCliParticipant extends BaseObserver {
     private readonly options: Required<
         Pick<
             CodexCliParticipantOptions,
-            "codexBin" | "fullAuto" | "skipGitRepoCheck"
+            "codexBin" | "bypassSandbox" | "skipGitRepoCheck"
         >
     > &
         CodexCliParticipantOptions
@@ -124,7 +132,7 @@ export class CodexCliParticipant extends BaseObserver {
         super()
         this.options = {
             codexBin: "codex",
-            fullAuto: false,
+            bypassSandbox: false,
             skipGitRepoCheck: false,
             ...opts,
         }
@@ -234,7 +242,16 @@ export class CodexCliParticipant extends BaseObserver {
         // `codex exec --json` — non-interactive JSONL stream.
         const args = ["exec", "--json"]
         if (this.options.skipGitRepoCheck) args.push("--skip-git-repo-check")
-        if (this.options.fullAuto) args.push("--full-auto")
+        if (this.options.bypassSandbox) {
+            // `--dangerously-bypass-approvals-and-sandbox` is the
+            // modern replacement for the deprecated `--full-auto`.
+            // workspace-write isn't enough — `.git/` is read-only
+            // even in workspace-write mode (per openai/codex#15505).
+            // baro stories need `.git/` writes to commit, so we go
+            // full bypass and rely on the per-story worktree for
+            // process-level isolation.
+            args.push("--dangerously-bypass-approvals-and-sandbox")
+        }
         if (this.options.model) args.push("--model", this.options.model)
         if (this.options.extraArgs?.length) args.push(...this.options.extraArgs)
         // Prompt is the final positional. Codex expects it as a single

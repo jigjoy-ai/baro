@@ -65,7 +65,7 @@ interface ProbeArgs {
     prompt: string
     cwd: string
     model?: string
-    fullAuto: boolean
+    bypassSandbox: boolean
     skipGitRepoCheck: boolean
 }
 
@@ -74,7 +74,7 @@ function parseArgs(): ProbeArgs {
     let prompt: string | undefined
     let cwd = process.cwd()
     let model: string | undefined
-    let fullAuto = false
+    let bypassSandbox = false
     let skipGitRepoCheck = false
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i]
@@ -88,8 +88,12 @@ function parseArgs(): ProbeArgs {
             case "--model":
                 model = argv[++i]
                 break
+            case "--bypass-sandbox":
             case "--full-auto":
-                fullAuto = true
+                // --full-auto kept as alias for the old behaviour;
+                // both now route to Codex's new
+                // --dangerously-bypass-approvals-and-sandbox flag.
+                bypassSandbox = true
                 break
             case "--skip-git-repo-check":
                 skipGitRepoCheck = true
@@ -97,7 +101,7 @@ function parseArgs(): ProbeArgs {
             case "--help":
             case "-h":
                 process.stdout.write(
-                    `usage: probe-codex.ts --prompt <text> [--cwd <path>] [--model <name>] [--full-auto] [--skip-git-repo-check]\n`,
+                    `usage: probe-codex.ts --prompt <text> [--cwd <path>] [--model <name>] [--bypass-sandbox] [--skip-git-repo-check]\n`,
                 )
                 process.exit(0)
         }
@@ -106,7 +110,7 @@ function parseArgs(): ProbeArgs {
         process.stderr.write("error: --prompt is required\n")
         process.exit(2)
     }
-    return { prompt, cwd, model, fullAuto, skipGitRepoCheck }
+    return { prompt, cwd, model, bypassSandbox, skipGitRepoCheck }
 }
 
 function summarize(item: Loggable): string {
@@ -177,7 +181,7 @@ class LoggingObserver extends BaseObserver {
 }
 
 async function main(): Promise<void> {
-    const { prompt, cwd, model, fullAuto, skipGitRepoCheck } = parseArgs()
+    const { prompt, cwd, model, bypassSandbox, skipGitRepoCheck } = parseArgs()
 
     const logsDir = join(process.cwd(), "packages/baro-app/scripts/spike-logs")
     mkdirSync(logsDir, { recursive: true })
@@ -195,7 +199,7 @@ async function main(): Promise<void> {
         cwd,
         prompt,
         model,
-        fullAuto,
+        bypassSandbox,
         skipGitRepoCheck,
     })
     codex.join(env)

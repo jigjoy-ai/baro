@@ -53,11 +53,15 @@ export interface CodexStorySpec {
      */
     hardTimeoutSecs?: number
     /**
-     * Pass `--full-auto` to Codex so it does not prompt for permission
-     * on every shell command / edit. Required for autonomous baro runs.
+     * Bypass Codex's sandbox + approval prompts (i.e. pass
+     * `--dangerously-bypass-approvals-and-sandbox`). Required for
+     * autonomous baro runs because Codex's `workspace-write` sandbox
+     * mode blocks `.git/` writes — without bypass the agent can't
+     * commit. baro story workers run in per-story git worktrees, so
+     * the "danger" is bounded by worktree isolation.
      * Default: true.
      */
-    fullAuto?: boolean
+    bypassSandbox?: boolean
     /**
      * Pass `--skip-git-repo-check`. baro story workers always run inside
      * per-story git worktrees, so the default is false; set this only
@@ -83,7 +87,7 @@ export class CodexStoryAgent extends BaseObserver {
             | "timeoutSecs"
             | "retryDelayMs"
             | "hardTimeoutSecs"
-            | "fullAuto"
+            | "bypassSandbox"
             | "skipGitRepoCheck"
         >
     > &
@@ -103,7 +107,7 @@ export class CodexStoryAgent extends BaseObserver {
             timeoutSecs: 600,
             retryDelayMs: 1500,
             hardTimeoutSecs: 0,
-            fullAuto: true,
+            bypassSandbox: true,
             skipGitRepoCheck: false,
             ...spec,
         }
@@ -257,7 +261,7 @@ export class CodexStoryAgent extends BaseObserver {
             cwd: this.spec.cwd,
             prompt: this.spec.prompt,
             model: this.spec.model,
-            fullAuto: this.spec.fullAuto,
+            bypassSandbox: this.spec.bypassSandbox,
             skipGitRepoCheck: this.spec.skipGitRepoCheck,
         })
         this.currentCodex = codex

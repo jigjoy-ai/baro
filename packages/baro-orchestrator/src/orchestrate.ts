@@ -53,6 +53,7 @@ import {
     AgentResult,
     AgentState,
     ClaudeSystem,
+    CodexTurnEvent,
     Coordination,
     Critique,
     FinalizeStarted,
@@ -60,6 +61,7 @@ import {
     RunStartRequest,
     type AgentResultData,
     type AgentStateData,
+    type CodexTurnEventData,
     type CoordinationData,
     type CritiqueData,
 } from "./semantic-events.js"
@@ -527,6 +529,10 @@ class BaroEventForwarder extends BaseObserver {
             this.handleClaudeResult(event.data)
             return
         }
+        if (CodexTurnEvent.is(event)) {
+            this.handleCodexTurnEvent(event.data)
+            return
+        }
         if (AgentState.is(event)) {
             this.handleAgentState(event.data)
             return
@@ -620,6 +626,54 @@ class BaroEventForwarder extends BaseObserver {
                 ? usage.output_tokens
                 : 0
         const tally = this.tokensByStory.get(item.agentId) ?? { input: 0, output: 0 }
+        tally.input += inputTokens
+        tally.output += outputTokens
+        this.tokensByStory.set(item.agentId, tally)
+        emit({
+            type: "token_usage",
+            id: item.agentId,
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
+        })
+    }
+
+    /**
+     * Codex emits its usage stats inside `turn.completed` envelopes
+     * (shape: `{type:"turn.completed", usage:{input_tokens,
+     * cached_input_tokens, output_tokens, reasoning_output_tokens}}`).
+     * Translate to the same `token_usage` BaroEvent shape Claude uses
+     * so the TUI's existing counter works without backend-specific
+     * branching. `cached_input_tokens` is rolled into `input_tokens`
+     * (Codex reports both — Claude only reports the combined total —
+     * so we surface the same number here for parity). Reasoning
+     * tokens are billed as output tokens by OpenAI so we lump them
+     * with output_tokens.
+     */
+    private handleCodexTurnEvent(item: CodexTurnEventData): void {
+        if (item.phase !== "completed") return
+        const raw = item.raw as Record<string, unknown>
+        const usage = raw.usage as
+            | {
+                  input_tokens?: number
+                  cached_input_tokens?: number
+                  output_tokens?: number
+                  reasoning_output_tokens?: number
+              }
+            | undefined
+        if (!usage) return
+        const inputTokens =
+            typeof usage.input_tokens === "number" ? usage.input_tokens : 0
+        const outputBase =
+            typeof usage.output_tokens === "number" ? usage.output_tokens : 0
+        const reasoning =
+            typeof usage.reasoning_output_tokens === "number"
+                ? usage.reasoning_output_tokens
+                : 0
+        const outputTokens = outputBase + reasoning
+        const tally = this.tokensByStory.get(item.agentId) ?? {
+            input: 0,
+            output: 0,
+        }
         tally.input += inputTokens
         tally.output += outputTokens
         this.tokensByStory.set(item.agentId, tally)
