@@ -215,13 +215,20 @@ struct Cli {
     #[arg(long)]
     quick: bool,
 
-    /// LLM provider for every phase of the run. `claude` (default)
-    /// drives Architect, Planner, Critic, Surgeon, and StoryAgent
-    /// through the Claude Code CLI. `openai` drives all five through
-    /// Mozaik's native OpenAI runner (gpt-5.x). `openai` requires
-    /// `OPENAI_API_KEY` to be set in the environment OR entered on
-    /// the provider-picker screen when running interactively.
-    #[arg(long, default_value = "claude", value_parser = ["claude", "openai"])]
+    /// LLM provider for the run.
+    ///
+    ///   claude (default) — drives Architect, Planner, Critic, Surgeon,
+    ///                      and StoryAgent through the Claude Code CLI.
+    ///   openai           — drives all five through Mozaik's native
+    ///                      OpenAI runner (gpt-5.x). Requires
+    ///                      OPENAI_API_KEY in the environment OR entered
+    ///                      on the provider-picker screen when running
+    ///                      interactively.
+    ///   codex            — subscription-arbitrage path via OpenAI Codex
+    ///                      CLI (ChatGPT Plus/Pro billing). v1: Story
+    ///                      phase only; Architect / Planner / Critic /
+    ///                      Surgeon fall back to Claude.
+    #[arg(long, default_value = "claude", value_parser = ["claude", "openai", "codex"])]
     llm: String,
 }
 
