@@ -1204,6 +1204,24 @@ fn spawn_context_builder(cwd: &Path, tx: mpsc::Sender<AppEvent>) {
                     let _ = tx.send(AppEvent::ContextError(format!("Failed to write CLAUDE.md: {}", e))).await;
                     return;
                 }
+                // Mirror the same content to AGENTS.md so subprocess
+                // backends that use the AGENTS.md convention (OpenAI
+                // Codex CLI, future agents) auto-pick up the project
+                // context the same way Claude Code picks up CLAUDE.md.
+                // Both files carry identical bytes — neither backend
+                // gets unique context the other doesn't have. Soft-
+                // fail: if AGENTS.md write errors, log + continue,
+                // since CLAUDE.md is still written and Claude path
+                // still works.
+                let agents_md_path = cwd.join("AGENTS.md");
+                if let Err(e) = tokio::fs::write(&agents_md_path, &content).await {
+                    let _ = tx
+                        .send(AppEvent::ContextError(format!(
+                            "Failed to write AGENTS.md (CLAUDE.md still wrote OK): {}",
+                            e
+                        )))
+                        .await;
+                }
                 let _ = tx.send(AppEvent::ContextReady(content)).await;
             }
             Err(e) => {
