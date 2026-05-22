@@ -38,6 +38,7 @@ import {
     ConductorRunSummary,
 } from "./participants/conductor.js"
 import { Critic } from "./participants/critic.js"
+import { CriticCodex } from "./participants/critic-codex.js"
 import { CriticOpenAI } from "./participants/critic-openai.js"
 import { Finalizer } from "./participants/finalizer.js"
 import { Librarian } from "./participants/librarian.js"
@@ -47,6 +48,7 @@ import { StoryFactory } from "./participants/story-factory.js"
 import { type StoryAgent } from "./participants/story-agent.js"
 import { StoryResult, type StoryResultData } from "./semantic-events.js"
 import { Surgeon, type PrdSnapshot } from "./participants/surgeon.js"
+import { SurgeonCodex } from "./participants/surgeon-codex.js"
 import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
 import { PrdFile, loadPrd } from "./prd.js"
 import {
@@ -199,9 +201,9 @@ export async function orchestrate(
         )
     } else if (llm === "codex") {
         process.stderr.write(
-            "[orchestrate] llm=codex: Story phase shells out to `codex exec --json` " +
-            "(ChatGPT subscription path). Architect / Planner / Critic / Surgeon " +
-            "fall back to Claude in v1 — codex-* siblings for those phases are a v2 follow-up.\n",
+            "[orchestrate] llm=codex: every LLM phase shells out to `codex exec --json` " +
+            "(ChatGPT subscription path). Architect / Planner / Critic / Surgeon / StoryAgent " +
+            "all running through Codex.\n",
         )
     } else {
         process.stderr.write(
@@ -247,7 +249,7 @@ export async function orchestrate(
     // Phase-4 observer — Surgeon (adaptive DAG mutation). Opt-in.
     // Joins early so it sees StoryResultItem-s from the moment the
     // Conductor starts running.
-    let surgeon: Surgeon | SurgeonOpenAI | null = null
+    let surgeon: Surgeon | SurgeonOpenAI | SurgeonCodex | null = null
     if (config.withSurgeon) {
         const snapshot = (): PrdSnapshot => {
             const current = loadPrd(config.prdPath)
@@ -263,27 +265,35 @@ export async function orchestrate(
                 })),
             }
         }
-        // Factory: when llm=openai, route the LLM-backed Surgeon to
-        // Mozaik's native OpenAI runner instead of `claude --print`.
-        // The deterministic fallback path is shared between both — if
-        // OpenAI errors out, SurgeonOpenAI still emits a skip ReplanItem.
-        surgeon = llm === "openai"
-            ? new SurgeonOpenAI({
-                  snapshot,
-                  model: config.surgeonModel ?? "gpt-5.5",
-              })
-            : new Surgeon({
-                  snapshot,
-                  useLlm: config.surgeonUseLlm ?? false,
-                  model: config.surgeonModel ?? "opus",
-              })
+        // Factory by provider. Bus contract is identical across all
+        // three — same ReplanItem shape — so downstream observers
+        // (Conductor's replan-applier, Auditor, kaleidoskop) don't
+        // notice the swap.
+        if (llm === "openai") {
+            surgeon = new SurgeonOpenAI({
+                snapshot,
+                model: config.surgeonModel ?? "gpt-5.5",
+            })
+        } else if (llm === "codex") {
+            surgeon = new SurgeonCodex({
+                snapshot,
+                useLlm: config.surgeonUseLlm ?? true,
+                model: config.surgeonModel,
+            })
+        } else {
+            surgeon = new Surgeon({
+                snapshot,
+                useLlm: config.surgeonUseLlm ?? false,
+                model: config.surgeonModel ?? "opus",
+            })
+        }
         surgeon.join(env)
     }
 
     // Phase-3 observer — Critic (live acceptance-criteria evaluator).
     // Opt-in (default OFF). Spawns `claude --model haiku` subprocesses
     // for each evaluation, inheriting Claude CLI auth.
-    let critic: Critic | CriticOpenAI | null = null
+    let critic: Critic | CriticOpenAI | CriticCodex | null = null
     if (config.withCritic) {
         const prd = loadPrd(config.prdPath)
         const targets = new Map<string, readonly string[]>(
@@ -291,20 +301,26 @@ export async function orchestrate(
                 .filter((s) => s.acceptance && s.acceptance.length > 0)
                 .map((s) => [s.id, s.acceptance] as [string, readonly string[]]),
         )
-        // Factory: when llm=openai, Critic runs every per-turn verdict
-        // through Mozaik's OpenAI runner. The bus contract is identical
-        // — same CritiqueItem shape, same AgentTargetedMessageItem
-        // emission for corrective feedback — so downstream observers
-        // (Cartographer, Auditor) don't notice the swap.
-        critic = llm === "openai"
-            ? new CriticOpenAI({
-                  targets,
-                  model: config.criticModel ?? "gpt-5.4-mini",
-              })
-            : new Critic({
-                  targets,
-                  model: config.criticModel ?? "haiku",
-              })
+        // Factory by provider. Bus contract is identical — same
+        // CritiqueItem shape, same AgentTargetedMessageItem corrective
+        // emission — so downstream observers (Cartographer, Auditor,
+        // kaleidoskop) don't notice the swap.
+        if (llm === "openai") {
+            critic = new CriticOpenAI({
+                targets,
+                model: config.criticModel ?? "gpt-5.4-mini",
+            })
+        } else if (llm === "codex") {
+            critic = new CriticCodex({
+                targets,
+                model: config.criticModel,
+            })
+        } else {
+            critic = new Critic({
+                targets,
+                model: config.criticModel ?? "haiku",
+            })
+        }
         critic.join(env)
     }
 

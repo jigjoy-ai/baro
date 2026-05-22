@@ -21,6 +21,7 @@
 import { readFileSync } from "fs"
 
 import { runPlannerClaude } from "../src/planning/planner-claude.js"
+import { runPlannerCodex } from "../src/planning/planner-codex.js"
 import { runPlannerOpenAI } from "../src/planning/planner-openai.js"
 
 interface Args {
@@ -123,23 +124,27 @@ async function main(): Promise<void> {
     const projectContext = tryRead(args.contextFile)
     const decisionDocument = tryRead(args.decisionFile)
 
-    // Codex is accepted at the boundary but routes to the Claude
-    // planner path in v1 — codex-planner.ts is a v2 follow-up. v1
-    // positioning: Codex covers the Story phase (the token-heavy
-    // one); Architect + Planner stay on Claude.
-    const plannerBackend = args.llm === "openai" ? "openai" : "claude"
     process.stderr.write(
-        `[run-planner] requested=${args.llm} → planner-backend=${plannerBackend} model=${args.model ?? "(default)"} quick=${args.quick}\n`,
+        `[run-planner] llm=${args.llm} model=${args.model ?? "(default)"} quick=${args.quick}\n`,
     )
 
     let prdJson: string
     const t0 = Date.now()
     try {
-        if (plannerBackend === "openai") {
+        if (args.llm === "openai") {
             if (!process.env.OPENAI_API_KEY) {
                 fatal("--llm openai requires OPENAI_API_KEY to be set")
             }
             prdJson = await runPlannerOpenAI({
+                goal: args.goal,
+                cwd: args.cwd,
+                model: args.model,
+                projectContext,
+                decisionDocument,
+                quick: args.quick,
+            })
+        } else if (args.llm === "codex") {
+            prdJson = await runPlannerCodex({
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,

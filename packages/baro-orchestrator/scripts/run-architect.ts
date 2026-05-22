@@ -20,6 +20,7 @@
 import { readFileSync } from "fs"
 
 import { runArchitectClaude } from "../src/planning/architect-claude.js"
+import { runArchitectCodex } from "../src/planning/architect-codex.js"
 import { runArchitectOpenAI } from "../src/planning/architect-openai.js"
 
 interface Args {
@@ -102,25 +103,25 @@ async function main(): Promise<void> {
         }
     }
 
-    // Codex is accepted at the boundary but routes to the Claude
-    // architect path in v1 — codex-architect.ts is a follow-up. Log
-    // explicitly so it's clear from the audit log which backend
-    // actually ran the architect phase, even when `--llm codex` was
-    // requested at the CLI.
-    const architectBackend =
-        args.llm === "openai" ? "openai" : "claude"
     process.stderr.write(
-        `[run-architect] requested=${args.llm} → architect-backend=${architectBackend} model=${args.model ?? "(default)"}\n`,
+        `[run-architect] llm=${args.llm} model=${args.model ?? "(default)"}\n`,
     )
 
     let doc: string
     const t0 = Date.now()
     try {
-        if (architectBackend === "openai") {
+        if (args.llm === "openai") {
             if (!process.env.OPENAI_API_KEY) {
                 fatal("--llm openai requires OPENAI_API_KEY to be set")
             }
             doc = await runArchitectOpenAI({
+                goal: args.goal,
+                cwd: args.cwd,
+                model: args.model,
+                projectContext,
+            })
+        } else if (args.llm === "codex") {
+            doc = await runArchitectCodex({
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,
