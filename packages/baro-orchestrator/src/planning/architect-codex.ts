@@ -27,7 +27,11 @@ export interface RunArchitectCodexOptions {
     projectContext?: string
     /** Path to the `codex` binary. Default: "codex". */
     codexBin?: string
-    /** Per-call timeout in milliseconds. Default: 180_000 (3 minutes). */
+    /** Per-call timeout in milliseconds. Default: 600_000 (10 minutes).
+     *  Codex with reasoning + tool-call exploration is materially
+     *  slower than Claude opus on the architect role — the original
+     *  3-minute timeout from architect-claude was killing runs mid-
+     *  exploration. */
     timeoutMs?: number
 }
 
@@ -42,7 +46,8 @@ export async function runArchitectCodex(
         cwd: opts.cwd,
         model: opts.model,
         codexBin: opts.codexBin,
-        timeoutMs: opts.timeoutMs,
+        timeoutMs: opts.timeoutMs ?? 600_000,
+        label: "codex-architect",
     })
 
     const doc = text.trim()

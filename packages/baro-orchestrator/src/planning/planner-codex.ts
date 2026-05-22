@@ -19,7 +19,10 @@ export interface RunPlannerCodexOptions {
     decisionDocument?: string
     quick?: boolean
     codexBin?: string
-    /** Per-call timeout in milliseconds. Default: 240_000 (4 minutes). */
+    /** Per-call timeout in milliseconds. Default: 900_000 (15 minutes).
+     *  Planner is the longest phase — large multi-story PRDs with
+     *  strict JSON output frequently push Codex past the 4-minute
+     *  ceiling that was killing runs on 0.43.0. */
     timeoutMs?: number
 }
 
@@ -39,7 +42,8 @@ export async function runPlannerCodex(
         cwd: opts.cwd,
         model: opts.model,
         codexBin: opts.codexBin,
-        timeoutMs: opts.timeoutMs ?? 240_000,
+        timeoutMs: opts.timeoutMs ?? 900_000,
+        label: "codex-planner",
     })
 
     const planText = text.trim()

@@ -37,7 +37,7 @@ export interface CriticCodexOptions {
     model?: string
     /** Path to the `codex` binary. Default: "codex". */
     codexBin?: string
-    /** Per-evaluation timeout in milliseconds. Default: 60_000. */
+    /** Per-evaluation timeout in milliseconds. Default: 180_000 (3 min). */
     timeoutMs?: number
 }
 
@@ -59,7 +59,7 @@ export class CriticCodex extends BaseObserver {
             maxEmissionsPerAgent: opts.maxEmissionsPerAgent ?? 2,
             model: opts.model,
             codexBin: opts.codexBin ?? "codex",
-            timeoutMs: opts.timeoutMs ?? 60_000,
+            timeoutMs: opts.timeoutMs ?? 180_000,
             targets: opts.targets,
         }
     }
@@ -143,17 +143,13 @@ export class CriticCodex extends BaseObserver {
         try {
             const text = await runCodexOneShot({
                 prompt,
-                // Critic doesn't operate on the worktree — but Codex
-                // still insists on running inside a git repo unless we
-                // skip the check. Pass through skipGitRepoCheck so the
-                // critic can be invoked from anywhere (including baro's
-                // own cwd that may not be the story worktree).
                 cwd: process.cwd(),
                 skipGitRepoCheck: true,
                 bypassSandbox: true,
                 model: this.opts.model,
                 codexBin: this.opts.codexBin,
                 timeoutMs: this.opts.timeoutMs,
+                label: "codex-critic",
             })
 
             const verdictJson = extractVerdictJson(text.trim())

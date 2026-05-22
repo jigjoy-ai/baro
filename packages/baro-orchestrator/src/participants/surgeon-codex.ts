@@ -42,7 +42,7 @@ export interface SurgeonCodexOptions {
     maxReplans?: number
     /** Path to the `codex` binary. Default: "codex". */
     codexBin?: string
-    /** Per-evaluation timeout in milliseconds. Default: 120_000. */
+    /** Per-evaluation timeout in milliseconds. Default: 300_000 (5 min). */
     timeoutMs?: number
 }
 
@@ -65,7 +65,7 @@ export class SurgeonCodex extends BaseObserver {
             model: opts.model,
             maxReplans: opts.maxReplans ?? 10,
             codexBin: opts.codexBin ?? "codex",
-            timeoutMs: opts.timeoutMs ?? 120_000,
+            timeoutMs: opts.timeoutMs ?? 300_000,
             snapshot: opts.snapshot,
         }
     }
@@ -114,6 +114,7 @@ export class SurgeonCodex extends BaseObserver {
                 model: this.opts.model,
                 codexBin: this.opts.codexBin,
                 timeoutMs: this.opts.timeoutMs,
+                label: "codex-surgeon",
             })
             const verdictText = text.trim()
             if (!verdictText) throw new Error("empty result")
