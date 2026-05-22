@@ -10,15 +10,6 @@
 import { mkdirSync } from "fs"
 import { dirname } from "path"
 
-import {
-    BaseObserver,
-    FunctionCallItem,
-    FunctionCallOutputItem,
-    ModelMessageItem,
-    Participant,
-    SemanticEvent,
-} from "@mozaik-ai/core"
-
 import { AgenticEnvironment } from "@mozaik-ai/core"
 
 import {
@@ -31,7 +22,6 @@ import {
     safePullRebase,
 } from "./git.js"
 import { buildDag } from "./dag.js"
-import { ConductorState, type ConductorStateData } from "./semantic-events.js"
 import { Auditor } from "./participants/auditor.js"
 import {
     Conductor,
@@ -46,28 +36,13 @@ import { Operator } from "./participants/operator.js"
 import { Sentry } from "./participants/sentry.js"
 import { StoryFactory } from "./participants/story-factory.js"
 import { type StoryAgent } from "./participants/story-agent.js"
-import { StoryResult, type StoryResultData } from "./semantic-events.js"
 import { Surgeon, type PrdSnapshot } from "./participants/surgeon.js"
 import { SurgeonCodex } from "./participants/surgeon-codex.js"
 import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
 import { PrdFile, loadPrd } from "./prd.js"
-import {
-    AgentResult,
-    AgentState,
-    ClaudeSystem,
-    CodexTurnEvent,
-    Coordination,
-    Critique,
-    FinalizeStarted,
-    PrCreated,
-    RunStartRequest,
-    type AgentResultData,
-    type AgentStateData,
-    type CodexTurnEventData,
-    type CoordinationData,
-    type CritiqueData,
-} from "./semantic-events.js"
+import { RunStartRequest } from "./semantic-events.js"
 import { emit } from "./tui-protocol.js"
+import { createTuiForwarders } from "./tui-forwarders/index.js"
 
 export interface OrchestrateConfig {
     prdPath: string
@@ -222,9 +197,9 @@ export async function orchestrate(
         for (const p of config.extraParticipants) p.join(env)
     }
 
-    // BaroEvent forwarder: watch the bus, translate to TUI protocol on stdout.
+    // BaroEvent forwarders: watch the bus, translate to TUI protocol on stdout.
     if (emitTui) {
-        new BaroEventForwarder().join(env)
+        for (const forwarder of createTuiForwarders()) forwarder.join(env)
     }
 
     // Operator listens for external commands (wired from caller).
@@ -502,266 +477,6 @@ export async function orchestrate(
 }
 
 /**
- * Translates bus events into the legacy BaroEvent shape consumed by the
- * Rust TUI. Lives inside this module so callers don't have to wire
- * sinks themselves.
- */
-class BaroEventForwarder extends BaseObserver {
-    /** Story IDs that have already received a `story_start`. */
-    private startedStories = new Set<string>()
-    /** Number of in-flight retry attempts per story (for `story_retry`). */
-    private retryCounts = new Map<string, number>()
-    /** Token-usage tally per story (incrementally updated from results). */
-    private tokensByStory = new Map<string, { input: number; output: number }>()
-
-    override async onExternalModelMessage(source: Participant, item: ModelMessageItem): Promise<void> {
-        this.handleModelMessage(source, item)
-    }
-
-    override async onExternalFunctionCall(source: Participant, item: FunctionCallItem): Promise<void> {
-        this.handleToolCall(source, item)
-    }
-
-    override async onExternalFunctionCallOutput(
-        source: Participant,
-        item: FunctionCallOutputItem,
-    ): Promise<void> {
-        this.handleToolResult(source, item)
-    }
-
-    override async onExternalEvent(
-        _source: Participant,
-        event: SemanticEvent<unknown>,
-    ): Promise<void> {
-        if (ConductorState.is(event)) {
-            this.handleConductorState(event.data)
-            return
-        }
-        if (StoryResult.is(event)) {
-            this.handleStoryResult(event.data)
-            return
-        }
-        if (AgentResult.is(event)) {
-            this.handleClaudeResult(event.data)
-            return
-        }
-        if (CodexTurnEvent.is(event)) {
-            this.handleCodexTurnEvent(event.data)
-            return
-        }
-        if (AgentState.is(event)) {
-            this.handleAgentState(event.data)
-            return
-        }
-        if (ClaudeSystem.is(event)) {
-            // Mostly noise; emit only init transitions (already covered
-            // by AgentState) — skip.
-            return
-        }
-        if (Coordination.is(event)) {
-            this.handleCoordination(event.data)
-            return
-        }
-        if (Critique.is(event)) {
-            this.handleCritique(event.data)
-            return
-        }
-        if (FinalizeStarted.is(event)) {
-            emit({ type: "finalize_start" })
-            return
-        }
-        if (PrCreated.is(event)) {
-            emit({ type: "finalize_complete", pr_url: event.data.url })
-            return
-        }
-    }
-
-    private handleCoordination(item: CoordinationData): void {
-        emit({
-            type: "story_log",
-            id: item.recipientId,
-            line: `[sentry/${item.kind}] ${item.reason}`,
-        })
-    }
-
-    private handleCritique(item: CritiqueData): void {
-        emit({
-            type: "story_log",
-            id: item.agentId,
-            line: `[critic/${item.verdict}] ${item.reasoning}`,
-        })
-    }
-
-    private handleConductorState(item: ConductorStateData): void {
-        // Mirror conductor lifecycle as a `progress` event the existing
-        // Rust TUI understands — it doesn't yet know `conductor_state`.
-        if (
-            item.phase === "running_level" &&
-            item.currentLevel != null &&
-            item.totalLevels != null
-        ) {
-            emit({
-                type: "progress",
-                completed: item.currentLevel - 1,
-                total: item.totalLevels,
-                percentage: Math.round(
-                    ((item.currentLevel - 1) / Math.max(1, item.totalLevels)) * 100,
-                ),
-            })
-        }
-    }
-
-    private handleStoryResult(item: StoryResultData): void {
-        if (item.success) {
-            emit({
-                type: "story_complete",
-                id: item.storyId,
-                duration_secs: item.durationSecs,
-                files_created: 0,
-                files_modified: 0,
-            })
-        } else {
-            emit({
-                type: "story_error",
-                id: item.storyId,
-                error: item.error ?? "unknown error",
-                attempt: item.attempts,
-                max_retries: item.attempts,
-            })
-        }
-    }
-
-    private handleClaudeResult(item: AgentResultData): void {
-        const usage = item.usage as
-            | { input_tokens?: number; output_tokens?: number }
-            | null
-        const inputTokens =
-            typeof usage?.input_tokens === "number" ? usage.input_tokens : 0
-        const outputTokens =
-            typeof usage?.output_tokens === "number"
-                ? usage.output_tokens
-                : 0
-        const tally = this.tokensByStory.get(item.agentId) ?? { input: 0, output: 0 }
-        tally.input += inputTokens
-        tally.output += outputTokens
-        this.tokensByStory.set(item.agentId, tally)
-        emit({
-            type: "token_usage",
-            id: item.agentId,
-            input_tokens: inputTokens,
-            output_tokens: outputTokens,
-        })
-    }
-
-    /**
-     * Codex emits its usage stats inside `turn.completed` envelopes
-     * (shape: `{type:"turn.completed", usage:{input_tokens,
-     * cached_input_tokens, output_tokens, reasoning_output_tokens}}`).
-     * Translate to the same `token_usage` BaroEvent shape Claude uses
-     * so the TUI's existing counter works without backend-specific
-     * branching. `cached_input_tokens` is rolled into `input_tokens`
-     * (Codex reports both — Claude only reports the combined total —
-     * so we surface the same number here for parity). Reasoning
-     * tokens are billed as output tokens by OpenAI so we lump them
-     * with output_tokens.
-     */
-    private handleCodexTurnEvent(item: CodexTurnEventData): void {
-        if (item.phase !== "completed") return
-        const raw = item.raw as Record<string, unknown>
-        const usage = raw.usage as
-            | {
-                  input_tokens?: number
-                  cached_input_tokens?: number
-                  output_tokens?: number
-                  reasoning_output_tokens?: number
-              }
-            | undefined
-        if (!usage) return
-        const inputTokens =
-            typeof usage.input_tokens === "number" ? usage.input_tokens : 0
-        const outputBase =
-            typeof usage.output_tokens === "number" ? usage.output_tokens : 0
-        const reasoning =
-            typeof usage.reasoning_output_tokens === "number"
-                ? usage.reasoning_output_tokens
-                : 0
-        const outputTokens = outputBase + reasoning
-        const tally = this.tokensByStory.get(item.agentId) ?? {
-            input: 0,
-            output: 0,
-        }
-        tally.input += inputTokens
-        tally.output += outputTokens
-        this.tokensByStory.set(item.agentId, tally)
-        emit({
-            type: "token_usage",
-            id: item.agentId,
-            input_tokens: inputTokens,
-            output_tokens: outputTokens,
-        })
-    }
-
-    private handleAgentState(item: AgentStateData): void {
-        if (item.phase === "running" && !this.startedStories.has(item.agentId)) {
-            this.startedStories.add(item.agentId)
-            emit({ type: "story_start", id: item.agentId, title: item.agentId })
-        }
-        if (item.phase === "waiting" && item.detail?.includes("retrying")) {
-            const count = (this.retryCounts.get(item.agentId) ?? 0) + 1
-            this.retryCounts.set(item.agentId, count)
-            emit({ type: "story_retry", id: item.agentId, attempt: count })
-        }
-    }
-
-    private handleModelMessage(source: Participant, item: ModelMessageItem): void {
-        const agentId = (source as unknown as { agentId?: string }).agentId
-        if (typeof agentId !== "string") return
-        const json = item.toJSON() as { content: Array<{ text: string }> }
-        const text = json.content?.[0]?.text ?? ""
-        if (!text.trim()) return
-        emitMultiline(agentId, text)
-    }
-
-    private handleToolCall(source: Participant, item: FunctionCallItem): void {
-        const agentId = (source as unknown as { agentId?: string }).agentId
-        if (typeof agentId !== "string") return
-        // Tool args can themselves contain newlines (multi-line file
-        // contents in a Write call, embedded code blocks, etc). Split.
-        emitMultiline(agentId, `[tool_call] ${item.name} ${item.args}`)
-    }
-
-    private handleToolResult(
-        source: Participant,
-        item: FunctionCallOutputItem,
-    ): void {
-        const agentId = (source as unknown as { agentId?: string }).agentId
-        if (typeof agentId !== "string") return
-        const json = item.toJSON() as {
-            call_id: string
-            output: Array<{ text: string }>
-        }
-        const text = json.output?.[0]?.text ?? ""
-        emitMultiline(agentId, `[tool_result ${json.call_id}] ${text}`)
-    }
-}
-
-/**
- * Emit a story_log per source line. Keeps the TUI clean (no embedded
- * `\n` rendered as ⏎ literals) and lets the log scrollbar work as
- * intended on long tool outputs.
- */
-function emitMultiline(agentId: string, text: string): void {
-    if (!text) return
-    const lines = text.split("\n")
-    for (const line of lines) {
-        // Skip purely empty trailing lines but keep blank rows mid-block
-        // so structure (e.g. paragraph breaks) survives.
-        if (line.length === 0 && lines.length === 1) continue
-        emit({ type: "story_log", id: agentId, line })
-    }
-}
-
-/**
  * Pull a few keyword-shaped tokens out of free text for Librarian
  * relevance hints. Lowercased, alphanumeric runs ≥ 3 chars.
  */
@@ -776,4 +491,3 @@ function tokenizeForHints(text: string): string[] {
     }
     return out
 }
-
