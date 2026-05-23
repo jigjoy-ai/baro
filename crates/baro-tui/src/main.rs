@@ -225,11 +225,32 @@ struct Cli {
     ///                      on the provider-picker screen when running
     ///                      interactively.
     ///   codex            — subscription-arbitrage path via OpenAI Codex
-    ///                      CLI (ChatGPT Plus/Pro billing). v1: Story
-    ///                      phase only; Architect / Planner / Critic /
-    ///                      Surgeon fall back to Claude.
-    #[arg(long, default_value = "claude", value_parser = ["claude", "openai", "codex"])]
+    ///                      CLI (ChatGPT Plus/Pro billing). All five
+    ///                      phases route through Codex.
+    ///   hybrid           — preset that mixes vendors per phase:
+    ///                      Architect / Planner / Surgeon stay on
+    ///                      Claude (high-stakes, low-volume), Story and
+    ///                      Critic move to Codex (high-volume, cheap
+    ///                      on ChatGPT subscription). Individual phase
+    ///                      overrides win when set.
+    #[arg(long, default_value = "claude", value_parser = ["claude", "openai", "codex", "hybrid"])]
     llm: String,
+
+    /// Per-phase overrides. Each accepts claude | openai | codex and
+    /// wins over `--llm` (including the `hybrid` preset) for that one
+    /// phase. Useful for surgical tuning: e.g. `--llm hybrid
+    /// --critic-llm claude` for a hybrid run that uses Claude for
+    /// Critic instead of Codex.
+    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    architect_llm: Option<String>,
+    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    planner_llm: Option<String>,
+    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    story_llm: Option<String>,
+    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    critic_llm: Option<String>,
+    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    surgeon_llm: Option<String>,
 }
 
 enum AppEvent {
@@ -450,13 +471,61 @@ async fn run_app(
         app.with_surgeon = false;
     }
 
-    // --llm picks the LLM provider. `claude` (default) → Claude Code
-    // CLI for every phase. `openai` → Mozaik native OpenAI runner end
-    // to end (Architect + Planner + Critic + Surgeon + StoryAgent),
-    // as of 0.33.
-    if let Some(provider) = app::LlmProvider::parse(&cli.llm) {
-        app.llm = provider;
+    // --llm picks the LLM provider. Three legacy values (claude /
+    // openai / codex) route every phase through one backend. The
+    // `hybrid` preset splits per-phase: Claude for Architect /
+    // Planner / Surgeon (high-stakes, low-volume calls), Codex for
+    // Story + Critic (high-volume, cheap on subscription).
+    match cli.llm.as_str() {
+        "hybrid" => {
+            // The preset only sets the defaults — explicit per-phase
+            // flags below win over these.
+            app.llm = app::LlmProvider::Claude; // bookkeeping default
+            app.architect_llm = app::LlmProvider::Claude;
+            app.planner_llm = app::LlmProvider::Claude;
+            app.story_llm = app::LlmProvider::Codex;
+            app.critic_llm = app::LlmProvider::Codex;
+            app.surgeon_llm = app::LlmProvider::Claude;
+        }
+        other => {
+            if let Some(provider) = app::LlmProvider::parse(other) {
+                app.llm = provider;
+                app.architect_llm = provider;
+                app.planner_llm = provider;
+                app.story_llm = provider;
+                app.critic_llm = provider;
+                app.surgeon_llm = provider;
+            }
+        }
     }
+
+    // Per-phase CLI overrides win over the preset / global default.
+    if let Some(ref v) = cli.architect_llm {
+        if let Some(p) = app::LlmProvider::parse(v) {
+            app.architect_llm = p;
+        }
+    }
+    if let Some(ref v) = cli.planner_llm {
+        if let Some(p) = app::LlmProvider::parse(v) {
+            app.planner_llm = p;
+        }
+    }
+    if let Some(ref v) = cli.story_llm {
+        if let Some(p) = app::LlmProvider::parse(v) {
+            app.story_llm = p;
+        }
+    }
+    if let Some(ref v) = cli.critic_llm {
+        if let Some(p) = app::LlmProvider::parse(v) {
+            app.critic_llm = p;
+        }
+    }
+    if let Some(ref v) = cli.surgeon_llm {
+        if let Some(p) = app::LlmProvider::parse(v) {
+            app.surgeon_llm = p;
+        }
+    }
+
     if app.llm == app::LlmProvider::OpenAI && std::env::var("OPENAI_API_KEY").is_err() {
         eprintln!(
             "[baro] WARNING: --llm openai requested but OPENAI_API_KEY is not set. \
@@ -879,6 +948,9 @@ async fn run_app(
                                         let sm = app.surgeon_model.clone();
                                         let ild = app.intra_level_delay_secs;
                                         let llm = app.llm;
+                                        let sllm = app.story_llm;
+                                        let cllm = app.critic_llm;
+                                        let surllm = app.surgeon_llm;
                                         let oak = app.openai_api_key.clone();
                                         let stm = app.story_model.clone();
                                         let err_tx = tx.clone();
@@ -909,7 +981,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, openai_api_key: oak.clone(), story_model: stm.clone() });
+                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), story_model: stm.clone() });
                                         });
                                     }
                                     Err(e) => {
@@ -950,6 +1022,9 @@ async fn run_app(
                                     let sm = app.surgeon_model.clone();
                                     let ild = app.intra_level_delay_secs;
                                     let llm = app.llm;
+                                    let sllm = app.story_llm;
+                                    let cllm = app.critic_llm;
+                                    let surllm = app.surgeon_llm;
                                     let oak = app.openai_api_key.clone();
                                     let stm = app.story_model.clone();
                                     let err_tx = tx.clone();
@@ -1000,7 +1075,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, openai_api_key: oak.clone(), story_model: stm.clone() });
+                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), story_model: stm.clone() });
                                     });
                                 }
                             }
@@ -1093,7 +1168,13 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     let architect_model = app.model_for_phase("architect");
     let context = app.claude_md_content.clone();
     let quick = app.quick;
-    let llm = app.llm;
+    // Per-phase routing: architect_llm and planner_llm let hybrid
+    // runs route Architect / Planner through Claude even when
+    // Story/Critic/Surgeon move to Codex (and vice versa). When the
+    // user didn't set per-phase overrides, both fall back to the
+    // global --llm value (set during CLI parsing).
+    let architect_llm = app.architect_llm;
+    let planner_llm = app.planner_llm;
     let openai_api_key = app.openai_api_key.clone();
 
     tokio::spawn(async move {
@@ -1114,7 +1195,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
             match architect_runner::run_architect(
                 &goal,
                 &cwd,
-                llm,
+                architect_llm,
                 architect_model.as_deref(),
                 context.as_deref(),
                 openai_api_key.as_deref(),
@@ -1148,7 +1229,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
         let result = planner_runner::run_planner(
             &goal,
             &cwd,
-            llm,
+            planner_llm,
             model.as_deref(),
             context.as_deref(),
             decision_doc.as_deref(),
@@ -1443,6 +1524,9 @@ fn spawn_executor(
         surgeon_model: config.surgeon_model,
         intra_level_delay_secs: config.intra_level_delay_secs,
         llm: config.llm.as_str().to_string(),
+        story_llm: config.story_llm.as_str().to_string(),
+        critic_llm: config.critic_llm.as_str().to_string(),
+        surgeon_llm: config.surgeon_llm.as_str().to_string(),
         openai_api_key: config.openai_api_key,
         story_model: config.story_model,
     };

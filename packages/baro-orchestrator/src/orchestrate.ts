@@ -147,11 +147,24 @@ export interface OrchestrateConfig {
      * placeholder that runs the Claude flow.
      *
      * `"codex"` is the subscription-arbitrage path via OpenAI Codex CLI
-     * (ChatGPT Plus/Pro billing). v1: covers the Story phase; Architect
-     * + Planner + Critic + Surgeon fall back to Claude (codex-* siblings
-     * for those phases are a v2 follow-up).
+     * (ChatGPT Plus/Pro billing). All phases route through Codex.
+     *
+     * This `llm` field is the **default** every Story/Critic/Surgeon
+     * phase uses unless an explicit per-phase override
+     * (`storyLlm`/`criticLlm`/`surgeonLlm`) is set below. Architect +
+     * Planner phases are wired up in the Rust TUI layer, not here —
+     * orchestrate.ts doesn't see them.
      */
     llm?: "claude" | "openai" | "codex"
+    /**
+     * Optional per-phase overrides. When set, win over `llm`. Each can
+     * be any of the three providers, independent of the others. Used
+     * by the `--llm hybrid` preset (Story+Critic on Codex bulk-savings,
+     * Surgeon on Claude for rare-but-high-stakes failures).
+     */
+    storyLlm?: "claude" | "openai" | "codex"
+    criticLlm?: "claude" | "openai" | "codex"
+    surgeonLlm?: "claude" | "openai" | "codex"
     /**
      * Per-phase model override for StoryAgent. When set, wins over
      * each story's individual `model` field in the PRD as well as
@@ -189,25 +202,42 @@ export async function orchestrate(
     const env = new AgenticEnvironment()
     const emitTui = config.emitTuiEvents ?? true
     const llm: "claude" | "openai" | "codex" = config.llm ?? "claude"
+    // Per-phase resolution: each falls back to global `llm` when no
+    // explicit override is provided. This is the central place where
+    // hybrid configurations land — every downstream factory branches
+    // on storyLlm / criticLlm / surgeonLlm, not on the global `llm`.
+    const storyLlm = config.storyLlm ?? llm
+    const criticLlm = config.criticLlm ?? llm
+    const surgeonLlm = config.surgeonLlm ?? llm
 
     // Provider banner so the stderr / audit log makes the actual
     // routing obvious. As of 0.33 every LLM-using phase (Architect,
     // Planner, Critic, Surgeon, StoryAgent) routes end-to-end to the
     // selected provider — no mixed-mode anymore.
-    if (llm === "openai") {
+    // Per-phase banner so the audit log spells out exactly which
+    // backend each in-process phase uses. Architect + Planner are
+    // run by the Rust TUI as separate subprocesses — their llm
+    // routing is logged in their own banners.
+    const isHybrid =
+        new Set([storyLlm, criticLlm, surgeonLlm, llm]).size > 1
+    if (isHybrid) {
         process.stderr.write(
-            "[orchestrate] llm=openai: Architect, Planner, Critic, Surgeon, StoryAgent " +
-            "all running through Mozaik's native OpenAI runner (gpt-5.x).\n",
+            `[orchestrate] hybrid routing: story=${storyLlm} critic=${criticLlm} surgeon=${surgeonLlm} (default=${llm})\n`,
+        )
+    } else if (llm === "openai") {
+        process.stderr.write(
+            "[orchestrate] llm=openai: Story, Critic, Surgeon all running through " +
+                "Mozaik's native OpenAI runner (gpt-5.x).\n",
         )
     } else if (llm === "codex") {
         process.stderr.write(
-            "[orchestrate] llm=codex: every LLM phase shells out to `codex exec --json` " +
-            "(ChatGPT subscription path). Architect / Planner / Critic / Surgeon / StoryAgent " +
-            "all running through Codex.\n",
+            "[orchestrate] llm=codex: Story, Critic, Surgeon all shelling out to " +
+                "`codex exec --json` (ChatGPT subscription path).\n",
         )
     } else {
         process.stderr.write(
-            "[orchestrate] llm=claude: every LLM phase shells out to the Claude Code CLI.\n",
+            "[orchestrate] llm=claude: Story, Critic, Surgeon all shelling out to " +
+                "the Claude Code CLI.\n",
         )
     }
 
@@ -269,12 +299,12 @@ export async function orchestrate(
         // three — same ReplanItem shape — so downstream observers
         // (Conductor's replan-applier, Auditor, kaleidoskop) don't
         // notice the swap.
-        if (llm === "openai") {
+        if (surgeonLlm === "openai") {
             surgeon = new SurgeonOpenAI({
                 snapshot,
                 model: config.surgeonModel ?? "gpt-5.5",
             })
-        } else if (llm === "codex") {
+        } else if (surgeonLlm === "codex") {
             surgeon = new SurgeonCodex({
                 snapshot,
                 useLlm: config.surgeonUseLlm ?? true,
@@ -305,12 +335,12 @@ export async function orchestrate(
         // CritiqueItem shape, same AgentTargetedMessageItem corrective
         // emission — so downstream observers (Cartographer, Auditor,
         // kaleidoskop) don't notice the swap.
-        if (llm === "openai") {
+        if (criticLlm === "openai") {
             critic = new CriticOpenAI({
                 targets,
                 model: config.criticModel ?? "gpt-5.4-mini",
             })
-        } else if (llm === "codex") {
+        } else if (criticLlm === "codex") {
             critic = new CriticCodex({
                 targets,
                 model: config.criticModel,
@@ -423,7 +453,7 @@ export async function orchestrate(
     // per-spawn, so future per-story overrides could live there too.
     const storyFactory = new StoryFactory({
         cwd: config.cwd,
-        llm,
+        llm: storyLlm,
         openaiModel: config.storyModel ?? "gpt-5.5",
         storyModelOverride: config.storyModel,
     })

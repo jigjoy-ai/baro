@@ -82,6 +82,14 @@ pub struct ExecutorConfig {
     /// as `--llm`; subsequent phases will use this to pick the right
     /// participant sibling per LLM-using role.
     pub llm: crate::app::LlmProvider,
+    /// Per-phase overrides forwarded to orchestrate.ts as
+    /// `--story-llm` / `--critic-llm` / `--surgeon-llm`. When equal
+    /// to `llm`, the orchestrator treats them as "no override" and
+    /// the global default flows. Used by the `--llm hybrid` preset
+    /// to keep Story + Critic on a different backend than the rest.
+    pub story_llm: crate::app::LlmProvider,
+    pub critic_llm: crate::app::LlmProvider,
+    pub surgeon_llm: crate::app::LlmProvider,
     /// OpenAI API key captured by the TUI (either from `OPENAI_API_KEY`
     /// in the shell env or typed into the ApiKeyInput screen). Forwarded
     /// to the orchestrator subprocess as an env var when `llm = OpenAI`.
