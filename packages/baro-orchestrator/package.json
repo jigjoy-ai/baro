@@ -1,28 +1,22 @@
 {
-  "name": "@baro/orchestrator",
-  "version": "0.0.1",
-  "private": true,
-  "type": "module",
-  "main": "dist/main.js",
-  "types": "dist/main.d.ts",
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "dev": "tsc -p tsconfig.json --watch",
-    "demo:single": "tsx scripts/demo-single-story.ts",
-    "demo:multi": "tsx scripts/demo-multi-story.ts",
-    "cli": "tsx scripts/cli.ts",
-    "e2e": "tsx scripts/e2e-test.ts",
-    "phase2": "tsx scripts/phase2-demo.ts",
-    "phase3": "tsx scripts/phase3-demo.ts",
-    "phase4": "tsx scripts/phase4-demo.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
-  "dependencies": {
-    "@mozaik-ai/core": "3.10.2"
-  },
-  "devDependencies": {
-    "@types/node": "^22.0.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.3.3"
-  }
+    "name": "@baro/orchestrator",
+    "version": "0.0.1",
+    "private": true,
+    "type": "module",
+    "main": "dist/main.js",
+    "types": "dist/main.d.ts",
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "dev": "tsc -p tsconfig.json --watch",
+        "cli": "tsx scripts/cli.ts",
+        "typecheck": "tsc -p tsconfig.json --noEmit"
+    },
+    "dependencies": {
+        "@mozaik-ai/core": "3.10.2"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "tsx": "^4.21.0",
+        "typescript": "^5.3.3"
+    }
 }
