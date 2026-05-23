@@ -125,3 +125,68 @@ defined in [../semantic-events.ts](../semantic-events.ts).
 - Emits: `FinalizeStarted`, `PrCreated`
 
 Source: [finalizer.ts](./finalizer.ts)
+
+---
+
+## BaroEvent forwarders
+
+`AgentStreamForwarder` mirrors Mozaik LLM-shape items from agent
+streams into Rust TUI story logs, splitting multi-line content into one
+BaroEvent per source line. It listens on the dedicated model-message,
+function-call, and function-call-output hooks rather than
+`onExternalEvent`.
+
+- Subscribes to: `ModelMessageItem`, `FunctionCallItem`,
+  `FunctionCallOutputItem`
+- Emits: `story_log`
+
+Source: [forwarders/agent-stream.ts](./forwarders/agent-stream.ts)
+
+`StoryLifecycleForwarder` mirrors agent and story terminal state into
+the Rust TUI lifecycle events. It deduplicates first-run starts per
+story, counts retry notices while an agent is waiting, and maps final
+story results to either completion or error BaroEvents.
+
+- Subscribes to: `AgentState`, `StoryResult`
+- Emits: `story_start`, `story_complete`, `story_error`, `story_retry`
+
+Source: [forwarders/story-lifecycle.ts](./forwarders/story-lifecycle.ts)
+
+`TokenUsageForwarder` mirrors usage accounting from Claude agent results
+and completed Codex turns into the Rust TUI token counter. Codex
+reasoning output tokens are folded into output tokens before emitting
+the BaroEvent.
+
+- Subscribes to: `AgentResult`, completed `CodexTurnEvent`
+- Emits: `token_usage`
+
+Source: [forwarders/token-usage.ts](./forwarders/token-usage.ts)
+
+`ProgressForwarder` mirrors Conductor level progress for the Rust TUI,
+which does not consume raw `ConductorState` events directly. It emits
+only while the conductor is running a level and both level ordinals are
+available.
+
+- Subscribes to: `ConductorState`
+- Emits: `progress`
+
+Source: [forwarders/progress.ts](./forwarders/progress.ts)
+
+`CoordinationForwarder` mirrors coordination notices and critique
+verdicts into per-story log lines. Sentry coordination entries are
+prefixed with their coordination kind, and Critic entries are prefixed
+with their verdict.
+
+- Subscribes to: `Coordination`, `Critique`
+- Emits: `story_log`
+
+Source: [forwarders/coordination.ts](./forwarders/coordination.ts)
+
+`FinalizationForwarder` mirrors finalization lifecycle events into the
+Rust TUI. It starts the finalize phase when shipping begins and completes
+it with the created pull-request URL once the PR has been opened.
+
+- Subscribes to: `FinalizeStarted`, `PrCreated`
+- Emits: `finalize_start`, `finalize_complete`
+
+Source: [forwarders/finalization.ts](./forwarders/finalization.ts)
