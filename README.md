@@ -69,7 +69,31 @@ flowchart LR
     F --> PR([Pull Request])
 ```
 
-Every story is one **Claude Code subprocess** (or one Mozaik-native OpenAI session) — auth inherits from your existing setup, no API key plumbing.
+Every story is one CLI subprocess — Claude Code, OpenAI Codex CLI, or a Mozaik-native OpenAI Responses session, depending on `--llm`. Auth inherits from whichever CLI you already have signed in, no API key plumbing.
+
+## Three LLM backends, one DAG
+
+```bash
+baro --llm claude  "Your goal"   # default — Claude Code on Anthropic Max subscription
+baro --llm codex   "Your goal"   # OpenAI Codex CLI on ChatGPT Pro/Plus subscription
+baro --llm openai  "Your goal"   # Mozaik-native OpenAI Responses (per-call API billing)
+baro --llm hybrid  "Your goal"   # Claude on Architect/Planner/Surgeon, Codex on Story/Critic
+```
+
+Same orchestration. Same DAG. Same prompts. The only thing that moves is which provider every agent talks to. `--llm hybrid` is the new default-recommendation for serious runs — Claude where the upstream plan matters, Codex for the parallel story+critic work that dominates the budget.
+
+Each phase has its own override flag if you want to mix it yourself:
+
+```bash
+baro --architect-llm claude \
+     --planner-llm  claude \
+     --story-llm    codex  \
+     --critic-llm   codex  \
+     --surgeon-llm  claude \
+     "Your goal"
+```
+
+Full breakdown at [docs.baro.rs/llm-providers](https://docs.baro.rs/llm-providers) — provider economics, per-phase routing, the side-by-side benchmark across three real tasks: [**I tested Claude Code vs OpenAI Codex in my parallel agent setup. Then I built a hybrid.**](https://jigjoy.ai/blog/claude-code-vs-codex-baro)
 
 ## Recent real run
 
@@ -82,7 +106,7 @@ Every story is one **Claude Code subprocess** (or one Mozaik-native OpenAI sessi
 | **Architect** | One Opus call before planning — emits a `DecisionDocument` that pins every cross-cutting design decision (file paths, schemas, API shapes, library choices) so 30 parallel agents don't each invent their own |
 | **Planner** | Decomposes the goal into a story DAG, with the DecisionDocument already pinned |
 | **Conductor** | State machine that drives the run by reacting to bus events |
-| **StoryAgent** | One Claude Code subprocess per story; multi-turn loop until story completes |
+| **StoryAgent** | One CLI subprocess per story (Claude Code / Codex / OpenAI Responses, picked by `--llm` or `--story-llm`); multi-turn loop until story completes |
 | **Critic** | Per-turn evaluator (Haiku). On fail verdict, injects corrective feedback as the agent's next turn |
 | **Sentry** | Flags overlapping Edit/Write tool calls across concurrent stories |
 | **Librarian** | Indexes one agent's Read/Grep findings so siblings don't redo the exploration |
@@ -96,16 +120,22 @@ Bus is open. CI deployers, Slack notifiers, ticket triggers — all new particip
 ```bash
 npm install -g baro-ai
 
-# Full run (default — Architect + Planner + parallel Story Agents)
+# Full run (default — Claude on every phase via Claude Code CLI)
 baro "Migrate the hardcoded category data to a backend dictionary"
 
 # Trivial goal — skip Architect + Critic + Surgeon, single story
 baro --quick "fix the typo on line 42 of README.md"
 
-# Route every phase through GPT-5.5 instead of Claude
+# Codex everywhere (ChatGPT Pro/Plus subscription, ~3-11× cheaper per run than Claude)
+baro --llm codex "Refactor the database layer"
+
+# Per-phase routing — Claude upstream (tight plans), Codex downstream (cheap writes)
+baro --llm hybrid "Add WebSocket support across api and frontend"
+
+# Route every phase through GPT-5.5 (Mozaik-native OpenAI API)
 OPENAI_API_KEY=sk-... baro --llm openai "Refactor the database layer"
 
-# Limit parallelism (Anthropic plan tiers cap concurrency)
+# Limit parallelism (plan-tier concurrency caps)
 baro --parallel 3 "Add unit tests for the auth module"
 
 # Dry-run first, execute later
@@ -134,7 +164,11 @@ For a deeper side-by-side on a real refactor, see [baro vs Claude Code `/goal`](
 
 ## Requirements
 
-- [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) authenticated (for `--llm claude`, the default) **or** `OPENAI_API_KEY` set (for `--llm openai`)
+- At least one of:
+  - [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) authenticated (for `--llm claude`, the default)
+  - [OpenAI Codex CLI](https://github.com/openai/codex) authenticated (for `--llm codex`)
+  - `OPENAI_API_KEY` set (for `--llm openai`)
+  - Both Claude CLI **and** Codex CLI authenticated (for `--llm hybrid`)
 - Node.js 20+
 - macOS (arm64/x64), Linux (x64/arm64), Windows (x64)
 - `gh` CLI (optional, for automatic PR creation)
