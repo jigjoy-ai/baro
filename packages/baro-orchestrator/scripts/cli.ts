@@ -43,6 +43,10 @@ interface CliArgs {
     storyModel?: string
     intraLevelDelaySecs?: number
     llm: "claude" | "openai" | "codex"
+    /** Optional per-phase overrides; each defaults to `llm`. */
+    storyLlm?: "claude" | "openai" | "codex"
+    criticLlm?: "claude" | "openai" | "codex"
+    surgeonLlm?: "claude" | "openai" | "codex"
     help: boolean
 }
 
@@ -134,6 +138,21 @@ function parseArgs(argv: string[]): CliArgs {
                 args.llm = v
                 break
             }
+            case "--story-llm":
+            case "--critic-llm":
+            case "--surgeon-llm": {
+                const v = required(argv, ++i, a)
+                if (v !== "claude" && v !== "openai" && v !== "codex") {
+                    process.stderr.write(
+                        `[cli] ${a} must be 'claude' | 'openai' | 'codex', got '${v}'\n`,
+                    )
+                    process.exit(2)
+                }
+                if (a === "--story-llm") args.storyLlm = v
+                else if (a === "--critic-llm") args.criticLlm = v
+                else args.surgeonLlm = v
+                break
+            }
             default:
                 process.stderr.write(`[cli] unknown flag: ${a}\n`)
                 process.exit(2)
@@ -215,6 +234,9 @@ async function main(): Promise<void> {
         surgeonModel: args.surgeonModel,
         intraLevelDelaySecs: args.intraLevelDelaySecs,
         llm: args.llm,
+        storyLlm: args.storyLlm,
+        criticLlm: args.criticLlm,
+        surgeonLlm: args.surgeonLlm,
         storyModel: args.storyModel,
     }
 

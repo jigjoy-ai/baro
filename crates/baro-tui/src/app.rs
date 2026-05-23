@@ -304,13 +304,20 @@ pub struct App {
     /// explicitly didn't sign up for). The fast path for "fix the typo" goals.
     pub quick: bool,
 
-    /// Which LLM provider runs the agents. Set via `--llm claude|openai`.
-    /// `claude` (the default) uses the Claude Code CLI as today. `openai`
-    /// is a placeholder until the Mozaik-native OpenAI participants are
-    /// feature-complete — currently it falls through to Claude behaviour
-    /// but is plumbed through to the orchestrator so each subsequent
-    /// phase can opt individual participants into the OpenAI path.
+    /// Which LLM provider runs the agents. Set via `--llm
+    /// claude|openai|codex|hybrid`. Read as **the default** every
+    /// phase uses unless an explicit per-phase override is set.
     pub llm: LlmProvider,
+    /// Per-phase overrides. Each defaults to `llm` when no override
+    /// is supplied on the command line. `--llm hybrid` is a preset
+    /// that flips these to a sensible split: Architect / Planner /
+    /// Surgeon stay on Claude (high-stakes, low-volume); Story and
+    /// Critic move to Codex (high-volume, cheap on subscription).
+    pub architect_llm: LlmProvider,
+    pub planner_llm: LlmProvider,
+    pub story_llm: LlmProvider,
+    pub critic_llm: LlmProvider,
+    pub surgeon_llm: LlmProvider,
 
     // Notification flag
     pub notification_ready: bool,
@@ -396,6 +403,11 @@ impl App {
             intra_level_delay_secs: None,
             quick: false,
             llm: LlmProvider::Claude,
+            architect_llm: LlmProvider::Claude,
+            planner_llm: LlmProvider::Claude,
+            story_llm: LlmProvider::Claude,
+            critic_llm: LlmProvider::Claude,
+            surgeon_llm: LlmProvider::Claude,
             token_usage: HashMap::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,

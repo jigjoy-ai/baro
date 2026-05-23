@@ -53,6 +53,14 @@ pub struct OrchestratorConfig {
     /// wired yet — a request for "openai" silently falls through to
     /// Claude behaviour until the per-phase siblings ship in 0.29+.
     pub llm: String,
+    /// Per-phase LLM overrides. Forwarded as `--story-llm` /
+    /// `--critic-llm` / `--surgeon-llm` only when they differ from
+    /// `llm` — that way pure-claude / pure-codex / pure-openai runs
+    /// have a clean command line and the orchestrator's startup
+    /// banner stays terse.
+    pub story_llm: String,
+    pub critic_llm: String,
+    pub surgeon_llm: String,
     /// OpenAI API key to inject as `OPENAI_API_KEY` into the
     /// orchestrator subprocess when `llm == "openai"`. The TUI gathers
     /// this from either the user's shell env or the ApiKeyInput
@@ -269,11 +277,29 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
         cmd.arg("--intra-level-delay").arg(d.to_string());
     }
     cmd.arg("--llm").arg(&cfg.llm);
+    // Per-phase overrides only sent when they DIFFER from the global
+    // `--llm`. Keeps the command line terse on pure-claude /
+    // pure-codex / pure-openai runs (no `--story-llm claude` noise
+    // when --llm claude already implies it).
+    if cfg.story_llm != cfg.llm {
+        cmd.arg("--story-llm").arg(&cfg.story_llm);
+    }
+    if cfg.critic_llm != cfg.llm {
+        cmd.arg("--critic-llm").arg(&cfg.critic_llm);
+    }
+    if cfg.surgeon_llm != cfg.llm {
+        cmd.arg("--surgeon-llm").arg(&cfg.surgeon_llm);
+    }
     // Only forward an explicitly-provided key. If openai_api_key is
     // None the user might still have the variable in their shell env;
     // tokio::Command inherits parent env by default, so it'll flow
     // through naturally without us touching it.
-    if cfg.llm == "openai" {
+    // If ANY phase uses openai, the API key needs to be available.
+    let uses_openai = cfg.llm == "openai"
+        || cfg.story_llm == "openai"
+        || cfg.critic_llm == "openai"
+        || cfg.surgeon_llm == "openai";
+    if uses_openai {
         if let Some(key) = &cfg.openai_api_key {
             cmd.env("OPENAI_API_KEY", key);
         }
