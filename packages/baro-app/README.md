@@ -14,7 +14,7 @@ Give it a goal, it breaks it into stories, builds a dependency DAG, and runs the
 npm install -g baro-ai
 ```
 
-Requires [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) installed and authenticated.
+Requires at least one of: [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) authenticated, [OpenAI Codex CLI](https://github.com/openai/codex) authenticated, or `OPENAI_API_KEY` exported.
 
 ## Usage
 
@@ -22,11 +22,21 @@ Requires [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) installed a
 # Interactive - opens welcome screen
 baro
 
-# Direct - skip to planning
+# Direct - skip to planning (default uses Claude Code under the hood)
 baro "Add authentication with JWT and role-based access control"
 
-# Use OpenAI for planning
-baro --planner openai "Add WebSocket support"
+# Codex everywhere (ChatGPT Pro/Plus subscription)
+baro --llm codex "Refactor the database layer"
+
+# Per-phase routing — Claude upstream, Codex downstream
+baro --llm hybrid "Add WebSocket support across api and frontend"
+
+# Route every phase through GPT-5.5 via Mozaik-native OpenAI API
+OPENAI_API_KEY=sk-... baro --llm openai "Refactor the database layer"
+
+# Mix it yourself — any phase can run on any backend
+baro --architect-llm claude --story-llm codex --critic-llm codex \
+     "Complex refactor where you want Claude planning"
 
 # Limit parallelism to 3 concurrent stories
 baro --parallel 3 "Refactor database layer"
@@ -52,11 +62,24 @@ baro --cwd ~/projects/myapp "Add REST API"
 
 ## How it works
 
-1. **Plan** — Claude (Opus) explores your codebase and generates a dependency graph of user stories
+1. **Plan** — Architect + Planner agents explore your codebase and generate a dependency graph of user stories
 2. **Review** — You review the plan, refine with feedback, accept or quit
-3. **Execute** — Stories run in parallel on a feature branch, each with its own Claude agent (Sonnet)
-4. **Review Agent** — After each level, a review agent (Haiku) checks work against acceptance criteria and creates fix stories if needed
+3. **Execute** — Stories run in parallel on a feature branch, each its own CLI subprocess (Claude Code, OpenAI Codex CLI, or Mozaik-native OpenAI Responses — picked by `--llm` or `--story-llm`)
+4. **Critic** — After every turn, a Critic agent checks work against acceptance criteria and injects corrective feedback when verdict is FAIL
 5. **Finalize** — Runs build verification and creates a GitHub PR with full summary
+
+## Three LLM backends, one DAG
+
+`--llm` picks how every agent in the run talks to its model:
+
+- `--llm claude` (default) — every agent shells out to the Claude Code CLI in headless mode. Bills against your Claude Max subscription.
+- `--llm codex` — every agent shells out to OpenAI's Codex CLI (`codex exec --json`). Bills against ChatGPT Pro/Plus subscription. ~3–11× cheaper per equivalent run than Claude.
+- `--llm openai` — Mozaik-native OpenAI Responses API. Bills per token retail.
+- `--llm hybrid` — Claude on Architect/Planner/Surgeon (where the upstream plan matters), Codex on Story/Critic (the parallel work that dominates the budget). Recommended for serious runs.
+
+Per-phase overrides exist (`--architect-llm`, `--planner-llm`, `--story-llm`, `--critic-llm`, `--surgeon-llm`) if you want to mix anything yourself.
+
+See [docs.baro.rs/llm-providers](https://docs.baro.rs/llm-providers) for the full provider breakdown, or the [side-by-side benchmark across three real tasks](https://jigjoy.ai/blog/claude-code-vs-codex-baro).
 
 ## Features
 
@@ -115,30 +138,41 @@ Arguments:
   goal                         Project goal (opens welcome screen if omitted)
 
 Options:
-  --planner <name>             Planner: claude or openai (default: claude)
+  --llm <name>                 Backend for every phase: claude | codex | openai | hybrid
+                               (default: claude)
+  --architect-llm <name>       Override LLM for Architect only
+  --planner-llm <name>         Override LLM for Planner only
+  --story-llm <name>           Override LLM for Story Agents only
+  --critic-llm <name>          Override LLM for Critic only
+  --surgeon-llm <name>         Override LLM for Surgeon only
   --model <name>               Override model for all phases: opus, sonnet, haiku
+                               (or per-provider equivalents)
   --no-model-routing           Use opus for everything (disables routing)
   --parallel <N>               Max concurrent stories, 0 = unlimited (default: 0)
   --timeout <seconds>          Story timeout in seconds (default: 600)
   --dry-run                    Generate plan only, save to prd.json, do not execute
   --resume                     Resume from existing prd.json (also runs dry-run plans)
-  --skip-context               Skip CLAUDE.md auto-generation
+  --skip-context               Skip CLAUDE.md / AGENTS.md auto-generation
   --cwd <path>                 Working directory (default: current)
   -h, --help                   Print help
 ```
 
 ## Requirements
 
-- [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) installed and authenticated
+- At least one of:
+  - [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) authenticated (for `--llm claude`, the default)
+  - [OpenAI Codex CLI](https://github.com/openai/codex) authenticated (for `--llm codex`)
+  - `OPENAI_API_KEY` exported (for `--llm openai`)
+  - Both Claude CLI **and** Codex CLI authenticated (for `--llm hybrid`)
 - macOS (arm64/x64), Linux (x64/arm64), or Windows (x64)
-- Node.js 18+ (only if using `--planner openai`)
+- Node.js 20+
 - `gh` CLI (optional, for automatic PR creation)
 
 > **Windows note:** Windows 10+ is required. For best TUI experience, use [Windows Terminal](https://aka.ms/terminal) or another modern terminal emulator.
 
 ## Architecture
 
-Rust binary distributed via npm. TUI built with ratatui, async execution with tokio, one Claude CLI process per story.
+Rust binary distributed via npm. TUI built with ratatui, async execution with tokio, one CLI subprocess per story (Claude Code, OpenAI Codex, or Mozaik-native OpenAI, depending on `--llm` / `--story-llm`). All agents communicate over a shared [Mozaik](https://github.com/jigjoy-ai/mozaik) event bus — no central coordinator.
 
 ## License
 
