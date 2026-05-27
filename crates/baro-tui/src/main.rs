@@ -928,7 +928,15 @@ async fn run_app(
                                     .and_then(|c| serde_json::from_str::<executor::PrdFile>(&c).map_err(|e| e.to_string()))
                                 {
                                     Ok(prd) => {
-                                        let full_branch = format!("baro/{}", prd.branch_name);
+                                        // 0.45.3+ persists the full "baro/<slug>-<suffix>"
+                                        // name in prd.json; pre-0.45.3 stored the bare slug.
+                                        // Accept either: use as-is when already prefixed,
+                                        // otherwise prepend so legacy prd.json still resolves.
+                                        let full_branch = if prd.branch_name.starts_with("baro/") {
+                                            prd.branch_name.clone()
+                                        } else {
+                                            format!("baro/{}", prd.branch_name)
+                                        };
                                         let branch_cwd = cwd.clone();
                                         let branch_name_clone = full_branch.clone();
                                         app.branch_name = full_branch;
@@ -1043,16 +1051,19 @@ async fn run_app(
                                                 return;
                                             }
                                         };
-                                        // Persist the suffixed name back to prd.json so
-                                        // the orchestrator's Finalizer pushes/PRs against
-                                        // the real branch, and a later `baro resume` picks
-                                        // up the same branch instead of generating a new
-                                        // suffix.
+                                        // Persist the FULL "baro/<slug>-<suffix>" name back
+                                        // to prd.json — exactly the branch Rust just created
+                                        // and checked out. The Mozaik orchestrator reads
+                                        // prd.branchName verbatim for its own
+                                        // createOrCheckoutBranch + Finalizer; stripping the
+                                        // "baro/" prefix here made it create a SECOND,
+                                        // un-prefixed branch ("<slug>-<suffix>") and commit
+                                        // every story there, leaving the prefixed branch empty
+                                        // and breaking resume (which looks for the prefixed
+                                        // one). Storing the prefixed name keeps Rust, Mozaik,
+                                        // and resume on a single branch.
                                         let mut exec_prd = exec_prd;
-                                        exec_prd.branch_name = actual_full_branch
-                                            .strip_prefix("baro/")
-                                            .unwrap_or(&actual_full_branch)
-                                            .to_string();
+                                        exec_prd.branch_name = actual_full_branch.clone();
                                         if let Err(e) = executor::write_prd(&exec_prd, &exec_cwd) {
                                             let _ = err_tx.send(AppEvent::BranchError(
                                                 format!("Failed to persist suffixed branch in prd.json: {}", e)
