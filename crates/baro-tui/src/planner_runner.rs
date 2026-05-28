@@ -33,6 +33,7 @@ pub async fn run_planner(
     decision_doc: Option<&str>,
     quick: bool,
     openai_api_key: Option<&str>,
+    openai_base_url: Option<&str>,
     effort: &str,
 ) -> Result<String, ProcessRunError> {
     let entry = discovery::locate_script(cwd, SCRIPT_REL_PATH, BUNDLE_NAME).map_err(|e| {
@@ -75,6 +76,9 @@ pub async fn run_planner(
     if matches!(llm, LlmProvider::OpenAI) {
         if let Some(key) = openai_api_key {
             cmd.env("OPENAI_API_KEY", key);
+        }
+        if let Some(url) = openai_base_url {
+            cmd.env("OPENAI_BASE_URL", url);
         }
     }
 

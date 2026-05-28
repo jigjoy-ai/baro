@@ -243,6 +243,15 @@ struct Cli {
     #[arg(long, default_value = "claude", value_parser = ["claude", "openai", "codex", "hybrid"])]
     llm: String,
 
+    /// Custom base URL for OpenAI-compatible API endpoints. When set,
+    /// all OpenAI-routed calls (Architect, Planner, Story, Critic,
+    /// Surgeon) are sent to this URL instead of api.openai.com.
+    /// Useful for providers that expose an OpenAI-compatible API:
+    /// Xiaomi MiMo, OpenRouter, vLLM, Ollama, etc. Can also be set
+    /// via the OPENAI_BASE_URL environment variable (flag wins).
+    #[arg(long, env = "OPENAI_BASE_URL")]
+    openai_base_url: Option<String>,
+
     /// Per-phase overrides. Each accepts claude | openai | codex and
     /// wins over `--llm` (including the `hybrid` preset) for that one
     /// phase. Useful for surgical tuning: e.g. `--llm hybrid
@@ -573,8 +582,8 @@ async fn run_app(
         }
     }
 
-    // Pre-fill OpenAI key from env BEFORE the goal branching below.
-    // Was previously inside the no-goal else-branch — that meant
+    // Pre-fill OpenAI key and base URL from env BEFORE the goal branching below.
+    // Was previously inside the no-goal else-branch -- that meant
     // `baro --llm openai "<goal>"` skipped both the env-read AND the
     // API-key entry screen, so if the user didn't have OPENAI_API_KEY
     // in their shell the planner subprocess started with no key and
@@ -582,6 +591,14 @@ async fn run_app(
     if let Ok(env_key) = std::env::var("OPENAI_API_KEY") {
         if !env_key.is_empty() {
             app.openai_api_key = Some(env_key);
+        }
+    }
+    // --openai-base-url flag wins over the env var when both are set.
+    if let Some(ref url) = cli.openai_base_url {
+        app.openai_base_url = Some(url.clone());
+    } else if let Ok(env_url) = std::env::var("OPENAI_BASE_URL") {
+        if !env_url.is_empty() {
+            app.openai_base_url = Some(env_url);
         }
     }
 
@@ -970,6 +987,7 @@ async fn run_app(
                                         let cllm = app.critic_llm;
                                         let surllm = app.surgeon_llm;
                                         let oak = app.openai_api_key.clone();
+                                        let obu = app.openai_base_url.clone();
                                         let eff = app.effort.clone();
                                         let stm = app.story_model.clone();
                                         let err_tx = tx.clone();
@@ -1000,7 +1018,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), effort: eff.clone(), story_model: stm.clone() });
+                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone() });
                                         });
                                     }
                                     Err(e) => {
@@ -1045,6 +1063,7 @@ async fn run_app(
                                     let cllm = app.critic_llm;
                                     let surllm = app.surgeon_llm;
                                     let oak = app.openai_api_key.clone();
+                                    let obu = app.openai_base_url.clone();
                                     let eff = app.effort.clone();
                                     let stm = app.story_model.clone();
                                     let err_tx = tx.clone();
@@ -1098,7 +1117,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), effort: eff.clone(), story_model: stm.clone() });
+                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone() });
                                     });
                                 }
                             }
@@ -1199,6 +1218,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     let architect_llm = app.architect_llm;
     let planner_llm = app.planner_llm;
     let openai_api_key = app.openai_api_key.clone();
+    let openai_base_url = app.openai_base_url.clone();
     let effort = app.effort.clone();
 
     tokio::spawn(async move {
@@ -1223,6 +1243,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
                 architect_model.as_deref(),
                 context.as_deref(),
                 openai_api_key.as_deref(),
+                openai_base_url.as_deref(),
                 &effort,
             ).await {
                 Ok(doc) => {
@@ -1260,6 +1281,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
             decision_doc.as_deref(),
             quick,
             openai_api_key.as_deref(),
+            openai_base_url.as_deref(),
             &effort,
         ).await;
 
@@ -1556,6 +1578,7 @@ fn spawn_executor(
         critic_llm: config.critic_llm.as_str().to_string(),
         surgeon_llm: config.surgeon_llm.as_str().to_string(),
         openai_api_key: config.openai_api_key,
+        openai_base_url: config.openai_base_url,
         effort: config.effort,
         story_model: config.story_model,
     };

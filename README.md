@@ -93,6 +93,26 @@ baro --architect-llm claude \
      "Your goal"
 ```
 
+### Custom OpenAI-compatible endpoints
+
+Any provider that exposes an OpenAI-compatible Chat Completions API works with `--llm openai`. Set `OPENAI_BASE_URL` to point at your endpoint and pass any model name via `--story-model` (or let it use the default):
+
+```bash
+# Xiaomi MiMo
+OPENAI_API_KEY=your-key OPENAI_BASE_URL=https://api.mimo.xiaomi.com/v1 \
+  baro --llm openai --story-model MiMo-7B-RL "Your goal"
+
+# OpenRouter (any model)
+OPENAI_API_KEY=your-key OPENAI_BASE_URL=https://openrouter.ai/api/v1 \
+  baro --llm openai --story-model anthropic/claude-3.5-sonnet "Your goal"
+
+# Local vLLM / Ollama
+OPENAI_API_KEY=not-needed OPENAI_BASE_URL=http://localhost:11434/v1 \
+  baro --llm openai --story-model llama3 "Your goal"
+```
+
+The `--openai-base-url` flag also works (wins over the env var when both are set).
+
 Full breakdown at [docs.baro.rs/llm-providers](https://docs.baro.rs/llm-providers) — provider economics, per-phase routing, the side-by-side benchmark across three real tasks: [**I tested Claude Code vs OpenAI Codex in my parallel agent setup. Then I built a hybrid.**](https://jigjoy.ai/blog/claude-code-vs-codex-baro)
 
 ## Recent real run
@@ -135,6 +155,12 @@ baro --llm hybrid "Add WebSocket support across api and frontend"
 # Route every phase through GPT-5.5 (Mozaik-native OpenAI API)
 OPENAI_API_KEY=sk-... baro --llm openai "Refactor the database layer"
 
+# Route through any OpenAI-compatible endpoint (Xiaomi MiMo, OpenRouter, vLLM, Ollama, etc.)
+OPENAI_API_KEY=your-key OPENAI_BASE_URL=https://api.mimo.xiaomi.com/v1 baro --llm openai "Refactor the database layer"
+
+# Or use the CLI flag (flag wins over env var)
+OPENAI_API_KEY=your-key baro --llm openai --openai-base-url https://api.mimo.xiaomi.com/v1 "Refactor the database layer"
+
 # Limit parallelism (plan-tier concurrency caps)
 baro --parallel 3 "Add unit tests for the auth module"
 
@@ -168,6 +194,7 @@ For a deeper side-by-side on a real refactor, see [baro vs Claude Code `/goal`](
   - [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) authenticated (for `--llm claude`, the default)
   - [OpenAI Codex CLI](https://github.com/openai/codex) authenticated (for `--llm codex`)
   - `OPENAI_API_KEY` set (for `--llm openai`)
+  - `OPENAI_BASE_URL` set to a custom endpoint (optional, for `--llm openai` — routes through Xiaomi MiMo, OpenRouter, vLLM, Ollama, or any OpenAI-compatible API)
   - Both Claude CLI **and** Codex CLI authenticated (for `--llm hybrid`)
 - Node.js 20+
 - macOS (arm64/x64), Linux (x64/arm64), Windows (x64)

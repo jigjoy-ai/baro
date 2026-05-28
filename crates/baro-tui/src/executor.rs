@@ -94,6 +94,9 @@ pub struct ExecutorConfig {
     /// in the shell env or typed into the ApiKeyInput screen). Forwarded
     /// to the orchestrator subprocess as an env var when `llm = OpenAI`.
     pub openai_api_key: Option<String>,
+    /// Optional custom base URL for OpenAI-compatible API endpoints.
+    /// Forwarded to the orchestrator subprocess as `OPENAI_BASE_URL`.
+    pub openai_base_url: Option<String>,
     /// Effort level for spawned `claude` processes, forwarded as
     /// `--effort` to the orchestrator subprocess. Default "high".
     pub effort: String,

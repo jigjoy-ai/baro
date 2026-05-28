@@ -31,6 +31,7 @@ import {
 } from "@mozaik-ai/core"
 
 import {
+    GenericOpenAIModel,
     UsageAccumulator,
     runInferenceRound,
 } from "./openai-runtime.js"
@@ -73,10 +74,10 @@ function pickModel(name: string): GenerativeModel {
         case "gpt-5.4-nano":
             return new Gpt54Nano()
         default:
-            throw new Error(
-                `ArchitectOpenAI: unknown model "${name}" — Mozaik 3.9 ships ` +
-                `gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.4-nano`,
+            process.stderr.write(
+                `[pickModel] Using model "${name}" as-is with the OpenAI API.\n`,
             )
+            return new GenericOpenAIModel(name)
     }
 }
 
