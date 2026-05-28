@@ -67,6 +67,9 @@ pub struct OrchestratorConfig {
     /// screen; it isn't written to disk. `None` is a no-op (any value
     /// already in the parent env is inherited normally).
     pub openai_api_key: Option<String>,
+    /// Effort level forwarded as `--effort` to the orchestrator
+    /// subprocess (applies to the Claude story path). Default "high".
+    pub effort: String,
     /// Per-phase model override for StoryAgent — forwarded as
     /// `--story-model X` to the orchestrator subprocess. Wins over
     /// the per-PRD-story `model` field and over the OpenAI default.
@@ -307,6 +310,7 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     if let Some(m) = &cfg.story_model {
         cmd.arg("--story-model").arg(m);
     }
+    cmd.arg("--effort").arg(&cfg.effort);
     cmd
 }
 

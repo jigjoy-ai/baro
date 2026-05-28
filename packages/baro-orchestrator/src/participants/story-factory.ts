@@ -55,6 +55,11 @@ export interface StoryFactoryOptions {
      * meaningful for OpenAI.
      */
     storyModelOverride?: string
+    /**
+     * Effort level for the Claude path, passed as `claude --effort`
+     * (low|medium|high|xhigh|max). Ignored by the OpenAI path.
+     */
+    effort?: string
 }
 
 export class StoryFactory extends BaseObserver {
@@ -142,6 +147,7 @@ export class StoryFactory extends BaseObserver {
                           prompt: req.prompt,
                           cwd: this.opts.cwd,
                           model: claudeModel,
+                          effort: this.opts.effort,
                           retries: req.retries,
                           timeoutSecs: req.timeoutSecs,
                       })

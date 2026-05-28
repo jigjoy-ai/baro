@@ -147,6 +147,12 @@ export interface OrchestrateConfig {
      * `--story-model`.
      */
     storyModel?: string
+    /**
+     * Effort level for the Claude story path, passed as `claude
+     * --effort` (low|medium|high|xhigh|max). Plumbed from `baro
+     * --effort`. Only the Claude backend honours it.
+     */
+    effort?: string
     /** Hooks for receiving Operator commands externally (Rust TUI). */
     operatorHooks?: {
         onAbort?: (storyId: string) => void
@@ -431,6 +437,7 @@ export async function orchestrate(
         llm: storyLlm,
         openaiModel: config.storyModel ?? "gpt-5.5",
         storyModelOverride: config.storyModel,
+        effort: config.effort,
     })
     storyFactory.setEnvironment(env)
     storyFactory.join(env)

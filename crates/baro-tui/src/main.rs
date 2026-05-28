@@ -125,6 +125,13 @@ struct Cli {
     #[arg(long = "model", value_parser = ["opus", "sonnet", "haiku"])]
     model: Option<String>,
 
+    /// Effort level for spawned `claude` processes (the Architect,
+    /// Planner, and Story agents on the `claude` backend). Higher =
+    /// more thinking per turn at more tokens. `max` matches Claude
+    /// Code's max-effort dynamic-workflows mode. Default: high.
+    #[arg(long, value_parser = ["low", "medium", "high", "xhigh", "max"], default_value = "high")]
+    effort: String,
+
     /// Disable model routing (equivalent to --model opus)
     #[arg(long = "no-model-routing")]
     no_model_routing: bool,
@@ -470,6 +477,9 @@ async fn run_app(
         app.with_critic = false;
         app.with_surgeon = false;
     }
+
+    // Effort level for spawned `claude` processes (default "high").
+    app.effort = cli.effort.clone();
 
     // --llm picks the LLM provider. Three legacy values (claude /
     // openai / codex) route every phase through one backend. The
@@ -960,6 +970,7 @@ async fn run_app(
                                         let cllm = app.critic_llm;
                                         let surllm = app.surgeon_llm;
                                         let oak = app.openai_api_key.clone();
+                                        let eff = app.effort.clone();
                                         let stm = app.story_model.clone();
                                         let err_tx = tx.clone();
                                         tokio::spawn(async move {
@@ -989,7 +1000,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), story_model: stm.clone() });
+                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), effort: eff.clone(), story_model: stm.clone() });
                                         });
                                     }
                                     Err(e) => {
@@ -1034,6 +1045,7 @@ async fn run_app(
                                     let cllm = app.critic_llm;
                                     let surllm = app.surgeon_llm;
                                     let oak = app.openai_api_key.clone();
+                                    let eff = app.effort.clone();
                                     let stm = app.story_model.clone();
                                     let err_tx = tx.clone();
                                     tokio::spawn(async move {
@@ -1086,7 +1098,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), story_model: stm.clone() });
+                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), effort: eff.clone(), story_model: stm.clone() });
                                     });
                                 }
                             }
@@ -1187,6 +1199,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     let architect_llm = app.architect_llm;
     let planner_llm = app.planner_llm;
     let openai_api_key = app.openai_api_key.clone();
+    let effort = app.effort.clone();
 
     tokio::spawn(async move {
         // Phase 1 — Architect. In quick mode we skip this entirely:
@@ -1210,6 +1223,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
                 architect_model.as_deref(),
                 context.as_deref(),
                 openai_api_key.as_deref(),
+                &effort,
             ).await {
                 Ok(doc) => {
                     let _ = tx.send(AppEvent::ArchitectComplete(doc.clone())).await;
@@ -1246,6 +1260,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
             decision_doc.as_deref(),
             quick,
             openai_api_key.as_deref(),
+            &effort,
         ).await;
 
         match result.and_then(|raw_json| {
@@ -1346,6 +1361,7 @@ fn spawn_refiner(app: &App, feedback: &str, cwd: &Path, tx: mpsc::Sender<AppEven
     let feedback = feedback.to_string();
     let cwd = cwd.to_path_buf();
     let model = app.model_for_phase("planning");
+    let effort = app.effort.clone();
     let context = app.claude_md_content.clone();
 
     // Build current plan JSON from app state
@@ -1380,6 +1396,7 @@ fn spawn_refiner(app: &App, feedback: &str, cwd: &Path, tx: mpsc::Sender<AppEven
                 prompt: prompt.clone(),
                 cwd: cwd.clone(),
                 model: model.clone(),
+                effort: effort.clone(),
                 log_tag: Some("refine"),
             };
 
@@ -1539,6 +1556,7 @@ fn spawn_executor(
         critic_llm: config.critic_llm.as_str().to_string(),
         surgeon_llm: config.surgeon_llm.as_str().to_string(),
         openai_api_key: config.openai_api_key,
+        effort: config.effort,
         story_model: config.story_model,
     };
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);

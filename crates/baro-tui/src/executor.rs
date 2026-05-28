@@ -94,6 +94,9 @@ pub struct ExecutorConfig {
     /// in the shell env or typed into the ApiKeyInput screen). Forwarded
     /// to the orchestrator subprocess as an env var when `llm = OpenAI`.
     pub openai_api_key: Option<String>,
+    /// Effort level for spawned `claude` processes, forwarded as
+    /// `--effort` to the orchestrator subprocess. Default "high".
+    pub effort: String,
     /// Per-phase model override for StoryAgent. When set, overrides
     /// each story's individual `model` field in the PRD as well as
     /// the OpenAI default. `--architect-model` and `--planner-model`

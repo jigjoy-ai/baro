@@ -61,6 +61,12 @@ export interface ClaudeCliParticipantOptions {
     /** Path to the `claude` binary. Default: "claude" (resolved via PATH). */
     claudeBin?: string
     /**
+     * Effort level passed as `claude --effort <level>` (low | medium |
+     * high | xhigh | max). When unset, the `claude` CLI uses its own
+     * default. Plumbed from `baro --effort`.
+     */
+    effort?: string
+    /**
      * If provided, pass `--resume <sessionId>` so Claude continues an
      * existing session instead of starting fresh. Required for
      * multi-turn agents that survive across multiple infer() calls.
@@ -276,6 +282,9 @@ export class ClaudeCliParticipant extends BaseObserver {
         }
         if (this.options.model) {
             args.push("--model", this.options.model)
+        }
+        if (this.options.effort) {
+            args.push("--effort", this.options.effort)
         }
         if (this.options.resumeSessionId) {
             args.push("--resume", this.options.resumeSessionId)

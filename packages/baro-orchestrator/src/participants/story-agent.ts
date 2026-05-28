@@ -49,6 +49,8 @@ export interface StorySpec {
     cwd: string
     /** Optional model override (e.g. "sonnet", "opus", "haiku"). */
     model?: string
+    /** Optional effort level passed as `claude --effort` (low|medium|high|xhigh|max). */
+    effort?: string
     /** Retry budget (number of *additional* attempts after the first). */
     retries?: number
     /** Per-attempt timeout in seconds. Default: 600. */
@@ -293,6 +295,7 @@ export class StoryAgent extends BaseObserver {
         const claude = new ClaudeCliParticipant(this.spec.id, {
             cwd: this.spec.cwd,
             model: this.spec.model,
+            effort: this.spec.effort,
         })
         this.currentClaude = claude
         claude.join(this.envRef)

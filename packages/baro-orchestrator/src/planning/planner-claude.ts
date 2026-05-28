@@ -30,6 +30,8 @@ export interface RunPlannerClaudeOptions {
     cwd: string
     /** Claude model. Default: routed (let Claude decide). */
     model?: string
+    /** Effort level passed as `claude --effort` (low|medium|high|xhigh|max). */
+    effort?: string
     /** Optional CLAUDE.md / project-context blob to prepend. */
     projectContext?: string
     /** Architect's DecisionDocument, if available, prepended as authoritative spec. */
@@ -64,6 +66,7 @@ export async function runPlannerClaude(
             "--output-format",
             "json",
             ...(opts.model ? ["--model", opts.model] : []),
+            ...(opts.effort ? ["--effort", opts.effort] : []),
             "--permission-mode",
             "bypassPermissions",
             "--system-prompt",

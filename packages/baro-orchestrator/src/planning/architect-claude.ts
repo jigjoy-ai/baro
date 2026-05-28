@@ -29,6 +29,8 @@ export interface RunArchitectClaudeOptions {
     cwd: string
     /** Claude model. Default: "opus" (the heavy-reasoning architect tier). */
     model?: string
+    /** Effort level passed as `claude --effort` (low|medium|high|xhigh|max). */
+    effort?: string
     /** Optional CLAUDE.md / project-context blob to prepend. */
     projectContext?: string
     /** Path to the `claude` binary. Default: "claude" (resolved via PATH). */
@@ -49,6 +51,7 @@ export async function runArchitectClaude(
             "json",
             "--model",
             opts.model ?? "opus",
+            ...(opts.effort ? ["--effort", opts.effort] : []),
             "--permission-mode",
             "bypassPermissions",
             "--system-prompt",

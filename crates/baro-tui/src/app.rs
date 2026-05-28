@@ -205,6 +205,10 @@ pub struct App {
     // written to disk.
     pub api_key_input: String,
     pub openai_api_key: Option<String>,
+    /// Effort level passed to spawned `claude` processes via
+    /// `--effort` (low|medium|high|xhigh|max). Default "high". Set via
+    /// `baro --effort`.
+    pub effort: String,
 
     // Welcome screen
     pub goal_input: String,
@@ -346,6 +350,7 @@ impl App {
             provider_picker_index: 0,
             api_key_input: String::new(),
             openai_api_key: None,
+            effort: "high".to_string(),
 
             goal_input: String::new(),
             welcome_field: WelcomeField::Goal,

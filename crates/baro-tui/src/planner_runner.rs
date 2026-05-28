@@ -33,6 +33,7 @@ pub async fn run_planner(
     decision_doc: Option<&str>,
     quick: bool,
     openai_api_key: Option<&str>,
+    effort: &str,
 ) -> Result<String, ProcessRunError> {
     let entry = discovery::locate_script(cwd, SCRIPT_REL_PATH, BUNDLE_NAME).map_err(|e| {
         ProcessRunError { message: e, log_path: None }
@@ -61,6 +62,7 @@ pub async fn run_planner(
     if let Some(m) = model {
         cmd.arg("--model").arg(m);
     }
+    cmd.arg("--effort").arg(effort);
     if let Some(ref f) = ctx_tempfile {
         cmd.arg("--context-file").arg(f.path());
     }

@@ -18,6 +18,9 @@ pub struct ClaudeRunConfig {
     pub prompt: String,
     pub cwd: PathBuf,
     pub model: Option<String>,
+    /// Effort level passed as `--effort` (low|medium|high|xhigh|max).
+    /// Empty string = omit the flag (use the CLI default).
+    pub effort: String,
     /// Short tag for the persisted log filename — "planner" today,
     /// "claude" if you leave it default. Always lowercase-kebab.
     pub log_tag: Option<&'static str>,
@@ -56,6 +59,9 @@ pub async fn spawn_claude_json(
     ]);
     if let Some(ref m) = config.model {
         cmd.arg("--model").arg(m);
+    }
+    if !config.effort.is_empty() {
+        cmd.arg("--effort").arg(&config.effort);
     }
     cmd.arg("-p").arg(&config.prompt);
     cmd.current_dir(&config.cwd);

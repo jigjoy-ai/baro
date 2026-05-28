@@ -39,6 +39,7 @@ pub async fn run_architect(
     model: Option<&str>,
     context: Option<&str>,
     openai_api_key: Option<&str>,
+    effort: &str,
 ) -> Result<String, ProcessRunError> {
     let entry = discovery::locate_script(cwd, SCRIPT_REL_PATH, BUNDLE_NAME).map_err(|e| {
         ProcessRunError { message: e, log_path: None }
@@ -80,6 +81,7 @@ pub async fn run_architect(
     if let Some(m) = model {
         cmd.arg("--model").arg(m);
     }
+    cmd.arg("--effort").arg(effort);
     if let Some(ref f) = ctx_tempfile {
         cmd.arg("--context-file").arg(f.path());
     }

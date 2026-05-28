@@ -35,6 +35,7 @@ interface Args {
      */
     llm: "claude" | "openai" | "codex"
     model?: string
+    effort?: string
     contextFile?: string
     decisionFile?: string
     quick: boolean
@@ -45,6 +46,7 @@ function parseArgs(argv: string[]): Args {
     let cwd: string | undefined
     let llm: "claude" | "openai" | "codex" | undefined
     let model: string | undefined
+    let effort: string | undefined
     let contextFile: string | undefined
     let decisionFile: string | undefined
     let quick = false
@@ -69,6 +71,9 @@ function parseArgs(argv: string[]): Args {
             case "--model":
                 model = required(argv, ++i, "--model")
                 break
+            case "--effort":
+                effort = required(argv, ++i, "--effort")
+                break
             case "--context-file":
                 contextFile = required(argv, ++i, "--context-file")
                 break
@@ -90,6 +95,7 @@ function parseArgs(argv: string[]): Args {
         cwd: cwd!,
         llm: llm!,
         model,
+        effort,
         contextFile,
         decisionFile,
         quick,
@@ -157,6 +163,7 @@ async function main(): Promise<void> {
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,
+                effort: args.effort,
                 projectContext,
                 decisionDocument,
                 quick: args.quick,

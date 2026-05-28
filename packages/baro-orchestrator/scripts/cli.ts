@@ -41,6 +41,7 @@ interface CliArgs {
     surgeonUseLlm: boolean
     surgeonModel?: string
     storyModel?: string
+    effort?: string
     intraLevelDelaySecs?: number
     llm: "claude" | "openai" | "codex"
     /** Optional per-phase overrides; each defaults to `llm`. */
@@ -126,6 +127,9 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--story-model":
                 args.storyModel = required(argv, ++i, "--story-model")
+                break
+            case "--effort":
+                args.effort = required(argv, ++i, "--effort")
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
@@ -238,6 +242,7 @@ async function main(): Promise<void> {
         criticLlm: args.criticLlm,
         surgeonLlm: args.surgeonLlm,
         storyModel: args.storyModel,
+        effort: args.effort,
     }
 
     if (args.llm === "openai" && !process.env.OPENAI_API_KEY) {
