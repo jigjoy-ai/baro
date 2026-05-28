@@ -13,7 +13,7 @@
     },
     "dependencies": {
         "@mozaik-ai/core": "3.10.2",
-        "openai": "^6.38.0"
+        "openai": "6.38.0"
     },
     "devDependencies": {
         "@types/node": "^22.0.0",
