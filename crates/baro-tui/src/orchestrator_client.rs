@@ -67,6 +67,10 @@ pub struct OrchestratorConfig {
     /// screen; it isn't written to disk. `None` is a no-op (any value
     /// already in the parent env is inherited normally).
     pub openai_api_key: Option<String>,
+    /// Optional custom base URL for OpenAI-compatible API endpoints
+    /// (e.g. Xiaomi MiMo, OpenRouter, local vLLM). Forwarded as
+    /// `OPENAI_BASE_URL` env var when any phase uses OpenAI.
+    pub openai_base_url: Option<String>,
     /// Effort level forwarded as `--effort` to the orchestrator
     /// subprocess (applies to the Claude story path). Default "high".
     pub effort: String,
@@ -305,6 +309,9 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     if uses_openai {
         if let Some(key) = &cfg.openai_api_key {
             cmd.env("OPENAI_API_KEY", key);
+        }
+        if let Some(url) = &cfg.openai_base_url {
+            cmd.env("OPENAI_BASE_URL", url);
         }
     }
     if let Some(m) = &cfg.story_model {

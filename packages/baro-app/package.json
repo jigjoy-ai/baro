@@ -23,7 +23,7 @@
     "zod-to-json-schema": "^3.25.1"
   },
   "devDependencies": {
-    "@mozaik-ai/core": "3.10.2",
+    "@mozaik-ai/core": "3.12.0",
     "@types/node": "^22.0.0",
     "tsup": "^8.0.2",
     "tsx": "^4.21.0",

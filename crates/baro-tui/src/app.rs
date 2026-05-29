@@ -205,6 +205,10 @@ pub struct App {
     // written to disk.
     pub api_key_input: String,
     pub openai_api_key: Option<String>,
+    /// Optional custom base URL for OpenAI-compatible API endpoints
+    /// (e.g. Xiaomi MiMo, OpenRouter, local vLLM). Read from
+    /// `OPENAI_BASE_URL` env var or `--openai-base-url` CLI flag.
+    pub openai_base_url: Option<String>,
     /// Effort level passed to spawned `claude` processes via
     /// `--effort` (low|medium|high|xhigh|max). Default "high". Set via
     /// `baro --effort`.
@@ -350,6 +354,7 @@ impl App {
             provider_picker_index: 0,
             api_key_input: String::new(),
             openai_api_key: None,
+            openai_base_url: None,
             effort: "high".to_string(),
 
             goal_input: String::new(),
