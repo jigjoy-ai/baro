@@ -40,8 +40,33 @@ export interface RunPlannerClaudeOptions {
     quick?: boolean
     /** Path to the `claude` binary. Default: "claude" (resolved via PATH). */
     claudeBin?: string
-    /** Per-call timeout in milliseconds. Default: 240_000 (4 minutes). */
+    /**
+     * Per-call timeout in milliseconds. Default scales with `effort`:
+     * a single `claude --print` planning turn at `--effort max` must
+     * explore the codebase AND emit the full DAG in one subprocess, so
+     * the flat 4-minute default that suited `high` was killing `max`
+     * runs mid-thought (SIGTERM → "Command failed"). See
+     * {@link effortTimeoutMs}.
+     */
     timeoutMs?: number
+}
+
+/**
+ * Default per-call timeout as a function of effort. Higher effort means
+ * Claude thinks/explores longer in a single `--print` turn, so the
+ * watchdog must wait proportionally longer before declaring failure.
+ */
+export function effortTimeoutMs(effort?: string): number {
+    switch (effort) {
+        case "max":
+            return 1_200_000 // 20 min
+        case "xhigh":
+            return 900_000 // 15 min
+        case "high":
+            return 480_000 // 8 min
+        default:
+            return 240_000 // 4 min (low | medium | unset)
+    }
 }
 
 /**
@@ -76,7 +101,7 @@ export async function runPlannerClaude(
         ],
         {
             cwd: opts.cwd,
-            timeout: opts.timeoutMs ?? 240_000,
+            timeout: opts.timeoutMs ?? effortTimeoutMs(opts.effort),
             maxBuffer: 16 * 1024 * 1024,
         },
     )

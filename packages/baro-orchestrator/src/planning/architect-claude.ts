@@ -19,6 +19,7 @@ import {
     ARCHITECT_SYSTEM_PROMPT,
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
+import { effortTimeoutMs } from "./planner-claude.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -35,7 +36,13 @@ export interface RunArchitectClaudeOptions {
     projectContext?: string
     /** Path to the `claude` binary. Default: "claude" (resolved via PATH). */
     claudeBin?: string
-    /** Per-call timeout in milliseconds. Default: 180_000 (3 minutes). */
+    /**
+     * Per-call timeout in milliseconds. Defaults scale with `effort`
+     * (shared with the Planner via {@link effortTimeoutMs}) — at
+     * `--effort max` a single exploratory architect turn routinely
+     * exceeds the old flat 3-minute default and was being SIGTERM'd
+     * mid-thought.
+     */
     timeoutMs?: number
 }
 
@@ -61,7 +68,7 @@ export async function runArchitectClaude(
         ],
         {
             cwd: opts.cwd,
-            timeout: opts.timeoutMs ?? 180_000,
+            timeout: opts.timeoutMs ?? effortTimeoutMs(opts.effort),
             maxBuffer: 16 * 1024 * 1024,
         },
     )
