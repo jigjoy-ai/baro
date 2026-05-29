@@ -1,32 +1,31 @@
 /**
- * OpenAI inference runtime — drives multi-round chat completions via
- * the official OpenAI SDK. The SDK reads `OPENAI_API_KEY` and
- * `OPENAI_BASE_URL` from the environment, so this automatically
- * supports any OpenAI-compatible endpoint (Xiaomi MiMo, OpenRouter,
- * vLLM, etc.).
+ * Mozaik-native inference runtime for the OpenAI-compatible backend —
+ * the single chokepoint every non-CLI phase (Architect, Planner, Story,
+ * Critic, Surgeon) routes its per-round inference through.
  *
- * Background: in Mozaik 3.9.x this file wrapped `OpenAIResponses`
- * (the lower-level ModelRuntime) so baro could drive its own multi-
- * round inference loops while still receiving per-call `TokenUsage`
- * — usage data that `OpenAIInferenceRunner` (the convenience layer)
- * deliberately discards.
+ * Inference goes through Mozaik's `OpenAICompatibleChatCompletions`
+ * runtime, which speaks the OpenAI **Chat Completions** dialect against
+ * a configurable base URL. The OpenAI SDK inside Mozaik reads
+ * `OPENAI_API_KEY` and `OPENAI_BASE_URL` from the environment (baro's
+ * Rust layer forwards both), so the same code path serves real OpenAI
+ * and any OpenAI-compatible endpoint — DeepSeek, OpenRouter, vLLM,
+ * Ollama, Xiaomi MiMo, etc.
  *
- * Mozaik 3.10 consolidated the public OpenAI inference API: it
- * removed `OpenAIResponses`, `InferenceRequest`, `InferenceResponse`,
- * and `InputStream` from the public exports. Rather than waiting for
- * Mozaik to re-expose those internals, this file now calls the
- * OpenAI Chat Completions API directly via the `openai` SDK.
+ * Mozaik owns the `ModelContext` ⇄ chat-message conversion (including
+ * the tricky bits: merging consecutive/parallel tool calls into one
+ * assistant message, tool-result mapping, token-usage extraction), so
+ * baro no longer hand-rolls any of it. Provider-only request fields
+ * (e.g. DeepSeek's `thinking`) would be passed via the runtime's
+ * `extraBody` config if/when needed.
  *
- * `UsageAccumulator` is still useful (it just sums TokenUsage shapes,
- * doesn't depend on the removed classes) and stays exported so its
- * call sites don't break.
+ * `UsageAccumulator` sums per-round `TokenUsage`-s and is provider-
+ * agnostic.
  */
 
-import OpenAI from "openai"
 import {
     ContextItem,
-    FunctionCallItem,
-    ModelMessageItem,
+    InferenceRequest,
+    OpenAICompatibleChatCompletions,
     TokenUsage,
     type GenerativeModel,
     type ModelContext,
@@ -39,17 +38,28 @@ export interface InferenceRound {
 }
 
 /**
- * A minimal `GenerativeModel` implementation for arbitrary model
- * names that aren't shipped by Mozaik. The model name is forwarded
- * as-is to the OpenAI Chat Completions API, which makes this work
- * with any OpenAI-compatible endpoint.
+ * A minimal `GenerativeModel` for arbitrary model names that aren't
+ * shipped by Mozaik. The name is forwarded as-is to the Chat
+ * Completions API, which makes any OpenAI-compatible endpoint usable
+ * via `--story-model <name>` (e.g. `deepseek-chat`, `llama3`,
+ * `anthropic/claude-3.5-sonnet` on OpenRouter).
  */
-export class GenericOpenAIModel {
-    specification: { name: string }
+export class GenericOpenAIModel implements GenerativeModel {
+    readonly specification: GenerativeModel["specification"]
     private _tools: Tool[] = []
+    private _reasoningEffort = "medium"
+    private _streaming = false
 
     constructor(name: string) {
-        this.specification = { name }
+        this.specification = {
+            name,
+            supportReasoningEffort: false,
+            defaultReasoningEffort: undefined,
+            supportStreaming: false,
+            contextWindowSize: 128_000,
+            maxOutputTokens: 16_384,
+            supportFunctionCalling: true,
+        }
     }
 
     setTools(tools: Tool[]): void {
@@ -59,176 +69,47 @@ export class GenericOpenAIModel {
     getTools(): Tool[] {
         return this._tools
     }
+
+    // Capability methods are no-ops: a generic chat model carries no
+    // Mozaik-side reasoning-effort or streaming state. With
+    // `supportReasoningEffort: false`, the runtime sends no
+    // reasoning_effort field for it.
+    setReasoningEffort(effort: string): void {
+        this._reasoningEffort = effort
+    }
+
+    getReasoningEffort(): string {
+        return this._reasoningEffort
+    }
+
+    setStreaming(streaming: boolean): void {
+        this._streaming = streaming
+    }
+
+    getStreaming(): boolean {
+        return this._streaming
+    }
 }
 
+// Cached module-level: the runtime is stateless aside from its vendor
+// SDK client, which reads the API key + base URL from the env once at
+// construction. Re-instantiating per round would rebuild the client
+// (and re-read the env) on every call.
+let runtime: OpenAICompatibleChatCompletions | undefined
+
 /**
- * One inference round against the OpenAI Chat Completions API.
- *
- * Converts the Mozaik `ModelContext` items into OpenAI message
- * format, calls `chat.completions.create`, and converts the
- * response back into Mozaik `ContextItem`-s so the caller's
- * multi-round loop keeps working unchanged.
+ * One inference round against the configured OpenAI-compatible endpoint.
+ * Delegates the heavy lifting (message conversion, tool-call round-trip,
+ * usage extraction) to Mozaik's runtime and returns the new context
+ * items plus this round's `TokenUsage`.
  */
 export async function runInferenceRound(
     context: ModelContext,
     model: GenerativeModel,
 ): Promise<InferenceRound> {
-    const client = new OpenAI()
-    const modelName = model.specification.name
-
-    // ── 1. Convert context items → OpenAI messages ───────────────
-    const messages: OpenAI.ChatCompletionMessageParam[] = []
-
-    for (const item of context.items) {
-        const json = (item as any).toJSON()
-
-        switch (item.type) {
-            case "system": {
-                const content = extractText(json)
-                messages.push({ role: "system", content })
-                break
-            }
-            case "user": {
-                const content = extractText(json)
-                messages.push({ role: "user", content })
-                break
-            }
-            case "message": {
-                // Assistant text message
-                const text = json?.content?.[0]?.text ?? ""
-                if (text) {
-                    messages.push({ role: "assistant", content: text })
-                }
-                break
-            }
-            case "function_call": {
-                // Previous assistant tool call
-                const fc = item as unknown as {
-                    callId: string
-                    name: string
-                    args: string
-                }
-                messages.push({
-                    role: "assistant",
-                    content: null,
-                    tool_calls: [
-                        {
-                            id: fc.callId,
-                            type: "function",
-                            function: {
-                                name: fc.name,
-                                arguments: fc.args,
-                            },
-                        },
-                    ],
-                })
-                break
-            }
-            case "function_call_output": {
-                // Tool result
-                const fco = item as unknown as {
-                    callId: string
-                    content: string
-                }
-                messages.push({
-                    role: "tool",
-                    tool_call_id: fco.callId,
-                    content: fco.content,
-                })
-                break
-            }
-            case "reasoning": {
-                // Reasoning items are not part of the chat message
-                // format — skip them silently.
-                break
-            }
-            // Unknown item types are silently skipped.
-        }
-    }
-
-    // ── 2. Convert Mozaik tools → OpenAI function tools ──────────
-    const mozaikTools: Tool[] =
-        (model as any).getTools?.() ?? []
-
-    const openaiTools: OpenAI.ChatCompletionTool[] = mozaikTools.map(
-        (t: any) => ({
-            type: "function" as const,
-            function: {
-                name: t.name,
-                description: t.description,
-                parameters: t.parameters,
-                ...(t.strict !== undefined ? { strict: t.strict } : {}),
-            },
-        }),
-    )
-
-    // ── 3. Call the API ──────────────────────────────────────────
-    const response = await client.chat.completions.create({
-        model: modelName,
-        messages,
-        ...(openaiTools.length > 0 ? { tools: openaiTools } : {}),
-    })
-
-    const choice = response.choices[0]
-    if (!choice) {
-        throw new Error(
-            `OpenAI returned no choices for model "${modelName}"`,
-        )
-    }
-
-    const assistant = choice.message
-
-    // ── 4. Convert response → Mozaik ContextItems ────────────────
-    const items: ContextItem[] = []
-
-    if (assistant.content) {
-        items.push(
-            ModelMessageItem.rehydrate({ text: assistant.content }),
-        )
-    }
-
-    if (assistant.tool_calls) {
-        for (const tc of assistant.tool_calls) {
-            items.push(
-                FunctionCallItem.rehydrate({
-                    callId: tc.id,
-                    name: tc.function.name,
-                    args: tc.function.arguments,
-                }),
-            )
-        }
-    }
-
-    // ── 5. Extract token usage ───────────────────────────────────
-    const usage: TokenUsage | undefined = response.usage
-        ? {
-              inputTokens: response.usage.prompt_tokens,
-              outputTokens: response.usage.completion_tokens,
-              totalTokens: response.usage.total_tokens,
-              inputTokenDetails: {
-                  cached_tokens:
-                      (response.usage as any).prompt_tokens_details
-                          ?.cached_tokens ?? 0,
-              },
-              outputTokenDetails: {
-                  reasoning_tokens:
-                      (response.usage as any).completion_tokens_details
-                          ?.reasoning_tokens ?? 0,
-              },
-          }
-        : undefined
-
-    return { items, usage }
-}
-
-/** Extract plain text from a Mozaik item's toJSON() payload. */
-function extractText(json: any): string {
-    if (typeof json === "string") return json
-    if (typeof json?.content === "string") return json.content
-    if (Array.isArray(json?.content) && json.content[0]?.text)
-        return json.content[0].text
-    if (typeof json?.text === "string") return json.text
-    return ""
+    runtime ??= new OpenAICompatibleChatCompletions()
+    const response = await runtime.infer(new InferenceRequest(model, context))
+    return { items: response.contextItems, usage: response.tokenUsage }
 }
 
 /**
