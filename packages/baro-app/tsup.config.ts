@@ -31,6 +31,14 @@ const sharedBundleConfig = {
     target: "node20" as const,
     platform: "node" as const,
     bundle: true,
+    // Each entry must be a SINGLE self-contained .mjs. tsup defaults
+    // `splitting: true` for esm, which hoists code shared across the
+    // three entries into `chunk-*.mjs` siblings — and those chunks were
+    // not staged into ~/.baro/bin by postinstall, so the runners died
+    // with ERR_MODULE_NOT_FOUND (chunk-*.mjs). Disabling splitting
+    // inlines everything back into each entry, matching the
+    // "zero runtime deps, self-contained" contract documented above.
+    splitting: false,
     // Force the Mozaik framework + the workspace orchestrator code
     // *into* the bundle so the published package is self-contained
     // (no runtime dependency on @mozaik-ai/core or @baro/orchestrator).

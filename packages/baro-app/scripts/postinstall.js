@@ -93,23 +93,31 @@ async function main() {
         console.warn(`  Build manually: cargo build --release -p baro-tui`)
     }
 
-    // Copy the bundled TS subprocess entry points alongside the binary
-    // so the Rust runners can find them regardless of how baro-ai was
-    // installed (local node_modules, npx, npm install -g …). These
-    // are the same `.mjs` files tsup produces in dist/ — staging them
-    // here lets architect_runner / planner_runner / orchestrator_client
-    // hit them via the production fast path (Node, no tsx).
-    const bundles = ["cli.mjs", "run-architect.mjs", "run-planner.mjs"]
+    // Stage the bundled TS subprocess code alongside the binary so the
+    // Rust runners can find it regardless of how baro-ai was installed
+    // (local node_modules, npx, npm install -g …). This lets
+    // architect_runner / planner_runner / orchestrator_client hit them
+    // via the production fast path (Node, no tsx).
+    //
+    // Copy EVERY `.mjs` in dist/, not just the three named entry points:
+    // tsup may emit shared `chunk-*.mjs` siblings (code-splitting), and
+    // an entry that imports a chunk we didn't stage dies at runtime with
+    // ERR_MODULE_NOT_FOUND. Globbing all `.mjs` keeps the runners whole
+    // even if the bundle layout changes. (Sourcemaps are skipped — not
+    // needed at runtime.)
+    const distDir = path.join(PACKAGE_ROOT, "dist")
+    let bundles = []
+    try {
+        bundles = fs.readdirSync(distDir).filter((n) => n.endsWith(".mjs"))
+    } catch (err) {
+        console.warn(`Warning: could not read ${distDir}: ${err.message}`)
+    }
     for (const name of bundles) {
-        const src = path.join(PACKAGE_ROOT, "dist", name)
+        const src = path.join(distDir, name)
         const dst = path.join(BARO_HOME, name)
         try {
-            if (fs.existsSync(src)) {
-                fs.copyFileSync(src, dst)
-                console.log(`${name} installed to ${dst}`)
-            } else {
-                console.warn(`Warning: ${src} missing — skipping ${name}`)
-            }
+            fs.copyFileSync(src, dst)
+            console.log(`${name} installed to ${dst}`)
         } catch (err) {
             console.warn(`Warning: Could not stage ${name}: ${err.message}`)
         }
