@@ -48,7 +48,21 @@ const sharedBundleConfig = {
     ],
     clean: false,
     sourcemap: true,
-    banner: { js: "#!/usr/bin/env node" },
+    // The bundle is ESM, but some transitive deps are CommonJS and call
+    // `require(...)` at load time (e.g. google-auth-library, pulled in
+    // via @mozaik-ai/core, does `require("child_process")`). esbuild
+    // rewrites those to its `__require` helper, which throws
+    // "Dynamic require of X is not supported" UNLESS a real `require`
+    // exists in scope — its fallback is `typeof require !== "undefined"`.
+    // Defining `require` via createRequire in the banner satisfies that
+    // fallback so CJS deps and Node builtins resolve at runtime.
+    banner: {
+        js: [
+            "#!/usr/bin/env node",
+            'import { createRequire as __baroCreateRequire } from "module";',
+            "const require = __baroCreateRequire(import.meta.url);",
+        ].join("\n"),
+    },
 }
 
 export default defineConfig([
