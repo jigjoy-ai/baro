@@ -155,6 +155,13 @@ export class Conductor extends BaseObserver {
      * is true only when this list is empty.
      */
     private readonly globalDropped: string[] = []
+    /**
+     * Extra end-of-run recovery attempts, separate from each StoryAgent's own
+     * retry loop. A story may exhaust its normal attempts, block the DAG, and
+     * still be recoverable after sibling stories have landed more context/code.
+     */
+    private readonly recoveryAttempts: Map<string, number> = new Map()
+    private readonly maxRecoveryAttemptsPerStory = 1
     private totalAttempts = 0
     private appliedReplans = 0
 
@@ -301,6 +308,15 @@ export class Conductor extends BaseObserver {
             const allPassed =
                 this.prd.userStories.every((s) => s.passes) &&
                 this.globalDropped.length === 0
+            if (!allPassed && this.globalFailed.length > 0) {
+                const recovered = await this.tryStartRecoveryLevel(
+                    this.globalFailed,
+                    blockedStoryIds.size > 0
+                        ? `blocked dependencies: ${[...blockedStoryIds].join(", ")}`
+                        : "terminal failed stories",
+                )
+                if (recovered) return
+            }
             const abortReason = allPassed
                 ? null
                 : this.globalFailed.length > 0
@@ -371,6 +387,7 @@ export class Conductor extends BaseObserver {
         if (item.success) {
             this.currentLevel.passed.push(item.storyId)
             this.globalCompleted.push(item.storyId)
+            this.removeGlobalFailed(item.storyId)
             if (this.prd) {
                 this.prd = markStoryPassed(this.prd, item.storyId, item.durationSecs)
                 savePrd(this.opts.prdPath, this.prd)
@@ -391,7 +408,7 @@ export class Conductor extends BaseObserver {
             }
         } else {
             this.currentLevel.failed.push(item.storyId)
-            this.globalFailed.push(item.storyId)
+            this.addGlobalFailed(item.storyId)
         }
 
         // Try to fill freed parallel slots with queued stories.
@@ -503,6 +520,26 @@ export class Conductor extends BaseObserver {
         if (this.pendingReplans.length > 0 && this.prd) {
             const drained = this.pendingReplans.splice(0)
             for (const replan of drained) {
+                if (
+                    replan.removedStoryIds.length > 0 &&
+                    replan.addedStories.length === 0
+                ) {
+                    // A pure "skip/drop this failed story" replan is a
+                    // destructive product decision: it can silently leave
+                    // dependent acceptance criteria undone. Do not apply it
+                    // automatically. The Conductor now does an automatic
+                    // recovery pass for the failed prerequisite; if that still
+                    // fails, the run ends as a blocked checkpoint rather than
+                    // opening a partial PR.
+                    this.emit(
+                        ConductorState.create({
+                            phase: "running_level",
+                            detail: `skip proposal deferred (source=${replan.source}, -${replan.removedStoryIds.length}): ${replan.reason}`,
+                            currentLevel: lvl.ordinal,
+                        }),
+                    )
+                    continue
+                }
                 this.prd = applyReplan(this.prd, replan)
                 this.appliedReplans += 1
                 replannedThisLevel = true
@@ -548,6 +585,11 @@ export class Conductor extends BaseObserver {
         const anySuccess = lvl.passed.length > 0
         const totalThisLevel = lvl.passed.length + lvl.failed.length
         if (!anySuccess && totalThisLevel > 0 && !replannedThisLevel) {
+            const recovered = await this.tryStartRecoveryLevel(
+                lvl.failed,
+                "all stories in level failed",
+            )
+            if (recovered) return
             this.terminateRun(
                 false,
                 "all stories in level failed; aborting remaining levels",
@@ -638,6 +680,83 @@ export class Conductor extends BaseObserver {
         }
 
         return blocked
+    }
+
+    private addGlobalFailed(storyId: string): void {
+        if (!this.globalFailed.includes(storyId)) {
+            this.globalFailed.push(storyId)
+        }
+    }
+
+    private removeGlobalFailed(storyId: string): void {
+        for (let i = this.globalFailed.length - 1; i >= 0; i--) {
+            if (this.globalFailed[i] === storyId) {
+                this.globalFailed.splice(i, 1)
+            }
+        }
+    }
+
+    private async tryStartRecoveryLevel(
+        candidateIds: readonly string[],
+        reason: string,
+    ): Promise<boolean> {
+        if (!this.prd) return false
+
+        const seen = new Set<string>()
+        const stories: PrdStory[] = []
+        for (const id of candidateIds) {
+            if (seen.has(id)) continue
+            seen.add(id)
+            const attempts = this.recoveryAttempts.get(id) ?? 0
+            if (attempts >= this.maxRecoveryAttemptsPerStory) continue
+            const story = this.prd.userStories.find((s) => s.id === id)
+            if (!story || story.passes) continue
+            stories.push(story)
+        }
+
+        if (stories.length === 0) return false
+
+        for (const story of stories) {
+            this.recoveryAttempts.set(
+                story.id,
+                (this.recoveryAttempts.get(story.id) ?? 0) + 1,
+            )
+            this.removeGlobalFailed(story.id)
+        }
+
+        const ordinal = (this.currentLevel?.ordinal ?? 0) + 1
+        const totalLevelsHint = ordinal
+        this.currentLevel = {
+            ordinal,
+            totalLevelsHint,
+            storyIds: stories.map((s) => s.id),
+            pending: new Set(stories.map((s) => s.id)),
+            passed: [],
+            failed: [],
+            perStoryAttempts: new Map(),
+        }
+
+        this.emit(
+            LevelStarted.create({
+                ordinal,
+                totalLevelsHint,
+                storyIds: this.currentLevel.storyIds,
+            }),
+        )
+        this.emit(
+            ConductorState.create({
+                phase: "running_level",
+                detail: `auto-recovery retry for ${this.currentLevel.storyIds.join(", ")} (${reason})`,
+                currentLevel: ordinal,
+                totalLevels: totalLevelsHint,
+                storyIds: this.currentLevel.storyIds,
+            }),
+        )
+
+        this.phase = "running"
+        this.spawnQueue.push(...stories)
+        await this.fillSpawnSlots()
+        return true
     }
 
     private resolvePrompt(story: PrdStory): string {

@@ -204,8 +204,10 @@ export class Finalizer extends BaseObserver {
     private async finalize(run: RunCompletedData): Promise<void> {
         if (!this.opts.createPr) return
 
-        if (!run.success && run.completedStories.length === 0) {
-            this.log("[finalizer] run failed before producing any commits; skipping PR")
+        if (!run.success) {
+            this.log(
+                `[finalizer] run did not complete successfully (${run.abortReason ?? "no reason"}); skipping PR`,
+            )
             this.emit(
                 PrCreated.create({
                     url: null,
