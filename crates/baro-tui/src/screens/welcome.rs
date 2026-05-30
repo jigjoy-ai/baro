@@ -242,7 +242,14 @@ pub fn render(f: &mut Frame, app: &App) {
             Span::styled("  Parallel: ", Style::default().fg(theme::MUTED)),
             Span::styled(format!("[{}]", parallel_val), par_style),
             Span::styled("          Timeout: ", Style::default().fg(theme::MUTED)),
-            Span::styled(format!("[{}s]", app.timeout_secs), timeout_style),
+            Span::styled(
+                if app.timeout_secs == 0 {
+                    "[auto]".to_string()
+                } else {
+                    format!("[{}s]", app.timeout_secs)
+                },
+                timeout_style,
+            ),
         ]),
         Line::from(planner_spans),
     ];

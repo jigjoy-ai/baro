@@ -396,7 +396,7 @@ impl App {
             refine_input: None,
             refining: false,
             parallel_limit: 0,
-            timeout_secs: 600,
+            timeout_secs: 0, // 0 = auto (orchestrator effort-scales the per-story timeout)
             notification_ready: false,
             model_routing: true,
             override_model: None,

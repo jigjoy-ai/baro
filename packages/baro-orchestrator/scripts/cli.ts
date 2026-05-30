@@ -56,7 +56,7 @@ function parseArgs(argv: string[]): CliArgs {
         prd: "prd.json",
         cwd: ".",
         parallel: 0,
-        timeout: 600,
+        timeout: 0, // 0 = auto (effort-scaled in storyTimeoutSecs); --timeout N overrides absolutely
         noGit: false,
         noTuiEvents: false,
         withCritic: false,
@@ -186,7 +186,7 @@ function printHelp(): void {
             "  --prd <path>          Path to prd.json (default: ./prd.json)",
             "  --cwd <path>          Working directory (default: .)",
             "  --parallel <N>        Max parallel stories per level (0 = unlimited)",
-            "  --timeout <secs>      Per-story timeout (default: 600)",
+            "  --timeout <secs>      Per-story timeout (default: auto — effort-scaled; any value overrides)",
             "  --model <name>        Override model (opus, sonnet, haiku)",
             "  --no-git              Skip git lifecycle (branch / push)",
             "  --no-tui-events       Skip BaroEvent JSON emission",

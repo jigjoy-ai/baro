@@ -167,28 +167,35 @@ export interface OrchestrateConfig {
 }
 
 /**
- * Per-story timeout floor by effort (seconds). A single `--effort max`
- * Opus story — write the layer, write its specs, run the suite — routinely
- * exceeds the flat 600s default and gets SIGTERM'd (exit 143), which baro
- * then burns on a full retry (observed: story S8 killed at 600s on a
- * pure-Opus run, retried 2/3). Floor the timeout up for high-effort runs so
- * stories finish on the first attempt; an explicit larger `--timeout` still
- * wins. low/medium/unset keep the prior 600s default. Codex stories finish
- * well under any of these, so the floor only ever bites the Claude path.
+ * Resolve the per-story timeout (seconds).
+ *
+ * `--timeout N` (any positive value) is an **absolute override** — it wins
+ * in both directions, so you can shorten OR lengthen the cap explicitly and
+ * nothing here second-guesses it.
+ *
+ * When `--timeout` is NOT set (`configured` is 0 or undefined — the Rust CLI
+ * sends 0 to mean "auto"), the default is **scaled by effort** rather than a
+ * hard-coded 600s: a single `--effort max` Opus story (write the layer + its
+ * specs + run the suite) routinely exceeds 600s and gets SIGTERM'd (exit 143
+ * → wasted full retry; observed: story S8 killed at 600s on a pure-Opus run).
+ * low/medium keep the prior 600s. Codex stories finish well under any of
+ * these, so the effort default only ever matters on the Claude path.
  */
 export function storyTimeoutSecs(
     configured: number | undefined,
     effort: string | undefined,
 ): number {
-    const floor =
-        effort === "max"
-            ? 1500
-            : effort === "xhigh"
-              ? 1200
-              : effort === "high"
-                ? 900
-                : 600
-    return Math.max(configured ?? 600, floor)
+    if (typeof configured === "number" && configured > 0) return configured
+    switch (effort) {
+        case "max":
+            return 1500
+        case "xhigh":
+            return 1200
+        case "high":
+            return 900
+        default:
+            return 600
+    }
 }
 
 export interface OrchestrateResult {

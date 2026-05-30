@@ -117,9 +117,11 @@ struct Cli {
     #[arg(long, default_value = "0")]
     parallel: u32,
 
-    /// Per-story timeout in seconds
-    #[arg(long, default_value = "600")]
-    timeout: u64,
+    /// Per-story timeout in seconds. Omit for an effort-scaled default
+    /// (--effort max ≈ 25 min, xhigh ≈ 20, high ≈ 15, else 10); pass a
+    /// value to override it absolutely — shorter OR longer.
+    #[arg(long)]
+    timeout: Option<u64>,
 
     /// Override model for all phases (valid: opus, sonnet, haiku)
     #[arg(long = "model", value_parser = ["opus", "sonnet", "haiku"])]
@@ -399,7 +401,8 @@ async fn run_app(
 
     // Apply config defaults, then CLI overrides
     app.parallel_limit = rc.parallel.unwrap_or(0);
-    app.timeout_secs = rc.timeout.unwrap_or(600);
+    // 0 = "auto": the orchestrator effort-scales the per-story timeout.
+    app.timeout_secs = rc.timeout.unwrap_or(0);
 
     app.planner = match rc.planner.as_deref() {
         Some("openai") => Planner::OpenAI,
@@ -416,7 +419,7 @@ async fn run_app(
 
     // CLI args override config
     if cli.parallel != 0 { app.parallel_limit = cli.parallel; }
-    if cli.timeout != 600 { app.timeout_secs = cli.timeout; }
+    if let Some(t) = cli.timeout { app.timeout_secs = t; }
 
     if cli.planner != "claude" {
         app.planner = match cli.planner.as_str() {
