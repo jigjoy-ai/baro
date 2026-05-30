@@ -129,7 +129,14 @@ pub fn render_completion(f: &mut Frame, app: &App) {
     f.render_widget(Clear, popup_area);
 
     let abnormal = app.exit_reason.is_some();
-    let banner_text = if abnormal {
+    let blocked = app
+        .exit_reason
+        .as_ref()
+        .map(|reason| reason.to_ascii_lowercase().contains("blocked"))
+        .unwrap_or(false);
+    let banner_text = if blocked {
+        "RUN BLOCKED"
+    } else if abnormal {
         "RUN ENDED EARLY"
     } else {
         "ALL STORIES COMPLETE"
@@ -287,7 +294,12 @@ pub fn render_completion(f: &mut Frame, app: &App) {
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("q quit", Style::default().fg(theme::MUTED))));
+    let footer = if abnormal {
+        "r rerun failed  |  q quit"
+    } else {
+        "q quit"
+    };
+    lines.push(Line::from(Span::styled(footer, Style::default().fg(theme::MUTED))));
 
     let block = Block::default()
         .borders(Borders::ALL)

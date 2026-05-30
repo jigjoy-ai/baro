@@ -453,6 +453,20 @@ impl App {
         self.screen = Screen::Execute;
         self.start_time = Instant::now();
         self.dag_scroll_offset = 0;
+        self.active_stories.clear();
+        self.selected_log_index = 0;
+        self.completed = 0;
+        self.percentage = 0;
+        self.final_stats = None;
+        self.done = false;
+        self.exit_reason = None;
+        self.finalize_in_progress = false;
+        self.pr_url = None;
+        self.push_results.clear();
+        self.token_usage.clear();
+        self.total_input_tokens = 0;
+        self.total_output_tokens = 0;
+        self.stories.clear();
     }
 
     pub fn planning_elapsed_secs(&self) -> u64 {

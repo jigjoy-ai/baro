@@ -90,6 +90,45 @@ use tokio::sync::mpsc;
 use app::{App, Planner, ReviewStory, Screen};
 use events::BaroEvent;
 
+fn review_stories_from_prd(prd: &executor::PrdFile) -> Vec<ReviewStory> {
+    prd.user_stories
+        .iter()
+        .map(|s| ReviewStory {
+            id: s.id.clone(),
+            title: s.title.clone(),
+            description: s.description.clone(),
+            depends_on: s.depends_on.clone(),
+            completed: s.passes,
+            model: s.model.clone(),
+        })
+        .collect()
+}
+
+fn executor_config_from_app(app: &App) -> executor::ExecutorConfig {
+    executor::ExecutorConfig {
+        parallel: app.parallel_limit,
+        timeout_secs: app.timeout_secs,
+        model_routing: app.model_routing,
+        override_model: app.override_model.clone(),
+        with_critic: app.with_critic,
+        critic_model: app.critic_model.clone(),
+        with_librarian: app.with_librarian,
+        with_sentry: app.with_sentry,
+        with_surgeon: app.with_surgeon,
+        surgeon_use_llm: app.surgeon_use_llm,
+        surgeon_model: app.surgeon_model.clone(),
+        intra_level_delay_secs: app.intra_level_delay_secs,
+        llm: app.llm,
+        story_llm: app.story_llm,
+        critic_llm: app.critic_llm,
+        surgeon_llm: app.surgeon_llm,
+        openai_api_key: app.openai_api_key.clone(),
+        openai_base_url: app.openai_base_url.clone(),
+        effort: app.effort.clone(),
+        story_model: app.story_model.clone(),
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "baro",
@@ -570,14 +609,7 @@ async fn run_app(
                     app.project = prd.project.clone();
                     app.branch_name = prd.branch_name.clone();
                     app.description = prd.description.clone();
-                    let stories: Vec<ReviewStory> = prd.user_stories.iter().map(|s| ReviewStory {
-                        id: s.id.clone(),
-                        title: s.title.clone(),
-                        description: s.description.clone(),
-                        depends_on: s.depends_on.clone(),
-                        completed: s.passes,
-                        model: s.model.clone(),
-                    }).collect();
+                    let stories = review_stories_from_prd(&prd);
                     app.show_review(stories);
                     entered_resume = true;
                 }
@@ -1130,6 +1162,60 @@ async fn run_app(
                         _ => {}
                     }},
                     Screen::Execute => match key.code {
+                        KeyCode::Char('r') if app.done && app.exit_reason.is_some() => {
+                            let prd_path = cwd.join("prd.json");
+                            match std::fs::read_to_string(&prd_path)
+                                .map_err(|e| e.to_string())
+                                .and_then(|c| serde_json::from_str::<executor::PrdFile>(&c).map_err(|e| e.to_string()))
+                            {
+                                Ok(prd) => {
+                                    let full_branch = if prd.branch_name.starts_with("baro/") {
+                                        prd.branch_name.clone()
+                                    } else {
+                                        format!("baro/{}", prd.branch_name)
+                                    };
+                                    app.is_resume = true;
+                                    app.project = prd.project.clone();
+                                    app.branch_name = full_branch.clone();
+                                    app.description = prd.description.clone();
+                                    app.review_stories = review_stories_from_prd(&prd);
+                                    app.start_execution();
+
+                                    let exec_cwd = cwd.clone();
+                                    let branch_cwd = cwd.clone();
+                                    let branch_tx = tx.clone();
+                                    let err_tx = tx.clone();
+                                    let cfg = executor_config_from_app(&app);
+                                    tokio::spawn(async move {
+                                        if let Err(e) = git::checkout_existing_branch(&branch_cwd, &full_branch).await {
+                                            let _ = err_tx.send(AppEvent::BranchError(
+                                                format!("Branch checkout failed: {}. Cannot rerun this checkpoint.", e)
+                                            )).await;
+                                            return;
+                                        }
+                                        match git::get_current_branch(&exec_cwd).await {
+                                            Ok(ref actual) if actual == &full_branch => {}
+                                            Ok(actual) => {
+                                                let _ = err_tx.send(AppEvent::BranchError(
+                                                    format!("Branch verification failed: expected '{}', got '{}'. Cannot rerun this checkpoint.", full_branch, actual)
+                                                )).await;
+                                                return;
+                                            }
+                                            Err(e) => {
+                                                let _ = err_tx.send(AppEvent::BranchError(
+                                                    format!("Branch verification failed: {}. Cannot rerun this checkpoint.", e)
+                                                )).await;
+                                                return;
+                                            }
+                                        }
+                                        spawn_executor(prd, exec_cwd, branch_tx, cfg);
+                                    });
+                                }
+                                Err(e) => {
+                                    app.exit_reason = Some(format!("Failed to read prd.json for rerun: {}", e));
+                                }
+                            }
+                        }
                         KeyCode::Char('q') => return Ok(()),
                         // Force a full terminal clear on every tab change.
                         // ratatui's `Clear` widget only marks cells stale in
@@ -1587,5 +1673,3 @@ fn spawn_executor(
     };
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
 }
-
-

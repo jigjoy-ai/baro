@@ -283,7 +283,15 @@ export class Conductor extends BaseObserver {
         if (this.phase !== "computing") return
         if (!this.prd) return
 
-        const levels = buildDag(this.prd.userStories, { onlyIncomplete: true })
+        const blockedStoryIds = this.computeBlockedStoryIds()
+        const failedIds = new Set(this.globalFailed)
+        const runnableStories = this.prd.userStories.filter(
+            (s) =>
+                !s.passes &&
+                !failedIds.has(s.id) &&
+                !blockedStoryIds.has(s.id),
+        )
+        const levels = buildDag(runnableStories)
 
         if (levels.length === 0) {
             // Run is "successful" only when every story currently in
@@ -293,7 +301,14 @@ export class Conductor extends BaseObserver {
             const allPassed =
                 this.prd.userStories.every((s) => s.passes) &&
                 this.globalDropped.length === 0
-            this.terminateRun(allPassed, null)
+            const abortReason = allPassed
+                ? null
+                : this.globalFailed.length > 0
+                  ? blockedStoryIds.size > 0
+                      ? `blocked by failed dependencies: failed ${this.globalFailed.join(", ")}; blocked ${[...blockedStoryIds].join(", ")}`
+                      : `stories failed: ${this.globalFailed.join(", ")}`
+                  : null
+            this.terminateRun(allPassed, abortReason)
             return
         }
 
@@ -590,6 +605,39 @@ export class Conductor extends BaseObserver {
             void Promise.resolve(this.opts.onRunComplete(summary)).catch(() => {})
         }
         this.resolveDone(summary)
+    }
+
+    /**
+     * Stories whose dependency chain includes a terminally failed story cannot
+     * become runnable in this run. Keep them out of the remaining DAG so
+     * `buildDag` cannot silently promote them after the failed dependency is
+     * filtered out. Do NOT mark them passed/dropped here: this is a checkpoint,
+     * and the user may choose to rerun the failed prerequisite on resume.
+     */
+    private computeBlockedStoryIds(): Set<string> {
+        if (!this.prd || this.globalFailed.length === 0) {
+            return new Set()
+        }
+
+        const failed = new Set(this.globalFailed)
+        const blocked = new Set<string>()
+        let changed = true
+
+        while (changed) {
+            changed = false
+            for (const story of this.prd.userStories) {
+                if (story.passes || failed.has(story.id) || blocked.has(story.id)) {
+                    continue
+                }
+
+                if ((story.dependsOn ?? []).some((id) => failed.has(id) || blocked.has(id))) {
+                    blocked.add(story.id)
+                    changed = true
+                }
+            }
+        }
+
+        return blocked
     }
 
     private resolvePrompt(story: PrdStory): string {
