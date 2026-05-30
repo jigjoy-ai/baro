@@ -166,6 +166,31 @@ export interface OrchestrateConfig {
     extraParticipants?: import("@mozaik-ai/core").Participant[]
 }
 
+/**
+ * Per-story timeout floor by effort (seconds). A single `--effort max`
+ * Opus story — write the layer, write its specs, run the suite — routinely
+ * exceeds the flat 600s default and gets SIGTERM'd (exit 143), which baro
+ * then burns on a full retry (observed: story S8 killed at 600s on a
+ * pure-Opus run, retried 2/3). Floor the timeout up for high-effort runs so
+ * stories finish on the first attempt; an explicit larger `--timeout` still
+ * wins. low/medium/unset keep the prior 600s default. Codex stories finish
+ * well under any of these, so the floor only ever bites the Claude path.
+ */
+export function storyTimeoutSecs(
+    configured: number | undefined,
+    effort: string | undefined,
+): number {
+    const floor =
+        effort === "max"
+            ? 1500
+            : effort === "xhigh"
+              ? 1200
+              : effort === "high"
+                ? 900
+                : 600
+    return Math.max(configured ?? 600, floor)
+}
+
 export interface OrchestrateResult {
     summary: ConductorRunSummary
     operator: Operator
@@ -358,7 +383,7 @@ export async function orchestrate(
         prdPath: config.prdPath,
         cwd: config.cwd,
         parallel: config.parallel ?? 0,
-        timeoutSecs: config.timeoutSecs ?? 600,
+        timeoutSecs: storyTimeoutSecs(config.timeoutSecs, config.effort),
         overrideModel: config.overrideModel ?? undefined,
         defaultModel: config.defaultModel ?? "opus",
         intraLevelDelaySecs: config.intraLevelDelaySecs,
