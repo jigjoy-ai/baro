@@ -162,6 +162,13 @@ export interface OrchestrateConfig {
      * before.
      */
     tierMap?: import("./routing.js").TierMap
+    /**
+     * Named OpenAI-compatible endpoints (from `--openai-endpoint`).
+     * Routes of the form `openai:model@name` resolve their base URL + key
+     * here, so one DAG can hit several OpenAI-compatible endpoints (e.g.
+     * MiniMax + real OpenAI) at once.
+     */
+    openaiEndpoints?: import("./routing.js").EndpointMap
     /** Hooks for receiving Operator commands externally (Rust TUI). */
     operatorHooks?: {
         onAbort?: (storyId: string) => void
@@ -249,6 +256,12 @@ export async function orchestrate(
         process.stderr.write(
             `[orchestrate] per-story tier map (fallback backend=${storyLlm}): ${pairs}\n`,
         )
+    }
+    if (config.openaiEndpoints && Object.keys(config.openaiEndpoints).length > 0) {
+        const eps = Object.entries(config.openaiEndpoints)
+            .map(([name, ep]) => `${name}→${ep.baseUrl}${ep.apiKey ? "" : " (no key!)"}`)
+            .join(" ")
+        process.stderr.write(`[orchestrate] openai endpoints: ${eps}\n`)
     }
     if (isHybrid) {
         process.stderr.write(
@@ -489,6 +502,8 @@ export async function orchestrate(
         storyModelOverride: config.storyModel,
         effort: config.effort,
         tierMap: config.tierMap,
+        endpoints: config.openaiEndpoints,
+        defaultApiKey: process.env.OPENAI_API_KEY,
     })
     storyFactory.setEnvironment(env)
     storyFactory.join(env)

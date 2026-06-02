@@ -5,8 +5,10 @@ import {
     formatRoute,
     isBackend,
     isClaudeTierName,
+    parseEndpoints,
     parseTierMap,
     resolveStoryRoute,
+    type EndpointMap,
     type ResolveOpts,
 } from "../src/routing.js"
 
@@ -208,6 +210,117 @@ describe("parseTierMap", () => {
     })
 })
 
+describe("resolveStoryRoute — per-story OpenAI endpoint (@)", () => {
+    const endpoints: EndpointMap = {
+        minimax: { baseUrl: "https://api.minimax.io/v1", apiKey: "mm-key" },
+        proxy: { baseUrl: "https://proxy.local/v1" }, // no key of its own
+    }
+
+    it("resolves a named endpoint to baseUrl + apiKey", () => {
+        assert.deepEqual(
+            resolveStoryRoute("openai:MiniMax-M3@minimax", {
+                fallbackBackend: "claude",
+                endpoints,
+            }),
+            {
+                backend: "openai",
+                model: "MiniMax-M3",
+                baseUrl: "https://api.minimax.io/v1",
+                apiKey: "mm-key",
+            },
+        )
+    })
+
+    it("falls back to defaultApiKey when the endpoint carries no key", () => {
+        assert.deepEqual(
+            resolveStoryRoute("openai:gpt-4o@proxy", {
+                fallbackBackend: "claude",
+                endpoints,
+                defaultApiKey: "env-key",
+            }),
+            {
+                backend: "openai",
+                model: "gpt-4o",
+                baseUrl: "https://proxy.local/v1",
+                apiKey: "env-key",
+            },
+        )
+    })
+
+    it("accepts an inline https:// URL with the default key", () => {
+        assert.deepEqual(
+            resolveStoryRoute("openai:MiniMax-M3@https://api.minimax.io/v1", {
+                fallbackBackend: "claude",
+                defaultApiKey: "env-key",
+            }),
+            {
+                backend: "openai",
+                model: "MiniMax-M3",
+                baseUrl: "https://api.minimax.io/v1",
+                apiKey: "env-key",
+            },
+        )
+    })
+
+    it("expands a tier-map route that references an endpoint", () => {
+        assert.deepEqual(
+            resolveStoryRoute("haiku", {
+                fallbackBackend: "claude",
+                tierMap: { haiku: "openai:MiniMax-M3@minimax" },
+                endpoints,
+            }),
+            {
+                backend: "openai",
+                model: "MiniMax-M3",
+                baseUrl: "https://api.minimax.io/v1",
+                apiKey: "mm-key",
+            },
+        )
+    })
+
+    it("throws on an unknown endpoint name", () => {
+        assert.throws(
+            () =>
+                resolveStoryRoute("openai:MiniMax-M3@nope", {
+                    fallbackBackend: "claude",
+                    endpoints,
+                }),
+            /unknown OpenAI endpoint "nope"/,
+        )
+    })
+
+    it("ignores @ on claude/codex routes (no endpoint concept)", () => {
+        assert.deepEqual(
+            resolveStoryRoute("claude:opus@whatever", { fallbackBackend: "openai" }),
+            { backend: "claude", model: "opus@whatever" },
+        )
+    })
+})
+
+describe("parseEndpoints", () => {
+    it("parses name=url specs and resolves keys via the callback", () => {
+        const map = parseEndpoints(
+            ["minimax=https://api.minimax.io/v1", "OpenAI=https://api.openai.com/v1"],
+            (name) => (name === "minimax" ? "mm-key" : undefined),
+        )
+        assert.deepEqual(map, {
+            minimax: { baseUrl: "https://api.minimax.io/v1", apiKey: "mm-key" },
+            openai: { baseUrl: "https://api.openai.com/v1", apiKey: undefined },
+        })
+    })
+
+    it("throws on a non-URL value", () => {
+        assert.throws(
+            () => parseEndpoints(["minimax=api.minimax.io"]),
+            /must start with http/,
+        )
+    })
+
+    it("throws on a malformed spec", () => {
+        assert.throws(() => parseEndpoints(["minimax"]), /expected name=url/)
+    })
+})
+
 describe("helpers", () => {
     it("isBackend", () => {
         assert.equal(isBackend("claude"), true)
@@ -226,5 +339,9 @@ describe("helpers", () => {
     it("formatRoute", () => {
         assert.equal(formatRoute({ backend: "openai", model: "MiniMax-M3" }), "openai:MiniMax-M3")
         assert.equal(formatRoute({ backend: "codex" }), "codex")
+        assert.equal(
+            formatRoute({ backend: "openai", model: "MiniMax-M3", baseUrl: "https://api.minimax.io/v1" }),
+            "openai:MiniMax-M3@https://api.minimax.io/v1",
+        )
     })
 })

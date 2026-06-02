@@ -26,7 +26,12 @@ import {
 import { CodexStoryAgent } from "./codex-story-agent.js"
 import { OpenAIStoryAgent } from "./openai-story-agent.js"
 import { StoryAgent } from "./story-agent.js"
-import { formatRoute, resolveStoryRoute, type TierMap } from "../routing.js"
+import {
+    formatRoute,
+    resolveStoryRoute,
+    type EndpointMap,
+    type TierMap,
+} from "../routing.js"
 
 export interface StoryFactoryOptions {
     cwd: string
@@ -56,6 +61,14 @@ export interface StoryFactoryOptions {
      * meaningful for OpenAI.
      */
     storyModelOverride?: string
+    /**
+     * Named OpenAI-compatible endpoints (from `--openai-endpoint`).
+     * Routes of the form `openai:model@name` resolve their base URL +
+     * key here so several endpoints can run in one DAG.
+     */
+    endpoints?: EndpointMap
+    /** Default API key for inline `@https://…` endpoints (OPENAI_API_KEY). */
+    defaultApiKey?: string
     /**
      * Effort level for the Claude path, passed as `claude --effort`
      * (low|medium|high|xhigh|max). Ignored by the OpenAI path.
@@ -125,6 +138,8 @@ export class StoryFactory extends BaseObserver {
             fallbackBackend: this.opts.llm ?? "claude",
             openaiDefaultModel: this.opts.openaiModel ?? "gpt-5.5",
             override: this.opts.storyModelOverride,
+            endpoints: this.opts.endpoints,
+            defaultApiKey: this.opts.defaultApiKey,
         })
 
         process.stderr.write(
@@ -154,7 +169,11 @@ export class StoryFactory extends BaseObserver {
                               retries: req.retries,
                               timeoutSecs: req.timeoutSecs,
                           },
-                          { model: route.model ?? this.opts.openaiModel },
+                          {
+                              model: route.model ?? this.opts.openaiModel,
+                              baseUrl: route.baseUrl,
+                              apiKey: route.apiKey,
+                          },
                       )
                     : new StoryAgent({
                           id: req.storyId,

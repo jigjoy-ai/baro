@@ -84,6 +84,13 @@ pub struct OrchestratorConfig {
     /// e.g. `"haiku=openai:MiniMax-M3,sonnet=openai:MiniMax-M3,opus=claude:opus"`.
     /// `None` → per-story tiers resolve on the phase `llm` as before.
     pub tier_map: Option<String>,
+    /// Named OpenAI-compatible endpoints (`name=url`), each forwarded as
+    /// a `--openai-endpoint` arg. Lets a route say `openai:model@name`,
+    /// so one DAG can hit several OpenAI-compatible endpoints (e.g.
+    /// MiniMax + real OpenAI). Keys are NOT passed here — the orchestrator
+    /// resolves them from `BARO_OPENAI_KEY_<NAME>` / `OPENAI_API_KEY`,
+    /// inherited through the subprocess env.
+    pub openai_endpoints: Vec<String>,
 }
 
 /// Spawn the orchestrator subprocess and return a channel that receives
@@ -316,7 +323,8 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
         || cfg.story_llm == "openai"
         || cfg.critic_llm == "openai"
         || cfg.surgeon_llm == "openai"
-        || tier_map_uses_openai;
+        || tier_map_uses_openai
+        || !cfg.openai_endpoints.is_empty();
     if uses_openai {
         if let Some(key) = &cfg.openai_api_key {
             cmd.env("OPENAI_API_KEY", key);
@@ -330,6 +338,9 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     }
     if let Some(tm) = &cfg.tier_map {
         cmd.arg("--tier-map").arg(tm);
+    }
+    for ep in &cfg.openai_endpoints {
+        cmd.arg("--openai-endpoint").arg(ep);
     }
     cmd.arg("--effort").arg(&cfg.effort);
     cmd
