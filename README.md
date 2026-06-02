@@ -115,6 +115,19 @@ The `--openai-base-url` flag also works (wins over the env var when both are set
 
 Full breakdown at [docs.baro.rs/llm-providers](https://docs.baro.rs/llm-providers) — provider economics, per-phase routing, the side-by-side benchmark across three real tasks: [**I tested Claude Code vs OpenAI Codex in my parallel agent setup. Then I built a hybrid.**](https://jigjoy.ai/blog/claude-code-vs-codex-baro)
 
+### Per-story model tiering (mixed fleet)
+
+`--llm` / `--story-llm` pick a backend per *phase* — every story runs on the same one. With `--tier-map` you tier per *story* instead: the Planner tags each story with a blast-radius tier (`haiku` = mechanical/self-contained, `sonnet` = one contained module, `opus` = cross-cutting / schema / a DAG hub — "what breaks if an agent gets this wrong?"), and the tier map binds each tier to a concrete `backend:model`. One DAG, several backends, chosen by risk:
+
+```bash
+# Cheap single-concern stories on MiniMax, cross-cutting stories on Claude Opus
+baro --openai-endpoint minimax=https://api.minimax.io/v1 \
+     --tier-map "haiku=openai:MiniMax-M3@minimax,sonnet=openai:MiniMax-M3@minimax,opus=claude:opus" \
+     "Your goal"
+```
+
+A story's route can name **any** backend (`claude:opus`, `openai:MiniMax-M3`, `codex:gpt-5.5`) and an OpenAI route can name its **own endpoint** with `@` — a registered name (`--openai-endpoint name=url`, repeatable) or an inline `@https://…` URL — so a single run can hit several OpenAI-compatible endpoints at once (e.g. MiniMax + real OpenAI). API keys are never put on the command line: each endpoint resolves its key from `BARO_OPENAI_KEY_<NAME>`, falling back to `OPENAI_API_KEY`. When the Surgeon splits a failed story, it tiers the pieces and escalates a tier up for any same-scope replacement (one attempt at that tier already burned out). Without `--tier-map`, per-story tiers resolve on the phase backend exactly as before.
+
 ## Recent real run
 
 [**How baro generated 808 NestJS Jest tests autonomously in 71 minutes**](https://jigjoy.ai/blog/baro-808-nestjs-jest-tests) — one prompt, 33-story DAG, two sessions because of the Anthropic 3am usage cap, 64 test suites, 83.5% branch coverage, +13,606 lines of test code, zero phantom bug issues filed.
