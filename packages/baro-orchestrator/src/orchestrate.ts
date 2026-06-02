@@ -153,6 +153,15 @@ export interface OrchestrateConfig {
      * --effort`. Only the Claude backend honours it.
      */
     effort?: string
+    /**
+     * Tier→`backend:model` bindings (from `--tier-map` / `BARO_TIER_MAP`).
+     * Binds the Planner's per-story blast-radius tier (haiku/sonnet/opus)
+     * to a concrete backend+model, so a single DAG can route cheap
+     * single-concern stories to one backend and cross-cutting stories to
+     * another. Absent → per-story tiers resolve on the phase `llm` as
+     * before.
+     */
+    tierMap?: import("./routing.js").TierMap
     /** Hooks for receiving Operator commands externally (Rust TUI). */
     operatorHooks?: {
         onAbort?: (storyId: string) => void
@@ -233,6 +242,14 @@ export async function orchestrate(
     // routing is logged in their own banners.
     const isHybrid =
         new Set([storyLlm, criticLlm, surgeonLlm, llm]).size > 1
+    if (config.tierMap && Object.keys(config.tierMap).length > 0) {
+        const pairs = Object.entries(config.tierMap)
+            .map(([tier, route]) => `${tier}→${route}`)
+            .join(" ")
+        process.stderr.write(
+            `[orchestrate] per-story tier map (fallback backend=${storyLlm}): ${pairs}\n`,
+        )
+    }
     if (isHybrid) {
         process.stderr.write(
             `[orchestrate] hybrid routing: story=${storyLlm} critic=${criticLlm} surgeon=${surgeonLlm} (default=${llm})\n`,
@@ -305,6 +322,7 @@ export async function orchestrate(
                     description: s.description,
                     dependsOn: s.dependsOn,
                     passes: s.passes,
+                    model: s.model,
                 })),
             }
         }
@@ -470,6 +488,7 @@ export async function orchestrate(
         openaiModel: config.storyModel ?? "gpt-5.5",
         storyModelOverride: config.storyModel,
         effort: config.effort,
+        tierMap: config.tierMap,
     })
     storyFactory.setEnvironment(env)
     storyFactory.join(env)

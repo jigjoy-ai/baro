@@ -78,6 +78,12 @@ pub struct OrchestratorConfig {
     /// `--story-model X` to the orchestrator subprocess. Wins over
     /// the per-PRD-story `model` field and over the OpenAI default.
     pub story_model: Option<String>,
+    /// Per-story tier→backend:model map, forwarded as `--tier-map`.
+    /// Binds the planner's blast-radius tiers (haiku/sonnet/opus) to
+    /// concrete backends so one DAG can mix claude/openai/codex stories,
+    /// e.g. `"haiku=openai:MiniMax-M3,sonnet=openai:MiniMax-M3,opus=claude:opus"`.
+    /// `None` → per-story tiers resolve on the phase `llm` as before.
+    pub tier_map: Option<String>,
 }
 
 /// Spawn the orchestrator subprocess and return a channel that receives
@@ -302,10 +308,15 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     // tokio::Command inherits parent env by default, so it'll flow
     // through naturally without us touching it.
     // If ANY phase uses openai, the API key needs to be available.
+    let tier_map_uses_openai = cfg
+        .tier_map
+        .as_deref()
+        .is_some_and(|m| m.contains("openai:"));
     let uses_openai = cfg.llm == "openai"
         || cfg.story_llm == "openai"
         || cfg.critic_llm == "openai"
-        || cfg.surgeon_llm == "openai";
+        || cfg.surgeon_llm == "openai"
+        || tier_map_uses_openai;
     if uses_openai {
         if let Some(key) = &cfg.openai_api_key {
             cmd.env("OPENAI_API_KEY", key);
@@ -316,6 +327,9 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     }
     if let Some(m) = &cfg.story_model {
         cmd.arg("--story-model").arg(m);
+    }
+    if let Some(tm) = &cfg.tier_map {
+        cmd.arg("--tier-map").arg(tm);
     }
     cmd.arg("--effort").arg(&cfg.effort);
     cmd

@@ -303,6 +303,9 @@ pub struct App {
     pub architect_model: Option<String>,
     pub planner_model: Option<String>,
     pub story_model: Option<String>,
+    /// Per-story tier→backend:model map from `--tier-map`. Lets one DAG
+    /// mix claude/openai/codex story-by-story.
+    pub tier_map: Option<String>,
     pub intra_level_delay_secs: Option<u64>,
 
     /// Quick mode (`--quick`): user has told us this goal is trivial and they
@@ -410,6 +413,7 @@ impl App {
             architect_model: None,
             planner_model: None,
             story_model: None,
+            tier_map: None,
             intra_level_delay_secs: None,
             quick: false,
             llm: LlmProvider::Claude,

@@ -23,6 +23,7 @@ import { resolve } from "path"
 
 import { orchestrate, type OrchestrateConfig } from "../src/orchestrate.js"
 import { ClaudeCliParticipant } from "../src/participants/claude-cli-participant.js"
+import { parseTierMap, type TierMap } from "../src/routing.js"
 
 interface CliArgs {
     prd: string
@@ -43,6 +44,7 @@ interface CliArgs {
     storyModel?: string
     effort?: string
     intraLevelDelaySecs?: number
+    tierMap?: TierMap
     llm: "claude" | "openai" | "codex"
     /** Optional per-phase overrides; each defaults to `llm`. */
     storyLlm?: "claude" | "openai" | "codex"
@@ -128,6 +130,14 @@ function parseArgs(argv: string[]): CliArgs {
             case "--story-model":
                 args.storyModel = required(argv, ++i, "--story-model")
                 break
+            case "--tier-map":
+                try {
+                    args.tierMap = parseTierMap(required(argv, ++i, "--tier-map"))
+                } catch (e) {
+                    process.stderr.write(`[cli] ${(e as Error).message}\n`)
+                    process.exit(2)
+                }
+                break
             case "--effort":
                 args.effort = required(argv, ++i, "--effort")
                 break
@@ -199,6 +209,9 @@ function printHelp(): void {
             "  --surgeon-use-llm     Use LLM evaluation in Surgeon (default: deterministic)",
             "  --surgeon-model <name> Model for Surgeon LLM (default: opus)",
             "  --intra-level-delay <secs>  Stagger story spawns within a level (default: 10, 0 disables)",
+            "  --tier-map <spec>     Bind per-story tiers to backends, e.g.",
+            "                        'haiku=openai:MiniMax-M3,sonnet=openai:MiniMax-M3,opus=claude:opus'",
+            "                        (also read from BARO_TIER_MAP). Lets one DAG mix claude/openai/codex.",
             "  -h, --help            Show this message",
             "",
         ].join("\n"),
@@ -210,6 +223,18 @@ async function main(): Promise<void> {
     if (args.help) {
         printHelp()
         return
+    }
+
+    // `--tier-map` wins; otherwise fall back to BARO_TIER_MAP env (how
+    // the Rust TUI forwards the operator's choice to this subprocess).
+    let tierMap = args.tierMap
+    if (!tierMap && process.env.BARO_TIER_MAP) {
+        try {
+            tierMap = parseTierMap(process.env.BARO_TIER_MAP)
+        } catch (e) {
+            process.stderr.write(`[cli] BARO_TIER_MAP: ${(e as Error).message}\n`)
+            process.exit(2)
+        }
     }
 
     const cwd = resolve(args.cwd)
@@ -243,6 +268,7 @@ async function main(): Promise<void> {
         surgeonLlm: args.surgeonLlm,
         storyModel: args.storyModel,
         effort: args.effort,
+        tierMap,
     }
 
     if (args.llm === "openai" && !process.env.OPENAI_API_KEY) {

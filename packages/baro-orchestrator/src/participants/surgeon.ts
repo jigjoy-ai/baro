@@ -55,6 +55,8 @@ export interface PrdSnapshot {
         description: string
         dependsOn: readonly string[]
         passes: boolean
+        /** Current routing tier ("haiku" | "sonnet" | "opus" | backend:model). */
+        model?: string
     }[]
 }
 
@@ -115,7 +117,7 @@ exactly this shape:
 {"action":"split"|"prereq"|"rewire"|"skip"|"abort",
  "reason":"…",
  "added":[ { "id":"S?","priority":N,"title":"…","description":"…",
-             "dependsOn":["…"], "acceptance":["…"] } ],
+             "dependsOn":["…"], "acceptance":["…"], "model":"sonnet" } ],
  "removed":["S?"],
  "modifiedDeps":[{"id":"S?","newDependsOn":["…"]}]}
 
@@ -125,6 +127,18 @@ Rules:
 - "modifiedDeps" rewires a story's dependsOn — use to repoint dependents
   of a removed story to a replacement.
 - "abort" → empty added/removed/modifiedDeps arrays.
+- TIER every added story with "model" ("haiku" | "sonnet" | "opus"),
+  the same way the planner does — by blast radius, not raw difficulty:
+    * "haiku"  → mechanical, single-concern, nothing important breaks
+    * "sonnet" → one contained feature/module
+    * "opus"   → cross-cutting / schema / wiring / a DAG hub
+  ESCALATION: the failing story already burned its retries at the tier
+  shown ("Tier that just failed"). Its replacement(s) must NOT repeat
+  that tier unless you are splitting it into genuinely smaller pieces.
+  When you keep the same scope (rewire / prereq replacement), bump the
+  tier UP one step (haiku→sonnet→opus). When you split (action "split"),
+  each child gets the tier its own (smaller) blast radius warrants —
+  often lower, but a still-complex child stays "opus".
 - Output ONLY the JSON object, nothing else.`
 
 export class Surgeon extends BaseObserver {
@@ -269,7 +283,7 @@ export function buildSurgeonPrompt(
     const storyLines = snap.stories
         .map(
             (s) =>
-                `  - ${s.id} ${s.passes ? "[passed]" : "[pending]"} "${s.title}" deps=${JSON.stringify(s.dependsOn)}`,
+                `  - ${s.id} ${s.passes ? "[passed]" : "[pending]"} ${s.model ? `<tier:${s.model}> ` : ""}"${s.title}" deps=${JSON.stringify(s.dependsOn)}`,
         )
         .join("\n")
     const failureStory = snap.stories.find((s) => s.id === failure.storyId)
@@ -284,6 +298,7 @@ export function buildSurgeonPrompt(
         `Story id: ${failure.storyId}`,
         `Title: ${failureStory?.title ?? "(unknown)"}`,
         `Description: ${failureStory?.description ?? "(unknown)"}`,
+        `Tier that just failed: ${failureStory?.model ?? "(default)"}`,
         `Attempts: ${failure.attempts}`,
         `Error: ${failure.error ?? "(no reason captured)"}`,
         "",

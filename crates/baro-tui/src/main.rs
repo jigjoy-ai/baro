@@ -126,6 +126,7 @@ fn executor_config_from_app(app: &App) -> executor::ExecutorConfig {
         openai_base_url: app.openai_base_url.clone(),
         effort: app.effort.clone(),
         story_model: app.story_model.clone(),
+        tier_map: app.tier_map.clone(),
     }
 }
 
@@ -240,6 +241,15 @@ struct Cli {
     /// rules. Default: routed (opus) for Claude, gpt-5.5 for OpenAI.
     #[arg(long)]
     story_model: Option<String>,
+
+    /// Per-story tier→backend:model map. Binds the planner's blast-radius
+    /// tiers to concrete backends so ONE run can mix claude/openai/codex
+    /// story-by-story (cheap stories on one model, cross-cutting stories
+    /// on another). Example:
+    ///   --tier-map "haiku=openai:MiniMax-M3,sonnet=openai:MiniMax-M3,opus=claude:opus"
+    /// Without this, per-story tiers run on the phase backend as before.
+    #[arg(long = "tier-map")]
+    tier_map: Option<String>,
 
     /// Seconds to wait between successive story spawns inside the same
     /// DAG level. Gives Librarian a window to capture and broadcast
@@ -513,6 +523,9 @@ async fn run_app(
     }
     if let Some(ref m) = cli.story_model {
         app.story_model = Some(m.clone());
+    }
+    if let Some(ref tm) = cli.tier_map {
+        app.tier_map = Some(tm.clone());
     }
     if let Some(d) = cli.intra_level_delay {
         app.intra_level_delay_secs = Some(d);
@@ -1025,6 +1038,7 @@ async fn run_app(
                                         let obu = app.openai_base_url.clone();
                                         let eff = app.effort.clone();
                                         let stm = app.story_model.clone();
+                                        let ttm = app.tier_map.clone();
                                         let err_tx = tx.clone();
                                         tokio::spawn(async move {
                                             // Resume path: prd.json already holds the
@@ -1053,7 +1067,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone() });
+                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone() });
                                         });
                                     }
                                     Err(e) => {
@@ -1101,6 +1115,7 @@ async fn run_app(
                                     let obu = app.openai_base_url.clone();
                                     let eff = app.effort.clone();
                                     let stm = app.story_model.clone();
+                                    let ttm = app.tier_map.clone();
                                     let err_tx = tx.clone();
                                     tokio::spawn(async move {
                                         // Fresh run: ALWAYS create a new suffixed branch
@@ -1152,7 +1167,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone() });
+                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone() });
                                     });
                                 }
                             }
@@ -1670,6 +1685,7 @@ fn spawn_executor(
         openai_base_url: config.openai_base_url,
         effort: config.effort,
         story_model: config.story_model,
+        tier_map: config.tier_map,
     };
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
 }
