@@ -107,10 +107,27 @@ Rules:
     "Rename pib→taxId in schema + DTOs"
     "Rename pib→taxId in services + frontend forms"
   Prefer 12-15 small stories over 5 big ones.
-- Default execution model is "opus". Only set "model" if you want to
-  override (e.g. set to "sonnet" or "haiku" for trivial cosmetic stories
-  that don't need deep reasoning). For everything substantive, leave
-  the field out and let the default opus run it.
+- TIER EVERY STORY by blast radius — set "model" on EVERY story to one
+  of "haiku" | "sonnet" | "opus". You are the tech lead assigning work
+  to a team; pick the tier by asking "if an agent gets THIS story wrong,
+  what breaks?" — NOT by raw difficulty:
+    * "haiku"  → nothing important breaks. Mechanical, single-concern,
+                 self-contained: a rename, boilerplate, a barrel/index
+                 file, one DTO, a config tweak, a doc edit, scaffolding.
+    * "sonnet" → one feature breaks but the damage is contained to its
+                 own module: a scoped service method, a component, a
+                 focused refactor, tests for non-trivial logic.
+    * "opus"   → other features / the architecture / data integrity
+                 break: schema or migration changes, cross-cutting
+                 refactors, public API/contract design, integration and
+                 wiring stories, anything that several other stories
+                 depend on (a hub node in the DAG).
+  Tiers are how the operator routes cost: a downstream tier map may send
+  "haiku"/"sonnet" to a cheaper backend and keep "opus" on the strongest
+  model. Misclassifying UP wastes money; misclassifying DOWN risks a
+  broken merge — when genuinely unsure between two tiers, pick the
+  HIGHER one. A foundational story that many others depend on is "opus"
+  even if it looks small.
 - Use dependsOn for dependencies; same-priority stories with no deps run IN PARALLEL
 - Include testable acceptance criteria and test commands
 - No circular dependencies

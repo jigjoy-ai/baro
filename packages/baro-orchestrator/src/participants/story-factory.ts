@@ -26,6 +26,12 @@ import {
 import { CodexStoryAgent } from "./codex-story-agent.js"
 import { OpenAIStoryAgent } from "./openai-story-agent.js"
 import { StoryAgent } from "./story-agent.js"
+import {
+    formatRoute,
+    resolveStoryRoute,
+    type EndpointMap,
+    type TierMap,
+} from "../routing.js"
 
 export interface StoryFactoryOptions {
     cwd: string
@@ -56,10 +62,27 @@ export interface StoryFactoryOptions {
      */
     storyModelOverride?: string
     /**
+     * Named OpenAI-compatible endpoints (from `--openai-endpoint`).
+     * Routes of the form `openai:model@name` resolve their base URL +
+     * key here so several endpoints can run in one DAG.
+     */
+    endpoints?: EndpointMap
+    /** Default API key for inline `@https://…` endpoints (OPENAI_API_KEY). */
+    defaultApiKey?: string
+    /**
      * Effort level for the Claude path, passed as `claude --effort`
      * (low|medium|high|xhigh|max). Ignored by the OpenAI path.
      */
     effort?: string
+    /**
+     * Tier→`backend:model` bindings. When a story's `model` is a bare
+     * tier name (e.g. "opus" from the Planner's blast-radius
+     * classification) and a binding exists, the story is routed to that
+     * concrete backend+model — independent of `llm`. This is what lets a
+     * single DAG mix claude / openai / codex stories. Absent → bare tier
+     * names resolve on `llm` exactly as before.
+     */
+    tierMap?: TierMap
 }
 
 export class StoryFactory extends BaseObserver {
@@ -104,49 +127,60 @@ export class StoryFactory extends BaseObserver {
         if (!this.envRef) return
         if (this.active.has(req.storyId)) return // idempotent
 
-        const llm = this.opts.llm ?? "claude"
+        // Resolve which backend + model THIS story runs on. The route
+        // can come from the story's own `model` field (a bare tier name
+        // or an explicit `backend:model`), the tier map, or the global
+        // `--story-model` override. `llm` is only the fallback backend
+        // when the route names none — so one DAG can mix all three
+        // backends story-by-story.
+        const route = resolveStoryRoute(req.model, {
+            tierMap: this.opts.tierMap,
+            fallbackBackend: this.opts.llm ?? "claude",
+            openaiDefaultModel: this.opts.openaiModel ?? "gpt-5.5",
+            override: this.opts.storyModelOverride,
+            endpoints: this.opts.endpoints,
+            defaultApiKey: this.opts.defaultApiKey,
+        })
 
-        // Provider factory: same StorySpec shape feeds both sides;
-        // the OpenAI agent ignores `model` (uses its own gpt-5.x
-        // mapping via openaiModel) and the Claude agent ignores the
-        // OpenAI-specific timeouts.
-        // `storyModelOverride` (from `--story-model`) wins over the
-        // per-PRD model. Empty/absent → use the per-story value.
-        const claudeModel = this.opts.storyModelOverride ?? req.model
-        const openaiModel =
-            this.opts.storyModelOverride ?? this.opts.openaiModel ?? "gpt-5.5"
-        // Codex uses its own model nomenclature (gpt-5.5 by default on
-        // accounts with Plus+ access). Honour storyModelOverride first;
-        // otherwise let Codex pick.
-        const codexModel = this.opts.storyModelOverride
+        process.stderr.write(
+            `[story-factory] ${req.storyId} → ${formatRoute(route)}` +
+                (req.model ? ` (model="${req.model}")` : "") +
+                "\n",
+        )
 
         const agent: StoryAgent | OpenAIStoryAgent | CodexStoryAgent =
-            llm === "codex"
+            route.backend === "codex"
                 ? new CodexStoryAgent({
                       id: req.storyId,
                       prompt: req.prompt,
                       cwd: this.opts.cwd,
-                      model: codexModel,
+                      // undefined → let Codex pick its account default.
+                      model: route.model,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
                   })
-                : llm === "openai"
+                : route.backend === "openai"
                     ? new OpenAIStoryAgent(
                           {
                               id: req.storyId,
                               prompt: req.prompt,
                               cwd: this.opts.cwd,
-                              model: req.model,
+                              model: route.model,
                               retries: req.retries,
                               timeoutSecs: req.timeoutSecs,
                           },
-                          { model: openaiModel },
+                          {
+                              model: route.model ?? this.opts.openaiModel,
+                              baseUrl: route.baseUrl,
+                              apiKey: route.apiKey,
+                          },
                       )
                     : new StoryAgent({
                           id: req.storyId,
                           prompt: req.prompt,
                           cwd: this.opts.cwd,
-                          model: claudeModel,
+                          // undefined → StoryAgent applies its own default.
+                          model: route.model,
                           effort: this.opts.effort,
                           retries: req.retries,
                           timeoutSecs: req.timeoutSecs,

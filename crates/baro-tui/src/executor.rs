@@ -106,6 +106,12 @@ pub struct ExecutorConfig {
     /// flow through their existing function-arg paths in spawn_planner
     /// and don't need an executor-side field.
     pub story_model: Option<String>,
+    /// Per-story tier→backend:model map, forwarded to the orchestrator as
+    /// `--tier-map`. Lets one DAG mix claude/openai/codex story-by-story.
+    pub tier_map: Option<String>,
+    /// Named OpenAI-compatible endpoints (`name=url`), forwarded as
+    /// `--openai-endpoint`. Routes reference them via `openai:model@name`.
+    pub openai_endpoints: Vec<String>,
 }
 
 // ─── Helpers used by main.rs ────────────────────────────────────────

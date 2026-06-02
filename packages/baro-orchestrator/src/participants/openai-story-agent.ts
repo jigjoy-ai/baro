@@ -64,6 +64,7 @@ import {
 import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
     GenericOpenAIModel,
+    type OpenAIConnection,
     UsageAccumulator,
     runInferenceRound,
 } from "../planning/openai-runtime.js"
@@ -120,6 +121,16 @@ export interface OpenAIStoryAgentOptions {
     maxRoundsPerTurn?: number
     /** Per-round inference timeout. Default: 180s. */
     perRoundTimeoutSecs?: number
+    /**
+     * Per-story OpenAI-compatible endpoint base URL. When set, THIS story
+     * runs against it instead of the process-global `OPENAI_BASE_URL` —
+     * and the model is always driven through `GenericOpenAIModel` (the
+     * built-in gpt-5.x classes are hard-wired to OpenAI). Used to mix
+     * endpoints (e.g. MiniMax + real OpenAI) in one run.
+     */
+    baseUrl?: string
+    /** API key paired with `baseUrl`. */
+    apiKey?: string
 }
 
 export class OpenAIStoryAgent extends BaseObserver {
@@ -165,8 +176,13 @@ export class OpenAIStoryAgent extends BaseObserver {
             model: opts.model ?? "gpt-5.5",
             maxRoundsPerTurn: opts.maxRoundsPerTurn ?? 30,
             perRoundTimeoutSecs: opts.perRoundTimeoutSecs ?? 180,
+            baseUrl: opts.baseUrl ?? "",
+            apiKey: opts.apiKey ?? "",
         }
-        this.model = pickModel(this.opts.model)
+        const connection: OpenAIConnection | undefined = opts.baseUrl
+            ? { baseURL: opts.baseUrl, apiKey: opts.apiKey }
+            : undefined
+        this.model = pickModel(this.opts.model, connection)
         this.tools = createStoryTools(spec.cwd)
         setModelTools(this.model, this.tools)
 
@@ -504,7 +520,13 @@ export class OpenAIStoryAgent extends BaseObserver {
 
 // ─── module helpers ────────────────────────────────────────────────
 
-function pickModel(name: string): GenerativeModel {
+function pickModel(name: string, connection?: OpenAIConnection): GenerativeModel {
+    // A per-story endpoint always goes through GenericOpenAIModel — the
+    // built-in gpt-5.x classes bind to OpenAI's own endpoint and can't be
+    // redirected, so "openai:gpt-4o@myproxy" must use the generic model.
+    if (connection?.baseURL) {
+        return new GenericOpenAIModel(name, connection)
+    }
     switch (name) {
         case "gpt-5.5":
             return new Gpt55()

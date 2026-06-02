@@ -23,6 +23,13 @@ import { resolve } from "path"
 
 import { orchestrate, type OrchestrateConfig } from "../src/orchestrate.js"
 import { ClaudeCliParticipant } from "../src/participants/claude-cli-participant.js"
+import {
+    parseEndpoints,
+    parseTierMap,
+    resolveStoryRoute,
+    type EndpointMap,
+    type TierMap,
+} from "../src/routing.js"
 
 interface CliArgs {
     prd: string
@@ -43,6 +50,9 @@ interface CliArgs {
     storyModel?: string
     effort?: string
     intraLevelDelaySecs?: number
+    tierMap?: TierMap
+    /** Raw `--openai-endpoint name=url` specs, resolved to a map later. */
+    endpointSpecs: string[]
     llm: "claude" | "openai" | "codex"
     /** Optional per-phase overrides; each defaults to `llm`. */
     storyLlm?: "claude" | "openai" | "codex"
@@ -64,6 +74,7 @@ function parseArgs(argv: string[]): CliArgs {
         noSentry: false,
         withSurgeon: false,
         surgeonUseLlm: false,
+        endpointSpecs: [],
         llm: "claude",
         help: false,
     }
@@ -127,6 +138,17 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--story-model":
                 args.storyModel = required(argv, ++i, "--story-model")
+                break
+            case "--tier-map":
+                try {
+                    args.tierMap = parseTierMap(required(argv, ++i, "--tier-map"))
+                } catch (e) {
+                    process.stderr.write(`[cli] ${(e as Error).message}\n`)
+                    process.exit(2)
+                }
+                break
+            case "--openai-endpoint":
+                args.endpointSpecs.push(required(argv, ++i, "--openai-endpoint"))
                 break
             case "--effort":
                 args.effort = required(argv, ++i, "--effort")
@@ -199,6 +221,14 @@ function printHelp(): void {
             "  --surgeon-use-llm     Use LLM evaluation in Surgeon (default: deterministic)",
             "  --surgeon-model <name> Model for Surgeon LLM (default: opus)",
             "  --intra-level-delay <secs>  Stagger story spawns within a level (default: 10, 0 disables)",
+            "  --tier-map <spec>     Bind per-story tiers to backends, e.g.",
+            "                        'haiku=openai:MiniMax-M3,sonnet=openai:MiniMax-M3,opus=claude:opus'",
+            "                        (also read from BARO_TIER_MAP). Lets one DAG mix claude/openai/codex.",
+            "  --openai-endpoint <name=url>  Register a named OpenAI-compatible endpoint (repeatable).",
+            "                        Reference it from a route as openai:<model>@<name>, e.g.",
+            "                        --openai-endpoint minimax=https://api.minimax.io/v1",
+            "                        --tier-map 'haiku=openai:MiniMax-M3@minimax,opus=claude:opus'",
+            "                        Key per endpoint: BARO_OPENAI_KEY_<NAME> env, else OPENAI_API_KEY.",
             "  -h, --help            Show this message",
             "",
         ].join("\n"),
@@ -210,6 +240,59 @@ async function main(): Promise<void> {
     if (args.help) {
         printHelp()
         return
+    }
+
+    // `--tier-map` wins; otherwise fall back to BARO_TIER_MAP env (how
+    // the Rust TUI forwards the operator's choice to this subprocess).
+    let tierMap = args.tierMap
+    if (!tierMap && process.env.BARO_TIER_MAP) {
+        try {
+            tierMap = parseTierMap(process.env.BARO_TIER_MAP)
+        } catch (e) {
+            process.stderr.write(`[cli] BARO_TIER_MAP: ${(e as Error).message}\n`)
+            process.exit(2)
+        }
+    }
+
+    // Build the OpenAI endpoint registry. API keys are resolved from the
+    // environment (per-endpoint `BARO_OPENAI_KEY_<NAME>`, else
+    // `OPENAI_API_KEY`) so secrets never travel on the command line. Specs
+    // come from repeated `--openai-endpoint` flags, or BARO_OPENAI_ENDPOINTS
+    // (comma-separated) as a fallback for manual runs.
+    let endpointSpecs = args.endpointSpecs
+    if (endpointSpecs.length === 0 && process.env.BARO_OPENAI_ENDPOINTS) {
+        endpointSpecs = process.env.BARO_OPENAI_ENDPOINTS.split(",")
+    }
+    let openaiEndpoints: EndpointMap | undefined
+    if (endpointSpecs.length > 0) {
+        try {
+            openaiEndpoints = parseEndpoints(endpointSpecs, (name) => {
+                const envName =
+                    "BARO_OPENAI_KEY_" + name.toUpperCase().replace(/[^A-Z0-9]/g, "_")
+                return process.env[envName] ?? process.env.OPENAI_API_KEY
+            })
+        } catch (e) {
+            process.stderr.write(`[cli] ${(e as Error).message}\n`)
+            process.exit(2)
+        }
+    }
+
+    // Fail fast: every endpoint a tier-map route references must resolve.
+    if (tierMap) {
+        for (const route of Object.values(tierMap)) {
+            try {
+                resolveStoryRoute(route, {
+                    fallbackBackend: args.llm,
+                    endpoints: openaiEndpoints,
+                    defaultApiKey: process.env.OPENAI_API_KEY,
+                })
+            } catch (e) {
+                process.stderr.write(
+                    `[cli] tier-map route "${route}": ${(e as Error).message}\n`,
+                )
+                process.exit(2)
+            }
+        }
     }
 
     const cwd = resolve(args.cwd)
@@ -243,6 +326,8 @@ async function main(): Promise<void> {
         surgeonLlm: args.surgeonLlm,
         storyModel: args.storyModel,
         effort: args.effort,
+        tierMap,
+        openaiEndpoints,
     }
 
     if (args.llm === "openai" && !process.env.OPENAI_API_KEY) {
