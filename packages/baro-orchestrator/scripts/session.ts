@@ -155,7 +155,9 @@ async function main(): Promise<void> {
     const session = new PlannerSession({ goal: args.goal, model: args.plannerModel })
 
     process.stderr.write(`[session] planning "${args.goal}" (planner=${args.plannerModel})\n`)
+    emit({ type: "plan_status", state: "planning", model: args.plannerModel })
     emitDraft(await session.seed())
+    emit({ type: "plan_status", state: "idle" })
 
     const rl = createInterface({ input: process.stdin })
     let running = false
@@ -172,6 +174,7 @@ async function main(): Promise<void> {
         }
 
         if (cmd.type === "plan_message" && typeof cmd.text === "string") {
+            emit({ type: "plan_status", state: "refining", model: args.plannerModel })
             try {
                 const turn = await session.handleMessage(cmd.text)
                 emit({ type: "plan_reply", text: turn.reply })
@@ -180,6 +183,7 @@ async function main(): Promise<void> {
             } catch (e) {
                 emit({ type: "plan_error", text: (e as Error).message })
             }
+            emit({ type: "plan_status", state: "idle" })
             continue
         }
 

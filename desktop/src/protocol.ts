@@ -21,6 +21,7 @@ export type SessionEvent =
     | { type: "plan_reply"; text: string }
     | { type: "plan_error"; text: string }
     | { type: "plan_committed"; prd: string }
+    | { type: "plan_status"; state: "planning" | "refining" | "idle"; model?: string }
     // ── execution (BaroEvent) ──
     | { type: "init"; project: string; stories: { id: string; title: string }[] }
     | { type: "dag"; levels: { id: string }[][] }
