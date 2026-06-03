@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "desktop",
+  "productName": "BDE",
   "version": "0.1.0",
   "identifier": "ai.jigjoy.baro.desktop",
   "build": {
@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "desktop",
-        "width": 800,
-        "height": 600
+        "title": "BDE — Baro Development Environment",
+        "width": 1280,
+        "height": 832
       }
     ],
     "security": {

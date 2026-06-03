@@ -43,6 +43,42 @@ export type SessionEvent =
     | { type: "token_usage"; id: string; input_tokens: number; output_tokens: number }
     | { type: "session_exit" }
 
+/** Top-level run lifecycle the UI renders. */
+export type Phase = "idle" | "planning" | "executing" | "done"
+/** Planner-call state during the planning phase (drives the activity indicator). */
+export type PlanStatus = "planning" | "refining" | "idle"
+
+export interface ChatMsg {
+    role: "you" | "planner" | "error"
+    text: string
+}
+
+export interface Tokens {
+    input: number
+    output: number
+}
+
+/** Captured when the run finishes, for the done summary. */
+export interface DoneInfo {
+    success: boolean
+    totalSecs: number
+    done: number
+    total: number
+    prUrl: string | null
+}
+
+/** The config the start form collects and hands to start_session. */
+export interface RunConfig {
+    goal: string
+    cwd: string
+    planner_model: string
+    llm: string
+    effort: string
+    no_git: boolean
+    tier_map: string | null
+    openai_endpoints: string[]
+}
+
 export type StoryStatus = "queued" | "running" | "done" | "failed"
 
 /** Tailwind-free tier colours for the read-only DAG badges. */
