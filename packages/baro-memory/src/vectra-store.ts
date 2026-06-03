@@ -16,7 +16,7 @@
 
 import { LocalIndex } from 'vectra'
 import type { QueryResult } from 'vectra'
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, rmSync, readdirSync, statSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, rmSync, readdirSync, statSync, lstatSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -39,8 +39,14 @@ const MAX_CONTENT_CHARS = 4000
 /** Maximum bytes for a single cached file (5MB). */
 const MAX_CACHE_FILE_BYTES = 5 * 1024 * 1024
 
+/** Maximum total cache size (50MB). Beyond this, oldest entries are evicted. */
+const MAX_TOTAL_CACHE_BYTES = 50 * 1024 * 1024
+
 /** Stale session threshold: 24 hours. */
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000
+
+/** Allowed parent directories for session paths (prevent path traversal). */
+const ALLOWED_SESSION_PARENTS = ['.baro', 'baro-memory', 'tmp']
 
 // ── Defaults ─────────────────────────────────────────────────────────────
 
@@ -103,8 +109,9 @@ export async function createMemoryStore(
         return new NoOpMemoryStore()
     }
 
-    // Resolve session path
+    // Resolve and validate session path (prevent path traversal)
     const sessionPath = cfg.sessionPath || join(tmpdir(), `baro-memory-${process.pid}-${Date.now()}`)
+    validateSessionPath(sessionPath)
     mkdirSync(sessionPath, { recursive: true })
 
     // Initialize Vectra index
@@ -124,8 +131,37 @@ export async function createMemoryStore(
 }
 
 /**
+ * Validate that sessionPath is safe (not a sensitive system directory).
+ * Prevents path traversal attacks via BARO_MEMORY_PATH env var.
+ */
+function validateSessionPath(sessionPath: string): void {
+    const resolved = join(sessionPath) // normalize
+    // Reject paths containing '..' traversal
+    if (resolved.includes('..')) {
+        throw new Error(`Invalid session path (contains ..): ${resolved}`)
+    }
+    // Reject obvious sensitive directories
+    const dangerous = ['/etc', '/usr', '/bin', '/sbin', '/var/run', '/System', '/Library']
+    for (const d of dangerous) {
+        if (resolved.startsWith(d + '/') || resolved === d) {
+            throw new Error(`Invalid session path (sensitive directory): ${resolved}`)
+        }
+    }
+    // Must contain a baro-related segment or be in tmpdir
+    const normalizedPath = resolved.toLowerCase()
+    const isSafe = ALLOWED_SESSION_PARENTS.some(p => normalizedPath.includes(p)) ||
+        normalizedPath.startsWith(tmpdir().toLowerCase())
+    if (!isSafe) {
+        throw new Error(
+            `Invalid session path (must be under ~/.baro, tmpdir, or contain 'baro-memory'): ${resolved}`
+        )
+    }
+}
+
+/**
  * Prune stale session directories older than SESSION_TTL_MS.
  * Call on orchestrator startup to prevent unbounded growth.
+ * Uses lstatSync to avoid following symlinks (prevents symlink attacks).
  */
 export function pruneOldSessions(sessionsDir: string): void {
     try {
@@ -135,8 +171,10 @@ export function pruneOldSessions(sessionsDir: string): void {
             if (!entry.startsWith('run-')) continue
             const entryPath = join(sessionsDir, entry)
             try {
-                const stat = statSync(entryPath)
-                if (now - stat.mtimeMs > SESSION_TTL_MS) {
+                const stat = lstatSync(entryPath)
+                // Skip symlinks entirely (potential attack vector)
+                if (stat.isSymbolicLink()) continue
+                if (stat.isDirectory() && now - stat.mtimeMs > SESSION_TTL_MS) {
                     rmSync(entryPath, { recursive: true, force: true })
                 }
             } catch { /* skip entries we can't stat */ }
@@ -306,16 +344,20 @@ class VectraMemoryStore implements MemoryStore {
 
     // ── File cache ───────────────────────────────────────────────
     // Simple JSON file (not vectorized -- exact key-value lookup).
-    // Uses a lockfile to prevent concurrent write corruption.
+    // NOTE: Multi-process writes use merge-on-write to reduce data loss.
+    // This is best-effort — not ACID. For guaranteed consistency, use SQLite.
 
     async cacheFile(path: string, content: string, agentId: string): Promise<void> {
         // Skip excessively large files
         if (content.length > MAX_CACHE_FILE_BYTES) return
 
+        // Merge-on-write: reload fresh state before modifying (reduces race window)
         const cache = this.loadCache()
         const existing = cache[path]
         if (!existing || existing.content !== content) {
             cache[path] = { path, content, readByAgent: agentId, timestamp: Date.now() }
+            // Evict oldest entries if total cache exceeds limit
+            this.evictIfNeeded(cache)
             this.saveCache(cache)
         }
     }
@@ -377,6 +419,26 @@ class VectraMemoryStore implements MemoryStore {
     }
 
     // ── Private helpers ──────────────────────────────────────────
+
+    /**
+     * Evict oldest cache entries until total size is under MAX_TOTAL_CACHE_BYTES.
+     * LRU-style: removes entries with oldest timestamps first.
+     */
+    private evictIfNeeded(cache: Record<string, CachedFile>): void {
+        let totalBytes = 0
+        for (const entry of Object.values(cache)) {
+            totalBytes += entry.content.length
+        }
+        if (totalBytes <= MAX_TOTAL_CACHE_BYTES) return
+
+        // Sort by timestamp ascending (oldest first)
+        const entries = Object.entries(cache).sort((a, b) => a[1].timestamp - b[1].timestamp)
+        for (const [key, entry] of entries) {
+            if (totalBytes <= MAX_TOTAL_CACHE_BYTES) break
+            totalBytes -= entry.content.length
+            delete cache[key]
+        }
+    }
 
     private generateId(finding: Finding): string {
         const parts = [finding.agentId, finding.tool]

@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createMemoryStore, MemoryStore, Finding } from '../index.js'
 import { join } from 'path'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 
 describe('VectraMemoryStore (persisted)', () => {
@@ -238,6 +238,78 @@ describe('Cross-process persistence', () => {
         expect(stats.cachedFiles).toBe(1)
 
         await store2.close()
+        try { rmSync(sessionPath, { recursive: true }) } catch {}
+    }, 60000)
+})
+
+describe('Corruption recovery', () => {
+    it('should handle corrupt cache.json gracefully', async () => {
+        const sessionPath = mkdtempSync(join(tmpdir(), 'baro-memory-corrupt-'))
+
+        // Create a store and cache a file
+        const store1 = await createMemoryStore({ sessionPath })
+        await store1.cacheFile('src/good.ts', 'good content', 'agent-1')
+        await store1.close()
+
+        // Corrupt the cache.json
+        const cachePath = join(sessionPath, 'cache.json')
+        writeFileSync(cachePath, '{ invalid json !!!', 'utf-8')
+
+        // New store should handle corruption gracefully
+        const store2 = await createMemoryStore({ sessionPath })
+        const content = await store2.getCachedFile('src/good.ts')
+        expect(content).toBeNull() // Data lost due to corruption, but no crash
+
+        // Should still work for new writes
+        await store2.cacheFile('src/new.ts', 'new content', 'agent-2')
+        const newContent = await store2.getCachedFile('src/new.ts')
+        expect(newContent).toBe('new content')
+
+        await store2.close()
+        try { rmSync(sessionPath, { recursive: true }) } catch {}
+    }, 60000)
+
+    it('should handle empty/missing cache.json', async () => {
+        const sessionPath = mkdtempSync(join(tmpdir(), 'baro-memory-empty-'))
+
+        const store = await createMemoryStore({ sessionPath })
+
+        // No cache.json exists yet — should return empty results
+        const paths = await store.getCachedPaths()
+        expect(paths).toEqual([])
+
+        const content = await store.getCachedFile('nonexistent.ts')
+        expect(content).toBeNull()
+
+        await store.close()
+        try { rmSync(sessionPath, { recursive: true }) } catch {}
+    }, 60000)
+
+    it('should return false for empty content in remember()', async () => {
+        const sessionPath = mkdtempSync(join(tmpdir(), 'baro-memory-empty-content-'))
+        const store = await createMemoryStore({ sessionPath })
+
+        const result1 = await store.remember({ tool: 'Read', agentId: 'a', content: '' })
+        expect(result1).toBe(false)
+
+        const result2 = await store.remember({ tool: 'Read', agentId: 'a', content: '   ' })
+        expect(result2).toBe(false)
+
+        await store.close()
+        try { rmSync(sessionPath, { recursive: true }) } catch {}
+    }, 60000)
+
+    it('should return empty results for empty query in recall()', async () => {
+        const sessionPath = mkdtempSync(join(tmpdir(), 'baro-memory-empty-query-'))
+        const store = await createMemoryStore({ sessionPath })
+
+        const results1 = await store.recall('')
+        expect(results1).toEqual([])
+
+        const results2 = await store.recall('   ')
+        expect(results2).toEqual([])
+
+        await store.close()
         try { rmSync(sessionPath, { recursive: true }) } catch {}
     }, 60000)
 })
