@@ -140,8 +140,17 @@ drag-n-drop; deleting the TUI.
 
 - **Transport:** stdio vs localhost WS for F0. Lean WS (kaleidoskop already
   speaks it; smooths the later remote path).
-- **Planning events gap:** does headless already emit Architect/Planner progress
-  as protocol events, or only render them in the TUI? (Resolve in F0.)
+- **Planning events gap — RESOLVED (F0 audit).** Planning is **off-protocol**:
+  `architect_runner.rs` / `planner_runner.rs` `spawn_and_capture` the whole
+  stdout as one blob (decision-doc / `prd.json`); the `BaroEvent` stream only
+  starts in `orchestrate.ts`, which `loadPrd`s an *already-finished* `prd.json`.
+  So the current Planner is one-shot capture with no streaming and no
+  conversation. **Consequence:** F1's conversational planner is **not** an
+  extension of the capture path — it is a new long-lived Mozaik participant in
+  the orchestrator that streams `plan_*` events and takes `plan_*` commands.
+  Cleanest shape: plan and run share **one long-lived orchestrator process +
+  one event stream**; the Rust capture-planner is a TUI-era artifact the
+  headless/desktop path bypasses.
 - **Draft-PRD shape:** reuse `PrdFile`/`PrdStory` verbatim as the draft, plus a
   conversation transcript alongside.
 - **RUN-gate invariant:** PLAN is strictly dry — zero git/agents/cost beyond
@@ -151,11 +160,12 @@ drag-n-drop; deleting the TUI.
 
 ## 9. First concrete steps
 
-1. F0 audit: trace whether Architect/Planner progress already reaches the
-   `BaroEvent` stream; list the gaps.
-2. Spike the conversational planner as a Mozaik participant over the existing
+1. ~~F0 audit: trace whether Architect/Planner progress reaches the `BaroEvent`
+   stream.~~ **Done** — it does not; planning is one-shot capture (see §8).
+2. **Spike the conversational planner** as a Mozaik participant over the existing
    PRD-mutation ops (no UI) — drive it from a script, assert the draft DAG
-   mutates coherently across turns.
+   mutates coherently across turns (split / add / rewire / re-tier). This is the
+   F1 core and the riskiest assumption; test it before any UI.
 3. Define the protocol extension (`plan_draft` / `plan_message` / `run_plan`).
 4. Stand up the Tauri shell + kaleidoskop viz + shadcn chat against a mocked
    draft stream, then wire to the real engine.
