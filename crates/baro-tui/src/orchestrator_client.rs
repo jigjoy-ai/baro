@@ -35,6 +35,9 @@ pub struct OrchestratorConfig {
     pub critic_model: Option<String>,
     /// Disable Librarian (Phase 2 cross-agent memory). Default: false (Librarian on).
     pub with_librarian: bool,
+    /// Disable semantic memory (MemoryLibrarian). Default: false (memory on).
+    /// When false and with_librarian is true, uses tag-based Librarian.
+    pub with_memory: bool,
     /// Disable Sentry (Phase 2 file conflict detector). Default: false (Sentry on).
     pub with_sentry: bool,
     /// Enable Surgeon (Phase 4 adaptive DAG mutation). Default: false.
@@ -280,6 +283,9 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     }
     if !cfg.with_librarian {
         cmd.arg("--no-librarian");
+    }
+    if !cfg.with_memory {
+        cmd.arg("--no-memory");
     }
     if !cfg.with_sentry {
         cmd.arg("--no-sentry");

@@ -71,6 +71,7 @@ pub struct ExecutorConfig {
     pub with_critic: bool,
     pub critic_model: Option<String>,
     pub with_librarian: bool,
+    pub with_memory: bool,
     pub with_sentry: bool,
     pub with_surgeon: bool,
     pub surgeon_use_llm: bool,
