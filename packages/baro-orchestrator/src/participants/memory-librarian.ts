@@ -1,10 +1,11 @@
 /**
  * MemoryLibrarian — semantic memory for cross-agent context sharing.
  *
- * Simple architecture:
- * 1. Agents read files → cached in ChromaDB
+ * Architecture:
+ * 1. Agents use tools (Read, Grep, etc.) → outputs intercepted and stored
  * 2. New story launches → semantic search for relevant context
- * 3. Context injected at launch (not mid-flight spam)
+ * 3. Context + CLI instructions injected at launch
+ * 4. Agents can query mid-flight via baro-memory CLI
  *
  * Log: ~/.baro/runs/memory-*.log
  * Debug: BARO_DEBUG=memory
@@ -17,6 +18,8 @@ import {
     Participant,
     SemanticEvent,
 } from "@mozaik-ai/core"
+
+import type { MemoryStore } from "@baro/memory"
 
 import {
     Knowledge,
@@ -68,11 +71,16 @@ function logStats(): void {
 
 const EXPLORATION_TOOLS = new Set(["Read", "Grep", "Glob", "Bash", "LSP"])
 
+/** Pending tool call awaiting its output. TTL-based cleanup prevents leaks. */
 interface PendingCall {
     agentId: string
     tool: string
     args: Record<string, unknown>
+    timestamp: number
 }
+
+/** Maximum age for a pending call before it's discarded (5 minutes). */
+const PENDING_TTL_MS = 5 * 60 * 1000
 
 export interface MemoryLibrarianOptions {
     disabled?: boolean
@@ -80,7 +88,7 @@ export interface MemoryLibrarianOptions {
     maxInjectedChars?: number
     /**
      * Session path for persisting memory to disk.
-     * When set, the memory store writes JSON files here so the CLI
+     * When set, the memory store writes to Vectra index here so the CLI
      * and orchestrator can share state across processes.
      * Typically: ~/.baro/sessions/<session-id>/memory
      */
@@ -93,8 +101,9 @@ export class MemoryLibrarian extends BaseObserver {
     private readonly opts: Required<MemoryLibrarianOptions>
     private readonly pending = new Map<string, PendingCall>()
     private readonly inFlight = new Set<string>()
-    private store: any = null
+    private store: MemoryStore | null = null
     private initPromise: Promise<void> | null = null
+    private initFailed = false
 
     constructor(opts: MemoryLibrarianOptions = {}) {
         super()
@@ -111,8 +120,11 @@ export class MemoryLibrarian extends BaseObserver {
         }
     }
 
-    private async ensureStore(): Promise<any> {
+    private async ensureStore(): Promise<MemoryStore | null> {
         if (this.opts.disabled) return null
+        // If initialization previously failed, don't retry endlessly
+        if (this.initFailed) return null
+
         if (!this.store && !this.initPromise) {
             this.initPromise = (async () => {
                 try {
@@ -127,11 +139,24 @@ export class MemoryLibrarian extends BaseObserver {
                 } catch (err) {
                     log(`Memory store failed: ${err}`)
                     this.store = null
+                    this.initFailed = true
+                    // Reset initPromise so it doesn't permanently reject
+                    this.initPromise = null
                 }
             })()
         }
-        await this.initPromise
+        if (this.initPromise) await this.initPromise
         return this.store
+    }
+
+    /** Cleanup stale pending calls (prevents memory leak from timed-out agents). */
+    private pruneStalePending(): void {
+        const now = Date.now()
+        for (const [callId, pending] of this.pending) {
+            if (now - pending.timestamp > PENDING_TTL_MS) {
+                this.pending.delete(callId)
+            }
+        }
     }
 
     // ── Called at story launch ────────────────────────────────
@@ -139,7 +164,10 @@ export class MemoryLibrarian extends BaseObserver {
     /**
      * Semantic search for relevant context from other agents.
      * Called by Conductor's onBeforeStoryLaunch hook.
-     * Returns context + instructions that survive compaction.
+     * Returns context + CLI instructions that survive compaction.
+     *
+     * ALWAYS returns instructions (even when store is empty) so agents
+     * know they can query mid-flight as other agents store findings.
      */
     async gatherContext(storyId: string, hints: readonly string[] = []): Promise<string | null> {
         const store = await this.ensureStore()
@@ -159,28 +187,26 @@ export class MemoryLibrarian extends BaseObserver {
         // Get list of cached files
         const cachedPaths = await store.getCachedPaths()
 
-        // ALWAYS inject CLI instructions so agents can query mid-flight,
-        // even when no findings exist yet (other agents will store findings
-        // as they work, and this agent can query them dynamically).
+        // ALWAYS inject CLI instructions so agents can query mid-flight
         const parts: string[] = []
 
-        // Memory instructions (survive compaction)
         parts.push("## Shared Memory System (from parallel agents)")
         parts.push("")
         parts.push("This project uses a shared memory system. Other agents have")
-        parts.push("already explored the codebase. Use these commands via Bash:")
+        parts.push("already explored the codebase (or will as they work).")
+        parts.push("Use these commands via Bash to check what's available:")
         parts.push("")
-        parts.push("	# Find relevant context from other agents")
-        parts.push("	node ~/.baro/bin/baro-memory.mjs query \"JWT authentication\"")
+        parts.push("\t# Find relevant context from other agents")
+        parts.push("\tnode ~/.baro/bin/baro-memory.mjs query \"JWT authentication\"")
         parts.push("")
-        parts.push("	# List files already read by other agents")
-        parts.push("	node ~/.baro/bin/baro-memory.mjs cache list")
+        parts.push("\t# List files already read by other agents")
+        parts.push("\tnode ~/.baro/bin/baro-memory.mjs cache list")
         parts.push("")
-        parts.push("	# Get cached file content (no disk read needed)")
-        parts.push("	node ~/.baro/bin/baro-memory.mjs cache get src/auth.ts")
+        parts.push("\t# Get cached file content (no disk read needed)")
+        parts.push("\tnode ~/.baro/bin/baro-memory.mjs cache get src/auth.ts")
         parts.push("")
-        parts.push("	# Store a finding for other agents")
-        parts.push("	node ~/.baro/bin/baro-memory.mjs store \"found X\" --tool Read --file src/foo.ts")
+        parts.push("\t# Store a finding for other agents")
+        parts.push("\tnode ~/.baro/bin/baro-memory.mjs store \"found X\" --tool Read --file src/foo.ts")
         parts.push("")
         parts.push("IMPORTANT: Check cached files BEFORE reading from disk.")
         parts.push("If a file is cached, use `baro-memory cache get` instead of Read.")
@@ -219,52 +245,82 @@ export class MemoryLibrarian extends BaseObserver {
         if (!EXPLORATION_TOOLS.has(item.name)) return
         const agentId = (source as unknown as { agentId?: string }).agentId
         if (typeof agentId !== "string") return
-        
+
+        // Prune stale entries periodically
+        if (this.pending.size > 100) this.pruneStalePending()
+
         let args: Record<string, unknown> = {}
         try { args = JSON.parse(item.args) } catch {}
-        this.pending.set(item.callId, { agentId, tool: item.name, args })
+        this.pending.set(item.callId, { agentId, tool: item.name, args, timestamp: Date.now() })
     }
 
     override async onExternalFunctionCallOutput(source: Participant, item: FunctionCallOutputItem): Promise<void> {
-        const json = item.toJSON() as { call_id: string; output: Array<{ text: string }> }
-        const pending = this.pending.get(json.call_id)
+        let callId: string
+        let outputTexts: string[]
+
+        try {
+            const json = item.toJSON() as Record<string, unknown>
+            callId = json.call_id as string
+            const output = json.output as Array<{ text?: string }> | undefined
+            outputTexts = (output ?? [])
+                .filter((b): b is { text: string } => typeof b?.text === "string")
+                .map(b => b.text)
+        } catch {
+            return // Malformed output — skip silently
+        }
+
+        const pending = this.pending.get(callId)
         if (!pending) return
-        this.pending.delete(json.call_id)
+        this.pending.delete(callId)
 
         const store = await this.ensureStore()
         if (!store) return
 
-        const content = json.output.map(b => b.text).join("\n")
-        const filePath = pending.tool === "Read" ? (pending.args.file_path ?? pending.args.path) as string : undefined
+        const content = outputTexts.join("\n")
+        if (!content.trim()) return // Skip empty outputs
+
+        const filePath = pending.tool === "Read"
+            ? (pending.args.file_path ?? pending.args.path) as string | undefined
+            : undefined
 
         // Cache file reads
-        if (pending.tool === "Read" && filePath) {
-            await store.cacheFile(filePath, content, pending.agentId)
-            stats.cached++
-            log(`CACHED: ${filePath} (${content.length} chars)`)
+        if (pending.tool === "Read" && filePath && content.length > 0) {
+            try {
+                await store.cacheFile(filePath, content, pending.agentId)
+                stats.cached++
+                log(`CACHED: ${filePath} (${content.length} chars)`)
+            } catch (err) {
+                log(`CACHE FAILED: ${filePath}: ${err}`)
+            }
         }
 
         // Store finding for semantic search
-        await store.remember({
-            tool: pending.tool,
-            agentId: pending.agentId,
-            content: content.slice(0, 4000),
-            filePath,
-            pattern: pending.tool === "Grep" ? pending.args.pattern as string : undefined,
-        })
-        stats.stored++
-        stats.charsStored += Math.min(content.length, 4000)
-        log(`STORED: ${pending.tool} ${filePath || ""} from ${pending.agentId}`)
-
-        // Emit Knowledge event
-        for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, Knowledge.create({
-                sourceAgentId: pending.agentId,
-                tags: [pending.tool.toLowerCase()],
-                summary: `${pending.tool} ${filePath || ""}`,
-                content: content.slice(0, 1000),
+        try {
+            await store.remember({
                 tool: pending.tool,
-            }))
+                agentId: pending.agentId,
+                content: content.slice(0, 4000),
+                filePath,
+                pattern: pending.tool === "Grep" ? pending.args.pattern as string : undefined,
+            })
+            stats.stored++
+            stats.charsStored += Math.min(content.length, 4000)
+            log(`STORED: ${pending.tool} ${filePath || ""} from ${pending.agentId}`)
+        } catch (err) {
+            log(`STORE FAILED: ${pending.tool} from ${pending.agentId}: ${err}`)
+        }
+
+        // Emit Knowledge event (only for high-value tools)
+        if (pending.tool === "Read" || pending.tool === "Grep") {
+            for (const env of this.getEnvironments()) {
+                env.deliverSemanticEvent(this, Knowledge.create({
+                    sourceAgentId: pending.agentId,
+                    tags: [pending.tool.toLowerCase()],
+                    summary: `${pending.tool} ${filePath || ""}`,
+                    content: content.slice(0, 1000),
+                    tool: pending.tool,
+                }))
+            }
         }
     }
 

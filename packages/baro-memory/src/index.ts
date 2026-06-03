@@ -35,7 +35,7 @@
  * @module @baro/memory
  */
 
-export { createMemoryStore } from './vectra-store.js'
+export { createMemoryStore, pruneOldSessions } from './vectra-store.js'
 export type {
     CachedFile,
     Finding,

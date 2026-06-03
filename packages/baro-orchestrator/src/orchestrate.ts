@@ -328,9 +328,19 @@ export async function orchestrate(
 
     // Generate a session-scoped memory path for cross-process sharing.
     // Vectra index + cache.json live here. CLI reads BARO_MEMORY_PATH.
+    // Include PID to prevent collision if two orchestrators start simultaneously.
+    const sessionsDir = join(process.env.HOME || "/tmp", ".baro", "sessions")
     const memorySessionPath = useMemory
-        ? join(process.env.HOME || "/tmp", ".baro", "sessions", `run-${Date.now()}`, "memory")
+        ? join(sessionsDir, `run-${Date.now()}-${process.pid}`, "memory")
         : undefined
+
+    // Prune stale session directories (>24h old) to prevent unbounded growth.
+    if (useMemory) {
+        try {
+            const { pruneOldSessions } = await import("@baro/memory")
+            pruneOldSessions(sessionsDir)
+        } catch { /* non-critical */ }
+    }
 
     // Expose path via env so child processes (story agents) inherit it.
     if (memorySessionPath) {
