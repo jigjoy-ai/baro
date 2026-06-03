@@ -28,6 +28,7 @@ import { createInterface } from "readline"
 import { resolve } from "path"
 
 import { orchestrate, type OrchestrateConfig } from "../src/orchestrate.js"
+import type { Operator } from "../src/participants/operator.js"
 import { savePrd, type PrdFile } from "../src/prd.js"
 import { buildDag } from "../src/dag.js"
 import { PlannerSession } from "../src/planning/planner-session.js"
@@ -160,12 +161,13 @@ async function main(): Promise<void> {
     emit({ type: "plan_status", state: "idle" })
 
     const rl = createInterface({ input: process.stdin })
-    let running = false
+    let executing = false
+    let operator: Operator | null = null
 
     for await (const line of rl) {
         const trimmed = line.trim()
         if (!trimmed) continue
-        let cmd: { type?: string; text?: string }
+        let cmd: { type?: string; text?: string; story_id?: string }
         try {
             cmd = JSON.parse(trimmed)
         } catch {
@@ -173,6 +175,25 @@ async function main(): Promise<void> {
             continue
         }
 
+        // ── steering during execution ──
+        // Once committed, the readline loop keeps running (we no longer
+        // close it) so the user can message / abort live stories via the
+        // Operator. Planning commands are ignored here.
+        if (executing) {
+            if (cmd.type === "redirect" && cmd.story_id && typeof cmd.text === "string") {
+                operator?.dispatch({ kind: "redirect", storyId: cmd.story_id, message: cmd.text })
+            } else if (cmd.type === "abort" && cmd.story_id) {
+                operator?.dispatch({ kind: "abort", storyId: cmd.story_id })
+            } else if (cmd.type === "abort_all") {
+                operator?.dispatch({ kind: "abort_all" })
+            } else if (cmd.type === "shutdown") {
+                operator?.dispatch({ kind: "shutdown" })
+                process.exit(0)
+            }
+            continue
+        }
+
+        // ── planning ──
         if (cmd.type === "plan_message" && typeof cmd.text === "string") {
             emit({ type: "plan_status", state: "refining", model: args.plannerModel })
             try {
@@ -189,13 +210,14 @@ async function main(): Promise<void> {
 
         if (cmd.type === "run_plan") {
             if (!session.draft) { emit({ type: "plan_error", text: "no draft to run" }); continue }
-            running = true
-            rl.close()
+            executing = true
             savePrd(prdPath, session.draft)
             emit({ type: "plan_committed", prd: prdPath })
             process.stderr.write(`[session] committed draft → ${prdPath}; executing\n`)
             // EXECUTE in the SAME process — orchestrate() emits the normal
-            // BaroEvent stream to stdout (emitTuiEvents defaults on).
+            // BaroEvent stream to stdout. We do NOT await it here: the
+            // readline loop stays alive so redirect/abort can steer live
+            // stories via the Operator captured below.
             const config: OrchestrateConfig = {
                 prdPath,
                 cwd,
@@ -206,11 +228,19 @@ async function main(): Promise<void> {
                 effort: args.effort,
                 tierMap,
                 openaiEndpoints: endpoints,
+                onOperatorReady: (op) => { operator = op },
             }
-            const result = await orchestrate(config)
-            const failed = result.summary.failedStories.length
-            process.stderr.write(`[session] run complete — ${failed} failed\n`)
-            process.exit(failed > 0 ? 1 : 0)
+            orchestrate(config)
+                .then((result) => {
+                    const failed = result.summary.failedStories.length
+                    process.stderr.write(`[session] run complete — ${failed} failed\n`)
+                    process.exit(failed > 0 ? 1 : 0)
+                })
+                .catch((e: unknown) => {
+                    process.stderr.write(`[session] run failed: ${(e as Error)?.stack ?? String(e)}\n`)
+                    process.exit(1)
+                })
+            continue
         }
 
         if (cmd.type === "shutdown") {
@@ -221,8 +251,9 @@ async function main(): Promise<void> {
         emit({ type: "plan_error", text: `unknown command: ${cmd.type}` })
     }
 
-    // stdin closed without run_plan → nothing to execute.
-    if (!running) {
+    // stdin closed while still planning → nothing to execute. (If we're
+    // executing, the orchestrate() promise above owns the exit.)
+    if (!executing) {
         process.stderr.write("[session] stdin closed before run_plan; exiting\n")
         process.exit(0)
     }

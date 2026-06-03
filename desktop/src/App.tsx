@@ -98,6 +98,7 @@ export default function App() {
     const [chat, setChat] = useState<ChatMsg[]>([])
     const [feed, setFeed] = useState<{ id: string; line: string }[]>([])
     const [draftMsg, setDraftMsg] = useState("")
+    const [target, setTarget] = useState<string | null>(null)
     const [prUrl, setPrUrl] = useState<string | null>(null)
     const feedRef = useRef<HTMLDivElement>(null)
     const chatEndRef = useRef<HTMLDivElement>(null)
@@ -198,9 +199,19 @@ export default function App() {
     async function sendMessage() {
         const text = draftMsg.trim()
         if (!text) return
-        setChat((c) => [...c, { role: "you", text }])
+        if (phase === "planning") {
+            setChat((c) => [...c, { role: "you", text }])
+            setDraftMsg("")
+            await send({ type: "plan_message", text })
+            return
+        }
+        // executing → steer a live story
+        const runningIds = stories.filter((s) => status[s.id] === "running").map((s) => s.id)
+        const to = target ?? runningIds[0]
+        if (!to) return
+        setChat((c) => [...c, { role: "you", text: `→ ${to}: ${text}` }])
         setDraftMsg("")
-        await send({ type: "plan_message", text })
+        await send({ type: "redirect", story_id: to, text })
     }
 
     const done = stories.filter((s) => status[s.id] === "done").length
@@ -320,7 +331,9 @@ export default function App() {
                         <div className="flex items-center gap-2 p-3">
                             <Input value={draftMsg} onChange={(e) => setDraftMsg(e.target.value)}
                                 onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-                                placeholder={phase === "planning" ? "refine the plan…" : "message a running story…"} />
+                                placeholder={phase === "planning" ? "refine the plan…"
+                                    : (target ?? running[0]) ? `message ${target ?? running[0]}…`
+                                    : "click a running story to message it…"} />
                             <Button size="icon" onClick={sendMessage} disabled={!draftMsg.trim()} aria-label="Send">
                                 <Send className="h-4 w-4" />
                             </Button>
@@ -347,9 +360,12 @@ export default function App() {
                                                 const st: StoryStatus = status[n.id] ?? "queued"
                                                 const title = stories.find((s) => s.id === n.id)?.title ?? n.id
                                                 const isRunning = st === "running"
+                                                const selectable = phase === "executing"
+                                                const selected = target === n.id
                                                 return (
                                                     <div key={n.id} title={title}
-                                                        className={`flex w-56 min-w-0 flex-col gap-1 rounded-md border bg-card px-2 py-1.5 text-xs transition-colors ${isRunning ? "border-amber-400/70 shadow-[0_0_0_1px_rgba(251,191,36,0.4)]" : ""}`}>
+                                                        onClick={selectable ? () => setTarget(n.id) : undefined}
+                                                        className={`flex w-56 min-w-0 flex-col gap-1 rounded-md border bg-card px-2 py-1.5 text-xs transition-colors ${isRunning ? "border-amber-400/70 shadow-[0_0_0_1px_rgba(251,191,36,0.4)]" : ""} ${selectable ? "cursor-pointer hover:border-foreground/30" : ""} ${selected ? "ring-2 ring-primary" : ""}`}>
                                                         <div className="flex min-w-0 items-center gap-1.5">
                                                             {phase !== "planning" && (
                                                                 <span className={`h-2 w-2 shrink-0 rounded-full ${isRunning ? "animate-pulse" : ""}`}
