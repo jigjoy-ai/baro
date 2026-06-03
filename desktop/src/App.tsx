@@ -7,6 +7,15 @@ import { Textarea } from "@/components/ui/textarea"
 import { Card } from "@/components/ui/card"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
+import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from "@/components/ui/select"
 import { Send } from "lucide-react"
 import {
     type DraftStory,
@@ -51,10 +60,35 @@ function Spinner() {
     )
 }
 
+function LabeledSelect({ label, value, onChange, options }: {
+    label: string
+    value: string
+    onChange: (v: string) => void
+    options: string[]
+}) {
+    return (
+        <div className="space-y-1.5">
+            <Label>{label}</Label>
+            <Select value={value} onValueChange={onChange}>
+                <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                    {options.map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
+                </SelectContent>
+            </Select>
+        </div>
+    )
+}
+
 export default function App() {
     const [phase, setPhase] = useState<Phase>("idle")
     const [planStatus, setPlanStatus] = useState<PlanStatus>("idle")
     const [plannerModel, setPlannerModel] = useState("sonnet")
+    const [llm, setLlm] = useState("claude")
+    const [effort, setEffort] = useState("high")
+    const [tierMap, setTierMap] = useState("")
+    const [endpoints, setEndpoints] = useState("")
+    const [noGit, setNoGit] = useState(false)
+    const [showAdvanced, setShowAdvanced] = useState(false)
     const [goal, setGoal] = useState("")
     const [cwd, setCwd] = useState("")
     const [stories, setStories] = useState<DraftStory[]>([])
@@ -135,8 +169,23 @@ export default function App() {
     async function start() {
         if (!goal.trim() || !cwd.trim()) return
         setChat([{ role: "you", text: goal }])
+        const openai_endpoints = endpoints
+            .split(/[\n,]/)
+            .map((s) => s.trim())
+            .filter(Boolean)
         try {
-            await invoke("start_session", { args: { goal, cwd, planner_model: plannerModel, no_git: false } })
+            await invoke("start_session", {
+                args: {
+                    goal,
+                    cwd,
+                    planner_model: plannerModel,
+                    llm,
+                    effort,
+                    no_git: noGit,
+                    tier_map: tierMap.trim() || null,
+                    openai_endpoints,
+                },
+            })
             setPhase("planning")
         } catch (e) {
             setChat((c) => [...c, { role: "error", text: String(e) }])
@@ -190,18 +239,54 @@ export default function App() {
             )}
 
             {phase === "idle" ? (
-                <div className="flex flex-1 items-center justify-center p-6">
-                    <Card className="w-full max-w-xl space-y-4 p-6">
+                <div className="flex flex-1 items-center justify-center overflow-auto p-6">
+                    <Card className="w-full max-w-2xl space-y-4 p-6">
                         <h2 className="text-lg font-semibold">Start a run</h2>
                         <div className="space-y-1.5">
-                            <label className="text-sm text-muted-foreground">Goal</label>
+                            <Label>Goal</Label>
                             <Textarea rows={3} value={goal} onChange={(e) => setGoal(e.target.value)}
                                 placeholder="Add a reservations module to the service…" />
                         </div>
                         <div className="space-y-1.5">
-                            <label className="text-sm text-muted-foreground">Working directory</label>
+                            <Label>Working directory</Label>
                             <Input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="/path/to/target/repo" />
                         </div>
+
+                        <button type="button" onClick={() => setShowAdvanced((v) => !v)}
+                            className="text-sm text-muted-foreground hover:text-foreground">
+                            {showAdvanced ? "▾" : "▸"} Run options
+                        </button>
+
+                        {showAdvanced && (
+                            <div className="space-y-4 rounded-md border bg-muted/20 p-4">
+                                <div className="grid grid-cols-3 gap-3">
+                                    <LabeledSelect label="Planner" value={plannerModel} onChange={setPlannerModel}
+                                        options={["opus", "sonnet", "haiku"]} />
+                                    <LabeledSelect label="Backend" value={llm} onChange={setLlm}
+                                        options={["claude", "openai", "codex"]} />
+                                    <LabeledSelect label="Effort" value={effort} onChange={setEffort}
+                                        options={["low", "medium", "high", "xhigh", "max"]} />
+                                </div>
+                                <div className="space-y-1.5">
+                                    <Label>Tier map <span className="text-muted-foreground">(optional)</span></Label>
+                                    <Input value={tierMap} onChange={(e) => setTierMap(e.target.value)}
+                                        placeholder="haiku=openai:MiniMax-M3@minimax,opus=claude:opus" className="font-mono text-xs" />
+                                </div>
+                                <div className="space-y-1.5">
+                                    <Label>OpenAI endpoints <span className="text-muted-foreground">(name=url, one per line)</span></Label>
+                                    <Textarea rows={2} value={endpoints} onChange={(e) => setEndpoints(e.target.value)}
+                                        placeholder="minimax=https://api.minimax.io/v1" className="font-mono text-xs" />
+                                    <p className="text-xs text-muted-foreground">
+                                        Keys come from <code>BARO_OPENAI_KEY_&lt;NAME&gt;</code> / <code>OPENAI_API_KEY</code> in the env.
+                                    </p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <Switch id="nogit" checked={noGit} onCheckedChange={setNoGit} />
+                                    <Label htmlFor="nogit">No git (skip branch / PR)</Label>
+                                </div>
+                            </div>
+                        )}
+
                         <Button onClick={start} disabled={!goal.trim() || !cwd.trim()} className="w-full">Plan it ▸</Button>
                     </Card>
                 </div>
