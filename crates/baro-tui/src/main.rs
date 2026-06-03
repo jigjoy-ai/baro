@@ -113,6 +113,7 @@ fn executor_config_from_app(app: &App) -> executor::ExecutorConfig {
         with_critic: app.with_critic,
         critic_model: app.critic_model.clone(),
         with_librarian: app.with_librarian,
+        with_memory: app.with_memory,
         with_sentry: app.with_sentry,
         with_surgeon: app.with_surgeon,
         surgeon_use_llm: app.surgeon_use_llm,
@@ -329,6 +330,12 @@ struct Cli {
     critic_llm: Option<String>,
     #[arg(long, value_parser = ["claude", "openai", "codex"])]
     surgeon_llm: Option<String>,
+
+    /// Disable semantic memory (MemoryLibrarian). Uses tag-based
+    /// Librarian instead. Semantic memory uses ONNX embeddings for
+    /// better context matching between agents. Default: ON.
+    #[arg(long)]
+    no_memory: bool,
 }
 
 enum AppEvent {
@@ -509,6 +516,9 @@ async fn run_app(
     }
     if cli.no_librarian {
         app.with_librarian = false;
+    }
+    if cli.no_memory {
+        app.with_memory = false;
     }
     if cli.no_sentry {
         app.with_sentry = false;
@@ -1039,6 +1049,7 @@ async fn run_app(
                                         let wc = app.with_critic;
                                         let cm = app.critic_model.clone();
                                         let wl = app.with_librarian;
+                                        let wmem = app.with_memory;
                                         let ws = app.with_sentry;
                                         let wsg = app.with_surgeon;
                                         let sul = app.surgeon_use_llm;
@@ -1082,7 +1093,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() });
+                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() });
                                         });
                                     }
                                     Err(e) => {
@@ -1117,6 +1128,7 @@ async fn run_app(
                                     let wc = app.with_critic;
                                     let cm = app.critic_model.clone();
                                     let wl = app.with_librarian;
+                                    let wmem = app.with_memory;
                                     let ws = app.with_sentry;
                                     let wsg = app.with_surgeon;
                                     let sul = app.surgeon_use_llm;
@@ -1183,7 +1195,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() });
+                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() });
                                     });
                                 }
                             }
@@ -1688,6 +1700,7 @@ fn spawn_executor(
         with_critic: config.with_critic,
         critic_model: config.critic_model,
         with_librarian: config.with_librarian,
+        with_memory: config.with_memory,
         with_sentry: config.with_sentry,
         with_surgeon: config.with_surgeon,
         surgeon_use_llm: config.surgeon_use_llm,

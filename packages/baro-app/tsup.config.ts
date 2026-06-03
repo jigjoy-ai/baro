@@ -44,7 +44,14 @@ const sharedBundleConfig = {
     // (no runtime dependency on @mozaik-ai/core or @baro/orchestrator).
     noExternal: [
         /^@mozaik-ai\//,
-        /^@baro\//,
+        // Don't bundle @baro/memory - it has native deps that can't be bundled
+        // /^@baro\//,
+    ],
+    external: [
+        '@baro/memory',
+        '@xenova/transformers',
+        'sharp',
+        'onnxruntime-node',
     ],
     clean: false,
     sourcemap: true,
@@ -76,6 +83,10 @@ export default defineConfig([
     },
     {
         entry: { "run-planner": "../baro-orchestrator/scripts/run-planner.ts" },
+        ...sharedBundleConfig,
+    },
+    {
+        entry: { "baro-memory": "../baro-orchestrator/scripts/baro-memory.ts" },
         ...sharedBundleConfig,
     },
 ])

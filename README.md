@@ -148,6 +148,19 @@ A story's route can name **any** backend (`claude:opus`, `openai:MiniMax-M3`, `c
 
 Bus is open. CI deployers, Slack notifiers, ticket triggers — all new participants, no orchestrator changes. Architecture deep-dive: [I tested Claude Code's new /goal feature against my parallel agent setup](https://jigjoy.ai/blog/baro-vs-claude-code).
 
+## Semantic memory (new)
+
+baro now includes **semantic memory** for cross-agent context sharing within a session. Instead of tag-based matching, agents use ONNX embeddings (CPU-only) to find semantically similar discoveries.
+
+**How it works:**
+- When Agent A reads a file, the content is cached and embedded
+- When Agent B asks for context, semantic search finds relevant discoveries
+- File reads are cached — if Agent B needs the same file, it's served from memory
+
+**Token savings:** ~50% fewer findings injected (only semantically relevant ones)
+
+**Disable with:** `baro --no-memory "goal"` (falls back to tag-based Librarian)
+
 ## Try it
 
 ```bash
@@ -200,6 +213,42 @@ Full options + `.barorc` config + per-phase model overrides: [**docs.baro.rs**](
 | **Adding a new behaviour** | new prompt | refactor orchestrator | new bus participant |
 
 For a deeper side-by-side on a real refactor, see [baro vs Claude Code `/goal`](https://jigjoy.ai/blog/baro-vs-claude-code).
+
+## Semantic Memory (cross-agent context sharing)
+
+baro includes an optional semantic memory system that lets parallel story agents share discoveries in real time. When one agent reads a file or greps a pattern, the finding is embedded (CPU-only ONNX, no API calls) and stored in a local [Vectra](https://github.com/stevenic/vectra) vector index on disk. Other agents can query this shared memory mid-flight.
+
+```
+Orchestrator                         Story Agents (parallel)
+────────────                         ──────────────────────
+intercepts Read/Grep/Bash outputs    $ baro-memory query "auth"
+  → embeds via ONNX MiniLM            → reads Vectra index from disk
+  → stores in Vectra LocalIndex        → returns relevant findings
+  → caches file content              $ baro-memory cache get src/auth.ts
+                                       → returns cached content (no disk read)
+```
+
+**Usage:**
+
+```bash
+baro "your goal"           # memory enabled by default
+baro --no-memory "goal"    # disable (falls back to tag-based Librarian)
+BARO_DEBUG=memory baro ... # debug logging to stderr + ~/.baro/runs/memory-*.log
+```
+
+**When it helps:**
+
+- Large codebases (20+ files) where multiple agents explore overlapping areas
+- Staggered DAGs where later stories benefit from earlier stories' exploration
+- Runs with 5+ stories touching the same subsystems
+
+**When it doesn't help (and adds slight overhead):**
+
+- Small codebases (1-3 files) where each agent only needs one read
+- Fully parallel DAGs with no dependencies (all stories launch before any findings exist)
+- Quick single-story tasks (`--quick`)
+
+The memory system adds ~1s startup overhead (ONNX model load) and negligible per-operation cost. It is session-scoped: data lives in `~/.baro/sessions/run-<timestamp>/memory/` and is discarded after the run.
 
 ## Requirements
 

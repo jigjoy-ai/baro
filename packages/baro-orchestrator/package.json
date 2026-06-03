@@ -12,6 +12,7 @@
         "typecheck": "tsc -p tsconfig.json --noEmit"
     },
     "dependencies": {
+        "@baro/memory": "*",
         "@mozaik-ai/core": "3.12.0"
     },
     "devDependencies": {
