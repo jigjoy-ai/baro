@@ -7,6 +7,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Card } from "@/components/ui/card"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
+import { Send } from "lucide-react"
 import {
     type DraftStory,
     type SessionEvent,
@@ -235,14 +236,21 @@ export default function App() {
                             <Input value={draftMsg} onChange={(e) => setDraftMsg(e.target.value)}
                                 onKeyDown={(e) => e.key === "Enter" && sendMessage()}
                                 placeholder={phase === "planning" ? "refine the plan…" : "message a running story…"} />
-                            {phase === "planning" && <Button onClick={() => send({ type: "run_plan" })}>▶ RUN</Button>}
+                            <Button size="icon" onClick={sendMessage} disabled={!draftMsg.trim()} aria-label="Send">
+                                <Send className="h-4 w-4" />
+                            </Button>
                         </div>
                     </Card>
 
                     {/* right — DAG + live feed */}
                     <Card className="flex min-h-0 flex-col gap-0 p-0">
-                        <div className="border-b px-4 py-2 text-sm text-muted-foreground">
-                            DAG {phase === "planning" ? "· draft (edit via chat)" : "· live"}
+                        <div className="flex items-center justify-between border-b px-4 py-2">
+                            <span className="text-sm text-muted-foreground">
+                                DAG {phase === "planning" ? "· draft (edit via chat)" : "· live"}
+                            </span>
+                            {phase === "planning" && (
+                                <Button size="sm" onClick={() => send({ type: "run_plan" })}>▶ RUN</Button>
+                            )}
                         </div>
                         <ScrollArea className="min-h-0 flex-1 p-4">
                             <div className="space-y-3">
