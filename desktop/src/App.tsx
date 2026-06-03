@@ -264,21 +264,21 @@ export default function App() {
                                                 const isRunning = st === "running"
                                                 return (
                                                     <div key={n.id} title={title}
-                                                        className={`flex min-w-[8rem] flex-col gap-1 rounded-md border bg-card px-2 py-1.5 text-xs transition-colors ${isRunning ? "border-amber-400/70 shadow-[0_0_0_1px_rgba(251,191,36,0.4)]" : ""}`}>
-                                                        <div className="flex items-center gap-1.5">
+                                                        className={`flex w-56 min-w-0 flex-col gap-1 rounded-md border bg-card px-2 py-1.5 text-xs transition-colors ${isRunning ? "border-amber-400/70 shadow-[0_0_0_1px_rgba(251,191,36,0.4)]" : ""}`}>
+                                                        <div className="flex min-w-0 items-center gap-1.5">
                                                             {phase !== "planning" && (
-                                                                <span className={`h-2 w-2 rounded-full ${isRunning ? "animate-pulse" : ""}`}
+                                                                <span className={`h-2 w-2 shrink-0 rounded-full ${isRunning ? "animate-pulse" : ""}`}
                                                                     style={{ background: statusColor(st) }} />
                                                             )}
                                                             <span className="font-medium">{n.id}</span>
-                                                            <span style={{ color: tierColor(n.model) }}>{n.model}</span>
+                                                            <span className="truncate" style={{ color: tierColor(n.model) }}>{n.model}</span>
                                                         </div>
-                                                        <span className="truncate text-muted-foreground/70">{title}</span>
-                                                        {isRunning && lastLine[n.id] && (
-                                                            <span className="truncate font-mono text-[10px] text-amber-400/80">
-                                                                {lastLine[n.id]}
-                                                            </span>
-                                                        )}
+                                                        <span className="line-clamp-2 text-muted-foreground/70">{title}</span>
+                                                        {/* reserved row so the card height/width doesn't jump as the
+                                                            running line streams in and out */}
+                                                        <span className="block h-3.5 truncate font-mono text-[10px] text-amber-400/80">
+                                                            {isRunning ? lastLine[n.id] ?? "" : ""}
+                                                        </span>
                                                     </div>
                                                 )
                                             })}
