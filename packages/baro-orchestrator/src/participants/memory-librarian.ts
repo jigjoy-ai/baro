@@ -103,7 +103,8 @@ export class MemoryLibrarian extends BaseObserver {
     private readonly inFlight = new Set<string>()
     private store: MemoryStore | null = null
     private initPromise: Promise<void> | null = null
-    private initFailed = false
+    private initAttempts = 0
+    private static readonly MAX_INIT_ATTEMPTS = 3
 
     constructor(opts: MemoryLibrarianOptions = {}) {
         super()
@@ -122,13 +123,14 @@ export class MemoryLibrarian extends BaseObserver {
 
     private async ensureStore(): Promise<MemoryStore | null> {
         if (this.opts.disabled) return null
-        // If initialization previously failed, don't retry endlessly
-        if (this.initFailed) return null
+        // Give up after MAX_INIT_ATTEMPTS failures (handles persistent errors)
+        if (this.initAttempts >= MemoryLibrarian.MAX_INIT_ATTEMPTS && !this.store) return null
 
         if (!this.store && !this.initPromise) {
             this.initPromise = (async () => {
                 try {
-                    log("Loading memory store...")
+                    this.initAttempts++
+                    log(`Loading memory store (attempt ${this.initAttempts}/${MemoryLibrarian.MAX_INIT_ATTEMPTS})...`)
                     const start = Date.now()
                     const { createMemoryStore } = await import("@baro/memory")
                     this.store = await createMemoryStore({
@@ -137,10 +139,9 @@ export class MemoryLibrarian extends BaseObserver {
                     })
                     log(`Memory store ready in ${Date.now() - start}ms`)
                 } catch (err) {
-                    log(`Memory store failed: ${err}`)
+                    log(`Memory store failed (attempt ${this.initAttempts}): ${err}`)
                     this.store = null
-                    this.initFailed = true
-                    // Reset initPromise so it doesn't permanently reject
+                    // Allow retry on next call
                     this.initPromise = null
                 }
             })()
@@ -334,6 +335,14 @@ export class MemoryLibrarian extends BaseObserver {
             this.inFlight.delete(event.data.storyId)
             log(`Story ${event.data.storyId} done (${this.inFlight.size} active)`)
             if (this.inFlight.size === 0) logStats()
+        }
+    }
+
+    /** Release the underlying store. Call on orchestrator shutdown. */
+    async close(): Promise<void> {
+        if (this.store) {
+            await this.store.close()
+            this.store = null
         }
     }
 }

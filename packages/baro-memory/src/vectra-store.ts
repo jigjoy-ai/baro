@@ -16,7 +16,7 @@
 
 import { LocalIndex } from 'vectra'
 import type { QueryResult } from 'vectra'
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, rmSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, rmSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -130,7 +130,6 @@ export async function createMemoryStore(
 export function pruneOldSessions(sessionsDir: string): void {
     try {
         if (!existsSync(sessionsDir)) return
-        const { readdirSync, statSync } = require('fs') as typeof import('fs')
         const now = Date.now()
         for (const entry of readdirSync(sessionsDir)) {
             if (!entry.startsWith('run-')) continue
@@ -313,26 +312,26 @@ class VectraMemoryStore implements MemoryStore {
         // Skip excessively large files
         if (content.length > MAX_CACHE_FILE_BYTES) return
 
-        const cache = this.loadCacheLocked()
+        const cache = this.loadCache()
         const existing = cache[path]
         if (!existing || existing.content !== content) {
             cache[path] = { path, content, readByAgent: agentId, timestamp: Date.now() }
-            this.saveCacheLocked(cache)
+            this.saveCache(cache)
         }
     }
 
     async getCachedFile(path: string): Promise<string | null> {
-        const cache = this.loadCacheLocked()
+        const cache = this.loadCache()
         return cache[path]?.content ?? null
     }
 
     async hasFile(path: string): Promise<boolean> {
-        const cache = this.loadCacheLocked()
+        const cache = this.loadCache()
         return path in cache
     }
 
     async getCachedPaths(): Promise<string[]> {
-        const cache = this.loadCacheLocked()
+        const cache = this.loadCache()
         return Object.keys(cache)
     }
 
@@ -349,7 +348,7 @@ class VectraMemoryStore implements MemoryStore {
                 agents.add(item.metadata.agentId)
             }
 
-            const cache = this.loadCacheLocked()
+            const cache = this.loadCache()
             let cacheSizeBytes = 0
             for (const entry of Object.values(cache)) {
                 cacheSizeBytes += entry.content.length
@@ -374,7 +373,7 @@ class VectraMemoryStore implements MemoryStore {
 
     async close(): Promise<void> {
         // Vectra auto-persists; clean up lockfile if present
-        try { if (existsSync(this.lockPath)) rmSync(this.lockPath) } catch {}
+        try { rmSync(this.lockPath, { force: true }) } catch {}
     }
 
     // ── Private helpers ──────────────────────────────────────────
@@ -384,15 +383,26 @@ class VectraMemoryStore implements MemoryStore {
         if (finding.filePath) parts.push(finding.filePath)
         else if (finding.pattern) parts.push(finding.pattern)
         else if (finding.command) parts.push(finding.command)
-        else parts.push(Date.now().toString(36)) // Ensure uniqueness for generic findings
+        else {
+            // For generic findings (no file/pattern/command), use a short
+            // content hash to maintain deterministic dedup while avoiding
+            // collisions. Same content = same ID = upsert (not duplicate).
+            let hash = 0
+            const str = finding.content.slice(0, 100)
+            for (let i = 0; i < str.length; i++) {
+                hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0
+            }
+            parts.push(Math.abs(hash).toString(36))
+        }
         return parts.join(':')
     }
 
     /**
-     * Load cache with a simple lockfile to prevent concurrent read-during-write.
-     * The lock is advisory (best-effort) since Node doesn't support mandatory file locks.
+     * Load cache from disk. Reads are not locked — if another process is
+     * mid-write using the atomic rename strategy, we'll either get the old
+     * complete version or the new complete version (never a partial write).
      */
-    private loadCacheLocked(): Record<string, CachedFile> {
+    private loadCache(): Record<string, CachedFile> {
         try {
             if (existsSync(this.cachePath)) {
                 const raw = readFileSync(this.cachePath, 'utf-8')
@@ -407,10 +417,11 @@ class VectraMemoryStore implements MemoryStore {
     }
 
     /**
-     * Save cache atomically (write to tmp, rename over target).
-     * Advisory lockfile prevents interleaved reads of partial writes.
+     * Save cache atomically (write to PID-scoped tmp file, then rename).
+     * The rename is atomic on POSIX, so concurrent readers see either the
+     * old or new version — never a partial write.
      */
-    private saveCacheLocked(cache: Record<string, CachedFile>): void {
+    private saveCache(cache: Record<string, CachedFile>): void {
         try {
             // Write lockfile (advisory — best effort)
             writeFileSync(this.lockPath, String(process.pid), 'utf-8')
