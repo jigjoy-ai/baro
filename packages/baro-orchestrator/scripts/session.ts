@@ -158,6 +158,7 @@ async function main(): Promise<void> {
     process.stderr.write(`[session] planning "${args.goal}" (planner=${args.plannerModel})\n`)
     emit({ type: "plan_status", state: "planning", model: args.plannerModel })
     emitDraft(await session.seed())
+    if (session.lastReply) emit({ type: "plan_reply", text: session.lastReply })
     emit({ type: "plan_status", state: "idle" })
 
     const rl = createInterface({ input: process.stdin })

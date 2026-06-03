@@ -54,14 +54,17 @@ export function useSession() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
 
-    // Live elapsed timer while the run is active.
+    // Elapsed timer — only ticks while something is actually happening
+    // (planner thinking, or stories executing). It freezes while the plan
+    // is drafted and waiting on the user, and stops when the run ends.
     useEffect(() => {
-        if (phase !== "planning" && phase !== "executing") return
+        const active = planStatus !== "idle" || phase === "executing"
+        if (!active) return
         const id = setInterval(() => {
             if (startedAt.current) setElapsedSecs(Math.round((Date.now() - startedAt.current) / 1000))
         }, 1000)
         return () => clearInterval(id)
-    }, [phase])
+    }, [phase, planStatus])
 
     function onEvent(raw: string) {
         let evt: SessionEvent
@@ -84,6 +87,10 @@ export function useSession() {
                 break
             case "plan_committed":
                 setPhase("executing")
+                // restart the clock so the status-bar timer measures the run,
+                // not the planning/idle time before RUN.
+                startedAt.current = Date.now()
+                setElapsedSecs(0)
                 setChat((c) => [...c, { role: "planner", text: "Plan committed — executing." }])
                 break
             case "story_start":

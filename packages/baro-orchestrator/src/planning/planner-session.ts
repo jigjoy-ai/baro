@@ -84,8 +84,10 @@ Tier every story by blast radius via "model": "haiku" (mechanical/self-contained
 
 Keep stories small (≤~10 files, one focused unit). Prefer parallel siblings over linear chains — only add dependsOn when B literally needs a symbol/file/schema A introduces.
 
+Also write a short "reply": 2-3 friendly sentences, first-person, as if pair-planning with the user — say how many stories you made, what runs in parallel vs. what waits, why you tiered them that way, and end by nudging them to refine (split / re-tier / reorder) or hit RUN. Conversational, not a list.
+
 Output ONLY valid JSON (no markdown) matching:
-{"project":"…","branchName":"kebab-case","description":"…","userStories":[
+{"reply":"…","project":"…","branchName":"kebab-case","description":"…","userStories":[
  {"id":"S1","priority":1,"title":"…","description":"…","dependsOn":[],"retries":2,"acceptance":["…"],"tests":["npm test"],"model":"opus"}]}`
 
 const TURN_SYSTEM = `You are baro's interactive planner, refining an existing draft DAG with the user. You are given the CURRENT DRAFT (JSON) and the user's message. Respond with a single JSON object describing how to mutate the draft — same vocabulary as baro's Surgeon, plus retier:
@@ -105,6 +107,8 @@ Rules:
 
 export class PlannerSession {
     public draft: PrdFile | null = null
+    /** The planner's conversational message from the initial seed. */
+    public lastReply = ""
     private readonly transcript: { role: "user" | "planner"; text: string }[] = []
     private readonly opts: Required<
         Pick<PlannerSessionOptions, "model" | "claudeBin" | "timeoutMs">
@@ -125,7 +129,8 @@ export class PlannerSession {
     /** Produce the initial draft from the goal. Idempotent-ish: re-seeding replaces the draft. */
     async seed(): Promise<PrdFile> {
         const raw = await this.call(SEED_SYSTEM, `User goal:\n${this.opts.goal}`)
-        const parsed = JSON.parse(extractJsonObject(raw)) as Partial<PrdFile>
+        const parsed = JSON.parse(extractJsonObject(raw)) as Partial<PrdFile> & { reply?: string }
+        this.lastReply = typeof parsed.reply === "string" ? parsed.reply : ""
         this.draft = normalizePrd(parsed, "planner-session")
         // Validate the DAG up front so a broken seed fails loudly.
         buildDag(this.draft.userStories)

@@ -62,7 +62,10 @@ export function DagPanel({
             </ScrollArea>
 
             <Separator />
-            <div ref={feedRef} className="h-40 overflow-auto bg-muted/30 p-2 font-mono text-[11px] leading-snug">
+            <div className="flex items-center gap-2 border-b px-3 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/60">
+                <span className="h-1 w-1 rounded-full bg-baro/70" /> Output
+            </div>
+            <div ref={feedRef} className="h-36 overflow-auto bg-muted/30 p-2 font-mono text-[11px] leading-snug">
                 {feed.map((f, i) => (
                     <div key={i} className="flex gap-2">
                         <span className="shrink-0 text-muted-foreground/50">{f.id}</span>
