@@ -43,6 +43,7 @@ interface CliArgs {
     withCritic: boolean
     criticModel?: string
     noLibrarian: boolean
+    noMemory: boolean
     noSentry: boolean
     withSurgeon: boolean
     surgeonUseLlm: boolean
@@ -71,6 +72,7 @@ function parseArgs(argv: string[]): CliArgs {
         noTuiEvents: false,
         withCritic: false,
         noLibrarian: false,
+        noMemory: false,
         noSentry: false,
         withSurgeon: false,
         surgeonUseLlm: false,
@@ -117,6 +119,9 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--no-librarian":
                 args.noLibrarian = true
+                break
+            case "--no-memory":
+                args.noMemory = true
                 break
             case "--no-sentry":
                 args.noSentry = true
@@ -216,6 +221,7 @@ function printHelp(): void {
             "  --with-critic         Enable Critic (live acceptance evaluator)",
             "  --critic-model <name> Model for Critic (default: haiku)",
             "  --no-librarian        Disable Librarian (cross-agent memory)",
+            "  --no-memory           Disable semantic memory (uses tag-based Librarian instead)",
             "  --no-sentry           Disable Sentry (file conflict detector)",
             "  --with-surgeon        Enable Surgeon (adaptive DAG mutation)",
             "  --surgeon-use-llm     Use LLM evaluation in Surgeon (default: deterministic)",
@@ -315,6 +321,7 @@ async function main(): Promise<void> {
         withCritic: args.withCritic,
         criticModel: args.criticModel,
         withLibrarian: args.noLibrarian ? false : undefined,
+        withMemory: args.noMemory ? false : undefined,
         withSentry: args.noSentry ? false : undefined,
         withSurgeon: args.withSurgeon,
         surgeonUseLlm: args.surgeonUseLlm,
@@ -357,6 +364,9 @@ async function main(): Promise<void> {
             )
             process.exit(1)
         }
+        // Explicit exit — open handles (ONNX model, Mozaik timers) prevent
+        // natural Node exit after orchestrate() resolves.
+        process.exit(0)
     } catch (e) {
         process.stderr.write(
             `[cli] fatal: ${(e as Error)?.stack ?? String(e)}\n`,

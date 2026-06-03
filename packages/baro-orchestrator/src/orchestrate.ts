@@ -8,7 +8,7 @@
  */
 
 import { mkdirSync } from "fs"
-import { dirname } from "path"
+import { dirname, join } from "path"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
 
@@ -33,6 +33,7 @@ import { CriticOpenAI } from "./participants/critic-openai.js"
 import { Finalizer } from "./participants/finalizer.js"
 import { joinBaroEventForwarders } from "./participants/forwarders/index.js"
 import { Librarian } from "./participants/librarian.js"
+import { MemoryLibrarian } from "./participants/memory-librarian.js"
 import { Operator } from "./participants/operator.js"
 import { Sentry } from "./participants/sentry.js"
 import { StoryFactory } from "./participants/story-factory.js"
@@ -71,6 +72,15 @@ export interface OrchestrateConfig {
      * stories. Default: true.
      */
     withLibrarian?: boolean
+    /**
+     * Whether to use semantic memory (MemoryLibrarian with Vectra) instead
+     * of the tag-based Librarian. Uses ONNX embeddings + Vectra local
+     * vector DB for cosine similarity search. Same interface, better
+     * context matching, cross-process sharing via disk persistence.
+     * Default: true (when withLibrarian is true).
+     * Pass false (or --no-memory CLI flag) to fall back to tag-based.
+     */
+    withMemory?: boolean
     /**
      * Whether to wire the Sentry (file-touch conflict detector). When
      * on, overlapping Edit/Write tool calls across agents emit
@@ -314,7 +324,24 @@ export async function orchestrate(
     // off via the OrchestrateConfig flags.
     const useLibrarian = config.withLibrarian ?? true
     const useSentry = config.withSentry ?? true
-    const librarian = useLibrarian ? new Librarian() : null
+    const useMemory = config.withMemory ?? true
+
+    // Generate a session-scoped memory path for cross-process sharing.
+    // Vectra index + cache.json live here. CLI reads BARO_MEMORY_PATH.
+    const memorySessionPath = useMemory
+        ? join(process.env.HOME || "/tmp", ".baro", "sessions", `run-${Date.now()}`, "memory")
+        : undefined
+
+    // Expose path via env so child processes (story agents) inherit it.
+    if (memorySessionPath) {
+        process.env.BARO_MEMORY_PATH = memorySessionPath
+    }
+
+    // Use MemoryLibrarian (Vectra-backed semantic) when memory is enabled,
+    // otherwise fall back to tag-based Librarian.
+    const librarian = useLibrarian
+        ? (useMemory ? new MemoryLibrarian({ sessionPath: memorySessionPath }) : new Librarian())
+        : null
     const sentry = useSentry ? new Sentry() : null
     if (librarian) librarian.join(env)
     if (sentry) sentry.join(env)
