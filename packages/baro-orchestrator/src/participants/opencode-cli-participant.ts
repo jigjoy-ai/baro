@@ -62,6 +62,21 @@ export interface OpenCodeRunSummary {
     sessionId: string | null
     exitCode: number | null
     error: Error | null
+    /**
+     * True once at least one `step_finish` event was observed — i.e. the
+     * agent loop actually completed a step rather than the process simply
+     * exiting. `opencode run` exits 0 even when the model refuses or
+     * produces no work, so exit code alone is NOT proof of task success
+     * (verified empirically). Callers should require this before treating
+     * exitCode 0 as a real completion.
+     */
+    sawStepFinish: boolean
+    /**
+     * Number of `tool_call` events observed. A code-writing story that
+     * claims success having invoked zero tools is suspect — the agent
+     * likely answered in prose instead of editing the worktree.
+     */
+    toolCallCount: number
 }
 
 /**
@@ -99,6 +114,9 @@ export class OpenCodeCliParticipant extends BaseObserver {
     private sessionId: string | null = null
     private exitCode: number | null = null
     private spawnError: Error | null = null
+    private sawStepFinish = false
+    private toolCallCount = 0
+    private doneSettled = false
     private resolveDone!: (summary: OpenCodeRunSummary) => void
     private resolveReady!: () => void
     private rejectReady!: (e: Error) => void
@@ -125,6 +143,21 @@ export class OpenCodeCliParticipant extends BaseObserver {
         this.done = new Promise<OpenCodeRunSummary>((res) => {
             this.resolveDone = res
         })
+    }
+
+    /**
+     * Settle the `done` promise exactly once. Both the `exit` and
+     * `error` process listeners can fire (in either order, or one
+     * without the other), so every resolution path goes through here to
+     * avoid a double-resolve and, more importantly, to guarantee `done`
+     * always settles — the previous `error` handler rejected `ready` but
+     * never resolved `done`, so an async spawn error with no following
+     * `exit` left `done` pending forever and any awaiter hung.
+     */
+    private settleDone(summary: OpenCodeRunSummary): void {
+        if (this.doneSettled) return
+        this.doneSettled = true
+        this.resolveDone(summary)
     }
 
     getSessionId(): string | null {
@@ -154,10 +187,12 @@ export class OpenCodeCliParticipant extends BaseObserver {
             this.spawnError = e instanceof Error ? e : new Error(String(e))
             this.transition("failed", this.spawnError.message)
             this.rejectReady(this.spawnError)
-            this.resolveDone({
+            this.settleDone({
                 sessionId: null,
                 exitCode: null,
                 error: this.spawnError,
+                sawStepFinish: this.sawStepFinish,
+                toolCallCount: this.toolCallCount,
             })
             return
         }
@@ -171,8 +206,22 @@ export class OpenCodeCliParticipant extends BaseObserver {
         proc.stdout!.on("data", (chunk: string) => this.handleStdout(chunk))
         proc.stderr!.on("data", (chunk: string) => this.handleStderr(chunk))
         proc.on("error", (err) => {
+            // Async process error (e.g. EACCES/EPIPE surfaced after a
+            // successful spawn). An 'exit' event may NOT follow, so settle
+            // `done` here too — otherwise the story agent's `await
+            // opencode.done` recovery path (and the one-shot caller) hang
+            // until their outer timeout, or forever where there is none.
+            OpenCodeCliParticipant.active.delete(this)
             this.spawnError = err
+            this.transition("failed", err.message)
             this.rejectReady(err)
+            this.settleDone({
+                sessionId: this.sessionId,
+                exitCode: this.exitCode,
+                error: err,
+                sawStepFinish: this.sawStepFinish,
+                toolCallCount: this.toolCallCount,
+            })
         })
         proc.on("exit", (code) => {
             OpenCodeCliParticipant.active.delete(this)
@@ -185,10 +234,12 @@ export class OpenCodeCliParticipant extends BaseObserver {
                 finalPhase,
                 code != null ? `exit code ${code}` : "no exit code",
             )
-            this.resolveDone({
+            this.settleDone({
                 sessionId: this.sessionId,
                 exitCode: code,
                 error: this.spawnError,
+                sawStepFinish: this.sawStepFinish,
+                toolCallCount: this.toolCallCount,
             })
         })
     }
@@ -261,6 +312,17 @@ export class OpenCodeCliParticipant extends BaseObserver {
         const { items, sessionId } = mapOpenCodeEvent(this.agentId, parsed)
         if (sessionId && !this.sessionId) {
             this.sessionId = sessionId
+        }
+        // Track completion evidence for the success predicate. exitCode 0
+        // is necessary but not sufficient — `opencode run` exits 0 on a
+        // refused/no-op turn — so the story agent additionally requires a
+        // step_finish (the agent loop actually completed) and at least one
+        // tool_call (it did work rather than answering in prose).
+        if (parsed.type === "step_finish") this.sawStepFinish = true
+        // Real opencode emits `tool_use`; `tool_call` is the legacy
+        // fallback shape. Count either as evidence the agent did work.
+        if (parsed.type === "tool_use" || parsed.type === "tool_call") {
+            this.toolCallCount += 1
         }
 
         for (const item of items) {

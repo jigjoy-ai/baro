@@ -283,14 +283,36 @@ export class OpenCodeStoryAgent extends BaseObserver {
         opencode.leave(this.envRef)
         this.currentOpenCode = null
 
-        const success =
-            summary.exitCode === 0 && summary.error == null
-
-        if (!success) {
+        // Success requires POSITIVE evidence of completed work, not
+        // merely the absence of a crash. `opencode run` exits 0 even when
+        // the model refuses the task or produces no edits (verified
+        // empirically: a refusal turn returns exitCode 0), so a clean exit
+        // alone would mark a no-op story as passed. We therefore also
+        // require the agent loop to have actually finished (`sawStepFinish`)
+        // and to have invoked at least one tool — a code-writing story that
+        // claims success having touched no tools almost certainly answered
+        // in prose instead of editing the worktree. This brings the
+        // OpenCode predicate up to (and slightly past) the Claude path,
+        // which gates on a non-error result payload.
+        if (summary.exitCode !== 0 || summary.error != null) {
             const reason = summary.error
                 ? summary.error.message
                 : `non-zero exit ${summary.exitCode}`
             return { success: false, summary, error: reason }
+        }
+        if (!summary.sawStepFinish) {
+            return {
+                success: false,
+                summary,
+                error: "opencode exited 0 but emitted no step_finish — the agent loop did not complete (likely a refusal or early abort)",
+            }
+        }
+        if (summary.toolCallCount === 0) {
+            return {
+                success: false,
+                summary,
+                error: "opencode exited 0 but invoked no tools — the agent answered in prose without editing the worktree, so the story is not verifiably done",
+            }
         }
 
         return { success: true, summary, error: null }

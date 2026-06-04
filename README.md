@@ -128,12 +128,16 @@ baro --llm opencode -m openai/gpt-4o "Your goal"
 # OpenCode with a local model (LM Studio, Ollama, etc.)
 baro --llm opencode -m lmstudio/qwen3-coder "Your goal"
 
-# Mix: Claude plans, OpenCode executes stories
+# Mix: Claude plans, OpenCode executes stories.
+# Note: `-m` is a GLOBAL override applied to every phase, so it can't be
+# combined with a Claude/OpenCode split (a provider/model string would be
+# handed to the Claude phases too, which only accept opus/sonnet/haiku).
+# Let OpenCode pick its configured default for the story phase instead.
 baro --architect-llm claude --planner-llm claude \
-     --story-llm opencode -m anthropic/claude-sonnet-4 "Your goal"
+     --story-llm opencode "Your goal"
 ```
 
-OpenCode manages its own API keys via `opencode providers` — no additional env vars needed for baro. Runs with `--dangerously-skip-permissions` for unattended execution in baro's per-story worktrees.
+OpenCode manages its own API keys and per-provider model defaults via `opencode providers` — no additional env vars needed for baro, and no `-m` required when you're happy with the OpenCode default. `-m provider/model` sets the model for **all** phases at once, so use it only when every phase runs on a non-Claude backend (e.g. `--llm opencode`). Runs with `--dangerously-skip-permissions` for unattended execution in baro's per-story worktrees.
 
 Full breakdown at [docs.baro.rs/llm-providers](https://docs.baro.rs/llm-providers) — provider economics, per-phase routing, the side-by-side benchmark across three real tasks: [**I tested Claude Code vs OpenAI Codex in my parallel agent setup. Then I built a hybrid.**](https://jigjoy.ai/blog/claude-code-vs-codex-baro)
 

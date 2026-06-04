@@ -122,7 +122,9 @@ export async function runOpenCodeOneShot(
                     }
                     continue
                 }
-                if (type === "tool_call") {
+                // Real opencode emits `tool_use`; `tool_call` is the
+                // legacy paired-shape fallback. Log either.
+                if (type === "tool_use" || type === "tool_call") {
                     const part = event.part as Record<string, unknown> | undefined
                     const tool =
                         typeof part?.tool === "string"
@@ -151,11 +153,6 @@ export async function runOpenCodeOneShot(
             clearTimeout(timer)
             const elapsedMs = Date.now() - startedAt
 
-            if (assistantText.trim()) {
-                resolve(assistantText)
-                return
-            }
-
             const ctx = [
                 `elapsed=${elapsedMs}ms`,
                 `exit=${code}`,
@@ -168,6 +165,28 @@ export async function runOpenCodeOneShot(
             ]
                 .filter((x): x is string => x !== null)
                 .join(" ")
+
+            // Abnormal termination must fail even if SOME text accumulated.
+            // The architect/planner callers feed the returned string into a
+            // markdown doc / JSON extractor that happily accepts a truncated
+            // but syntactically-closed fragment — so resolving partial text
+            // on a timeout (SIGTERM) or crash silently produces an
+            // incomplete design doc or PRD with no error surfaced. Treat
+            // timeout, a terminating signal, or a non-zero exit as failure.
+            if (timedOut || signal != null || (code != null && code !== 0)) {
+                reject(
+                    new Error(
+                        `runOpenCodeOneShot: opencode terminated abnormally before completing (${ctx})`,
+                    ),
+                )
+                return
+            }
+
+            if (assistantText.trim()) {
+                resolve(assistantText)
+                return
+            }
+
             reject(
                 new Error(
                     `runOpenCodeOneShot: opencode produced no text output (${ctx})`,

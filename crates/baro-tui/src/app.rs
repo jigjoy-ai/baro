@@ -346,6 +346,13 @@ pub struct App {
     pub story_llm: LlmProvider,
     pub critic_llm: LlmProvider,
     pub surgeon_llm: LlmProvider,
+    /// True when the user passed `--llm` explicitly (any value, including
+    /// `claude` and `hybrid`). The provider picker is shown only when no
+    /// `--llm` was given — keying on `llm != Claude` was wrong because
+    /// the `hybrid` preset and an explicit `--llm claude` both resolve
+    /// `llm` to Claude, which wrongly re-prompted (and, for hybrid, the
+    /// picker then collapsed the per-phase split).
+    pub llm_explicitly_set: bool,
 
     // Notification flag
     pub notification_ready: bool,
@@ -451,6 +458,7 @@ impl App {
             story_llm: LlmProvider::Claude,
             critic_llm: LlmProvider::Claude,
             surgeon_llm: LlmProvider::Claude,
+            llm_explicitly_set: false,
             token_usage: HashMap::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -508,7 +516,15 @@ impl App {
             .unwrap_or(0)
     }
 
-    // Planner toggle
+    // Planner toggle (Welcome screen radio). Cycles the backend AND
+    // reconciles it into the routing fields. Execution routes off
+    // `llm` / `*_llm` / `model_for_phase` — NOT the legacy `planner`
+    // enum — so mutating `planner` alone (the old behaviour) left the
+    // radio cosmetic: picking opencode/codex/openai on the Welcome
+    // screen still ran every phase on Claude. We now propagate the
+    // selection to all routing fields so the chosen backend actually
+    // drives the run, matching what the ProviderPicker Enter handler
+    // does.
     pub fn toggle_planner(&mut self) {
         self.planner = match self.planner {
             Planner::Claude => Planner::OpenAI,
@@ -516,6 +532,18 @@ impl App {
             Planner::Codex => Planner::OpenCode,
             Planner::OpenCode => Planner::Claude,
         };
+        let provider = match self.planner {
+            Planner::Claude => LlmProvider::Claude,
+            Planner::OpenAI => LlmProvider::OpenAI,
+            Planner::Codex => LlmProvider::Codex,
+            Planner::OpenCode => LlmProvider::OpenCode,
+        };
+        self.llm = provider;
+        self.architect_llm = provider;
+        self.planner_llm = provider;
+        self.story_llm = provider;
+        self.critic_llm = provider;
+        self.surgeon_llm = provider;
     }
 
     // Execute screen tab navigation
