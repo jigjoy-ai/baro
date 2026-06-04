@@ -54,11 +54,11 @@ interface CliArgs {
     tierMap?: TierMap
     /** Raw `--openai-endpoint name=url` specs, resolved to a map later. */
     endpointSpecs: string[]
-    llm: "claude" | "openai" | "codex"
+    llm: "claude" | "openai" | "codex" | "opencode"
     /** Optional per-phase overrides; each defaults to `llm`. */
-    storyLlm?: "claude" | "openai" | "codex"
-    criticLlm?: "claude" | "openai" | "codex"
-    surgeonLlm?: "claude" | "openai" | "codex"
+    storyLlm?: "claude" | "openai" | "codex" | "opencode"
+    criticLlm?: "claude" | "openai" | "codex" | "opencode"
+    surgeonLlm?: "claude" | "openai" | "codex" | "opencode"
     help: boolean
 }
 
@@ -160,9 +160,9 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex") {
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode") {
                     process.stderr.write(
-                        `[cli] --llm must be 'claude' | 'openai' | 'codex', got '${v}'\n`,
+                        `[cli] --llm must be 'claude' | 'openai' | 'codex' | 'opencode', got '${v}'\n`,
                     )
                     process.exit(2)
                 }
@@ -173,9 +173,9 @@ function parseArgs(argv: string[]): CliArgs {
             case "--critic-llm":
             case "--surgeon-llm": {
                 const v = required(argv, ++i, a)
-                if (v !== "claude" && v !== "openai" && v !== "codex") {
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode") {
                     process.stderr.write(
-                        `[cli] ${a} must be 'claude' | 'openai' | 'codex', got '${v}'\n`,
+                        `[cli] ${a} must be 'claude' | 'openai' | 'codex' | 'opencode', got '${v}'\n`,
                     )
                     process.exit(2)
                 }

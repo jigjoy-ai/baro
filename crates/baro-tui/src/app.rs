@@ -28,6 +28,8 @@ pub enum Screen {
 pub enum Planner {
     Claude,
     OpenAI,
+    Codex,
+    OpenCode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,6 +123,12 @@ pub enum LlmProvider {
     /// Implementation: `packages/baro-orchestrator/src/participants/
     /// codex-cli-participant.ts`.
     Codex,
+    /// OpenCode CLI subprocess. Multi-provider agent shell that outputs
+    /// JSONL via `opencode run --format json`. Supports any model via
+    /// `-m provider/model` flag. One-shot non-interactive invocation.
+    /// Implementation: `packages/baro-orchestrator/src/participants/
+    /// opencode-cli-participant.ts`.
+    OpenCode,
 }
 
 impl LlmProvider {
@@ -129,6 +137,7 @@ impl LlmProvider {
             Self::Claude => "claude",
             Self::OpenAI => "openai",
             Self::Codex => "codex",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -137,6 +146,7 @@ impl LlmProvider {
             "claude" => Some(Self::Claude),
             "openai" => Some(Self::OpenAI),
             "codex" => Some(Self::Codex),
+            "opencode" => Some(Self::OpenCode),
             _ => None,
         }
     }
@@ -194,10 +204,13 @@ pub struct App {
     pub planner: Planner,
 
     // Provider-picker screen (first step when invoked without a goal).
-    // 0 = Claude Code, 1 = Mozaik native (OpenAI). Stored as an index
-    // for trivial up/down handling; the chosen LlmProvider lands in
-    // `self.llm` on confirm.
+    // Index into `provider_picker_options`; the chosen LlmProvider
+    // lands in `self.llm` on confirm.
     pub provider_picker_index: usize,
+    /// Available backends for the picker, populated at startup. Claude
+    /// and OpenAI are always present; Codex and OpenCode are added when
+    /// their CLI is detected on PATH.
+    pub provider_picker_options: Vec<LlmProvider>,
 
     // API-key input screen — buffer for the in-progress text. The
     // confirmed key (whether from this input or the environment) is
@@ -333,6 +346,13 @@ pub struct App {
     pub story_llm: LlmProvider,
     pub critic_llm: LlmProvider,
     pub surgeon_llm: LlmProvider,
+    /// True when the user passed `--llm` explicitly (any value, including
+    /// `claude` and `hybrid`). The provider picker is shown only when no
+    /// `--llm` was given — keying on `llm != Claude` was wrong because
+    /// the `hybrid` preset and an explicit `--llm claude` both resolve
+    /// `llm` to Claude, which wrongly re-prompted (and, for hybrid, the
+    /// picker then collapsed the per-phase split).
+    pub llm_explicitly_set: bool,
 
     // Notification flag
     pub notification_ready: bool,
@@ -359,6 +379,16 @@ impl App {
             planner: Planner::Claude,
 
             provider_picker_index: 0,
+            provider_picker_options: {
+                let mut opts = vec![LlmProvider::Claude, LlmProvider::OpenAI];
+                if which::which("codex").is_ok() {
+                    opts.push(LlmProvider::Codex);
+                }
+                if which::which("opencode").is_ok() {
+                    opts.push(LlmProvider::OpenCode);
+                }
+                opts
+            },
             api_key_input: String::new(),
             openai_api_key: None,
             openai_base_url: None,
@@ -428,6 +458,7 @@ impl App {
             story_llm: LlmProvider::Claude,
             critic_llm: LlmProvider::Claude,
             surgeon_llm: LlmProvider::Claude,
+            llm_explicitly_set: false,
             token_usage: HashMap::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -485,12 +516,34 @@ impl App {
             .unwrap_or(0)
     }
 
-    // Planner toggle
+    // Planner toggle (Welcome screen radio). Cycles the backend AND
+    // reconciles it into the routing fields. Execution routes off
+    // `llm` / `*_llm` / `model_for_phase` — NOT the legacy `planner`
+    // enum — so mutating `planner` alone (the old behaviour) left the
+    // radio cosmetic: picking opencode/codex/openai on the Welcome
+    // screen still ran every phase on Claude. We now propagate the
+    // selection to all routing fields so the chosen backend actually
+    // drives the run, matching what the ProviderPicker Enter handler
+    // does.
     pub fn toggle_planner(&mut self) {
         self.planner = match self.planner {
             Planner::Claude => Planner::OpenAI,
-            Planner::OpenAI => Planner::Claude,
+            Planner::OpenAI => Planner::Codex,
+            Planner::Codex => Planner::OpenCode,
+            Planner::OpenCode => Planner::Claude,
         };
+        let provider = match self.planner {
+            Planner::Claude => LlmProvider::Claude,
+            Planner::OpenAI => LlmProvider::OpenAI,
+            Planner::Codex => LlmProvider::Codex,
+            Planner::OpenCode => LlmProvider::OpenCode,
+        };
+        self.llm = provider;
+        self.architect_llm = provider;
+        self.planner_llm = provider;
+        self.story_llm = provider;
+        self.critic_llm = provider;
+        self.surgeon_llm = provider;
     }
 
     // Execute screen tab navigation
@@ -1002,6 +1055,11 @@ impl App {
                     Some("gpt-5.5".to_string())
                 }
                 (LlmProvider::OpenAI, "review") => Some("gpt-5.4-mini".to_string()),
+                // OpenCode: no hardcoded model — let it use whatever the
+                // user configured in their opencode setup. Returning None
+                // means the TS side passes no --model flag and opencode
+                // picks its own default provider + model.
+                (LlmProvider::OpenCode, _) => None,
                 _ => None,
             };
         }

@@ -23,6 +23,7 @@ import { readFileSync } from "fs"
 import { runPlannerClaude } from "../src/planning/planner-claude.js"
 import { runPlannerCodex } from "../src/planning/planner-codex.js"
 import { runPlannerOpenAI } from "../src/planning/planner-openai.js"
+import { runPlannerOpenCode } from "../src/planning/planner-opencode.js"
 
 interface Args {
     goal: string
@@ -33,7 +34,7 @@ interface Args {
      * v1 positioning: Codex covers the Story phase; Architect and
      * Planner stay on Claude.
      */
-    llm: "claude" | "openai" | "codex"
+    llm: "claude" | "openai" | "codex" | "opencode"
     model?: string
     effort?: string
     contextFile?: string
@@ -44,7 +45,7 @@ interface Args {
 function parseArgs(argv: string[]): Args {
     let goal: string | undefined
     let cwd: string | undefined
-    let llm: "claude" | "openai" | "codex" | undefined
+    let llm: "claude" | "openai" | "codex" | "opencode" | undefined
     let model: string | undefined
     let effort: string | undefined
     let contextFile: string | undefined
@@ -62,10 +63,10 @@ function parseArgs(argv: string[]): Args {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex") {
-                    fatal(`--llm must be 'claude' | 'openai' | 'codex', got '${v}'`)
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode") {
+                    fatal(`--llm must be 'claude' | 'openai' | 'codex' | 'opencode', got '${v}'`)
                 }
-                llm = v as "claude" | "openai" | "codex"
+                llm = v as "claude" | "openai" | "codex" | "opencode"
                 break
             }
             case "--model":
@@ -151,6 +152,15 @@ async function main(): Promise<void> {
             })
         } else if (args.llm === "codex") {
             prdJson = await runPlannerCodex({
+                goal: args.goal,
+                cwd: args.cwd,
+                model: args.model,
+                projectContext,
+                decisionDocument,
+                quick: args.quick,
+            })
+        } else if (args.llm === "opencode") {
+            prdJson = await runPlannerOpenCode({
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,

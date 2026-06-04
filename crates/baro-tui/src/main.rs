@@ -165,8 +165,14 @@ struct Cli {
     #[arg(long)]
     timeout: Option<u64>,
 
-    /// Override model for all phases (valid: opus, sonnet, haiku)
-    #[arg(long = "model", value_parser = ["opus", "sonnet", "haiku"])]
+    /// Override model for all phases. For `--llm claude` the valid
+    /// values are opus / sonnet / haiku; for openai / codex / opencode
+    /// the value is passed through verbatim (e.g.
+    /// `anthropic/claude-sonnet-4`, `openai/gpt-4o`,
+    /// `lmstudio/qwen3-coder`). Validation is per-backend at runtime
+    /// rather than a fixed clap allow-list, so non-Claude backends can
+    /// name any provider/model their CLI understands.
+    #[arg(long = "model", short = 'm')]
     model: Option<String>,
 
     /// Effort level for spawned `claude` processes (the Architect,
@@ -303,7 +309,7 @@ struct Cli {
     ///                      Critic move to Codex (high-volume, cheap
     ///                      on ChatGPT subscription). Individual phase
     ///                      overrides win when set.
-    #[arg(long, default_value = "claude", value_parser = ["claude", "openai", "codex", "hybrid"])]
+    #[arg(long, default_value = "claude", value_parser = ["claude", "openai", "codex", "opencode", "hybrid"])]
     llm: String,
 
     /// Custom base URL for OpenAI-compatible API endpoints. When set,
@@ -315,20 +321,20 @@ struct Cli {
     #[arg(long, env = "OPENAI_BASE_URL")]
     openai_base_url: Option<String>,
 
-    /// Per-phase overrides. Each accepts claude | openai | codex and
+    /// Per-phase overrides. Each accepts claude | openai | codex | opencode and
     /// wins over `--llm` (including the `hybrid` preset) for that one
     /// phase. Useful for surgical tuning: e.g. `--llm hybrid
     /// --critic-llm claude` for a hybrid run that uses Claude for
     /// Critic instead of Codex.
-    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
     architect_llm: Option<String>,
-    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
     planner_llm: Option<String>,
-    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
     story_llm: Option<String>,
-    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
     critic_llm: Option<String>,
-    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
     surgeon_llm: Option<String>,
 
     /// Disable semantic memory (MemoryLibrarian). Uses tag-based
@@ -473,6 +479,8 @@ async fn run_app(
 
     app.planner = match rc.planner.as_deref() {
         Some("openai") => Planner::OpenAI,
+        Some("codex") => Planner::Codex,
+        Some("opencode") => Planner::OpenCode,
         _ => Planner::Claude,
     };
 
@@ -491,11 +499,30 @@ async fn run_app(
     if cli.planner != "claude" {
         app.planner = match cli.planner.as_str() {
             "openai" => Planner::OpenAI,
+            "codex" => Planner::Codex,
+            "opencode" => Planner::OpenCode,
             _ => Planner::Claude,
         };
     }
 
+    // When --llm is set, auto-select the matching planner so the user
+    // doesn't need to pass both --llm and --planner.
+    match cli.llm.as_str() {
+        "openai" => app.planner = Planner::OpenAI,
+        "codex" => app.planner = Planner::Codex,
+        "opencode" => app.planner = Planner::OpenCode,
+        _ => {} // claude/hybrid keep the default or explicit --planner
+    }
+
     if let Some(ref model) = cli.model {
+        // `--model` is a GLOBAL override applied to every phase. We
+        // accept it verbatim here (no clap value_parser) so non-Claude
+        // backends can name any provider/model string — e.g.
+        // `--llm opencode -m anthropic/claude-sonnet-4`. The Claude-only
+        // opus/sonnet/haiku vocabulary is validated AFTER per-phase
+        // backends are resolved (see the model-vs-backend check below),
+        // because that's the point where we know which phases actually
+        // run on Claude and would choke on a provider/model string.
         app.override_model = Some(model.clone());
         app.model_routing = false;
     } else if cli.no_model_routing {
@@ -574,6 +601,13 @@ async fn run_app(
     // `hybrid` preset splits per-phase: Claude for Architect /
     // Planner / Surgeon (high-stakes, low-volume calls), Codex for
     // Story + Critic (high-volume, cheap on subscription).
+    // Did the user actually type `--llm`? `cli.llm` has a default of
+    // "claude", so its value alone can't distinguish an explicit
+    // `--llm claude` (or `--llm hybrid`, which also resolves llm to
+    // Claude) from the no-flag default. We need that distinction to
+    // decide whether to show the provider picker, so scan the raw argv.
+    app.llm_explicitly_set = std::env::args().any(|a| a == "--llm" || a.starts_with("--llm="));
+
     match cli.llm.as_str() {
         "hybrid" => {
             // The preset only sets the defaults — explicit per-phase
@@ -621,6 +655,39 @@ async fn run_app(
     if let Some(ref v) = cli.surgeon_llm {
         if let Some(p) = app::LlmProvider::parse(v) {
             app.surgeon_llm = p;
+        }
+    }
+
+    // Validate a global `--model` against the resolved per-phase
+    // backends. `--model` is applied verbatim to EVERY phase, but the
+    // Claude CLI only understands opus/sonnet/haiku — a provider/model
+    // string like `anthropic/claude-sonnet-4` would make any Claude
+    // phase fail. So if `--model` isn't a Claude model name AND at
+    // least one phase still routes through Claude, reject early with a
+    // clear message instead of letting the Claude subprocess choke.
+    // (This is why the check lives here, after per-phase resolution,
+    // rather than at parse time.)
+    if let Some(ref model) = cli.model {
+        let is_claude_model = matches!(model.as_str(), "opus" | "sonnet" | "haiku");
+        let any_claude_phase = [
+            app.architect_llm,
+            app.planner_llm,
+            app.story_llm,
+            app.critic_llm,
+            app.surgeon_llm,
+        ]
+        .iter()
+        .any(|p| *p == app::LlmProvider::Claude);
+        if !is_claude_model && any_claude_phase {
+            eprintln!(
+                "[baro] error: --model '{}' is not a Claude model (opus/sonnet/haiku) \
+                 but at least one phase still runs on Claude. `--model` applies to \
+                 every phase, so it must be Claude-compatible unless all phases use a \
+                 non-Claude backend. Route the Claude phases elsewhere (e.g. \
+                 `--llm opencode`) or use a per-phase model flag.",
+                model
+            );
+            std::process::exit(2);
         }
     }
 
@@ -705,8 +772,20 @@ async fn run_app(
                 }
             }
         } else {
-            // No goal: show ProviderPicker first.
-            app.screen = app::Screen::ProviderPicker;
+            // No goal: show ProviderPicker first — UNLESS the user
+            // explicitly chose a backend via --llm. Gate on whether
+            // --llm was actually passed, NOT on `llm != Claude`: the
+            // `hybrid` preset and an explicit `--llm claude` both
+            // resolve `llm` to Claude, and the old guard wrongly
+            // re-prompted them. Worse, for hybrid the picker's Enter
+            // handler then overwrote every per-phase backend with one
+            // provider, silently destroying the hybrid split the user
+            // asked for.
+            if app.llm_explicitly_set {
+                app.screen = app::Screen::Welcome;
+            } else {
+                app.screen = app::Screen::ProviderPicker;
+            }
         }
     }
 
@@ -829,25 +908,40 @@ async fn run_app(
                     Screen::ProviderPicker => match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
                         KeyCode::Up | KeyCode::Char('k') => {
-                            app.provider_picker_index = 0;
+                            if app.provider_picker_index > 0 {
+                                app.provider_picker_index -= 1;
+                            } else {
+                                app.provider_picker_index = app.provider_picker_options.len().saturating_sub(1);
+                            }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            app.provider_picker_index = 1;
+                            if app.provider_picker_index < app.provider_picker_options.len().saturating_sub(1) {
+                                app.provider_picker_index += 1;
+                            } else {
+                                app.provider_picker_index = 0;
+                            }
                         }
                         KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
-                            if app.provider_picker_index == 0 {
-                                app.llm = app::LlmProvider::Claude;
-                                app.screen = Screen::Welcome;
+                            let chosen = app.provider_picker_options[app.provider_picker_index];
+                            app.llm = chosen;
+                            app.architect_llm = chosen;
+                            app.planner_llm = chosen;
+                            app.story_llm = chosen;
+                            app.critic_llm = chosen;
+                            app.surgeon_llm = chosen;
+                            // Set the legacy planner enum to match
+                            app.planner = match chosen {
+                                app::LlmProvider::Claude => app::Planner::Claude,
+                                app::LlmProvider::OpenAI => app::Planner::OpenAI,
+                                app::LlmProvider::Codex => app::Planner::Codex,
+                                app::LlmProvider::OpenCode => app::Planner::OpenCode,
+                            };
+                            // OpenAI needs an API key — detour if missing
+                            if chosen == app::LlmProvider::OpenAI && app.openai_api_key.is_none() {
+                                app.api_key_input.clear();
+                                app.screen = Screen::ApiKeyInput;
                             } else {
-                                app.llm = app::LlmProvider::OpenAI;
-                                // Skip the API-key screen if the user
-                                // already has the secret in their env.
-                                if app.openai_api_key.is_some() {
-                                    app.screen = Screen::Welcome;
-                                } else {
-                                    app.api_key_input.clear();
-                                    app.screen = Screen::ApiKeyInput;
-                                }
+                                app.screen = Screen::Welcome;
                             }
                         }
                         _ => {}
@@ -1366,7 +1460,17 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
                 ))
                 .await;
             None
-        } else if matches!(planner, Planner::Claude) {
+        } else {
+            // Run the Architect for every backend. The TS architect
+            // (run-architect.ts) has a path for all four providers
+            // (claude / openai / codex / opencode), so gating on the
+            // backend was both unnecessary and incoherent: upstream ran
+            // it for Claude only, this branch had widened it to
+            // Claude|Codex|OpenCode (silently changing Codex behaviour
+            // and still excluding OpenAI for no reason). Gate purely on
+            // `!quick` — quick mode is the only case that legitimately
+            // skips the design document. Routing keys off `architect_llm`
+            // (the real per-phase field), not the legacy `planner` enum.
             let _ = tx.send(AppEvent::ArchitectStarted).await;
             match architect_runner::run_architect(
                 &goal,
@@ -1395,8 +1499,6 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
                     None
                 }
             }
-        } else {
-            None
         };
 
         // Phase 2 — Planner. TS subprocess decides Claude vs OpenAI

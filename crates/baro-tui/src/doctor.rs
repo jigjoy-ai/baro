@@ -46,6 +46,7 @@ pub async fn run() -> i32 {
     results.push(check_claude_version().await);
     results.push(check_claude_print_call().await);
     results.push(check_codex_on_path().await);
+    results.push(check_opencode_on_path().await);
     results.push(check_gh_on_path().await);
     results.push(check_audit_dir_writable().await);
 
@@ -198,6 +199,24 @@ async fn check_codex_on_path() -> CheckResult {
             "codex on PATH (optional, used for --llm codex)",
             "binary not found",
             "Install OpenAI Codex CLI from https://developers.openai.com/codex/cli if you want the `--llm codex` subscription path; otherwise this check is informational and Claude / OpenAI routes still work.",
+        ),
+    }
+}
+
+/// Verify `opencode` binary is reachable (optional — only needed for
+/// `baro --llm opencode`). Soft failure: opencode is optional
+/// infrastructure for the OpenCode backend; not having it doesn't
+/// block Claude, OpenAI, or Codex workflows.
+async fn check_opencode_on_path() -> CheckResult {
+    match which::which("opencode") {
+        Ok(path) => CheckResult::pass(
+            "opencode on PATH (optional, used for --llm opencode)",
+            format!("{}", path.display()),
+        ),
+        Err(_) => CheckResult::fail(
+            "opencode on PATH (optional, used for --llm opencode)",
+            "binary not found",
+            "Install opencode from https://opencode.ai if you want the `--llm opencode` multi-provider path; otherwise this check is informational and other routes still work.",
         ),
     }
 }
