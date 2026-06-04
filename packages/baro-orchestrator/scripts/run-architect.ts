@@ -59,10 +59,10 @@ function parseArgs(argv: string[]): Args {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex") {
-                    fatal(`--llm must be 'claude' | 'openai' | 'codex', got '${v}'`)
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode") {
+                    fatal(`--llm must be 'claude' | 'openai' | 'codex' | 'opencode', got '${v}'`)
                 }
-                llm = v as "claude" | "openai" | "codex"
+                llm = v as "claude" | "openai" | "codex" | "opencode"
                 break
             }
             case "--model":
