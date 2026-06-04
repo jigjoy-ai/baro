@@ -1010,12 +1010,11 @@ impl App {
                     Some("gpt-5.5".to_string())
                 }
                 (LlmProvider::OpenAI, "review") => Some("gpt-5.4-mini".to_string()),
-                // OpenCode supports any provider/model — use anthropic/claude-sonnet-4
-                // for heavy phases and a smaller model for review/critic.
-                (LlmProvider::OpenCode, "architect" | "planning" | "execution" | "story") => {
-                    Some("anthropic/claude-sonnet-4".to_string())
-                }
-                (LlmProvider::OpenCode, "review") => Some("anthropic/claude-haiku-3".to_string()),
+                // OpenCode: no hardcoded model — let it use whatever the
+                // user configured in their opencode setup. Returning None
+                // means the TS side passes no --model flag and opencode
+                // picks its own default provider + model.
+                (LlmProvider::OpenCode, _) => None,
                 _ => None,
             };
         }
