@@ -705,8 +705,15 @@ async fn run_app(
                 }
             }
         } else {
-            // No goal: show ProviderPicker first.
-            app.screen = app::Screen::ProviderPicker;
+            // No goal: show ProviderPicker first — UNLESS the user
+            // explicitly chose a non-default backend via --llm (the
+            // picker only offers Claude/OpenAI; codex/opencode/hybrid
+            // users already made their choice on the command line).
+            if app.llm != app::LlmProvider::Claude {
+                app.screen = app::Screen::Welcome;
+            } else {
+                app.screen = app::Screen::ProviderPicker;
+            }
         }
     }
 
