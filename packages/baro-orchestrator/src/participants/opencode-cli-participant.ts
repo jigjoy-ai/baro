@@ -140,6 +140,12 @@ export class OpenCodeCliParticipant extends BaseObserver {
             this.resolveReady = res
             this.rejectReady = rej
         })
+        // Suppress UnhandledPromiseRejection when callers only await
+        // `done` and never attach a rejection handler to `ready`. The
+        // rejection is still observable by callers who do await `ready`;
+        // the no-op catch here only prevents the Node.js warning when no
+        // one is listening.
+        this.ready.catch(() => { /* suppressed — callers use `done` */ })
         this.done = new Promise<OpenCodeRunSummary>((res) => {
             this.resolveDone = res
         })

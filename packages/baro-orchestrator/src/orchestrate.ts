@@ -30,6 +30,7 @@ import {
 import { Critic } from "./participants/critic.js"
 import { CriticCodex } from "./participants/critic-codex.js"
 import { CriticOpenAI } from "./participants/critic-openai.js"
+import { CriticOpenCode } from "./participants/critic-opencode.js"
 import { Finalizer } from "./participants/finalizer.js"
 import { joinBaroEventForwarders } from "./participants/forwarders/index.js"
 import { Librarian } from "./participants/librarian.js"
@@ -41,6 +42,7 @@ import { type StoryAgent } from "./participants/story-agent.js"
 import { Surgeon, type PrdSnapshot } from "./participants/surgeon.js"
 import { SurgeonCodex } from "./participants/surgeon-codex.js"
 import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
+import { SurgeonOpenCode } from "./participants/surgeon-opencode.js"
 import { PrdFile, loadPrd } from "./prd.js"
 import { RunStartRequest } from "./semantic-events.js"
 import { emit } from "./tui-protocol.js"
@@ -287,6 +289,11 @@ export async function orchestrate(
             "[orchestrate] llm=codex: Story, Critic, Surgeon all shelling out to " +
                 "`codex exec --json` (ChatGPT subscription path).\n",
         )
+    } else if (llm === "opencode") {
+        process.stderr.write(
+            "[orchestrate] llm=opencode: Story, Critic, Surgeon all shelling out to " +
+                "`opencode run --format json` (OpenCode CLI path).\n",
+        )
     } else {
         process.stderr.write(
             "[orchestrate] llm=claude: Story, Critic, Surgeon all shelling out to " +
@@ -359,7 +366,7 @@ export async function orchestrate(
     // Phase-4 observer — Surgeon (adaptive DAG mutation). Opt-in.
     // Joins early so it sees StoryResultItem-s from the moment the
     // Conductor starts running.
-    let surgeon: Surgeon | SurgeonOpenAI | SurgeonCodex | null = null
+    let surgeon: Surgeon | SurgeonOpenAI | SurgeonCodex | SurgeonOpenCode | null = null
     if (config.withSurgeon) {
         const snapshot = (): PrdSnapshot => {
             const current = loadPrd(config.prdPath)
@@ -391,6 +398,12 @@ export async function orchestrate(
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
             })
+        } else if (surgeonLlm === "opencode") {
+            surgeon = new SurgeonOpenCode({
+                snapshot,
+                useLlm: config.surgeonUseLlm ?? true,
+                model: config.surgeonModel,
+            })
         } else {
             surgeon = new Surgeon({
                 snapshot,
@@ -404,7 +417,7 @@ export async function orchestrate(
     // Phase-3 observer — Critic (live acceptance-criteria evaluator).
     // Opt-in (default OFF). Spawns `claude --model haiku` subprocesses
     // for each evaluation, inheriting Claude CLI auth.
-    let critic: Critic | CriticOpenAI | CriticCodex | null = null
+    let critic: Critic | CriticOpenAI | CriticCodex | CriticOpenCode | null = null
     if (config.withCritic) {
         const prd = loadPrd(config.prdPath)
         const targets = new Map<string, readonly string[]>(
@@ -423,6 +436,11 @@ export async function orchestrate(
             })
         } else if (criticLlm === "codex") {
             critic = new CriticCodex({
+                targets,
+                model: config.criticModel,
+            })
+        } else if (criticLlm === "opencode") {
+            critic = new CriticOpenCode({
                 targets,
                 model: config.criticModel,
             })

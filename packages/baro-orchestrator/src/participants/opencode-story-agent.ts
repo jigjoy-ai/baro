@@ -362,8 +362,12 @@ function raceWithTimeout<T>(
     ms: number,
     label: string,
 ): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>
+    const timeout = new Promise<T>(
+        (_, rej) => { timer = setTimeout(() => rej(new Error(label)), ms) },
+    )
     return Promise.race([
-        p,
-        new Promise<T>((_, rej) => setTimeout(() => rej(new Error(label)), ms)),
+        p.then((v) => { clearTimeout(timer); return v }),
+        timeout,
     ])
 }
