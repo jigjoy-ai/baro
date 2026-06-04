@@ -303,7 +303,7 @@ struct Cli {
     ///                      Critic move to Codex (high-volume, cheap
     ///                      on ChatGPT subscription). Individual phase
     ///                      overrides win when set.
-    #[arg(long, default_value = "claude", value_parser = ["claude", "openai", "codex", "hybrid"])]
+    #[arg(long, default_value = "claude", value_parser = ["claude", "openai", "codex", "opencode", "hybrid"])]
     llm: String,
 
     /// Custom base URL for OpenAI-compatible API endpoints. When set,
@@ -315,20 +315,20 @@ struct Cli {
     #[arg(long, env = "OPENAI_BASE_URL")]
     openai_base_url: Option<String>,
 
-    /// Per-phase overrides. Each accepts claude | openai | codex and
+    /// Per-phase overrides. Each accepts claude | openai | codex | opencode and
     /// wins over `--llm` (including the `hybrid` preset) for that one
     /// phase. Useful for surgical tuning: e.g. `--llm hybrid
     /// --critic-llm claude` for a hybrid run that uses Claude for
     /// Critic instead of Codex.
-    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
     architect_llm: Option<String>,
-    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
     planner_llm: Option<String>,
-    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
     story_llm: Option<String>,
-    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
     critic_llm: Option<String>,
-    #[arg(long, value_parser = ["claude", "openai", "codex"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
     surgeon_llm: Option<String>,
 
     /// Disable semantic memory (MemoryLibrarian). Uses tag-based

@@ -77,6 +77,7 @@ pub fn render(f: &mut Frame, app: &App) {
         crate::app::LlmProvider::Claude => "Claude",
         crate::app::LlmProvider::OpenAI => "OpenAI",
         crate::app::LlmProvider::Codex => "Codex",
+        crate::app::LlmProvider::OpenCode => "OpenCode",
     };
 
     if let Some(ref err) = app.planning_error {

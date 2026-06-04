@@ -45,6 +45,26 @@ export {
     type CodexStoryOutcome,
 } from "./participants/codex-story-agent.js"
 
+export {
+    OpenCodeCliParticipant,
+    type OpenCodeCliParticipantOptions,
+    type OpenCodeRunSummary,
+} from "./participants/opencode-cli-participant.js"
+
+export {
+    OpenCodeStoryAgent,
+    type OpenCodeStorySpec,
+    type OpenCodeStoryOutcome,
+} from "./participants/opencode-story-agent.js"
+
+export {
+    mapOpenCodeEvent,
+    type OpenCodeMapResult,
+    type MappedOpenCodeItem,
+} from "./opencode-stream-mapper.js"
+
+export { runOpenCodeOneShot, type RunOpenCodeOneShotOptions } from "./opencode-one-shot.js"
+
 export { Auditor, type AuditorOptions } from "./participants/auditor.js"
 
 export {

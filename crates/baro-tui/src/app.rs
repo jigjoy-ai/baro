@@ -121,6 +121,12 @@ pub enum LlmProvider {
     /// Implementation: `packages/baro-orchestrator/src/participants/
     /// codex-cli-participant.ts`.
     Codex,
+    /// OpenCode CLI subprocess. Multi-provider agent shell that outputs
+    /// JSONL via `opencode run --format json`. Supports any model via
+    /// `-m provider/model` flag. One-shot non-interactive invocation.
+    /// Implementation: `packages/baro-orchestrator/src/participants/
+    /// opencode-cli-participant.ts`.
+    OpenCode,
 }
 
 impl LlmProvider {
@@ -129,6 +135,7 @@ impl LlmProvider {
             Self::Claude => "claude",
             Self::OpenAI => "openai",
             Self::Codex => "codex",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -137,6 +144,7 @@ impl LlmProvider {
             "claude" => Some(Self::Claude),
             "openai" => Some(Self::OpenAI),
             "codex" => Some(Self::Codex),
+            "opencode" => Some(Self::OpenCode),
             _ => None,
         }
     }
@@ -1002,6 +1010,12 @@ impl App {
                     Some("gpt-5.5".to_string())
                 }
                 (LlmProvider::OpenAI, "review") => Some("gpt-5.4-mini".to_string()),
+                // OpenCode supports any provider/model — use anthropic/claude-sonnet-4
+                // for heavy phases and a smaller model for review/critic.
+                (LlmProvider::OpenCode, "architect" | "planning" | "execution" | "story") => {
+                    Some("anthropic/claude-sonnet-4".to_string())
+                }
+                (LlmProvider::OpenCode, "review") => Some("anthropic/claude-haiku-3".to_string()),
                 _ => None,
             };
         }

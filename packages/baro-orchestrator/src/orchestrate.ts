@@ -140,16 +140,16 @@ export interface OrchestrateConfig {
      * Planner phases are wired up in the Rust TUI layer, not here —
      * orchestrate.ts doesn't see them.
      */
-    llm?: "claude" | "openai" | "codex"
+    llm?: "claude" | "openai" | "codex" | "opencode"
     /**
      * Optional per-phase overrides. When set, win over `llm`. Each can
      * be any of the three providers, independent of the others. Used
      * by the `--llm hybrid` preset (Story+Critic on Codex bulk-savings,
      * Surgeon on Claude for rare-but-high-stakes failures).
      */
-    storyLlm?: "claude" | "openai" | "codex"
-    criticLlm?: "claude" | "openai" | "codex"
-    surgeonLlm?: "claude" | "openai" | "codex"
+    storyLlm?: "claude" | "openai" | "codex" | "opencode"
+    criticLlm?: "claude" | "openai" | "codex" | "opencode"
+    surgeonLlm?: "claude" | "openai" | "codex" | "opencode"
     /**
      * Per-phase model override for StoryAgent. When set, wins over
      * each story's individual `model` field in the PRD as well as
@@ -240,7 +240,7 @@ export async function orchestrate(
 ): Promise<OrchestrateResult> {
     const env = new AgenticEnvironment()
     const emitTui = config.emitTuiEvents ?? true
-    const llm: "claude" | "openai" | "codex" = config.llm ?? "claude"
+    const llm: "claude" | "openai" | "codex" | "opencode" = config.llm ?? "claude"
     // Per-phase resolution: each falls back to global `llm` when no
     // explicit override is provided. This is the central place where
     // hybrid configurations land — every downstream factory branches
