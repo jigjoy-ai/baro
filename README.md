@@ -69,15 +69,16 @@ flowchart LR
     F --> PR([Pull Request])
 ```
 
-Every story is one CLI subprocess — Claude Code, OpenAI Codex CLI, or a Mozaik-native OpenAI Responses session, depending on `--llm`. Auth inherits from whichever CLI you already have signed in, no API key plumbing.
+Every story is one CLI subprocess — Claude Code, OpenAI Codex CLI, OpenCode, or a Mozaik-native OpenAI Responses session, depending on `--llm`. Auth inherits from whichever CLI you already have signed in, no API key plumbing.
 
-## Three LLM backends, one DAG
+## Four LLM backends, one DAG
 
 ```bash
-baro --llm claude  "Your goal"   # default — Claude Code on Anthropic Max subscription
-baro --llm codex   "Your goal"   # OpenAI Codex CLI on ChatGPT Pro/Plus subscription
-baro --llm openai  "Your goal"   # Mozaik-native OpenAI Responses (per-call API billing)
-baro --llm hybrid  "Your goal"   # Claude on Architect/Planner/Surgeon, Codex on Story/Critic
+baro --llm claude    "Your goal"   # default — Claude Code on Anthropic Max subscription
+baro --llm codex     "Your goal"   # OpenAI Codex CLI on ChatGPT Pro/Plus subscription
+baro --llm openai    "Your goal"   # Mozaik-native OpenAI Responses (per-call API billing)
+baro --llm opencode  "Your goal"   # OpenCode CLI — multi-provider agent shell (any model)
+baro --llm hybrid    "Your goal"   # Claude on Architect/Planner/Surgeon, Codex on Story/Critic
 ```
 
 Same orchestration. Same DAG. Same prompts. The only thing that moves is which provider every agent talks to. `--llm hybrid` is the new default-recommendation for serious runs — Claude where the upstream plan matters, Codex for the parallel story+critic work that dominates the budget.
@@ -85,11 +86,11 @@ Same orchestration. Same DAG. Same prompts. The only thing that moves is which p
 Each phase has its own override flag if you want to mix it yourself:
 
 ```bash
-baro --architect-llm claude \
-     --planner-llm  claude \
-     --story-llm    codex  \
-     --critic-llm   codex  \
-     --surgeon-llm  claude \
+baro --architect-llm claude   \
+     --planner-llm  claude   \
+     --story-llm    opencode \
+     --critic-llm   codex    \
+     --surgeon-llm  claude   \
      "Your goal"
 ```
 
@@ -112,6 +113,27 @@ OPENAI_API_KEY=not-needed OPENAI_BASE_URL=http://localhost:11434/v1 \
 ```
 
 The `--openai-base-url` flag also works (wins over the env var when both are set).
+
+### OpenCode (multi-provider agent shell)
+
+[OpenCode](https://opencode.ai) is an open-source coding agent that supports any LLM provider. With `--llm opencode`, baro delegates story execution to the `opencode` CLI. Model selection uses the `-m provider/model` format:
+
+```bash
+# OpenCode with Anthropic Claude
+baro --llm opencode -m anthropic/claude-sonnet-4 "Your goal"
+
+# OpenCode with OpenAI
+baro --llm opencode -m openai/gpt-4o "Your goal"
+
+# OpenCode with a local model (LM Studio, Ollama, etc.)
+baro --llm opencode -m lmstudio/qwen3-coder "Your goal"
+
+# Mix: Claude plans, OpenCode executes stories
+baro --architect-llm claude --planner-llm claude \
+     --story-llm opencode -m anthropic/claude-sonnet-4 "Your goal"
+```
+
+OpenCode manages its own API keys via `opencode providers` — no additional env vars needed for baro. Runs with `--dangerously-skip-permissions` for unattended execution in baro's per-story worktrees.
 
 Full breakdown at [docs.baro.rs/llm-providers](https://docs.baro.rs/llm-providers) — provider economics, per-phase routing, the side-by-side benchmark across three real tasks: [**I tested Claude Code vs OpenAI Codex in my parallel agent setup. Then I built a hybrid.**](https://jigjoy.ai/blog/claude-code-vs-codex-baro)
 
@@ -139,7 +161,7 @@ A story's route can name **any** backend (`claude:opus`, `openai:MiniMax-M3`, `c
 | **Architect** | One Opus call before planning — emits a `DecisionDocument` that pins every cross-cutting design decision (file paths, schemas, API shapes, library choices) so 30 parallel agents don't each invent their own |
 | **Planner** | Decomposes the goal into a story DAG, with the DecisionDocument already pinned |
 | **Conductor** | State machine that drives the run by reacting to bus events |
-| **StoryAgent** | One CLI subprocess per story (Claude Code / Codex / OpenAI Responses, picked by `--llm` or `--story-llm`); multi-turn loop until story completes |
+| **StoryAgent** | One CLI subprocess per story (Claude Code / Codex / OpenCode / OpenAI Responses, picked by `--llm` or `--story-llm`); multi-turn loop until story completes |
 | **Critic** | Per-turn evaluator (Haiku). On fail verdict, injects corrective feedback as the agent's next turn |
 | **Sentry** | Flags overlapping Edit/Write tool calls across concurrent stories |
 | **Librarian** | Indexes one agent's Read/Grep findings so siblings don't redo the exploration |
@@ -255,6 +277,7 @@ The memory system adds ~1s startup overhead (ONNX model load) and negligible per
 - At least one of:
   - [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) authenticated (for `--llm claude`, the default)
   - [OpenAI Codex CLI](https://github.com/openai/codex) authenticated (for `--llm codex`)
+  - [OpenCode CLI](https://opencode.ai) with a provider configured (for `--llm opencode`)
   - `OPENAI_API_KEY` set (for `--llm openai`)
   - `OPENAI_BASE_URL` set to a custom endpoint (optional, for `--llm openai` — routes through Xiaomi MiMo, OpenRouter, vLLM, Ollama, or any OpenAI-compatible API)
   - Both Claude CLI **and** Codex CLI authenticated (for `--llm hybrid`)
