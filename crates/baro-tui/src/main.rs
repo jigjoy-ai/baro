@@ -473,6 +473,8 @@ async fn run_app(
 
     app.planner = match rc.planner.as_deref() {
         Some("openai") => Planner::OpenAI,
+        Some("codex") => Planner::Codex,
+        Some("opencode") => Planner::OpenCode,
         _ => Planner::Claude,
     };
 
@@ -491,8 +493,19 @@ async fn run_app(
     if cli.planner != "claude" {
         app.planner = match cli.planner.as_str() {
             "openai" => Planner::OpenAI,
+            "codex" => Planner::Codex,
+            "opencode" => Planner::OpenCode,
             _ => Planner::Claude,
         };
+    }
+
+    // When --llm is set, auto-select the matching planner so the user
+    // doesn't need to pass both --llm and --planner.
+    match cli.llm.as_str() {
+        "openai" => app.planner = Planner::OpenAI,
+        "codex" => app.planner = Planner::Codex,
+        "opencode" => app.planner = Planner::OpenCode,
+        _ => {} // claude/hybrid keep the default or explicit --planner
     }
 
     if let Some(ref model) = cli.model {
@@ -836,25 +849,40 @@ async fn run_app(
                     Screen::ProviderPicker => match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
                         KeyCode::Up | KeyCode::Char('k') => {
-                            app.provider_picker_index = 0;
+                            if app.provider_picker_index > 0 {
+                                app.provider_picker_index -= 1;
+                            } else {
+                                app.provider_picker_index = app.provider_picker_options.len().saturating_sub(1);
+                            }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            app.provider_picker_index = 1;
+                            if app.provider_picker_index < app.provider_picker_options.len().saturating_sub(1) {
+                                app.provider_picker_index += 1;
+                            } else {
+                                app.provider_picker_index = 0;
+                            }
                         }
                         KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
-                            if app.provider_picker_index == 0 {
-                                app.llm = app::LlmProvider::Claude;
-                                app.screen = Screen::Welcome;
+                            let chosen = app.provider_picker_options[app.provider_picker_index];
+                            app.llm = chosen;
+                            app.architect_llm = chosen;
+                            app.planner_llm = chosen;
+                            app.story_llm = chosen;
+                            app.critic_llm = chosen;
+                            app.surgeon_llm = chosen;
+                            // Set the legacy planner enum to match
+                            app.planner = match chosen {
+                                app::LlmProvider::Claude => app::Planner::Claude,
+                                app::LlmProvider::OpenAI => app::Planner::OpenAI,
+                                app::LlmProvider::Codex => app::Planner::Codex,
+                                app::LlmProvider::OpenCode => app::Planner::OpenCode,
+                            };
+                            // OpenAI needs an API key — detour if missing
+                            if chosen == app::LlmProvider::OpenAI && app.openai_api_key.is_none() {
+                                app.api_key_input.clear();
+                                app.screen = Screen::ApiKeyInput;
                             } else {
-                                app.llm = app::LlmProvider::OpenAI;
-                                // Skip the API-key screen if the user
-                                // already has the secret in their env.
-                                if app.openai_api_key.is_some() {
-                                    app.screen = Screen::Welcome;
-                                } else {
-                                    app.api_key_input.clear();
-                                    app.screen = Screen::ApiKeyInput;
-                                }
+                                app.screen = Screen::Welcome;
                             }
                         }
                         _ => {}
@@ -1373,7 +1401,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
                 ))
                 .await;
             None
-        } else if matches!(planner, Planner::Claude) {
+        } else if matches!(planner, Planner::Claude | Planner::Codex | Planner::OpenCode) {
             let _ = tx.send(AppEvent::ArchitectStarted).await;
             match architect_runner::run_architect(
                 &goal,

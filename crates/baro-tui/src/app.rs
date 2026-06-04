@@ -28,6 +28,8 @@ pub enum Screen {
 pub enum Planner {
     Claude,
     OpenAI,
+    Codex,
+    OpenCode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -202,10 +204,13 @@ pub struct App {
     pub planner: Planner,
 
     // Provider-picker screen (first step when invoked without a goal).
-    // 0 = Claude Code, 1 = Mozaik native (OpenAI). Stored as an index
-    // for trivial up/down handling; the chosen LlmProvider lands in
-    // `self.llm` on confirm.
+    // Index into `provider_picker_options`; the chosen LlmProvider
+    // lands in `self.llm` on confirm.
     pub provider_picker_index: usize,
+    /// Available backends for the picker, populated at startup. Claude
+    /// and OpenAI are always present; Codex and OpenCode are added when
+    /// their CLI is detected on PATH.
+    pub provider_picker_options: Vec<LlmProvider>,
 
     // API-key input screen — buffer for the in-progress text. The
     // confirmed key (whether from this input or the environment) is
@@ -367,6 +372,16 @@ impl App {
             planner: Planner::Claude,
 
             provider_picker_index: 0,
+            provider_picker_options: {
+                let mut opts = vec![LlmProvider::Claude, LlmProvider::OpenAI];
+                if which::which("codex").is_ok() {
+                    opts.push(LlmProvider::Codex);
+                }
+                if which::which("opencode").is_ok() {
+                    opts.push(LlmProvider::OpenCode);
+                }
+                opts
+            },
             api_key_input: String::new(),
             openai_api_key: None,
             openai_base_url: None,
@@ -497,7 +512,9 @@ impl App {
     pub fn toggle_planner(&mut self) {
         self.planner = match self.planner {
             Planner::Claude => Planner::OpenAI,
-            Planner::OpenAI => Planner::Claude,
+            Planner::OpenAI => Planner::Codex,
+            Planner::Codex => Planner::OpenCode,
+            Planner::OpenCode => Planner::Claude,
         };
     }
 
