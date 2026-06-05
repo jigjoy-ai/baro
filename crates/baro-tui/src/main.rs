@@ -310,7 +310,7 @@ struct Cli {
     ///                      Critic move to Codex (high-volume, cheap
     ///                      on ChatGPT subscription). Individual phase
     ///                      overrides win when set.
-    #[arg(long, default_value = "claude", value_parser = ["claude", "openai", "codex", "opencode", "hybrid"])]
+    #[arg(long, default_value = "claude", value_parser = ["claude", "openai", "codex", "opencode", "copilot", "hybrid"])]
     llm: String,
 
     /// Custom base URL for OpenAI-compatible API endpoints. When set,
@@ -524,6 +524,7 @@ async fn run_app(
         "openai" => app.planner = Planner::OpenAI,
         "codex" => app.planner = Planner::Codex,
         "opencode" => app.planner = Planner::OpenCode,
+        "copilot" => app.planner = Planner::Copilot,
         _ => {} // claude/hybrid keep the default or explicit --planner
     }
 
