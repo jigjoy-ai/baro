@@ -382,3 +382,31 @@ export interface OpenCodeUnknownEventData {
 }
 export const OpenCodeUnknownEvent =
     defineSemanticEvent<OpenCodeUnknownEventData>("opencode_unknown_event")
+
+// ─── Copilot CLI passthrough types ────────────────────────────────────
+// Copilot (`copilot -p ... --output-format json`) emits a stream of JSONL
+// events whose exact schema is undocumented; everything unrecognized falls
+// through to CopilotUnknownEvent so no event is ever silently dropped.
+
+export interface CopilotSystemData {
+    agentId: string
+    subtype: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const CopilotSystem = defineSemanticEvent<CopilotSystemData>("copilot_system")
+
+export interface CopilotItemEventData {
+    agentId: string
+    itemType: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const CopilotItemEvent =
+    defineSemanticEvent<CopilotItemEventData>("copilot_item_event")
+
+export interface CopilotUnknownEventData {
+    agentId: string
+    copilotType: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const CopilotUnknownEvent =
+    defineSemanticEvent<CopilotUnknownEventData>("copilot_unknown_event")
