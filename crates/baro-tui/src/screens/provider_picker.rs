@@ -45,6 +45,11 @@ fn provider_description(provider: LlmProvider) -> &'static [&'static str] {
             "model you configured in opencode (any provider). No extra",
             "API keys needed, opencode manages its own credentials.",
         ],
+        LlmProvider::Copilot => &[
+            "GitHub Copilot CLI. Drives every phase through your",
+            "`copilot` CLI session — uses your gh/Copilot auth. No extra",
+            "API keys needed. One-shot non-interactive per story.",
+        ],
     }
 }
 
@@ -54,6 +59,7 @@ fn provider_title(provider: LlmProvider) -> &'static str {
         LlmProvider::OpenAI => "Mozaik native — OpenAI",
         LlmProvider::Codex => "Codex CLI",
         LlmProvider::OpenCode => "OpenCode",
+        LlmProvider::Copilot => "GitHub Copilot CLI",
     }
 }
 

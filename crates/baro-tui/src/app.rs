@@ -30,6 +30,7 @@ pub enum Planner {
     OpenAI,
     Codex,
     OpenCode,
+    Copilot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -129,6 +130,12 @@ pub enum LlmProvider {
     /// Implementation: `packages/baro-orchestrator/src/participants/
     /// opencode-cli-participant.ts`.
     OpenCode,
+    /// GitHub Copilot CLI subprocess. One-shot non-interactive invocation
+    /// (`copilot -p ... --output-format json`) emitting JSONL, modeled on
+    /// the Codex backend. Uses its own `gh`/Copilot auth.
+    /// Implementation: `packages/baro-orchestrator/src/participants/
+    /// copilot-cli-participant.ts`.
+    Copilot,
 }
 
 impl LlmProvider {
@@ -138,6 +145,7 @@ impl LlmProvider {
             Self::OpenAI => "openai",
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
+            Self::Copilot => "copilot",
         }
     }
 
@@ -147,6 +155,7 @@ impl LlmProvider {
             "openai" => Some(Self::OpenAI),
             "codex" => Some(Self::Codex),
             "opencode" => Some(Self::OpenCode),
+            "copilot" => Some(Self::Copilot),
             _ => None,
         }
     }
@@ -398,6 +407,9 @@ impl App {
                 if which::which("opencode").is_ok() {
                     opts.push(LlmProvider::OpenCode);
                 }
+                if which::which("copilot").is_ok() {
+                    opts.push(LlmProvider::Copilot);
+                }
                 opts
             },
             api_key_input: String::new(),
@@ -543,13 +555,15 @@ impl App {
             Planner::Claude => Planner::OpenAI,
             Planner::OpenAI => Planner::Codex,
             Planner::Codex => Planner::OpenCode,
-            Planner::OpenCode => Planner::Claude,
+            Planner::OpenCode => Planner::Copilot,
+            Planner::Copilot => Planner::Claude,
         };
         let provider = match self.planner {
             Planner::Claude => LlmProvider::Claude,
             Planner::OpenAI => LlmProvider::OpenAI,
             Planner::Codex => LlmProvider::Codex,
             Planner::OpenCode => LlmProvider::OpenCode,
+            Planner::Copilot => LlmProvider::Copilot,
         };
         self.llm = provider;
         self.architect_llm = provider;
@@ -1073,6 +1087,10 @@ impl App {
                 // means the TS side passes no --model flag and opencode
                 // picks its own default provider + model.
                 (LlmProvider::OpenCode, _) => None,
+                // Copilot: no hardcoded model — let it use its own default
+                // (`claude-sonnet-4.5`). Returning None means the TS side
+                // passes no --model flag.
+                (LlmProvider::Copilot, _) => None,
                 _ => None,
             };
         }

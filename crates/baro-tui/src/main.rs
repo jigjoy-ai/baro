@@ -950,6 +950,7 @@ async fn run_app(
                                 app::LlmProvider::OpenAI => app::Planner::OpenAI,
                                 app::LlmProvider::Codex => app::Planner::Codex,
                                 app::LlmProvider::OpenCode => app::Planner::OpenCode,
+                                app::LlmProvider::Copilot => app::Planner::Copilot,
                             };
                             // OpenAI needs an API key — detour if missing
                             if chosen == app::LlmProvider::OpenAI && app.openai_api_key.is_none() {
