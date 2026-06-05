@@ -22,6 +22,7 @@ import { readFileSync } from "fs"
 
 import { runPlannerClaude } from "../src/planning/planner-claude.js"
 import { runPlannerCodex } from "../src/planning/planner-codex.js"
+import { runPlannerCopilot } from "../src/planning/planner-copilot.js"
 import { runPlannerOpenAI } from "../src/planning/planner-openai.js"
 import { runPlannerOpenCode } from "../src/planning/planner-opencode.js"
 
@@ -34,7 +35,7 @@ interface Args {
      * v1 positioning: Codex covers the Story phase; Architect and
      * Planner stay on Claude.
      */
-    llm: "claude" | "openai" | "codex" | "opencode"
+    llm: "claude" | "openai" | "codex" | "opencode" | "copilot"
     model?: string
     effort?: string
     contextFile?: string
@@ -45,7 +46,7 @@ interface Args {
 function parseArgs(argv: string[]): Args {
     let goal: string | undefined
     let cwd: string | undefined
-    let llm: "claude" | "openai" | "codex" | "opencode" | undefined
+    let llm: "claude" | "openai" | "codex" | "opencode" | "copilot" | undefined
     let model: string | undefined
     let effort: string | undefined
     let contextFile: string | undefined
@@ -63,10 +64,18 @@ function parseArgs(argv: string[]): Args {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode") {
-                    fatal(`--llm must be 'claude' | 'openai' | 'codex' | 'opencode', got '${v}'`)
+                if (
+                    v !== "claude" &&
+                    v !== "openai" &&
+                    v !== "codex" &&
+                    v !== "opencode" &&
+                    v !== "copilot"
+                ) {
+                    fatal(
+                        `--llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'copilot', got '${v}'`,
+                    )
                 }
-                llm = v as "claude" | "openai" | "codex" | "opencode"
+                llm = v as "claude" | "openai" | "codex" | "opencode" | "copilot"
                 break
             }
             case "--model":
@@ -152,6 +161,15 @@ async function main(): Promise<void> {
             })
         } else if (args.llm === "codex") {
             prdJson = await runPlannerCodex({
+                goal: args.goal,
+                cwd: args.cwd,
+                model: args.model,
+                projectContext,
+                decisionDocument,
+                quick: args.quick,
+            })
+        } else if (args.llm === "copilot") {
+            prdJson = await runPlannerCopilot({
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,
