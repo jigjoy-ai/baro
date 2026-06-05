@@ -276,6 +276,50 @@ BARO_DEBUG=memory baro ... # debug logging to stderr + ~/.baro/runs/memory-*.log
 
 The memory system adds ~1s startup overhead (ONNX model load) and negligible per-operation cost. It is session-scoped: data lives in `~/.baro/sessions/run-<timestamp>/memory/` and is discarded after the run.
 
+## Building from source
+
+The shipping executable is the native Rust binary `baro` (`baro.exe` on Windows). The npm package `baro-ai` is a thin wrapper whose `postinstall` downloads a prebuilt binary from GitHub releases; building from source produces the same artifacts locally.
+
+### Native binary (local platform)
+
+```bash
+cargo build --release -p baro-tui
+```
+
+Output: `target/release/baro` (`target/release/baro.exe` on Windows).
+
+### Cross-compiled binaries
+
+Build for a specific target with `--target` (these are the five release targets):
+
+```bash
+cargo build --release --target aarch64-apple-darwin
+cargo build --release --target x86_64-apple-darwin
+cargo build --release --target x86_64-unknown-linux-gnu
+cargo build --release --target aarch64-unknown-linux-gnu
+cargo build --release --target x86_64-pc-windows-msvc
+```
+
+For the Linux ARM64 target (`aarch64-unknown-linux-gnu`), install the `gcc-aarch64-linux-gnu` package and point Cargo at its linker:
+
+```bash
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+  cargo build --release --target aarch64-unknown-linux-gnu
+```
+
+### TypeScript bundles
+
+The npm package's `dist/*.mjs` bundles (spawned by the Rust runners at run time) are built from the repo root:
+
+```bash
+npm install
+npm run build --workspace packages/baro-app
+```
+
+### Running your build (dev vs prod)
+
+The npm `bin/baro` shim execs `~/.baro/bin/baro`, so to use a locally built binary through the wrapper it must be reachable there. Alternatively, run the built binary directly: `target/release/baro`.
+
 ## Requirements
 
 - At least one of:
