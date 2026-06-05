@@ -68,6 +68,13 @@ export interface OrchestrateConfig {
      */
     withGit?: boolean
     /**
+     * Whether to create a pull request (`gh pr create`) at end of run.
+     * Branch creation and pushes still happen regardless; this only
+     * gates the final PR. If undefined, defaults to true (when git is
+     * on). Set false (via --no-pr) to skip PR creation.
+     */
+    withPr?: boolean
+    /**
      * Whether to wire the Librarian (cross-agent runtime memory) into
      * the run. When on, prompts for stories at later DAG levels are
      * automatically augmented with relevant findings from earlier
@@ -462,6 +469,7 @@ export async function orchestrate(
         ? new Finalizer({
               cwd: config.cwd,
               prdPath: config.prdPath,
+              createPr: config.withPr ?? true,
               onLog: (line) =>
                   emitTui && emit({ type: "story_log", id: "_finalizer", line }),
           })

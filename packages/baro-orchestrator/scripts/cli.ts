@@ -38,6 +38,7 @@ interface CliArgs {
     timeout: number
     model?: string
     noGit: boolean
+    noPr: boolean
     noTuiEvents: boolean
     auditLog?: string
     withCritic: boolean
@@ -69,6 +70,7 @@ function parseArgs(argv: string[]): CliArgs {
         parallel: 0,
         timeout: 0, // 0 = auto (effort-scaled in storyTimeoutSecs); --timeout N overrides absolutely
         noGit: false,
+        noPr: false,
         noTuiEvents: false,
         withCritic: false,
         noLibrarian: false,
@@ -104,6 +106,9 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--no-git":
                 args.noGit = true
+                break
+            case "--no-pr":
+                args.noPr = true
                 break
             case "--no-tui-events":
                 args.noTuiEvents = true
@@ -216,6 +221,7 @@ function printHelp(): void {
             "  --timeout <secs>      Per-story timeout (default: auto — effort-scaled; any value overrides)",
             "  --model <name>        Override model (opus, sonnet, haiku)",
             "  --no-git              Skip git lifecycle (branch / push)",
+            "  --no-pr               Skip PR creation at end of run (still branches/pushes)",
             "  --no-tui-events       Skip BaroEvent JSON emission",
             "  --audit-log <path>    Persist all bus events to JSONL",
             "  --with-critic         Enable Critic (live acceptance evaluator)",
@@ -317,6 +323,7 @@ async function main(): Promise<void> {
         defaultModel: args.model ?? "sonnet",
         emitTuiEvents: !args.noTuiEvents,
         withGit: args.noGit ? false : undefined,
+        withPr: args.noPr ? false : undefined,
         auditLogPath: args.auditLog,
         withCritic: args.withCritic,
         criticModel: args.criticModel,

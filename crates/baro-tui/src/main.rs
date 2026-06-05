@@ -129,6 +129,7 @@ fn executor_config_from_app(app: &App) -> executor::ExecutorConfig {
         story_model: app.story_model.clone(),
         tier_map: app.tier_map.clone(),
         openai_endpoints: app.openai_endpoints.clone(),
+        skip_pr: app.skip_pr,
     }
 }
 
@@ -342,6 +343,18 @@ struct Cli {
     /// better context matching between agents. Default: ON.
     #[arg(long)]
     no_memory: bool,
+
+    /// Use the current branch instead of creating a new baro/<name> branch.
+    /// Commits land on whatever branch is checked out now; no new branch is
+    /// created. (Resume/rerun already reuse the persisted branch.)
+    #[arg(long = "no-branch")]
+    no_branch: bool,
+
+    /// Skip pull-request creation at the end of the run. Branch creation and
+    /// pushes still happen; only the final `gh pr create` is skipped. (Use
+    /// --no-branch to also stay on the current branch.)
+    #[arg(long = "no-pr")]
+    no_pr: bool,
 }
 
 enum AppEvent {
@@ -581,6 +594,8 @@ async fn run_app(
     if let Some(d) = cli.intra_level_delay {
         app.intra_level_delay_secs = Some(d);
     }
+    app.use_current_branch = cli.no_branch;
+    app.skip_pr = cli.no_pr;
 
     // --quick is the user telling us "this is trivial, don't ceremony it".
     // We honour that on three fronts: skip Architect (no design doc),
@@ -1159,6 +1174,7 @@ async fn run_app(
                                         let stm = app.story_model.clone();
                                         let ttm = app.tier_map.clone();
                                         let oep = app.openai_endpoints.clone();
+                                        let skp = app.skip_pr;
                                         let err_tx = tx.clone();
                                         tokio::spawn(async move {
                                             // Resume path: prd.json already holds the
@@ -1187,7 +1203,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() });
+                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone(), skip_pr: skp });
                                         });
                                     }
                                     Err(e) => {
@@ -1238,6 +1254,8 @@ async fn run_app(
                                     let stm = app.story_model.clone();
                                     let ttm = app.tier_map.clone();
                                     let oep = app.openai_endpoints.clone();
+                                    let skp = app.skip_pr;
+                                    let use_current_branch = app.use_current_branch;
                                     let err_tx = tx.clone();
                                     tokio::spawn(async move {
                                         // Fresh run: ALWAYS create a new suffixed branch
@@ -1245,13 +1263,30 @@ async fn run_app(
                                         // from sibling clones with the same origin would
                                         // otherwise collide on `git push`, and the user
                                         // explicitly wants every run on its own branch.
-                                        let actual_full_branch = match git::create_fresh_branch(&branch_cwd, &branch_name_clone).await {
-                                            Ok(name) => name,
-                                            Err(e) => {
-                                                let _ = err_tx.send(AppEvent::BranchError(
-                                                    format!("Branch creation failed: {}. Cannot proceed on main branch.", e)
-                                                )).await;
-                                                return;
+                                        // --no-branch: reuse whatever branch is checked
+                                        // out now (verbatim, no `baro/` prefix) instead
+                                        // of creating a new suffixed branch. Push is
+                                        // still handled by the orchestrator's
+                                        // createOrCheckoutBranch on run start.
+                                        let actual_full_branch = if use_current_branch {
+                                            match git::get_current_branch(&branch_cwd).await {
+                                                Ok(b) => b,
+                                                Err(e) => {
+                                                    let _ = err_tx.send(AppEvent::BranchError(
+                                                        format!("Could not determine current branch: {}. Cannot proceed.", e)
+                                                    )).await;
+                                                    return;
+                                                }
+                                            }
+                                        } else {
+                                            match git::create_fresh_branch(&branch_cwd, &branch_name_clone).await {
+                                                Ok(name) => name,
+                                                Err(e) => {
+                                                    let _ = err_tx.send(AppEvent::BranchError(
+                                                        format!("Branch creation failed: {}. Cannot proceed on main branch.", e)
+                                                    )).await;
+                                                    return;
+                                                }
                                             }
                                         };
                                         // Persist the FULL "baro/<slug>-<suffix>" name back
@@ -1289,7 +1324,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() });
+                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone(), skip_pr: skp });
                                     });
                                 }
                             }
@@ -1798,6 +1833,7 @@ fn spawn_executor(
         override_model: config.override_model,
         default_model,
         skip_git: false,
+        skip_pr: config.skip_pr,
         audit_log: Some(audit_log_default),
         with_critic: config.with_critic,
         critic_model: config.critic_model,

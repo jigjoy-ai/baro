@@ -113,6 +113,10 @@ pub struct ExecutorConfig {
     /// Named OpenAI-compatible endpoints (`name=url`), forwarded as
     /// `--openai-endpoint`. Routes reference them via `openai:model@name`.
     pub openai_endpoints: Vec<String>,
+    /// Skip `gh pr create` at end of run (from `--no-pr`). Pushed through
+    /// to the orchestrator as `--no-pr`; branch creation + push are
+    /// unaffected. Distinct from the orchestrator's `--no-git`.
+    pub skip_pr: bool,
 }
 
 // ─── Helpers used by main.rs ────────────────────────────────────────

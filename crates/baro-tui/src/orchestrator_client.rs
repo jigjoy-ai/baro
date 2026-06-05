@@ -27,6 +27,10 @@ pub struct OrchestratorConfig {
     pub default_model: Option<String>,
     /// If true, the orchestrator will skip the git lifecycle (branch/push).
     pub skip_git: bool,
+    /// If true, the orchestrator skips `gh pr create` at end of run while
+    /// keeping branch creation + push. Forwarded as `--no-pr`. Distinct
+    /// from `skip_git`, which disables the entire git lifecycle.
+    pub skip_pr: bool,
     /// Optional path for the audit JSONL log.
     pub audit_log: Option<PathBuf>,
     /// Enable Critic (Phase 3 live acceptance evaluator). Default: false.
@@ -271,6 +275,9 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     }
     if cfg.skip_git {
         cmd.arg("--no-git");
+    }
+    if cfg.skip_pr {
+        cmd.arg("--no-pr");
     }
     if let Some(p) = &cfg.audit_log {
         cmd.arg("--audit-log").arg(p);
