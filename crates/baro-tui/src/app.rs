@@ -325,6 +325,17 @@ pub struct App {
     pub openai_endpoints: Vec<String>,
     pub intra_level_delay_secs: Option<u64>,
 
+    /// Use the currently checked-out branch instead of creating a new
+    /// `baro/<slug>-<timestamp>` branch (set from `--no-branch`). Scoped
+    /// to the fresh-run path; resume/rerun already reuse the persisted
+    /// branch. Default: false (create a fresh branch).
+    pub use_current_branch: bool,
+
+    /// Skip `gh pr create` at end of run (set from `--no-pr`). Branch
+    /// creation and pushes still happen; only PR creation is suppressed.
+    /// Default: false (create a PR).
+    pub skip_pr: bool,
+
     /// Quick mode (`--quick`): user has told us this goal is trivial and they
     /// want a surgical run. Skips the Architect phase entirely, instructs the
     /// Planner to emit exactly one story, and disables Critic + Surgeon
@@ -451,6 +462,8 @@ impl App {
             tier_map: None,
             openai_endpoints: Vec::new(),
             intra_level_delay_secs: None,
+            use_current_branch: false,
+            skip_pr: false,
             quick: false,
             llm: LlmProvider::Claude,
             architect_llm: LlmProvider::Claude,
