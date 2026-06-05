@@ -55,11 +55,11 @@ interface CliArgs {
     tierMap?: TierMap
     /** Raw `--openai-endpoint name=url` specs, resolved to a map later. */
     endpointSpecs: string[]
-    llm: "claude" | "openai" | "codex" | "opencode"
+    llm: "claude" | "openai" | "codex" | "opencode" | "copilot"
     /** Optional per-phase overrides; each defaults to `llm`. */
-    storyLlm?: "claude" | "openai" | "codex" | "opencode"
-    criticLlm?: "claude" | "openai" | "codex" | "opencode"
-    surgeonLlm?: "claude" | "openai" | "codex" | "opencode"
+    storyLlm?: "claude" | "openai" | "codex" | "opencode" | "copilot"
+    criticLlm?: "claude" | "openai" | "codex" | "opencode" | "copilot"
+    surgeonLlm?: "claude" | "openai" | "codex" | "opencode" | "copilot"
     help: boolean
 }
 
@@ -165,9 +165,15 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode") {
+                if (
+                    v !== "claude" &&
+                    v !== "openai" &&
+                    v !== "codex" &&
+                    v !== "opencode" &&
+                    v !== "copilot"
+                ) {
                     process.stderr.write(
-                        `[cli] --llm must be 'claude' | 'openai' | 'codex' | 'opencode', got '${v}'\n`,
+                        `[cli] --llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'copilot', got '${v}'\n`,
                     )
                     process.exit(2)
                 }
@@ -178,9 +184,15 @@ function parseArgs(argv: string[]): CliArgs {
             case "--critic-llm":
             case "--surgeon-llm": {
                 const v = required(argv, ++i, a)
-                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode") {
+                if (
+                    v !== "claude" &&
+                    v !== "openai" &&
+                    v !== "codex" &&
+                    v !== "opencode" &&
+                    v !== "copilot"
+                ) {
                     process.stderr.write(
-                        `[cli] ${a} must be 'claude' | 'openai' | 'codex' | 'opencode', got '${v}'\n`,
+                        `[cli] ${a} must be 'claude' | 'openai' | 'codex' | 'opencode' | 'copilot', got '${v}'\n`,
                     )
                     process.exit(2)
                 }
