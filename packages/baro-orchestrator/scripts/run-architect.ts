@@ -21,6 +21,7 @@ import { readFileSync } from "fs"
 
 import { runArchitectClaude } from "../src/planning/architect-claude.js"
 import { runArchitectCodex } from "../src/planning/architect-codex.js"
+import { runArchitectCopilot } from "../src/planning/architect-copilot.js"
 import { runArchitectOpenAI } from "../src/planning/architect-openai.js"
 import { runArchitectOpenCode } from "../src/planning/architect-opencode.js"
 
@@ -34,7 +35,7 @@ interface Args {
      * Codex covers the Story phase (which dominates token spend);
      * Architect and Planner stay on Claude.
      */
-    llm: "claude" | "openai" | "codex" | "opencode"
+    llm: "claude" | "openai" | "codex" | "opencode" | "copilot"
     model?: string
     effort?: string
     contextFile?: string
@@ -43,7 +44,7 @@ interface Args {
 function parseArgs(argv: string[]): Args {
     let goal: string | undefined
     let cwd: string | undefined
-    let llm: "claude" | "openai" | "codex" | "opencode" | undefined
+    let llm: "claude" | "openai" | "codex" | "opencode" | "copilot" | undefined
     let model: string | undefined
     let effort: string | undefined
     let contextFile: string | undefined
@@ -59,10 +60,18 @@ function parseArgs(argv: string[]): Args {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode") {
-                    fatal(`--llm must be 'claude' | 'openai' | 'codex' | 'opencode', got '${v}'`)
+                if (
+                    v !== "claude" &&
+                    v !== "openai" &&
+                    v !== "codex" &&
+                    v !== "opencode" &&
+                    v !== "copilot"
+                ) {
+                    fatal(
+                        `--llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'copilot', got '${v}'`,
+                    )
                 }
-                llm = v as "claude" | "openai" | "codex" | "opencode"
+                llm = v as "claude" | "openai" | "codex" | "opencode" | "copilot"
                 break
             }
             case "--model":
@@ -128,6 +137,13 @@ async function main(): Promise<void> {
             })
         } else if (args.llm === "codex") {
             doc = await runArchitectCodex({
+                goal: args.goal,
+                cwd: args.cwd,
+                model: args.model,
+                projectContext,
+            })
+        } else if (args.llm === "copilot") {
+            doc = await runArchitectCopilot({
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,
