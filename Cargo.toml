@@ -1,3 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/baro-tui"]
+# The Tauri desktop app is its own standalone crate (its own deps/edition);
+# keep it out of this workspace so cargo doesn't try to absorb it.
+exclude = ["desktop/src-tauri"]

@@ -188,6 +188,14 @@ export interface OrchestrateConfig {
         onShutdown?: () => void
     }
     /**
+     * Called once the Operator is live on the bus (before stories run), so a
+     * long-lived caller can steer the run mid-flight — e.g.
+     * `operator.dispatch({ kind: "redirect", storyId, message })` to message a
+     * running story. Without this, the Operator is only returned after the
+     * run finishes.
+     */
+    onOperatorReady?: (operator: Operator) => void
+    /**
      * Extra participants to attach to the bus before the run starts.
      * Useful for live debugging, custom observers, or test harnesses.
      */
@@ -321,6 +329,7 @@ export async function orchestrate(
     const operator = new Operator(config.operatorHooks ?? {})
     operator.setEnvironment(env)
     operator.join(env)
+    config.onOperatorReady?.(operator)
 
     const useGit = config.withGit ?? (await isInsideGitRepo(config.cwd))
     const gitGate = new GitGate()
