@@ -47,6 +47,7 @@ pub async fn run() -> i32 {
     results.push(check_claude_print_call().await);
     results.push(check_codex_on_path().await);
     results.push(check_opencode_on_path().await);
+    results.push(check_copilot_on_path().await);
     results.push(check_gh_on_path().await);
     results.push(check_audit_dir_writable().await);
 
@@ -217,6 +218,24 @@ async fn check_opencode_on_path() -> CheckResult {
             "opencode on PATH (optional, used for --llm opencode)",
             "binary not found",
             "Install opencode from https://opencode.ai if you want the `--llm opencode` multi-provider path; otherwise this check is informational and other routes still work.",
+        ),
+    }
+}
+
+/// Verify `copilot` binary is reachable (optional — only needed for
+/// `baro --llm copilot`). Soft failure: copilot is optional
+/// infrastructure for the Copilot backend; not having it doesn't
+/// block Claude, OpenAI, Codex, or OpenCode workflows.
+async fn check_copilot_on_path() -> CheckResult {
+    match which::which("copilot") {
+        Ok(path) => CheckResult::pass(
+            "copilot on PATH (optional, used for --llm copilot)",
+            format!("{}", path.display()),
+        ),
+        Err(_) => CheckResult::fail(
+            "copilot on PATH (optional, used for --llm copilot)",
+            "binary not found",
+            "Install the GitHub Copilot CLI from https://docs.github.com/copilot/concepts/agents/about-copilot-cli if you want the `--llm copilot` path; otherwise this check is informational and other routes still work.",
         ),
     }
 }
