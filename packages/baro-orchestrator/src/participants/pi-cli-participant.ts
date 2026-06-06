@@ -261,6 +261,11 @@ export class PiCliParticipant extends BaseObserver {
         proc.stdout!.setEncoding("utf8")
         proc.stderr!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => this.handleStdout(chunk))
+        // Flush any trailing line that arrived without a newline before the
+        // stream closed — a Pi build/wrapper omitting the final `\n` would
+        // otherwise drop its last event (e.g. agent_end), corrupting the
+        // success predicate. 'end' fires after the last 'data', before 'exit'.
+        proc.stdout!.on("end", () => this.flushStdout())
         proc.stderr!.on("data", (chunk: string) => this.handleStderr(chunk))
         proc.on("error", (err) => {
             // Async process error (e.g. EACCES/EPIPE surfaced after a
@@ -390,6 +395,17 @@ export class PiCliParticipant extends BaseObserver {
             )
             this.buffer = ""
         }
+    }
+
+    /**
+     * Process any trailing buffered bytes left when stdout closes without a
+     * final newline. Called from the stream's 'end' handler so a final
+     * `message_end`/`agent_end` line that lacks a trailing `\n` is not lost.
+     */
+    private flushStdout(): void {
+        const line = this.buffer.trim()
+        this.buffer = ""
+        if (line) this.processLine(line)
     }
 
     private handleStderr(chunk: string): void {

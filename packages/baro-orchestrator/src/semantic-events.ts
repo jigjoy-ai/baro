@@ -408,7 +408,7 @@ export const PiTurnEvent = defineSemanticEvent<PiTurnEventData>("pi_turn_event")
 
 export interface PiItemEventData {
     agentId: string
-    /** "text" | "thinking" | "tool_call" | "tool_result" */
+    /** "text" | "thinking" | "tool_call" | "tool_start" | "tool_update" | "tool_result" */
     itemType: string
     raw: Readonly<Record<string, unknown>>
 }

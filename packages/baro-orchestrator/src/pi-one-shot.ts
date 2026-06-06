@@ -111,19 +111,17 @@ export async function runPiOneShot(
 
         const maxBufferBytes = 16 * 1024 * 1024
 
-        proc.stdout!.setEncoding("utf8")
-        proc.stdout!.on("data", (chunk: string) => {
-            stdoutBuffer += chunk
-            let nl: number
-            while ((nl = stdoutBuffer.indexOf("\n")) >= 0) {
-                const line = stdoutBuffer.slice(0, nl).trim()
-                stdoutBuffer = stdoutBuffer.slice(nl + 1)
-                if (!line) continue
+        // Process a single complete JSONL line. Pulled out of the data
+        // handler so the stream-`end` flush can reuse it for a final line
+        // that arrives without a trailing newline.
+        const processLine = (rawLine: string): void => {
+                const line = rawLine.trim()
+                if (!line) return
                 let event: Record<string, unknown>
                 try {
                     event = JSON.parse(line) as Record<string, unknown>
                 } catch {
-                    continue
+                    return
                 }
                 const type = typeof event.type === "string" ? event.type : ""
                 if (type) eventTypesSeen.push(type)
@@ -153,7 +151,7 @@ export async function runPiOneShot(
                             }
                         }
                     }
-                    continue
+                    return
                 }
 
                 // Log tool executions so the audit trail shows agent activity.
@@ -169,7 +167,7 @@ export async function runPiOneShot(
                                 ? event.name.slice(0, 120)
                                 : "?"
                     process.stderr.write(`[${label}] tool: ${toolName}\n`)
-                    continue
+                    return
                 }
                 // Also catch the toolcall_start shape carried inside
                 // message_update.assistantMessageEvent. The tool name lives on
@@ -188,8 +186,18 @@ export async function runPiOneShot(
                                     : "?"
                         process.stderr.write(`[${label}] tool: ${toolName}\n`)
                     }
-                    continue
+                    return
                 }
+        }
+
+        proc.stdout!.setEncoding("utf8")
+        proc.stdout!.on("data", (chunk: string) => {
+            stdoutBuffer += chunk
+            let nl: number
+            while ((nl = stdoutBuffer.indexOf("\n")) >= 0) {
+                const line = stdoutBuffer.slice(0, nl)
+                stdoutBuffer = stdoutBuffer.slice(nl + 1)
+                processLine(line)
             }
             // Guard against unbounded growth from a newline-less stream
             // (a wedged Pi or one enormous line). Drop the partial so
@@ -198,6 +206,16 @@ export async function runPiOneShot(
                 process.stderr.write(
                     `[${label}] stdout buffer exceeded ${maxBufferBytes} bytes without a newline — discarding partial line\n`,
                 )
+                stdoutBuffer = ""
+            }
+        })
+        // Flush a final line that arrives without a trailing newline — a Pi
+        // version or wrapper that omits the last `\n` would otherwise drop its
+        // `message_end`, leaving assistantText empty and failing a successful
+        // run. The 'end' event fires after the last 'data' and before 'exit'.
+        proc.stdout!.on("end", () => {
+            if (stdoutBuffer.length > 0) {
+                processLine(stdoutBuffer)
                 stdoutBuffer = ""
             }
         })

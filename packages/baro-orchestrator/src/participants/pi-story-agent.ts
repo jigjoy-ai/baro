@@ -376,5 +376,11 @@ function raceWithTimeout<T>(
     // the fulfil branch only would leave the timer pending (and keeping the
     // event loop alive up to `ms`) on any rejection of `p`.
     const settled = p.finally(() => clearTimeout(timer))
+    // If the timeout wins the race, `settled` stays pending and would surface
+    // an UnhandledPromiseRejection should `p` later reject (Node ≥ 15). The
+    // race already propagates the real outcome to the caller, so swallow the
+    // now-unobserved rejection on the losing branch. Harmless for the current
+    // sole caller (`pi.done` never rejects); makes the helper safe to reuse.
+    settled.catch(() => { /* observed via the race; ignore late rejection */ })
     return Promise.race([settled, timeout])
 }

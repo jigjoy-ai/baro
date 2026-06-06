@@ -46,8 +46,8 @@
  *                               from content blocks + PiTurnEvent "message_end".
  *   - "message_end" (user)    → PiTurnEvent "message_end" (turn lifecycle
  *                               record only; no content items extracted).
- *   - "tool_execution_start"  → PiItemEvent itemType "tool_result" (raw).
- *   - "tool_execution_update" → PiItemEvent itemType "tool_result" (raw).
+ *   - "tool_execution_start"  → PiItemEvent itemType "tool_start" (raw).
+ *   - "tool_execution_update" → PiItemEvent itemType "tool_update" (raw).
  *   - "tool_execution_end"    → FunctionCallOutputItem (callId from
  *                               `toolCallId`, output from result.content[].text)
  *                               + PiItemEvent itemType "tool_result".
@@ -335,11 +335,15 @@ export function mapPiEvent(
     }
 
     // ─── tool_execution_start ─────────────────────────────────────
+    // Distinct itemType per lifecycle phase ("tool_start"/"tool_update"/
+    // "tool_result") so audit-log readers and itemType-filtering observers
+    // can tell a tool starting from one mid-stream from a completed result
+    // without reaching into the opaque `raw` field.
     if (type === "tool_execution_start") {
         items.push(
             PiItemEvent.create({
                 agentId,
-                itemType: "tool_result",
+                itemType: "tool_start",
                 raw: event,
             }),
         )
@@ -351,7 +355,7 @@ export function mapPiEvent(
         items.push(
             PiItemEvent.create({
                 agentId,
-                itemType: "tool_result",
+                itemType: "tool_update",
                 raw: event,
             }),
         )
