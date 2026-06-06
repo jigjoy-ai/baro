@@ -26,6 +26,7 @@ import {
 import { CodexStoryAgent } from "./codex-story-agent.js"
 import { OpenAIStoryAgent } from "./openai-story-agent.js"
 import { OpenCodeStoryAgent } from "./opencode-story-agent.js"
+import { PiStoryAgent } from "./pi-story-agent.js"
 import { StoryAgent } from "./story-agent.js"
 import {
     formatRoute,
@@ -45,10 +46,11 @@ export interface StoryFactoryOptions {
      *               subprocess (ChatGPT subscription billing path)
      *   "opencode" — OpenCodeStoryAgent wrapping an `opencode run --format json`
      *               subprocess
-     * Same bus contract for all four — Conductor, Critic, Surgeon,
+     *   "pi"      — PiStoryAgent wrapping a `pi --mode json -p` subprocess
+     * Same bus contract for all — Conductor, Critic, Surgeon,
      * Sentry, Librarian, Cartographer don't notice the swap.
      */
-    llm?: "claude" | "openai" | "codex" | "opencode"
+    llm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     /**
      * Optional model name to pass to OpenAI agents. Default
      * `gpt-5.5` — StoryAgent's coding loop benefits from the largest
@@ -95,7 +97,7 @@ export class StoryFactory extends BaseObserver {
     private envRef: AgenticEnvironment | null = null
     private readonly active: Map<
         string,
-        StoryAgent | OpenAIStoryAgent | CodexStoryAgent | OpenCodeStoryAgent
+        StoryAgent | OpenAIStoryAgent | CodexStoryAgent | OpenCodeStoryAgent | PiStoryAgent
     > = new Map()
 
     constructor(private readonly opts: StoryFactoryOptions) {
@@ -151,8 +153,17 @@ export class StoryFactory extends BaseObserver {
                 "\n",
         )
 
-        const agent: StoryAgent | OpenAIStoryAgent | CodexStoryAgent | OpenCodeStoryAgent =
-            route.backend === "opencode"
+        const agent: StoryAgent | OpenAIStoryAgent | CodexStoryAgent | OpenCodeStoryAgent | PiStoryAgent =
+            route.backend === "pi"
+                ? new PiStoryAgent({
+                      id: req.storyId,
+                      prompt: req.prompt,
+                      cwd: this.opts.cwd,
+                      model: route.model,
+                      retries: req.retries,
+                      timeoutSecs: req.timeoutSecs,
+                  })
+                : route.backend === "opencode"
                 ? new OpenCodeStoryAgent({
                       id: req.storyId,
                       prompt: req.prompt,

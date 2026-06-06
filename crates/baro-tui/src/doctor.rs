@@ -47,6 +47,7 @@ pub async fn run() -> i32 {
     results.push(check_claude_print_call().await);
     results.push(check_codex_on_path().await);
     results.push(check_opencode_on_path().await);
+    results.push(check_pi_on_path().await);
     results.push(check_gh_on_path().await);
     results.push(check_audit_dir_writable().await);
 
@@ -217,6 +218,24 @@ async fn check_opencode_on_path() -> CheckResult {
             "opencode on PATH (optional, used for --llm opencode)",
             "binary not found",
             "Install opencode from https://opencode.ai if you want the `--llm opencode` multi-provider path; otherwise this check is informational and other routes still work.",
+        ),
+    }
+}
+
+/// Verify `pi` binary is reachable (optional — only needed for
+/// `baro --llm pi`). Soft failure: pi is optional
+/// infrastructure for the Pi backend; not having it doesn't
+/// block Claude, OpenAI, Codex, or OpenCode workflows.
+async fn check_pi_on_path() -> CheckResult {
+    match which::which("pi") {
+        Ok(path) => CheckResult::pass(
+            "pi on PATH (optional, used for --llm pi)",
+            format!("{}", path.display()),
+        ),
+        Err(_) => CheckResult::fail(
+            "pi on PATH (optional, used for --llm pi)",
+            "binary not found",
+            "Install pi if you want the `--llm pi` multi-provider path; otherwise this check is informational and other routes still work.",
         ),
     }
 }

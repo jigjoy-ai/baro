@@ -31,6 +31,7 @@ import { Critic } from "./participants/critic.js"
 import { CriticCodex } from "./participants/critic-codex.js"
 import { CriticOpenAI } from "./participants/critic-openai.js"
 import { CriticOpenCode } from "./participants/critic-opencode.js"
+import { CriticPi } from "./participants/critic-pi.js"
 import { Finalizer } from "./participants/finalizer.js"
 import { joinBaroEventForwarders } from "./participants/forwarders/index.js"
 import { Librarian } from "./participants/librarian.js"
@@ -43,6 +44,7 @@ import { Surgeon, type PrdSnapshot } from "./participants/surgeon.js"
 import { SurgeonCodex } from "./participants/surgeon-codex.js"
 import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
 import { SurgeonOpenCode } from "./participants/surgeon-opencode.js"
+import { SurgeonPi } from "./participants/surgeon-pi.js"
 import { PrdFile, loadPrd } from "./prd.js"
 import { RunStartRequest } from "./semantic-events.js"
 import { emit } from "./tui-protocol.js"
@@ -142,16 +144,16 @@ export interface OrchestrateConfig {
      * Planner phases are wired up in the Rust TUI layer, not here —
      * orchestrate.ts doesn't see them.
      */
-    llm?: "claude" | "openai" | "codex" | "opencode"
+    llm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     /**
      * Optional per-phase overrides. When set, win over `llm`. Each can
      * be any of the three providers, independent of the others. Used
      * by the `--llm hybrid` preset (Story+Critic on Codex bulk-savings,
      * Surgeon on Claude for rare-but-high-stakes failures).
      */
-    storyLlm?: "claude" | "openai" | "codex" | "opencode"
-    criticLlm?: "claude" | "openai" | "codex" | "opencode"
-    surgeonLlm?: "claude" | "openai" | "codex" | "opencode"
+    storyLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    criticLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    surgeonLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     /**
      * Per-phase model override for StoryAgent. When set, wins over
      * each story's individual `model` field in the PRD as well as
@@ -242,7 +244,7 @@ export async function orchestrate(
 ): Promise<OrchestrateResult> {
     const env = new AgenticEnvironment()
     const emitTui = config.emitTuiEvents ?? true
-    const llm: "claude" | "openai" | "codex" | "opencode" = config.llm ?? "claude"
+    const llm: "claude" | "openai" | "codex" | "opencode" | "pi" = config.llm ?? "claude"
     // Per-phase resolution: each falls back to global `llm` when no
     // explicit override is provided. This is the central place where
     // hybrid configurations land — every downstream factory branches
@@ -250,6 +252,25 @@ export async function orchestrate(
     const storyLlm = config.storyLlm ?? llm
     const criticLlm = config.criticLlm ?? llm
     const surgeonLlm = config.surgeonLlm ?? llm
+
+    // The Critic listens for AgentResult on the bus. The CLI-subprocess
+    // story backends (pi, opencode) emit StoryResult/AgentState and never
+    // AgentResult, so the Critic is silent whenever the STORY backend is one
+    // of them — regardless of which backend the Critic itself runs on. (The
+    // critic backend choice only affects which model evaluates; it can't
+    // observe what the story never emits.) Warn loudly rather than failing
+    // quietly. `--critic-llm pi` over a Claude/OpenAI story still works,
+    // because those story backends DO emit AgentResult.
+    if (config.withCritic) {
+        const noAgentResult = new Set(["pi", "opencode"])
+        if (noAgentResult.has(storyLlm)) {
+            process.stderr.write(
+                `[orchestrate] WARNING: --with-critic with story backend '${storyLlm}' — ` +
+                    `the ${storyLlm} backend emits no AgentResult, so the Critic will never fire. ` +
+                    `Use a Claude/OpenAI story backend, or set --story-llm to a different backend.\n`,
+            )
+        }
+    }
 
     // Provider banner so the stderr / audit log makes the actual
     // routing obvious. As of 0.33 every LLM-using phase (Architect,
@@ -293,6 +314,11 @@ export async function orchestrate(
         process.stderr.write(
             "[orchestrate] llm=opencode: Story, Critic, Surgeon all shelling out to " +
                 "`opencode run --format json` (OpenCode CLI path).\n",
+        )
+    } else if (llm === "pi") {
+        process.stderr.write(
+            "[orchestrate] llm=pi: Story, Critic, Surgeon all shelling out to " +
+                "`pi --mode json -p` (Pi CLI path).\n",
         )
     } else {
         process.stderr.write(
@@ -366,7 +392,7 @@ export async function orchestrate(
     // Phase-4 observer — Surgeon (adaptive DAG mutation). Opt-in.
     // Joins early so it sees StoryResultItem-s from the moment the
     // Conductor starts running.
-    let surgeon: Surgeon | SurgeonOpenAI | SurgeonCodex | SurgeonOpenCode | null = null
+    let surgeon: Surgeon | SurgeonOpenAI | SurgeonCodex | SurgeonOpenCode | SurgeonPi | null = null
     if (config.withSurgeon) {
         const snapshot = (): PrdSnapshot => {
             const current = loadPrd(config.prdPath)
@@ -404,6 +430,12 @@ export async function orchestrate(
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
             })
+        } else if (surgeonLlm === "pi") {
+            surgeon = new SurgeonPi({
+                snapshot,
+                useLlm: config.surgeonUseLlm ?? true,
+                model: config.surgeonModel,
+            })
         } else {
             surgeon = new Surgeon({
                 snapshot,
@@ -417,7 +449,7 @@ export async function orchestrate(
     // Phase-3 observer — Critic (live acceptance-criteria evaluator).
     // Opt-in (default OFF). Spawns `claude --model haiku` subprocesses
     // for each evaluation, inheriting Claude CLI auth.
-    let critic: Critic | CriticOpenAI | CriticCodex | CriticOpenCode | null = null
+    let critic: Critic | CriticOpenAI | CriticCodex | CriticOpenCode | CriticPi | null = null
     if (config.withCritic) {
         const prd = loadPrd(config.prdPath)
         const targets = new Map<string, readonly string[]>(
@@ -441,6 +473,11 @@ export async function orchestrate(
             })
         } else if (criticLlm === "opencode") {
             critic = new CriticOpenCode({
+                targets,
+                model: config.criticModel,
+            })
+        } else if (criticLlm === "pi") {
+            critic = new CriticPi({
                 targets,
                 model: config.criticModel,
             })

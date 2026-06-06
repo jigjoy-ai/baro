@@ -6,6 +6,7 @@
 //!   - Mozaik native    — always available (needs OPENAI_API_KEY)
 //!   - Codex            — shown when `codex` is on PATH
 //!   - OpenCode         — shown when `opencode` is on PATH
+//!   - Pi               — shown when `pi` is on PATH
 //!
 //! Up/Down to highlight, Enter to confirm. The picked
 //! `LlmProvider` lands in `app.llm`; the next screen is decided in
@@ -45,6 +46,11 @@ fn provider_description(provider: LlmProvider) -> &'static [&'static str] {
             "model you configured in opencode (any provider). No extra",
             "API keys needed, opencode manages its own credentials.",
         ],
+        LlmProvider::Pi => &[
+            "Pi CLI — multi-provider agent shell. Uses whatever",
+            "model you configured in pi (any provider). No extra",
+            "API keys needed, pi manages its own credentials.",
+        ],
     }
 }
 
@@ -54,6 +60,7 @@ fn provider_title(provider: LlmProvider) -> &'static str {
         LlmProvider::OpenAI => "Mozaik native — OpenAI",
         LlmProvider::Codex => "Codex CLI",
         LlmProvider::OpenCode => "OpenCode",
+        LlmProvider::Pi => "Pi",
     }
 }
 

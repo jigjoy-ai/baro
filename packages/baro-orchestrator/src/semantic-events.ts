@@ -382,3 +382,42 @@ export interface OpenCodeUnknownEventData {
 }
 export const OpenCodeUnknownEvent =
     defineSemanticEvent<OpenCodeUnknownEventData>("opencode_unknown_event")
+
+// ─── Pi CLI passthrough types ─────────────────────────────────────────
+// Pi emits a stream of JSONL events with these envelope types:
+//   - session / agent_start / turn_start / agent_end → lifecycle
+//   - message_start / message_end / turn_end          → turn boundaries
+//   - message_update (assistantMessageEvent deltas)    → streamed items
+//   - tool_execution_start / _update / _end           → tool activity
+
+export interface PiSystemData {
+    agentId: string
+    /** "session" | "agent_start" | "turn_start" | "agent_end" */
+    subtype: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const PiSystem = defineSemanticEvent<PiSystemData>("pi_system")
+
+export interface PiTurnEventData {
+    agentId: string
+    /** "message_start" | "message_end" | "turn_end" */
+    turnType: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const PiTurnEvent = defineSemanticEvent<PiTurnEventData>("pi_turn_event")
+
+export interface PiItemEventData {
+    agentId: string
+    /** "text" | "thinking" | "tool_call" | "tool_start" | "tool_update" | "tool_result" */
+    itemType: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const PiItemEvent = defineSemanticEvent<PiItemEventData>("pi_item_event")
+
+export interface PiUnknownEventData {
+    agentId: string
+    piType: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const PiUnknownEvent =
+    defineSemanticEvent<PiUnknownEventData>("pi_unknown_event")

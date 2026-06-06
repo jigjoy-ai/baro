@@ -30,6 +30,7 @@ pub enum Planner {
     OpenAI,
     Codex,
     OpenCode,
+    Pi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -129,6 +130,10 @@ pub enum LlmProvider {
     /// Implementation: `packages/baro-orchestrator/src/participants/
     /// opencode-cli-participant.ts`.
     OpenCode,
+    /// Pi CLI subprocess. Multi-provider agent shell similar to OpenCode.
+    /// Implementation: `packages/baro-orchestrator/src/participants/
+    /// pi-cli-participant.ts`.
+    Pi,
 }
 
 impl LlmProvider {
@@ -138,6 +143,7 @@ impl LlmProvider {
             Self::OpenAI => "openai",
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
+            Self::Pi => "pi",
         }
     }
 
@@ -147,6 +153,7 @@ impl LlmProvider {
             "openai" => Some(Self::OpenAI),
             "codex" => Some(Self::Codex),
             "opencode" => Some(Self::OpenCode),
+            "pi" => Some(Self::Pi),
             _ => None,
         }
     }
@@ -387,6 +394,9 @@ impl App {
                 if which::which("opencode").is_ok() {
                     opts.push(LlmProvider::OpenCode);
                 }
+                if which::which("pi").is_ok() {
+                    opts.push(LlmProvider::Pi);
+                }
                 opts
             },
             api_key_input: String::new(),
@@ -530,13 +540,15 @@ impl App {
             Planner::Claude => Planner::OpenAI,
             Planner::OpenAI => Planner::Codex,
             Planner::Codex => Planner::OpenCode,
-            Planner::OpenCode => Planner::Claude,
+            Planner::OpenCode => Planner::Pi,
+            Planner::Pi => Planner::Claude,
         };
         let provider = match self.planner {
             Planner::Claude => LlmProvider::Claude,
             Planner::OpenAI => LlmProvider::OpenAI,
             Planner::Codex => LlmProvider::Codex,
             Planner::OpenCode => LlmProvider::OpenCode,
+            Planner::Pi => LlmProvider::Pi,
         };
         self.llm = provider;
         self.architect_llm = provider;
@@ -1060,6 +1072,9 @@ impl App {
                 // means the TS side passes no --model flag and opencode
                 // picks its own default provider + model.
                 (LlmProvider::OpenCode, _) => None,
+                // Pi: no hardcoded model — let it use whatever the
+                // user configured in their pi setup.
+                (LlmProvider::Pi, _) => None,
                 _ => None,
             };
         }
