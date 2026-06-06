@@ -44,11 +44,18 @@ const sharedBundleConfig = {
     // (no runtime dependency on @mozaik-ai/core or @baro/orchestrator).
     noExternal: [
         /^@mozaik-ai\//,
-        // Don't bundle @baro/memory - it has native deps that can't be bundled
-        // /^@baro\//,
+        // Bundle @baro/memory's OWN source (plain TS: Vectra wrapper +
+        // cache). Its heavy ML deps stay external (below) — they have
+        // wasm/native assets esbuild can't inline. Bundling the wrapper
+        // is what makes the published package able to LOAD memory at all:
+        // before this, `import("@baro/memory")` resolved to nothing from
+        // the staged ~/.baro/bin/cli.mjs and threw ERR_MODULE_NOT_FOUND,
+        // silently disabling semantic memory on every npm install.
+        /^@baro\//,
     ],
     external: [
-        '@baro/memory',
+        // The embedding stack — resolved at runtime from the node_modules
+        // postinstall links next to the staged bundle (see postinstall.js).
         '@xenova/transformers',
         'sharp',
         'onnxruntime-node',

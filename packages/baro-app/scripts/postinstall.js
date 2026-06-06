@@ -8,10 +8,12 @@
 import * as fs from "fs"
 import * as path from "path"
 import { fileURLToPath } from "url"
+import { createRequire } from "module"
 import * as https from "https"
 import * as os from "os"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const require = createRequire(import.meta.url)
 const PACKAGE_ROOT = path.resolve(__dirname, "..")
 const BARO_HOME = path.join(os.homedir(), ".baro", "bin")
 const BINARY_NAME = process.platform === "win32" ? "baro.exe" : "baro"
@@ -121,6 +123,40 @@ async function main() {
         } catch (err) {
             console.warn(`Warning: Could not stage ${name}: ${err.message}`)
         }
+    }
+
+    wireMemoryDeps()
+}
+
+/**
+ * Make the externalized embedding stack (`@xenova/transformers` + friends)
+ * resolvable from the staged bundles in ~/.baro/bin.
+ *
+ * The bundles run from ~/.baro/bin/cli.mjs, detached from baro-ai's own
+ * node_modules, so a runtime `import("@xenova/transformers")` would walk
+ * ~/.baro/bin/node_modules → ~/.baro/node_modules → … and find nothing —
+ * which is exactly why semantic memory silently failed to load before.
+ * We point ~/.baro/bin/node_modules at the real node_modules that holds
+ * @xenova (and its hoisted siblings), so the dynamic import resolves.
+ * Best-effort: if it can't be wired, memory is simply unavailable (the
+ * MemoryLibrarian already degrades gracefully) — never fail the install.
+ */
+function wireMemoryDeps() {
+    try {
+        const entry = require.resolve("@xenova/transformers", { paths: [PACKAGE_ROOT] })
+        const marker = `${path.sep}node_modules${path.sep}`
+        const idx = entry.lastIndexOf(marker)
+        if (idx === -1) {
+            console.warn("Warning: @xenova/transformers not under a node_modules dir; skipping memory wiring")
+            return
+        }
+        const realNodeModules = entry.slice(0, idx + marker.length - 1) // .../node_modules
+        const link = path.join(BARO_HOME, "node_modules")
+        try { fs.rmSync(link, { recursive: true, force: true }) } catch {}
+        fs.symlinkSync(realNodeModules, link, process.platform === "win32" ? "junction" : "dir")
+        console.log(`memory deps linked: ${link} -> ${realNodeModules}`)
+    } catch (err) {
+        console.warn(`Warning: could not wire memory deps (semantic memory may be unavailable): ${err.message}`)
     }
 }
 
