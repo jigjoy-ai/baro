@@ -65,6 +65,26 @@ export {
 
 export { runOpenCodeOneShot, type RunOpenCodeOneShotOptions } from "./opencode-one-shot.js"
 
+export {
+    PiCliParticipant,
+    type PiCliParticipantOptions,
+    type PiRunSummary,
+} from "./participants/pi-cli-participant.js"
+
+export {
+    PiStoryAgent,
+    type PiStorySpec,
+    type PiStoryOutcome,
+} from "./participants/pi-story-agent.js"
+
+export {
+    mapPiEvent,
+    type PiMapResult,
+    type MappedPiItem,
+} from "./pi-stream-mapper.js"
+
+export { runPiOneShot, type RunPiOneShotOptions } from "./pi-one-shot.js"
+
 export { Auditor, type AuditorOptions } from "./participants/auditor.js"
 
 export {

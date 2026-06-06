@@ -23,6 +23,7 @@ import { resolve } from "path"
 
 import { orchestrate, type OrchestrateConfig } from "../src/orchestrate.js"
 import { ClaudeCliParticipant } from "../src/participants/claude-cli-participant.js"
+import { PiCliParticipant } from "../src/participants/pi-cli-participant.js"
 import {
     parseEndpoints,
     parseTierMap,
@@ -54,11 +55,11 @@ interface CliArgs {
     tierMap?: TierMap
     /** Raw `--openai-endpoint name=url` specs, resolved to a map later. */
     endpointSpecs: string[]
-    llm: "claude" | "openai" | "codex" | "opencode"
+    llm: "claude" | "openai" | "codex" | "opencode" | "pi"
     /** Optional per-phase overrides; each defaults to `llm`. */
-    storyLlm?: "claude" | "openai" | "codex" | "opencode"
-    criticLlm?: "claude" | "openai" | "codex" | "opencode"
-    surgeonLlm?: "claude" | "openai" | "codex" | "opencode"
+    storyLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    criticLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    surgeonLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     help: boolean
 }
 
@@ -160,9 +161,9 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode") {
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi") {
                     process.stderr.write(
-                        `[cli] --llm must be 'claude' | 'openai' | 'codex' | 'opencode', got '${v}'\n`,
+                        `[cli] --llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi', got '${v}'\n`,
                     )
                     process.exit(2)
                 }
@@ -173,9 +174,9 @@ function parseArgs(argv: string[]): CliArgs {
             case "--critic-llm":
             case "--surgeon-llm": {
                 const v = required(argv, ++i, a)
-                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode") {
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi") {
                     process.stderr.write(
-                        `[cli] ${a} must be 'claude' | 'openai' | 'codex' | 'opencode', got '${v}'\n`,
+                        `[cli] ${a} must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi', got '${v}'\n`,
                     )
                     process.exit(2)
                 }
@@ -401,11 +402,13 @@ let shuttingDown = false
 function shutdown(signal: NodeJS.Signals): void {
     if (shuttingDown) return
     shuttingDown = true
-    process.stderr.write(`[cli] received ${signal}, killing in-flight Claude children...\n`)
+    process.stderr.write(`[cli] received ${signal}, killing in-flight children...\n`)
     ClaudeCliParticipant.killAll("SIGTERM")
+    PiCliParticipant.killAll("SIGTERM")
     // Give children a moment to die cleanly, then escalate.
     setTimeout(() => {
         ClaudeCliParticipant.killAll("SIGKILL")
+        PiCliParticipant.killAll("SIGKILL")
         process.exit(signal === "SIGINT" ? 130 : 143)
     }, 1500).unref()
 }

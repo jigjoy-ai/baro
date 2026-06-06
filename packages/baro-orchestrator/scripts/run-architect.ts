@@ -23,6 +23,7 @@ import { runArchitectClaude } from "../src/planning/architect-claude.js"
 import { runArchitectCodex } from "../src/planning/architect-codex.js"
 import { runArchitectOpenAI } from "../src/planning/architect-openai.js"
 import { runArchitectOpenCode } from "../src/planning/architect-opencode.js"
+import { runArchitectPi } from "../src/planning/architect-pi.js"
 
 interface Args {
     goal: string
@@ -34,7 +35,7 @@ interface Args {
      * Codex covers the Story phase (which dominates token spend);
      * Architect and Planner stay on Claude.
      */
-    llm: "claude" | "openai" | "codex" | "opencode"
+    llm: "claude" | "openai" | "codex" | "opencode" | "pi"
     model?: string
     effort?: string
     contextFile?: string
@@ -43,7 +44,7 @@ interface Args {
 function parseArgs(argv: string[]): Args {
     let goal: string | undefined
     let cwd: string | undefined
-    let llm: "claude" | "openai" | "codex" | "opencode" | undefined
+    let llm: "claude" | "openai" | "codex" | "opencode" | "pi" | undefined
     let model: string | undefined
     let effort: string | undefined
     let contextFile: string | undefined
@@ -59,10 +60,10 @@ function parseArgs(argv: string[]): Args {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode") {
-                    fatal(`--llm must be 'claude' | 'openai' | 'codex' | 'opencode', got '${v}'`)
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi") {
+                    fatal(`--llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi', got '${v}'`)
                 }
-                llm = v as "claude" | "openai" | "codex" | "opencode"
+                llm = v as "claude" | "openai" | "codex" | "opencode" | "pi"
                 break
             }
             case "--model":
@@ -135,6 +136,13 @@ async function main(): Promise<void> {
             })
         } else if (args.llm === "opencode") {
             doc = await runArchitectOpenCode({
+                goal: args.goal,
+                cwd: args.cwd,
+                model: args.model,
+                projectContext,
+            })
+        } else if (args.llm === "pi") {
+            doc = await runArchitectPi({
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,

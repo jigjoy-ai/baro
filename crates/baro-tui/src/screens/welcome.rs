@@ -238,6 +238,8 @@ pub fn render(f: &mut Frame, app: &App) {
     planner_spans.extend(radio(app.planner == Planner::Codex, "codex", planner_focused));
     planner_spans.push(Span::raw("  "));
     planner_spans.extend(radio(app.planner == Planner::OpenCode, "opencode", planner_focused));
+    planner_spans.push(Span::raw("  "));
+    planner_spans.extend(radio(app.planner == Planner::Pi, "pi", planner_focused));
 
     let settings_lines = vec![
         Line::from(model_spans),

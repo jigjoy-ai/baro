@@ -309,7 +309,7 @@ struct Cli {
     ///                      Critic move to Codex (high-volume, cheap
     ///                      on ChatGPT subscription). Individual phase
     ///                      overrides win when set.
-    #[arg(long, default_value = "claude", value_parser = ["claude", "openai", "codex", "opencode", "hybrid"])]
+    #[arg(long, default_value = "claude", value_parser = ["claude", "openai", "codex", "opencode", "pi", "hybrid"])]
     llm: String,
 
     /// Custom base URL for OpenAI-compatible API endpoints. When set,
@@ -326,15 +326,15 @@ struct Cli {
     /// phase. Useful for surgical tuning: e.g. `--llm hybrid
     /// --critic-llm claude` for a hybrid run that uses Claude for
     /// Critic instead of Codex.
-    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode", "pi"])]
     architect_llm: Option<String>,
-    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode", "pi"])]
     planner_llm: Option<String>,
-    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode", "pi"])]
     story_llm: Option<String>,
-    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode", "pi"])]
     critic_llm: Option<String>,
-    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode"])]
+    #[arg(long, value_parser = ["claude", "openai", "codex", "opencode", "pi"])]
     surgeon_llm: Option<String>,
 
     /// Disable semantic memory (MemoryLibrarian). Uses tag-based
@@ -481,6 +481,7 @@ async fn run_app(
         Some("openai") => Planner::OpenAI,
         Some("codex") => Planner::Codex,
         Some("opencode") => Planner::OpenCode,
+        Some("pi") => Planner::Pi,
         _ => Planner::Claude,
     };
 
@@ -501,6 +502,7 @@ async fn run_app(
             "openai" => Planner::OpenAI,
             "codex" => Planner::Codex,
             "opencode" => Planner::OpenCode,
+            "pi" => Planner::Pi,
             _ => Planner::Claude,
         };
     }
@@ -511,6 +513,7 @@ async fn run_app(
         "openai" => app.planner = Planner::OpenAI,
         "codex" => app.planner = Planner::Codex,
         "opencode" => app.planner = Planner::OpenCode,
+        "pi" => app.planner = Planner::Pi,
         _ => {} // claude/hybrid keep the default or explicit --planner
     }
 
@@ -935,6 +938,7 @@ async fn run_app(
                                 app::LlmProvider::OpenAI => app::Planner::OpenAI,
                                 app::LlmProvider::Codex => app::Planner::Codex,
                                 app::LlmProvider::OpenCode => app::Planner::OpenCode,
+                                app::LlmProvider::Pi => app::Planner::Pi,
                             };
                             // OpenAI needs an API key — detour if missing
                             if chosen == app::LlmProvider::OpenAI && app.openai_api_key.is_none() {
