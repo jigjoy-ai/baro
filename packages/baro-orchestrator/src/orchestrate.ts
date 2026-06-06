@@ -253,6 +253,23 @@ export async function orchestrate(
     const criticLlm = config.criticLlm ?? llm
     const surgeonLlm = config.surgeonLlm ?? llm
 
+    // The Critic only evaluates backends that emit an AgentResult on the bus.
+    // The CLI-subprocess backends (pi, opencode) emit StoryResult/AgentState
+    // instead, so a self-paired run (story AND critic on the same such
+    // backend) leaves the Critic permanently silent. Warn loudly rather than
+    // failing quietly — the valid use (e.g. `--critic-llm pi` evaluating
+    // Claude stories, which DO emit AgentResult) is unaffected.
+    if (config.withCritic) {
+        const noAgentResult = new Set(["pi", "opencode"])
+        if (noAgentResult.has(criticLlm) && criticLlm === storyLlm) {
+            process.stderr.write(
+                `[orchestrate] WARNING: --with-critic with story+critic both on '${criticLlm}' — ` +
+                    `the ${criticLlm} backend emits no AgentResult, so the Critic will never fire. ` +
+                    `Use a Claude/OpenAI story backend, or set --critic-llm to a different backend.\n`,
+            )
+        }
+    }
+
     // Provider banner so the stderr / audit log makes the actual
     // routing obvious. As of 0.33 every LLM-using phase (Architect,
     // Planner, Critic, Surgeon, StoryAgent) routes end-to-end to the
