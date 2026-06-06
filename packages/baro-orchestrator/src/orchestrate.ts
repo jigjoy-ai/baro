@@ -253,19 +253,21 @@ export async function orchestrate(
     const criticLlm = config.criticLlm ?? llm
     const surgeonLlm = config.surgeonLlm ?? llm
 
-    // The Critic only evaluates backends that emit an AgentResult on the bus.
-    // The CLI-subprocess backends (pi, opencode) emit StoryResult/AgentState
-    // instead, so a self-paired run (story AND critic on the same such
-    // backend) leaves the Critic permanently silent. Warn loudly rather than
-    // failing quietly — the valid use (e.g. `--critic-llm pi` evaluating
-    // Claude stories, which DO emit AgentResult) is unaffected.
+    // The Critic listens for AgentResult on the bus. The CLI-subprocess
+    // story backends (pi, opencode) emit StoryResult/AgentState and never
+    // AgentResult, so the Critic is silent whenever the STORY backend is one
+    // of them — regardless of which backend the Critic itself runs on. (The
+    // critic backend choice only affects which model evaluates; it can't
+    // observe what the story never emits.) Warn loudly rather than failing
+    // quietly. `--critic-llm pi` over a Claude/OpenAI story still works,
+    // because those story backends DO emit AgentResult.
     if (config.withCritic) {
         const noAgentResult = new Set(["pi", "opencode"])
-        if (noAgentResult.has(criticLlm) && criticLlm === storyLlm) {
+        if (noAgentResult.has(storyLlm)) {
             process.stderr.write(
-                `[orchestrate] WARNING: --with-critic with story+critic both on '${criticLlm}' — ` +
-                    `the ${criticLlm} backend emits no AgentResult, so the Critic will never fire. ` +
-                    `Use a Claude/OpenAI story backend, or set --critic-llm to a different backend.\n`,
+                `[orchestrate] WARNING: --with-critic with story backend '${storyLlm}' — ` +
+                    `the ${storyLlm} backend emits no AgentResult, so the Critic will never fire. ` +
+                    `Use a Claude/OpenAI story backend, or set --story-llm to a different backend.\n`,
             )
         }
     }
