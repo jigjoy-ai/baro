@@ -75,6 +75,15 @@ export interface PiRunSummary {
      * agent likely answered in prose instead of editing the worktree.
      */
     toolCallCount: number
+    /**
+     * Number of `tool_execution_end` events whose `isError` was NOT true —
+     * i.e. tools that actually succeeded. A story whose every tool call
+     * failed (all writes 500'd, etc.) still emits agent_end with
+     * toolCallCount > 0, so gating success on attempts alone marks a
+     * do-nothing run as passed. Callers should require at least one
+     * SUCCESSFUL tool, not merely one attempted.
+     */
+    toolSuccessCount: number
 }
 
 /**
@@ -116,6 +125,7 @@ export class PiCliParticipant extends BaseObserver {
     private spawnError: Error | null = null
     private sawAgentEnd = false
     private toolCallCount = 0
+    private toolSuccessCount = 0
     private doneSettled = false
     private readySettled = false
     private killTimer: ReturnType<typeof setTimeout> | null = null
@@ -239,6 +249,7 @@ export class PiCliParticipant extends BaseObserver {
                 error: this.spawnError,
                 sawAgentEnd: this.sawAgentEnd,
                 toolCallCount: this.toolCallCount,
+                toolSuccessCount: this.toolSuccessCount,
             })
             return
         }
@@ -267,6 +278,7 @@ export class PiCliParticipant extends BaseObserver {
                 error: err,
                 sawAgentEnd: this.sawAgentEnd,
                 toolCallCount: this.toolCallCount,
+                toolSuccessCount: this.toolSuccessCount,
             })
         })
         proc.on("exit", (code) => {
@@ -294,6 +306,7 @@ export class PiCliParticipant extends BaseObserver {
                 error: this.spawnError,
                 sawAgentEnd: this.sawAgentEnd,
                 toolCallCount: this.toolCallCount,
+                toolSuccessCount: this.toolSuccessCount,
             })
         })
     }
@@ -408,6 +421,12 @@ export class PiCliParticipant extends BaseObserver {
         // tool_execution_start (it did work rather than answering in prose).
         if (parsed.type === "agent_end") this.sawAgentEnd = true
         if (parsed.type === "tool_execution_start") this.toolCallCount += 1
+        // Count tools that actually succeeded (isError !== true) separately
+        // from attempts — the story success predicate gates on successes so a
+        // run where every tool failed is not reported as done.
+        if (parsed.type === "tool_execution_end" && parsed.isError !== true) {
+            this.toolSuccessCount += 1
+        }
 
         for (const item of items) {
             if (item instanceof SemanticEvent) {

@@ -145,11 +145,30 @@ export class SurgeonPi extends BaseObserver {
                     modifiedDeps[m.id] = [...m.newDependsOn]
                 }
             }
+            // Validate LLM-supplied added/removed before they reach the
+            // Conductor's DAG mutation. The `as ReplanStoryAdd[]` cast does
+            // not enforce shape at runtime — a malformed entry (missing
+            // dependsOn, non-string removal id) would otherwise be injected
+            // into the DAG and crash a later `dependsOn` access or silently
+            // mis-target a removal. Same element-by-element discipline as
+            // modifiedDeps above.
+            const addedStories = (parsed.added ?? []).filter(
+                (s): s is ReplanStoryAdd =>
+                    s != null &&
+                    typeof s.id === "string" &&
+                    typeof s.title === "string" &&
+                    typeof s.description === "string" &&
+                    typeof s.priority === "number" &&
+                    Array.isArray(s.dependsOn),
+            )
+            const removedStoryIds = (parsed.removed ?? []).filter(
+                (r): r is string => typeof r === "string",
+            )
             return {
                 source: "surgeon",
                 reason: `${parsed.action}: ${parsed.reason ?? ""}`,
-                addedStories: parsed.added ?? [],
-                removedStoryIds: parsed.removed ?? [],
+                addedStories,
+                removedStoryIds,
                 modifiedDeps,
             }
         } catch (err) {

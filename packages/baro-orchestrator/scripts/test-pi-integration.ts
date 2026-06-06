@@ -231,6 +231,90 @@ function testStreamMapper(): void {
         `output text extracted from result.content[].text (got: ${outText})`,
     )
 
+    // Regression (HIGH-1): an empty-but-successful tool result (e.g. bash with
+    // no stdout → content:[{type:"text",text:""}]) must STILL emit a
+    // FunctionCallOutputItem (reconciled to the callId), not fall through to a
+    // stringified-envelope dump and not be dropped.
+    const emptyOutEnd = {
+        type: "tool_execution_end",
+        toolCallId: realCallId,
+        toolName: "bash",
+        result: { content: [{ type: "text", text: "" }] },
+        isError: false,
+    }
+    const emptyRes = mapPiEvent("agent-1", emptyOutEnd)
+    const emptyFnOut = emptyRes.items.find(
+        (i): i is FunctionCallOutputItem => i instanceof FunctionCallOutputItem,
+    )
+    assert(
+        emptyFnOut !== undefined,
+        "empty-success tool result still emits a FunctionCallOutputItem (HIGH-1)",
+    )
+    const emptyParts = emptyFnOut
+        ? (JSON.parse(JSON.stringify(emptyFnOut)).output as
+              | Array<{ text?: string }>
+              | undefined)
+        : undefined
+    const emptyText = Array.isArray(emptyParts)
+        ? emptyParts.map((p) => p.text ?? "").join("")
+        : undefined
+    assert(
+        emptyText === "" && !String(emptyText).includes("content"),
+        `empty result yields empty output, not a stringified envelope (got: ${JSON.stringify(emptyText)})`,
+    )
+
+    // Regression (HIGH-1, load-bearing): a tool_execution_end with NO `result`
+    // field at all (interrupted/cancelled/error path) — this is the shape that
+    // makes extractToolOutput return undefined. The OLD emit guard
+    // (`callId !== undefined && outputStr !== undefined`) would DROP the
+    // FunctionCallOutputItem here, orphaning the FunctionCallItem from
+    // message_end. The fix emits it anyway (body defaults to ""/"no output").
+    // This assertion FAILS if the fix is reverted.
+    const noBodyEnd = {
+        type: "tool_execution_end",
+        toolCallId: realCallId,
+        toolName: "bash",
+        isError: false,
+    }
+    const noBodyRes = mapPiEvent("agent-1", noBodyEnd)
+    const noBodyFnOut = noBodyRes.items.find(
+        (i): i is FunctionCallOutputItem => i instanceof FunctionCallOutputItem,
+    )
+    assert(
+        noBodyFnOut !== undefined,
+        "tool_execution_end with NO result field still emits a FunctionCallOutputItem (HIGH-1, fails on revert)",
+    )
+
+    // Regression (HIGH-1): same shape but isError → output must be the explicit
+    // failure sentinel, not dropped. The 'no output' default branch is only
+    // reachable when result is entirely absent, so this exercises it.
+    const errEnd = {
+        type: "tool_execution_end",
+        toolCallId: realCallId,
+        toolName: "bash",
+        isError: true,
+    }
+    const errRes = mapPiEvent("agent-1", errEnd)
+    const errFnOut = errRes.items.find(
+        (i): i is FunctionCallOutputItem => i instanceof FunctionCallOutputItem,
+    )
+    assert(
+        errFnOut !== undefined,
+        "errored tool_execution_end with no result still emits a FunctionCallOutputItem (HIGH-1, fails on revert)",
+    )
+    const errParts = errFnOut
+        ? (JSON.parse(JSON.stringify(errFnOut)).output as
+              | Array<{ text?: string }>
+              | undefined)
+        : undefined
+    const errText = Array.isArray(errParts)
+        ? errParts.map((p) => p.text ?? "").join("")
+        : undefined
+    assert(
+        errText === "[error] no output",
+        `errored no-result output is the explicit '[error] no output' sentinel (got: ${JSON.stringify(errText)})`,
+    )
+
     // agent_end (loop-done signal).
     const agentEndEvent = { type: "agent_end", messages: [], willRetry: false }
     const agentEndResult = mapPiEvent("agent-1", agentEndEvent)

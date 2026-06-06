@@ -441,5 +441,13 @@ orphanWatchdog.unref()
 
 main().catch((e: unknown) => {
     process.stderr.write(`[cli] unhandled: ${(e as Error)?.stack ?? String(e)}\n`)
+    // Reap in-flight children before bailing. process.exit() gives no grace
+    // window for SIGTERM to land, so SIGKILL directly — otherwise an unhandled
+    // crash orphans live claude/codex/opencode/pi subprocesses that keep
+    // burning quota and holding worktrees with no parent to clean them up.
+    ClaudeCliParticipant.killAll("SIGKILL")
+    CodexCliParticipant.killAll("SIGKILL")
+    OpenCodeCliParticipant.killAll("SIGKILL")
+    PiCliParticipant.killAll("SIGKILL")
     process.exit(1)
 })

@@ -114,10 +114,16 @@ function eventTimestamp(event: Record<string, unknown>): string {
 function extractToolOutput(event: Record<string, unknown>): string | undefined {
     const resultObj = event.result as Record<string, unknown> | undefined
 
-    // Primary: result.content[] of {type:"text",text}.
+    // Primary: result.content[] of {type:"text",text}. A content array that
+    // contains at least one text block is authoritative — return its joined
+    // text even when that text is the empty string (e.g. `bash` with no
+    // stdout is a legitimate empty success, NOT "no usable output"). Only
+    // fall through to the fallbacks when the array carried no text block at
+    // all, so we never mis-dump the whole envelope over a real empty result.
     const content = resultObj?.content
     if (Array.isArray(content)) {
         const texts: string[] = []
+        let sawTextBlock = false
         for (const block of content) {
             if (
                 block !== null &&
@@ -127,10 +133,11 @@ function extractToolOutput(event: Record<string, unknown>): string | undefined {
                 const b = block as Record<string, unknown>
                 if (b.type === "text" && typeof b.text === "string") {
                     texts.push(b.text)
+                    sawTextBlock = true
                 }
             }
         }
-        if (texts.length > 0) return texts.join("")
+        if (sawTextBlock) return texts.join("")
     }
 
     // Fallbacks (older/alternate shapes): plain string outputs first.
@@ -383,12 +390,19 @@ export function mapPiEvent(
 
         const outputStr = extractToolOutput(event)
 
-        if (callId !== undefined && outputStr !== undefined) {
+        // Emit the output whenever we have a callId — even if no output text
+        // could be extracted. The matching FunctionCallItem was already put on
+        // the bus from message_end; skipping the output here would leave a
+        // dangling, unreconciled tool call (breaks audit replay and any
+        // model-side transcript reconstruction). Default to empty string; on
+        // an error result with no body, surface the failure explicitly.
+        if (callId !== undefined) {
             const isError = event.isError === true
+            const body = outputStr ?? (isError ? "no output" : "")
             // Prefix on error so downstream readers can tell a failed tool
             // run apart from a successful one (the bus item carries no
             // dedicated error flag for this type).
-            const finalOutput = isError ? `[error] ${outputStr}` : outputStr
+            const finalOutput = isError ? `[error] ${body}` : body
             items.push(FunctionCallOutputItem.create(callId, finalOutput))
         }
 

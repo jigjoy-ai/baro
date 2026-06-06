@@ -310,11 +310,14 @@ export class PiStoryAgent extends BaseObserver {
                 error: "pi exited 0 but emitted no agent_end — the agent loop did not complete",
             }
         }
-        if (summary.toolCallCount === 0) {
+        if (summary.toolSuccessCount === 0) {
             return {
                 success: false,
                 summary,
-                error: "pi exited 0 but invoked no tools — answered in prose without editing the worktree",
+                error:
+                    summary.toolCallCount === 0
+                        ? "pi exited 0 but invoked no tools — answered in prose without editing the worktree"
+                        : "pi exited 0 and invoked tools but every tool call failed (isError) — the worktree was not successfully edited",
             }
         }
 
