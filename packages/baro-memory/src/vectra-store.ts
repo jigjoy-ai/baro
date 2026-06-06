@@ -18,7 +18,7 @@ import { LocalIndex } from 'vectra'
 import type { QueryResult } from 'vectra'
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, rmSync, readdirSync, statSync, lstatSync } from 'fs'
 import { join } from 'path'
-import { tmpdir } from 'os'
+import { tmpdir, homedir } from 'os'
 
 import type {
     CachedFile,
@@ -123,8 +123,15 @@ export async function createMemoryStore(
         await index.createIndex({ version: 1 })
     }
 
-    // Load ONNX embedding model (cached after first load by transformers.js)
-    const { pipeline } = await import('@xenova/transformers')
+    // Load ONNX embedding model (cached after first load by transformers.js).
+    // Pin the cache to a writable, persistent baro-owned dir: the default is
+    // `node_modules/@xenova/transformers/.cache`, which on a global install
+    // (e.g. /usr/local/lib) can be read-only — the model would fail to
+    // download. ~/.baro/models is user-writable and survives across runs so
+    // MiniLM is fetched only once. Override with TRANSFORMERS_CACHE if set.
+    const transformers = await import('@xenova/transformers')
+    transformers.env.cacheDir = process.env.TRANSFORMERS_CACHE || join(homedir(), '.baro', 'models')
+    const { pipeline } = transformers
     const extractor = await pipeline('feature-extraction', cfg.embeddingModel) as unknown as EmbeddingPipeline
 
     return new VectraMemoryStore(index, extractor, sessionPath, cfg)
