@@ -23,6 +23,8 @@ import { resolve } from "path"
 
 import { orchestrate, type OrchestrateConfig } from "../src/orchestrate.js"
 import { ClaudeCliParticipant } from "../src/participants/claude-cli-participant.js"
+import { CodexCliParticipant } from "../src/participants/codex-cli-participant.js"
+import { OpenCodeCliParticipant } from "../src/participants/opencode-cli-participant.js"
 import { PiCliParticipant } from "../src/participants/pi-cli-participant.js"
 import {
     parseEndpoints,
@@ -404,10 +406,14 @@ function shutdown(signal: NodeJS.Signals): void {
     shuttingDown = true
     process.stderr.write(`[cli] received ${signal}, killing in-flight children...\n`)
     ClaudeCliParticipant.killAll("SIGTERM")
+    CodexCliParticipant.killAll("SIGTERM")
+    OpenCodeCliParticipant.killAll("SIGTERM")
     PiCliParticipant.killAll("SIGTERM")
     // Give children a moment to die cleanly, then escalate.
     setTimeout(() => {
         ClaudeCliParticipant.killAll("SIGKILL")
+        CodexCliParticipant.killAll("SIGKILL")
+        OpenCodeCliParticipant.killAll("SIGKILL")
         PiCliParticipant.killAll("SIGKILL")
         process.exit(signal === "SIGINT" ? 130 : 143)
     }, 1500).unref()
