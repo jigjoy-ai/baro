@@ -270,6 +270,58 @@ pub fn render(f: &mut Frame, app: &App) {
         );
         f.render_widget(paragraph, overlay_area);
     }
+
+    // Branch/planning error overlay. BranchError (e.g. a failed resume
+    // checkout) is delivered to the Review screen via app.planning_error,
+    // but without this the error was never rendered — pressing Enter on a
+    // doomed resume looked like a silent bounce. Show it as a prominent
+    // modal so the failure is visible and actionable. (#47)
+    if let Some(ref err) = app.planning_error {
+        let mut lines: Vec<Line> = vec![
+            Line::from(vec![
+                Span::styled(
+                    " \u{2716} ",
+                    Style::default().fg(theme::ERROR).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Cannot start run",
+                    Style::default().fg(theme::ERROR).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(""),
+        ];
+        // Wrap handles long lines; render the full body so nothing is lost.
+        for body_line in err.lines() {
+            lines.push(Line::from(Span::styled(
+                body_line.to_string(),
+                Style::default().fg(theme::TEXT_DIM),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Enter/Esc: dismiss",
+            Style::default().fg(theme::MUTED),
+        )));
+
+        // 2 border rows + lines.len() content rows, capped to avoid
+        // overflowing very short terminals; minimum 5 to always fit the
+        // header + dismiss hint.
+        let modal_height = (2 + lines.len() as u16).clamp(5, 18).min(area.height);
+        let overlay_area = centered_rect(70, modal_height, area);
+        f.render_widget(Clear, overlay_area);
+        let paragraph = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::ERROR_DIM))
+                    .title(Span::styled(
+                        " Error ",
+                        Style::default().fg(theme::ERROR).add_modifier(Modifier::BOLD),
+                    )),
+            )
+            .wrap(Wrap { trim: false });
+        f.render_widget(paragraph, overlay_area);
+    }
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
