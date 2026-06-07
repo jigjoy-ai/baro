@@ -140,9 +140,20 @@ export class StoryFactory extends BaseObserver {
         if (!this.envRef) return
         // Idempotent across both the settled set and the in-progress set:
         // spawn awaits worktree creation, so a duplicate request must not slip
-        // through that window and create a second worktree + agent.
+        // through that window and create a second worktree + agent. The
+        // finally clears the in-progress marker even if construction throws,
+        // so a later recovery respawn of this story isn't blocked forever.
         if (this.active.has(req.storyId) || this.spawning.has(req.storyId)) return
         this.spawning.add(req.storyId)
+        try {
+            await this.buildAndLaunch(req)
+        } finally {
+            this.spawning.delete(req.storyId)
+        }
+    }
+
+    private async buildAndLaunch(req: StorySpawnRequestData): Promise<void> {
+        if (!this.envRef) return
 
         // Resolve which backend + model THIS story runs on. The route
         // can come from the story's own `model` field (a bare tier name
@@ -228,7 +239,6 @@ export class StoryFactory extends BaseObserver {
 
         agent.join(this.envRef)
         this.active.set(req.storyId, agent)
-        this.spawning.delete(req.storyId)
 
         // The agent's run() returns a Promise but we don't await it
         // here — the StoryResult event will arrive on the bus when it

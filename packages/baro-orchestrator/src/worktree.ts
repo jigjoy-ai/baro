@@ -252,10 +252,15 @@ export class WorktreeManager {
             `WARNING: story ${storyId} passed with uncommitted changes; ` +
                 `auto-committing them before merge`,
         )
-        await execQuiet("git", ["add", "-A"], worktreePath)
-        // Never commit the symlinked dep dirs, even if the repo doesn't
-        // .gitignore them — they'd land as broken absolute-path symlinks.
-        await execQuiet("git", ["reset", "-q", "--", ...LINKED_DEP_DIRS], worktreePath)
+        // Stage everything EXCEPT the symlinked dep dirs (excluded at the add
+        // step, not a follow-up reset, so a silent reset failure can't leave a
+        // broken absolute-path symlink staged even if the repo doesn't ignore
+        // node_modules).
+        await execQuiet(
+            "git",
+            ["add", "-A", "--", ".", ...LINKED_DEP_DIRS.map((d) => `:(exclude)${d}`)],
+            worktreePath,
+        )
         await execQuiet(
             "git",
             ["commit", "-m", `baro: auto-commit uncommitted work for story ${storyId}`],
