@@ -24,59 +24,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::Parser;
-
-/// Guard that holds a session lock file and removes it on drop.
-struct SessionLock {
-    path: PathBuf,
-}
-
-impl SessionLock {
-    fn acquire(cwd: &Path) -> Result<Self, String> {
-        let lock_path = cwd.join("baro.lock");
-
-        if lock_path.exists() {
-            if let Ok(contents) = std::fs::read_to_string(&lock_path) {
-                if let Ok(pid) = contents.trim().parse::<u32>() {
-                    if is_process_alive(pid) {
-                        return Err(
-                            "Another baro session is active in this directory. Multiple sessions per project coming soon.".to_string()
-                        );
-                    }
-                }
-            }
-            // Stale lock file — overwrite below
-        }
-
-        std::fs::write(&lock_path, std::process::id().to_string())
-            .map_err(|e| format!("Failed to create lock file: {}", e))?;
-
-        Ok(SessionLock { path: lock_path })
-    }
-}
-
-impl Drop for SessionLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-#[cfg(unix)]
-fn is_process_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_process_alive(_pid: u32) -> bool {
-    // On non-Unix platforms, assume stale lock
-    false
-}
 use crossterm::{
     execute,
     terminal::{
@@ -201,7 +148,7 @@ struct PrdStoryOutput {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = cli::cli::parse();
+    let cli = cli::cli::parse()?;
 
     // `baro --doctor` short-circuits before any TUI setup. It's a
     // diagnostic command, not a run, and it has to work even when the
@@ -212,16 +159,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Resolve cwd early so we can acquire the session lock before entering the TUI
-    let cwd = std::fs::canonicalize(&cli.cwd)?;
+    // let cwd = std::fs::canonicalize(&cli.cwd)?;
 
-    // Acquire session lock — prints error and exits if another session is active
-    let _lock = match SessionLock::acquire(&cwd) {
-        Ok(lock) => lock,
-        Err(msg) => {
-            eprintln!("{}", msg);
-            std::process::exit(1);
-        }
-    };
+    // // Acquire session lock — prints error and exits if another session is active
+    // let _lock = match SessionLock::acquire(&cwd) {
+    //     Ok(lock) => lock,
+    //     Err(msg) => {
+    //         eprintln!("{}", msg);
+    //         std::process::exit(1);
+    //     }
+    // };
 
     let mut writer = open_terminal_writer()?;
     enable_raw_mode()?;

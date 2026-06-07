@@ -1,14 +1,16 @@
-use clap::{Parser};
+use std::{fs};
+
+use clap::{CommandFactory, Error, Parser, error::ErrorKind};
+
+use crate::cli::session::SessionLock;
 
 #[derive(Parser)]
-#[
-    command(
-        name="baro",
-        version,
-        about="AI-Powered project executio",
-        after_help="Issues: https://github.com/jigjoy-ai/baro/issues\nTwitter: @lotus_sbc"
-    )
-]
+#[command(
+    name = "baro",
+    version,
+    about = "AI-Powered project executio",
+    after_help = "Issues: https://github.com/jigjoy-ai/baro/issues\nTwitter: @lotus_sbc"
+)]
 pub struct Cli {
     pub goal: Option<String>,
 
@@ -59,7 +61,7 @@ pub struct Cli {
 
     #[arg(long)]
     pub planner_model: Option<String>,
-    
+
     #[arg(long)]
     pub critic_model: Option<String>,
 
@@ -72,7 +74,7 @@ pub struct Cli {
     #[arg(long = "openai-endpoint")]
     pub openai_endpoint: Vec<String>,
 
-    #[arg(long="intra-level-delay")]
+    #[arg(long = "intra-level-delay")]
     pub intra_level_delay: Option<u64>,
 
     #[arg(long)]
@@ -84,7 +86,7 @@ pub struct Cli {
     #[arg(long, default_value="claude", value_parser=["claude", "openai", "codex", "opencode", "pi", "hybrid"])]
     pub llm: String,
 
-    #[arg(long, env="OPENAI_BASE_URL")]
+    #[arg(long, env = "OPENAI_BASE_URL")]
     pub openai_base_url: Option<String>,
 
     #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi"])]
@@ -106,9 +108,24 @@ pub struct Cli {
     pub no_memory: bool,
 }
 
-pub fn parse() -> Cli {
+pub fn parse() -> Result<Cli, Error> {
     // TODO: Need to implement furthur parsing to make sure the models and everything works based on Enums rather than string
+    let mut cmd = Cli::command(); 
     let cli = Cli::parse();
 
-    return cli
+    let cwd = fs::canonicalize(&cli.cwd)?;
+
+    if !cli.doctor {
+        let _lock = match SessionLock::acquire(&cwd) {
+            Ok(lock) => lock,
+            Err(msg) => {
+                return Err(cmd.error(
+                    ErrorKind::ValueValidation, 
+                    format!("Failed to acquire session lock: {msg}")
+                ));
+            }
+        };
+    }
+
+    return Ok(cli);
 }
