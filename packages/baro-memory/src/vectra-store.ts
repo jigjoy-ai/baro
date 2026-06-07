@@ -209,9 +209,15 @@ async function embed(extractor: EmbeddingPipeline, text: string): Promise<number
 // ── VectraMemoryStore ────────────────────────────────────────────────────
 
 class VectraMemoryStore implements MemoryStore {
-    private readonly index: LocalIndex<VectraItemMetadata>
+    // Not readonly: the reader re-instantiates the index to pick up writes
+    // made by other processes (see refreshIndexIfChanged).
+    private index: LocalIndex<VectraItemMetadata>
     private readonly extractor: EmbeddingPipeline
     private readonly sessionPath: string
+    private readonly indexPath: string
+    private readonly indexFilePath: string
+    /** mtimeMs of index.json last time we (re)loaded; -1 = never seen. */
+    private lastIndexMtimeMs = -1
     private readonly cachePath: string
     private readonly lockPath: string
     private readonly config: Required<MemoryStoreConfig>
@@ -225,9 +231,43 @@ class VectraMemoryStore implements MemoryStore {
         this.index = index
         this.extractor = extractor
         this.sessionPath = sessionPath
+        this.indexPath = join(sessionPath, 'index')
+        // Vectra persists the index to <folder>/index.json.
+        this.indexFilePath = join(this.indexPath, 'index.json')
         this.cachePath = join(sessionPath, 'cache.json')
         this.lockPath = join(sessionPath, 'cache.lock')
         this.config = config
+    }
+
+    /**
+     * Pick up cross-process writes to the shared on-disk index.
+     *
+     * Vectra's LocalIndex loads the whole index into a private in-memory
+     * `_data` field on first query and never reloads it. Findings written by
+     * story agents in SEPARATE processes (via the baro-memory CLI) land on
+     * disk but stay invisible to this long-lived reader — so recall/getStats
+     * see a frozen (usually empty) snapshot and always return 0 (issue #51).
+     *
+     * There is no public reload on LocalIndex, so we detect a change via the
+     * index file's mtime and swap in a fresh LocalIndex, which lazily loads
+     * the current on-disk data on its next query. Throttled by mtime so we
+     * don't re-read every call — cheap relative to an LLM turn. Read paths
+     * only; writers (remember/upsertItem) already refresh Vectra's `_data`
+     * via beginUpdate, and reloading mid-write could clobber a pending batch.
+     *
+     * Never throws: on any stat/instantiation error we keep the current
+     * index and degrade gracefully.
+     */
+    private refreshIndexIfChanged(): void {
+        try {
+            if (!existsSync(this.indexFilePath)) return
+            const mtimeMs = statSync(this.indexFilePath).mtimeMs
+            if (mtimeMs === this.lastIndexMtimeMs) return
+            this.lastIndexMtimeMs = mtimeMs
+            this.index = new LocalIndex<VectraItemMetadata>(this.indexPath)
+        } catch {
+            // Keep the existing index on any error.
+        }
     }
 
     // ── Semantic memory ──────────────────────────────────────────
@@ -265,6 +305,9 @@ class VectraMemoryStore implements MemoryStore {
             const filterByTool = options?.filterByTool
 
             if (!query?.trim()) return []
+
+            // Reload the on-disk index if other processes wrote to it.
+            this.refreshIndexIfChanged()
 
             const vector = await embed(this.extractor, query)
 
@@ -388,6 +431,8 @@ class VectraMemoryStore implements MemoryStore {
 
     async getStats(): Promise<MemoryStats> {
         try {
+            // Reload the on-disk index if other processes wrote to it.
+            this.refreshIndexIfChanged()
             const items = await this.index.listItems<VectraItemMetadata>()
             const tools = new Set<string>()
             const agents = new Set<string>()
