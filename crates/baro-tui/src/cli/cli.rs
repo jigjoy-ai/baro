@@ -8,7 +8,7 @@ use crate::cli::session::SessionLock;
 #[command(
     name = "baro",
     version,
-    about = "AI-Powered project executio",
+    about = "AI-powered project execution",
     after_help = "Issues: https://github.com/jigjoy-ai/baro/issues\nTwitter: @lotus_sbc"
 )]
 pub struct Cli {
@@ -26,7 +26,7 @@ pub struct Cli {
     #[arg(long, default_value = "0")]
     pub parallel: u32,
 
-    #[arg(long, default_value = "0")]
+    #[arg(long)]
     pub timeout: Option<u64>,
 
     #[arg(long = "model", short = 'm')]
@@ -35,7 +35,7 @@ pub struct Cli {
     #[arg(long, value_parser=["low", "medium", "high", "xhigh", "max"], default_value="high")]
     pub effort: String,
 
-    #[arg(long = "no-modle-routing")]
+    #[arg(long = "no-model-routing")]
     pub no_model_routing: bool,
 
     #[arg(long)]
@@ -108,24 +108,24 @@ pub struct Cli {
     pub no_memory: bool,
 }
 
-pub fn parse() -> Result<Cli, Error> {
-    // TODO: Need to implement furthur parsing to make sure the models and everything works based on Enums rather than string
-    let mut cmd = Cli::command(); 
+pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {
+    let mut cmd = Cli::command();
     let cli = Cli::parse();
 
     let cwd = fs::canonicalize(&cli.cwd)?;
 
-    if !cli.doctor {
-        let _lock = match SessionLock::acquire(&cwd) {
-            Ok(lock) => lock,
-            Err(msg) => {
-                return Err(cmd.error(
-                    ErrorKind::ValueValidation, 
-                    format!("Failed to acquire session lock: {msg}")
-                ));
-            }
-        };
-    }
+    let lock = if !cli.doctor {
+        Some(
+            SessionLock::acquire(&cwd).map_err(|msg| {
+                cmd.error(
+                    ErrorKind::ValueValidation,
+                    format!("Failed to acquire session lock: {msg}"),
+                )
+            })?,
+        )
+    } else {
+        None
+    };
 
-    return Ok(cli);
+    Ok((cli, lock))
 }

@@ -148,7 +148,7 @@ struct PrdStoryOutput {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = cli::cli::parse()?;
+     let (cli, _lock) = cli::cli::parse()?;
 
     // `baro --doctor` short-circuits before any TUI setup. It's a
     // diagnostic command, not a run, and it has to work even when the
@@ -157,18 +157,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cli.doctor {
         std::process::exit(doctor::run().await);
     }
-
-    // Resolve cwd early so we can acquire the session lock before entering the TUI
-    // let cwd = std::fs::canonicalize(&cli.cwd)?;
-
-    // // Acquire session lock — prints error and exits if another session is active
-    // let _lock = match SessionLock::acquire(&cwd) {
-    //     Ok(lock) => lock,
-    //     Err(msg) => {
-    //         eprintln!("{}", msg);
-    //         std::process::exit(1);
-    //     }
-    // };
 
     let mut writer = open_terminal_writer()?;
     enable_raw_mode()?;
