@@ -27,9 +27,9 @@
  * the same backend/model the old phase-level wiring produced.
  */
 
-export type Backend = "claude" | "openai" | "codex"
+export type Backend = "claude" | "openai" | "codex" | "opencode" | "pi"
 
-const BACKENDS: readonly Backend[] = ["claude", "openai", "codex"]
+const BACKENDS: readonly Backend[] = ["claude", "openai", "codex", "opencode", "pi"]
 
 export function isBackend(s: string): s is Backend {
     return (BACKENDS as readonly string[]).includes(s)
@@ -239,6 +239,7 @@ function defaultRoute(backend: Backend, openaiDefaultModel?: string): StoryRoute
     if (backend === "openai") return { backend, model: openaiDefaultModel }
     // Claude → StoryAgent applies its own default ("opus").
     // Codex → its own account default.
+    // OpenCode → its configured default model.
     return { backend }
 }
 
@@ -272,7 +273,7 @@ export function parseTierMap(spec: string): TierMap {
         if (!backend) {
             throw new Error(
                 `--tier-map route "${route}" for tier "${tier}" must name a backend ` +
-                    `(claude: | openai: | codex:)`,
+                    `(claude: | openai: | codex: | opencode: | pi:)`,
             )
         }
         map[tier] = route

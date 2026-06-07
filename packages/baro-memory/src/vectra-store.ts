@@ -18,7 +18,7 @@ import { LocalIndex } from 'vectra'
 import type { QueryResult } from 'vectra'
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, rmSync, readdirSync, statSync, lstatSync } from 'fs'
 import { join } from 'path'
-import { tmpdir } from 'os'
+import { tmpdir, homedir } from 'os'
 
 import type {
     CachedFile,
@@ -123,8 +123,15 @@ export async function createMemoryStore(
         await index.createIndex({ version: 1 })
     }
 
-    // Load ONNX embedding model (cached after first load by transformers.js)
-    const { pipeline } = await import('@xenova/transformers')
+    // Load ONNX embedding model (cached after first load by transformers.js).
+    // Pin the cache to a writable, persistent baro-owned dir: the default is
+    // `node_modules/@xenova/transformers/.cache`, which on a global install
+    // (e.g. /usr/local/lib) can be read-only — the model would fail to
+    // download. ~/.baro/models is user-writable and survives across runs so
+    // MiniLM is fetched only once. Override with TRANSFORMERS_CACHE if set.
+    const transformers = await import('@xenova/transformers')
+    transformers.env.cacheDir = process.env.TRANSFORMERS_CACHE || join(homedir(), '.baro', 'models')
+    const { pipeline } = transformers
     const extractor = await pipeline('feature-extraction', cfg.embeddingModel) as unknown as EmbeddingPipeline
 
     return new VectraMemoryStore(index, extractor, sessionPath, cfg)
@@ -202,9 +209,15 @@ async function embed(extractor: EmbeddingPipeline, text: string): Promise<number
 // ── VectraMemoryStore ────────────────────────────────────────────────────
 
 class VectraMemoryStore implements MemoryStore {
-    private readonly index: LocalIndex<VectraItemMetadata>
+    // Not readonly: the reader re-instantiates the index to pick up writes
+    // made by other processes (see refreshIndexIfChanged).
+    private index: LocalIndex<VectraItemMetadata>
     private readonly extractor: EmbeddingPipeline
     private readonly sessionPath: string
+    private readonly indexPath: string
+    private readonly indexFilePath: string
+    /** mtimeMs of index.json last time we (re)loaded; -1 = never seen. */
+    private lastIndexMtimeMs = -1
     private readonly cachePath: string
     private readonly lockPath: string
     private readonly config: Required<MemoryStoreConfig>
@@ -218,9 +231,48 @@ class VectraMemoryStore implements MemoryStore {
         this.index = index
         this.extractor = extractor
         this.sessionPath = sessionPath
+        this.indexPath = join(sessionPath, 'index')
+        // Vectra persists the index to <folder>/index.json.
+        this.indexFilePath = join(this.indexPath, 'index.json')
         this.cachePath = join(sessionPath, 'cache.json')
         this.lockPath = join(sessionPath, 'cache.lock')
         this.config = config
+    }
+
+    /**
+     * Pick up cross-process writes to the shared on-disk index.
+     *
+     * Vectra's LocalIndex loads the whole index into a private in-memory
+     * `_data` field on first query and never reloads it. Findings written by
+     * story agents in SEPARATE processes (via the baro-memory CLI) land on
+     * disk but stay invisible to this long-lived reader — so recall/getStats
+     * see a frozen (usually empty) snapshot and always return 0 (issue #51).
+     *
+     * There is no public reload on LocalIndex, so we detect a change via the
+     * index file's mtime and swap in a fresh LocalIndex, which lazily loads
+     * the current on-disk data on its next query. Throttled by mtime so we
+     * don't re-read every call — cheap relative to an LLM turn. Read paths
+     * only; writers (remember/upsertItem) already refresh Vectra's `_data`
+     * via beginUpdate, and reloading mid-write could clobber a pending batch.
+     *
+     * Never throws: on any stat/instantiation error we keep the current
+     * index and degrade gracefully.
+     */
+    private refreshIndexIfChanged(): void {
+        try {
+            if (!existsSync(this.indexFilePath)) return
+            const mtimeMs = statSync(this.indexFilePath).mtimeMs
+            if (mtimeMs === this.lastIndexMtimeMs) return
+            // Create the new index BEFORE advancing the mtime watermark: if
+            // instantiation throws, we keep the old index AND the old mtime,
+            // so the next call retries instead of locking onto a stale
+            // snapshot for this mtime (Greptile #52 P2).
+            const newIndex = new LocalIndex<VectraItemMetadata>(this.indexPath)
+            this.lastIndexMtimeMs = mtimeMs
+            this.index = newIndex
+        } catch {
+            // Keep the existing index on any error.
+        }
     }
 
     // ── Semantic memory ──────────────────────────────────────────
@@ -258,6 +310,9 @@ class VectraMemoryStore implements MemoryStore {
             const filterByTool = options?.filterByTool
 
             if (!query?.trim()) return []
+
+            // Reload the on-disk index if other processes wrote to it.
+            this.refreshIndexIfChanged()
 
             const vector = await embed(this.extractor, query)
 
@@ -381,6 +436,8 @@ class VectraMemoryStore implements MemoryStore {
 
     async getStats(): Promise<MemoryStats> {
         try {
+            // Reload the on-disk index if other processes wrote to it.
+            this.refreshIndexIfChanged()
             const items = await this.index.listItems<VectraItemMetadata>()
             const tools = new Set<string>()
             const agents = new Set<string>()

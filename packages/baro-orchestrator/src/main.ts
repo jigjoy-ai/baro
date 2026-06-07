@@ -45,6 +45,46 @@ export {
     type CodexStoryOutcome,
 } from "./participants/codex-story-agent.js"
 
+export {
+    OpenCodeCliParticipant,
+    type OpenCodeCliParticipantOptions,
+    type OpenCodeRunSummary,
+} from "./participants/opencode-cli-participant.js"
+
+export {
+    OpenCodeStoryAgent,
+    type OpenCodeStorySpec,
+    type OpenCodeStoryOutcome,
+} from "./participants/opencode-story-agent.js"
+
+export {
+    mapOpenCodeEvent,
+    type OpenCodeMapResult,
+    type MappedOpenCodeItem,
+} from "./opencode-stream-mapper.js"
+
+export { runOpenCodeOneShot, type RunOpenCodeOneShotOptions } from "./opencode-one-shot.js"
+
+export {
+    PiCliParticipant,
+    type PiCliParticipantOptions,
+    type PiRunSummary,
+} from "./participants/pi-cli-participant.js"
+
+export {
+    PiStoryAgent,
+    type PiStorySpec,
+    type PiStoryOutcome,
+} from "./participants/pi-story-agent.js"
+
+export {
+    mapPiEvent,
+    type PiMapResult,
+    type MappedPiItem,
+} from "./pi-stream-mapper.js"
+
+export { runPiOneShot, type RunPiOneShotOptions } from "./pi-one-shot.js"
+
 export { Auditor, type AuditorOptions } from "./participants/auditor.js"
 
 export {

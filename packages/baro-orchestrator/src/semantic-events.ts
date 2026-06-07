@@ -349,3 +349,75 @@ export interface StoryResultData {
     error: string | null
 }
 export const StoryResult = defineSemanticEvent<StoryResultData>("story_result")
+
+// ─── OpenCode CLI passthrough types ───────────────────────────────────
+// OpenCode emits a stream of JSONL events with these envelope types:
+//   - step_start   → beginning of an inference step
+//   - text         → assistant text output
+//   - tool_call    → tool invocation
+//   - tool_result  → tool output
+//   - step_finish  → end of step with token/cost metadata
+
+export interface OpenCodeSystemData {
+    agentId: string
+    /** "step_start" | "step_finish" */
+    subtype: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const OpenCodeSystem = defineSemanticEvent<OpenCodeSystemData>("opencode_system")
+
+export interface OpenCodeStepEventData {
+    agentId: string
+    /** "text" | "tool_call" | "tool_result" */
+    stepType: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const OpenCodeStepEvent =
+    defineSemanticEvent<OpenCodeStepEventData>("opencode_step_event")
+
+export interface OpenCodeUnknownEventData {
+    agentId: string
+    openCodeType: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const OpenCodeUnknownEvent =
+    defineSemanticEvent<OpenCodeUnknownEventData>("opencode_unknown_event")
+
+// ─── Pi CLI passthrough types ─────────────────────────────────────────
+// Pi emits a stream of JSONL events with these envelope types:
+//   - session / agent_start / turn_start / agent_end → lifecycle
+//   - message_start / message_end / turn_end          → turn boundaries
+//   - message_update (assistantMessageEvent deltas)    → streamed items
+//   - tool_execution_start / _update / _end           → tool activity
+
+export interface PiSystemData {
+    agentId: string
+    /** "session" | "agent_start" | "turn_start" | "agent_end" */
+    subtype: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const PiSystem = defineSemanticEvent<PiSystemData>("pi_system")
+
+export interface PiTurnEventData {
+    agentId: string
+    /** "message_start" | "message_end" | "turn_end" */
+    turnType: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const PiTurnEvent = defineSemanticEvent<PiTurnEventData>("pi_turn_event")
+
+export interface PiItemEventData {
+    agentId: string
+    /** "text" | "thinking" | "tool_call" | "tool_start" | "tool_update" | "tool_result" */
+    itemType: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const PiItemEvent = defineSemanticEvent<PiItemEventData>("pi_item_event")
+
+export interface PiUnknownEventData {
+    agentId: string
+    piType: string
+    raw: Readonly<Record<string, unknown>>
+}
+export const PiUnknownEvent =
+    defineSemanticEvent<PiUnknownEventData>("pi_unknown_event")

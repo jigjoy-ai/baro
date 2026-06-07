@@ -242,6 +242,57 @@ describe('Cross-process persistence', () => {
     }, 60000)
 })
 
+describe('Cross-process recall on a live reader (#51 regression)', () => {
+    // The bug: a long-lived reader store, created BEFORE another process
+    // writes findings to the shared on-disk index, never saw those writes —
+    // Vectra's LocalIndex caches its data in-memory at first query and never
+    // reloads, so recall()/getStats() returned 0 forever. The fix reloads
+    // the index when its on-disk mtime changes. This test reproduces the
+    // exact ordering: reader opened first, writer (a SECOND store on the same
+    // session path, standing in for the subprocess CLI writer) writes after,
+    // then the pre-existing reader must see the finding.
+    it('reader created before an external write still recalls it after reload', async () => {
+        const sessionPath = mkdtempSync(join(tmpdir(), 'baro-memory-stale-'))
+
+        // Reader opens first, against an empty index — this is the instance
+        // that, pre-fix, froze on the empty snapshot.
+        const reader = await createMemoryStore({ sessionPath })
+
+        // Sanity: nothing there yet.
+        const before = await reader.getStats()
+        expect(before.totalFindings).toBe(0)
+
+        // A separate store on the same session path writes a finding (stands
+        // in for the out-of-process baro-memory CLI writer).
+        const writer = await createMemoryStore({ sessionPath })
+        await writer.remember({
+            tool: 'Codex',
+            agentId: 'writer-process',
+            content: 'Chemical hazard mitigation already applied in docx-generator',
+            filePath: 'packages/core/src/docx-generator.ts',
+        })
+        await writer.close()
+
+        // The pre-existing reader must now observe the write (mtime-triggered
+        // reload). Pre-fix this returned 0 / [].
+        const stats = await reader.getStats()
+        expect(stats.totalFindings).toBe(1)
+
+        const results = await reader.recall('chemical hazard docx', {
+            maxResults: 5,
+            minSimilarity: 0.2,
+        })
+        expect(results.length).toBeGreaterThan(0)
+        expect(results[0].metadata.agentId).toBe('writer-process')
+        expect(results[0].metadata.filePath).toBe(
+            'packages/core/src/docx-generator.ts',
+        )
+
+        await reader.close()
+        try { rmSync(sessionPath, { recursive: true }) } catch {}
+    }, 60000)
+})
+
 describe('Corruption recovery', () => {
     it('should handle corrupt cache.json gracefully', async () => {
         const sessionPath = mkdtempSync(join(tmpdir(), 'baro-memory-corrupt-'))

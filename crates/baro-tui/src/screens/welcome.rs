@@ -227,14 +227,19 @@ pub fn render(f: &mut Frame, app: &App) {
     };
 
     let planner_focused = focused == WelcomeField::Planner;
-    let is_claude = app.planner == Planner::Claude;
 
     let mut planner_spans = vec![
         Span::styled("  Planner:  ", Style::default().fg(theme::MUTED)),
     ];
-    planner_spans.extend(radio(is_claude, "claude", planner_focused));
+    planner_spans.extend(radio(app.planner == Planner::Claude, "claude", planner_focused));
     planner_spans.push(Span::raw("  "));
-    planner_spans.extend(radio(!is_claude, "openai", planner_focused));
+    planner_spans.extend(radio(app.planner == Planner::OpenAI, "openai", planner_focused));
+    planner_spans.push(Span::raw("  "));
+    planner_spans.extend(radio(app.planner == Planner::Codex, "codex", planner_focused));
+    planner_spans.push(Span::raw("  "));
+    planner_spans.extend(radio(app.planner == Planner::OpenCode, "opencode", planner_focused));
+    planner_spans.push(Span::raw("  "));
+    planner_spans.extend(radio(app.planner == Planner::Pi, "pi", planner_focused));
 
     let settings_lines = vec![
         Line::from(model_spans),

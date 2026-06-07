@@ -23,6 +23,9 @@ import { resolve } from "path"
 
 import { orchestrate, type OrchestrateConfig } from "../src/orchestrate.js"
 import { ClaudeCliParticipant } from "../src/participants/claude-cli-participant.js"
+import { CodexCliParticipant } from "../src/participants/codex-cli-participant.js"
+import { OpenCodeCliParticipant } from "../src/participants/opencode-cli-participant.js"
+import { PiCliParticipant } from "../src/participants/pi-cli-participant.js"
 import {
     parseEndpoints,
     parseTierMap,
@@ -54,11 +57,11 @@ interface CliArgs {
     tierMap?: TierMap
     /** Raw `--openai-endpoint name=url` specs, resolved to a map later. */
     endpointSpecs: string[]
-    llm: "claude" | "openai" | "codex"
+    llm: "claude" | "openai" | "codex" | "opencode" | "pi"
     /** Optional per-phase overrides; each defaults to `llm`. */
-    storyLlm?: "claude" | "openai" | "codex"
-    criticLlm?: "claude" | "openai" | "codex"
-    surgeonLlm?: "claude" | "openai" | "codex"
+    storyLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    criticLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
+    surgeonLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     help: boolean
 }
 
@@ -160,9 +163,9 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--llm": {
                 const v = required(argv, ++i, "--llm")
-                if (v !== "claude" && v !== "openai" && v !== "codex") {
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi") {
                     process.stderr.write(
-                        `[cli] --llm must be 'claude' | 'openai' | 'codex', got '${v}'\n`,
+                        `[cli] --llm must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi', got '${v}'\n`,
                     )
                     process.exit(2)
                 }
@@ -173,9 +176,9 @@ function parseArgs(argv: string[]): CliArgs {
             case "--critic-llm":
             case "--surgeon-llm": {
                 const v = required(argv, ++i, a)
-                if (v !== "claude" && v !== "openai" && v !== "codex") {
+                if (v !== "claude" && v !== "openai" && v !== "codex" && v !== "opencode" && v !== "pi") {
                     process.stderr.write(
-                        `[cli] ${a} must be 'claude' | 'openai' | 'codex', got '${v}'\n`,
+                        `[cli] ${a} must be 'claude' | 'openai' | 'codex' | 'opencode' | 'pi', got '${v}'\n`,
                     )
                     process.exit(2)
                 }
@@ -401,11 +404,17 @@ let shuttingDown = false
 function shutdown(signal: NodeJS.Signals): void {
     if (shuttingDown) return
     shuttingDown = true
-    process.stderr.write(`[cli] received ${signal}, killing in-flight Claude children...\n`)
+    process.stderr.write(`[cli] received ${signal}, killing in-flight children...\n`)
     ClaudeCliParticipant.killAll("SIGTERM")
+    CodexCliParticipant.killAll("SIGTERM")
+    OpenCodeCliParticipant.killAll("SIGTERM")
+    PiCliParticipant.killAll("SIGTERM")
     // Give children a moment to die cleanly, then escalate.
     setTimeout(() => {
         ClaudeCliParticipant.killAll("SIGKILL")
+        CodexCliParticipant.killAll("SIGKILL")
+        OpenCodeCliParticipant.killAll("SIGKILL")
+        PiCliParticipant.killAll("SIGKILL")
         process.exit(signal === "SIGINT" ? 130 : 143)
     }, 1500).unref()
 }
@@ -432,5 +441,13 @@ orphanWatchdog.unref()
 
 main().catch((e: unknown) => {
     process.stderr.write(`[cli] unhandled: ${(e as Error)?.stack ?? String(e)}\n`)
+    // Reap in-flight children before bailing. process.exit() gives no grace
+    // window for SIGTERM to land, so SIGKILL directly — otherwise an unhandled
+    // crash orphans live claude/codex/opencode/pi subprocesses that keep
+    // burning quota and holding worktrees with no parent to clean them up.
+    ClaudeCliParticipant.killAll("SIGKILL")
+    CodexCliParticipant.killAll("SIGKILL")
+    OpenCodeCliParticipant.killAll("SIGKILL")
+    PiCliParticipant.killAll("SIGKILL")
     process.exit(1)
 })
