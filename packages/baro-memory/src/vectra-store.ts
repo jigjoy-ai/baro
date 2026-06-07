@@ -263,8 +263,13 @@ class VectraMemoryStore implements MemoryStore {
             if (!existsSync(this.indexFilePath)) return
             const mtimeMs = statSync(this.indexFilePath).mtimeMs
             if (mtimeMs === this.lastIndexMtimeMs) return
+            // Create the new index BEFORE advancing the mtime watermark: if
+            // instantiation throws, we keep the old index AND the old mtime,
+            // so the next call retries instead of locking onto a stale
+            // snapshot for this mtime (Greptile #52 P2).
+            const newIndex = new LocalIndex<VectraItemMetadata>(this.indexPath)
             this.lastIndexMtimeMs = mtimeMs
-            this.index = new LocalIndex<VectraItemMetadata>(this.indexPath)
+            this.index = newIndex
         } catch {
             // Keep the existing index on any error.
         }
