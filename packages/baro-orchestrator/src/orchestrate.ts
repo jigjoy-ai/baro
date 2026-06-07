@@ -21,6 +21,7 @@ import {
     isInsideGitRepo,
     safePullRebase,
 } from "./git.js"
+import { WorktreeManager } from "./worktree.js"
 import { buildDag } from "./dag.js"
 import { Auditor } from "./participants/auditor.js"
 import {
@@ -126,6 +127,18 @@ export interface OrchestrateConfig {
      * Set to 0 to disable staggering.
      */
     intraLevelDelaySecs?: number
+    /**
+     * Run each story in its own git worktree (issue #50) instead of a shared
+     * working tree. Default: true when git lifecycle is on. Set false to keep
+     * the old shared-tree behaviour.
+     */
+    withWorktrees?: boolean
+    /**
+     * Symlink dependency dirs (node_modules, …) from the repo root into each
+     * story worktree so builds/tests resolve. Default: true. Only relevant
+     * when withWorktrees is on.
+     */
+    worktreeLinkDepDirs?: boolean
     /**
      * Which LLM provider drives the agents. `"claude"` (the current
      * default) uses the Claude Code CLI for Architect, Planner,
@@ -352,6 +365,25 @@ export async function orchestrate(
     const gitGate = new GitGate()
     let baseSha: string | null = null
 
+    // Unique per-run id, shared by the memory session path and the per-story
+    // worktree branch/dir names so concurrent runs and resumes never collide.
+    const runId = `run-${Date.now()}-${process.pid}`
+
+    // Escape hatch: explicit config wins; else BARO_NO_WORKTREES disables it
+    // without needing the Rust CLI flag plumbing; else on by default.
+    const worktreesEnabled = config.withWorktrees ?? !process.env.BARO_NO_WORKTREES
+    const worktrees =
+        useGit && worktreesEnabled
+            ? new WorktreeManager(config.cwd, gitGate, runId, {
+                  linkDepDirs: config.worktreeLinkDepDirs ?? true,
+                  onLog: (line) =>
+                      emitTui && emit({ type: "story_log", id: "_git", line }),
+              })
+            : null
+    // Story pushes run off the Conductor's critical path (see onStoryPassed);
+    // awaited before the run finishes so no push is lost.
+    const storyPushes: Promise<void>[] = []
+
     // Phase-2 observers — Librarian (cross-agent memory) and Sentry
     // (file conflict detection). Both default ON; either can be turned
     // off via the OrchestrateConfig flags.
@@ -364,7 +396,7 @@ export async function orchestrate(
     // Include PID to prevent collision if two orchestrators start simultaneously.
     const sessionsDir = join(process.env.HOME || "/tmp", ".baro", "sessions")
     const memorySessionPath = useMemory
-        ? join(sessionsDir, `run-${Date.now()}-${process.pid}`, "memory")
+        ? join(sessionsDir, runId, "memory")
         : undefined
 
     // Prune stale session directories (>24h old) to prevent unbounded growth.
@@ -527,6 +559,7 @@ export async function orchestrate(
                           (line) => emitTui && emit({ type: "story_log", id: "_git", line }),
                       )
                   }
+                  await worktrees?.cleanupStaleOnStart()
               }
             : undefined,
         onBeforeStoryLaunch: librarian
@@ -542,38 +575,54 @@ export async function orchestrate(
             : undefined,
         onStoryPassed: useGit
             ? async (storyId) => {
-                  await safePullRebase(
-                      config.cwd,
-                      (line) =>
-                          emitTui && emit({ type: "story_log", id: storyId, line }),
-                      gitGate,
-                  )
-                  try {
-                      await gitPushWithRetry(gitGate, {
-                          cwd: config.cwd,
-                          onLog: (line) =>
-                              emitTui &&
-                              emit({ type: "story_log", id: storyId, line }),
-                      })
-                      if (emitTui) {
-                          emit({
-                              type: "push_status",
-                              id: storyId,
-                              success: true,
-                              error: null,
-                          })
-                      }
-                  } catch (e) {
-                      if (emitTui) {
-                          emit({
-                              type: "push_status",
-                              id: storyId,
-                              success: false,
-                              error: (e as Error)?.message ?? String(e),
-                          })
+                  const log = (line: string) =>
+                      emitTui && emit({ type: "story_log", id: storyId, line })
+                  // Merge the story into the run branch on the critical path
+                  // (fast, local) so the next DAG level sees it. mergeBack
+                  // returns false when the story had no worktree (create()
+                  // fell back to the shared tree) — that story still needs the
+                  // shared-tree remote reconciliation.
+                  let merged = false
+                  if (worktrees) {
+                      try {
+                          merged = await worktrees.mergeBack(storyId)
+                      } catch (e) {
+                          // Unresolvable merge: keep the worktree + branch so
+                          // the passed work can be recovered, don't push/clean.
+                          log(`[git] merge-back failed; worktree preserved for recovery: ${(e as Error)?.message ?? String(e)}`)
+                          if (emitTui) {
+                              emit({ type: "push_status", id: storyId, success: false, error: (e as Error)?.message ?? String(e) })
+                          }
+                          return
                       }
                   }
+                  if (!merged) {
+                      await safePullRebase(config.cwd, log, gitGate)
+                  }
+                  // Push + worktree cleanup run off the Conductor's critical
+                  // path: a slow network push must not stall other stories'
+                  // merge-backs or slot freeing. gitGate still serializes the
+                  // actual push; orchestrate awaits storyPushes before finishing.
+                  storyPushes.push(
+                      (async () => {
+                          try {
+                              await gitPushWithRetry(gitGate, { cwd: config.cwd, onLog: log })
+                              if (emitTui) {
+                                  emit({ type: "push_status", id: storyId, success: true, error: null })
+                              }
+                          } catch (e) {
+                              if (emitTui) {
+                                  emit({ type: "push_status", id: storyId, success: false, error: (e as Error)?.message ?? String(e) })
+                              }
+                          } finally {
+                              if (merged) await worktrees?.cleanup(storyId)
+                          }
+                      })(),
+                  )
               }
+            : undefined,
+        onStoryFailed: worktrees
+            ? (storyId) => worktrees.cleanup(storyId)
             : undefined,
     })
     conductor.setEnvironment(env)
@@ -589,6 +638,7 @@ export async function orchestrate(
     // per-spawn, so future per-story overrides could live there too.
     const storyFactory = new StoryFactory({
         cwd: config.cwd,
+        worktrees: worktrees ?? undefined,
         llm: storyLlm,
         openaiModel: config.storyModel ?? "gpt-5.5",
         storyModelOverride: config.storyModel,
@@ -629,6 +679,14 @@ export async function orchestrate(
         RunStartRequest.create({ reason: "orchestrate" }),
     )
     const summary = await conductor.done
+
+    // Drain detached story pushes (and their worktree cleanups) before the
+    // backstop sweep, so no push is abandoned mid-flight.
+    await Promise.allSettled(storyPushes)
+
+    // Backstop: per-story worktrees are removed as each story settles, but
+    // sweep any stragglers + the temp dir + dangling branches here.
+    await worktrees?.cleanupAll()
 
     // Drain in-flight async observers so all side effects (CritiqueItem,
     // ReplanItem) land in the audit log before this function returns.

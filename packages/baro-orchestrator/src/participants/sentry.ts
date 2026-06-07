@@ -14,6 +14,10 @@
  * we can prove the architecture works and measure how often it fires
  * in real runs.
  *
+ * Since per-story worktree isolation (#50), an overlap no longer means a
+ * live shared-tree collision — each agent writes its own worktree — but
+ * predicts a likely merge-back conflict, so the notice is still useful.
+ *
  * Library-grade: no PRD knowledge.
  */
 

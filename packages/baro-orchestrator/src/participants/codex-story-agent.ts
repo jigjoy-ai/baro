@@ -57,15 +57,15 @@ export interface CodexStorySpec {
      * `--dangerously-bypass-approvals-and-sandbox`). Required for
      * autonomous baro runs because Codex's `workspace-write` sandbox
      * mode blocks `.git/` writes — without bypass the agent can't
-     * commit. baro story workers run in per-story git worktrees, so
-     * the "danger" is bounded by worktree isolation.
-     * Default: true.
+     * commit. The "danger" is bounded by the per-story git worktree
+     * (WorktreeManager, #50): the agent's writes land in an isolated
+     * tree that's merged back only on success. Default: true.
      */
     bypassSandbox?: boolean
     /**
-     * Pass `--skip-git-repo-check`. baro story workers always run inside
-     * per-story git worktrees, so the default is false; set this only
-     * when wiring up tests or one-off runs.
+     * Pass `--skip-git-repo-check`. baro story workers run inside a
+     * per-story git worktree (a valid git repo), so the default is false;
+     * set this only when wiring up tests or one-off runs.
      */
     skipGitRepoCheck?: boolean
 }
