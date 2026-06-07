@@ -303,7 +303,11 @@ pub fn render(f: &mut Frame, app: &App) {
             Style::default().fg(theme::MUTED),
         )));
 
-        let overlay_area = centered_rect(70, 11, area);
+        // 2 border rows + lines.len() content rows, capped to avoid
+        // overflowing very short terminals; minimum 5 to always fit the
+        // header + dismiss hint.
+        let modal_height = (2 + lines.len() as u16).clamp(5, 18).min(area.height);
+        let overlay_area = centered_rect(70, modal_height, area);
         f.render_widget(Clear, overlay_area);
         let paragraph = Paragraph::new(lines)
             .block(
