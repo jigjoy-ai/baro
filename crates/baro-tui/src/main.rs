@@ -1108,6 +1108,20 @@ async fn run_app(
                             KeyCode::Backspace => { app.refine_input.as_mut().unwrap().pop(); }
                             _ => {}
                         }
+                    } else if app.planning_error.is_some() {
+                        // A branch/planning error is shown on the Review
+                        // screen (#47). Enter/Esc dismisses it rather than
+                        // re-triggering the doomed run or quitting; any other
+                        // key is ignored while the error modal is up.
+                        match key.code {
+                            KeyCode::Enter
+                            | KeyCode::Char('\r')
+                            | KeyCode::Char('\n')
+                            | KeyCode::Esc => {
+                                app.planning_error = None;
+                            }
+                            _ => {}
+                        }
                     } else {
                         match key.code {
                         KeyCode::Char('r') => {
