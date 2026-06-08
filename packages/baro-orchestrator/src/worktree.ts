@@ -129,7 +129,7 @@ export class WorktreeManager {
                 // Any first-merge failure (content, modify/delete, rename, …)
                 // → abort and retry favouring the merging story.
                 const conflicts = await this.conflictedPaths()
-                await execQuiet("git", ["merge", "--abort"], this.repoRoot)
+                await this.abortMerge(storyId)
                 this.log(
                     `WARNING: story ${storyId} conflicts with already-merged work` +
                         (conflicts.length ? ` on [${conflicts.join(", ")}]` : "") +
@@ -143,7 +143,7 @@ export class WorktreeManager {
                     )
                     return true
                 } catch (e) {
-                    await execQuiet("git", ["merge", "--abort"], this.repoRoot)
+                    await this.abortMerge(storyId)
                     // Keep the branch out of the cleanup sweep so its commits
                     // survive the run and stay recoverable.
                     this.preserved.add(storyId)
@@ -154,6 +154,22 @@ export class WorktreeManager {
             }
         } finally {
             release()
+        }
+    }
+
+    /**
+     * Abort an in-progress merge, logging if the abort itself fails. A
+     * lingering MERGE_HEAD (e.g. a held index.lock) would otherwise make the
+     * NEXT story's merge fail and be misdiagnosed against the wrong story.
+     */
+    private async abortMerge(storyId: string): Promise<void> {
+        try {
+            await exec("git", ["merge", "--abort"], { cwd: this.repoRoot })
+        } catch (e) {
+            this.log(
+                `WARNING: 'git merge --abort' failed after story ${storyId} ` +
+                    `(${errMsg(e)}); run branch may have a lingering MERGE_HEAD`,
+            )
         }
     }
 
@@ -285,13 +301,21 @@ export class WorktreeManager {
         await execQuiet("git", ["reset", "-q", "--", ...LINKED_DEP_DIRS], worktreePath)
 
         let staged: string[] = []
+        let diffFailed = false
         try {
             const { stdout } = await exec("git", ["diff", "--cached", "--name-only"], {
                 cwd: worktreePath,
             })
             staged = stdout.split("\n").map((l) => l.trim()).filter(Boolean)
-        } catch {
-            /* treat as nothing staged */
+        } catch (e) {
+            // Don't treat an unreadable index as "nothing staged" — that would
+            // silently skip the commit and drop the work. Warn and commit
+            // whatever is staged instead (dep dirs were already reset above).
+            diffFailed = true
+            this.log(
+                `WARNING: could not inspect staged changes for story ${storyId} ` +
+                    `(${errMsg(e)}); committing whatever is staged`,
+            )
         }
         // If the reset didn't drop a dep dir, refuse to commit a broken symlink.
         const depStaged = staged.filter((p) =>
@@ -305,12 +329,14 @@ export class WorktreeManager {
             await execQuiet("git", ["reset", "-q"], worktreePath)
             return
         }
-        // Only a dep dir was dirty → nothing real to commit (benign).
-        if (staged.length === 0) return
+        // Only a dep dir was dirty → nothing real to commit (benign). When the
+        // diff couldn't be read we don't know, so fall through and let the
+        // commit (or its "nothing to commit" failure) decide.
+        if (!diffFailed && staged.length === 0) return
 
         this.log(
             `WARNING: story ${storyId} passed with uncommitted changes; ` +
-                `auto-committing ${staged.length} path(s) before merge`,
+                `auto-committing ${diffFailed ? "" : `${staged.length} path(s) `}before merge`,
         )
         try {
             await exec(
