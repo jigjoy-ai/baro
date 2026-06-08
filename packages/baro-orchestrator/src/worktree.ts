@@ -42,6 +42,8 @@ export interface WorktreeManagerOptions {
  */
 export class WorktreeManager {
     private readonly paths = new Map<string, string>()
+    /** Stories whose merge-back failed: their branch is kept for recovery. */
+    private readonly preserved = new Set<string>()
     private readonly baseDir: string
     private readonly linkDepDirs: boolean
     private readonly log: (line: string) => void
@@ -142,6 +144,9 @@ export class WorktreeManager {
                     return true
                 } catch (e) {
                     await execQuiet("git", ["merge", "--abort"], this.repoRoot)
+                    // Keep the branch out of the cleanup sweep so its commits
+                    // survive the run and stay recoverable.
+                    this.preserved.add(storyId)
                     throw new Error(
                         `could not merge story ${storyId} even with -X theirs: ${errMsg(e)}`,
                     )
@@ -168,13 +173,25 @@ export class WorktreeManager {
         }
     }
 
-    /** Remove every worktree + branch this manager created, plus its temp dir. */
+    /**
+     * Remove every worktree this manager created, plus its temp dir. Branches
+     * are deleted too — EXCEPT those marked preserved (an unresolvable
+     * merge-back): their worktree dir is freed but the branch ref is kept so
+     * the commits stay recoverable after the run.
+     */
     async cleanupAll(): Promise<void> {
         const release = await this.gate.acquire()
         try {
             for (const [storyId, path] of this.paths) {
                 await this.removeWorktreeQuiet(path)
-                await this.deleteBranchQuiet(this.branchOf(storyId))
+                if (this.preserved.has(storyId)) {
+                    this.log(
+                        `kept branch ${this.branchOf(storyId)} for recovery ` +
+                            `(merge-back failed); inspect with: git log ${this.branchOf(storyId)}`,
+                    )
+                } else {
+                    await this.deleteBranchQuiet(this.branchOf(storyId))
+                }
             }
             this.paths.clear()
             await execQuiet("git", ["worktree", "prune"], this.repoRoot)
@@ -261,11 +278,29 @@ export class WorktreeManager {
             ["add", "-A", "--", ".", ...LINKED_DEP_DIRS.map((d) => `:(exclude)${d}`)],
             worktreePath,
         )
-        await execQuiet(
-            "git",
-            ["commit", "-m", `baro: auto-commit uncommitted work for story ${storyId}`],
-            worktreePath,
-        )
+        // Nothing staged (e.g. the only dirty entry was a dep-dir symlink we
+        // excluded) → benign, nothing to commit.
+        let hasStaged = false
+        try {
+            await exec("git", ["diff", "--cached", "--quiet"], { cwd: worktreePath })
+        } catch {
+            hasStaged = true
+        }
+        if (!hasStaged) return
+        try {
+            await exec(
+                "git",
+                ["commit", "-m", `baro: auto-commit uncommitted work for story ${storyId}`],
+                { cwd: worktreePath },
+            )
+        } catch (e) {
+            // Surface a real commit failure: the leftover work would otherwise
+            // be silently dropped (the branch is merged without it).
+            this.log(
+                `WARNING: failed to auto-commit story ${storyId}'s leftover work ` +
+                    `(${errMsg(e)}); it will not be included in the merge`,
+            )
+        }
     }
 
     private async conflictedPaths(): Promise<string[]> {
