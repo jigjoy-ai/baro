@@ -249,7 +249,8 @@ export class WorktreeManager {
     /**
      * Commit work the agent edited but didn't commit, so it isn't lost on
      * cleanup (passing is signalled by the agent, not by a commit existing).
-     * `git add -A` respects .gitignore, so symlinked node_modules etc. are safe.
+     * Never commits the symlinked dep dirs, and surfaces a warning rather than
+     * silently dropping work if any git step fails.
      */
     private async autoCommitLeftovers(
         storyId: string,
@@ -265,28 +266,52 @@ export class WorktreeManager {
             return
         }
         if (!dirty) return
+
+        // Stage all non-ignored work. No pathspec (so the exit code reflects
+        // real failures, not the benign "some paths are gitignored" advice
+        // that an explicit `.` pathspec triggers); .gitignore already keeps
+        // node_modules out in the common case.
+        try {
+            await exec("git", ["add", "-A"], { cwd: worktreePath })
+        } catch (e) {
+            this.log(
+                `WARNING: failed to stage story ${storyId}'s leftover work ` +
+                    `(${errMsg(e)}); it will not be included in the merge`,
+            )
+            return
+        }
+        // Belt for repos that DON'T gitignore the dep dirs: unstage them so
+        // their absolute-path symlinks never get committed.
+        await execQuiet("git", ["reset", "-q", "--", ...LINKED_DEP_DIRS], worktreePath)
+
+        let staged: string[] = []
+        try {
+            const { stdout } = await exec("git", ["diff", "--cached", "--name-only"], {
+                cwd: worktreePath,
+            })
+            staged = stdout.split("\n").map((l) => l.trim()).filter(Boolean)
+        } catch {
+            /* treat as nothing staged */
+        }
+        // If the reset didn't drop a dep dir, refuse to commit a broken symlink.
+        const depStaged = staged.filter((p) =>
+            LINKED_DEP_DIRS.some((d) => p === d || p.startsWith(`${d}/`)),
+        )
+        if (depStaged.length > 0) {
+            this.log(
+                `WARNING: could not keep dep dirs [${depStaged.join(", ")}] out of ` +
+                    `story ${storyId}'s auto-commit; skipping it to avoid committing symlinks`,
+            )
+            await execQuiet("git", ["reset", "-q"], worktreePath)
+            return
+        }
+        // Only a dep dir was dirty → nothing real to commit (benign).
+        if (staged.length === 0) return
+
         this.log(
             `WARNING: story ${storyId} passed with uncommitted changes; ` +
-                `auto-committing them before merge`,
+                `auto-committing ${staged.length} path(s) before merge`,
         )
-        // Stage everything EXCEPT the symlinked dep dirs (excluded at the add
-        // step, not a follow-up reset, so a silent reset failure can't leave a
-        // broken absolute-path symlink staged even if the repo doesn't ignore
-        // node_modules).
-        await execQuiet(
-            "git",
-            ["add", "-A", "--", ".", ...LINKED_DEP_DIRS.map((d) => `:(exclude)${d}`)],
-            worktreePath,
-        )
-        // Nothing staged (e.g. the only dirty entry was a dep-dir symlink we
-        // excluded) → benign, nothing to commit.
-        let hasStaged = false
-        try {
-            await exec("git", ["diff", "--cached", "--quiet"], { cwd: worktreePath })
-        } catch {
-            hasStaged = true
-        }
-        if (!hasStaged) return
         try {
             await exec(
                 "git",
@@ -294,8 +319,8 @@ export class WorktreeManager {
                 { cwd: worktreePath },
             )
         } catch (e) {
-            // Surface a real commit failure: the leftover work would otherwise
-            // be silently dropped (the branch is merged without it).
+            // Surface a real commit failure: the work would otherwise be
+            // silently dropped (the branch merges without it).
             this.log(
                 `WARNING: failed to auto-commit story ${storyId}'s leftover work ` +
                     `(${errMsg(e)}); it will not be included in the merge`,
