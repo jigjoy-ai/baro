@@ -369,9 +369,12 @@ export async function orchestrate(
     // worktree branch/dir names so concurrent runs and resumes never collide.
     const runId = `run-${Date.now()}-${process.pid}`
 
-    // Escape hatch: explicit config wins; else BARO_NO_WORKTREES disables it
-    // without needing the Rust CLI flag plumbing; else on by default.
-    const worktreesEnabled = config.withWorktrees ?? !process.env.BARO_NO_WORKTREES
+    // Escape hatch: explicit config wins; else the presence of
+    // BARO_NO_WORKTREES disables it (NO_COLOR-style — set to ANY value,
+    // including empty, to turn worktrees off) without needing Rust CLI flag
+    // plumbing; else on by default.
+    const worktreesEnabled =
+        config.withWorktrees ?? !("BARO_NO_WORKTREES" in process.env)
     const worktrees =
         useGit && worktreesEnabled
             ? new WorktreeManager(config.cwd, gitGate, runId, {
