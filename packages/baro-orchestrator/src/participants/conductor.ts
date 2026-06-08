@@ -75,6 +75,12 @@ export interface ConductorOptions {
     defaultModel?: string
     promptTemplatePath?: string
     onStoryPassed?: (storyId: string) => Promise<void> | void
+    /**
+     * Called when a story fails terminally (after its retries). Used to
+     * discard the story's isolated worktree + branch (#50) without merging.
+     * Awaited so cleanup completes before the level boundary advances.
+     */
+    onStoryFailed?: (storyId: string) => Promise<void> | void
     onRunStart?: (prd: PrdFile) => Promise<void> | void
     onBeforeStoryLaunch?: (
         storyId: string,
@@ -185,6 +191,15 @@ export class Conductor extends BaseObserver {
     public readonly done: Promise<ConductorRunSummary>
     private resolveDone!: (summary: ConductorRunSummary) => void
 
+    /**
+     * Serializes event handling. Mozaik delivers events without awaiting the
+     * handler, so two StoryResults settling together could interleave — one
+     * spawning the next DAG level while another's `await onStoryPassed`
+     * (worktree merge-back, #50) is still in flight, leaving the dependent
+     * level without the merged work. Chaining handlers keeps them sequential.
+     */
+    private handleChain: Promise<void> = Promise.resolve()
+
     constructor(opts: ConductorOptions) {
         super()
         this.opts = {
@@ -229,7 +244,16 @@ export class Conductor extends BaseObserver {
         await this.handle(event)
     }
 
-    private async handle(event: SemanticEvent<unknown>): Promise<void> {
+    private handle(event: SemanticEvent<unknown>): Promise<void> {
+        // Run strictly after any in-flight handler. `.catch` on the stored
+        // chain keeps one handler's failure from poisoning the queue while
+        // still surfacing the rejection to this call's awaiter.
+        const run = this.handleChain.then(() => this.handleEvent(event))
+        this.handleChain = run.catch(() => {})
+        return run
+    }
+
+    private async handleEvent(event: SemanticEvent<unknown>): Promise<void> {
         if (RunStartRequest.is(event)) {
             await this.handleRunStart()
             return
@@ -409,6 +433,20 @@ export class Conductor extends BaseObserver {
         } else {
             this.currentLevel.failed.push(item.storyId)
             this.addGlobalFailed(item.storyId)
+            if (this.opts.onStoryFailed) {
+                try {
+                    await this.opts.onStoryFailed(item.storyId)
+                } catch (e) {
+                    this.emit(
+                        ConductorState.create({
+                            phase: "running_level",
+                            detail: `onStoryFailed hook for ${item.storyId} failed: ${(e as Error)?.message ?? String(e)}`,
+                            currentLevel: this.currentLevel.ordinal,
+                            totalLevels: this.currentLevel.totalLevelsHint,
+                        }),
+                    )
+                }
+            }
         }
 
         // Try to fill freed parallel slots with queued stories.

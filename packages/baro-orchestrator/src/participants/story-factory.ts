@@ -34,9 +34,15 @@ import {
     type EndpointMap,
     type TierMap,
 } from "../routing.js"
+import type { WorktreeManager } from "../worktree.js"
 
 export interface StoryFactoryOptions {
     cwd: string
+    /**
+     * When set, each story runs in its own isolated git worktree instead of
+     * the shared `cwd` (issue #50). create() falls back to `cwd` on failure.
+     */
+    worktrees?: WorktreeManager
     /**
      * Which LLM provider every story uses.
      *   "claude"  — StoryAgent wrapping a `claude` CLI subprocess
@@ -99,6 +105,8 @@ export class StoryFactory extends BaseObserver {
         string,
         StoryAgent | OpenAIStoryAgent | CodexStoryAgent | OpenCodeStoryAgent | PiStoryAgent
     > = new Map()
+    /** Story ids whose spawn is in progress (closes the await-create window). */
+    private readonly spawning = new Set<string>()
 
     constructor(private readonly opts: StoryFactoryOptions) {
         super()
@@ -130,7 +138,22 @@ export class StoryFactory extends BaseObserver {
 
     private async spawn(req: StorySpawnRequestData): Promise<void> {
         if (!this.envRef) return
-        if (this.active.has(req.storyId)) return // idempotent
+        // Idempotent across both the settled set and the in-progress set:
+        // spawn awaits worktree creation, so a duplicate request must not slip
+        // through that window and create a second worktree + agent. The
+        // finally clears the in-progress marker even if construction throws,
+        // so a later recovery respawn of this story isn't blocked forever.
+        if (this.active.has(req.storyId) || this.spawning.has(req.storyId)) return
+        this.spawning.add(req.storyId)
+        try {
+            await this.buildAndLaunch(req)
+        } finally {
+            this.spawning.delete(req.storyId)
+        }
+    }
+
+    private async buildAndLaunch(req: StorySpawnRequestData): Promise<void> {
+        if (!this.envRef) return
 
         // Resolve which backend + model THIS story runs on. The route
         // can come from the story's own `model` field (a bare tier name
@@ -153,12 +176,17 @@ export class StoryFactory extends BaseObserver {
                 "\n",
         )
 
+        // Per-story worktree isolation (#50); falls back to the shared cwd.
+        const storyCwd = this.opts.worktrees
+            ? (await this.opts.worktrees.create(req.storyId)) ?? this.opts.cwd
+            : this.opts.cwd
+
         const agent: StoryAgent | OpenAIStoryAgent | CodexStoryAgent | OpenCodeStoryAgent | PiStoryAgent =
             route.backend === "pi"
                 ? new PiStoryAgent({
                       id: req.storyId,
                       prompt: req.prompt,
-                      cwd: this.opts.cwd,
+                      cwd: storyCwd,
                       model: route.model,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
@@ -167,7 +195,7 @@ export class StoryFactory extends BaseObserver {
                 ? new OpenCodeStoryAgent({
                       id: req.storyId,
                       prompt: req.prompt,
-                      cwd: this.opts.cwd,
+                      cwd: storyCwd,
                       model: route.model,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
@@ -176,7 +204,7 @@ export class StoryFactory extends BaseObserver {
                     ? new CodexStoryAgent({
                           id: req.storyId,
                           prompt: req.prompt,
-                          cwd: this.opts.cwd,
+                          cwd: storyCwd,
                           // undefined → let Codex pick its account default.
                           model: route.model,
                           retries: req.retries,
@@ -187,7 +215,7 @@ export class StoryFactory extends BaseObserver {
                               {
                                   id: req.storyId,
                                   prompt: req.prompt,
-                                  cwd: this.opts.cwd,
+                                  cwd: storyCwd,
                                   model: route.model,
                                   retries: req.retries,
                                   timeoutSecs: req.timeoutSecs,
@@ -201,7 +229,7 @@ export class StoryFactory extends BaseObserver {
                         : new StoryAgent({
                               id: req.storyId,
                               prompt: req.prompt,
-                              cwd: this.opts.cwd,
+                              cwd: storyCwd,
                               // undefined → StoryAgent applies its own default.
                               model: route.model,
                               effort: this.opts.effort,

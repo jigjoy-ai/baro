@@ -166,7 +166,10 @@ export async function safePullRebase(
         }
 
         try {
-            await exec("git", ["pull", "--rebase", "origin", branch], { cwd })
+            // --rebase=merges so per-story `--no-ff` merge commits (worktree
+            // isolation, issue #50) survive the replay instead of being
+            // flattened or dropped.
+            await exec("git", ["pull", "--rebase=merges", "origin", branch], { cwd })
             onLog?.("[git] pull ok")
         } catch {
             onLog?.("[git] pull conflict, continuing without pull")
@@ -229,7 +232,9 @@ export async function gitPushWithRetry(
                 `[git] push rejected (attempt ${attempt}/${max}), pulling and retrying...`,
             )
             try {
-                await exec("git", ["pull", "--rebase", "origin", branch], {
+                // --rebase=merges: preserve per-story `--no-ff` merge commits
+                // (worktree isolation, #50) when reconciling a rejected push.
+                await exec("git", ["pull", "--rebase=merges", "origin", branch], {
                     cwd: options.cwd,
                 })
             } catch {
