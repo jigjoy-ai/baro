@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 
 import { FunctionCallItem, type Participant } from "@mozaik-ai/core"
 
-import { StoryResult } from "../src/semantic-events.js"
+import { AgentState, StoryResult } from "../src/semantic-events.js"
 import { StoryLifecycleForwarder } from "../src/participants/forwarders/story-lifecycle.js"
 
 // The forwarder reads `source.agentId`; a story's agentId == its storyId.
@@ -17,6 +17,10 @@ function call(name: string, args: Record<string, unknown>): FunctionCallItem {
 
 function result(storyId: string, success: boolean) {
     return StoryResult.create({ storyId, success, attempts: 1, durationSecs: 3, error: success ? null : "boom" })
+}
+
+function retry(agentId: string) {
+    return AgentState.create({ agentId, phase: "waiting", detail: "retrying (1/2)" })
 }
 
 /**
@@ -109,6 +113,22 @@ describe("StoryLifecycleForwarder — per-story file stats (#39)", () => {
         })
         assert.equal(complete(events, "S5")!.files_created, 1)
         assert.equal(complete(events, "S6")!.files_created, 2)
+    })
+
+    it("counts only the winning attempt's touches across a retry", () => {
+        const f = new StoryLifecycleForwarder()
+        const events = capture(() => {
+            // Attempt 1 writes foo.ts, then fails and retries.
+            void f.onExternalFunctionCall(source("S8"), call("Write", { file_path: "foo.ts", content: "x" }))
+            void f.onExternalEvent(source("S8"), retry("S8"))
+            // Attempt 2 writes bar.ts and lands.
+            void f.onExternalFunctionCall(source("S8"), call("Write", { file_path: "bar.ts", content: "y" }))
+            void f.onExternalEvent(source("S8"), result("S8", true))
+        })
+        const ev = complete(events, "S8")
+        assert.equal(ev!.files_created, 1, "abandoned attempt-1 file not counted")
+        assert.equal(ev!.files_modified, 0)
+        assert.ok(events.some((e) => e.type === "story_retry" && e.id === "S8"), "story_retry emitted")
     })
 
     it("emits story_error (not story_complete) on failure and forgets the touches", () => {

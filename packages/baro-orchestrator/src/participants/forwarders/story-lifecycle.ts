@@ -30,6 +30,8 @@ export class StoryLifecycleForwarder extends BaseObserver {
     private retryCounts = new Map<string, number>()
     // storyId → (path → first-touch kind). Distinct paths per story, so a
     // file touched many times counts once, classified by its first write.
+    // Reset on each retry so story_complete reflects only the winning
+    // attempt's touches, not files a failed attempt wrote and abandoned.
     private filesByStory = new Map<string, Map<string, "created" | "modified">>()
 
     override async onExternalEvent(
@@ -82,6 +84,9 @@ export class StoryLifecycleForwarder extends BaseObserver {
         if (item.phase === "waiting" && item.detail?.includes("retrying")) {
             const count = (this.retryCounts.get(item.agentId) ?? 0) + 1
             this.retryCounts.set(item.agentId, count)
+            // Drop the failed attempt's file touches so the eventual
+            // story_complete counts only the attempt that actually lands.
+            this.filesByStory.delete(item.agentId)
             emit({ type: "story_retry", id: item.agentId, attempt: count })
         }
     }
