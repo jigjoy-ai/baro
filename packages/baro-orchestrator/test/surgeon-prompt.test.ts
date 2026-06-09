@@ -33,7 +33,7 @@ describe("buildSurgeonPrompt — names the model that actually ran (#48)", () =>
 
     it("adds the actual model and tells the LLM to cite it, keeping the tier line", () => {
         // Mirrors orchestrate(): --story-llm codex --story-model gpt-5.5.
-        const describe = (model: string | undefined) =>
+        const routeDescriber = (model: string | undefined) =>
             formatRoute(
                 resolveStoryRoute(model, {
                     fallbackBackend: "codex",
@@ -41,7 +41,7 @@ describe("buildSurgeonPrompt — names the model that actually ran (#48)", () =>
                     openaiDefaultModel: "gpt-5.5",
                 }),
             )
-        const p = buildSurgeonPrompt(snap, failure, describe)
+        const p = buildSurgeonPrompt(snap, failure, routeDescriber)
         assert.match(p, /Model that actually ran: codex:gpt-5\.5/)
         assert.match(p, /refer to THIS model in your reason, not the tier/)
         // The planner tier stays (the escalation rule depends on it).
