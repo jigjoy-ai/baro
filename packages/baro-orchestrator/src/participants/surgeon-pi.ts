@@ -26,6 +26,7 @@ import {
 } from "../semantic-events.js"
 import {
     PrdSnapshot,
+    type RouteDescriber,
     SURGEON_SYSTEM_PROMPT,
     buildSurgeonPrompt,
     extractJsonObject,
@@ -35,6 +36,8 @@ import {
 export interface SurgeonPiOptions {
     /** Returns a fresh snapshot of the current PRD. */
     snapshot: () => PrdSnapshot
+    /** Describes the model a story actually ran on (issue #48). */
+    resolveRoute?: RouteDescriber
     /** Use Pi CLI to evaluate replans. Default: true. */
     useLlm?: boolean
     /**
@@ -56,12 +59,13 @@ export interface SurgeonPiOptions {
 
 export class SurgeonPi extends BaseObserver {
     private readonly opts: Required<
-        Omit<SurgeonPiOptions, "snapshot" | "provider" | "model" | "piBin">
+        Omit<SurgeonPiOptions, "snapshot" | "provider" | "model" | "piBin" | "resolveRoute">
     > & {
         snapshot: () => PrdSnapshot
         provider: string | undefined
         model: string | undefined
         piBin: string
+        resolveRoute?: RouteDescriber
     }
 
     private replansEmitted = 0
@@ -77,6 +81,7 @@ export class SurgeonPi extends BaseObserver {
             piBin: opts.piBin ?? "pi",
             timeoutMs: opts.timeoutMs ?? 300_000,
             snapshot: opts.snapshot,
+            resolveRoute: opts.resolveRoute,
         }
     }
 
@@ -112,7 +117,7 @@ export class SurgeonPi extends BaseObserver {
         failure: StoryResultData,
     ): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const userPrompt = buildSurgeonPrompt(snap, failure)
+        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute)
         const prompt = `${SURGEON_SYSTEM_PROMPT}\n\n${userPrompt}`
 
         try {

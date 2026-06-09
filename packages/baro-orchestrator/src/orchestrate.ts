@@ -23,6 +23,11 @@ import {
 } from "./git.js"
 import { WorktreeManager } from "./worktree.js"
 import { buildDag } from "./dag.js"
+import {
+    formatRoute,
+    resolveStoryRoute,
+    type ResolveOpts,
+} from "./routing.js"
 import { Auditor } from "./participants/auditor.js"
 import {
     Conductor,
@@ -41,7 +46,11 @@ import { Operator } from "./participants/operator.js"
 import { Sentry } from "./participants/sentry.js"
 import { StoryFactory } from "./participants/story-factory.js"
 import { type StoryAgent } from "./participants/story-agent.js"
-import { Surgeon, type PrdSnapshot } from "./participants/surgeon.js"
+import {
+    Surgeon,
+    type PrdSnapshot,
+    type RouteDescriber,
+} from "./participants/surgeon.js"
 import { SurgeonCodex } from "./participants/surgeon-codex.js"
 import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
 import { SurgeonOpenCode } from "./participants/surgeon-opencode.js"
@@ -449,6 +458,29 @@ export async function orchestrate(
                 })),
             }
         }
+        // Tell the Surgeon what a story's planner tier actually resolved to,
+        // so its replan reason names the model that ran rather than the tier
+        // an override replaced (issue #48). Only wired when an override is in
+        // play — on a plain run the tier IS the model, so we keep showing it.
+        const storyRouting: ResolveOpts = {
+            fallbackBackend: storyLlm,
+            openaiDefaultModel: config.storyModel ?? "gpt-5.5",
+            override: config.storyModel,
+            tierMap: config.tierMap,
+            endpoints: config.openaiEndpoints,
+            defaultApiKey: process.env.OPENAI_API_KEY,
+        }
+        const routingOverridden =
+            storyLlm !== "claude" || !!config.storyModel || !!config.tierMap
+        const resolveRoute: RouteDescriber | undefined = routingOverridden
+            ? (model) => {
+                  try {
+                      return formatRoute(resolveStoryRoute(model, storyRouting))
+                  } catch {
+                      return null
+                  }
+              }
+            : undefined
         // Factory by provider. Bus contract is identical across all
         // three — same ReplanItem shape — so downstream observers
         // (Conductor's replan-applier, Auditor, kaleidoskop) don't
@@ -456,29 +488,34 @@ export async function orchestrate(
         if (surgeonLlm === "openai") {
             surgeon = new SurgeonOpenAI({
                 snapshot,
+                resolveRoute,
                 model: config.surgeonModel ?? "gpt-5.5",
             })
         } else if (surgeonLlm === "codex") {
             surgeon = new SurgeonCodex({
                 snapshot,
+                resolveRoute,
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
             })
         } else if (surgeonLlm === "opencode") {
             surgeon = new SurgeonOpenCode({
                 snapshot,
+                resolveRoute,
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
             })
         } else if (surgeonLlm === "pi") {
             surgeon = new SurgeonPi({
                 snapshot,
+                resolveRoute,
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
             })
         } else {
             surgeon = new Surgeon({
                 snapshot,
+                resolveRoute,
                 useLlm: config.surgeonUseLlm ?? false,
                 model: config.surgeonModel ?? "opus",
             })
