@@ -60,9 +60,20 @@ export interface PrdSnapshot {
     }[]
 }
 
+/**
+ * Renders a story's planner tier (its PRD `model`) as the backend:model that
+ * actually ran, accounting for `--story-model` / `--story-llm` / tier-map
+ * overrides. Returns null when the route can't be resolved. Wired from
+ * orchestrate() only when an override is active, so a plain run keeps showing
+ * just the tier (issue #48).
+ */
+export type RouteDescriber = (model: string | undefined) => string | null
+
 export interface SurgeonOptions {
     /** Returns a fresh snapshot of the current PRD. */
     snapshot: () => PrdSnapshot
+    /** Describes the model a story actually ran on (see RouteDescriber). */
+    resolveRoute?: RouteDescriber
     /** Use Claude CLI to evaluate replans. Default: false (deterministic). */
     useLlm?: boolean
     /** Model for LLM evaluations. Default: "opus". */
@@ -162,6 +173,7 @@ export class Surgeon extends BaseObserver {
             claudeBin: opts.claudeBin ?? "claude",
             timeoutMs: opts.timeoutMs ?? 90_000,
             snapshot: opts.snapshot,
+            resolveRoute: opts.resolveRoute,
         }
     }
 
@@ -213,7 +225,7 @@ export class Surgeon extends BaseObserver {
         failure: StoryResultData,
     ): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const prompt = buildSurgeonPrompt(snap, failure)
+        const prompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute)
         try {
             const { stdout } = await execFileAsync(
                 this.opts.claudeBin,
@@ -279,6 +291,7 @@ export class Surgeon extends BaseObserver {
 export function buildSurgeonPrompt(
     snap: PrdSnapshot,
     failure: StoryResultData,
+    resolveRoute?: RouteDescriber,
 ): string {
     const storyLines = snap.stories
         .map(
@@ -287,6 +300,11 @@ export function buildSurgeonPrompt(
         )
         .join("\n")
     const failureStory = snap.stories.find((s) => s.id === failure.storyId)
+    // The PRD `model` is the planner's blast-radius TIER, which a
+    // `--story-model`/`--story-llm`/tier-map override can replace at spawn
+    // time. Surface the model that actually ran so the reason doesn't
+    // misattribute the failure to a tier that never executed (issue #48).
+    const ranOn = resolveRoute ? resolveRoute(failureStory?.model) : null
     return [
         `# Project: ${snap.project}`,
         `Description: ${snap.description}`,
@@ -299,6 +317,12 @@ export function buildSurgeonPrompt(
         `Title: ${failureStory?.title ?? "(unknown)"}`,
         `Description: ${failureStory?.description ?? "(unknown)"}`,
         `Tier that just failed: ${failureStory?.model ?? "(default)"}`,
+        ...(ranOn
+            ? [
+                  `Model that actually ran: ${ranOn}  (an override replaced the ` +
+                      `planner tier above; refer to THIS model in your reason, not the tier)`,
+              ]
+            : []),
         `Attempts: ${failure.attempts}`,
         `Error: ${failure.error ?? "(no reason captured)"}`,
         "",

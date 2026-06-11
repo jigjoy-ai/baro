@@ -50,11 +50,14 @@ import {
     extractJsonObject,
     surgeonDeterministicReplan,
     type PrdSnapshot,
+    type RouteDescriber,
 } from "./surgeon.js"
 
 export interface SurgeonOpenAIOptions {
     /** PRD snapshot provider. Same shape as `Surgeon`. */
     snapshot: () => PrdSnapshot
+    /** Describes the model a story actually ran on (issue #48). */
+    resolveRoute?: RouteDescriber
     /** Max replans this Surgeon will emit per run. Default: 10. */
     maxReplans?: number
     /**
@@ -96,6 +99,7 @@ export class SurgeonOpenAI extends BaseObserver {
             maxReplans: opts.maxReplans ?? 10,
             model: opts.model ?? "gpt-5.5",
             snapshot: opts.snapshot,
+            resolveRoute: opts.resolveRoute,
         }
         this.model = pickModel(this.opts.model)
     }
@@ -135,7 +139,7 @@ export class SurgeonOpenAI extends BaseObserver {
      */
     private async evaluate(failure: StoryResultData): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const userPrompt = buildSurgeonPrompt(snap, failure)
+        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute)
         const context = ModelContext.create("surgeon")
             .addContextItem(SystemMessageItem.create(SURGEON_SYSTEM_PROMPT))
             .addContextItem(UserMessageItem.create(userPrompt))

@@ -26,6 +26,7 @@ import {
 } from "../semantic-events.js"
 import {
     PrdSnapshot,
+    type RouteDescriber,
     SURGEON_SYSTEM_PROMPT,
     buildSurgeonPrompt,
     extractJsonObject,
@@ -35,6 +36,8 @@ import {
 export interface SurgeonOpenCodeOptions {
     /** Returns a fresh snapshot of the current PRD. */
     snapshot: () => PrdSnapshot
+    /** Describes the model a story actually ran on (issue #48). */
+    resolveRoute?: RouteDescriber
     /** Use OpenCode CLI to evaluate replans. Default: true. */
     useLlm?: boolean
     /**
@@ -53,11 +56,12 @@ export interface SurgeonOpenCodeOptions {
 
 export class SurgeonOpenCode extends BaseObserver {
     private readonly opts: Required<
-        Omit<SurgeonOpenCodeOptions, "snapshot" | "model" | "opencodeBin">
+        Omit<SurgeonOpenCodeOptions, "snapshot" | "model" | "opencodeBin" | "resolveRoute">
     > & {
         snapshot: () => PrdSnapshot
         model: string | undefined
         opencodeBin: string
+        resolveRoute?: RouteDescriber
     }
 
     private replansEmitted = 0
@@ -72,6 +76,7 @@ export class SurgeonOpenCode extends BaseObserver {
             opencodeBin: opts.opencodeBin ?? "opencode",
             timeoutMs: opts.timeoutMs ?? 300_000,
             snapshot: opts.snapshot,
+            resolveRoute: opts.resolveRoute,
         }
     }
 
@@ -107,7 +112,7 @@ export class SurgeonOpenCode extends BaseObserver {
         failure: StoryResultData,
     ): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const userPrompt = buildSurgeonPrompt(snap, failure)
+        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute)
         const prompt = `${SURGEON_SYSTEM_PROMPT}\n\n${userPrompt}`
 
         try {
