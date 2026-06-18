@@ -181,7 +181,14 @@ pub struct Cli {
     ///                      Critic move to Codex (high-volume, cheap
     ///                      on ChatGPT subscription). Individual phase
     ///                      overrides win when set.
-    #[arg(long, default_value="claude", value_parser=["claude", "openai", "codex", "opencode", "pi", "hybrid"])]
+    ///   jigjoy           — hosted preset: every phase talks to the
+    ///                      baro gateway (an OpenAI-compatible proxy)
+    ///                      that holds the upstream keys and routes
+    ///                      planner/architect/surgeon to a strong model
+    ///                      and story/critic to a cheap one. Supply only
+    ///                      your hosted key via JIGJOY_API_KEY; override
+    ///                      the gateway URL with BARO_JIGJOY_URL.
+    #[arg(long, default_value="claude", value_parser=["claude", "openai", "codex", "opencode", "pi", "hybrid", "jigjoy"])]
     pub llm: String,
 
     /// Custom base URL for OpenAI-compatible API endpoints. When set,

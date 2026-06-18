@@ -59,7 +59,9 @@ export interface RunArchitectOpenAIOptions {
      * if exceeded.
      */
     maxRounds?: number
-    /** Per-round inference timeout in seconds (passed via AbortSignal). Default: 120. */
+    /** Per-round inference timeout in seconds. Default: 600 — reasoning models
+     * (gpt-5.5 on the Responses API) can need minutes per round; matches the
+     * 10-min default the pi/codex/opencode architect backends use. */
     perRoundTimeoutSecs?: number
 }
 
@@ -95,7 +97,7 @@ export async function runArchitectOpenAI(
         )
 
     const maxRounds = opts.maxRounds ?? 12
-    const perRoundTimeoutMs = (opts.perRoundTimeoutSecs ?? 120) * 1000
+    const perRoundTimeoutMs = (opts.perRoundTimeoutSecs ?? 600) * 1000
     const usage = new UsageAccumulator()
 
     for (let round = 1; round <= maxRounds; round++) {

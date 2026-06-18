@@ -343,6 +343,64 @@ async fn run_app(
             app.critic_llm = app::LlmProvider::Codex;
             app.surgeon_llm = app::LlmProvider::Claude;
         }
+        "jigjoy" => {
+            // Hosted preset. Every phase talks to the baro gateway (an
+            // OpenAI-compatible proxy) which holds the real upstream keys
+            // and classifies by model name: gpt* -> strong tier, deepseek*
+            // -> cheap tier. The user supplies only their hosted key
+            // (JIGJOY_API_KEY) and never sees the upstream keys.
+            app.llm = app::LlmProvider::OpenAI;
+            app.architect_llm = app::LlmProvider::OpenAI;
+            app.planner_llm = app::LlmProvider::OpenAI;
+            app.story_llm = app::LlmProvider::OpenAI;
+            app.critic_llm = app::LlmProvider::OpenAI;
+            app.surgeon_llm = app::LlmProvider::OpenAI;
+
+            // Per-phase model defaults — only when the user didn't pin one
+            // (the `--*-model` flags are applied above). Names are sent to
+            // the gateway verbatim; it maps them to the real upstream model.
+            if app.planner_model.is_none() {
+                app.planner_model = Some("gpt-5.5".to_string());
+            }
+            if app.architect_model.is_none() {
+                app.architect_model = Some("gpt-5.5".to_string());
+            }
+            if app.surgeon_model.is_none() {
+                app.surgeon_model = Some("gpt-5.5".to_string());
+            }
+            if app.story_model.is_none() {
+                app.story_model = Some("deepseek-chat".to_string());
+            }
+            if app.critic_model.is_none() {
+                app.critic_model = Some("deepseek-chat".to_string());
+            }
+
+            // Default gateway URL unless the user set --openai-base-url or
+            // OPENAI_BASE_URL. Set the env var so the resolution below picks
+            // it up. Override per-deploy with BARO_JIGJOY_URL.
+            let base_url_set = cli.openai_base_url.is_some()
+                || std::env::var("OPENAI_BASE_URL")
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+            if !base_url_set {
+                let url = std::env::var("BARO_JIGJOY_URL")
+                    .unwrap_or_else(|_| "https://baro.jigjoy.ai/v1".to_string());
+                std::env::set_var("OPENAI_BASE_URL", url);
+            }
+
+            // The hosted key arrives as JIGJOY_API_KEY; the OpenAI path reads
+            // OPENAI_API_KEY, so bridge it without clobbering an explicit one.
+            let openai_key_set = std::env::var("OPENAI_API_KEY")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            if !openai_key_set {
+                if let Ok(k) = std::env::var("JIGJOY_API_KEY") {
+                    if !k.is_empty() {
+                        std::env::set_var("OPENAI_API_KEY", k);
+                    }
+                }
+            }
+        }
         other => {
             if let Some(provider) = app::LlmProvider::parse(other) {
                 app.llm = provider;
