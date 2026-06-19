@@ -23,11 +23,11 @@ import {
     StorySpawned,
     type StorySpawnRequestData,
 } from "../semantic-events.js"
-import { CodexStoryAgent } from "./codex-story-agent.js"
-import { OpenAIStoryAgent } from "./openai-story-agent.js"
-import { OpenCodeStoryAgent } from "./opencode-story-agent.js"
-import { PiStoryAgent } from "./pi-story-agent.js"
-import { StoryAgent } from "./story-agent.js"
+import {
+    LocalStoryExecutor,
+    type StoryExecution,
+    type StoryExecutor,
+} from "./story-executor.js"
 import {
     formatRoute,
     resolveStoryRoute,
@@ -94,22 +94,26 @@ export interface StoryFactoryOptions {
      * names resolve on `llm` exactly as before.
      */
     tierMap?: TierMap
+    /**
+     * Where stories actually run. Default: in-process (`LocalStoryExecutor`).
+     * Inject an alternative — a mock for tests, or an out-of-process / remote
+     * executor — to run the agent loop elsewhere without touching any other
+     * participant.
+     */
+    executor?: StoryExecutor
 }
 
 export class StoryFactory extends BaseObserver {
-    // Typed as BaroEnvironment because StoryAgent.run() / join() still
-    // expect the old environment type. Once StoryAgent migrates, this
-    // narrows to vanilla AgenticEnvironment.
+    /** The bus environment, wired in before any spawn; passed to the executor. */
     private envRef: AgenticEnvironment | null = null
-    private readonly active: Map<
-        string,
-        StoryAgent | OpenAIStoryAgent | CodexStoryAgent | OpenCodeStoryAgent | PiStoryAgent
-    > = new Map()
+    private readonly active: Map<string, StoryExecution> = new Map()
     /** Story ids whose spawn is in progress (closes the await-create window). */
     private readonly spawning = new Set<string>()
+    private readonly executor: StoryExecutor
 
     constructor(private readonly opts: StoryFactoryOptions) {
         super()
+        this.executor = opts.executor ?? new LocalStoryExecutor()
     }
 
     setEnvironment(env: AgenticEnvironment): void {
@@ -125,12 +129,12 @@ export class StoryFactory extends BaseObserver {
             return
         }
 
-        // When a story finishes (passes or fails), drop our reference so
-        // we can clean up its bus membership.
+        // When a story finishes (passes or fails), dispose its execution so we
+        // can clean up its bus membership / executor resources.
         if (StoryResult.is(event)) {
-            const agent = this.active.get(event.data.storyId)
-            if (agent && this.envRef) {
-                agent.leave(this.envRef)
+            const exec = this.active.get(event.data.storyId)
+            if (exec && this.envRef) {
+                exec.dispose(this.envRef)
                 this.active.delete(event.data.storyId)
             }
         }
@@ -181,70 +185,14 @@ export class StoryFactory extends BaseObserver {
             ? (await this.opts.worktrees.create(req.storyId)) ?? this.opts.cwd
             : this.opts.cwd
 
-        const agent: StoryAgent | OpenAIStoryAgent | CodexStoryAgent | OpenCodeStoryAgent | PiStoryAgent =
-            route.backend === "pi"
-                ? new PiStoryAgent({
-                      id: req.storyId,
-                      prompt: req.prompt,
-                      cwd: storyCwd,
-                      model: route.model,
-                      retries: req.retries,
-                      timeoutSecs: req.timeoutSecs,
-                  })
-                : route.backend === "opencode"
-                ? new OpenCodeStoryAgent({
-                      id: req.storyId,
-                      prompt: req.prompt,
-                      cwd: storyCwd,
-                      model: route.model,
-                      retries: req.retries,
-                      timeoutSecs: req.timeoutSecs,
-                  })
-                : route.backend === "codex"
-                    ? new CodexStoryAgent({
-                          id: req.storyId,
-                          prompt: req.prompt,
-                          cwd: storyCwd,
-                          // undefined → let Codex pick its account default.
-                          model: route.model,
-                          retries: req.retries,
-                          timeoutSecs: req.timeoutSecs,
-                      })
-                    : route.backend === "openai"
-                        ? new OpenAIStoryAgent(
-                              {
-                                  id: req.storyId,
-                                  prompt: req.prompt,
-                                  cwd: storyCwd,
-                                  model: route.model,
-                                  retries: req.retries,
-                                  timeoutSecs: req.timeoutSecs,
-                              },
-                              {
-                                  model: route.model ?? this.opts.openaiModel,
-                                  baseUrl: route.baseUrl,
-                                  apiKey: route.apiKey,
-                              },
-                          )
-                        : new StoryAgent({
-                              id: req.storyId,
-                              prompt: req.prompt,
-                              cwd: storyCwd,
-                              // undefined → StoryAgent applies its own default.
-                              model: route.model,
-                              effort: this.opts.effort,
-                              retries: req.retries,
-                              timeoutSecs: req.timeoutSecs,
-                          })
-
-        agent.join(this.envRef)
-        this.active.set(req.storyId, agent)
-
-        // The agent's run() returns a Promise but we don't await it
-        // here — the StoryResult event will arrive on the bus when it
-        // settles, and Conductor reacts to that. Pure fire-and-forget
-        // event-driven flow.
-        void agent.run(this.envRef)
+        // Run the story — in-process by default, or via an injected executor
+        // that runs it elsewhere. Either way the StoryResult lands on the bus
+        // when it settles, and Conductor reacts.
+        const exec = this.executor.start(req, route, storyCwd, this.envRef, {
+            openaiModel: this.opts.openaiModel,
+            effort: this.opts.effort,
+        })
+        this.active.set(req.storyId, exec)
 
         // Emit the "yes, agent spawned" notification so observers can
         // see the lifecycle. Conductor doesn't actually need this, but
