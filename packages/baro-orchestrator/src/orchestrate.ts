@@ -205,6 +205,13 @@ export interface OrchestrateConfig {
      * MiniMax + real OpenAI) at once.
      */
     openaiEndpoints?: import("./routing.js").EndpointMap
+    /**
+     * Where story agents run. Default: in-process (`LocalStoryExecutor`).
+     * Pass a custom `StoryExecutor` to run the agent loop elsewhere (a mock for
+     * tests, or an out-of-process / remote executor) without changing any other
+     * participant.
+     */
+    executor?: import("./participants/story-executor.js").StoryExecutor
     /** Hooks for receiving Operator commands externally (Rust TUI). */
     operatorHooks?: {
         onAbort?: (storyId: string) => void
@@ -696,6 +703,7 @@ export async function orchestrate(
         tierMap: config.tierMap,
         endpoints: config.openaiEndpoints,
         defaultApiKey: process.env.OPENAI_API_KEY,
+        executor: config.executor,
     })
     storyFactory.setEnvironment(env)
     storyFactory.join(env)
