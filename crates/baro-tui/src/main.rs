@@ -747,7 +747,9 @@ async fn run_app(
                 app.branch_name = branch;
                 app.description = description;
                 if headless {
-                    // No review screen — auto-confirm and execute.
+                    // Emit a planning event for the runner/dashboard, then
+                    // auto-confirm and execute (no review screen).
+                    println!(r#"{{"type":"plan_ready","stories":{}}}"#, stories.len());
                     confirm_and_execute(&mut app, stories, &cwd, tx.clone());
                 } else {
                     app.show_review(stories);
@@ -772,9 +774,15 @@ async fn run_app(
                 app.planning_error = Some(err);
             }
             Some(AppEvent::ArchitectStarted) => {
+                if headless {
+                    println!(r#"{{"type":"architect_start"}}"#);
+                }
                 app.architect_status = app::ArchitectStatus::Running;
             }
             Some(AppEvent::ArchitectComplete(doc)) => {
+                if headless {
+                    println!(r#"{{"type":"architect_complete"}}"#);
+                }
                 app.architect_status = app::ArchitectStatus::Complete;
                 app.decision_document = Some(doc);
             }

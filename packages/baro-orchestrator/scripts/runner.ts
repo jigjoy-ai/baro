@@ -46,20 +46,11 @@ function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: AbortS
         const env = { ...process.env }
         delete env.ANTHROPIC_API_KEY
 
-        // Default planning (Architect + Planner) to a less rate-limited model so a
-        // cloud run doesn't die when opus is throttled/unavailable; override via env.
-        const planModel = process.env.BARO_PLAN_MODEL ?? "sonnet"
+        // Planning + execution use baro's own model routing (Architect/Planner on
+        // the latest opus for the claude backend) — we don't override it.
         const child = spawn(
             baroBin,
-            [
-                "--headless", d.goal,
-                "--cwd", workspaceDir,
-                "--llm", d.route?.backend ?? "claude",
-                "--architect-model", planModel,
-                "--planner-model", planModel,
-                "--parallel", String(d.parallel),
-                "--timeout", String(d.timeoutSecs),
-            ],
+            ["--headless", d.goal, "--cwd", workspaceDir, "--llm", d.route?.backend ?? "claude", "--parallel", String(d.parallel), "--timeout", String(d.timeoutSecs)],
             { cwd: workspaceDir, env, stdio: ["ignore", "pipe", "pipe"] },
         )
 
