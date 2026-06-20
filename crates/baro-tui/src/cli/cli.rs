@@ -221,6 +221,13 @@ pub struct Cli {
     /// better context matching between agents. Default: ON.
     #[arg(long)]
     pub no_memory: bool,
+
+    /// Run without the TUI: plan and execute the goal autonomously,
+    /// auto-confirming the plan, and stream the orchestrator's event
+    /// JSON to stdout. For CI / automation / remote runners. Requires a
+    /// goal argument.
+    #[arg(long)]
+    pub headless: bool,
 }
 
 pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {
