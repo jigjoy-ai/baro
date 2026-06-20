@@ -4,6 +4,9 @@
 // Self-contained: the wire protocol is vendored (mirrors @jigjoy-ai/baro-protocol).
 
 import { spawn } from "node:child_process"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { WebSocket } from "ws"
 
 interface WireEvent {
@@ -19,6 +22,10 @@ interface RunDispatchMsg {
     parallel: number
     timeoutSecs: number
     route?: { backend?: string; model?: string }
+    // When present, clone this repo (with the token) and run there so baro opens
+    // a PR; otherwise run in the local --workspace dir.
+    repo?: { fullName: string }
+    githubToken?: string
 }
 type ToRunner = RunDispatchMsg | { t: "cancel"; storyId: string } | { t: "ping"; ts: number } | { t: string }
 
@@ -38,20 +45,53 @@ interface RunOutcome {
     error: string | null
 }
 
-// Run one dispatched goal headless and forward its native event stream.
-function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: AbortSignal): Promise<RunOutcome> {
-    return new Promise((resolve) => {
-        // Use the subscription login, not API billing: a stray ANTHROPIC_API_KEY
-        // makes the claude CLI use API auth. Strip it for the child.
-        const env = { ...process.env }
-        delete env.ANTHROPIC_API_KEY
+// Clone a repo into a fresh temp dir using the user's OAuth token; returns the dir.
+function cloneRepo(fullName: string, token: string, emit: (e: WireEvent) => void): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const dir = mkdtempSync(join(tmpdir(), "baro-clone-"))
+        const url = `https://x-access-token:${token}@github.com/${fullName}.git`
+        emit({ type: "story_log", agentId: "_git", data: { type: "story_log", id: "_git", line: `cloning ${fullName}…` } })
+        const ch = spawn("git", ["clone", "--quiet", url, dir], { stdio: "ignore" })
+        ch.on("close", (code) => (code === 0 ? resolve(dir) : reject(new Error(`git clone exit ${code}`))))
+        ch.on("error", reject)
+    })
+}
 
+// Run one dispatched goal headless and forward its native event stream. With a
+// repo, clone it (token auth) and run there so baro pushes + opens a PR.
+async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: AbortSignal): Promise<RunOutcome> {
+    // Use the subscription login, not API billing: a stray ANTHROPIC_API_KEY
+    // makes the claude CLI use API auth. Strip it for the child.
+    const env: Record<string, string | undefined> = { ...process.env }
+    delete env.ANTHROPIC_API_KEY
+
+    let cwd = workspaceDir
+    let cleanup: (() => void) | undefined
+    if (d.repo && d.githubToken) {
+        try {
+            cwd = await cloneRepo(d.repo.fullName, d.githubToken, emit)
+        } catch (e) {
+            return { success: false, durationSecs: 1, error: `clone failed: ${(e as Error).message}` }
+        }
+        // Let baro's git push + `gh pr create` authenticate as the user.
+        env.GH_TOKEN = d.githubToken
+        env.GITHUB_TOKEN = d.githubToken
+        cleanup = () => {
+            try {
+                rmSync(cwd, { recursive: true, force: true })
+            } catch {
+                // best-effort
+            }
+        }
+    }
+
+    const outcome = await new Promise<RunOutcome>((resolve) => {
         // Planning + execution use baro's own model routing (Architect/Planner on
         // the latest opus for the claude backend) — we don't override it.
         const child = spawn(
             baroBin,
-            ["--headless", d.goal, "--cwd", workspaceDir, "--llm", d.route?.backend ?? "claude", "--parallel", String(d.parallel), "--timeout", String(d.timeoutSecs)],
-            { cwd: workspaceDir, env, stdio: ["ignore", "pipe", "pipe"] },
+            ["--headless", d.goal, "--cwd", cwd, "--llm", d.route?.backend ?? "claude", "--parallel", String(d.parallel), "--timeout", String(d.timeoutSecs)],
+            { cwd, env, stdio: ["ignore", "pipe", "pipe"] },
         )
 
         const started = Date.now()
@@ -104,6 +144,8 @@ function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: AbortS
         })
         child.on("error", (e) => resolve({ success: false, durationSecs: secs(), error: e.message }))
     })
+    cleanup?.()
+    return outcome
 }
 
 // One connection: register, handle dispatches, resolve when the socket closes
