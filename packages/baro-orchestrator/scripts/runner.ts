@@ -46,9 +46,20 @@ function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: AbortS
         const env = { ...process.env }
         delete env.ANTHROPIC_API_KEY
 
+        // Default planning (Architect + Planner) to a less rate-limited model so a
+        // cloud run doesn't die when opus is throttled/unavailable; override via env.
+        const planModel = process.env.BARO_PLAN_MODEL ?? "sonnet"
         const child = spawn(
             baroBin,
-            ["--headless", d.goal, "--cwd", workspaceDir, "--llm", d.route?.backend ?? "claude", "--parallel", String(d.parallel), "--timeout", String(d.timeoutSecs)],
+            [
+                "--headless", d.goal,
+                "--cwd", workspaceDir,
+                "--llm", d.route?.backend ?? "claude",
+                "--architect-model", planModel,
+                "--planner-model", planModel,
+                "--parallel", String(d.parallel),
+                "--timeout", String(d.timeoutSecs),
+            ],
             { cwd: workspaceDir, env, stdio: ["ignore", "pipe", "pipe"] },
         )
 
@@ -58,6 +69,7 @@ function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: AbortS
         let passed = 0
         let failed = 0
         let doneSuccess: boolean | null = null
+        let stderrTail = ""
 
         let buf = ""
         child.stdout?.on("data", (chunk: Buffer) => {
@@ -81,17 +93,24 @@ function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: AbortS
                 else if (ev.type === "done") doneSuccess = !!ev.success
             }
         })
-        child.stderr?.on("data", () => {})
+        // Keep the tail of stderr so a failure carries the real cause back to
+        // the cloud (e.g. "planner FAILED: claude … model opus") instead of a
+        // bare exit code — otherwise failures are invisible in the dashboard.
+        child.stderr?.on("data", (chunk: Buffer) => {
+            stderrTail = (stderrTail + chunk.toString()).slice(-4000)
+        })
         signal.addEventListener("abort", () => child.kill("SIGTERM"))
-        child.on("close", (code) =>
+        child.on("close", (code) => {
+            const ok = doneSuccess ?? (code === 0 && failed === 0 && passed > 0)
+            const errTail = stderrTail.trim().split("\n").filter(Boolean).slice(-3).join(" · ").slice(-500)
             resolve({
-                success: doneSuccess ?? (code === 0 && failed === 0 && passed > 0),
+                success: ok,
                 durationSecs: secs(),
                 storiesPassed: passed,
                 storiesTotal: stories.size || passed + failed,
-                error: doneSuccess === false ? "run reported failure" : code === 0 ? null : `exit ${code}`,
-            }),
-        )
+                error: ok ? null : errTail || (doneSuccess === false ? "run reported failure" : `exit ${code}`),
+            })
+        })
         child.on("error", (e) => resolve({ success: false, durationSecs: secs(), error: e.message }))
     })
 }
