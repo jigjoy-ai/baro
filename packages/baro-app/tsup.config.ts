@@ -96,4 +96,9 @@ export default defineConfig([
         entry: { "baro-memory": "../baro-orchestrator/scripts/baro-memory.ts" },
         ...sharedBundleConfig,
     },
+    {
+        // `baro connect` runner — pairs with baro-cloud, runs dispatched goals.
+        entry: { runner: "../baro-orchestrator/scripts/runner.ts" },
+        ...sharedBundleConfig,
+    },
 ])

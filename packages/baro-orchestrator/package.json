@@ -1,23 +1,25 @@
 {
-    "name": "@baro/orchestrator",
-    "version": "0.0.1",
-    "private": true,
-    "type": "module",
-    "main": "dist/main.js",
-    "types": "dist/main.d.ts",
-    "scripts": {
-        "build": "tsc -p tsconfig.json",
-        "dev": "tsc -p tsconfig.json --watch",
-        "cli": "tsx scripts/cli.ts",
-        "typecheck": "tsc -p tsconfig.json --noEmit"
-    },
-    "dependencies": {
-        "@baro/memory": "*",
-        "@mozaik-ai/core": "3.12.0"
-    },
-    "devDependencies": {
-        "@types/node": "^22.0.0",
-        "tsx": "^4.21.0",
-        "typescript": "^5.3.3"
-    }
+  "name": "@baro/orchestrator",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "types": "dist/main.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "cli": "tsx scripts/cli.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@baro/memory": "*",
+    "@mozaik-ai/core": "3.12.0",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.3.3",
+    "@types/ws": "^8.5.0"
+  }
 }

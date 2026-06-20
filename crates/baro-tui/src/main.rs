@@ -148,6 +148,13 @@ struct PrdStoryOutput {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `baro connect [--token …] [--workspace …]` — run as a baro-cloud runner.
+    // Handled before clap / the session lock so it bypasses the TUI entirely.
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.get(1).map(|s| s.as_str()) == Some("connect") {
+        return run_connect(&raw_args[2..]).await;
+    }
+
      let (cli, _lock) = cli::cli::parse()?;
 
     // `baro --doctor` short-circuits before any TUI setup. It's a
@@ -192,6 +199,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// `baro connect` — run as a baro-cloud runner. Spawns the bundled runner.mjs,
+/// which pairs with the control plane and runs each dispatched goal via
+/// `baro --headless` over the user's subscription.
+async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut token = std::env::var("RUNNER_TOKEN").ok();
+    let mut workspace = std::env::var("WORKSPACE_DIR").ok();
+    let mut control_url = std::env::var("CONTROL_URL").ok();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--token" => {
+                token = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--workspace" | "--cwd" => {
+                workspace = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--control-url" => {
+                control_url = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "-h" | "--help" => {
+                println!("Usage: baro connect --token <rt_…> [--workspace <git repo>]");
+                println!("Pairs this machine with baro-cloud and runs dispatched goals over your subscription.");
+                return Ok(());
+            }
+            _ => i += 1,
+        }
+    }
+
+    let workspace = workspace.unwrap_or_else(|| ".".to_string());
+    let cwd = std::fs::canonicalize(&workspace)
+        .map_err(|e| format!("workspace '{}' not found: {}", workspace, e))?;
+
+    let entry = discovery::locate_script(&cwd, "packages/baro-orchestrator/scripts/runner.ts", "runner.mjs")
+        .map_err(|e| format!("could not locate the runner bundle ({e}). Reinstall: npm install -g baro-ai"))?;
+
+    let mut cmd = match &entry {
+        discovery::ScriptEntry::Tsx { tsx, script } => {
+            let mut c = tokio::process::Command::new(tsx);
+            c.arg(script);
+            c
+        }
+        discovery::ScriptEntry::NodeJs(js) => {
+            let mut c = tokio::process::Command::new("node");
+            c.arg(js);
+            c
+        }
+    };
+    if let Some(t) = &token {
+        cmd.env("RUNNER_TOKEN", t);
+    }
+    if let Some(u) = &control_url {
+        cmd.env("CONTROL_URL", u);
+    }
+    cmd.env("WORKSPACE_DIR", &cwd);
+    // The runner spawns `baro --headless`; point it at this very binary.
+    if let Ok(exe) = std::env::current_exe() {
+        cmd.env("BARO_BIN", exe);
+    }
+    cmd.stdin(std::process::Stdio::null());
+
+    println!("baro connect — starting runner (workspace: {})", cwd.display());
+    let status = cmd
+        .spawn()
+        .map_err(|e| format!("failed to start runner: {e}"))?
+        .wait()
+        .await?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 async fn run_app(
