@@ -5,7 +5,7 @@
 
 import { spawn } from "node:child_process"
 import { mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { hostname, tmpdir } from "node:os"
 import { join } from "node:path"
 import { WebSocket } from "ws"
 
@@ -35,7 +35,9 @@ const url = process.env.CONTROL_URL ?? "wss://api.baro.jigjoy.ai"
 const token = process.env.RUNNER_TOKEN
 const workspaceDir = process.env.WORKSPACE_DIR ?? process.cwd()
 const baroBin = process.env.BARO_BIN ?? "baro"
-const runnerId = process.env.RUNNER_ID ?? `runner-${process.pid}`
+// Stable per-machine id so the control plane can show one runner across
+// reconnects (not a new entry each time), plus a human-readable hostname.
+const runnerId = process.env.RUNNER_ID ?? hostname()
 
 interface RunOutcome {
     success: boolean
@@ -155,7 +157,7 @@ function connectOnce(): Promise<void> {
         const ws = new WebSocket(url)
         const inflight = new Map<string, AbortController>()
         ws.on("open", () => {
-            ws.send(encode({ t: "register", runnerId, token, backends: ["claude"], workspaceIds: ["default"], version: "0.55.0" }))
+            ws.send(encode({ t: "register", runnerId, hostname: hostname(), token, backends: ["claude"], workspaceIds: ["default"], version: "0.55.4" }))
             console.log(`[baro] connected to ${url} — workspace ${workspaceDir}`)
         })
         ws.on("message", (data: Buffer) => {

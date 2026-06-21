@@ -2,6 +2,8 @@
 
 A concise list of every published version. For full release notes, see the corresponding commit on the v* tag.
 
+## v0.55.4 — feat(0.55.4): `baro connect` — stable per-machine runner identity. The runner now registers with a stable `runnerId` (the machine `hostname`, overridable via `RUNNER_ID`) and sends its `hostname`, instead of a per-process `runner-<pid>` that changed on every reconnect. This lets baro-cloud show one runner across reconnects + keep history (online / last-seen) rather than a new entry each time. `runner.mjs` rebuilt.
+
 ## v0.55.3 — feat(0.55.3): `baro connect` — run on a chosen GitHub repo + open a PR. When the control plane dispatches a run with a `repo` + `githubToken` (the user picked a repo in the baro-cloud dashboard), the runner clones that repo into a temp dir with token auth, runs `baro --headless` there, and exports `GH_TOKEN`/`GITHUB_TOKEN` so baro pushes the branch + `gh pr create` opens the PR — then removes the clone. Without a repo it still runs in the local `--workspace` dir. `runner.mjs` rebuilt.
 
 ## v0.55.2 — fix(0.55.2): `baro connect` — keep opus for planning + stream the planning phase. Reverts 0.55.1's sonnet planning default: the Architect + Planner stay on baro's own routing (the latest `opus` for the `claude` backend) — quality planning is the point, and an opus outage is transient + now visible (see 0.55.1's stderr-tail error reporting) rather than something to paper over with a weaker model. Headless mode also now prints `architect_start` / `architect_complete` / `plan_ready` events to stdout, so a remote runner / the baro-cloud dashboard shows the **planning** phase live, not just execution. `runner.mjs` rebuilt.
