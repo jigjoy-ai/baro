@@ -154,15 +154,49 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
 // loop instead of hammering it forever with a token that will never resolve.
 let rejected: string | undefined
 
-// One connection: register, handle dispatches, resolve when the socket closes
-// (so the outer loop reconnects). Control-plane pings keep it alive between runs.
+// The live socket. An in-flight run streams through *this*, not the socket it
+// started on, so events + run_result keep flowing after a reconnect: the control
+// plane re-attaches by runnerId and only fails the run after a grace window. A
+// brief network blip mid-run no longer kills work that's still executing here.
+let currentWs: WebSocket | null = null
+const inflight = new Map<string, AbortController>()
+const send = (m: unknown): void => {
+    if (currentWs?.readyState === WebSocket.OPEN) currentWs.send(encode(m))
+}
+
+function handleMessage(m: ToRunner): void {
+    if (m.t === "rejected") {
+        rejected = (m as { reason?: string }).reason ?? "unknown reason"
+        console.error(`[baro] control plane rejected this runner: ${rejected}`)
+        currentWs?.close()
+    } else if (m.t === "ping") {
+        send({ t: "pong", ts: (m as { ts: number }).ts })
+    } else if (m.t === "cancel") {
+        inflight.get((m as { storyId: string }).storyId)?.abort()
+    } else if (m.t === "dispatch_run") {
+        const d = m as RunDispatchMsg
+        if (inflight.has(d.runId)) return // already running — ignore a duplicate dispatch
+        const ac = new AbortController()
+        inflight.set(d.runId, ac)
+        console.log(`[baro] run ${d.runId}: ${d.goal.split("\n")[0]}`)
+        const emit = (event: WireEvent) => send({ t: "event", storyId: event.agentId, event })
+        void runGoal(d, emit, ac.signal).then((o) => {
+            send({ t: "run_result", runId: d.runId, ...o })
+            inflight.delete(d.runId)
+            console.log(`[baro] run ${d.runId}: ${o.success ? "done" : "failed"} (${o.durationSecs}s)`)
+        })
+    }
+}
+
+// One connection: register, then resolve when the socket closes so the outer loop
+// reconnects. Any in-flight run keeps streaming through `currentWs` across the gap.
 function connectOnce(): Promise<void> {
     return new Promise((resolve) => {
         const ws = new WebSocket(url)
-        const inflight = new Map<string, AbortController>()
+        currentWs = ws
         ws.on("open", () => {
             ws.send(encode({ t: "register", runnerId, hostname: hostname(), token, backends: ["claude"], workspaceIds: ["default"], version: "0.55.4" }))
-            console.log(`[baro] connected to ${url} — workspace ${workspaceDir}`)
+            console.log(inflight.size ? `[baro] reconnected to ${url} — resuming ${inflight.size} in-flight run(s)` : `[baro] connected to ${url} — workspace ${workspaceDir}`)
         })
         ws.on("message", (data: Buffer) => {
             let m: ToRunner
@@ -171,29 +205,10 @@ function connectOnce(): Promise<void> {
             } catch {
                 return
             }
-            if (m.t === "rejected") {
-                rejected = (m as { reason?: string }).reason ?? "unknown reason"
-                console.error(`[baro] control plane rejected this runner: ${rejected}`)
-                ws.close()
-            } else if (m.t === "ping") {
-                ws.send(encode({ t: "pong", ts: (m as { ts: number }).ts }))
-            } else if (m.t === "cancel") {
-                inflight.get((m as { storyId: string }).storyId)?.abort()
-            } else if (m.t === "dispatch_run") {
-                const d = m as RunDispatchMsg
-                const ac = new AbortController()
-                inflight.set(d.runId, ac)
-                console.log(`[baro] run ${d.runId}: ${d.goal.split("\n")[0]}`)
-                const emit = (event: WireEvent) => ws.send(encode({ t: "event", storyId: event.agentId, event }))
-                void runGoal(d, emit, ac.signal).then((o) => {
-                    ws.send(encode({ t: "run_result", runId: d.runId, ...o }))
-                    inflight.delete(d.runId)
-                    console.log(`[baro] run ${d.runId}: ${o.success ? "done" : "failed"} (${o.durationSecs}s)`)
-                })
-            }
+            handleMessage(m)
         })
         ws.on("close", () => {
-            console.log("[baro] disconnected; reconnecting in 2s…")
+            console.log(inflight.size ? "[baro] disconnected mid-run; reconnecting in 2s…" : "[baro] disconnected; reconnecting in 2s…")
             resolve()
         })
         ws.on("error", (e: Error) => console.error("[baro] ws error:", e.message))
