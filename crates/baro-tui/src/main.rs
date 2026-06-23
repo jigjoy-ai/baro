@@ -13,6 +13,7 @@ mod notification;
 mod orchestrator_client;
 mod planner_runner;
 mod screens;
+mod service;
 mod subprocess;
 mod theme;
 mod ui;
@@ -208,6 +209,8 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let mut token = std::env::var("RUNNER_TOKEN").ok();
     let mut workspace = std::env::var("WORKSPACE_DIR").ok();
     let mut control_url = std::env::var("CONTROL_URL").ok();
+    let mut install = false;
+    let mut uninstall = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -223,18 +226,43 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 control_url = args.get(i + 1).cloned();
                 i += 2;
             }
+            "--install-service" => {
+                install = true;
+                i += 1;
+            }
+            "--uninstall-service" => {
+                uninstall = true;
+                i += 1;
+            }
             "-h" | "--help" => {
                 println!("Usage: baro connect --token <rt_…> [--workspace <git repo>]");
                 println!("Pairs this machine with baro-cloud and runs dispatched goals over your subscription.");
+                println!();
+                println!("  --install-service    install a background service (launchd/systemd/Task Scheduler)");
+                println!("                       so the runner survives terminal close, logout, and reboot");
+                println!("  --uninstall-service  remove that service");
                 return Ok(());
             }
             _ => i += 1,
         }
     }
 
+    // Uninstall is independent of token/workspace.
+    if uninstall {
+        return service::uninstall();
+    }
+
     let workspace = workspace.unwrap_or_else(|| ".".to_string());
     let cwd = std::fs::canonicalize(&workspace)
         .map_err(|e| format!("workspace '{}' not found: {}", workspace, e))?;
+
+    // Install the background service (token + workspace baked in) and exit —
+    // the service itself runs `baro connect` for real, in the background.
+    if install {
+        let exe = std::env::current_exe().map_err(|e| format!("cannot resolve baro binary: {e}"))?;
+        let token = token.ok_or("--install-service needs --token <rt_…> (get one from the dashboard)")?;
+        return service::install(&service::ServiceConfig { exe, token, workspace: cwd, control_url });
+    }
 
     let entry = discovery::locate_script(&cwd, "packages/baro-orchestrator/scripts/runner.ts", "runner.mjs")
         .map_err(|e| format!("could not locate the runner bundle ({e}). Reinstall: npm install -g baro-ai"))?;
