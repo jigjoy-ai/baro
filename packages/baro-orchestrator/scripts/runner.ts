@@ -27,7 +27,7 @@ interface RunDispatchMsg {
     repo?: { fullName: string }
     githubToken?: string
 }
-type ToRunner = RunDispatchMsg | { t: "cancel"; storyId: string } | { t: "ping"; ts: number } | { t: string }
+type ToRunner = RunDispatchMsg | { t: "cancel"; storyId: string } | { t: "ping"; ts: number } | { t: "rejected"; reason: string } | { t: string }
 
 const encode = (m: unknown): string => JSON.stringify(m)
 
@@ -150,6 +150,10 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
     return outcome
 }
 
+// Set when the control plane refuses us (bad/expired token): stop the reconnect
+// loop instead of hammering it forever with a token that will never resolve.
+let rejected: string | undefined
+
 // One connection: register, handle dispatches, resolve when the socket closes
 // (so the outer loop reconnects). Control-plane pings keep it alive between runs.
 function connectOnce(): Promise<void> {
@@ -167,7 +171,11 @@ function connectOnce(): Promise<void> {
             } catch {
                 return
             }
-            if (m.t === "ping") {
+            if (m.t === "rejected") {
+                rejected = (m as { reason?: string }).reason ?? "unknown reason"
+                console.error(`[baro] control plane rejected this runner: ${rejected}`)
+                ws.close()
+            } else if (m.t === "ping") {
                 ws.send(encode({ t: "pong", ts: (m as { ts: number }).ts }))
             } else if (m.t === "cancel") {
                 inflight.get((m as { storyId: string }).storyId)?.abort()
@@ -196,6 +204,10 @@ async function main() {
     if (!token) console.warn("[baro] warning: no --token — this runner won't be paired to your account")
     for (;;) {
         await connectOnce()
+        if (rejected) {
+            console.error("[baro] not reconnecting — re-run `baro connect --token rt_…` with a fresh token from the dashboard")
+            process.exit(1)
+        }
         await new Promise((r) => setTimeout(r, 2000))
     }
 }
