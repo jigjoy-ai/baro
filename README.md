@@ -279,6 +279,31 @@ baro --doctor
 
 Full options + `.barorc` config + per-phase model overrides: [**docs.baro.rs**](https://docs.baro.rs).
 
+## Run it from the cloud — `baro connect`
+
+baro can also run as a **remote runner** for baro-cloud: fire a goal from a web
+dashboard, a teammate, or a GitHub issue labeled `baro`, and it executes here on
+your machine over your own subscription — your code never leaves it. baro-cloud
+orchestrates (Architect/Planner/Critic/Surgeon) and never sees your source, only
+metadata + diffs. Pair a machine with one line:
+
+```bash
+curl -fsSL https://api.baro.jigjoy.ai/install.sh | sh -s -- --token rt_…
+```
+
+That installs baro and registers a background **service** that survives terminal
+close, logout, and reboot — launchd (macOS), systemd (Linux), or a logon task
+(Windows). Or do it by hand:
+
+```bash
+baro connect --install-service --token rt_…   # persistent background service
+baro connect --token rt_…                      # foreground, this terminal only
+baro connect --uninstall-service               # remove the service
+```
+
+Get a pairing token (`rt_…`) from baro-cloud → Runners. A mid-run network blip
+won't kill a run: the runner reconnects and resumes streaming where it left off.
+
 ## How it compares
 
 | | Single Claude Code session | DIY `Promise.all` of subprocesses | baro |
