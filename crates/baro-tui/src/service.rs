@@ -102,6 +102,11 @@ fn install_macos(cfg: &ServiceConfig) -> R {
         .collect::<Vec<_>>()
         .join("\n");
 
+    // launchd starts services with a bare PATH (no /usr/local/bin, /opt/homebrew/…),
+    // so node/tsx/claude wouldn't be found. Bake the PATH that was in effect at
+    // install time — whatever made `baro` + `node` resolvable in the user's shell.
+    let path_env = xml_escape(&install_path());
+
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -112,6 +117,10 @@ fn install_macos(cfg: &ServiceConfig) -> R {
   <array>
 {program_xml}
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>{path_env}</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>{log}</string>
@@ -122,8 +131,13 @@ fn install_macos(cfg: &ServiceConfig) -> R {
     );
     std::fs::write(&path, plist)?;
     let p = path.display().to_string();
-    // Reload: unload any prior copy (ignore failure), then load enabled.
-    let _ = Command::new("launchctl").args(["unload", &p]).status();
+    // Reload: unload any prior copy (silently — it usually isn't loaded), then
+    // load enabled.
+    let _ = Command::new("launchctl")
+        .args(["unload", &p])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
     let status = Command::new("launchctl").args(["load", "-w", &p]).status()?;
     if !status.success() {
         return Err(format!("launchctl load failed for {p}").into());
@@ -162,12 +176,16 @@ fn install_linux(cfg: &ServiceConfig) -> R {
     parts.extend(connect_args(cfg));
     let exec = parts.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
 
+    // Bake the install-time PATH so node/tsx/claude resolve under systemd's
+    // otherwise-minimal environment (same reason as the launchd plist).
+    let path_env = install_path();
     let unit = format!(
         "[Unit]\n\
          Description=baro-cloud runner\n\
          After=network-online.target\n\
          Wants=network-online.target\n\n\
          [Service]\n\
+         Environment=PATH={path_env}\n\
          ExecStart={exec}\n\
          Restart=always\n\
          RestartSec=2\n\n\
@@ -262,6 +280,15 @@ fn uninstall_windows() -> R {
 /// Minimal XML escaping for launchd plist string values.
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// PATH to bake into the service so background launches find node/tsx/claude.
+/// Falls back to common install dirs if the environment somehow has none.
+fn install_path() -> String {
+    match std::env::var("PATH") {
+        Ok(p) if !p.is_empty() => p,
+        _ => "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin".to_string(),
+    }
 }
 
 /// Single-quote a string for a systemd ExecStart token (POSIX shell quoting).
