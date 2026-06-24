@@ -294,6 +294,12 @@ export class Finalizer extends BaseObserver {
             sequentialSecs: this.sequentialSeconds(),
         })
 
+        // The per-story merge-back push (gitPushWithRetry) is async and can still
+        // be in flight when RunCompleted fires this finalizer — which races
+        // `gh pr create` into "No commits between <base> and <branch>". Push the
+        // head (awaited) here so the remote branch has the run's commits first.
+        await this.pushBranch(branch)
+
         this.log(`[finalizer] opening PR on ${baseBranch} ← ${branch}`)
         const url = await this.openPr({ title, body, baseBranch, branch })
 
@@ -585,6 +591,19 @@ export class Finalizer extends BaseObserver {
             return true
         } catch {
             return false
+        }
+    }
+
+    // Ensure the remote head branch is up to date with the local integration
+    // branch (which has the merged story commits by RunCompleted time) before we
+    // open the PR. Best-effort: if it's already pushed or has no remote, openPr
+    // surfaces the real outcome.
+    private async pushBranch(branch: string): Promise<void> {
+        try {
+            await execFileAsync("git", ["push", "origin", branch], { cwd: this.opts.cwd })
+        } catch (e) {
+            const detail = ((e as { stderr?: string }).stderr ?? (e as Error).message).split("\n")[0]?.trim()
+            this.log(`[finalizer] pre-PR push: ${detail}`)
         }
     }
 

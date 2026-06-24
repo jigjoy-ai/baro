@@ -94,6 +94,10 @@ pub struct OrchestratorConfig {
     /// resolves them from `BARO_OPENAI_KEY_<NAME>` / `OPENAI_API_KEY`,
     /// inherited through the subprocess env.
     pub openai_endpoints: Vec<String>,
+    /// Headless mode: echo every raw orchestrator stdout line (the native
+    /// event JSON) to this process's stdout, so a remote runner / CI can
+    /// consume the stream directly without the TUI.
+    pub echo_raw: bool,
 }
 
 /// Spawn the orchestrator subprocess and return a channel that receives
@@ -162,12 +166,18 @@ async fn run(
 
     // Drain stdout: each line is a BaroEvent JSON.
     let stdout_tx = tx.clone();
+    let echo_raw = cfg.echo_raw;
     let stdout_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
+            }
+            // Headless: pass the orchestrator's native event JSON straight
+            // through to stdout for a remote runner / CI to consume.
+            if echo_raw {
+                println!("{}", trimmed);
             }
             match serde_json::from_str::<BaroEvent>(trimmed) {
                 Ok(ev) => {

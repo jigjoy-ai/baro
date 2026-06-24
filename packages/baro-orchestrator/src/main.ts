@@ -100,6 +100,18 @@ export {
 } from "./participants/story-agent.js"
 export { StoryResult } from "./semantic-events.js"
 
+// The StoryExecutor seam — implement `StoryExecutor` and pass it as
+// `OrchestrateConfig.executor` to run a story's agent loop somewhere other
+// than in-process (the default is `LocalStoryExecutor`).
+export {
+    LocalStoryExecutor,
+    type StoryExecutor,
+    type StoryExecution,
+    type StoryExecOpts,
+} from "./participants/story-executor.js"
+export { type StoryRoute, type Backend } from "./routing.js"
+export { type StorySpawnRequestData } from "./semantic-events.js"
+
 export {
     Conductor,
     type ConductorOptions,

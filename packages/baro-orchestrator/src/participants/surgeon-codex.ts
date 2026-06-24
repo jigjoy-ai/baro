@@ -25,6 +25,7 @@ import {
 } from "../semantic-events.js"
 import {
     PrdSnapshot,
+    type RouteDescriber,
     SURGEON_SYSTEM_PROMPT,
     buildSurgeonPrompt,
     extractJsonObject,
@@ -34,6 +35,8 @@ import {
 export interface SurgeonCodexOptions {
     /** Returns a fresh snapshot of the current PRD. */
     snapshot: () => PrdSnapshot
+    /** Describes the model a story actually ran on (issue #48). */
+    resolveRoute?: RouteDescriber
     /** Use Codex CLI to evaluate replans. Default: true. */
     useLlm?: boolean
     /** Model for LLM evaluations. Default: undefined (Codex picks). */
@@ -48,11 +51,12 @@ export interface SurgeonCodexOptions {
 
 export class SurgeonCodex extends BaseObserver {
     private readonly opts: Required<
-        Omit<SurgeonCodexOptions, "snapshot" | "model" | "codexBin">
+        Omit<SurgeonCodexOptions, "snapshot" | "model" | "codexBin" | "resolveRoute">
     > & {
         snapshot: () => PrdSnapshot
         model: string | undefined
         codexBin: string
+        resolveRoute?: RouteDescriber
     }
 
     private replansEmitted = 0
@@ -67,6 +71,7 @@ export class SurgeonCodex extends BaseObserver {
             codexBin: opts.codexBin ?? "codex",
             timeoutMs: opts.timeoutMs ?? 300_000,
             snapshot: opts.snapshot,
+            resolveRoute: opts.resolveRoute,
         }
     }
 
@@ -102,7 +107,7 @@ export class SurgeonCodex extends BaseObserver {
         failure: StoryResultData,
     ): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const userPrompt = buildSurgeonPrompt(snap, failure)
+        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute)
         const prompt = `${SURGEON_SYSTEM_PROMPT}\n\n${userPrompt}`
 
         try {

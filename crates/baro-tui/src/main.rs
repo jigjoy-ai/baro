@@ -13,6 +13,7 @@ mod notification;
 mod orchestrator_client;
 mod planner_runner;
 mod screens;
+mod service;
 mod subprocess;
 mod theme;
 mod ui;
@@ -148,6 +149,13 @@ struct PrdStoryOutput {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `baro connect [--token …] [--workspace …]` — run as a baro-cloud runner.
+    // Handled before clap / the session lock so it bypasses the TUI entirely.
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.get(1).map(|s| s.as_str()) == Some("connect") {
+        return run_connect(&raw_args[2..]).await;
+    }
+
      let (cli, _lock) = cli::cli::parse()?;
 
     // `baro --doctor` short-circuits before any TUI setup. It's a
@@ -158,6 +166,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(doctor::run().await);
     }
 
+    // Headless: no terminal / alternate screen. Drive the run and stream
+    // the orchestrator's event JSON to stdout (CI / automation / remote runner).
+    if cli.headless {
+        let result = run_app(None, cli).await;
+        if let Err(err) = result {
+            eprintln!("Error: {}", err);
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     let mut writer = open_terminal_writer()?;
     enable_raw_mode()?;
     execute!(writer, EnterAlternateScreen)?;
@@ -166,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(writer);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, cli).await;
+    let result = run_app(Some(&mut terminal), cli).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -183,10 +202,110 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `baro connect` — run as a baro-cloud runner. Spawns the bundled runner.mjs,
+/// which pairs with the control plane and runs each dispatched goal via
+/// `baro --headless` over the user's subscription.
+async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut token = std::env::var("RUNNER_TOKEN").ok();
+    let mut workspace = std::env::var("WORKSPACE_DIR").ok();
+    let mut control_url = std::env::var("CONTROL_URL").ok();
+    let mut install = false;
+    let mut uninstall = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--token" => {
+                token = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--workspace" | "--cwd" => {
+                workspace = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--control-url" => {
+                control_url = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--install-service" => {
+                install = true;
+                i += 1;
+            }
+            "--uninstall-service" => {
+                uninstall = true;
+                i += 1;
+            }
+            "-h" | "--help" => {
+                println!("Usage: baro connect --token <rt_…> [--workspace <git repo>]");
+                println!("Pairs this machine with baro-cloud and runs dispatched goals over your subscription.");
+                println!();
+                println!("  --install-service    install a background service (launchd/systemd/Task Scheduler)");
+                println!("                       so the runner survives terminal close, logout, and reboot");
+                println!("  --uninstall-service  remove that service");
+                return Ok(());
+            }
+            _ => i += 1,
+        }
+    }
+
+    // Uninstall is independent of token/workspace.
+    if uninstall {
+        return service::uninstall();
+    }
+
+    let workspace = workspace.unwrap_or_else(|| ".".to_string());
+    let cwd = std::fs::canonicalize(&workspace)
+        .map_err(|e| format!("workspace '{}' not found: {}", workspace, e))?;
+
+    // Install the background service (token + workspace baked in) and exit —
+    // the service itself runs `baro connect` for real, in the background.
+    if install {
+        let exe = std::env::current_exe().map_err(|e| format!("cannot resolve baro binary: {e}"))?;
+        let token = token.ok_or("--install-service needs --token <rt_…> (get one from the dashboard)")?;
+        return service::install(&service::ServiceConfig { exe, token, workspace: cwd, control_url });
+    }
+
+    let entry = discovery::locate_script(&cwd, "packages/baro-orchestrator/scripts/runner.ts", "runner.mjs")
+        .map_err(|e| format!("could not locate the runner bundle ({e}). Reinstall: npm install -g baro-ai"))?;
+
+    let mut cmd = match &entry {
+        discovery::ScriptEntry::Tsx { tsx, script } => {
+            let mut c = tokio::process::Command::new(tsx);
+            c.arg(script);
+            c
+        }
+        discovery::ScriptEntry::NodeJs(js) => {
+            let mut c = tokio::process::Command::new("node");
+            c.arg(js);
+            c
+        }
+    };
+    if let Some(t) = &token {
+        cmd.env("RUNNER_TOKEN", t);
+    }
+    if let Some(u) = &control_url {
+        cmd.env("CONTROL_URL", u);
+    }
+    cmd.env("WORKSPACE_DIR", &cwd);
+    // The runner spawns `baro --headless`; point it at this very binary.
+    if let Ok(exe) = std::env::current_exe() {
+        cmd.env("BARO_BIN", exe);
+    }
+    cmd.stdin(std::process::Stdio::null());
+
+    println!("baro connect — starting runner (workspace: {})", cwd.display());
+    let status = cmd
+        .spawn()
+        .map_err(|e| format!("failed to start runner: {e}"))?
+        .wait()
+        .await?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
 async fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
+    mut terminal: Option<&mut Terminal<CrosstermBackend<Box<dyn Write>>>>,
     cli: cli::cli::Cli,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let headless = cli.headless;
     let mut app = App::new();
     let cwd = std::fs::canonicalize(&cli.cwd)?;
 
@@ -343,6 +462,64 @@ async fn run_app(
             app.critic_llm = app::LlmProvider::Codex;
             app.surgeon_llm = app::LlmProvider::Claude;
         }
+        "jigjoy" => {
+            // Hosted preset. Every phase talks to the baro gateway (an
+            // OpenAI-compatible proxy) which holds the real upstream keys
+            // and classifies by model name: gpt* -> strong tier, deepseek*
+            // -> cheap tier. The user supplies only their hosted key
+            // (JIGJOY_API_KEY) and never sees the upstream keys.
+            app.llm = app::LlmProvider::OpenAI;
+            app.architect_llm = app::LlmProvider::OpenAI;
+            app.planner_llm = app::LlmProvider::OpenAI;
+            app.story_llm = app::LlmProvider::OpenAI;
+            app.critic_llm = app::LlmProvider::OpenAI;
+            app.surgeon_llm = app::LlmProvider::OpenAI;
+
+            // Per-phase model defaults — only when the user didn't pin one
+            // (the `--*-model` flags are applied above). Names are sent to
+            // the gateway verbatim; it maps them to the real upstream model.
+            if app.planner_model.is_none() {
+                app.planner_model = Some("gpt-5.5".to_string());
+            }
+            if app.architect_model.is_none() {
+                app.architect_model = Some("gpt-5.5".to_string());
+            }
+            if app.surgeon_model.is_none() {
+                app.surgeon_model = Some("gpt-5.5".to_string());
+            }
+            if app.story_model.is_none() {
+                app.story_model = Some("deepseek-chat".to_string());
+            }
+            if app.critic_model.is_none() {
+                app.critic_model = Some("deepseek-chat".to_string());
+            }
+
+            // Default gateway URL unless the user set --openai-base-url or
+            // OPENAI_BASE_URL. Set the env var so the resolution below picks
+            // it up. Override per-deploy with BARO_JIGJOY_URL.
+            let base_url_set = cli.openai_base_url.is_some()
+                || std::env::var("OPENAI_BASE_URL")
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+            if !base_url_set {
+                let url = std::env::var("BARO_JIGJOY_URL")
+                    .unwrap_or_else(|_| "https://baro.jigjoy.ai/v1".to_string());
+                std::env::set_var("OPENAI_BASE_URL", url);
+            }
+
+            // The hosted key arrives as JIGJOY_API_KEY; the OpenAI path reads
+            // OPENAI_API_KEY, so bridge it without clobbering an explicit one.
+            let openai_key_set = std::env::var("OPENAI_API_KEY")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            if !openai_key_set {
+                if let Ok(k) = std::env::var("JIGJOY_API_KEY") {
+                    if !k.is_empty() {
+                        std::env::set_var("OPENAI_API_KEY", k);
+                    }
+                }
+            }
+        }
         other => {
             if let Some(provider) = app::LlmProvider::parse(other) {
                 app.llm = provider;
@@ -479,6 +656,9 @@ async fn run_app(
             // straight to planning after the key is captured, so the
             // user never goes through Welcome.
             if app.llm == app::LlmProvider::OpenAI && app.openai_api_key.is_none() {
+                if headless {
+                    return Err("--headless with --llm openai requires OPENAI_API_KEY".into());
+                }
                 app.screen = app::Screen::ApiKeyInput;
                 app.api_key_input.clear();
             } else {
@@ -496,6 +676,9 @@ async fn run_app(
                 }
             }
         } else {
+            if headless {
+                return Err("--headless requires a goal argument".into());
+            }
             // No goal: show ProviderPicker first — UNLESS the user
             // explicitly chose a backend via --llm. Gate on whether
             // --llm was actually passed, NOT on `llm != Claude`: the
@@ -513,19 +696,21 @@ async fn run_app(
         }
     }
 
-    // Keyboard input from /dev/tty
-    let tx_key = tx.clone();
-    std::thread::spawn(move || loop {
-        match crossterm::event::poll(Duration::from_millis(100)) {
-            Ok(true) => {
-                if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
-                    if tx_key.blocking_send(AppEvent::Key(key)).is_err() { break; }
+    // Keyboard input from /dev/tty (TUI only — headless has no terminal).
+    if !headless {
+        let tx_key = tx.clone();
+        std::thread::spawn(move || loop {
+            match crossterm::event::poll(Duration::from_millis(100)) {
+                Ok(true) => {
+                    if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
+                        if tx_key.blocking_send(AppEvent::Key(key)).is_err() { break; }
+                    }
                 }
+                Ok(false) => {}
+                Err(_) => break,
             }
-            Ok(false) => {}
-            Err(_) => break,
-        }
-    });
+        });
+    }
 
     // Tick timer
     let tx_tick = tx.clone();
@@ -537,26 +722,40 @@ async fn run_app(
     });
 
     loop {
-        terminal.draw(|f| ui::render(f, &mut app))?;
+        if let Some(t) = terminal.as_deref_mut() {
+            t.draw(|f| ui::render(f, &mut app))?;
+        }
         match rx.recv().await {
             Some(AppEvent::Baro(ev)) => {
                 // Fire notification immediately when stories complete
                 if matches!(ev, BaroEvent::NotificationReady) {
                     notification::notify_completion();
                 }
+                let is_exit = matches!(ev, BaroEvent::OrchestratorExited { .. });
                 let story_start_id = if let BaroEvent::StoryStart { ref id, .. } = ev {
                     Some(id.clone())
                 } else {
                     None
                 };
                 app.handle_event(ev);
+                // Headless: orchestrator_client streams every event to stdout
+                // (echo_raw). When the orchestrator exits the run is done —
+                // leave the loop so the process exits.
+                if headless {
+                    if is_exit {
+                        break;
+                    }
+                    continue;
+                }
                 if story_start_id.is_some() {
                     app.auto_scroll_to_running();
                 }
                 if let Some(ref sid) = story_start_id {
                     if app.global_tab == app::GlobalTab::Dag {
-                        let visible = terminal.size().map(|s| s.height.saturating_sub(10)).unwrap_or(20);
-                        app.dag_auto_scroll_to_story(sid, visible);
+                        if let Some(t) = terminal.as_deref_mut() {
+                            let visible = t.size().map(|s| s.height.saturating_sub(10)).unwrap_or(20);
+                            app.dag_auto_scroll_to_story(sid, visible);
+                        }
                     }
                 }
             }
@@ -566,15 +765,28 @@ async fn run_app(
                 spawn_planner(&app, &cwd, tx.clone());
             }
             Some(AppEvent::ContextError(err)) => {
+                if headless {
+                    return Err(format!("context build failed: {}", err).into());
+                }
                 app.planning_error = Some(err);
             }
             Some(AppEvent::PlanReady(stories, project, branch, description)) => {
                 app.project = project;
                 app.branch_name = branch;
                 app.description = description;
-                app.show_review(stories);
+                if headless {
+                    // Emit a planning event for the runner/dashboard, then
+                    // auto-confirm and execute (no review screen).
+                    println!(r#"{{"type":"plan_ready","stories":{}}}"#, stories.len());
+                    confirm_and_execute(&mut app, stories, &cwd, tx.clone());
+                } else {
+                    app.show_review(stories);
+                }
             }
             Some(AppEvent::PlanError(err, log_path)) => {
+                if headless {
+                    return Err(format!("planning failed: {}", err).into());
+                }
                 app.planning_error = Some(err);
                 app.planning_log_path = log_path;
             }
@@ -590,9 +802,15 @@ async fn run_app(
                 app.planning_error = Some(err);
             }
             Some(AppEvent::ArchitectStarted) => {
+                if headless {
+                    println!(r#"{{"type":"architect_start"}}"#);
+                }
                 app.architect_status = app::ArchitectStatus::Running;
             }
             Some(AppEvent::ArchitectComplete(doc)) => {
+                if headless {
+                    println!(r#"{{"type":"architect_complete"}}"#);
+                }
                 app.architect_status = app::ArchitectStatus::Complete;
                 app.decision_document = Some(doc);
             }
@@ -601,6 +819,9 @@ async fn run_app(
                 app.decision_document = None;
             }
             Some(AppEvent::BranchError(err)) => {
+                if headless {
+                    return Err(format!("branch/exec failed: {}", err).into());
+                }
                 app.planning_error = Some(err);
                 app.screen = Screen::Review;
             }
@@ -608,6 +829,9 @@ async fn run_app(
                 app.branch_name = name;
             }
             Some(AppEvent::Key(key)) => {
+                // Keys only arrive in TUI mode; rebind `terminal` to the
+                // real handle so the screen handlers below are unchanged.
+                let Some(terminal) = terminal.as_deref_mut() else { continue };
                 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
                 // Ghostty (and other terminals that enable the kitty
                 // keyboard protocol) emit Enter as a Release-only event
@@ -926,7 +1150,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() });
+                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() }, false);
                                         });
                                     }
                                     Err(e) => {
@@ -1028,7 +1252,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() });
+                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() }, false);
                                     });
                                 }
                             }
@@ -1084,7 +1308,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(prd, exec_cwd, branch_tx, cfg);
+                                        spawn_executor(prd, exec_cwd, branch_tx, cfg, false);
                                     });
                                 }
                                 Err(e) => {
@@ -1436,11 +1660,61 @@ fn spawn_refiner(app: &App, feedback: &str, cwd: &Path, tx: mpsc::Sender<AppEven
     });
 }
 
+/// Headless plan confirmation: write the PRD, create the run branch, and spawn
+/// the orchestrator (streaming its events to stdout via echo_raw). Mirrors the
+/// TUI Review→Enter fresh path, minus the interactive review.
+fn confirm_and_execute(
+    app: &mut App,
+    stories: Vec<ReviewStory>,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    app.review_stories = stories;
+    let prd = executor::prd_from_review(
+        &app.project,
+        &app.branch_name,
+        &app.description,
+        &app.review_stories,
+        app.decision_document.clone(),
+    );
+    if let Err(e) = executor::write_prd(&prd, cwd) {
+        let _ = tx.try_send(AppEvent::BranchError(format!("Failed to write prd.json: {}", e)));
+        return;
+    }
+    let full_branch = format!("baro/{}", app.branch_name);
+    app.branch_name = full_branch.clone();
+    app.start_execution();
+    let cfg = executor_config_from_app(app);
+    let exec_cwd = cwd.to_path_buf();
+    let branch_cwd = cwd.to_path_buf();
+    tokio::spawn(async move {
+        let actual_full_branch = match git::create_fresh_branch(&branch_cwd, &full_branch).await {
+            Ok(name) => name,
+            Err(e) => {
+                let _ = tx
+                    .send(AppEvent::BranchError(format!("Branch creation failed: {}", e)))
+                    .await;
+                return;
+            }
+        };
+        let mut exec_prd = prd;
+        exec_prd.branch_name = actual_full_branch;
+        if let Err(e) = executor::write_prd(&exec_prd, &exec_cwd) {
+            let _ = tx
+                .send(AppEvent::BranchError(format!("Failed to persist branch in prd.json: {}", e)))
+                .await;
+            return;
+        }
+        spawn_executor(exec_prd, exec_cwd, tx, cfg, true);
+    });
+}
+
 fn spawn_executor(
     _prd: executor::PrdFile,
     cwd: PathBuf,
     tx: mpsc::Sender<AppEvent>,
     config: executor::ExecutorConfig,
+    echo_raw: bool,
 ) {
     // The orchestrator (TS, Mozaik-based) replaces the in-process Rust
     // executor. Bridge BaroEvent → AppEvent::Baro the same way the old
@@ -1557,6 +1831,7 @@ fn spawn_executor(
         story_model: config.story_model,
         tier_map: config.tier_map,
         openai_endpoints: config.openai_endpoints,
+        echo_raw,
     };
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
 }

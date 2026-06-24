@@ -21,7 +21,13 @@ import {
     isInsideGitRepo,
     safePullRebase,
 } from "./git.js"
+import { WorktreeManager } from "./worktree.js"
 import { buildDag } from "./dag.js"
+import {
+    formatRoute,
+    resolveStoryRoute,
+    type ResolveOpts,
+} from "./routing.js"
 import { Auditor } from "./participants/auditor.js"
 import {
     Conductor,
@@ -40,7 +46,11 @@ import { Operator } from "./participants/operator.js"
 import { Sentry } from "./participants/sentry.js"
 import { StoryFactory } from "./participants/story-factory.js"
 import { type StoryAgent } from "./participants/story-agent.js"
-import { Surgeon, type PrdSnapshot } from "./participants/surgeon.js"
+import {
+    Surgeon,
+    type PrdSnapshot,
+    type RouteDescriber,
+} from "./participants/surgeon.js"
 import { SurgeonCodex } from "./participants/surgeon-codex.js"
 import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
 import { SurgeonOpenCode } from "./participants/surgeon-opencode.js"
@@ -127,6 +137,18 @@ export interface OrchestrateConfig {
      */
     intraLevelDelaySecs?: number
     /**
+     * Run each story in its own git worktree (issue #50) instead of a shared
+     * working tree. Default: true when git lifecycle is on. Set false to keep
+     * the old shared-tree behaviour.
+     */
+    withWorktrees?: boolean
+    /**
+     * Symlink dependency dirs (node_modules, …) from the repo root into each
+     * story worktree so builds/tests resolve. Default: true. Only relevant
+     * when withWorktrees is on.
+     */
+    worktreeLinkDepDirs?: boolean
+    /**
      * Which LLM provider drives the agents. `"claude"` (the current
      * default) uses the Claude Code CLI for Architect, Planner,
      * StoryAgent, Critic, and Surgeon. `"openai"` is wired through
@@ -183,6 +205,13 @@ export interface OrchestrateConfig {
      * MiniMax + real OpenAI) at once.
      */
     openaiEndpoints?: import("./routing.js").EndpointMap
+    /**
+     * Where story agents run. Default: in-process (`LocalStoryExecutor`).
+     * Pass a custom `StoryExecutor` to run the agent loop elsewhere (a mock for
+     * tests, or an out-of-process / remote executor) without changing any other
+     * participant.
+     */
+    executor?: import("./participants/story-executor.js").StoryExecutor
     /** Hooks for receiving Operator commands externally (Rust TUI). */
     operatorHooks?: {
         onAbort?: (storyId: string) => void
@@ -361,6 +390,33 @@ export async function orchestrate(
     const gitGate = new GitGate()
     let baseSha: string | null = null
 
+    // Unique per-run id, shared by the memory session path and the per-story
+    // worktree branch/dir names so concurrent runs and resumes never collide.
+    const runId = `run-${Date.now()}-${process.pid}`
+
+    // Escape hatch: explicit config wins; else the presence of
+    // BARO_NO_WORKTREES disables it (NO_COLOR-style — set to ANY value,
+    // including empty, to turn worktrees off) without needing Rust CLI flag
+    // plumbing; else on by default.
+    const worktreesEnabled =
+        config.withWorktrees ?? !("BARO_NO_WORKTREES" in process.env)
+    const worktrees =
+        useGit && worktreesEnabled
+            ? new WorktreeManager(config.cwd, gitGate, runId, {
+                  linkDepDirs: config.worktreeLinkDepDirs ?? true,
+                  onLog: (line) =>
+                      emitTui && emit({ type: "story_log", id: "_git", line }),
+              })
+            : null
+    // Fallback/non-worktree story pushes run off the Conductor's critical
+    // path (see onStoryPassed); awaited before the run finishes so none is
+    // lost. Worktree merge-backs accumulate on the LOCAL run branch and are
+    // pushed once at the end (worktreePushNeeded) instead — a per-story push
+    // would re-stall the Conductor, since it shares gitGate with the
+    // on-critical-path merge-back.
+    const storyPushes: Promise<void>[] = []
+    let worktreePushNeeded = false
+
     // Phase-2 observers — Librarian (cross-agent memory) and Sentry
     // (file conflict detection). Both default ON; either can be turned
     // off via the OrchestrateConfig flags.
@@ -373,7 +429,7 @@ export async function orchestrate(
     // Include PID to prevent collision if two orchestrators start simultaneously.
     const sessionsDir = join(process.env.HOME || "/tmp", ".baro", "sessions")
     const memorySessionPath = useMemory
-        ? join(sessionsDir, `run-${Date.now()}-${process.pid}`, "memory")
+        ? join(sessionsDir, runId, "memory")
         : undefined
 
     // Prune stale session directories (>24h old) to prevent unbounded growth.
@@ -418,6 +474,29 @@ export async function orchestrate(
                 })),
             }
         }
+        // Tell the Surgeon what a story's planner tier actually resolved to,
+        // so its replan reason names the model that ran rather than the tier
+        // an override replaced (issue #48). Only wired when an override is in
+        // play — on a plain run the tier IS the model, so we keep showing it.
+        const storyRouting: ResolveOpts = {
+            fallbackBackend: storyLlm,
+            openaiDefaultModel: config.storyModel ?? "gpt-5.5",
+            override: config.storyModel,
+            tierMap: config.tierMap,
+            endpoints: config.openaiEndpoints,
+            defaultApiKey: process.env.OPENAI_API_KEY,
+        }
+        const routingOverridden =
+            storyLlm !== "claude" || !!config.storyModel || !!config.tierMap
+        const resolveRoute: RouteDescriber | undefined = routingOverridden
+            ? (model) => {
+                  try {
+                      return formatRoute(resolveStoryRoute(model, storyRouting))
+                  } catch {
+                      return null
+                  }
+              }
+            : undefined
         // Factory by provider. Bus contract is identical across all
         // three — same ReplanItem shape — so downstream observers
         // (Conductor's replan-applier, Auditor, kaleidoskop) don't
@@ -425,29 +504,34 @@ export async function orchestrate(
         if (surgeonLlm === "openai") {
             surgeon = new SurgeonOpenAI({
                 snapshot,
+                resolveRoute,
                 model: config.surgeonModel ?? "gpt-5.5",
             })
         } else if (surgeonLlm === "codex") {
             surgeon = new SurgeonCodex({
                 snapshot,
+                resolveRoute,
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
             })
         } else if (surgeonLlm === "opencode") {
             surgeon = new SurgeonOpenCode({
                 snapshot,
+                resolveRoute,
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
             })
         } else if (surgeonLlm === "pi") {
             surgeon = new SurgeonPi({
                 snapshot,
+                resolveRoute,
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
             })
         } else {
             surgeon = new Surgeon({
                 snapshot,
+                resolveRoute,
                 useLlm: config.surgeonUseLlm ?? false,
                 model: config.surgeonModel ?? "opus",
             })
@@ -536,6 +620,7 @@ export async function orchestrate(
                           (line) => emitTui && emit({ type: "story_log", id: "_git", line }),
                       )
                   }
+                  await worktrees?.cleanupStaleOnStart()
               }
             : undefined,
         onBeforeStoryLaunch: librarian
@@ -551,38 +636,59 @@ export async function orchestrate(
             : undefined,
         onStoryPassed: useGit
             ? async (storyId) => {
-                  await safePullRebase(
-                      config.cwd,
-                      (line) =>
-                          emitTui && emit({ type: "story_log", id: storyId, line }),
-                      gitGate,
-                  )
-                  try {
-                      await gitPushWithRetry(gitGate, {
-                          cwd: config.cwd,
-                          onLog: (line) =>
-                              emitTui &&
-                              emit({ type: "story_log", id: storyId, line }),
-                      })
-                      if (emitTui) {
-                          emit({
-                              type: "push_status",
-                              id: storyId,
-                              success: true,
-                              error: null,
-                          })
+                  const log = (line: string) =>
+                      emitTui && emit({ type: "story_log", id: storyId, line })
+                  // Merge the story into the run branch on the critical path
+                  // (fast, local) so the next DAG level sees it. mergeBack
+                  // returns false when the story had no worktree (create()
+                  // fell back to the shared tree) — that story still needs the
+                  // shared-tree remote reconciliation.
+                  if (worktrees) {
+                      let merged = false
+                      try {
+                          merged = await worktrees.mergeBack(storyId)
+                      } catch (e) {
+                          // Unresolvable merge: keep the worktree + branch so
+                          // the passed work can be recovered, don't push/clean.
+                          log(`[git] merge-back failed; worktree preserved for recovery: ${(e as Error)?.message ?? String(e)}`)
+                          if (emitTui) {
+                              emit({ type: "push_status", id: storyId, success: false, error: (e as Error)?.message ?? String(e) })
+                          }
+                          return
                       }
-                  } catch (e) {
-                      if (emitTui) {
-                          emit({
-                              type: "push_status",
-                              id: storyId,
-                              success: false,
-                              error: (e as Error)?.message ?? String(e),
-                          })
+                      if (merged) {
+                          // Cleanup is fast + local; the run branch is pushed
+                          // once after the run (worktreePushNeeded) so this
+                          // critical-path callback never waits on the network.
+                          await worktrees.cleanup(storyId)
+                          worktreePushNeeded = true
+                          if (emitTui) {
+                              emit({ type: "push_status", id: storyId, success: true, error: null })
+                          }
+                          return
                       }
+                      // merged === false → story fell back to the shared tree;
+                      // reconcile + push it like the non-worktree path below.
                   }
+                  await safePullRebase(config.cwd, log, gitGate)
+                  storyPushes.push(
+                      (async () => {
+                          try {
+                              await gitPushWithRetry(gitGate, { cwd: config.cwd, onLog: log })
+                              if (emitTui) {
+                                  emit({ type: "push_status", id: storyId, success: true, error: null })
+                              }
+                          } catch (e) {
+                              if (emitTui) {
+                                  emit({ type: "push_status", id: storyId, success: false, error: (e as Error)?.message ?? String(e) })
+                              }
+                          }
+                      })(),
+                  )
               }
+            : undefined,
+        onStoryFailed: worktrees
+            ? (storyId) => worktrees.cleanup(storyId)
             : undefined,
     })
     conductor.setEnvironment(env)
@@ -598,6 +704,7 @@ export async function orchestrate(
     // per-spawn, so future per-story overrides could live there too.
     const storyFactory = new StoryFactory({
         cwd: config.cwd,
+        worktrees: worktrees ?? undefined,
         llm: storyLlm,
         openaiModel: config.storyModel ?? "gpt-5.5",
         storyModelOverride: config.storyModel,
@@ -605,6 +712,7 @@ export async function orchestrate(
         tierMap: config.tierMap,
         endpoints: config.openaiEndpoints,
         defaultApiKey: process.env.OPENAI_API_KEY,
+        executor: config.executor,
     })
     storyFactory.setEnvironment(env)
     storyFactory.join(env)
@@ -638,6 +746,28 @@ export async function orchestrate(
         RunStartRequest.create({ reason: "orchestrate" }),
     )
     const summary = await conductor.done
+
+    // Drain detached fallback/non-worktree pushes before finishing.
+    await Promise.allSettled(storyPushes)
+
+    // Push the accumulated run branch once (worktree merge-backs only touched
+    // the local branch during the run). Done after conductor.done so the slow
+    // network push can't stall the run; before the Finalizer so its PR sees
+    // every commit.
+    if (worktreePushNeeded) {
+        const log = (line: string) =>
+            emitTui && emit({ type: "story_log", id: "_git", line })
+        try {
+            await gitPushWithRetry(gitGate, { cwd: config.cwd, onLog: log })
+            if (emitTui) emit({ type: "push_status", id: "_git", success: true, error: null })
+        } catch (e) {
+            if (emitTui) emit({ type: "push_status", id: "_git", success: false, error: (e as Error)?.message ?? String(e) })
+        }
+    }
+
+    // Backstop: per-story worktrees are removed as each story settles, but
+    // sweep any stragglers + the temp dir + dangling branches here.
+    await worktrees?.cleanupAll()
 
     // Drain in-flight async observers so all side effects (CritiqueItem,
     // ReplanItem) land in the audit log before this function returns.

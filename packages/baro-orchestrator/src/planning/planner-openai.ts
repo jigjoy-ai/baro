@@ -59,7 +59,10 @@ export interface RunPlannerOpenAIOptions {
      * to design) — 8 is generous. Triggers an error if exceeded.
      */
     maxRounds?: number
-    /** Per-round inference timeout in seconds. Default: 120. */
+    /** Per-round inference timeout in seconds. Default: 600 — reasoning models
+     * (gpt-5.5 on the Responses API) routinely need minutes per round; the old
+     * 120 s killed planning mid-round. Matches the 10-min default the
+     * pi/codex/opencode architect backends already use. */
     perRoundTimeoutSecs?: number
 }
 
@@ -102,7 +105,7 @@ export async function runPlannerOpenAI(
         )
 
     const maxRounds = opts.maxRounds ?? 8
-    const perRoundTimeoutMs = (opts.perRoundTimeoutSecs ?? 120) * 1000
+    const perRoundTimeoutMs = (opts.perRoundTimeoutSecs ?? 600) * 1000
     const usage = new UsageAccumulator()
 
     for (let round = 1; round <= maxRounds; round++) {
@@ -115,10 +118,13 @@ export async function runPlannerOpenAI(
         }> = []
 
         const roundPromise = runInferenceRound(context, model)
-        const timeoutPromise = new Promise<never>((_, rej) =>
-            setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs),
-        )
-        const result = await Promise.race([roundPromise, timeoutPromise])
+        // Clear the timer once the round settles — a pending setTimeout keeps the
+        // process alive for the full 600s after the work is done (see architect-openai).
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const timeoutPromise = new Promise<never>((_, rej) => {
+            timer = setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs)
+        })
+        const result = await Promise.race([roundPromise, timeoutPromise]).finally(() => clearTimeout(timer))
         usage.add(result.usage)
 
         for (const item of result.items) {

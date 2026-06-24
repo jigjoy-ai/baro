@@ -52,10 +52,10 @@ export interface CodexCliParticipantOptions {
      * on the CLI. Replaces the deprecated `--full-auto` flag —
      * which was just sandbox=workspace-write + no-approvals, but
      * workspace-write blocks writes to `.git/` so the agent can't
-     * commit. Baro story workers run in per-story git worktrees
-     * (already isolated from the rest of the filesystem) so the
-     * "danger" is bounded; the agent NEEDS .git/ writes to land
-     * commits and let Finalizer push.
+     * commit. Baro story workers run in a per-story git worktree
+     * (WorktreeManager, #50) — an isolated tree merged back only on
+     * success — so the "danger" is bounded; the agent NEEDS .git/
+     * writes to land commits and let Finalizer push.
      *
      * Default: false. Callers that don't need autonomous .git
      * writes (e.g. read-only probes) should leave it off.
@@ -63,10 +63,10 @@ export interface CodexCliParticipantOptions {
     bypassSandbox?: boolean
     /**
      * If true, pass `--skip-git-repo-check`. Required when the cwd is
-     * not a git repo (Codex refuses to run otherwise). baro's
-     * story workers always run inside per-story git worktrees, so the
-     * default is false — set this only when wiring up tests or one-off
-     * runs from /tmp.
+     * not a git repo (Codex refuses to run otherwise). baro's story
+     * workers run inside a per-story git worktree (a valid git repo), so
+     * the default is false — set this only when wiring up tests or
+     * one-off runs from /tmp.
      */
     skipGitRepoCheck?: boolean
     /** Extra CLI arguments appended after the standard set. */
@@ -248,8 +248,8 @@ export class CodexCliParticipant extends BaseObserver {
             // workspace-write isn't enough — `.git/` is read-only
             // even in workspace-write mode (per openai/codex#15505).
             // baro stories need `.git/` writes to commit, so we go
-            // full bypass and rely on the per-story worktree for
-            // process-level isolation.
+            // full bypass and rely on the per-story worktree (#50) for
+            // isolation.
             args.push("--dangerously-bypass-approvals-and-sandbox")
         }
         if (this.options.model) args.push("--model", this.options.model)

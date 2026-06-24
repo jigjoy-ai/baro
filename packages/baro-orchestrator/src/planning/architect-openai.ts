@@ -59,7 +59,9 @@ export interface RunArchitectOpenAIOptions {
      * if exceeded.
      */
     maxRounds?: number
-    /** Per-round inference timeout in seconds (passed via AbortSignal). Default: 120. */
+    /** Per-round inference timeout in seconds. Default: 600 — reasoning models
+     * (gpt-5.5 on the Responses API) can need minutes per round; matches the
+     * 10-min default the pi/codex/opencode architect backends use. */
     perRoundTimeoutSecs?: number
 }
 
@@ -95,7 +97,7 @@ export async function runArchitectOpenAI(
         )
 
     const maxRounds = opts.maxRounds ?? 12
-    const perRoundTimeoutMs = (opts.perRoundTimeoutSecs ?? 120) * 1000
+    const perRoundTimeoutMs = (opts.perRoundTimeoutSecs ?? 600) * 1000
     const usage = new UsageAccumulator()
 
     for (let round = 1; round <= maxRounds; round++) {
@@ -112,10 +114,15 @@ export async function runArchitectOpenAI(
         }> = []
 
         const roundPromise = runInferenceRound(context, model)
-        const timeoutPromise = new Promise<never>((_, rej) =>
-            setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs),
-        )
-        const result = await Promise.race([roundPromise, timeoutPromise])
+        // Clear the timeout once the round settles. Leaving it pending kept the
+        // 600s timer alive and so kept the whole run-architect process from
+        // exiting for 10 minutes after the architect had already finished —
+        // which stalled `baro --headless` waiting on the subprocess.
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const timeoutPromise = new Promise<never>((_, rej) => {
+            timer = setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs)
+        })
+        const result = await Promise.race([roundPromise, timeoutPromise]).finally(() => clearTimeout(timer))
         usage.add(result.usage)
 
         for (const item of result.items) {
