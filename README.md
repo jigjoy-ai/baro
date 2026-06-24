@@ -304,6 +304,11 @@ baro connect --uninstall-service               # remove the service
 Get a pairing token (`rt_…`) from baro-cloud → Runners. A mid-run network blip
 won't kill a run: the runner reconnects and resumes streaming where it left off.
 
+**No machine or subscription?** baro-cloud can also run a goal entirely on
+**baro's cloud** — each run executes in an isolated sandbox on our infrastructure,
+billed from prepaid credits. Pick **☁ baro's cloud** in the dashboard (no runner
+to pair) at [app.baro.jigjoy.ai](https://app.baro.jigjoy.ai).
+
 ## How it compares
 
 | | Single Claude Code session | DIY `Promise.all` of subprocesses | baro |
