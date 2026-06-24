@@ -38,6 +38,9 @@ const baroBin = process.env.BARO_BIN ?? "baro"
 // Stable per-machine id so the control plane can show one runner across
 // reconnects (not a new entry each time), plus a human-readable hostname.
 const runnerId = process.env.RUNNER_ID ?? hostname()
+// Single-run mode for ephemeral cloud workers (Fargate): take one dispatched run,
+// deliver its result, then exit — no reconnect loop.
+const runOnce = process.env.BARO_RUN_ONCE === "1"
 
 interface RunOutcome {
     success: boolean
@@ -184,6 +187,14 @@ function handleMessage(m: ToRunner): void {
             send({ t: "run_result", runId: d.runId, ...o })
             inflight.delete(d.runId)
             console.log(`[baro] run ${d.runId}: ${o.success ? "done" : "failed"} (${o.durationSecs}s)`)
+            // Ephemeral worker: deliver the result, give the socket a moment to
+            // flush, then exit so the Fargate task tears down.
+            if (runOnce) {
+                setTimeout(() => {
+                    currentWs?.close()
+                    process.exit(o.success ? 0 : 1)
+                }, 1500)
+            }
         })
     }
 }
@@ -195,7 +206,7 @@ function connectOnce(): Promise<void> {
         const ws = new WebSocket(url)
         currentWs = ws
         ws.on("open", () => {
-            ws.send(encode({ t: "register", runnerId, hostname: hostname(), token, backends: ["claude"], workspaceIds: ["default"], version: "0.56.2" }))
+            ws.send(encode({ t: "register", runnerId, hostname: hostname(), token, backends: ["claude"], workspaceIds: ["default"], version: "0.56.3" }))
             console.log(inflight.size ? `[baro] reconnected to ${url} — resuming ${inflight.size} in-flight run(s)` : `[baro] connected to ${url} — workspace ${workspaceDir}`)
         })
         ws.on("message", (data: Buffer) => {

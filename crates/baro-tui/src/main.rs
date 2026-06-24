@@ -211,6 +211,9 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let mut control_url = std::env::var("CONTROL_URL").ok();
     let mut install = false;
     let mut uninstall = false;
+    // Single-run mode (for ephemeral cloud/Fargate workers): pair, take exactly one
+    // dispatched run, then exit — no reconnect loop. Env or flag.
+    let mut once = std::env::var("BARO_RUN_ONCE").as_deref() == Ok("1");
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -234,6 +237,10 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 uninstall = true;
                 i += 1;
             }
+            "--once" => {
+                once = true;
+                i += 1;
+            }
             "-h" | "--help" => {
                 println!("Usage: baro connect --token <rt_…> [--workspace <git repo>]");
                 println!("Pairs this machine with baro-cloud and runs dispatched goals over your subscription.");
@@ -241,6 +248,7 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 println!("  --install-service    install a background service (launchd/systemd/Task Scheduler)");
                 println!("                       so the runner survives terminal close, logout, and reboot");
                 println!("  --uninstall-service  remove that service");
+                println!("  --once               run exactly one dispatched goal, then exit (cloud workers)");
                 return Ok(());
             }
             _ => i += 1,
@@ -286,6 +294,9 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         cmd.env("CONTROL_URL", u);
     }
     cmd.env("WORKSPACE_DIR", &cwd);
+    if once {
+        cmd.env("BARO_RUN_ONCE", "1");
+    }
     // The runner spawns `baro --headless`; point it at this very binary.
     if let Ok(exe) = std::env::current_exe() {
         cmd.env("BARO_BIN", exe);
