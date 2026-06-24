@@ -206,7 +206,7 @@ function connectOnce(): Promise<void> {
         const ws = new WebSocket(url)
         currentWs = ws
         ws.on("open", () => {
-            ws.send(encode({ t: "register", runnerId, hostname: hostname(), token, backends: ["claude"], workspaceIds: ["default"], version: "0.56.3" }))
+            ws.send(encode({ t: "register", runnerId, hostname: hostname(), token, backends: ["claude"], workspaceIds: ["default"], version: "0.56.4" }))
             console.log(inflight.size ? `[baro] reconnected to ${url} — resuming ${inflight.size} in-flight run(s)` : `[baro] connected to ${url} — workspace ${workspaceDir}`)
         })
         ws.on("message", (data: Buffer) => {
@@ -228,6 +228,16 @@ function connectOnce(): Promise<void> {
 
 async function main() {
     if (!token) console.warn("[baro] warning: no --token — this runner won't be paired to your account")
+    // Ephemeral worker safety: if nothing is dispatched within 3 min of starting,
+    // exit so an orphaned cloud task (paired but never given work) can't linger.
+    if (runOnce) {
+        setTimeout(() => {
+            if (inflight.size === 0) {
+                console.error("[baro] --once: no run dispatched within 180s; exiting")
+                process.exit(2)
+            }
+        }, 180_000)
+    }
     for (;;) {
         await connectOnce()
         if (rejected) {
