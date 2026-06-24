@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { ChevronRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -6,6 +7,34 @@ import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import type { RunConfig } from "@/protocol"
 import { RunOptions, type RunOptionsValues } from "./RunOptions"
+
+const BACKENDS = [
+    {
+        id: "claude",
+        name: "Claude Code",
+        desc: "The default. Drives every phase through your existing Claude Code CLI.",
+    },
+    {
+        id: "openai",
+        name: "OpenAI (native)",
+        desc: "Runs every phase through gpt-5.x via baro's native OpenAI inference runner. Requires OPENAI_API_KEY in your shell.",
+    },
+    {
+        id: "codex",
+        name: "Codex CLI",
+        desc: "Drives phases through OpenAI's Codex CLI — a subscription-priced backend that arbitrages your Codex plan instead of per-token API billing.",
+    },
+    {
+        id: "opencode",
+        name: "OpenCode",
+        desc: "Drives phases through the OpenCode CLI agent (opencode run). Available when the opencode binary is on your PATH.",
+    },
+    {
+        id: "pi",
+        name: "Pi",
+        desc: "Drives phases through the Pi coding-agent CLI (pi -p, one-shot JSON). Available when the pi binary is on your PATH.",
+    },
+] as const
 
 export function StartView({ onStart }: { onStart: (cfg: RunConfig) => void }) {
     const [goal, setGoal] = useState("")
@@ -23,6 +52,12 @@ export function StartView({ onStart }: { onStart: (cfg: RunConfig) => void }) {
         setOpts((o) => ({ ...o, [k]: val }))
 
     const ready = goal.trim().length > 0 && cwd.trim().length > 0
+
+    function cycleBackend(dir: 1 | -1) {
+        const i = BACKENDS.findIndex((b) => b.id === opts.llm)
+        const next = BACKENDS[(i + dir + BACKENDS.length) % BACKENDS.length]
+        set("llm", next.id)
+    }
 
     function submit() {
         if (!ready) return
@@ -53,6 +88,44 @@ export function StartView({ onStart }: { onStart: (cfg: RunConfig) => void }) {
                 <div className="space-y-1.5">
                     <Label>Working directory</Label>
                     <Input value={cwd} onChange={(e) => setCwd(e.target.value)} placeholder="/path/to/target/repo" />
+                </div>
+
+                {/* backend picker — keyboard navigable, like the TUI */}
+                <div className="space-y-1.5">
+                    <Label>Pick a backend</Label>
+                    <div
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                            if (e.key === "ArrowDown") { e.preventDefault(); cycleBackend(1) }
+                            else if (e.key === "ArrowUp") { e.preventDefault(); cycleBackend(-1) }
+                            else if (e.key === "Enter") { e.preventDefault(); submit() }
+                        }}
+                        className="space-y-2 rounded-md outline-none focus-visible:ring-2 focus-visible:ring-baro/40"
+                    >
+                        {BACKENDS.map((b) => {
+                            const active = opts.llm === b.id
+                            return (
+                                <button
+                                    type="button"
+                                    key={b.id}
+                                    onClick={() => set("llm", b.id)}
+                                    className={[
+                                        "flex w-full items-start gap-2 rounded-md border px-3 py-2.5 text-left transition-colors",
+                                        active ? "border-baro/70 bg-baro-soft" : "border-border hover:border-foreground/30",
+                                    ].join(" ")}
+                                >
+                                    <ChevronRight className={`mt-0.5 h-4 w-4 shrink-0 ${active ? "text-baro" : "text-transparent"}`} />
+                                    <span className="min-w-0">
+                                        <span className={`block text-sm font-medium ${active ? "text-baro" : "text-foreground"}`}>{b.name}</span>
+                                        <span className="block text-xs leading-relaxed text-muted-foreground">{b.desc}</span>
+                                    </span>
+                                </button>
+                            )
+                        })}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground/70">
+                        <span className="text-muted-foreground">↑/↓</span> choose · <span className="text-muted-foreground">Enter</span> confirm
+                    </p>
                 </div>
 
                 <button type="button" onClick={() => setShowAdvanced((s) => !s)}

@@ -32,14 +32,14 @@ import type { Operator } from "../src/participants/operator.js"
 import { savePrd, type PrdFile } from "../src/prd.js"
 import { buildDag } from "../src/dag.js"
 import { PlannerSession } from "../src/planning/planner-session.js"
-import { parseTierMap, parseEndpoints, type EndpointMap } from "../src/routing.js"
+import { parseTierMap, parseEndpoints, isBackend, type Backend, type EndpointMap } from "../src/routing.js"
 
 interface Args {
     goal: string
     cwd: string
     prd: string
     plannerModel: string
-    llm: "claude" | "openai" | "codex"
+    llm: Backend
     noGit: boolean
     parallel: number
     effort?: string
@@ -75,8 +75,8 @@ function parseArgs(argv: string[]): Args {
             case "--planner-model": a.plannerModel = val(); break
             case "--llm": {
                 const v = val()
-                if (v !== "claude" && v !== "openai" && v !== "codex") {
-                    process.stderr.write(`[session] --llm must be claude|openai|codex\n`)
+                if (!isBackend(v)) {
+                    process.stderr.write(`[session] --llm must be claude|openai|codex|opencode|pi\n`)
                     process.exit(2)
                 }
                 a.llm = v

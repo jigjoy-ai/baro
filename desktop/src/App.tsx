@@ -11,6 +11,7 @@ import { StatusBar } from "@/components/StatusBar"
 import { StartView } from "@/components/StartView"
 import { ChatPanel } from "@/components/ChatPanel"
 import { DagPanel } from "@/components/DagPanel"
+import { RunOverview } from "@/components/RunOverview"
 import { DoneSummary } from "@/components/DoneSummary"
 
 export default function App() {
@@ -43,7 +44,17 @@ export default function App() {
 
     return (
         <div className="flex h-screen flex-col bg-background text-foreground">
-            <TitleBar phase={s.phase} done={done} total={total} prUrl={s.prUrl} />
+            <TitleBar
+                phase={s.phase}
+                done={done}
+                total={total}
+                prUrl={s.prUrl}
+                mode={s.mode}
+                running={s.running}
+                projectName={s.phase === "idle" ? null : s.doneInfo ? "booking-service" : "current run"}
+                onReplay={s.replayDemo}
+                onStop={s.stop}
+            />
 
             {s.phase === "idle" ? (
                 <StartView onStart={s.start} />
@@ -53,7 +64,7 @@ export default function App() {
                         <DoneSummary info={s.doneInfo} tokens={s.tokens} prUrl={s.prUrl} onNewRun={newRun} />
                     )}
                     <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
-                        <ResizablePanel defaultSize="42%" minSize="25%">
+                        <ResizablePanel defaultSize="34%" minSize="24%">
                             <div className="h-full p-3 pr-1.5">
                                 <ChatPanel
                                     chat={s.chat}
@@ -64,8 +75,8 @@ export default function App() {
                             </div>
                         </ResizablePanel>
                         <ResizableHandle withHandle />
-                        <ResizablePanel defaultSize="58%" minSize="30%">
-                            <div className="h-full p-3 pl-1.5">
+                        <ResizablePanel defaultSize="42%" minSize="30%">
+                            <div className="h-full p-3 px-1.5">
                                 <DagPanel
                                     levels={s.levels}
                                     stories={s.stories}
@@ -76,6 +87,20 @@ export default function App() {
                                     feed={s.feed}
                                     onSelect={s.setTarget}
                                     onRun={s.run}
+                                />
+                            </div>
+                        </ResizablePanel>
+                        <ResizableHandle withHandle />
+                        <ResizablePanel defaultSize="24%" minSize="18%">
+                            <div className="h-full p-3 pl-1.5">
+                                <RunOverview
+                                    phase={s.phase}
+                                    levels={s.levels}
+                                    stories={s.stories}
+                                    status={s.status}
+                                    done={done}
+                                    total={total}
+                                    prUrl={s.prUrl}
                                 />
                             </div>
                         </ResizablePanel>

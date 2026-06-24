@@ -27,7 +27,7 @@ export function RunOptions({
                 <Picker label="Planner" value={v.plannerModel} onChange={(x) => on("plannerModel", x)}
                     options={["opus", "sonnet", "haiku"]} />
                 <Picker label="Backend" value={v.llm} onChange={(x) => on("llm", x)}
-                    options={["claude", "openai", "codex"]} />
+                    options={["claude", "openai", "codex", "opencode", "pi"]} />
                 <Picker label="Effort" value={v.effort} onChange={(x) => on("effort", x)}
                     options={["low", "medium", "high", "xhigh", "max"]} />
             </div>

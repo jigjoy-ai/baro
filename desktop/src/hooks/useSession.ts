@@ -12,6 +12,10 @@ import type {
     StoryStatus,
     Tokens,
 } from "@/protocol"
+import { MOCK_GOAL, MOCK_RUN } from "@/lib/mock"
+
+/** Where the current run's events come from. */
+export type RunMode = "live" | "mock" | null
 
 /**
  * Owns the whole runtime: subscribes to the session event stream from the
@@ -35,8 +39,12 @@ export function useSession() {
     const [target, setTarget] = useState<string | null>(null)
     const [doneInfo, setDoneInfo] = useState<DoneInfo | null>(null)
     const [elapsedSecs, setElapsedSecs] = useState(0)
+    const [mode, setMode] = useState<RunMode>(null)
+    const [running, setRunning] = useState(false)
 
     const startedAt = useRef<number | null>(null)
+    // Pending mock-replay timers, so a Stop / unmount can cancel them.
+    const timers = useRef<number[]>([])
     // Mirror the bits the done-summary needs without re-subscribing.
     const storiesRef = useRef<DraftStory[]>([])
     const statusRef = useRef<Record<string, StoryStatus>>({})
@@ -53,6 +61,9 @@ export function useSession() {
         return () => void subs.then((fns) => fns.forEach((f) => f()))
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
+
+    // Cancel any in-flight mock timers when the hook unmounts.
+    useEffect(() => () => timers.current.forEach(clearTimeout), [])
 
     // Elapsed timer — only ticks while something is actually happening
     // (planner thinking, or stories executing). It freezes while the plan
@@ -131,7 +142,17 @@ export function useSession() {
         }
     }
 
+    // Wipe every render slice back to a fresh idle run.
+    function resetState() {
+        setPhase("idle"); setPlanStatus("idle"); setPlannerModel("sonnet"); setBackend("claude")
+        setStories([]); setLevels([]); setStatus({}); setLastLine({}); setChat([]); setFeed([])
+        setTokens({ input: 0, output: 0 }); setPrUrl(null); setTarget(null); setDoneInfo(null)
+        setElapsedSecs(0)
+        storiesRef.current = []; statusRef.current = {}; startedAt.current = null
+    }
+
     const start = useCallback(async (cfg: RunConfig) => {
+        setMode("live")
         setChat([{ role: "you", text: cfg.goal }])
         setBackend(cfg.llm)
         startedAt.current = Date.now()
@@ -142,6 +163,30 @@ export function useSession() {
         } catch (e) {
             setChat((c) => [...c, { role: "error", text: String(e) }])
         }
+    }, [])
+
+    // Stop whatever is playing — cancels mock timers and the live session.
+    const stop = useCallback(() => {
+        timers.current.forEach(clearTimeout)
+        timers.current = []
+        setRunning(false)
+        invoke("stop_session").catch(() => { /* no live session */ })
+    }, [])
+
+    // Stream the bundled demo run through the real reducer, no backend needed.
+    const replayDemo = useCallback(() => {
+        timers.current.forEach(clearTimeout)
+        resetState()
+        setMode("mock"); setRunning(true)
+        startedAt.current = Date.now()
+        setChat([{ role: "you", text: MOCK_GOAL }])
+        setPhase("planning") // skip the StartView while the planner "thinks"
+        const ids = MOCK_RUN.map(({ at, evt }) =>
+            window.setTimeout(() => onEvent(JSON.stringify(evt)), at))
+        const end = Math.max(...MOCK_RUN.map((m) => m.at)) + 300
+        ids.push(window.setTimeout(() => setRunning(false), end))
+        timers.current = ids
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
 
     const send = useCallback(async (line: object) => {
@@ -169,7 +214,8 @@ export function useSession() {
         phase, planStatus, plannerModel, backend,
         stories, levels, status, lastLine, chat, feed,
         tokens, prUrl, target, doneInfo, elapsedSecs,
-        setTarget, start, sendMessage, run,
+        mode, running,
+        setTarget, start, sendMessage, run, replayDemo, stop,
     }
 }
 
