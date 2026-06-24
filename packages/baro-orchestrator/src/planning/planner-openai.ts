@@ -118,10 +118,13 @@ export async function runPlannerOpenAI(
         }> = []
 
         const roundPromise = runInferenceRound(context, model)
-        const timeoutPromise = new Promise<never>((_, rej) =>
-            setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs),
-        )
-        const result = await Promise.race([roundPromise, timeoutPromise])
+        // Clear the timer once the round settles — a pending setTimeout keeps the
+        // process alive for the full 600s after the work is done (see architect-openai).
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const timeoutPromise = new Promise<never>((_, rej) => {
+            timer = setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs)
+        })
+        const result = await Promise.race([roundPromise, timeoutPromise]).finally(() => clearTimeout(timer))
         usage.add(result.usage)
 
         for (const item of result.items) {

@@ -114,10 +114,15 @@ export async function runArchitectOpenAI(
         }> = []
 
         const roundPromise = runInferenceRound(context, model)
-        const timeoutPromise = new Promise<never>((_, rej) =>
-            setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs),
-        )
-        const result = await Promise.race([roundPromise, timeoutPromise])
+        // Clear the timeout once the round settles. Leaving it pending kept the
+        // 600s timer alive and so kept the whole run-architect process from
+        // exiting for 10 minutes after the architect had already finished —
+        // which stalled `baro --headless` waiting on the subprocess.
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const timeoutPromise = new Promise<never>((_, rej) => {
+            timer = setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs)
+        })
+        const result = await Promise.race([roundPromise, timeoutPromise]).finally(() => clearTimeout(timer))
         usage.add(result.usage)
 
         for (const item of result.items) {

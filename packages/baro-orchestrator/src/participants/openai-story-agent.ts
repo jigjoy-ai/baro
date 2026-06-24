@@ -398,13 +398,16 @@ export class OpenAIStoryAgent extends BaseObserver {
 
             try {
                 const roundPromise = runInferenceRound(context, this.model)
-                const timeoutPromise = new Promise<never>((_, rej) =>
-                    setTimeout(
+                // Clear the timer once the round settles — a pending setTimeout keeps
+                // the process alive for the full perRoundMs after the work is done.
+                let roundTimer: ReturnType<typeof setTimeout> | undefined
+                const timeoutPromise = new Promise<never>((_, rej) => {
+                    roundTimer = setTimeout(
                         () => rej(new Error(`round ${round} timed out after ${perRoundMs}ms`)),
                         perRoundMs,
-                    ),
-                )
-                const result = await Promise.race([roundPromise, timeoutPromise])
+                    )
+                })
+                const result = await Promise.race([roundPromise, timeoutPromise]).finally(() => clearTimeout(roundTimer))
                 usage.add(result.usage)
 
                 for (const item of result.items) {
