@@ -18,6 +18,8 @@ cd your-repo
 baro "Add JWT authentication with role-based access control"
 ```
 
+**No machine, or no Claude/Codex subscription?** Run the same fleet on **baro's cloud** — nothing to install, each run in an isolated sandbox, pay as you go. → **[app.baro.jigjoy.ai](https://app.baro.jigjoy.ai)**
+
 ![baro TUI at the end of a real run — 33 of 33 stories complete on a NestJS service, 2.2× parallel speedup, 32 files modified, PR opened](https://raw.githubusercontent.com/jigjoy-ai/baro/main/assets/screenshot.png)
 
 <sub>baro at the end of an [actual run](https://jigjoy.ai/blog/baro-808-nestjs-jest-tests) — one prompt → 33-story DAG → 32 files modified → PR opened. The summary panel shows wall time, parallel speedup (2.2×), token usage, and the PR URL.</sub>
