@@ -306,7 +306,9 @@ function bashTool(cwd: string): Tool {
                     cwd,
                     encoding: "utf-8",
                     maxBuffer: 4 * 1024 * 1024,
-                    timeout: 30_000,
+                    // Real builds/test suites (e.g. a Next.js `npm run build`) take minutes;
+                    // 30s was far too short. Default 5min, overridable per environment.
+                    timeout: Number(process.env.BARO_BASH_TIMEOUT_MS) || 300_000,
                     stdio: ["ignore", "pipe", "pipe"],
                 })
                 if (output.length > MAX_BASH_OUTPUT_BYTES) {
