@@ -155,6 +155,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if raw_args.get(1).map(|s| s.as_str()) == Some("connect") {
         return run_connect(&raw_args[2..]).await;
     }
+    // `baro login` — browser-based sign in/up; stores a credential so `baro connect`
+    // pairs with no token to paste. Handled before clap, like connect.
+    if raw_args.get(1).map(|s| s.as_str()) == Some("login") {
+        return run_login().await;
+    }
 
      let (cli, _lock) = cli::cli::parse()?;
 
@@ -202,6 +207,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `baro login` — browser-based device auth. Spawns the bundled runner in login mode;
+/// it opens the browser, polls the control plane, and stores a credential under ~/.baro
+/// so later `baro connect` needs no token. CONTROL_URL is inherited from the env if set.
+async fn run_login() -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let entry = discovery::locate_script(&cwd, "packages/baro-orchestrator/scripts/runner.ts", "runner.mjs")
+        .map_err(|e| format!("could not locate the runner bundle ({e}). Reinstall: npm install -g baro-ai"))?;
+    let mut cmd = match &entry {
+        discovery::ScriptEntry::Tsx { tsx, script } => {
+            let mut c = tokio::process::Command::new(tsx);
+            c.arg(script);
+            c
+        }
+        discovery::ScriptEntry::NodeJs(js) => {
+            let mut c = tokio::process::Command::new("node");
+            c.arg(js);
+            c
+        }
+    };
+    cmd.env("BARO_LOGIN", "1");
+    let status = cmd.spawn().map_err(|e| format!("failed to start login: {e}"))?.wait().await?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
 /// `baro connect` — run as a baro-cloud runner. Spawns the bundled runner.mjs,
 /// which pairs with the control plane and runs each dispatched goal via
 /// `baro --headless` over the user's subscription.
@@ -242,8 +271,9 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 i += 1;
             }
             "-h" | "--help" => {
-                println!("Usage: baro connect --token <rt_…> [--workspace <git repo>]");
+                println!("Usage: baro connect [--token <rt_…>] [--workspace <git repo>]");
                 println!("Pairs this machine with baro-cloud and runs dispatched goals over your subscription.");
+                println!("Run `baro login` first and the token is optional — connect signs in automatically.");
                 println!();
                 println!("  --install-service    install a background service (launchd/systemd/Task Scheduler)");
                 println!("                       so the runner survives terminal close, logout, and reboot");

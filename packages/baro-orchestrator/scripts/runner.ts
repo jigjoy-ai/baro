@@ -4,8 +4,8 @@
 // Self-contained: the wire protocol is vendored (mirrors @jigjoy-ai/baro-protocol).
 
 import { spawn } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
-import { hostname, tmpdir } from "node:os"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { hostname, homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { WebSocket } from "ws"
 
@@ -32,7 +32,52 @@ type ToRunner = RunDispatchMsg | { t: "cancel"; storyId: string } | { t: "ping";
 const encode = (m: unknown): string => JSON.stringify(m)
 
 const url = process.env.CONTROL_URL ?? "wss://api.baro.jigjoy.ai"
-const token = process.env.RUNNER_TOKEN
+let token = process.env.RUNNER_TOKEN
+
+// The HTTP origin of the control plane (the WS url with the scheme swapped) — used by
+// `baro login` and runner self-registration. wss://host → https://host.
+const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
+const credsPath = join(homedir(), ".baro", "credentials.json")
+
+const readCliToken = (): string | undefined => {
+    try {
+        return (JSON.parse(readFileSync(credsPath, "utf8")) as { token?: string }).token
+    } catch {
+        return undefined
+    }
+}
+
+const openBrowser = (target: string): void => {
+    const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open"
+    try {
+        spawn(cmd, [target], { stdio: "ignore", detached: true, shell: process.platform === "win32" }).unref()
+    } catch {
+        /* best-effort — the URL is printed too */
+    }
+}
+
+// `baro login`: device flow. Ask for a code, open the browser to approve it, poll until
+// the control plane mints a long-lived cli_ token, then store it under ~/.baro.
+async function login(): Promise<void> {
+    const start = (await (await fetch(`${httpBase}/cli/auth/start`, { method: "POST" })).json()) as {
+        deviceCode: string
+        userCode: string
+        verifyUrl: string
+    }
+    console.log(`\n  Opening your browser to sign in. If it doesn't open, visit:\n  ${start.verifyUrl}\n\n  Confirm this code matches:  ${start.userCode}\n`)
+    openBrowser(start.verifyUrl)
+    for (;;) {
+        await new Promise((r) => setTimeout(r, 2000))
+        const r = (await (await fetch(`${httpBase}/cli/auth/poll?deviceCode=${start.deviceCode}`)).json()) as { status: string; token?: string }
+        if (r.status === "approved" && r.token) {
+            mkdirSync(join(homedir(), ".baro"), { recursive: true })
+            writeFileSync(credsPath, JSON.stringify({ token: r.token, controlUrl: url }, null, 2), { mode: 0o600 })
+            console.log("  ✓ Signed in. Run `baro connect` to pair this machine.\n")
+            return
+        }
+        if (r.status === "expired") throw new Error("login code expired — run `baro login` again")
+    }
+}
 const workspaceDir = process.env.WORKSPACE_DIR ?? process.cwd()
 const baroBin = process.env.BARO_BIN ?? "baro"
 // Stable per-machine id so the control plane can show one runner across
@@ -227,7 +272,27 @@ function connectOnce(): Promise<void> {
 }
 
 async function main() {
-    if (!token) console.warn("[baro] warning: no --token — this runner won't be paired to your account")
+    if (process.env.BARO_LOGIN === "1") {
+        await login()
+        return
+    }
+    // No --token? If `baro login` left credentials, register a runner with them — no
+    // dashboard visit, no token to paste.
+    if (!token) {
+        const cli = readCliToken()
+        if (cli) {
+            try {
+                const reg = (await (await fetch(`${httpBase}/cli/runners/register`, { method: "POST", headers: { authorization: `Bearer ${cli}` } })).json()) as { token?: string }
+                token = reg.token
+            } catch {
+                /* fall through to the not-signed-in message */
+            }
+        }
+    }
+    if (!token) {
+        console.error("[baro] not signed in. Run `baro login` first, or pass --token <rt_…> (get one from the dashboard).")
+        process.exit(1)
+    }
     // Ephemeral worker safety: if nothing is dispatched within 3 min of starting,
     // exit so an orphaned cloud task (paired but never given work) can't linger.
     if (runOnce) {
