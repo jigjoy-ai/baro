@@ -11,7 +11,7 @@
  */
 
 import { execFile } from "child_process"
-import { existsSync, rmSync, symlinkSync } from "fs"
+import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import { promisify } from "util"
@@ -20,10 +20,27 @@ import { GitGate } from "./git.js"
 
 const exec = promisify(execFile)
 
-// A fresh worktree only checks out git-tracked files, so it has no
-// node_modules. Symlink these dependency dirs from the repo root (best-effort)
-// so builds/tests resolve; they're read-mostly, so sharing is safe.
-const LINKED_DEP_DIRS = ["node_modules", ".venv", "vendor"] as const
+// A fresh worktree only checks out git-tracked files, so it has none of the installed
+// dependency artifacts (node_modules, …). We SHARE these across all worktrees by
+// symlinking them to one persistent location, so a story that runs `npm install` (or
+// pip/composer/…) makes the result visible to every other story — exactly like the old
+// single shared workspace, on any stack. Discovery is manifest-driven so we share them
+// wherever a package lives, including monorepo subdirs (e.g. `frontend/node_modules`).
+const DEP_DIR_BY_MANIFEST: Record<string, string> = {
+    "package.json": "node_modules",
+    "pnpm-workspace.yaml": "node_modules",
+    "pyproject.toml": ".venv",
+    "requirements.txt": ".venv",
+    "setup.py": ".venv",
+    Pipfile: ".venv",
+    "composer.json": "vendor",
+}
+// Artifact dir names (used to keep them out of commits at ANY depth).
+const DEP_DIR_NAMES = new Set(["node_modules", ".venv", "vendor"])
+// Dirs we never descend into when discovering package roots.
+const SCAN_SKIP = new Set(["node_modules", ".git", ".venv", "vendor", "dist", "build", "target", ".next", "out", "coverage"])
+// How deep to look for nested package manifests (covers the common monorepo layout).
+const SCAN_DEPTH = 3
 
 export interface WorktreeManagerOptions {
     /** Symlink dependency dirs (node_modules, …) into each worktree. Default true. */
@@ -249,15 +266,62 @@ export class WorktreeManager {
 
     // ── internals ────────────────────────────────────────────────────
 
-    private symlinkDepDirs(worktreePath: string): void {
-        for (const dir of LINKED_DEP_DIRS) {
-            const src = join(this.repoRoot, dir)
-            const dest = join(worktreePath, dir)
-            if (!existsSync(src) || existsSync(dest)) continue
+    /**
+     * Package roots in the repo (root + nested), each mapped to the dep dir its stack
+     * installs into. Computed once per run and cached. Manifest-driven so it works on
+     * any stack and finds monorepo subpackages (e.g. `frontend` → node_modules).
+     */
+    private depLocs?: Array<{ rel: string; dir: string }>
+    private depLocations(): Array<{ rel: string; dir: string }> {
+        if (this.depLocs) return this.depLocs
+        const out: Array<{ rel: string; dir: string }> = []
+        const seen = new Set<string>()
+        const scan = (rel: string, depth: number): void => {
+            let entries: import("fs").Dirent[]
             try {
-                symlinkSync(src, dest, "dir")
+                entries = readdirSync(join(this.repoRoot, rel) || this.repoRoot, { withFileTypes: true })
+            } catch {
+                return
+            }
+            const record = (dir: string): void => {
+                const key = `${rel}|${dir}`
+                if (!seen.has(key)) {
+                    seen.add(key)
+                    out.push({ rel, dir })
+                }
+            }
+            for (const e of entries) {
+                // A manifest marks a package root (share its dep dir even before install)…
+                if (e.isFile() && DEP_DIR_BY_MANIFEST[e.name]) record(DEP_DIR_BY_MANIFEST[e.name])
+                // …and an already-present dep dir is shared as-is (the local case).
+                else if (e.isDirectory() && DEP_DIR_NAMES.has(e.name)) record(e.name)
+            }
+            if (depth <= 0) return
+            for (const e of entries) {
+                if (e.isDirectory() && !SCAN_SKIP.has(e.name) && !e.name.startsWith(".")) {
+                    scan(rel ? join(rel, e.name) : e.name, depth - 1)
+                }
+            }
+        }
+        scan("", SCAN_DEPTH)
+        this.depLocs = out
+        return out
+    }
+
+    private symlinkDepDirs(worktreePath: string): void {
+        for (const { rel, dir } of this.depLocations()) {
+            // ONE shared, run-persistent location every worktree points at. Pre-create it
+            // (empty) if no story has installed yet, so the first `npm install` writes
+            // through the symlink into here and the rest see it — like a shared workspace.
+            const shared = join(this.repoRoot, rel, dir)
+            const dest = join(worktreePath, rel, dir)
+            if (existsSync(dest)) continue
+            try {
+                if (!existsSync(shared)) mkdirSync(shared, { recursive: true })
+                mkdirSync(join(worktreePath, rel), { recursive: true })
+                symlinkSync(shared, dest, "dir")
             } catch (e) {
-                this.log(`could not symlink ${dir} into worktree (${errMsg(e)})`)
+                this.log(`could not symlink ${join(rel, dir)} into worktree (${errMsg(e)})`)
             }
         }
     }
@@ -296,9 +360,10 @@ export class WorktreeManager {
             )
             return
         }
-        // Belt for repos that DON'T gitignore the dep dirs: unstage them so
-        // their absolute-path symlinks never get committed.
-        await execQuiet("git", ["reset", "-q", "--", ...LINKED_DEP_DIRS], worktreePath)
+        // Belt for repos that DON'T gitignore the dep dirs: unstage them (at every
+        // package root, nested included) so their absolute-path symlinks never commit.
+        const resetSpecs = this.depLocations().map(({ rel, dir }) => join(rel, dir))
+        if (resetSpecs.length) await execQuiet("git", ["reset", "-q", "--", ...resetSpecs], worktreePath)
 
         let staged: string[] = []
         let diffFailed = false
@@ -317,10 +382,9 @@ export class WorktreeManager {
                     `(${errMsg(e)}); committing whatever is staged`,
             )
         }
-        // If the reset didn't drop a dep dir, refuse to commit a broken symlink.
-        const depStaged = staged.filter((p) =>
-            LINKED_DEP_DIRS.some((d) => p === d || p.startsWith(`${d}/`)),
-        )
+        // If the reset didn't drop a dep dir, refuse to commit a broken symlink. Match a
+        // dep dir as any path segment, so nested ones (e.g. frontend/node_modules) count.
+        const depStaged = staged.filter((p) => p.split("/").some((seg) => DEP_DIR_NAMES.has(seg)))
         if (depStaged.length > 0) {
             this.log(
                 `WARNING: could not keep dep dirs [${depStaged.join(", ")}] out of ` +

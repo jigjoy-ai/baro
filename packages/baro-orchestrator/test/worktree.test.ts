@@ -235,6 +235,42 @@ describe("WorktreeManager — dependency dir symlink", () => {
         )
     })
 
+    it("shares deps installed by one story with the others (fresh clone, no node_modules yet)", async () => {
+        // The hosted-run bug: a fresh clone has package.json but NO node_modules, so the
+        // setup story installs deps that the dependent stories then can't see.
+        writeFileSync(join(repo, "package.json"), '{"name":"x"}\n')
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "add package.json")
+
+        const p1 = (await mgr.create("S1"))!
+        // S1 "installs" — writes into its node_modules (a symlink to the shared dir).
+        mkdirSync(join(p1, "node_modules", "vitest"), { recursive: true })
+        writeFileSync(join(p1, "node_modules", "vitest", "bin.js"), "1\n")
+
+        const p2 = (await mgr.create("S2"))!
+        assert.ok(
+            existsSync(join(p2, "node_modules", "vitest", "bin.js")),
+            "S2 sees deps S1 installed, via the shared node_modules",
+        )
+    })
+
+    it("shares a monorepo subpackage's node_modules (e.g. frontend/)", async () => {
+        mkdirSync(join(repo, "frontend"), { recursive: true })
+        writeFileSync(join(repo, "frontend", "package.json"), '{"name":"f"}\n')
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", "add frontend pkg")
+
+        const p1 = (await mgr.create("S1"))!
+        mkdirSync(join(p1, "frontend", "node_modules", "vitest"), { recursive: true })
+        writeFileSync(join(p1, "frontend", "node_modules", "vitest", "bin.js"), "1\n")
+
+        const p2 = (await mgr.create("S2"))!
+        assert.ok(
+            existsSync(join(p2, "frontend", "node_modules", "vitest", "bin.js")),
+            "S2 sees frontend deps S1 installed",
+        )
+    })
+
     it("skips the symlink when disabled", async () => {
         mkdirSync(join(repo, "node_modules"), { recursive: true })
         const noLink = new WorktreeManager(repo, new GitGate(), "run-nolink", {
