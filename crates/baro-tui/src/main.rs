@@ -161,6 +161,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_login().await;
     }
 
+    // Interactive use: tell the user when a newer baro is out (we release often). The
+    // network check runs in the JS layer (no HTTP dep here); this only reads its cache.
+    notify_update();
+
      let (cli, _lock) = cli::cli::parse()?;
 
     // `baro --doctor` short-circuits before any TUI setup. It's a
@@ -207,6 +211,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// True if version `a` is older than `b` (numeric, per dotted segment).
+fn semver_lt(a: &str, b: &str) -> bool {
+    let p = |s: &str| s.split('.').map(|x| x.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    let (pa, pb) = (p(a), p(b));
+    for i in 0..3 {
+        let (x, y) = (pa.get(i).copied().unwrap_or(0), pb.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x < y;
+        }
+    }
+    false
+}
+
+/// Read the update cache the JS layer maintains (`~/.baro/update-check.json`) and print a
+/// banner if a newer baro is published. If the cache is stale/missing, kick off a detached
+/// background refresh so the NEXT run has current data. Best-effort — never blocks or fails.
+fn notify_update() {
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+        return;
+    };
+    let cache = std::path::PathBuf::from(home).join(".baro").join("update-check.json");
+    let mut fresh = false;
+    if let Ok(s) = std::fs::read_to_string(&cache) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            let latest = v.get("latest").and_then(|x| x.as_str()).unwrap_or("");
+            let checked = v.get("checkedAt").and_then(|x| x.as_u64()).unwrap_or(0);
+            if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                fresh = (now.as_millis() as u64).saturating_sub(checked) < 24 * 3600 * 1000;
+            }
+            if !latest.is_empty() && semver_lt(env!("CARGO_PKG_VERSION"), latest) {
+                eprintln!("\n  a newer baro is available: {} → {}", env!("CARGO_PKG_VERSION"), latest);
+                eprintln!("  update:  npm i -g baro-ai\n");
+            }
+        }
+    }
+    if !fresh {
+        spawn_bg_update_check();
+    }
+}
+
+/// Fire-and-forget the JS update check so the cache refreshes for next time.
+fn spawn_bg_update_check() {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let Ok(entry) = discovery::locate_script(&cwd, "packages/baro-orchestrator/scripts/runner.ts", "runner.mjs") else {
+        return;
+    };
+    let mut cmd = match &entry {
+        discovery::ScriptEntry::Tsx { tsx, script } => {
+            let mut c = std::process::Command::new(tsx);
+            c.arg(script);
+            c
+        }
+        discovery::ScriptEntry::NodeJs(js) => {
+            let mut c = std::process::Command::new("node");
+            c.arg(js);
+            c
+        }
+    };
+    cmd.env("BARO_CHECK_UPDATE", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let _ = cmd.spawn(); // detached: don't wait, ignore errors
+}
+
 /// `baro login` — browser-based device auth. Spawns the bundled runner in login mode;
 /// it opens the browser, polls the control plane, and stores a credential under ~/.baro
 /// so later `baro connect` needs no token. CONTROL_URL is inherited from the env if set.
@@ -243,9 +312,15 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     // Single-run mode (for ephemeral cloud/Fargate workers): pair, take exactly one
     // dispatched run, then exit — no reconnect loop. Env or flag.
     let mut once = std::env::var("BARO_RUN_ONCE").as_deref() == Ok("1");
+    // Set by the managed service invocation → the runner may self-update + exit-to-restart.
+    let mut service = std::env::var("BARO_SERVICE").as_deref() == Ok("1");
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--service" => {
+                service = true;
+                i += 1;
+            }
             "--token" => {
                 token = args.get(i + 1).cloned();
                 i += 2;
@@ -326,6 +401,9 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     cmd.env("WORKSPACE_DIR", &cwd);
     if once {
         cmd.env("BARO_RUN_ONCE", "1");
+    }
+    if service {
+        cmd.env("BARO_SERVICE", "1");
     }
     // The runner spawns `baro --headless`; point it at this very binary.
     if let Ok(exe) = std::env::current_exe() {

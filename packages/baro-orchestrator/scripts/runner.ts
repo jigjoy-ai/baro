@@ -39,6 +39,63 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
+const VERSION = "0.57.1"
+const updateCachePath = join(homedir(), ".baro", "update-check.json")
+
+// a.b.c < x.y.z, numeric per-segment.
+function semverLt(a: string, b: string): boolean {
+    const pa = a.split(".").map(Number)
+    const pb = b.split(".").map(Number)
+    for (let i = 0; i < 3; i++) {
+        const x = pa[i] ?? 0
+        const y = pb[i] ?? 0
+        if (x !== y) return x < y
+    }
+    return false
+}
+
+// Latest published baro-ai version, cached ~24h in ~/.baro so we don't hit npm on every
+// start. The cache file is ALSO what the Rust binary reads to print its update banner —
+// one network check (here) serves both the runner self-update and the interactive notice.
+async function getLatest(force = false): Promise<string | null> {
+    if (!force) {
+        try {
+            const c = JSON.parse(readFileSync(updateCachePath, "utf8")) as { latest?: string; checkedAt?: number }
+            if (c.latest && c.checkedAt && Date.now() - c.checkedAt < 24 * 3600_000) return c.latest
+        } catch {
+            /* no/!stale cache → fetch */
+        }
+    }
+    try {
+        const ctrl = new AbortController()
+        const t = setTimeout(() => ctrl.abort(), 4000)
+        const r = await fetch("https://registry.npmjs.org/baro-ai/latest", { signal: ctrl.signal })
+        clearTimeout(t)
+        const latest = ((await r.json()) as { version?: string }).version
+        if (!latest) return null
+        try {
+            mkdirSync(join(homedir(), ".baro"), { recursive: true })
+            writeFileSync(updateCachePath, JSON.stringify({ latest, checkedAt: Date.now() }))
+        } catch {
+            /* best-effort cache */
+        }
+        return latest
+    } catch {
+        return null
+    }
+}
+
+// Pull the new version in place. Returns true on success. Best-effort: a sudo/perms
+// failure (global install owned by root) is reported, never fatal.
+async function selfUpdate(latest: string): Promise<boolean> {
+    return await new Promise((resolve) => {
+        console.log(`[baro] updating ${VERSION} → ${latest}…`)
+        const child = spawn("npm", ["install", "-g", `baro-ai@${latest}`], { stdio: "inherit", shell: process.platform === "win32" })
+        child.on("exit", (code) => resolve(code === 0))
+        child.on("error", () => resolve(false))
+    })
+}
+
 const readCliToken = (): string | undefined => {
     try {
         return (JSON.parse(readFileSync(credsPath, "utf8")) as { token?: string }).token
@@ -251,7 +308,7 @@ function connectOnce(): Promise<void> {
         const ws = new WebSocket(url)
         currentWs = ws
         ws.on("open", () => {
-            ws.send(encode({ t: "register", runnerId, hostname: hostname(), token, backends: ["claude"], workspaceIds: ["default"], version: "0.57.1" }))
+            ws.send(encode({ t: "register", runnerId, hostname: hostname(), token, backends: ["claude"], workspaceIds: ["default"], version: VERSION }))
             console.log(inflight.size ? `[baro] reconnected to ${url} — resuming ${inflight.size} in-flight run(s)` : `[baro] connected to ${url} — workspace ${workspaceDir}`)
         })
         ws.on("message", (data: Buffer) => {
@@ -275,6 +332,31 @@ async function main() {
     if (process.env.BARO_LOGIN === "1") {
         await login()
         return
+    }
+    // Refresh-only mode: the Rust binary spawns this in the background so the update
+    // cache stays fresh for its banner, even when baro is only used interactively.
+    if (process.env.BARO_CHECK_UPDATE === "1") {
+        await getLatest(true)
+        return
+    }
+    // Keep runners current. We release often and a stale runner re-runs bugs we've already
+    // fixed (e.g. the worktree dep-sharing fix). Check npm; if behind, self-update under a
+    // background service (it restarts into the new version) or just notify in foreground.
+    try {
+        const latest = await getLatest()
+        if (latest && semverLt(VERSION, latest)) {
+            if (process.env.BARO_SERVICE === "1") {
+                if (await selfUpdate(latest)) {
+                    console.log(`[baro] updated to ${latest} — restarting service…`)
+                    process.exit(0) // launchd/systemd/Task Scheduler relaunches with the new version
+                }
+                console.warn(`[baro] could not self-update (likely a root-owned global install). Update manually: npm i -g baro-ai@latest`)
+            } else {
+                console.warn(`[baro] a newer baro is available (${VERSION} → ${latest}). Update: npm i -g baro-ai`)
+            }
+        }
+    } catch {
+        /* never let the update check block the runner */
     }
     // No --token? If `baro login` left credentials, register a runner with them — no
     // dashboard visit, no token to paste.

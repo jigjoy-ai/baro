@@ -67,6 +67,9 @@ fn log_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
 fn connect_args(cfg: &ServiceConfig) -> Vec<String> {
     let mut args = vec![
         "connect".to_string(),
+        // Marks this as the managed service invocation, so the runner knows it may
+        // self-update and exit-to-restart (the service relaunches the new version).
+        "--service".to_string(),
         "--token".to_string(),
         cfg.token.clone(),
         "--workspace".to_string(),
@@ -120,6 +123,7 @@ fn install_macos(cfg: &ServiceConfig) -> R {
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>{path_env}</string>
+    <key>BARO_SERVICE</key><string>1</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -186,6 +190,7 @@ fn install_linux(cfg: &ServiceConfig) -> R {
          Wants=network-online.target\n\n\
          [Service]\n\
          Environment=PATH={path_env}\n\
+         Environment=BARO_SERVICE=1\n\
          ExecStart={exec}\n\
          Restart=always\n\
          RestartSec=2\n\n\
