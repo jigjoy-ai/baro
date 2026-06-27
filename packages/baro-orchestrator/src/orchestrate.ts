@@ -271,6 +271,23 @@ export interface OrchestrateResult {
 export async function orchestrate(
     config: OrchestrateConfig,
 ): Promise<OrchestrateResult> {
+    // Harden the environment so the tools agents run never hang on a prompt or a watcher,
+    // on ANY stack. Set once here (the chokepoint every run goes through); child agents
+    // spawn inheriting process.env, so this reaches every shell command they issue.
+    //  - CI=1            → vitest/jest/playwright/pytest run once, no watch, no prompts
+    //  - npm_config_yes  → `npx <tool>` auto-confirms instead of "Ok to proceed? (y)"
+    //  - *_PROMPT/INPUT  → pip/git/apt never block waiting on a TTY
+    for (const [k, v] of Object.entries({
+        CI: "1",
+        npm_config_yes: "true",
+        npm_config_fund: "false",
+        npm_config_audit: "false",
+        PIP_NO_INPUT: "1",
+        GIT_TERMINAL_PROMPT: "0",
+        DEBIAN_FRONTEND: "noninteractive",
+    })) {
+        if (process.env[k] === undefined) process.env[k] = v
+    }
     const env = new AgenticEnvironment()
     const emitTui = config.emitTuiEvents ?? true
     const llm: "claude" | "openai" | "codex" | "opencode" | "pi" = config.llm ?? "claude"
