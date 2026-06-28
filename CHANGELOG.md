@@ -2,6 +2,8 @@
 
 A concise list of every published version. For full release notes, see the corresponding commit on the v* tag.
 
+## v0.59.1 — fix(0.59.1): clean diffOnly preview — no noisy push/PR errors. A diffOnly run cloned the public repo but kept its `origin`, so baro still tried to push the branch + open a PR with no token — flooding the log with `push rejected`, `could not read Username`, `gh pr create failed`. The runner now **removes the origin remote** right after the public clone, so baro hits the clean "no remote, skipping push" path and the preview log shows only real work. `runner.mjs` rebuilt.
+
 ## v0.59.0 — feat(0.59.0): no-GitHub preview runs (`diffOnly`). A dispatched run can now set `diffOnly` — the runner clones the PUBLIC repo WITHOUT a token, runs baro, and returns the resulting unified patch instead of pushing a branch + opening a PR. Powers baro-cloud's "preview on any public repo" path: a visitor sees baro's actual changes (a downloadable diff in the dashboard) before connecting GitHub. The finalizer's push/PR is skipped gracefully (no token), and `GIT_TERMINAL_PROMPT=0` keeps it from blocking. `runner.mjs` rebuilt.
 
 ## v0.58.1 — fix(0.58.1): test commands never hang, on any stack. Agents sometimes parked forever on `npx vitest run` — either `npx` waiting on an interactive "Ok to proceed?" prompt, or a test framework defaulting to watch mode. orchestrate() now sets `CI=1`, `npm_config_yes=true`, `PIP_NO_INPUT=1`, `GIT_TERMINAL_PROMPT=0`, `DEBIAN_FRONTEND=noninteractive` once at the run chokepoint; child agents inherit it, so vitest/jest/playwright/pytest run once (no watch) and npx auto-confirms — framework-agnostic. `runner.mjs` rebuilt.

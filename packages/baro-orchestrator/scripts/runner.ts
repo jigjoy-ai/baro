@@ -42,7 +42,7 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.59.0"
+const VERSION = "0.59.1"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
 // a.b.c < x.y.z, numeric per-segment.
@@ -200,12 +200,18 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
             return { success: false, durationSecs: 1, error: `clone failed: ${(e as Error).message}` }
         }
         if (d.diffOnly) {
-            // Record the base so we can diff baro's work against it. No GH_TOKEN → the
-            // finalizer's push/PR is skipped gracefully; we return the patch instead.
+            // Drop the origin remote so baro skips ALL push/PR steps cleanly ("no remote,
+            // skipping push") instead of failing them noisily without a token — we return
+            // the patch instead. Record the base first to diff baro's work against it.
             try {
                 diffBase = execFileSync("git", ["rev-parse", "HEAD"], { cwd }).toString().trim()
             } catch {
                 diffBase = undefined
+            }
+            try {
+                execFileSync("git", ["remote", "remove", "origin"], { cwd })
+            } catch {
+                /* best-effort — diff still works; push would just warn */
             }
         } else {
             // Let baro's git push + `gh pr create` authenticate as the user.
