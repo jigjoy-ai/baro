@@ -3,7 +3,7 @@
 // events back. Bundled into baro-ai as runner.mjs and spawned by `baro connect`.
 // Self-contained: the wire protocol is vendored (mirrors @jigjoy-ai/baro-protocol).
 
-import { spawn } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { hostname, homedir, tmpdir } from "node:os"
 import { join } from "node:path"
@@ -26,6 +26,9 @@ interface RunDispatchMsg {
     // a PR; otherwise run in the local --workspace dir.
     repo?: { fullName: string }
     githubToken?: string
+    // No-GitHub preview: clone the (public) repo WITHOUT a token, run, and return the
+    // diff instead of opening a PR — so a visitor sees baro's output before connecting.
+    diffOnly?: boolean
 }
 type ToRunner = RunDispatchMsg | { t: "cancel"; storyId: string } | { t: "ping"; ts: number } | { t: "rejected"; reason: string } | { t: string }
 
@@ -39,7 +42,7 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.58.1"
+const VERSION = "0.59.0"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
 // a.b.c < x.y.z, numeric per-segment.
@@ -150,18 +153,32 @@ interface RunOutcome {
     storiesPassed?: number
     storiesTotal?: number
     error: string | null
+    // Set in diffOnly mode: the unified patch of everything baro changed (no PR opened).
+    diff?: string
 }
 
-// Clone a repo into a fresh temp dir using the user's OAuth token; returns the dir.
-function cloneRepo(fullName: string, token: string, emit: (e: WireEvent) => void): Promise<string> {
+// Clone a repo into a fresh temp dir. With a token, authenticate (private repos + push);
+// without one, a plain public clone (diffOnly preview). Returns the dir.
+function cloneRepo(fullName: string, token: string | undefined, emit: (e: WireEvent) => void): Promise<string> {
     return new Promise((resolve, reject) => {
         const dir = mkdtempSync(join(tmpdir(), "baro-clone-"))
-        const url = `https://x-access-token:${token}@github.com/${fullName}.git`
+        const url = token ? `https://x-access-token:${token}@github.com/${fullName}.git` : `https://github.com/${fullName}.git`
         emit({ type: "story_log", agentId: "_git", data: { type: "story_log", id: "_git", line: `cloning ${fullName}…` } })
         const ch = spawn("git", ["clone", "--quiet", url, dir], { stdio: "ignore" })
         ch.on("close", (code) => (code === 0 ? resolve(dir) : reject(new Error(`git clone exit ${code}`))))
         ch.on("error", reject)
     })
+}
+
+// Capture everything baro changed vs the base commit as one unified patch (bounded).
+function captureDiff(cwd: string, base: string): string {
+    try {
+        execFileSync("git", ["add", "-A"], { cwd })
+        const out = execFileSync("git", ["diff", "--cached", base], { cwd, maxBuffer: 8 * 1024 * 1024 }).toString()
+        return out.length > 200_000 ? out.slice(0, 200_000) + "\n… (diff truncated)" : out
+    } catch {
+        return ""
+    }
 }
 
 // Run one dispatched goal headless and forward its native event stream. With a
@@ -174,15 +191,27 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
 
     let cwd = workspaceDir
     let cleanup: (() => void) | undefined
-    if (d.repo && d.githubToken) {
+    let diffBase: string | undefined
+    if (d.repo && (d.githubToken || d.diffOnly)) {
         try {
+            // diffOnly → public clone (no token); otherwise authenticated (private + push).
             cwd = await cloneRepo(d.repo.fullName, d.githubToken, emit)
         } catch (e) {
             return { success: false, durationSecs: 1, error: `clone failed: ${(e as Error).message}` }
         }
-        // Let baro's git push + `gh pr create` authenticate as the user.
-        env.GH_TOKEN = d.githubToken
-        env.GITHUB_TOKEN = d.githubToken
+        if (d.diffOnly) {
+            // Record the base so we can diff baro's work against it. No GH_TOKEN → the
+            // finalizer's push/PR is skipped gracefully; we return the patch instead.
+            try {
+                diffBase = execFileSync("git", ["rev-parse", "HEAD"], { cwd }).toString().trim()
+            } catch {
+                diffBase = undefined
+            }
+        } else {
+            // Let baro's git push + `gh pr create` authenticate as the user.
+            env.GH_TOKEN = d.githubToken
+            env.GITHUB_TOKEN = d.githubToken
+        }
         cleanup = () => {
             try {
                 rmSync(cwd, { recursive: true, force: true })
@@ -251,6 +280,10 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         })
         child.on("error", (e) => resolve({ success: false, durationSecs: secs(), error: e.message }))
     })
+    // diffOnly: return baro's changes as a patch instead of a PR (no GitHub needed).
+    if (d.diffOnly && diffBase) {
+        outcome.diff = captureDiff(cwd, diffBase)
+    }
     cleanup?.()
     return outcome
 }
