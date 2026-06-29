@@ -46,6 +46,11 @@ export interface DoneStats {
 
 export type BaroEvent =
     | { type: "init"; project: string; stories: StoryInfo[] }
+    // The Architect's design/decision spec (markdown) — the authoritative set of
+    // file paths, schema/API shapes, naming + dependency choices every story works
+    // from. Emitted once after planning so the dashboard can surface it (it was
+    // previously only ever written to prd.json on disk).
+    | { type: "decision_document"; document: string }
     | { type: "dag"; levels: DagNodeInfo[][] }
     | { type: "story_start"; id: string; title: string }
     | { type: "story_log"; id: string; line: string }

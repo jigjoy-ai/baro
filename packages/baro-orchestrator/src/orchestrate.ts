@@ -743,6 +743,11 @@ export async function orchestrate(
             lvl.storyIds.map((id) => ({ id })),
         )
         emit({ type: "dag", levels: dagLevels })
+        // Surface the Architect's decision spec so the dashboard can show the
+        // "why" behind the run (it otherwise lives only in prd.json on disk).
+        if (prd.decisionDocument && prd.decisionDocument.trim()) {
+            emit({ type: "decision_document", document: prd.decisionDocument })
+        }
     }
 
     // Mozaik-native: kick the run by emitting a RunStartRequestItem on
