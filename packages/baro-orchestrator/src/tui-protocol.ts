@@ -82,6 +82,16 @@ export type BaroEvent =
           input_tokens: number
           output_tokens: number
       }
+    // Live, cumulative-per-agent token estimate streamed WHILE a story runs (so the UI
+    // can show tokens climbing in real time). Distinct from token_usage, which is the
+    // authoritative total emitted once the agent finishes. Throttled by the forwarder;
+    // consumers should treat it as the latest snapshot, not a delta to sum.
+    | {
+          type: "token_progress"
+          id: string
+          input_tokens: number
+          output_tokens: number
+      }
 
 /**
  * Write a single event as a JSON line to stdout. Caller should not

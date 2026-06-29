@@ -42,7 +42,7 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.59.2"
+const VERSION = "0.60.0"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
 // a.b.c < x.y.z, numeric per-segment.
@@ -192,6 +192,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
     let cwd = workspaceDir
     let cleanup: (() => void) | undefined
     let diffBase: string | undefined
+    let scratch = false
     if (d.repo && (d.githubToken || d.diffOnly)) {
         try {
             // diffOnly → public clone (no token); otherwise authenticated (private + push).
@@ -217,6 +218,29 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
             // Let baro's git push + `gh pr create` authenticate as the user.
             env.GH_TOKEN = d.githubToken
             env.GITHUB_TOKEN = d.githubToken
+        }
+        cleanup = () => {
+            try {
+                rmSync(cwd, { recursive: true, force: true })
+            } catch {
+                // best-effort
+            }
+        }
+    } else if (!d.repo) {
+        // No repo selected → from-scratch build. The runner's default workspace isn't a
+        // git repo, so baro would die on branch creation ("not a git repository"). Give it
+        // a clean, git-initialized scratch dir (like the hosted sandbox) and return the
+        // result as a patch — so a repo-less first run works on self-hosted runners too,
+        // and the user actually sees what baro built.
+        scratch = true
+        cwd = mkdtempSync(join(tmpdir(), "baro-scratch-"))
+        try {
+            const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "baro", GIT_AUTHOR_EMAIL: "baro@baro.rs", GIT_COMMITTER_NAME: "baro", GIT_COMMITTER_EMAIL: "baro@baro.rs" }
+            execFileSync("git", ["init", "-q"], { cwd })
+            execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "baro: initial workspace"], { cwd, env: gitEnv })
+            diffBase = execFileSync("git", ["rev-parse", "HEAD"], { cwd }).toString().trim()
+        } catch (e) {
+            return { success: false, durationSecs: 1, error: `workspace init failed: ${(e as Error).message}` }
         }
         cleanup = () => {
             try {
@@ -305,8 +329,8 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         })
         child.on("error", (e) => resolve({ success: false, durationSecs: secs(), error: e.message }))
     })
-    // diffOnly: return baro's changes as a patch instead of a PR (no GitHub needed).
-    if (d.diffOnly && diffBase) {
+    // diffOnly (or repo-less scratch) runs return baro's changes as a patch, not a PR.
+    if ((d.diffOnly || scratch) && diffBase) {
         outcome.diff = captureDiff(cwd, diffBase)
     }
     cleanup?.()
