@@ -1304,6 +1304,7 @@ async fn run_app(
                                     let exec_prd = prd;
                                     let exec_cwd = cwd.clone();
                                     let branch_tx = tx.clone();
+                                    let is_followup = app.is_followup;
                                     let mr = app.model_routing;
                                     let om = app.override_model.clone();
                                     let pl = app.parallel_limit;
@@ -1334,13 +1335,28 @@ async fn run_app(
                                         // from sibling clones with the same origin would
                                         // otherwise collide on `git push`, and the user
                                         // explicitly wants every run on its own branch.
-                                        let actual_full_branch = match git::create_fresh_branch(&branch_cwd, &branch_name_clone).await {
-                                            Ok(name) => name,
-                                            Err(e) => {
-                                                let _ = err_tx.send(AppEvent::BranchError(
-                                                    format!("Branch creation failed: {}. Cannot proceed on main branch.", e)
-                                                )).await;
-                                                return;
+                                        // Follow-up (continue): stay on the branch we're already
+                                        // on (the prior run's) so it lands on the same PR — don't
+                                        // cut a fresh branch. Otherwise: a new suffixed branch.
+                                        let actual_full_branch = if is_followup {
+                                            match git::get_current_branch(&branch_cwd).await {
+                                                Ok(name) => name,
+                                                Err(e) => {
+                                                    let _ = err_tx.send(AppEvent::BranchError(
+                                                        format!("Couldn't read current branch for follow-up: {}", e)
+                                                    )).await;
+                                                    return;
+                                                }
+                                            }
+                                        } else {
+                                            match git::create_fresh_branch(&branch_cwd, &branch_name_clone).await {
+                                                Ok(name) => name,
+                                                Err(e) => {
+                                                    let _ = err_tx.send(AppEvent::BranchError(
+                                                        format!("Branch creation failed: {}. Cannot proceed on main branch.", e)
+                                                    )).await;
+                                                    return;
+                                                }
                                             }
                                         };
                                         // Persist the FULL "baro/<slug>-<suffix>" name back
@@ -1388,6 +1404,34 @@ async fn run_app(
                         _ => {}
                     }},
                     Screen::Execute => match key.code {
+                        // Follow-up prompt (open after a successful run): type a new goal,
+                        // Enter re-plans on the SAME branch (--continue → updates the PR).
+                        KeyCode::Esc if app.followup_input.is_some() => {
+                            app.followup_input = None;
+                        }
+                        KeyCode::Backspace if app.followup_input.is_some() => {
+                            if let Some(s) = app.followup_input.as_mut() {
+                                s.pop();
+                            }
+                        }
+                        KeyCode::Char(c) if app.followup_input.is_some() => {
+                            if let Some(s) = app.followup_input.as_mut() {
+                                s.push(c);
+                            }
+                        }
+                        KeyCode::Enter if app.followup_input.is_some() => {
+                            let goal = app.followup_input.take().unwrap_or_default();
+                            if !goal.trim().is_empty() {
+                                std::env::set_var("BARO_CONTINUE", "1");
+                                app.is_followup = true;
+                                app.goal_input = goal;
+                                app.start_planning();
+                                spawn_planner(&app, &cwd, tx.clone());
+                            }
+                        }
+                        KeyCode::Char('f') if app.done && app.exit_reason.is_none() && app.pr_url.is_some() && app.followup_input.is_none() => {
+                            app.followup_input = Some(String::new());
+                        }
                         KeyCode::Char('r') if app.done && app.exit_reason.is_some() => {
                             let prd_path = cwd.join("prd.json");
                             match std::fs::read_to_string(&prd_path)

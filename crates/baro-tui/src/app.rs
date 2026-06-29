@@ -296,6 +296,11 @@ pub struct App {
 
     // Refinement
     pub refine_input: Option<String>,
+    /// When `Some`, the post-run follow-up prompt is open and this is the buffer.
+    pub followup_input: Option<String>,
+    /// Set when the current run is a follow-up (continue on the existing branch/PR);
+    /// the Review→Execute path then stays on the current branch instead of creating one.
+    pub is_followup: bool,
     pub refining: bool,
 
     // Config
@@ -441,6 +446,8 @@ impl App {
             pr_url: None,
             is_resume: false,
             refine_input: None,
+            followup_input: None,
+            is_followup: false,
             refining: false,
             parallel_limit: 0,
             timeout_secs: 0, // 0 = auto (orchestrator effort-scales the per-story timeout)

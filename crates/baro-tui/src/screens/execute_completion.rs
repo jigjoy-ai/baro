@@ -294,12 +294,26 @@ pub fn render_completion(f: &mut Frame, app: &App) {
     }
 
     lines.push(Line::from(""));
-    let footer = if abnormal {
-        "r rerun failed  |  q quit"
+    if let Some(ref fu) = app.followup_input {
+        lines.push(Line::from(Span::styled(
+            "Follow up — continue on this PR:",
+            Style::default().fg(banner_color).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!("> {}", fu)));
+        lines.push(Line::from(Span::styled(
+            "Enter to run  ·  Esc to cancel",
+            Style::default().fg(theme::MUTED),
+        )));
     } else {
-        "q quit"
-    };
-    lines.push(Line::from(Span::styled(footer, Style::default().fg(theme::MUTED))));
+        let footer = if abnormal {
+            "r rerun failed  |  q quit"
+        } else if app.pr_url.is_some() {
+            "f follow-up  |  q quit"
+        } else {
+            "q quit"
+        };
+        lines.push(Line::from(Span::styled(footer, Style::default().fg(theme::MUTED))));
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
