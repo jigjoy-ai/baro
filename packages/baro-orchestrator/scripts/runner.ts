@@ -31,6 +31,8 @@ interface RunDispatchMsg {
     diffOnly?: boolean
     // Skip planning (architect + planner) — single-agent fast path for trivial goals.
     quick?: boolean
+    // Follow-up: check out this PR's branch and run with --continue so it updates in place.
+    followUp?: { prNumber: number }
 }
 type ToRunner = RunDispatchMsg | { t: "cancel"; storyId: string } | { t: "ping"; ts: number } | { t: "rejected"; reason: string } | { t: string }
 
@@ -44,7 +46,7 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.67.0"
+const VERSION = "0.68.0"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
 // a.b.c < x.y.z, numeric per-segment.
@@ -221,6 +223,18 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
             // Let baro's git push + `gh pr create` authenticate as the user.
             env.GH_TOKEN = d.githubToken
             env.GITHUB_TOKEN = d.githubToken
+            // Follow-up: check out the prior run's PR branch so its work is the starting
+            // point. baro runs with --continue (below) → commits here → the existing PR
+            // updates. If checkout fails (PR closed/merged), fall through to a normal run.
+            if (d.followUp?.prNumber) {
+                try {
+                    execFileSync("gh", ["pr", "checkout", String(d.followUp.prNumber)], { cwd, env })
+                    emit({ type: "story_log", agentId: "_git", data: { type: "story_log", id: "_git", line: `continuing on PR #${d.followUp.prNumber}…` } })
+                } catch {
+                    emit({ type: "story_log", agentId: "_git", data: { type: "story_log", id: "_git", line: `PR #${d.followUp.prNumber} not checkout-able (closed?) — opening a fresh PR` } })
+                    d.followUp = undefined // don't pass --continue; let baro open a new PR
+                }
+            }
         }
         cleanup = () => {
             try {
@@ -259,7 +273,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         // the latest opus for the claude backend) — we don't override it.
         const child = spawn(
             baroBin,
-            ["--headless", d.goal, "--cwd", cwd, "--llm", d.route?.backend ?? "claude", "--parallel", String(d.parallel), "--timeout", String(d.timeoutSecs), ...(d.quick ? ["--quick"] : [])],
+            ["--headless", d.goal, "--cwd", cwd, "--llm", d.route?.backend ?? "claude", "--parallel", String(d.parallel), "--timeout", String(d.timeoutSecs), ...(d.quick ? ["--quick"] : []), ...(d.followUp ? ["--continue"] : [])],
             { cwd, env, stdio: ["ignore", "pipe", "pipe"] },
         )
 
