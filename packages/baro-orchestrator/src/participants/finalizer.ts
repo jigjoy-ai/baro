@@ -26,6 +26,8 @@
  */
 
 import { execFile } from "child_process"
+import { mkdirSync, writeFileSync } from "fs"
+import { join } from "path"
 import { promisify } from "util"
 
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
@@ -268,6 +270,10 @@ export class Finalizer extends BaseObserver {
             }
         }
 
+        // Persist the Architect's ADRs as committed files under adr/ so the
+        // decisions live in the repo (and land in this PR), not just prd.json.
+        await this.writeAndCommitAdrs(prd)
+
         // Build a SHA → first-line-of-message map for everything between
         // the base SHA and HEAD. We can't reliably attribute commits to
         // stories one-to-one because some stories produce multiple
@@ -326,6 +332,43 @@ export class Finalizer extends BaseObserver {
             return loadPrd(this.opts.prdPath)
         } catch {
             return null
+        }
+    }
+
+    // ─── ADRs ───────────────────────────────────────────────────────
+
+    /**
+     * Split the Architect's decision document into individual ADRs and write
+     * each as adr/NNNN-slug.md, then commit them so they ship in the PR. The
+     * trivial "no cross-cutting decisions needed" placeholder is skipped, and
+     * an unchanged adr/ (re-run) produces no empty commit. Best-effort: any
+     * failure is logged and never aborts finalization.
+     */
+    private async writeAndCommitAdrs(prd: PrdFile | null): Promise<void> {
+        const doc = prd?.decisionDocument
+        if (!doc || !doc.trim()) return
+        const adrs = parseAdrs(doc)
+        if (adrs.length === 0) return
+        try {
+            const dir = join(this.opts.cwd, "adr")
+            mkdirSync(dir, { recursive: true })
+            for (const a of adrs) {
+                const num = a.num.padStart(4, "0")
+                writeFileSync(join(dir, `${num}-${slugify(a.title)}.md`), `# ADR-${num}: ${a.title}\n\n${a.body}\n`)
+            }
+            await execFileAsync("git", ["add", "adr"], { cwd: this.opts.cwd })
+            try {
+                await execFileAsync(
+                    "git",
+                    ["commit", "-m", `docs: architecture decision records (${adrs.length})\n\n${BARO_COAUTHOR_TRAILER}`],
+                    { cwd: this.opts.cwd },
+                )
+                this.log(`[finalizer] wrote ${adrs.length} ADR(s) to adr/`)
+            } catch {
+                // Nothing staged (identical adr/ already committed) — fine.
+            }
+        } catch (e) {
+            this.log(`[finalizer] could not write ADRs: ${(e as Error).message}`)
         }
     }
 
@@ -651,6 +694,30 @@ export class Finalizer extends BaseObserver {
 }
 
 // ─── module-private helpers ─────────────────────────────────────────
+
+// Split the decision document on "## ADR-NNN: title" headers into records.
+// The leading "## Existing context" preamble (no ADR- prefix) is ignored.
+function parseAdrs(doc: string): { num: string; title: string; body: string }[] {
+    const adrs: { num: string; title: string; body: string[] }[] = []
+    let cur: { num: string; title: string; body: string[] } | null = null
+    for (const ln of doc.replace(/\r/g, "").split("\n")) {
+        const m = ln.match(/^##\s+ADR-(\d+):\s*(.*)$/)
+        if (m) {
+            if (cur) adrs.push(cur)
+            cur = { num: m[1], title: m[2].trim(), body: [] }
+        } else if (cur) {
+            cur.body.push(ln)
+        }
+    }
+    if (cur) adrs.push(cur)
+    return adrs
+        .filter((a) => !/no cross-cutting decisions/i.test(a.title))
+        .map((a) => ({ num: a.num, title: a.title, body: a.body.join("\n").trim() }))
+}
+
+function slugify(s: string): string {
+    return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "decision"
+}
 
 function formatDuration(secs: number): string {
     if (secs < 60) return `${Math.round(secs)}s`
