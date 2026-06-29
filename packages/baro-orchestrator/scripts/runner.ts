@@ -42,7 +42,7 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.59.1"
+const VERSION = "0.59.2"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
 // a.b.c < x.y.z, numeric per-segment.
@@ -242,6 +242,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         let passed = 0
         let failed = 0
         let doneSuccess: boolean | null = null
+        let lastErr = "" // real failure reason from the event stream (beats raw stderr)
         let stderrTail = ""
 
         let buf = ""
@@ -264,6 +265,13 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
                 if (ev.type === "story_complete") passed++
                 else if (ev.type === "story_error") failed++
                 else if (ev.type === "done") doneSuccess = !!ev.success
+                // Capture the real failure reason from the stream (story/planner/architect
+                // errors, or a failed `done`), so we don't fall back to a noisy stderr banner.
+                const d2 = (ev.data ?? {}) as Record<string, unknown>
+                const msg = d2.error ?? d2.message ?? (ev as Record<string, unknown>).error
+                if (typeof msg === "string" && msg.trim() && (String(ev.type).includes("error") || String(ev.type).includes("fail") || (ev.type === "done" && ev.success === false))) {
+                    lastErr = msg.trim()
+                }
             }
         })
         // Keep the tail of stderr so a failure carries the real cause back to
@@ -275,13 +283,24 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         signal.addEventListener("abort", () => child.kill("SIGTERM"))
         child.on("close", (code) => {
             const ok = doneSuccess ?? (code === 0 && failed === 0 && passed > 0)
-            const errTail = stderrTail.trim().split("\n").filter(Boolean).slice(-3).join(" · ").slice(-500)
+            // Don't let baro's startup "User goal:" banner (it echoes the goal to stderr)
+            // masquerade as the failure reason — filter it + the goal lines out.
+            const goalLines = new Set(d.goal.split("\n").map((s) => s.trim()).filter(Boolean))
+            const errTail = stderrTail
+                .trim()
+                .split("\n")
+                .map((s) => s.trim())
+                .filter((l) => l && l !== "User goal:" && !l.startsWith("User goal:") && !goalLines.has(l))
+                .slice(-3)
+                .join(" · ")
+                .slice(-500)
             resolve({
                 success: ok,
                 durationSecs: secs(),
                 storiesPassed: passed,
                 storiesTotal: stories.size || passed + failed,
-                error: ok ? null : errTail || (doneSuccess === false ? "run reported failure" : `exit ${code}`),
+                // Prefer the real reason from the stream, then cleaned stderr, then a fallback.
+                error: ok ? null : lastErr || errTail || (doneSuccess === false ? "run reported failure" : `exit ${code} — the run ended without a result (is the claude/codex CLI signed in on this runner?)`),
             })
         })
         child.on("error", (e) => resolve({ success: false, durationSecs: secs(), error: e.message }))

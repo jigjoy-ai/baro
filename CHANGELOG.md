@@ -2,6 +2,8 @@
 
 A concise list of every published version. For full release notes, see the corresponding commit on the v* tag.
 
+## v0.59.2 — fix(0.59.2): real failure reason on a failed run (not the goal echo). When a run failed before emitting a result, the runner reported baro's startup "User goal: …" stderr banner as the error — so the dashboard showed the goal back instead of why it failed. Now capture the actual reason from the event stream (story/planner errors, failed `done`), filter the goal banner out of the stderr fallback, and give a clear hint when a run ends with no result (is the claude/codex CLI signed in on this runner?). `runner.mjs` rebuilt.
+
 ## v0.59.1 — fix(0.59.1): clean diffOnly preview — no noisy push/PR errors. A diffOnly run cloned the public repo but kept its `origin`, so baro still tried to push the branch + open a PR with no token — flooding the log with `push rejected`, `could not read Username`, `gh pr create failed`. The runner now **removes the origin remote** right after the public clone, so baro hits the clean "no remote, skipping push" path and the preview log shows only real work. `runner.mjs` rebuilt.
 
 ## v0.59.0 — feat(0.59.0): no-GitHub preview runs (`diffOnly`). A dispatched run can now set `diffOnly` — the runner clones the PUBLIC repo WITHOUT a token, runs baro, and returns the resulting unified patch instead of pushing a branch + opening a PR. Powers baro-cloud's "preview on any public repo" path: a visitor sees baro's actual changes (a downloadable diff in the dashboard) before connecting GitHub. The finalizer's push/PR is skipped gracefully (no token), and `GIT_TERMINAL_PROMPT=0` keeps it from blocking. `runner.mjs` rebuilt.
