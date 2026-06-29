@@ -42,7 +42,7 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.64.0"
+const VERSION = "0.65.0"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
 // a.b.c < x.y.z, numeric per-segment.
@@ -310,23 +310,28 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         child.on("close", (code) => {
             const ok = doneSuccess ?? (code === 0 && failed === 0 && passed > 0)
             // Don't let baro's startup "User goal:" banner (it echoes the goal to stderr)
-            // masquerade as the failure reason — filter it + the goal lines out.
+            // or the agent CLI's harmless "no stdin" warning masquerade as the failure
+            // reason — filter them + the goal lines out so the helpful fallback can win.
             const goalLines = new Set(d.goal.split("\n").map((s) => s.trim()).filter(Boolean))
+            const isNoise = (l: string) => /no stdin data received|redirect stdin explicitly|proceeding without it/i.test(l)
             const errTail = stderrTail
                 .trim()
                 .split("\n")
                 .map((s) => s.trim())
-                .filter((l) => l && l !== "User goal:" && !l.startsWith("User goal:") && !goalLines.has(l))
+                .filter((l) => l && l !== "User goal:" && !l.startsWith("User goal:") && !goalLines.has(l) && !isNoise(l))
                 .slice(-3)
                 .join(" · ")
                 .slice(-500)
+            // The agent CLI produced nothing usable (e.g. it isn't signed in on this
+            // self-hosted machine) — say so clearly and point at the zero-setup path.
+            const cliHint = `the agent CLI on this runner produced no output — make sure \`claude\` (or \`codex\`) is installed and signed in here (run it once), or run on baro's cloud instead (no setup)`
             resolve({
                 success: ok,
                 durationSecs: secs(),
                 storiesPassed: passed,
                 storiesTotal: stories.size || passed + failed,
                 // Prefer the real reason from the stream, then cleaned stderr, then a fallback.
-                error: ok ? null : lastErr || errTail || (doneSuccess === false ? "run reported failure" : `exit ${code} — the run ended without a result (is the claude/codex CLI signed in on this runner?)`),
+                error: ok ? null : lastErr || errTail || (doneSuccess === false ? "run reported failure" : cliHint),
             })
         })
         child.on("error", (e) => resolve({ success: false, durationSecs: secs(), error: e.message }))
