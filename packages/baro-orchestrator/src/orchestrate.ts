@@ -15,6 +15,7 @@ import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
     GitGate,
     createOrCheckoutBranch,
+    getCurrentBranch,
     getGitFileStats,
     getHeadSha,
     gitPushWithRetry,
@@ -55,7 +56,7 @@ import { SurgeonCodex } from "./participants/surgeon-codex.js"
 import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
 import { SurgeonOpenCode } from "./participants/surgeon-opencode.js"
 import { SurgeonPi } from "./participants/surgeon-pi.js"
-import { PrdFile, loadPrd } from "./prd.js"
+import { PrdFile, loadPrd, savePrd } from "./prd.js"
 import { RunStartRequest } from "./semantic-events.js"
 import { emit } from "./tui-protocol.js"
 
@@ -79,6 +80,13 @@ export interface OrchestrateConfig {
      * whether `cwd` is a git working tree.
      */
     withGit?: boolean
+    /**
+     * Continue mode (`--continue`): keep working on the CURRENT branch instead of
+     * creating a new one, so the run lands on the existing PR (the finalizer's
+     * `gh pr create` finds it and updates in place). Used by follow-up runs — the
+     * branch already holds the prior work, which baro re-reads as context.
+     */
+    continueRun?: boolean
     /**
      * Whether to wire the Librarian (cross-agent runtime memory) into
      * the run. When on, prompts for stories at later DAG levels are
@@ -397,6 +405,22 @@ export async function orchestrate(
     const useGit = config.withGit ?? (await isInsideGitRepo(config.cwd))
     const gitGate = new GitGate()
     let baseSha: string | null = null
+
+    // Continue mode: stay on the CURRENT branch (a follow-up landing on the existing PR)
+    // instead of the planner's fresh branch. Override prd.branchName with the checked-out
+    // branch so createOrCheckoutBranch is a no-op and the Finalizer pushes here → gh pr
+    // create finds the open PR and updates it. The branch already holds the prior work.
+    if (config.continueRun && useGit) {
+        const cur = await getCurrentBranch(config.cwd)
+        if (cur) {
+            const prd = loadPrd(config.prdPath)
+            if (prd.branchName !== cur) {
+                prd.branchName = cur
+                savePrd(config.prdPath, prd)
+            }
+            process.stderr.write(`[orchestrate] continue mode — staying on branch '${cur}' (updates the existing PR)\n`)
+        }
+    }
 
     // Unique per-run id, shared by the memory session path and the per-story
     // worktree branch/dir names so concurrent runs and resumes never collide.

@@ -555,6 +555,13 @@ async fn run_app(
         app.with_surgeon = false;
     }
 
+    // --continue: keep working on the current branch (follow-up onto the existing PR).
+    // The branch override happens in the JS orchestrator; the spawned cli.mjs inherits
+    // this env (orchestrator_client doesn't clear it), so we don't thread a config field.
+    if cli.continue_run {
+        std::env::set_var("BARO_CONTINUE", "1");
+    }
+
     // Effort level for spawned `claude` processes (default "high").
     app.effort = cli.effort.clone();
 

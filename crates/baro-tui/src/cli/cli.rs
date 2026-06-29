@@ -163,6 +163,13 @@ pub struct Cli {
     #[arg(long)]
     pub quick: bool,
 
+    /// Continue a previous run on the CURRENT branch instead of opening a new
+    /// one — the follow-up lands on the existing PR. The branch already holds
+    /// the prior work, which baro re-reads as context.
+    /// `baro --continue "now add error handling"`
+    #[arg(long = "continue")]
+    pub continue_run: bool,
+
     /// LLM provider for the run.
     ///
     ///   claude (default) — drives Architect, Planner, Critic, Surgeon,

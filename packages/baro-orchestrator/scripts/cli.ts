@@ -41,6 +41,7 @@ interface CliArgs {
     timeout: number
     model?: string
     noGit: boolean
+    continueRun: boolean
     noTuiEvents: boolean
     auditLog?: string
     withCritic: boolean
@@ -72,6 +73,7 @@ function parseArgs(argv: string[]): CliArgs {
         parallel: 0,
         timeout: 0, // 0 = auto (effort-scaled in storyTimeoutSecs); --timeout N overrides absolutely
         noGit: false,
+        continueRun: false,
         noTuiEvents: false,
         withCritic: false,
         noLibrarian: false,
@@ -107,6 +109,9 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--no-git":
                 args.noGit = true
+                break
+            case "--continue":
+                args.continueRun = true
                 break
             case "--no-tui-events":
                 args.noTuiEvents = true
@@ -320,6 +325,7 @@ async function main(): Promise<void> {
         defaultModel: args.model ?? "sonnet",
         emitTuiEvents: !args.noTuiEvents,
         withGit: args.noGit ? false : undefined,
+        continueRun: args.continueRun || process.env.BARO_CONTINUE === "1",
         auditLogPath: args.auditLog,
         withCritic: args.withCritic,
         criticModel: args.criticModel,
