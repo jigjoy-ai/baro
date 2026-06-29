@@ -42,7 +42,7 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.63.0"
+const VERSION = "0.64.0"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
 // a.b.c < x.y.z, numeric per-segment.
@@ -193,6 +193,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
     let cleanup: (() => void) | undefined
     let diffBase: string | undefined
     let scratch = false
+    let prUrl: string | null = null
     if (d.repo && (d.githubToken || d.diffOnly)) {
         try {
             // diffOnly → public clone (no token); otherwise authenticated (private + push).
@@ -289,6 +290,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
                 if (ev.type === "story_complete") passed++
                 else if (ev.type === "story_error") failed++
                 else if (ev.type === "done") doneSuccess = !!ev.success
+                else if (ev.type === "finalize_complete") prUrl = ((ev.data as Record<string, unknown> | undefined)?.pr_url as string) ?? (ev.pr_url as string) ?? prUrl
                 // Capture the real failure reason from the stream (story/planner/architect
                 // errors, or a failed `done`), so we don't fall back to a noisy stderr banner.
                 const d2 = (ev.data ?? {}) as Record<string, unknown>
@@ -333,8 +335,66 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
     if ((d.diffOnly || scratch) && diffBase) {
         outcome.diff = captureDiff(cwd, diffBase)
     }
+    // PR doctor (opt-in, read-only for now): once the PR is open, watch its CI and
+    // report the result back so the user sees green/red in the dashboard. The auto-fix
+    // loop builds on this — it's gated off until validated against real CI.
+    if (process.env.BARO_PR_DOCTOR === "1" && d.repo && !d.diffOnly && !scratch && outcome.success && prUrl) {
+        try {
+            await watchCi(cwd, emit, signal)
+        } catch (e) {
+            emit({ type: "story_log", agentId: "_ci", data: { type: "story_log", id: "_ci", line: `[pr-doctor] CI watch error: ${(e as Error).message}` } })
+        }
+    }
     cleanup?.()
     return outcome
+}
+
+// Run a `gh` command, capturing exit code + combined output (gh exits non-zero on
+// failing/pending checks, which is signal, not an error).
+function gh(args: string[], cwd: string): { code: number; out: string } {
+    try {
+        const out = execFileSync("gh", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })
+        return { code: 0, out }
+    } catch (e) {
+        const err = e as { status?: number; stdout?: Buffer | string; stderr?: Buffer | string }
+        return {
+            code: typeof err.status === "number" ? err.status : 1,
+            out: `${err.stdout?.toString() ?? ""}${err.stderr?.toString() ?? ""}`,
+        }
+    }
+}
+
+// Poll the PR's CI until it settles, reporting status as story_log lines under "_ci"
+// so it shows in the dashboard activity. Read-only — never pushes.
+async function watchCi(cwd: string, emit: (e: WireEvent) => void, signal: AbortSignal): Promise<void> {
+    const log = (line: string) => emit({ type: "story_log", agentId: "_ci", data: { type: "story_log", id: "_ci", line } })
+    const timeoutMs = Number(process.env.BARO_PR_DOCTOR_CI_TIMEOUT ?? 900) * 1000
+    const deadline = Date.now() + timeoutMs
+    log("watching the pull request's CI…")
+    while (Date.now() < deadline && !signal.aborted) {
+        const r = gh(["pr", "checks"], cwd)
+        const out = r.out.toLowerCase()
+        if (out.includes("no checks") || out.includes("no commit statuses")) {
+            log("no CI configured on this repo — nothing to watch.")
+            return
+        }
+        if (r.code === 0) {
+            log("✓ CI is green — all checks passed.")
+            return
+        }
+        if (r.code === 8 || out.includes("pending") || out.includes("in progress") || out.includes("queued")) {
+            await new Promise((res) => setTimeout(res, 20000))
+            continue
+        }
+        const fails = r.out
+            .split("\n")
+            .filter((l) => /fail|error|✗|×/i.test(l))
+            .slice(0, 8)
+            .join("\n")
+        log(`✗ CI is failing:\n${fails || r.out.slice(-500)}`)
+        return
+    }
+    log("CI watch timed out while checks were still pending.")
 }
 
 // Set when the control plane refuses us (bad/expired token): stop the reconnect
