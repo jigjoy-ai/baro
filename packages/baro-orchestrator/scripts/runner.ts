@@ -29,6 +29,8 @@ interface RunDispatchMsg {
     // No-GitHub preview: clone the (public) repo WITHOUT a token, run, and return the
     // diff instead of opening a PR — so a visitor sees baro's output before connecting.
     diffOnly?: boolean
+    // Skip planning (architect + planner) — single-agent fast path for trivial goals.
+    quick?: boolean
 }
 type ToRunner = RunDispatchMsg | { t: "cancel"; storyId: string } | { t: "ping"; ts: number } | { t: "rejected"; reason: string } | { t: string }
 
@@ -42,7 +44,7 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.65.0"
+const VERSION = "0.66.0"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
 // a.b.c < x.y.z, numeric per-segment.
@@ -257,7 +259,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         // the latest opus for the claude backend) — we don't override it.
         const child = spawn(
             baroBin,
-            ["--headless", d.goal, "--cwd", cwd, "--llm", d.route?.backend ?? "claude", "--parallel", String(d.parallel), "--timeout", String(d.timeoutSecs)],
+            ["--headless", d.goal, "--cwd", cwd, "--llm", d.route?.backend ?? "claude", "--parallel", String(d.parallel), "--timeout", String(d.timeoutSecs), ...(d.quick ? ["--quick"] : [])],
             { cwd, env, stdio: ["ignore", "pipe", "pipe"] },
         )
 
