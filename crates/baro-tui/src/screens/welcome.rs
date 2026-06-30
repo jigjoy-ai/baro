@@ -156,7 +156,7 @@ pub fn render(f: &mut Frame, app: &App) {
     f.render_widget(tagline, chunks[3]);
 
     // ── Goal input ──
-    let input_width = (w - 10).min(100);
+    let input_width = w.saturating_sub(10).min(100);
     let input_area = center(chunks[5], input_width);
 
     let cursor_visible = (app.tick_count / 5).is_multiple_of(2);
