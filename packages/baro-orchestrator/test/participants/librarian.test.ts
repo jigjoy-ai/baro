@@ -3,7 +3,12 @@ import assert from "node:assert/strict"
 
 import { FunctionCallItem, FunctionCallOutputItem } from "@mozaik-ai/core"
 
-import { AgentTargetedMessage, Knowledge, StorySpawned } from "../../src/semantic-events.js"
+import {
+    AgentTargetedMessage,
+    Knowledge,
+    StoryResult,
+    StorySpawned,
+} from "../../src/semantic-events.js"
 import { Librarian } from "../../src/participants/librarian.js"
 import { joinWithCapture, source } from "./helpers.js"
 
@@ -66,5 +71,33 @@ describe("Librarian", () => {
         assert.equal(targeted[0].data.recipientId, "S2")
         assert.equal(targeted[0].data.metadata.from_agent, "S1")
         assert.ok(targeted[0].data.text.includes("Grep 'auth' in src"))
+    })
+
+    it("stops broadcasting findings to stories after they complete", async () => {
+        const librarian = new Librarian()
+        const env = joinWithCapture(librarian)
+
+        await librarian.onExternalEvent(source("conductor"), StorySpawned.create({ storyId: "S2" }))
+        await librarian.onExternalEvent(
+            source("S2"),
+            StoryResult.create({
+                storyId: "S2",
+                success: true,
+                attempts: 1,
+                durationSecs: 3,
+                error: null,
+            }),
+        )
+        await librarian.onExternalFunctionCall(
+            source("S1"),
+            call("read-1", "Read", { file_path: "src/auth.ts" }),
+        )
+        await librarian.onExternalFunctionCallOutput(
+            source("S1"),
+            FunctionCallOutputItem.create("read-1", "export const token = 'abc'"),
+        )
+
+        assert.equal(librarian.getKnowledge().length, 1)
+        assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
     })
 })

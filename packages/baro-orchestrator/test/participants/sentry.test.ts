@@ -56,4 +56,26 @@ describe("Sentry", () => {
             payload: { path: "src/conflict.ts", agents: ["S2", "S1"] },
         })
     })
+
+    it("tracks overlaps without emitting coordination when notices are disabled", async () => {
+        const overlaps: Array<{ path: string; agents: string[] }> = []
+        const sentry = new Sentry({
+            emitNotice: false,
+            onOverlap: (info) => overlaps.push(info),
+        })
+        const env = joinWithCapture(sentry)
+
+        await sentry.onExternalFunctionCall(
+            source("S1"),
+            call("Write", { file_path: "src/shared.ts", content: "first" }),
+        )
+        await sentry.onExternalFunctionCall(
+            source("S2"),
+            call("Write", { file_path: "src/shared.ts", content: "second" }),
+        )
+
+        assert.equal(sentry.getTouches().length, 2)
+        assert.deepEqual(overlaps, [{ path: "src/shared.ts", agents: ["S2", "S1"] }])
+        assert.equal(env.events.filter(Coordination.is).length, 0)
+    })
 })

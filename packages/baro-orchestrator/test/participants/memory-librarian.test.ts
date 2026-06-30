@@ -4,6 +4,7 @@ import assert from "node:assert/strict"
 import { FunctionCallItem, FunctionCallOutputItem } from "@mozaik-ai/core"
 
 import { MemoryLibrarian } from "../../src/participants/memory-librarian.js"
+import { StoryResult, StorySpawned } from "../../src/semantic-events.js"
 import { joinWithCapture, source } from "./helpers.js"
 
 function call(
@@ -35,5 +36,25 @@ describe("MemoryLibrarian", () => {
         )
 
         assert.deepEqual(env.events, [])
+    })
+
+    it("stays silent for story lifecycle events when disabled", async () => {
+        const librarian = new MemoryLibrarian({ disabled: true })
+        const env = joinWithCapture(librarian)
+
+        await librarian.onExternalEvent(source("conductor"), StorySpawned.create({ storyId: "S2" }))
+        await librarian.onExternalEvent(
+            source("S2"),
+            StoryResult.create({
+                storyId: "S2",
+                success: false,
+                attempts: 2,
+                durationSecs: 10,
+                error: "failed",
+            }),
+        )
+
+        assert.deepEqual(env.events, [])
+        assert.equal(await librarian.gatherContext("S3", ["auth"]), null)
     })
 })
