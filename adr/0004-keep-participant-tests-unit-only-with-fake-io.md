@@ -1,0 +1,6 @@
+# ADR-0004: Keep participant tests unit-only with fake IO
+
+**Status:** Accepted
+**Context:** Several participants shell out to `claude`, `codex`, `opencode`, `pi`, `gh`, or OpenAI-backed paths; live CLIs would make unit tests slow, flaky, and credential-dependent.
+**Decision:** Do not invoke real external LLM CLIs, `gh`, network APIs, or ONNX/vector-store downloads in participant unit tests. For CLI wrapper participants, use temporary executable Node scripts created under the test temp directory and pass them via existing option fields such as `claudeBin`, `codexBin`, `opencodeBin`, and `piBin`; those scripts should emit minimal JSONL accepted by the corresponding stream mapper and exit deterministically. For Finalizer, use `createPr: false` or a temp git repo plus fake `gh` only when asserting PR-command behavior. For `MemoryLibrarian`, use `disabled: true` for no-store behavior or an in-memory stub only through public options; do not rely on the real `@baro/memory` embedding path.
+**Consequences:** The participant test suite must pass on a clean machine without Claude, Codex, OpenCode, Pi, GitHub CLI, API keys, or network access. Live integration coverage remains in separate integration scripts/tests, not this suite.

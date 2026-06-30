@@ -1,0 +1,6 @@
+# ADR-0005: Assert one primary contract per participant, not exhaustive internals
+
+**Status:** Accepted
+**Context:** There are 34 participant classes; exhaustive branch coverage would turn this goal into a broad refactor and encourage brittle private-field assertions.
+**Decision:** Each participant test file must include at least one test that exercises the participant’s public bus/IO contract: observers must react to the event or Mozaik item they subscribe to and emit or record the documented result; push-only participants such as `Operator` must translate public commands; CLI participants must prove start/phase/result handling against fake process output; story-agent wrappers must prove they emit terminal `StoryResult`/outcome on a deterministic fake backend; forwarders must prove the expected `BaroEvent` shape on stdout. Do not assert private fields except where an existing public accessor already exposes state, such as `getPhase()`, `getTouches()`, `getKnowledge()`, or `getCurrent*()`.
+**Consequences:** Tests provide a regression net for every participant without freezing implementation details. Agents should prefer semantic-event factory guards and explicit field assertions over broad snapshots.
