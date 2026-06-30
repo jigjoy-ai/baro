@@ -52,6 +52,35 @@ describe("Critic", () => {
         )
         assert.match(messages[0]!.data.text, /Missing tests/)
     })
+
+    it("emits pass critiques without corrective messages", async () => {
+        const critic = new Critic({
+            targets: new Map([["agent-a", ["must include tests"]]]),
+            model: "fake-claude-model",
+        })
+        Object.defineProperty(critic, "evaluate", {
+            value: async () => ({
+                verdict: "pass",
+                reasoning: "All criteria satisfied",
+                violatedCriteria: [],
+            }),
+        })
+        const env = joinWithCapture(critic)
+
+        await critic.onExternalEvent(source("runner"), resultEvent())
+        await critic.idle()
+
+        const critiques = env.events.filter(Critique.is)
+        const messages = env.events.filter(AgentTargetedMessage.is)
+
+        assert.equal(critiques.length, 1)
+        assert.equal(critiques[0]!.data.agentId, "agent-a")
+        assert.equal(critiques[0]!.data.verdict, "pass")
+        assert.equal(critiques[0]!.data.reasoning, "All criteria satisfied")
+        assert.deepEqual(critiques[0]!.data.violatedCriteria, [])
+        assert.equal(critiques[0]!.data.modelUsed, "fake-claude-model")
+        assert.equal(messages.length, 0)
+    })
 })
 
 async function emitResultTurns(critic: Critic, turns: number): Promise<void> {
