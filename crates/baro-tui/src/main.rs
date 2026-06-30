@@ -1138,12 +1138,26 @@ async fn run_app(
                         }
                         KeyCode::Char(c) => {
                             if app.welcome_field == app::WelcomeField::Goal {
-                                app.goal_input.push(c);
+                                // Word-delete chords some terminals send as a Char:
+                                // Ctrl+W (raw 0x17 or 'w'+CONTROL) and Alt/Option+Delete (0x7f).
+                                let is_ctrl_w = c == '\u{17}'
+                                    || (c == 'w' && key.modifiers.contains(KeyModifiers::CONTROL));
+                                let is_alt_del =
+                                    c == '\u{7f}' && key.modifiers.contains(KeyModifiers::ALT);
+                                if is_ctrl_w || is_alt_del {
+                                    delete_prev_word(&mut app.goal_input);
+                                } else {
+                                    app.goal_input.push(c);
+                                }
                             }
                         }
                         KeyCode::Backspace => {
                             if app.welcome_field == app::WelcomeField::Goal {
-                                app.goal_input.pop();
+                                if key.modifiers.contains(KeyModifiers::ALT) {
+                                    delete_prev_word(&mut app.goal_input);
+                                } else {
+                                    app.goal_input.pop();
+                                }
                             }
                         }
                         _ => {}
@@ -2004,4 +2018,37 @@ fn spawn_executor(
         echo_raw,
     };
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
+}
+
+/// Delete the previous word from the goal input, terminal-style: drop any
+/// trailing whitespace, then the trailing run of non-whitespace characters.
+fn delete_prev_word(s: &mut String) {
+    let trimmed = s.trim_end();
+    match trimmed.rfind(char::is_whitespace) {
+        // Keep up to and including the boundary whitespace (char-boundary safe).
+        Some(idx) => {
+            let end = idx + trimmed[idx..].chars().next().unwrap().len_utf8();
+            s.truncate(end);
+        }
+        None => s.clear(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::delete_prev_word;
+
+    fn deleted(input: &str) -> String {
+        let mut s = input.to_string();
+        delete_prev_word(&mut s);
+        s
+    }
+
+    #[test]
+    fn word_delete_cases() {
+        assert_eq!(deleted("hello world"), "hello ");
+        assert_eq!(deleted("hello world   "), "hello ");
+        assert_eq!(deleted("hello"), "");
+        assert_eq!(deleted(""), "");
+    }
 }
