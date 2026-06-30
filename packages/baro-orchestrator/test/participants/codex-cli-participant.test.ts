@@ -1,4 +1,4 @@
-import { chmodSync, writeFileSync } from "node:fs"
+import { chmodSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
@@ -36,6 +36,25 @@ function writeFakeCodex(dir: string): string {
     )
     chmodSync(bin, 0o755)
     return bin
+}
+
+function writeFakeCodexArgCapture(
+    dir: string,
+): { bin: string; argsPath: string } {
+    const bin = join(dir, "fake-codex-args.mjs")
+    const argsPath = join(dir, "args.json")
+
+    writeFileSync(
+        bin,
+        `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)));
+console.log(JSON.stringify({ type: "thread.started", thread_id: "codex-thread-args" }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 2, output_tokens: 3 } }));
+`,
+    )
+    chmodSync(bin, 0o755)
+    return { bin, argsPath }
 }
 
 describe("CodexCliParticipant", () => {
@@ -80,6 +99,40 @@ describe("CodexCliParticipant", () => {
                         event.data.phase === "completed",
                 ),
             )
+        })
+    })
+
+    it("passes configured command arguments to the fake Codex process", async () => {
+        await withTempDir("baro-codex-cli-args-", async (dir) => {
+            const { bin, argsPath } = writeFakeCodexArgCapture(dir)
+            const env = captureEnv()
+            const participant = new CodexCliParticipant("codex-agent", {
+                cwd: dir,
+                prompt: "do the configured work",
+                codexBin: bin,
+                skipGitRepoCheck: true,
+                bypassSandbox: true,
+                model: "gpt-test",
+                extraArgs: ["--profile", "baro-test"],
+            })
+
+            participant.start(env)
+            await participant.ready
+            const summary = await participant.done
+
+            assert.equal(summary.exitCode, 0)
+            assert.equal(summary.threadId, "codex-thread-args")
+            assert.deepEqual(JSON.parse(readFileSync(argsPath, "utf8")), [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model",
+                "gpt-test",
+                "--profile",
+                "baro-test",
+                "do the configured work",
+            ])
         })
     })
 })
