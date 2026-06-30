@@ -6,6 +6,18 @@ import { AgentTargetedMessage } from "../../src/semantic-events.js"
 import { joinWithCapture } from "./helpers.js"
 
 describe("Operator", () => {
+    it("ignores redirect commands until it has joined an environment", () => {
+        const operator = new Operator()
+
+        assert.doesNotThrow(() => {
+            operator.dispatch({
+                kind: "redirect",
+                storyId: "S1",
+                message: "No environment yet.",
+            })
+        })
+    })
+
     it("translates redirect commands into targeted semantic messages", () => {
         const operator = new Operator()
         const env = joinWithCapture(operator)
