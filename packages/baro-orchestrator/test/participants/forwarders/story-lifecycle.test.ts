@@ -70,4 +70,32 @@ describe("StoryLifecycleForwarder", () => {
             },
         ])
     })
+
+    it("emits story_error BaroEvents for failed story results", async () => {
+        const forwarder = new StoryLifecycleForwarder()
+        const agent = source("S2")
+
+        const events = parseEvents(await captureStdout(async () => {
+            await forwarder.onExternalEvent(
+                agent,
+                StoryResult.create({
+                    storyId: "S2",
+                    success: false,
+                    attempts: 3,
+                    durationSecs: 25,
+                    error: "tests failed",
+                }),
+            )
+        }))
+
+        assert.deepEqual(events, [
+            {
+                type: "story_error",
+                id: "S2",
+                error: "tests failed",
+                attempt: 3,
+                max_retries: 3,
+            },
+        ])
+    })
 })

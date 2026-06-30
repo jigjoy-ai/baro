@@ -54,4 +54,60 @@ describe("AgentStreamForwarder", () => {
             { type: "activity", id: "S1", kind: "tool_result", text: "done" },
         ])
     })
+
+    it("emits typed activity shapes for file changes and test results", async () => {
+        const forwarder = new AgentStreamForwarder()
+        const agent = source("S2")
+
+        const events = parseEvents(await captureStdout(async () => {
+            await forwarder.onExternalFunctionCall(
+                agent,
+                FunctionCallItem.rehydrate({
+                    callId: "call-1",
+                    name: "write_file",
+                    args: JSON.stringify({ path: "src/new.ts" }),
+                }),
+            )
+            await forwarder.onExternalFunctionCall(
+                agent,
+                FunctionCallItem.rehydrate({
+                    callId: "call-2",
+                    name: "edit_file",
+                    args: JSON.stringify({ file_path: "src/existing.ts" }),
+                }),
+            )
+            await forwarder.onExternalFunctionCallOutput(
+                agent,
+                FunctionCallOutputItem.create("call-3", "12 tests passed\nok"),
+            )
+        }))
+
+        assert.deepEqual(events, [
+            {
+                type: "activity",
+                id: "S2",
+                kind: "file_change",
+                tool: "write",
+                op: "create",
+                path: "src/new.ts",
+                text: "src/new.ts",
+            },
+            {
+                type: "activity",
+                id: "S2",
+                kind: "file_change",
+                tool: "write",
+                op: "modify",
+                path: "src/existing.ts",
+                text: "src/existing.ts",
+            },
+            {
+                type: "activity",
+                id: "S2",
+                kind: "test",
+                ok: true,
+                text: "12 tests passed",
+            },
+        ])
+    })
 })

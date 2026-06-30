@@ -47,4 +47,29 @@ describe("CoordinationForwarder", () => {
             },
         ])
     })
+
+    it("emits exact story_log shape for merge coordination", async () => {
+        const forwarder = new CoordinationForwarder()
+        const lines = await captureStdout(async () => {
+            await forwarder.onExternalEvent(
+                source("conductor"),
+                Coordination.create({
+                    fromAgentId: "conductor",
+                    recipientId: "S4",
+                    kind: "merge",
+                    reason: "shared dependency complete",
+                    payload: { level: 2 },
+                }),
+            )
+        })
+
+        const events = lines.map((line) => JSON.parse(line) as BaroEvent)
+        assert.deepEqual(events, [
+            {
+                type: "story_log",
+                id: "S4",
+                line: "[sentry/merge] shared dependency complete",
+            },
+        ])
+    })
 })

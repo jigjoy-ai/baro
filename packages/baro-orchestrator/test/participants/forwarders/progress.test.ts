@@ -25,4 +25,23 @@ describe("ProgressForwarder", () => {
             { type: "progress", completed: 2, total: 5, percentage: 40 },
         ])
     })
+
+    it("emits zero-percent progress for the first running level", async () => {
+        const forwarder = new ProgressForwarder()
+        const lines = await captureStdout(async () => {
+            await forwarder.onExternalEvent(
+                source("conductor"),
+                ConductorState.create({
+                    phase: "running_level",
+                    currentLevel: 1,
+                    totalLevels: 4,
+                }),
+            )
+        })
+
+        const events = lines.map((line) => JSON.parse(line) as BaroEvent)
+        assert.deepEqual(events, [
+            { type: "progress", completed: 0, total: 4, percentage: 0 },
+        ])
+    })
 })
