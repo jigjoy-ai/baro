@@ -51,6 +51,25 @@ function writeFakeOpenCode(dir: string): string {
     return bin
 }
 
+function writeFailingFakeOpenCode(dir: string): string {
+    const bin = join(dir, "fake-opencode-fail.mjs")
+
+    writeFileSync(
+        bin,
+        `#!/usr/bin/env node
+console.log(JSON.stringify({
+  type: "step_start",
+  timestamp: 1,
+  sessionID: "opencode-session-fail",
+  part: { type: "step-start" }
+}));
+process.exit(7);
+`,
+    )
+    chmodSync(bin, 0o755)
+    return bin
+}
+
 describe("OpenCodeCliParticipant", () => {
     it("maps fake JSONL output into lifecycle and tool events", async () => {
         await withTempDir("baro-opencode-cli-", async (dir) => {
@@ -95,6 +114,37 @@ describe("OpenCodeCliParticipant", () => {
                     (event) =>
                         OpenCodeStepEvent.is(event) &&
                         event.data.stepType === "tool_result",
+                ),
+            )
+        })
+    })
+
+    it("reports a failed phase when the fake OpenCode process exits nonzero", async () => {
+        await withTempDir("baro-opencode-cli-fail-", async (dir) => {
+            const env = captureEnv()
+            const participant = new OpenCodeCliParticipant("opencode-agent", {
+                cwd: dir,
+                prompt: "fail deterministically",
+                opencodeBin: writeFailingFakeOpenCode(dir),
+            })
+
+            participant.start(env)
+            await participant.ready
+            const summary = await participant.done
+
+            assert.equal(summary.exitCode, 7)
+            assert.equal(summary.sessionId, "opencode-session-fail")
+            assert.equal(summary.error, null)
+            assert.equal(summary.sawStepFinish, false)
+            assert.equal(summary.toolCallCount, 0)
+            assert.equal(participant.getPhase(), "failed")
+            assert.ok(
+                env.events.some(
+                    (event) =>
+                        AgentState.is(event) &&
+                        event.data.agentId === "opencode-agent" &&
+                        event.data.phase === "failed" &&
+                        event.data.detail === "exit code 7",
                 ),
             )
         })

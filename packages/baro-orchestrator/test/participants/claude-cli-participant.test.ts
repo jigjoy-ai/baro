@@ -1,4 +1,4 @@
-import { chmodSync, writeFileSync } from "node:fs"
+import { chmodSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
@@ -7,9 +7,10 @@ import { ClaudeCliParticipant } from "../../src/participants/claude-cli-particip
 import {
     AgentResult,
     AgentState,
+    AgentTargetedMessage,
     ClaudeSystem,
 } from "../../src/semantic-events.js"
-import { captureEnv, withTempDir } from "./helpers.js"
+import { captureEnv, source, withTempDir } from "./helpers.js"
 
 function writeFakeClaude(dir: string): string {
     const bin = join(dir, "fake-claude.mjs")
@@ -35,6 +36,40 @@ function writeFakeClaude(dir: string): string {
     )
     chmodSync(bin, 0o755)
     return bin
+}
+
+function writeFakeClaudeStdinCapture(
+    dir: string,
+): { bin: string; stdinPath: string } {
+    const bin = join(dir, "fake-claude-stdin.mjs")
+    const stdinPath = join(dir, "stdin.jsonl")
+
+    writeFileSync(
+        bin,
+        `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+const stdinPath = ${JSON.stringify(stdinPath)};
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "claude-session-stdin" }));
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+});
+process.stdin.on("end", () => {
+  writeFileSync(stdinPath, input);
+  console.log(JSON.stringify({
+    type: "result",
+    subtype: "success",
+    session_id: "claude-session-stdin",
+    is_error: false,
+    result: "stdin captured",
+    num_turns: 1
+  }));
+});
+`,
+    )
+    chmodSync(bin, 0o755)
+    return { bin, stdinPath }
 }
 
 describe("ClaudeCliParticipant", () => {
@@ -78,6 +113,47 @@ describe("ClaudeCliParticipant", () => {
                         event.data.resultText === "claude completed",
                 ),
             )
+        })
+    })
+
+    it("forwards targeted messages to the fake Claude stdin stream", async () => {
+        await withTempDir("baro-claude-cli-stdin-", async (dir) => {
+            const { bin, stdinPath } = writeFakeClaudeStdinCapture(dir)
+            const env = captureEnv()
+            const participant = new ClaudeCliParticipant("claude-agent", {
+                cwd: dir,
+                claudeBin: bin,
+            })
+
+            participant.start(env)
+            await participant.ready
+            await participant.onExternalEvent(
+                source("story-agent"),
+                AgentTargetedMessage.create({
+                    recipientId: "claude-agent",
+                    text: "continue from the bus",
+                    metadata: { storyId: "S3" },
+                }),
+            )
+            participant.closeStdin()
+            const summary = await participant.done
+
+            assert.equal(summary.exitCode, 0)
+            assert.equal(summary.lastResult?.resultText, "stdin captured")
+
+            const lines = readFileSync(stdinPath, "utf8")
+                .trim()
+                .split("\n")
+                .map((line) => JSON.parse(line))
+            assert.deepEqual(lines, [
+                {
+                    type: "user",
+                    message: {
+                        role: "user",
+                        content: "continue from the bus",
+                    },
+                },
+            ])
         })
     })
 })
