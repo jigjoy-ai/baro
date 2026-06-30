@@ -147,4 +147,50 @@ describe("SurgeonPi", () => {
             },
         )
     })
+
+    it("filters malformed dependency modification payload entries", async () => {
+        const verdict = {
+            action: "rewire",
+            reason: "keep dependent reachable",
+            added: [],
+            removed: [],
+            modifiedDeps: [
+                { id: "S2", newDependsOn: ["S1a"] },
+                { id: 12, newDependsOn: ["S1"] },
+                { id: "S3", newDependsOn: "S1" },
+            ],
+        }
+        await withSpawnOutput(
+            [
+                JSON.stringify({
+                    type: "message_end",
+                    message: {
+                        role: "assistant",
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify(verdict),
+                            },
+                        ],
+                    },
+                }),
+            ],
+            0,
+            async () => {
+                const surgeon = new SurgeonPi({
+                    snapshot,
+                    timeoutMs: 10_000,
+                })
+                const env = joinWithCapture(surgeon)
+
+                await surgeon.onExternalEvent(source("story-agent"), failure)
+                await surgeon.idle()
+
+                const replans = env.events.filter(Replan.is)
+                assert.equal(replans.length, 1)
+                assert.equal(replans[0]!.data.reason, "rewire: keep dependent reachable")
+                assert.deepEqual(replans[0]!.data.modifiedDeps, { S2: ["S1a"] })
+            },
+        )
+    })
 })

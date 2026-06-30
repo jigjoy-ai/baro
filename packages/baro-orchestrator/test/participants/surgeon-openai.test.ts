@@ -156,4 +156,25 @@ describe("SurgeonOpenAI", () => {
         assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
         assert.deepEqual(replans[0]!.data.modifiedDeps, { S2: ["S1a"] })
     })
+
+    it("falls back to a deterministic Replan when OpenAI returns malformed text", async () => {
+        responseMode = "json"
+        assistantText = "no replan json available"
+        const surgeon = new SurgeonOpenAI({
+            snapshot,
+            model: "baro-test-model",
+        })
+        const env = joinWithCapture(surgeon)
+
+        await surgeon.onExternalEvent(source("story-agent"), failure)
+        await surgeon.idle()
+
+        const replans = env.events.filter(Replan.is)
+        assert.equal(replans.length, 1)
+        assert.deepEqual(replans[0]!.data.addedStories, [])
+        assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
+        assert.deepEqual(replans[0]!.data.modifiedDeps, {})
+        assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
+        assert.match(replans[0]!.data.reason, /openai-llm fallback after error: no JSON object found/)
+    })
 })

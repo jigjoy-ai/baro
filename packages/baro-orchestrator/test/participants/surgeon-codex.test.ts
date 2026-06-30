@@ -147,4 +147,37 @@ describe("SurgeonCodex", () => {
             },
         )
     })
+
+    it("falls back to a deterministic Replan when Codex returns malformed text", async () => {
+        await withSpawnOutput(
+            [
+                JSON.stringify({
+                    type: "item.completed",
+                    item: {
+                        type: "agent_message",
+                        text: "no replan json available",
+                    },
+                }),
+            ],
+            0,
+            async () => {
+                const surgeon = new SurgeonCodex({
+                    snapshot,
+                    timeoutMs: 10_000,
+                })
+                const env = joinWithCapture(surgeon)
+
+                await surgeon.onExternalEvent(source("story-agent"), failure)
+                await surgeon.idle()
+
+                const replans = env.events.filter(Replan.is)
+                assert.equal(replans.length, 1)
+                assert.deepEqual(replans[0]!.data.addedStories, [])
+                assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
+                assert.deepEqual(replans[0]!.data.modifiedDeps, {})
+                assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
+                assert.match(replans[0]!.data.reason, /codex fallback after error: no JSON object found/)
+            },
+        )
+    })
 })

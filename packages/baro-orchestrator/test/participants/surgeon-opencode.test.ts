@@ -144,4 +144,29 @@ describe("SurgeonOpenCode", () => {
             },
         )
     })
+
+    it("falls back to a deterministic Replan when OpenCode returns malformed text", async () => {
+        await withSpawnOutput(
+            [JSON.stringify({ type: "text", part: { text: "no replan json available" } })],
+            0,
+            async () => {
+                const surgeon = new SurgeonOpenCode({
+                    snapshot,
+                    timeoutMs: 10_000,
+                })
+                const env = joinWithCapture(surgeon)
+
+                await surgeon.onExternalEvent(source("story-agent"), failure)
+                await surgeon.idle()
+
+                const replans = env.events.filter(Replan.is)
+                assert.equal(replans.length, 1)
+                assert.deepEqual(replans[0]!.data.addedStories, [])
+                assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
+                assert.deepEqual(replans[0]!.data.modifiedDeps, {})
+                assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
+                assert.match(replans[0]!.data.reason, /opencode fallback after error: no JSON object found/)
+            },
+        )
+    })
 })
