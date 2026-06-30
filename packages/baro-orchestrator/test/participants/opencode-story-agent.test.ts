@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
-import { delimiter, join } from "node:path"
+import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import { OpenCodeStoryAgent } from "../../src/participants/opencode-story-agent.js"
@@ -12,10 +12,11 @@ describe("OpenCodeStoryAgent", () => {
         await withTempDir("opencode-story-agent-", async (dir) => {
             const binDir = join(dir, "bin")
             const cwd = join(dir, "cwd")
+            const opencodeBin = join(binDir, "opencode")
             mkdirSync(binDir)
             mkdirSync(cwd)
             writeFileSync(
-                join(binDir, "opencode"),
+                opencodeBin,
                 `#!/usr/bin/env node
 console.log(JSON.stringify({ type: "step_start", sessionID: "opencode-session", timestamp: 1 }))
 console.log(JSON.stringify({
@@ -33,60 +34,79 @@ console.log(JSON.stringify({ type: "step_finish", sessionID: "opencode-session",
 process.exit(0)
 `,
             )
-            chmodSync(join(binDir, "opencode"), 0o755)
+            chmodSync(opencodeBin, 0o755)
 
-            await withFakePath(binDir, async () => {
-                const env = captureEnv()
-                const agent = new OpenCodeStoryAgent({
-                    id: "story-opencode",
-                    prompt: "finish the story",
-                    cwd,
-                    retries: 0,
-                    timeoutSecs: 15,
-                })
-
-                const outcome = await agent.run(env)
-                const event = env.events.find(StoryResult.is)
-
-                assert.equal(outcome.success, true)
-                assert.equal(outcome.storyId, "story-opencode")
-                assert.equal(outcome.attempts, 1)
-                assert.equal(outcome.finalSummary?.sessionId, "opencode-session")
-                assert.equal(outcome.finalSummary?.sawStepFinish, true)
-                assert.equal(outcome.finalSummary?.toolCallCount, 1)
-                assert.ok(event)
-                assert.equal(event.data.storyId, "story-opencode")
-                assert.equal(event.data.success, true)
-                assert.equal(event.data.attempts, 1)
-                assert.equal(event.data.error, null)
+            const env = captureEnv()
+            const agent = new OpenCodeStoryAgent({
+                id: "story-opencode",
+                prompt: "finish the story",
+                cwd,
+                opencodeBin,
+                retries: 0,
+                timeoutSecs: 15,
             })
+
+            const outcome = await agent.run(env)
+            const event = env.events.find(StoryResult.is)
+
+            assert.equal(outcome.success, true)
+            assert.equal(outcome.storyId, "story-opencode")
+            assert.equal(outcome.attempts, 1)
+            assert.equal(outcome.finalSummary?.sessionId, "opencode-session")
+            assert.equal(outcome.finalSummary?.sawStepFinish, true)
+            assert.equal(outcome.finalSummary?.toolCallCount, 1)
+            assert.ok(event)
+            assert.equal(event.data.storyId, "story-opencode")
+            assert.equal(event.data.success, true)
+            assert.equal(event.data.attempts, 1)
+            assert.equal(event.data.error, null)
+        })
+    })
+
+    it("emits a failed terminal StoryResult after exhausting OpenCode retries", async () => {
+        await withTempDir("opencode-story-agent-retry-", async (dir) => {
+            const binDir = join(dir, "bin")
+            const cwd = join(dir, "cwd")
+            const opencodeBin = join(binDir, "opencode")
+            mkdirSync(binDir)
+            mkdirSync(cwd)
+            writeFileSync(
+                opencodeBin,
+                `#!/usr/bin/env node
+console.log(JSON.stringify({ type: "step_start", sessionID: "opencode-session", timestamp: 1 }))
+console.log(JSON.stringify({ type: "step_finish", sessionID: "opencode-session", timestamp: 2 }))
+process.exit(0)
+`,
+            )
+            chmodSync(opencodeBin, 0o755)
+
+            const env = captureEnv()
+            const agent = new OpenCodeStoryAgent({
+                id: "story-opencode-retry",
+                prompt: "finish the story",
+                cwd,
+                opencodeBin,
+                retries: 1,
+                retryDelayMs: 0,
+                timeoutSecs: 5,
+            })
+
+            const outcome = await agent.run(env)
+            const events = env.events.filter(StoryResult.is)
+            const event = events[0]
+
+            assert.equal(outcome.success, false)
+            assert.equal(outcome.storyId, "story-opencode-retry")
+            assert.equal(outcome.attempts, 2)
+            assert.match(outcome.error ?? "", /opencode exited 0 but invoked no tools/)
+            assert.equal(outcome.finalSummary?.sawStepFinish, true)
+            assert.equal(outcome.finalSummary?.toolCallCount, 0)
+            assert.equal(events.length, 1)
+            assert.ok(event)
+            assert.equal(event.data.storyId, "story-opencode-retry")
+            assert.equal(event.data.success, false)
+            assert.equal(event.data.attempts, 2)
+            assert.equal(event.data.error, outcome.error)
         })
     })
 })
-
-type FakePathGlobal = typeof globalThis & {
-    __baroFakePathTail?: Promise<void>
-}
-
-async function withFakePath<T>(binDir: string, fn: () => Promise<T>): Promise<T> {
-    const g = globalThis as FakePathGlobal
-    const previous = g.__baroFakePathTail ?? Promise.resolve()
-    let release!: () => void
-    const current = new Promise<void>((resolve) => {
-        release = resolve
-    })
-    g.__baroFakePathTail = previous.then(() => current)
-    await previous
-
-    const oldPath = process.env.PATH
-    process.env.PATH = `${binDir}${delimiter}${oldPath ?? ""}`
-    try {
-        return await fn()
-    } finally {
-        process.env.PATH = oldPath
-        release()
-        if (g.__baroFakePathTail === current) {
-            g.__baroFakePathTail = undefined
-        }
-    }
-}

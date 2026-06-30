@@ -51,6 +51,8 @@ export interface StorySpec {
     model?: string
     /** Optional effort level passed as `claude --effort` (low|medium|high|xhigh|max). */
     effort?: string
+    /** Path to the `claude` binary. Default: "claude" (resolved via PATH). */
+    claudeBin?: string
     /** Retry budget (number of *additional* attempts after the first). */
     retries?: number
     /** Per-attempt timeout in seconds. Default: 600. */
@@ -296,6 +298,7 @@ export class StoryAgent extends BaseObserver {
             cwd: this.spec.cwd,
             model: this.spec.model,
             effort: this.spec.effort,
+            claudeBin: this.spec.claudeBin,
         })
         this.currentClaude = claude
         claude.join(this.envRef)

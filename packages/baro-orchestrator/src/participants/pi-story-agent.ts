@@ -46,6 +46,8 @@ export interface PiStorySpec {
     provider?: string
     /** Optional model override. Treated as an opaque string. */
     model?: string
+    /** Path to the `pi` binary. Default: "pi" (resolved via PATH). */
+    piBin?: string
     /** Retry budget (number of *additional* attempts after the first). */
     retries?: number
     /** Per-attempt timeout in seconds. Default: 600. */
@@ -261,6 +263,7 @@ export class PiStoryAgent extends BaseObserver {
             prompt: this.spec.prompt,
             provider: this.spec.provider,
             model: this.spec.model,
+            piBin: this.spec.piBin,
         })
         this.currentPi = pi
         pi.join(this.envRef)
