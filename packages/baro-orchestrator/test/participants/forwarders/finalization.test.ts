@@ -33,4 +33,26 @@ describe("FinalizationForwarder", () => {
             },
         ])
     })
+
+    it("emits finalize_complete with null PR URL when no PR is created", async () => {
+        const forwarder = new FinalizationForwarder()
+        const lines = await captureStdout(async () => {
+            await forwarder.onExternalEvent(
+                source("finalizer"),
+                PrCreated.create({
+                    url: null,
+                    branch: "feature/s9",
+                    baseBranch: "main",
+                }),
+            )
+        })
+
+        const events = lines.map((line) => JSON.parse(line) as BaroEvent)
+        assert.deepEqual(events, [
+            {
+                type: "finalize_complete",
+                pr_url: null,
+            },
+        ])
+    })
 })

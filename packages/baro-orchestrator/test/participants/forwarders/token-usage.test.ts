@@ -1,7 +1,11 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import { AgentResult, CodexTurnEvent } from "../../../src/semantic-events.js"
+import {
+    AgentResult,
+    ClaudeStreamChunk,
+    CodexTurnEvent,
+} from "../../../src/semantic-events.js"
 import type { BaroEvent } from "../../../src/tui-protocol.js"
 import { TokenUsageForwarder } from "../../../src/participants/forwarders/token-usage.js"
 import { captureStdout, source } from "../helpers.js"
@@ -25,7 +29,7 @@ describe("TokenUsageForwarder", () => {
                     isError: false,
                     resultText: "done",
                     usage: { input_tokens: 11, output_tokens: 7 },
-                    totalCostUsd: null,
+                    totalCostUsd: 0.012,
                     numTurns: null,
                     durationMs: null,
                 }),
@@ -52,12 +56,42 @@ describe("TokenUsageForwarder", () => {
                 id: "S1",
                 input_tokens: 11,
                 output_tokens: 7,
+                cost_usd: 0.012,
             },
             {
                 type: "token_usage",
                 id: "S2",
                 input_tokens: 13,
                 output_tokens: 8,
+            },
+        ])
+    })
+
+    it("emits live token_progress events for Claude stream chunks", async () => {
+        const forwarder = new TokenUsageForwarder()
+        const agent = source("S1")
+
+        const events = parseEvents(await captureStdout(async () => {
+            await forwarder.onExternalEvent(
+                agent,
+                ClaudeStreamChunk.create({
+                    agentId: "S1",
+                    raw: {
+                        event: {
+                            type: "message_start",
+                            message: { usage: { output_tokens: 4 } },
+                        },
+                    },
+                }),
+            )
+        }))
+
+        assert.deepEqual(events, [
+            {
+                type: "token_progress",
+                id: "S1",
+                input_tokens: 0,
+                output_tokens: 4,
             },
         ])
     })
