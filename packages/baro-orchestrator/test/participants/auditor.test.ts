@@ -61,4 +61,32 @@ describe("Auditor", () => {
             assert.equal(existsSync(logPath), false)
         })
     })
+
+    it("applies custom filters before writing entries", async () => {
+        await withTempDir("baro-auditor-", async (dir) => {
+            const logPath = join(dir, "audit.jsonl")
+            const auditor = new Auditor({
+                path: logPath,
+                filter: (participant) =>
+                    (participant as unknown as { agentId?: string }).agentId === "S2",
+            })
+
+            await auditor.onExternalEvent(
+                source("S1"),
+                AgentState.create({ agentId: "S1", phase: "running" }),
+            )
+            await auditor.onExternalEvent(
+                source("S2"),
+                AgentState.create({ agentId: "S2", phase: "done" }),
+            )
+
+            const entries = readJsonl(logPath)
+            assert.equal(entries.length, 1)
+            assert.equal(entries[0].source, "Object:S2")
+            assert.deepEqual(entries[0].item, {
+                type: "agent_state",
+                data: { agentId: "S2", phase: "done" },
+            })
+        })
+    })
 })
