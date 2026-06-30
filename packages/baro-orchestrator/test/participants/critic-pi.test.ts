@@ -61,6 +61,38 @@ describe("CriticPi", () => {
             )
         })
     })
+
+    it("emits a deterministic fail critique when the backend cannot start", async () => {
+        await withTempDir("baro-critic-pi-", async (dir) => {
+            const critic = new CriticPi({
+                targets: new Map([["agent-a", ["must include tests"]]]),
+                model: "fake-pi-model",
+                piBin: join(dir, "missing-pi"),
+                timeoutMs: 5_000,
+            })
+            const env = joinWithCapture(critic)
+
+            await critic.onExternalEvent(source("runner"), resultEvent())
+            await critic.idle()
+
+            const critiques = env.events.filter(Critique.is)
+            const messages = env.events.filter(AgentTargetedMessage.is)
+
+            assert.equal(critiques.length, 1)
+            assert.equal(critiques[0]!.data.verdict, "fail")
+            assert.equal(critiques[0]!.data.modelUsed, "fake-pi-model")
+            assert.match(
+                critiques[0]!.data.reasoning,
+                /CriticPi LLM call failed: spawn .*missing-pi ENOENT/,
+            )
+            assert.deepEqual(critiques[0]!.data.violatedCriteria, [
+                "[critic error — could not evaluate]",
+            ])
+            assert.equal(messages.length, 1)
+            assert.equal(messages[0]!.data.recipientId, "agent-a")
+            assert.equal(messages[0]!.data.metadata.criticTurn, 1)
+        })
+    })
 })
 
 async function emitResultTurns(critic: CriticPi, turns: number): Promise<void> {

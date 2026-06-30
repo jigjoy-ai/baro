@@ -61,6 +61,48 @@ describe("CriticCodex", () => {
             )
         })
     })
+
+    it("emits a deterministic fail critique for malformed backend output", async () => {
+        await withTempDir("baro-critic-codex-", async (dir) => {
+            const codexBin = join(dir, "codex")
+            writeFileSync(
+                codexBin,
+                [
+                    "#!/bin/sh",
+                    "cat <<'JSON'",
+                    "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"not json\"}}",
+                    "JSON",
+                ].join("\n") + "\n",
+            )
+            chmodSync(codexBin, 0o755)
+
+            const critic = new CriticCodex({
+                targets: new Map([["agent-a", ["must include tests"]]]),
+                codexBin,
+                timeoutMs: 5_000,
+            })
+            const env = joinWithCapture(critic)
+
+            await critic.onExternalEvent(source("runner"), resultEvent())
+            await critic.idle()
+
+            const critiques = env.events.filter(Critique.is)
+            const messages = env.events.filter(AgentTargetedMessage.is)
+
+            assert.equal(critiques.length, 1)
+            assert.equal(critiques[0]!.data.verdict, "fail")
+            assert.match(
+                critiques[0]!.data.reasoning,
+                /CriticCodex LLM call failed: no JSON object found/,
+            )
+            assert.deepEqual(critiques[0]!.data.violatedCriteria, [
+                "[critic error — could not evaluate]",
+            ])
+            assert.equal(messages.length, 1)
+            assert.equal(messages[0]!.data.recipientId, "agent-a")
+            assert.equal(messages[0]!.data.metadata.criticTurn, 1)
+        })
+    })
 })
 
 async function emitResultTurns(
