@@ -59,4 +59,25 @@ describe("Surgeon", () => {
             modifiedDeps: {},
         })
     })
+
+    it("ignores successful StoryResult events", async () => {
+        const surgeon = new Surgeon({
+            snapshot: () => snapshot,
+            useLlm: false,
+        })
+        const env = joinWithCapture(surgeon)
+
+        await surgeon.onExternalEvent(
+            source("S1"),
+            StoryResult.create({
+                storyId: "S1",
+                success: true,
+                attempts: 1,
+                durationSecs: 8,
+            }),
+        )
+        await surgeon.idle()
+
+        assert.equal(env.events.filter(Replan.is).length, 0)
+    })
 })
