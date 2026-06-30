@@ -4,7 +4,7 @@
 // Self-contained: the wire protocol is vendored (mirrors @jigjoy-ai/baro-protocol).
 
 import { execFileSync, spawn } from "node:child_process"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { hostname, homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { WebSocket } from "ws"
@@ -174,6 +174,20 @@ function cloneRepo(fullName: string, token: string | undefined, emit: (e: WireEv
     })
 }
 
+// Keep baro's dep-sharing symlinks (node_modules/.venv/vendor — see worktree.ts) out of every
+// git operation: `git add -A`, the Finalizer's commits, and captureDiff. Otherwise the symlink
+// lands in the PR / patch (e.g. a `node_modules → /tmp/baro-clone-…/node_modules` symlink). Uses
+// the repo-local .git/info/exclude — never touches the user's tracked .gitignore. Worktrees
+// share the common dir's info/exclude, so one write covers them too.
+function excludeDepDirs(cwd: string): void {
+    try {
+        const patterns = ["node_modules", "**/node_modules", ".venv", "**/.venv", "vendor", "**/vendor"]
+        appendFileSync(join(cwd, ".git", "info", "exclude"), `\n# baro: dep-sharing symlinks (never commit)\n${patterns.join("\n")}\n`)
+    } catch {
+        /* best-effort — worst case the symlink shows up as before */
+    }
+}
+
 // Capture everything baro changed vs the base commit as one unified patch (bounded).
 function captureDiff(cwd: string, base: string): string {
     try {
@@ -205,6 +219,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         } catch (e) {
             return { success: false, durationSecs: 1, error: `clone failed: ${(e as Error).message}` }
         }
+        excludeDepDirs(cwd) // keep node_modules/.venv/vendor symlinks out of the PR / patch
         if (d.diffOnly) {
             // Drop the origin remote so baro skips ALL push/PR steps cleanly ("no remote,
             // skipping push") instead of failing them noisily without a token — we return
@@ -254,6 +269,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         try {
             const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "baro", GIT_AUTHOR_EMAIL: "baro@baro.rs", GIT_COMMITTER_NAME: "baro", GIT_COMMITTER_EMAIL: "baro@baro.rs" }
             execFileSync("git", ["init", "-q"], { cwd })
+            excludeDepDirs(cwd) // keep dep-sharing symlinks out of the scratch diff
             execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "baro: initial workspace"], { cwd, env: gitEnv })
             diffBase = execFileSync("git", ["rev-parse", "HEAD"], { cwd }).toString().trim()
         } catch (e) {
