@@ -295,8 +295,13 @@ pub fn render_completion(f: &mut Frame, app: &App) {
 
     lines.push(Line::from(""));
     if let Some(ref fu) = app.followup_input {
+        let fu_label = if app.pr_url.is_some() {
+            "Follow up — continue on this PR:"
+        } else {
+            "Follow up — continue this run:"
+        };
         lines.push(Line::from(Span::styled(
-            "Follow up — continue on this PR:",
+            fu_label,
             Style::default().fg(banner_color).add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(format!("> {}", fu)));
@@ -307,10 +312,8 @@ pub fn render_completion(f: &mut Frame, app: &App) {
     } else {
         let footer = if abnormal {
             "r rerun failed  |  q quit"
-        } else if app.pr_url.is_some() {
-            "f follow-up  |  q quit"
         } else {
-            "q quit"
+            "f follow-up  |  q quit"
         };
         lines.push(Line::from(Span::styled(footer, Style::default().fg(theme::MUTED))));
     }

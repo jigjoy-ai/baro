@@ -16,7 +16,7 @@ function parseEvents(lines: string[]): BaroEvent[] {
 }
 
 describe("AgentStreamForwarder", () => {
-    it("emits story_log events for model messages and tool IO", async () => {
+    it("emits condensed activity events for model messages and tool IO", async () => {
         const forwarder = new AgentStreamForwarder()
         const agent = source("S1")
 
@@ -39,15 +39,19 @@ describe("AgentStreamForwarder", () => {
             )
         }))
 
+        // The forwarder now emits ONE condensed, typed `activity` per bus item
+        // (no per-line firehose): model message → agent_msg (first line),
+        // read/bash/file tool calls → tool_call, outputs → tool_result.
         assert.deepEqual(events, [
-            { type: "story_log", id: "S1", line: "hello" },
-            { type: "story_log", id: "S1", line: "world" },
+            { type: "activity", id: "S1", kind: "agent_msg", text: "hello" },
             {
-                type: "story_log",
+                type: "activity",
                 id: "S1",
-                line: "[tool_call] Read {\"file_path\":\"src/app.ts\"}",
+                kind: "tool_call",
+                tool: "read",
+                text: "Read src/app.ts",
             },
-            { type: "story_log", id: "S1", line: "[tool_result call-1] done" },
+            { type: "activity", id: "S1", kind: "tool_result", text: "done" },
         ])
     })
 })

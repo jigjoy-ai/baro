@@ -42,10 +42,16 @@ export interface DoneStats {
     files_modified: number
 }
 
+export interface DiffFileInfo {
+    path: string
+    added: number
+    removed: number
+}
+
 // ─── Outbound: orchestrator → TUI ───────────────────────────────────
 
 export type BaroEvent =
-    | { type: "init"; project: string; stories: StoryInfo[] }
+    | { type: "init"; project: string; stories: StoryInfo[]; runner?: string }
     // The Architect's design/decision spec (markdown) — the authoritative set of
     // file paths, schema/API shapes, naming + dependency choices every story works
     // from. Emitted once after planning so the dashboard can surface it (it was
@@ -81,11 +87,23 @@ export type BaroEvent =
           abort_reason?: string
       }
     | { type: "notification_ready" }
+    // Per-story changes merged into the run branch: file list with add/remove
+    // counts + a capped unified diff, so the TUI can show a Changes/diff view.
+    | {
+          type: "story_diff"
+          id: string
+          files: DiffFileInfo[]
+          diff?: string
+      }
     | {
           type: "token_usage"
           id: string
           input_tokens: number
           output_tokens: number
+          // Per-story cost in USD when the backend reports it (Claude CLI's
+          // total_cost_usd). Absent for subscription paths (codex/openai) that
+          // have no per-call dollar cost. Summed downstream.
+          cost_usd?: number
       }
     // Live, cumulative-per-agent token estimate streamed WHILE a story runs (so the UI
     // can show tokens climbing in real time). Distinct from token_usage, which is the
@@ -96,6 +114,21 @@ export type BaroEvent =
           id: string
           input_tokens: number
           output_tokens: number
+      }
+    // One condensed, typed line for the structured Activity feed. Replaces the
+    // raw `story_log` firehose (full tool args / file reads / model output split
+    // line-by-line) with a single meaningful entry per bus item, so the TUI can
+    // render a readable, color-coded feed instead of a wall of streamed text.
+    | {
+          type: "activity"
+          id: string
+          // tool_call | tool_result | agent_msg | file_change | test | conflict | verdict | error | warn
+          kind: string
+          text: string
+          tool?: string // tool_call: read | write | bash | other
+          path?: string // file_change
+          op?: string // file_change: create | modify
+          ok?: boolean // test / verdict pass-fail
       }
 
 /**

@@ -23,7 +23,7 @@ use utils::extract_json;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::{
     execute,
@@ -847,9 +847,20 @@ async fn run_app(
         }
     });
 
+    // Throttle drawing to ~30fps. During a run the orchestrator floods the
+    // channel with log events; drawing once per event pegs the CPU and starves
+    // keyboard input (the lag). We still apply every event immediately so state
+    // stays current — we just coalesce the redraws. The 100ms tick guarantees an
+    // idle refresh, so the final frame after a burst is never more than a tick late.
+    let mut last_draw = Instant::now()
+        .checked_sub(Duration::from_millis(100))
+        .unwrap_or_else(Instant::now);
     loop {
         if let Some(t) = terminal.as_deref_mut() {
-            t.draw(|f| ui::render(f, &mut app))?;
+            if last_draw.elapsed() >= Duration::from_millis(33) {
+                t.draw(|f| ui::render(f, &mut app))?;
+                last_draw = Instant::now();
+            }
         }
         match rx.recv().await {
             Some(AppEvent::Baro(ev)) => {
@@ -1429,7 +1440,10 @@ async fn run_app(
                                 spawn_planner(&app, &cwd, tx.clone());
                             }
                         }
-                        KeyCode::Char('f') if app.done && app.exit_reason.is_none() && app.pr_url.is_some() && app.followup_input.is_none() => {
+                        // Follow-up works on the current branch via --continue, with or
+                        // without a PR — don't gate on pr_url (local/no-remote runs can
+                        // still continue the run in place).
+                        KeyCode::Char('f') if app.done && app.exit_reason.is_none() && app.followup_input.is_none() => {
                             app.followup_input = Some(String::new());
                         }
                         KeyCode::Char('r') if app.done && app.exit_reason.is_some() => {
@@ -1505,6 +1519,10 @@ async fn run_app(
                         }
                         KeyCode::Char('3') => {
                             app.global_tab = app::GlobalTab::Stats;
+                            let _ = terminal.clear();
+                        }
+                        KeyCode::Char('4') => {
+                            app.global_tab = app::GlobalTab::Changes;
                             let _ = terminal.clear();
                         }
                         KeyCode::Tab => {

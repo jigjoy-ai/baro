@@ -8,6 +8,7 @@
  */
 
 import { mkdirSync } from "fs"
+import { hostname } from "os"
 import { dirname, join } from "path"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
@@ -16,6 +17,7 @@ import {
     GitGate,
     createOrCheckoutBranch,
     getCurrentBranch,
+    getDiff,
     getGitFileStats,
     getHeadSha,
     gitPushWithRetry,
@@ -670,6 +672,9 @@ export async function orchestrate(
             ? async (storyId) => {
                   const log = (line: string) =>
                       emitTui && emit({ type: "story_log", id: storyId, line })
+                  // Run-branch HEAD before this story merges, so we can diff
+                  // exactly what the story added once merge-back lands.
+                  const beforeMerge = emitTui ? await getHeadSha(config.cwd) : null
                   // Merge the story into the run branch on the critical path
                   // (fast, local) so the next DAG level sees it. mergeBack
                   // returns false when the story had no worktree (create()
@@ -689,6 +694,20 @@ export async function orchestrate(
                           return
                       }
                       if (merged) {
+                          // Surface what the story changed (file list + capped
+                          // diff) for the TUI Changes view, before the worktree
+                          // is cleaned up.
+                          if (emitTui && beforeMerge) {
+                              const d = await getDiff(config.cwd, beforeMerge, "HEAD")
+                              if (d.files.length) {
+                                  emit({
+                                      type: "story_diff",
+                                      id: storyId,
+                                      files: d.files,
+                                      diff: d.diff || undefined,
+                                  })
+                              }
+                          }
                           // Cleanup is fast + local; the run branch is pushed
                           // once after the run (worktreePushNeeded) so this
                           // critical-path callback never waits on the network.
@@ -762,6 +781,7 @@ export async function orchestrate(
                 title: s.title,
                 depends_on: s.dependsOn,
             })),
+            runner: hostname(),
         })
         const dagLevels = buildDag(prd.userStories).map((lvl) =>
             lvl.storyIds.map((id) => ({ id })),

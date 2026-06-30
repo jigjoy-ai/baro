@@ -101,6 +101,10 @@ export class TokenUsageForwarder extends BaseObserver {
             id: item.agentId,
             input_tokens: inputTokens,
             output_tokens: outputTokens,
+            // Claude CLI reports a per-result dollar cost; carry it so the TUI
+            // can sum a per-run cost. Null for non-Claude backends.
+            cost_usd:
+                typeof item.totalCostUsd === "number" ? item.totalCostUsd : undefined,
         })
     }
 

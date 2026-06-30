@@ -27,12 +27,23 @@ pub struct DoneStats {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct DiffFile {
+    pub path: String,
+    pub added: u32,
+    pub removed: u32,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type")]
 pub enum BaroEvent {
     #[serde(rename = "init")]
     Init {
         project: String,
         stories: Vec<StoryInfo>,
+        /// Where this run executes (hostname for the local CLI). Optional for
+        /// backwards-compat with orchestrators that don't emit it.
+        #[serde(default)]
+        runner: Option<String>,
     },
 
     #[serde(rename = "dag")]
@@ -50,6 +61,20 @@ pub enum BaroEvent {
     StoryLog {
         id: String,
         line: String,
+    },
+
+    /// One condensed, typed entry for the structured Activity feed.
+    #[serde(rename = "activity")]
+    Activity {
+        id: String,
+        kind: String,
+        text: String,
+        #[serde(default)]
+        tool: Option<String>,
+        #[serde(default)]
+        op: Option<String>,
+        #[serde(default)]
+        ok: Option<bool>,
     },
 
     #[serde(rename = "story_complete")]
@@ -135,6 +160,19 @@ pub enum BaroEvent {
         id: String,
         input_tokens: u64,
         output_tokens: u64,
+        /// Per-story USD cost when the backend reports it (Claude CLI). Absent
+        /// for subscription paths. Summed into a per-run cost.
+        #[serde(default)]
+        cost_usd: Option<f64>,
+    },
+
+    /// Per-story changes merged into the run branch: file list + capped diff.
+    #[serde(rename = "story_diff")]
+    StoryDiff {
+        id: String,
+        files: Vec<DiffFile>,
+        #[serde(default)]
+        diff: Option<String>,
     },
 
     /// Synthetic event the orchestrator client emits exactly once when

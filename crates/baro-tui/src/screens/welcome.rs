@@ -59,15 +59,14 @@ const LETTER_O: [&str; 9] = [
 ];
 
 fn rainbow(idx: usize) -> Color {
-    match idx % 7 {
-        0 => Color::LightRed,
-        1 => Color::LightYellow,
-        2 => Color::LightGreen,
-        3 => Color::LightCyan,
-        4 => Color::LightBlue,
-        5 => Color::LightMagenta,
-        6 => Color::Yellow,
-        _ => Color::White,
+    // Warm amber gradient (baro brand: fan → converge), not a rainbow.
+    match idx % 6 {
+        0 => Color::Rgb(255, 209, 128), // bright amber
+        1 => Color::Rgb(255, 201, 112),
+        2 => Color::Rgb(255, 181, 71), // #ffb547
+        3 => Color::Rgb(255, 181, 71),
+        4 => Color::Rgb(214, 140, 40), // deep amber
+        _ => Color::Rgb(176, 124, 54), // muted amber
     }
 }
 

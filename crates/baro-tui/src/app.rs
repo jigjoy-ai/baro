@@ -68,6 +68,7 @@ pub enum GlobalTab {
     Dashboard,
     Dag,
     Stats,
+    Changes,
 }
 
 impl GlobalTab {
@@ -75,15 +76,17 @@ impl GlobalTab {
         match self {
             Self::Dashboard => Self::Dag,
             Self::Dag => Self::Stats,
-            Self::Stats => Self::Dashboard,
+            Self::Stats => Self::Changes,
+            Self::Changes => Self::Dashboard,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Dashboard => Self::Stats,
+            Self::Dashboard => Self::Changes,
             Self::Dag => Self::Dashboard,
             Self::Stats => Self::Dag,
+            Self::Changes => Self::Stats,
         }
     }
 
@@ -92,6 +95,7 @@ impl GlobalTab {
             Self::Dashboard => 0,
             Self::Dag => 1,
             Self::Stats => 2,
+            Self::Changes => 3,
         }
     }
 }
@@ -187,11 +191,24 @@ pub struct StoryState {
     pub files_modified: u32,
 }
 
+/// One condensed, typed entry in the structured Activity feed (replaces the
+/// raw `logs` firehose for rendering). `text` is the ready-to-show summary;
+/// `kind`/`tool`/`op`/`ok` drive the color + icon.
+#[derive(Debug, Clone)]
+pub struct ActivityEntry {
+    pub kind: String,
+    pub text: String,
+    pub tool: Option<String>,
+    pub op: Option<String>,
+    pub ok: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ActiveStory {
     pub id: String,
     pub title: String,
     pub logs: Vec<String>,
+    pub activity: Vec<ActivityEntry>,
     pub start_time: Instant,
 }
 
@@ -264,6 +281,14 @@ pub struct App {
 
     // Execute screen
     pub project: String,
+    /// Where the run executes (hostname for local CLI); shown in the status bar.
+    pub runner: Option<String>,
+    /// Files changed across all merged stories (path + add/remove counts).
+    pub changed_files: Vec<crate::events::DiffFile>,
+    /// Per-story capped unified diff text, for the Changes view.
+    pub story_diffs: HashMap<String, String>,
+    /// Per-run cost in USD, summed from backends that report it (Claude CLI).
+    pub total_cost_usd: f64,
     pub stories: Vec<StoryState>,
     pub dag_levels: Vec<Vec<String>>,
     pub active_stories: HashMap<String, ActiveStory>,
@@ -479,6 +504,10 @@ impl App {
             token_usage: HashMap::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
+            runner: None,
+            changed_files: Vec::new(),
+            story_diffs: HashMap::new(),
+            total_cost_usd: 0.0,
             global_tab: GlobalTab::Dashboard,
             selected_log_index: 0,
             tick_count: 0,
@@ -524,6 +553,9 @@ impl App {
         self.token_usage.clear();
         self.total_input_tokens = 0;
         self.total_output_tokens = 0;
+        self.changed_files.clear();
+        self.story_diffs.clear();
+        self.total_cost_usd = 0.0;
         self.stories.clear();
     }
 
@@ -772,8 +804,9 @@ impl App {
 
     pub fn handle_event(&mut self, event: BaroEvent) {
         match event {
-            BaroEvent::Init { project, stories } => {
+            BaroEvent::Init { project, stories, runner } => {
                 self.project = project;
+                self.runner = runner;
                 self.total = stories.len() as u32;
                 // On resume, review_stories was seeded from prd.json with
                 // each story's `completed` flag. The orchestrator emits
@@ -829,6 +862,7 @@ impl App {
                         id,
                         title,
                         logs: Vec::new(),
+                        activity: Vec::new(),
                         start_time: Instant::now(),
                     },
                 );
@@ -842,6 +876,16 @@ impl App {
                     }
                 }
                 // Ensure entry exists; usize::MAX means "follow tail" (clamped at render)
+                self.log_scroll_offsets.entry(id).or_insert(usize::MAX);
+            }
+
+            BaroEvent::Activity { id, kind, text, tool, op, ok } => {
+                if let Some(active) = self.active_stories.get_mut(&id) {
+                    active.activity.push(ActivityEntry { kind, text, tool, op, ok });
+                    if active.activity.len() > MAX_LOG_LINES {
+                        active.activity.remove(0);
+                    }
+                }
                 self.log_scroll_offsets.entry(id).or_insert(usize::MAX);
             }
 
@@ -958,8 +1002,10 @@ impl App {
                         id: "finalize".to_string(),
                         title: "Finalizing".to_string(),
                         logs: Vec::new(),
+                        activity: Vec::new(),
                         start_time: Instant::now(),
                     },
+
                 );
             }
 
@@ -991,12 +1037,33 @@ impl App {
                 self.notification_ready = true;
             }
 
-            BaroEvent::TokenUsage { id, input_tokens, output_tokens } => {
+            BaroEvent::TokenUsage { id, input_tokens, output_tokens, cost_usd } => {
                 let entry = self.token_usage.entry(id).or_insert((0, 0));
                 entry.0 += input_tokens;
                 entry.1 += output_tokens;
                 self.total_input_tokens += input_tokens;
                 self.total_output_tokens += output_tokens;
+                if let Some(c) = cost_usd {
+                    self.total_cost_usd += c;
+                }
+            }
+
+            BaroEvent::StoryDiff { id, files, diff } => {
+                // Merge file stats into the run-wide changed-files list (dedup
+                // by path, accumulating counts), and keep the per-story diff.
+                for f in files {
+                    if let Some(existing) =
+                        self.changed_files.iter_mut().find(|e| e.path == f.path)
+                    {
+                        existing.added += f.added;
+                        existing.removed += f.removed;
+                    } else {
+                        self.changed_files.push(f);
+                    }
+                }
+                if let Some(text) = diff {
+                    self.story_diffs.insert(id, text);
+                }
             }
 
             BaroEvent::OrchestratorExited { code, reason } => {

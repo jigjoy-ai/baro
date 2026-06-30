@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::app::{App, GlobalTab, StoryStatus};
 use crate::theme;
+use crate::utils::format_commas;
 
 /// Count stories by status for use in headers and progress widgets.
 /// Derived from `app.stories` directly so the counter reflects real
@@ -53,6 +54,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             Constraint::Length(3), // Header + tabs
             Constraint::Min(8),   // Main content (tab-dependent)
             Constraint::Length(3), // Progress bar
+            Constraint::Length(1), // Status bar
             Constraint::Length(1), // Footer
         ])
         .split(f.area());
@@ -68,10 +70,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
         GlobalTab::Dashboard => render_dashboard(f, app, chunks[1]),
         GlobalTab::Dag => render_dag_full(f, app, chunks[1]),
         GlobalTab::Stats => render_stats_full(f, app, chunks[1]),
+        GlobalTab::Changes => render_changes(f, app, chunks[1]),
     }
 
     render_progress(f, app, chunks[2]);
-    render_footer(f, app, chunks[3]);
+    render_status_bar(f, app, chunks[3]);
+    render_footer(f, app, chunks[4]);
 
     if app.done {
         render_completion(f, app);
@@ -85,7 +89,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Min(20),
-            Constraint::Length(28),
+            Constraint::Length(42),
         ])
         .split(area);
 
@@ -149,6 +153,15 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(theme::MUTED)
             },
         ),
+        Span::raw("  "),
+        Span::styled(
+            "4:Changes",
+            if active_tab == 3 {
+                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::MUTED)
+            },
+        ),
     ]);
 
     let tabs = Paragraph::new(tab_line).block(
@@ -192,7 +205,10 @@ fn render_progress(f: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
                 )),
         )
-        .gauge_style(Style::default().fg(theme::GAUGE_FG))
+        // bg = dark so the label over the filled bar renders dark-on-amber
+        // (ratatui reverses gauge_style for the label portion on the bar);
+        // over the unfilled part the label keeps its light fg on the dark bg.
+        .gauge_style(Style::default().fg(theme::GAUGE_FG).bg(theme::BG))
         .ratio(ratio)
         .label(Span::styled(
             label,
@@ -200,6 +216,187 @@ fn render_progress(f: &mut Frame, app: &App, area: Rect) {
         ));
 
     f.render_widget(gauge, area);
+}
+
+// --- Shared: Status Bar ---
+// Full-width run status, mirroring the web run-view bar:
+//   ● status · elapsed · agents · tokens · files · repo
+// (cost + runner id are not tracked in App yet — see report.)
+
+fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
+    let counts = count_stories(app);
+    let elapsed = app.elapsed_secs();
+
+    let (word, color) = if app.done {
+        if app.exit_reason.is_some() {
+            ("failed", theme::ERROR)
+        } else {
+            ("done", theme::SUCCESS)
+        }
+    } else if app.finalize_in_progress {
+        ("finalizing", theme::ACCENT)
+    } else if app.review_in_progress {
+        ("reviewing", theme::ACCENT)
+    } else {
+        ("running", theme::ACCENT)
+    };
+
+    let agents = if app.done {
+        format!("{} agents", counts.total)
+    } else {
+        format!("{}/{} agents", counts.running, counts.total)
+    };
+
+    // Files touched: aggregate from final_stats once done, else sum live per-story counts.
+    let files: u32 = app
+        .final_stats
+        .as_ref()
+        .map(|s| s.files_created + s.files_modified)
+        .unwrap_or_else(|| {
+            app.stories
+                .iter()
+                .map(|s| s.files_created + s.files_modified)
+                .sum()
+        });
+
+    let tokens = format_commas(app.total_input_tokens + app.total_output_tokens);
+
+    let sep = || Span::styled("  ·  ", Style::default().fg(theme::BORDER));
+    let mut spans = vec![
+        Span::styled(" \u{25CF} ", Style::default().fg(color)),
+        Span::styled(word, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        sep(),
+        Span::styled(
+            format!("{:02}:{:02}", elapsed / 60, elapsed % 60),
+            Style::default().fg(theme::TEXT_DIM),
+        ),
+        sep(),
+        Span::styled(agents, Style::default().fg(theme::TEXT_DIM)),
+        sep(),
+        Span::styled(format!("{} tok", tokens), Style::default().fg(theme::TEXT_DIM)),
+        sep(),
+        Span::styled(format!("{} files", files), Style::default().fg(theme::TEXT_DIM)),
+    ];
+    // Cost: only backends that report it (Claude CLI) contribute; omit when zero
+    // so subscription runs don't show a misleading $0.00.
+    if app.total_cost_usd > 0.0 {
+        spans.push(sep());
+        spans.push(Span::styled(
+            format!("${:.2}", app.total_cost_usd),
+            Style::default().fg(theme::TEXT_DIM),
+        ));
+    }
+    if !app.project.is_empty() {
+        spans.push(sep());
+        spans.push(Span::styled(
+            app.project.clone(),
+            Style::default().fg(theme::ACCENT_DIM),
+        ));
+    }
+    if let Some(runner) = &app.runner {
+        if !runner.is_empty() {
+            spans.push(sep());
+            spans.push(Span::styled(
+                runner.clone(),
+                Style::default().fg(theme::MUTED),
+            ));
+        }
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+// --- Changes tab: files touched + colored diff ---
+
+fn render_changes(f: &mut Frame, app: &App, area: Rect) {
+    if app.changed_files.is_empty() {
+        let p = Paragraph::new(Line::from(Span::styled(
+            "  No changes yet — diffs appear here as stories merge into the run branch.",
+            Style::default().fg(theme::MUTED),
+        )))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::BORDER))
+                .title(Span::styled(
+                    " Changes ",
+                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                )),
+        );
+        f.render_widget(p, area);
+        return;
+    }
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .split(area);
+
+    // Left: changed files with +added / -removed counts.
+    let file_lines: Vec<Line> = app
+        .changed_files
+        .iter()
+        .map(|fch| {
+            Line::from(vec![
+                Span::styled(format!("+{}", fch.added), Style::default().fg(theme::SUCCESS)),
+                Span::raw(" "),
+                Span::styled(format!("-{}", fch.removed), Style::default().fg(theme::ERROR)),
+                Span::raw("  "),
+                Span::styled(fch.path.clone(), Style::default().fg(theme::TEXT)),
+            ])
+        })
+        .collect();
+    let files_panel = Paragraph::new(file_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::BORDER))
+            .title(Span::styled(
+                format!(" Changes ({}) ", app.changed_files.len()),
+                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            )),
+    );
+    f.render_widget(files_panel, cols[0]);
+
+    // Right: per-story unified diff, colored like the web demo (additions green,
+    // deletions red, hunk headers amber). Stable order by story id.
+    let mut diffs: Vec<(&String, &String)> = app.story_diffs.iter().collect();
+    diffs.sort_by(|a, b| a.0.cmp(b.0));
+    let mut diff_lines: Vec<Line> = Vec::new();
+    for (sid, text) in diffs {
+        diff_lines.push(Line::from(Span::styled(
+            format!("\u{258C} {}", sid),
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        )));
+        for raw in text.lines() {
+            let style = if raw.starts_with("+++")
+                || raw.starts_with("---")
+                || raw.starts_with("diff ")
+                || raw.starts_with("index ")
+            {
+                Style::default().fg(theme::MUTED)
+            } else if raw.starts_with("@@") {
+                Style::default().fg(theme::ACCENT)
+            } else if raw.starts_with('+') {
+                Style::default().fg(theme::SUCCESS)
+            } else if raw.starts_with('-') {
+                Style::default().fg(theme::ERROR)
+            } else {
+                Style::default().fg(theme::TEXT_DIM)
+            };
+            diff_lines.push(Line::from(Span::styled(raw.to_string(), style)));
+        }
+        diff_lines.push(Line::from(""));
+    }
+    let diff_panel = Paragraph::new(diff_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::BORDER))
+            .title(Span::styled(
+                " Diff ",
+                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            )),
+    );
+    f.render_widget(diff_panel, cols[1]);
 }
 
 // --- Shared: Footer ---

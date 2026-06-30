@@ -278,6 +278,67 @@ export async function getGitFileStats(
     }
 }
 
+export interface DiffFile {
+    path: string
+    added: number
+    removed: number
+}
+
+export interface StoryDiffResult {
+    files: DiffFile[]
+    /** Unified diff text, capped so the stdout event stream stays small. */
+    diff: string
+}
+
+/** Max diff lines carried in a story_diff event; the rest is truncated. */
+const DIFF_LINE_CAP = 180
+
+/**
+ * Per-story changes between two refs: `--numstat` for the file list +
+ * add/remove counts, plus a capped unified diff for the TUI Changes view.
+ * Best-effort — returns empty on any git failure.
+ */
+export async function getDiff(
+    cwd: string,
+    fromSha: string,
+    toSha = "HEAD",
+): Promise<StoryDiffResult> {
+    const files: DiffFile[] = []
+    try {
+        const { stdout } = await exec("git", ["diff", "--numstat", fromSha, toSha], { cwd })
+        for (const line of stdout.split("\n")) {
+            if (!line.trim()) continue
+            const parts = line.split("\t")
+            if (parts.length < 3) continue
+            const [a, r] = parts
+            const path = parts.slice(2).join("\t")
+            files.push({
+                path,
+                added: a === "-" ? 0 : parseInt(a, 10) || 0,
+                removed: r === "-" ? 0 : parseInt(r, 10) || 0,
+            })
+        }
+    } catch {
+        // ignore
+    }
+    let diff = ""
+    try {
+        const { stdout } = await exec("git", ["diff", fromSha, toSha], {
+            cwd,
+            maxBuffer: 16 * 1024 * 1024,
+        })
+        const lines = stdout.split("\n")
+        diff =
+            lines.length > DIFF_LINE_CAP
+                ? lines.slice(0, DIFF_LINE_CAP).join("\n") +
+                  `\n… (${lines.length - DIFF_LINE_CAP} more lines truncated)`
+                : stdout
+    } catch {
+        // ignore
+    }
+    return { files, diff }
+}
+
 // ─── Internal helpers ───────────────────────────────────────────────
 
 async function hasRemoteOrigin(cwd: string): Promise<boolean> {

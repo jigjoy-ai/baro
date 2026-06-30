@@ -9,9 +9,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, StoryStatus};
+use crate::app::{ActivityEntry, App, StoryStatus};
 use crate::theme;
-use crate::utils::format_token_display;
 
 pub fn render_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
     // Clear the whole dashboard area each frame so stale characters from
@@ -33,11 +32,6 @@ pub fn render_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_story_list(f: &mut Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(2)])
-        .split(area);
-
     let mut items: Vec<ListItem> = Vec::new();
 
     if app.dag_levels.is_empty() {
@@ -75,7 +69,7 @@ fn render_story_list(f: &mut Frame, app: &mut App, area: Rect) {
                 let spinner = spinner_chars[(app.tick_count as usize) % spinner_chars.len()];
                 items.push(ListItem::new(Line::from(Span::styled(
                     format!("   {} Reviewing Level {}...", spinner, i),
-                    Style::default().fg(ratatui::style::Color::Cyan),
+                    Style::default().fg(theme::ACCENT),
                 ))));
             }
 
@@ -95,33 +89,22 @@ fn render_story_list(f: &mut Frame, app: &mut App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::BORDER))
                 .title(Span::styled(
-                    " Stories ",
+                    " Agents ",
                     Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
                 )),
         );
-    f.render_stateful_widget(list, chunks[0], &mut app.story_list_state);
+    f.render_stateful_widget(list, area, &mut app.story_list_state);
 
     // Story list scrollbar
-    let inner_height = chunks[0].height.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
     if item_count > inner_height {
         let position = app.story_list_state.selected().unwrap_or(0);
         let mut scrollbar_state =
             ScrollbarState::new(item_count.saturating_sub(inner_height)).position(position);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .style(Style::default().fg(theme::MUTED));
-        f.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
+        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
-
-    // Stats area: wall time + token counter
-    let elapsed = app.total_time_secs;
-    let wall_time = format!(" {}:{:02}", elapsed / 60, elapsed % 60);
-    let token_line = format!(" {}", format_token_display(app.total_input_tokens, app.total_output_tokens));
-
-    let stats = Paragraph::new(vec![
-        Line::from(Span::styled(wall_time, Style::default().fg(theme::MUTED))),
-        Line::from(Span::styled(token_line, Style::default().fg(theme::MUTED))),
-    ]);
-    f.render_widget(stats, chunks[1]);
 }
 
 fn story_list_item(
@@ -224,11 +207,11 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
 
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(ratatui::style::Color::Cyan))
+                .border_style(Style::default().fg(theme::ACCENT))
                 .title(Span::styled(
                     title,
                     Style::default()
-                        .fg(ratatui::style::Color::Cyan)
+                        .fg(theme::ACCENT)
                         .add_modifier(Modifier::BOLD),
                 ));
 
@@ -239,7 +222,7 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
                 let mut scrollbar_state =
                     ScrollbarState::new(total_logs.saturating_sub(inner_height)).position(skip);
                 let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .style(Style::default().fg(ratatui::style::Color::Cyan));
+                    .style(Style::default().fg(theme::MUTED));
                 f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
             }
         } else {
@@ -256,7 +239,7 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme::BORDER))
                     .title(Span::styled(
-                        " Logs ",
+                        " Activity ",
                         Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
                     )),
             );
@@ -313,14 +296,14 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
         .unwrap_or_default();
 
     if let Some(story) = app.active_stories.get(&selected_id) {
-        let total_logs = story.logs.len();
+        let total_logs = story.activity.len();
         let inner_height = log_chunks[1].height.saturating_sub(2) as usize;
         let tail = total_logs.saturating_sub(inner_height);
         let stored = app.log_scroll_offsets.get(&selected_id).copied().unwrap_or(usize::MAX);
         let skip = if stored == usize::MAX { tail } else { stored.min(tail) };
-        let visible_logs: Vec<Line> = story.logs[skip..]
+        let visible_logs: Vec<Line> = story.activity[skip..]
             .iter()
-            .map(|l| Line::from(Span::styled(l.clone(), Style::default().fg(theme::TEXT))))
+            .map(activity_line)
             .collect();
 
         let block = Block::default()
@@ -345,4 +328,38 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
             f.render_stateful_widget(scrollbar, log_chunks[1], &mut scrollbar_state);
         }
     }
+}
+
+/// One Activity entry → a color-coded line. Icon carries the type signal;
+/// file changes + test verdicts color the whole line (diff-like). The panel
+/// is already scoped to one story, so no per-line agent prefix.
+fn activity_line(e: &ActivityEntry) -> Line<'static> {
+    let (icon, icon_color, text_color) = match e.kind.as_str() {
+        "tool_call" => match e.tool.as_deref() {
+            Some("bash") => ("$ ", theme::ACCENT, theme::TEXT),
+            Some("read") => ("· ", theme::TEXT_DIM, theme::TEXT_DIM),
+            _ => ("» ", theme::ACCENT, theme::TEXT),
+        },
+        "file_change" => match e.op.as_deref() {
+            Some("modify") => ("~ ", theme::WARNING, theme::WARNING),
+            _ => ("+ ", theme::SUCCESS, theme::SUCCESS),
+        },
+        "agent_msg" => ("› ", theme::TEXT_DIM, theme::TEXT_DIM),
+        "tool_result" => ("  ", theme::MUTED, theme::MUTED),
+        "test" | "verdict" => {
+            if e.ok == Some(true) {
+                ("✓ ", theme::SUCCESS, theme::SUCCESS)
+            } else {
+                ("✗ ", theme::ERROR, theme::ERROR)
+            }
+        }
+        "decision" => ("◆ ", theme::ACCENT, theme::TEXT),
+        "conflict" | "warn" => ("! ", theme::WARNING, theme::WARNING),
+        "error" => ("✗ ", theme::ERROR, theme::ERROR),
+        _ => ("  ", theme::TEXT, theme::TEXT),
+    };
+    Line::from(vec![
+        Span::styled(icon, Style::default().fg(icon_color)),
+        Span::styled(e.text.clone(), Style::default().fg(text_color)),
+    ])
 }

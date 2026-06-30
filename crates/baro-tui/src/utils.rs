@@ -36,13 +36,3 @@ pub fn format_commas(n: u64) -> String {
     }
     result.chars().rev().collect()
 }
-
-/// Produce a combined token display string:
-/// "Tokens: 12,345 in / 23,456 out"
-pub fn format_token_display(input_tokens: u64, output_tokens: u64) -> String {
-    format!(
-        "Tokens: {} in / {} out",
-        format_commas(input_tokens),
-        format_commas(output_tokens),
-    )
-}
