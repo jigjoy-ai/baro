@@ -41,6 +41,8 @@ export interface OpenCodeStorySpec {
     cwd: string
     /** Optional model override (e.g. "anthropic/claude-sonnet-4-20250514"). */
     model?: string
+    /** Path to the `opencode` binary. Default: "opencode" (resolved via PATH). */
+    opencodeBin?: string
     /** Retry budget (number of *additional* attempts after the first). */
     retries?: number
     /** Per-attempt timeout in seconds. Default: 600. */
@@ -254,6 +256,7 @@ export class OpenCodeStoryAgent extends BaseObserver {
             cwd: this.spec.cwd,
             prompt: this.spec.prompt,
             model: this.spec.model,
+            opencodeBin: this.spec.opencodeBin,
             skipPermissions: this.spec.skipPermissions,
         })
         this.currentOpenCode = opencode

@@ -55,6 +55,45 @@ describe("OpenAIStoryAgent", () => {
             }
         })
     })
+
+    it("emits a failed terminal StoryResult after exhausting OpenAI retries", async () => {
+        await withTempDir("openai-story-agent-retry-", async (dir) => {
+            const cwd = join(dir, "cwd")
+            mkdirSync(cwd)
+            const env = captureEnv()
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "story-openai-retry",
+                    prompt: "finish the story",
+                    cwd,
+                    retries: 1,
+                    retryDelayMs: 0,
+                    quietTimeoutMs: 5,
+                    maxTurns: 1,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 0,
+                    perRoundTimeoutSecs: 1,
+                },
+            )
+
+            const outcome = await agent.run(env)
+            const events = env.events.filter(StoryResult.is)
+            const event = events[0]
+
+            assert.equal(outcome.success, false)
+            assert.equal(outcome.storyId, "story-openai-retry")
+            assert.equal(outcome.attempts, 2)
+            assert.equal(outcome.error, "attempt did not reach a terminal state")
+            assert.equal(events.length, 1)
+            assert.ok(event)
+            assert.equal(event.data.storyId, "story-openai-retry")
+            assert.equal(event.data.success, false)
+            assert.equal(event.data.attempts, 2)
+            assert.equal(event.data.error, "attempt did not reach a terminal state")
+        })
+    })
 })
 
 async function startFakeOpenAIServer(): Promise<Server> {

@@ -40,6 +40,8 @@ export interface CodexStorySpec {
     cwd: string
     /** Optional model override (e.g. "gpt-5.5"). */
     model?: string
+    /** Path to the `codex` binary. Default: "codex" (resolved via PATH). */
+    codexBin?: string
     /** Retry budget (number of *additional* attempts after the first). */
     retries?: number
     /** Per-attempt timeout in seconds. Default: 600. */
@@ -261,6 +263,7 @@ export class CodexStoryAgent extends BaseObserver {
             cwd: this.spec.cwd,
             prompt: this.spec.prompt,
             model: this.spec.model,
+            codexBin: this.spec.codexBin,
             bypassSandbox: this.spec.bypassSandbox,
             skipGitRepoCheck: this.spec.skipGitRepoCheck,
         })
