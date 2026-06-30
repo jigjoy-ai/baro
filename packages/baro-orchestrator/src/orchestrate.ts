@@ -841,6 +841,23 @@ export async function orchestrate(
         const stats = await getGitFileStats(config.cwd, baseSha)
         filesCreated = stats.created
         filesModified = stats.modified
+
+        // Safety net for the Changes view: emit the full run diff (base → HEAD)
+        // at completion so it's reliably populated even when a per-story
+        // merge-back diff was missed (shared-tree fallback) or the user opened
+        // Changes before any story merged. Files dedupe by path in the TUI, so
+        // this is harmless when the per-story diffs already landed.
+        if (emitTui) {
+            const runDiff = await getDiff(config.cwd, baseSha, "HEAD")
+            if (runDiff.files.length) {
+                emit({
+                    type: "story_diff",
+                    id: "(run)",
+                    files: runDiff.files,
+                    diff: runDiff.diff || undefined,
+                })
+            }
+        }
     }
 
     if (emitTui) {
