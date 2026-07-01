@@ -51,6 +51,7 @@ interface CliArgs {
     noSentry: boolean
     withSurgeon: boolean
     surgeonUseLlm: boolean
+    withSupervisor: boolean
     surgeonModel?: string
     storyModel?: string
     effort?: string
@@ -79,8 +80,12 @@ function parseArgs(argv: string[]): CliArgs {
         noLibrarian: false,
         noMemory: false,
         noSentry: false,
-        withSurgeon: false,
-        surgeonUseLlm: false,
+        // Self-healing on by default: the Supervisor catches a stuck story early
+        // and the Surgeon splits/escalates it, instead of failing the whole run.
+        // Disable with --no-surgeon / --no-supervisor.
+        withSurgeon: true,
+        surgeonUseLlm: true,
+        withSupervisor: true,
         endpointSpecs: [],
         llm: "claude",
         help: false,
@@ -139,6 +144,15 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--surgeon-use-llm":
                 args.surgeonUseLlm = true
+                break
+            case "--no-surgeon":
+                args.withSurgeon = false
+                break
+            case "--no-supervisor":
+                args.withSupervisor = false
+                break
+            case "--with-supervisor":
+                args.withSupervisor = true
                 break
             case "--surgeon-model":
                 args.surgeonModel = required(argv, ++i, "--surgeon-model")
@@ -334,6 +348,7 @@ async function main(): Promise<void> {
         withSentry: args.noSentry ? false : undefined,
         withSurgeon: args.withSurgeon,
         surgeonUseLlm: args.surgeonUseLlm,
+        withSupervisor: args.withSupervisor,
         surgeonModel: args.surgeonModel,
         intraLevelDelaySecs: args.intraLevelDelaySecs,
         llm: args.llm,

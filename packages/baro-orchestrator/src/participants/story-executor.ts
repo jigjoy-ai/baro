@@ -35,6 +35,12 @@ export interface StoryExecOpts {
 export interface StoryExecution {
     /** Release bus membership / resources after the StoryResult lands. */
     dispose(env: AgenticEnvironment): void
+    /**
+     * Abort the running agent early (Supervisor uses this on a detected stall).
+     * The agent settles with a failed StoryResult, which the Surgeon then reacts
+     * to. Optional so custom executors need not implement it.
+     */
+    abort?(): void
 }
 
 /**
@@ -134,6 +140,9 @@ export class LocalStoryExecutor implements StoryExecutor {
         // run settles, and Conductor reacts to that.
         void agent.run(env)
 
-        return { dispose: (e: AgenticEnvironment) => agent.leave(e) }
+        return {
+            dispose: (e: AgenticEnvironment) => agent.leave(e),
+            abort: () => (agent as { abort?: () => void }).abort?.(),
+        }
     }
 }

@@ -140,6 +140,19 @@ export class StoryFactory extends BaseObserver {
         }
     }
 
+    /**
+     * Abort a running story mid-flight (the Supervisor calls this on a detected
+     * stall). The agent settles with a failed StoryResult, which the Surgeon
+     * then reacts to (split/escalate). Returns false if the story isn't active
+     * or its executor doesn't support abort.
+     */
+    abort(storyId: string): boolean {
+        const exec = this.active.get(storyId)
+        if (!exec?.abort) return false
+        exec.abort()
+        return true
+    }
+
     private async spawn(req: StorySpawnRequestData): Promise<void> {
         if (!this.envRef) return
         // Idempotent across both the settled set and the in-progress set:

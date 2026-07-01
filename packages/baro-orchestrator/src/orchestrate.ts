@@ -58,6 +58,7 @@ import { SurgeonCodex } from "./participants/surgeon-codex.js"
 import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
 import { SurgeonOpenCode } from "./participants/surgeon-opencode.js"
 import { SurgeonPi } from "./participants/surgeon-pi.js"
+import { Supervisor } from "./participants/supervisor.js"
 import { PrdFile, loadPrd, savePrd } from "./prd.js"
 import { RunStartRequest } from "./semantic-events.js"
 import { emit } from "./tui-protocol.js"
@@ -131,6 +132,14 @@ export interface OrchestrateConfig {
      * Conductor applies at the next level boundary. Default: false.
      */
     withSurgeon?: boolean
+    /**
+     * Whether to wire the Supervisor (mid-run non-convergence detector). When on,
+     * a story that spins without progress (many tool calls, no file changes, or a
+     * repeated call) is aborted early so it fails fast and the Surgeon can split /
+     * escalate it — instead of burning the whole run budget on non-terminal
+     * retries. Best paired with `withSurgeon: true`. Default: false.
+     */
+    withSupervisor?: boolean
     /**
      * Use Claude CLI (claude --model …) for Surgeon evaluation.
      * Default: false (deterministic skip-only strategy). Setting true
@@ -767,6 +776,22 @@ export async function orchestrate(
     })
     storyFactory.setEnvironment(env)
     storyFactory.join(env)
+
+    // Supervisor — mid-run non-convergence detector. Aborts a spinning story
+    // early (via StoryFactory.abort) so it settles as a failed StoryResult and
+    // the Surgeon can split/escalate it, instead of burning the run budget on a
+    // non-terminal loop (the failure mode that lost run-42-mr27k0vl).
+    if (config.withSupervisor) {
+        const supervisor = new Supervisor({
+            onStall: (storyId, reason) => {
+                const aborted = storyFactory.abort(storyId)
+                if (aborted && emitTui) {
+                    emit({ type: "story_log", id: storyId, line: `⚠ ${reason} — aborting so it can be split/escalated` })
+                }
+            },
+        })
+        supervisor.join(env)
+    }
 
     // Emit `init` early so the TUI can render the story list before any
     // Claude process spawns. Also emit `dag` so the DAG tab has something
