@@ -1138,13 +1138,8 @@ async fn run_app(
                         }
                         KeyCode::Char(c) => {
                             if app.welcome_field == app::WelcomeField::Goal {
-                                // Word-delete chords some terminals send as a Char:
-                                // Ctrl+W (raw 0x17 or 'w'+CONTROL) and Alt/Option+Delete (0x7f).
-                                let is_ctrl_w = c == '\u{17}'
-                                    || (c == 'w' && key.modifiers.contains(KeyModifiers::CONTROL));
-                                let is_alt_del =
-                                    c == '\u{7f}' && key.modifiers.contains(KeyModifiers::ALT);
-                                if is_ctrl_w || is_alt_del {
+                                // Ctrl+W deletes the previous word, terminal-style.
+                                if c == 'w' && key.modifiers.contains(KeyModifiers::CONTROL) {
                                     delete_prev_word(&mut app.goal_input);
                                 } else {
                                     app.goal_input.push(c);
@@ -1153,11 +1148,7 @@ async fn run_app(
                         }
                         KeyCode::Backspace => {
                             if app.welcome_field == app::WelcomeField::Goal {
-                                if key.modifiers.contains(KeyModifiers::ALT) {
-                                    delete_prev_word(&mut app.goal_input);
-                                } else {
-                                    app.goal_input.pop();
-                                }
+                                app.goal_input.pop();
                             }
                         }
                         _ => {}

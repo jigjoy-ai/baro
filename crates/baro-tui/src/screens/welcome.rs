@@ -175,26 +175,20 @@ pub fn render(f: &mut Frame, app: &App) {
     };
 
     // Wrap the typed goal and scroll so the last 3 inner rows (with the cursor) stay visible.
-    // Inner text width = box width minus the 2 border columns; +1 accounts for the leading space.
-    let inner_text_width = input_area.width.saturating_sub(2);
-    let wrapped_rows = if inner_text_width == 0 {
-        1
-    } else {
-        let chars = app.goal_input.chars().count() as u16 + 1;
-        chars.div_ceil(inner_text_width).max(1)
-    };
-    let overflow_rows = wrapped_rows.saturating_sub(3);
-
+    // Ask ratatui for the exact wrapped line count at the inner width (box width minus the 2
+    // border columns) — a char-count estimate mispredicts word-wrap and clips the cursor.
     let goal_border = if focused == WelcomeField::Goal { theme::BORDER_ACTIVE } else { theme::BORDER };
-    let input = Paragraph::new(display_text)
-        .wrap(ratatui::widgets::Wrap { trim: false })
-        .scroll((overflow_rows, 0))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(goal_border))
-                .title(Span::styled(" Goal ", Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))),
-        );
+    let input = Paragraph::new(display_text).wrap(ratatui::widgets::Wrap { trim: false });
+
+    let inner_text_width = input_area.width.saturating_sub(2);
+    let overflow_rows = (input.line_count(inner_text_width) as u16).saturating_sub(3);
+
+    let input = input.scroll((overflow_rows, 0)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(goal_border))
+            .title(Span::styled(" Goal ", Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))),
+    );
     f.render_widget(input, input_area);
 
     // ── Settings box ──
