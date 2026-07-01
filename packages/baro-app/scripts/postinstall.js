@@ -126,6 +126,29 @@ async function main() {
     }
 
     wireMemoryDeps()
+    printUsage()
+}
+
+/**
+ * Short "you're ready — here's how to start" banner, printed once after install.
+ * npm shows top-level (global) install-script output, so `npm i -g baro-ai` users
+ * see this. Best-effort: purely cosmetic, must never affect the install.
+ */
+function printUsage() {
+    const A = "\x1b[38;5;214m" // amber
+    const B = "\x1b[1m"
+    const D = "\x1b[2m"
+    const R = "\x1b[0m"
+    console.log(`
+  ${B}baro is ready.${R}
+
+    ${A}baro "add JWT auth with refresh tokens"${R}   plan a goal → a fleet of agents → a PR
+    ${A}baro --continue${R}                            follow up on the last run, in place
+    ${A}baro connect${R}                               pair this machine with baro's cloud
+    ${A}baro --help${R}                                all commands & flags
+
+  ${D}Runs on the Claude or Codex CLI you already have. Docs: https://docs.baro.rs${R}
+`)
 }
 
 /**
