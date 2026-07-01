@@ -38,6 +38,8 @@ export interface SurgeonPiOptions {
     snapshot: () => PrdSnapshot
     /** Describes the model a story actually ran on (issue #48). */
     resolveRoute?: RouteDescriber
+    /** Explicit `backend:model` the Surgeon may set to escalate a stuck, right-sized story. */
+    escalationRoute?: string
     /** Use Pi CLI to evaluate replans. Default: true. */
     useLlm?: boolean
     /**
@@ -59,13 +61,15 @@ export interface SurgeonPiOptions {
 
 export class SurgeonPi extends BaseObserver {
     private readonly opts: Required<
-        Omit<SurgeonPiOptions, "snapshot" | "provider" | "model" | "piBin" | "resolveRoute">
+        Omit<SurgeonPiOptions, "snapshot" | "provider" | "model" | "piBin" | "resolveRoute" | "escalationRoute">
     > & {
         snapshot: () => PrdSnapshot
         provider: string | undefined
         model: string | undefined
         piBin: string
         resolveRoute?: RouteDescriber
+        /** Explicit `backend:model` the Surgeon may set to escalate a stuck, right-sized story. */
+        escalationRoute?: string
     }
 
     private replansEmitted = 0
@@ -82,6 +86,7 @@ export class SurgeonPi extends BaseObserver {
             timeoutMs: opts.timeoutMs ?? 300_000,
             snapshot: opts.snapshot,
             resolveRoute: opts.resolveRoute,
+            escalationRoute: opts.escalationRoute,
         }
     }
 
@@ -117,7 +122,7 @@ export class SurgeonPi extends BaseObserver {
         failure: StoryResultData,
     ): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute)
+        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute, this.opts.escalationRoute)
         const prompt = `${SURGEON_SYSTEM_PROMPT}\n\n${userPrompt}`
 
         try {

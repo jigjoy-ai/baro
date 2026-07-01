@@ -74,6 +74,8 @@ export interface SurgeonOptions {
     snapshot: () => PrdSnapshot
     /** Describes the model a story actually ran on (see RouteDescriber). */
     resolveRoute?: RouteDescriber
+    /** Explicit `backend:model` the Surgeon may set to escalate a stuck, right-sized story. */
+    escalationRoute?: string
     /** Use Claude CLI to evaluate replans. Default: false (deterministic). */
     useLlm?: boolean
     /** Model for LLM evaluations. Default: "opus". */
@@ -128,7 +130,7 @@ exactly this shape:
 {"action":"split"|"prereq"|"rewire"|"skip"|"abort",
  "reason":"…",
  "added":[ { "id":"S?","priority":N,"title":"…","description":"…",
-             "dependsOn":["…"], "acceptance":["…"], "model":"sonnet" } ],
+             "dependsOn":["…"], "acceptance":["…"] } ],
  "removed":["S?"],
  "modifiedDeps":[{"id":"S?","newDependsOn":["…"]}]}
 
@@ -138,18 +140,22 @@ Rules:
 - "modifiedDeps" rewires a story's dependsOn — use to repoint dependents
   of a removed story to a replacement.
 - "abort" → empty added/removed/modifiedDeps arrays.
-- TIER every added story with "model" ("haiku" | "sonnet" | "opus"),
-  the same way the planner does — by blast radius, not raw difficulty:
-    * "haiku"  → mechanical, single-concern, nothing important breaks
-    * "sonnet" → one contained feature/module
-    * "opus"   → cross-cutting / schema / wiring / a DAG hub
-  ESCALATION: the failing story already burned its retries at the tier
-  shown ("Tier that just failed"). Its replacement(s) must NOT repeat
-  that tier unless you are splitting it into genuinely smaller pieces.
-  When you keep the same scope (rewire / prereq replacement), bump the
-  tier UP one step (haiku→sonnet→opus). When you split (action "split"),
-  each child gets the tier its own (smaller) blast radius warrants —
-  often lower, but a still-complex child stays "opus".
+- MODEL: LEAVE "model" UNSET on the stories you add — they run on the
+  default (cheaper) model, which is exactly what split children want.
+  Do NOT use planner tier names ("haiku"/"sonnet"/"opus") — the story
+  model is not chosen by tier here; it is either the default or an
+  explicit escalation route (below).
+- ESCALATION vs SPLIT — the failing story already burned its retries on
+  the model shown ("Model that just failed"). Two ways to recover:
+    * SPLIT (preferred): if it was TOO BROAD — too many files/concerns
+      for one session — break it into smaller, focused stories and
+      leave their "model" unset (they stay on the cheaper model). A
+      smaller, sharper story is usually what a stuck run actually needs.
+    * ESCALATE (sparingly): if the story was already RIGHT-SIZED but
+      genuinely needs a more capable model, set that ONE story's "model"
+      to the exact ESCALATION ROUTE printed in the failure context
+      below. That runs it on the stronger model. Only escalate when the
+      scope is already tight — never as a reflex.
 - Output ONLY the JSON object, nothing else.`
 
 export class Surgeon extends BaseObserver {
@@ -174,6 +180,7 @@ export class Surgeon extends BaseObserver {
             timeoutMs: opts.timeoutMs ?? 90_000,
             snapshot: opts.snapshot,
             resolveRoute: opts.resolveRoute,
+            escalationRoute: opts.escalationRoute,
         }
     }
 
@@ -225,7 +232,7 @@ export class Surgeon extends BaseObserver {
         failure: StoryResultData,
     ): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const prompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute)
+        const prompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute, this.opts.escalationRoute)
         try {
             const { stdout } = await execFileAsync(
                 this.opts.claudeBin,
@@ -292,6 +299,7 @@ export function buildSurgeonPrompt(
     snap: PrdSnapshot,
     failure: StoryResultData,
     resolveRoute?: RouteDescriber,
+    escalationRoute?: string,
 ): string {
     const storyLines = snap.stories
         .map(
@@ -325,6 +333,16 @@ export function buildSurgeonPrompt(
             : []),
         `Attempts: ${failure.attempts}`,
         `Error: ${failure.error ?? "(no reason captured)"}`,
+        ...(escalationRoute
+            ? [
+                  "",
+                  `# Escalation route`,
+                  `To ESCALATE a right-sized story onto the stronger model, set that ` +
+                      `story's "model" to EXACTLY: ${escalationRoute}`,
+                  `Otherwise leave "model" unset — added stories run on the default ` +
+                      `(cheaper) model. Prefer splitting a too-broad story over escalating.`,
+              ]
+            : []),
         "",
         `# Decide`,
         `Output the replan JSON per the rules in your system prompt.`,

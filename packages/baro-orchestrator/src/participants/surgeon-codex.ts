@@ -37,6 +37,8 @@ export interface SurgeonCodexOptions {
     snapshot: () => PrdSnapshot
     /** Describes the model a story actually ran on (issue #48). */
     resolveRoute?: RouteDescriber
+    /** Explicit `backend:model` the Surgeon may set to escalate a stuck, right-sized story. */
+    escalationRoute?: string
     /** Use Codex CLI to evaluate replans. Default: true. */
     useLlm?: boolean
     /** Model for LLM evaluations. Default: undefined (Codex picks). */
@@ -51,12 +53,14 @@ export interface SurgeonCodexOptions {
 
 export class SurgeonCodex extends BaseObserver {
     private readonly opts: Required<
-        Omit<SurgeonCodexOptions, "snapshot" | "model" | "codexBin" | "resolveRoute">
+        Omit<SurgeonCodexOptions, "snapshot" | "model" | "codexBin" | "resolveRoute" | "escalationRoute">
     > & {
         snapshot: () => PrdSnapshot
         model: string | undefined
         codexBin: string
         resolveRoute?: RouteDescriber
+        /** Explicit `backend:model` the Surgeon may set to escalate a stuck, right-sized story. */
+        escalationRoute?: string
     }
 
     private replansEmitted = 0
@@ -72,6 +76,7 @@ export class SurgeonCodex extends BaseObserver {
             timeoutMs: opts.timeoutMs ?? 300_000,
             snapshot: opts.snapshot,
             resolveRoute: opts.resolveRoute,
+            escalationRoute: opts.escalationRoute,
         }
     }
 
@@ -107,7 +112,7 @@ export class SurgeonCodex extends BaseObserver {
         failure: StoryResultData,
     ): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute)
+        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute, this.opts.escalationRoute)
         const prompt = `${SURGEON_SYSTEM_PROMPT}\n\n${userPrompt}`
 
         try {

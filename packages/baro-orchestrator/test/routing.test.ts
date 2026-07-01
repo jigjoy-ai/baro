@@ -346,7 +346,11 @@ describe("helpers", () => {
     })
 })
 
-describe("resolveStoryRoute — tier-map default + escalation (cloud jigjoy)", () => {
+describe("resolveStoryRoute — cheap-by-default + Surgeon escalation route (cloud jigjoy)", () => {
+    // The hosted-gateway tier map: EVERY planner tier maps to the cheap model.
+    // The planner's blast-radius tier does NOT pick the story model — stories
+    // run cheap by default and only reach the strong model through an explicit
+    // escalation route the Surgeon sets on a stuck story.
     const jigjoy: ResolveOpts = {
         fallbackBackend: "openai",
         openaiDefaultModel: "gpt-5.5",
@@ -354,21 +358,19 @@ describe("resolveStoryRoute — tier-map default + escalation (cloud jigjoy)", (
             default: "openai:deepseek-chat",
             haiku: "openai:deepseek-chat",
             sonnet: "openai:deepseek-chat",
-            opus: "openai:gpt-5.5",
+            opus: "openai:deepseek-chat",
         },
     }
     it("routes an un-tiered story to the cheap default (NOT the openai default)", () => {
         assert.deepEqual(resolveStoryRoute(undefined, jigjoy), { backend: "openai", model: "deepseek-chat" })
         assert.deepEqual(resolveStoryRoute("", jigjoy), { backend: "openai", model: "deepseek-chat" })
     })
-    it("keeps low tiers on the cheap model", () => {
-        assert.deepEqual(resolveStoryRoute("sonnet", jigjoy), { backend: "openai", model: "deepseek-chat" })
+    it("keeps EVERY planner tier — including opus — on the cheap model", () => {
         assert.deepEqual(resolveStoryRoute("haiku", jigjoy), { backend: "openai", model: "deepseek-chat" })
+        assert.deepEqual(resolveStoryRoute("sonnet", jigjoy), { backend: "openai", model: "deepseek-chat" })
+        assert.deepEqual(resolveStoryRoute("opus", jigjoy), { backend: "openai", model: "deepseek-chat" })
     })
-    it("escalates an opus-tiered story (Surgeon) to the strong model", () => {
-        assert.deepEqual(resolveStoryRoute("opus", jigjoy), { backend: "openai", model: "gpt-5.5" })
-    })
-    it("a per-story explicit route is not blocked (no override in play)", () => {
+    it("runs the Surgeon's explicit escalation route on the strong model (bypasses the cheap tier map)", () => {
         assert.deepEqual(resolveStoryRoute("openai:gpt-5.5", jigjoy), { backend: "openai", model: "gpt-5.5" })
     })
 })

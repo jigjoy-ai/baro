@@ -38,6 +38,8 @@ export interface SurgeonOpenCodeOptions {
     snapshot: () => PrdSnapshot
     /** Describes the model a story actually ran on (issue #48). */
     resolveRoute?: RouteDescriber
+    /** Explicit `backend:model` the Surgeon may set to escalate a stuck, right-sized story. */
+    escalationRoute?: string
     /** Use OpenCode CLI to evaluate replans. Default: true. */
     useLlm?: boolean
     /**
@@ -56,12 +58,14 @@ export interface SurgeonOpenCodeOptions {
 
 export class SurgeonOpenCode extends BaseObserver {
     private readonly opts: Required<
-        Omit<SurgeonOpenCodeOptions, "snapshot" | "model" | "opencodeBin" | "resolveRoute">
+        Omit<SurgeonOpenCodeOptions, "snapshot" | "model" | "opencodeBin" | "resolveRoute" | "escalationRoute">
     > & {
         snapshot: () => PrdSnapshot
         model: string | undefined
         opencodeBin: string
         resolveRoute?: RouteDescriber
+        /** Explicit `backend:model` the Surgeon may set to escalate a stuck, right-sized story. */
+        escalationRoute?: string
     }
 
     private replansEmitted = 0
@@ -77,6 +81,7 @@ export class SurgeonOpenCode extends BaseObserver {
             timeoutMs: opts.timeoutMs ?? 300_000,
             snapshot: opts.snapshot,
             resolveRoute: opts.resolveRoute,
+            escalationRoute: opts.escalationRoute,
         }
     }
 
@@ -112,7 +117,7 @@ export class SurgeonOpenCode extends BaseObserver {
         failure: StoryResultData,
     ): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute)
+        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute, this.opts.escalationRoute)
         const prompt = `${SURGEON_SYSTEM_PROMPT}\n\n${userPrompt}`
 
         try {

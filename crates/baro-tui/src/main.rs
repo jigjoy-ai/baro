@@ -634,16 +634,20 @@ async fn run_app(
             if app.critic_model.is_none() {
                 app.critic_model = Some(cheap.clone());
             }
-            // Stories run via a TIER MAP, not a story-model override. Un-tiered
-            // stories (the `default` entry) and the low tiers use the cheap
-            // model; a story tiered `opus` — the planner's high-blast tier, or a
-            // Surgeon escalation of a stuck story — uses the strong model. A map
-            // (rather than an override) is what lets a per-story escalation take
-            // effect; an override would win over it and pin every story to one
-            // model.
+            // Stories run on the cheap tier via a TIER MAP (not a story-model
+            // override). EVERY planner tier — including `opus` — maps to the cheap
+            // model: the planner tiers by blast radius and readily marks a story
+            // `opus`, but on the two-tier hosted gateway the strong model is many
+            // times pricier per token, so a story-level agent must never land
+            // there by default (a big-context story on the strong tier is what
+            // ran up surprise cost). Self-healing for a stuck story is handled by
+            // SPLITTING it into smaller (still cheap) stories, not by silently
+            // promoting it to the strong model. Keeping a map (rather than an
+            // override) leaves room for a future explicit per-story escalation
+            // route the Surgeon could emit for a genuinely stuck story.
             if app.tier_map.is_none() {
                 app.tier_map = Some(format!(
-                    "default=openai:{cheap},haiku=openai:{cheap},sonnet=openai:{cheap},opus=openai:{strong}"
+                    "default=openai:{cheap},haiku=openai:{cheap},sonnet=openai:{cheap},opus=openai:{cheap}"
                 ));
             }
 

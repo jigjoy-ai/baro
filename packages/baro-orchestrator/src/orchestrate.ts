@@ -540,6 +540,22 @@ export async function orchestrate(
                   }
               }
             : undefined
+        // The escalation route: an explicit `backend:model` the Surgeon may set
+        // on a right-sized-but-stuck story to run it on the stronger model,
+        // bypassing the (cheap-by-default) tier map. It IS the Surgeon's own
+        // model — the strong tier on this setup (openai:gpt-5.5 on the hosted
+        // gateway, claude:opus locally). Stories default to the cheap model and
+        // only reach the strong model through this deliberate, on-failure
+        // escalation — never the planner's up-front tier.
+        const surgeonEscalationModel =
+            config.surgeonModel ??
+            (surgeonLlm === "openai" ? "gpt-5.5" : surgeonLlm === "claude" ? "opus" : undefined)
+        // A global `--story-model` override wins over any per-story route, so it
+        // would silently defeat an escalation route — don't offer one then.
+        const escalationRoute =
+            surgeonEscalationModel && !config.storyModel
+                ? `${surgeonLlm}:${surgeonEscalationModel}`
+                : undefined
         // Factory by provider. Bus contract is identical across all
         // three — same ReplanItem shape — so downstream observers
         // (Conductor's replan-applier, Auditor, kaleidoskop) don't
@@ -548,12 +564,14 @@ export async function orchestrate(
             surgeon = new SurgeonOpenAI({
                 snapshot,
                 resolveRoute,
+                escalationRoute,
                 model: config.surgeonModel ?? "gpt-5.5",
             })
         } else if (surgeonLlm === "codex") {
             surgeon = new SurgeonCodex({
                 snapshot,
                 resolveRoute,
+                escalationRoute,
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
             })
@@ -561,6 +579,7 @@ export async function orchestrate(
             surgeon = new SurgeonOpenCode({
                 snapshot,
                 resolveRoute,
+                escalationRoute,
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
             })
@@ -568,6 +587,7 @@ export async function orchestrate(
             surgeon = new SurgeonPi({
                 snapshot,
                 resolveRoute,
+                escalationRoute,
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
             })
@@ -575,6 +595,7 @@ export async function orchestrate(
             surgeon = new Surgeon({
                 snapshot,
                 resolveRoute,
+                escalationRoute,
                 useLlm: config.surgeonUseLlm ?? false,
                 model: config.surgeonModel ?? "opus",
             })

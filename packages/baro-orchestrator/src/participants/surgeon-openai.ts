@@ -58,6 +58,8 @@ export interface SurgeonOpenAIOptions {
     snapshot: () => PrdSnapshot
     /** Describes the model a story actually ran on (issue #48). */
     resolveRoute?: RouteDescriber
+    /** Explicit `backend:model` the Surgeon may set to escalate a stuck, right-sized story. */
+    escalationRoute?: string
     /** Max replans this Surgeon will emit per run. Default: 10. */
     maxReplans?: number
     /**
@@ -100,6 +102,7 @@ export class SurgeonOpenAI extends BaseObserver {
             model: opts.model ?? "gpt-5.5",
             snapshot: opts.snapshot,
             resolveRoute: opts.resolveRoute,
+            escalationRoute: opts.escalationRoute,
         }
         this.model = pickModel(this.opts.model)
     }
@@ -139,7 +142,7 @@ export class SurgeonOpenAI extends BaseObserver {
      */
     private async evaluate(failure: StoryResultData): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute)
+        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute, this.opts.escalationRoute)
         const context = ModelContext.create("surgeon")
             .addContextItem(SystemMessageItem.create(SURGEON_SYSTEM_PROMPT))
             .addContextItem(UserMessageItem.create(userPrompt))
