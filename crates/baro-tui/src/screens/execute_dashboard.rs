@@ -301,9 +301,10 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
         let tail = total_logs.saturating_sub(inner_height);
         let stored = app.log_scroll_offsets.get(&selected_id).copied().unwrap_or(usize::MAX);
         let skip = if stored == usize::MAX { tail } else { stored.min(tail) };
+        let inner_w = log_chunks[1].width.saturating_sub(3) as usize;
         let visible_logs: Vec<Line> = story.activity[skip..]
             .iter()
-            .map(activity_line)
+            .map(|e| activity_line(e, inner_w))
             .collect();
 
         let block = Block::default()
@@ -333,7 +334,7 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
 /// One Activity entry → a color-coded line. Icon carries the type signal;
 /// file changes + test verdicts color the whole line (diff-like). The panel
 /// is already scoped to one story, so no per-line agent prefix.
-fn activity_line(e: &ActivityEntry) -> Line<'static> {
+fn activity_line(e: &ActivityEntry, width: usize) -> Line<'static> {
     let (icon, icon_color, text_color) = match e.kind.as_str() {
         "tool_call" => match e.tool.as_deref() {
             Some("bash") => ("$ ", theme::ACCENT, theme::TEXT),
@@ -358,8 +359,11 @@ fn activity_line(e: &ActivityEntry) -> Line<'static> {
         "error" => ("✗ ", theme::ERROR, theme::ERROR),
         _ => ("  ", theme::TEXT, theme::TEXT),
     };
+    // Truncate to the panel width (minus the 2-char icon) so long lines get a
+    // clean ellipsis instead of ratatui clipping them mid-word at the edge.
+    let budget = width.saturating_sub(icon.chars().count()).max(8);
     Line::from(vec![
         Span::styled(icon, Style::default().fg(icon_color)),
-        Span::styled(e.text.clone(), Style::default().fg(text_color)),
+        Span::styled(truncate_for_panel(&e.text, budget), Style::default().fg(text_color)),
     ])
 }

@@ -35,15 +35,18 @@ export class AgentStreamForwarder extends BaseObserver {
         const tool = item.name
 
         // File writes/edits surface as file_change (path + op).
-        if (tool === "write_file" || tool === "edit_file") {
+        // Claude: write_file / edit_file. Codex maps file_change → name "edit".
+        if (tool === "write_file" || tool === "edit_file" || tool === "edit") {
             const path = strField(args, "path", "file_path", "file") ?? "(file)"
-            const op = tool === "edit_file" ? "modify" : "create"
+            const op = tool === "write_file" ? "create" : "modify"
             emit({ type: "activity", id: agentId, kind: "file_change", tool: "write", op, path, text: path })
             return
         }
-        if (tool === "bash") {
-            const cmd = firstLine(strField(args, "command", "cmd", "script") ?? "")
-            emit({ type: "activity", id: agentId, kind: "tool_call", tool: "bash", text: truncate(cmd || "bash", 140) })
+        // Shell/bash commands. Claude: bash. Codex maps command_execution →
+        // name "shell" with the argv in `command` (often ["bash","-lc","<script>"]).
+        if (tool === "bash" || tool === "shell") {
+            const cmd = firstLine(cmdText(args))
+            emit({ type: "activity", id: agentId, kind: "tool_call", tool: "bash", text: truncate(cmd || tool, 140) })
             return
         }
         // Read-ish tools: read_file, list_files, file_tree, grep, glob.
@@ -103,6 +106,18 @@ function strField(obj: Record<string, unknown>, ...keys: string[]): string | und
         if (typeof v === "string" && v.length > 0) return v
     }
     return undefined
+}
+
+/** Extract a shell command from tool args — string or argv array; unwraps `bash -lc "<script>"`. */
+function cmdText(args: Record<string, unknown>): string {
+    const c = args.command ?? args.cmd ?? args.script
+    if (Array.isArray(c)) {
+        if (c.length >= 3 && /^(ba)?sh$/.test(String(c[0])) && /^-[lc]+$/.test(String(c[1]))) {
+            return String(c[2])
+        }
+        return c.map(String).join(" ")
+    }
+    return typeof c === "string" ? c : ""
 }
 
 function firstLine(s: string): string {
