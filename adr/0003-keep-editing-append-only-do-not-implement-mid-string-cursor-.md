@@ -1,0 +1,6 @@
+# ADR-0003: Keep editing append-only; do not implement mid-string cursor movement
+
+**Status:** Superseded by ADR-0004 (append-only stands; word-delete-at-end is now in scope)
+**Context:** "Can't handle it the same way as terminals" could be read as a request for full terminal-style line editing (arrow-key cursor, insert/delete mid-string, word-delete). That is a separate, larger feature the user did not explicitly ask for; the concrete complaint is overflow. Implementing a cursor index would touch `App` state, the render, and the key handler, and risks inconsistent behavior across agents.
+**Decision:** In `main.rs` Welcome key handler, leave editing exactly as today: `KeyCode::Char(c) => app.goal_input.push(c)`, `KeyCode::Backspace => app.goal_input.pop()`, and `Left`/`Right` remain no-ops for `WelcomeField::Goal`. Do **not** add a cursor index, insert-at-cursor, or word-delete in this change. The blinking cursor stays rendered at the end of the text (ADR-001).
+**Consequences:** Scope stays minimal and matches the stated bug. If the user later wants true in-line editing (move cursor, insert mid-string), that is a follow-up that would add a `goal_cursor: usize` to `App` and update both the handler and `welcome.rs` render — out of scope here. Implementation agents must not expand beyond append-only editing in this task.

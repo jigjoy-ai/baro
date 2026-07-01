@@ -155,34 +155,34 @@ pub fn render(f: &mut Frame, app: &App) {
     f.render_widget(tagline, chunks[3]);
 
     // ── Goal input ──
-    let input_width = (w - 10).min(100);
+    let input_width = w.saturating_sub(10).min(100);
     let input_area = center(chunks[5], input_width);
 
     let cursor_visible = (app.tick_count / 5).is_multiple_of(2);
     let cursor_char = if cursor_visible && focused == WelcomeField::Goal { "\u{2588}" } else { " " };
 
     let display_text = if app.goal_input.is_empty() {
-        vec![
-            Line::from(""),
-            Line::from(vec![
-                Span::styled(" What do you want to build?  ", Style::default().fg(theme::MUTED)),
-                Span::styled(cursor_char, Style::default().fg(theme::SUCCESS).add_modifier(Modifier::BOLD)),
-            ]),
-            Line::from(""),
-        ]
+        Line::from(vec![
+            Span::styled(" What do you want to build?  ", Style::default().fg(theme::MUTED)),
+            Span::styled(cursor_char, Style::default().fg(theme::SUCCESS).add_modifier(Modifier::BOLD)),
+        ])
     } else {
-        vec![
-            Line::from(""),
-            Line::from(vec![
-                Span::styled(format!(" {}", &app.goal_input), Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)),
-                Span::styled(cursor_char, Style::default().fg(theme::SUCCESS).add_modifier(Modifier::BOLD)),
-            ]),
-            Line::from(""),
-        ]
+        Line::from(vec![
+            Span::styled(format!(" {}", &app.goal_input), Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled(cursor_char, Style::default().fg(theme::SUCCESS).add_modifier(Modifier::BOLD)),
+        ])
     };
 
+    // Wrap the typed goal and scroll so the last 3 inner rows (with the cursor) stay visible.
+    // Ask ratatui for the exact wrapped line count at the inner width (box width minus the 2
+    // border columns) — a char-count estimate mispredicts word-wrap and clips the cursor.
     let goal_border = if focused == WelcomeField::Goal { theme::BORDER_ACTIVE } else { theme::BORDER };
-    let input = Paragraph::new(display_text).block(
+    let input = Paragraph::new(display_text).wrap(ratatui::widgets::Wrap { trim: false });
+
+    let inner_text_width = input_area.width.saturating_sub(2);
+    let overflow_rows = (input.line_count(inner_text_width) as u16).saturating_sub(3);
+
+    let input = input.scroll((overflow_rows, 0)).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(goal_border))
