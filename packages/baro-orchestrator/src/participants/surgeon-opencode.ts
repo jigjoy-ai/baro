@@ -72,7 +72,7 @@ export class SurgeonOpenCode extends BaseObserver {
         this.opts = {
             useLlm: opts.useLlm ?? true,
             model: opts.model,
-            maxReplans: opts.maxReplans ?? 10,
+            maxReplans: opts.maxReplans ?? Infinity,
             opencodeBin: opts.opencodeBin ?? "opencode",
             timeoutMs: opts.timeoutMs ?? 300_000,
             snapshot: opts.snapshot,

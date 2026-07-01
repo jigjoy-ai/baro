@@ -169,7 +169,7 @@ export class Surgeon extends BaseObserver {
         this.opts = {
             useLlm: opts.useLlm ?? true,
             model: opts.model ?? "opus",
-            maxReplans: opts.maxReplans ?? 10,
+            maxReplans: opts.maxReplans ?? Infinity,
             claudeBin: opts.claudeBin ?? "claude",
             timeoutMs: opts.timeoutMs ?? 90_000,
             snapshot: opts.snapshot,

@@ -626,11 +626,22 @@ async fn run_app(
             if app.surgeon_model.is_none() {
                 app.surgeon_model = Some("gpt-5.5".to_string());
             }
-            if app.story_model.is_none() {
-                app.story_model = Some("deepseek-chat".to_string());
-            }
             if app.critic_model.is_none() {
                 app.critic_model = Some("deepseek-chat".to_string());
+            }
+            // Stories default to the cheap tier via the tier map — NOT a hard
+            // `story-model` override, which wins over per-story models and would
+            // block the Surgeon from escalating a stuck story. The planner tiers
+            // each story haiku/sonnet (→ deepseek, cheap) or opus (→ gpt-5.5,
+            // strong); a Supervisor abort → Surgeon escalation bumps a failed
+            // story to opus → gpt-5.5, and the gateway meters + bills it at the
+            // gpt-5.5 rate (×markup) accordingly. This is the ONLY escalation the
+            // 2-tier gateway offers, so it's the cloud escalation target.
+            if app.tier_map.is_none() {
+                app.tier_map = Some(
+                    "haiku=openai:deepseek-chat,sonnet=openai:deepseek-chat,opus=openai:gpt-5.5"
+                        .to_string(),
+                );
             }
 
             // Default gateway URL unless the user set --openai-base-url or

@@ -96,7 +96,7 @@ export class SurgeonOpenAI extends BaseObserver {
     constructor(opts: SurgeonOpenAIOptions) {
         super()
         this.opts = {
-            maxReplans: opts.maxReplans ?? 10,
+            maxReplans: opts.maxReplans ?? Infinity,
             model: opts.model ?? "gpt-5.5",
             snapshot: opts.snapshot,
             resolveRoute: opts.resolveRoute,

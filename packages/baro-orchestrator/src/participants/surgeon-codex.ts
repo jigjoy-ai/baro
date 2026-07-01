@@ -67,7 +67,7 @@ export class SurgeonCodex extends BaseObserver {
         this.opts = {
             useLlm: opts.useLlm ?? true,
             model: opts.model,
-            maxReplans: opts.maxReplans ?? 10,
+            maxReplans: opts.maxReplans ?? Infinity,
             codexBin: opts.codexBin ?? "codex",
             timeoutMs: opts.timeoutMs ?? 300_000,
             snapshot: opts.snapshot,

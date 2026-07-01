@@ -77,7 +77,7 @@ export class SurgeonPi extends BaseObserver {
             useLlm: opts.useLlm ?? true,
             provider: opts.provider,
             model: opts.model,
-            maxReplans: opts.maxReplans ?? 10,
+            maxReplans: opts.maxReplans ?? Infinity,
             piBin: opts.piBin ?? "pi",
             timeoutMs: opts.timeoutMs ?? 300_000,
             snapshot: opts.snapshot,
