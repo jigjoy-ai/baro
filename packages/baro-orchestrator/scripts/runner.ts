@@ -46,7 +46,7 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.70.1"
+const VERSION = "0.70.2"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
 // a.b.c < x.y.z, numeric per-segment.
@@ -68,7 +68,7 @@ async function getLatest(force = false): Promise<string | null> {
     if (!force) {
         try {
             const c = JSON.parse(readFileSync(updateCachePath, "utf8")) as { latest?: string; checkedAt?: number }
-            if (c.latest && c.checkedAt && Date.now() - c.checkedAt < 24 * 3600_000) return c.latest
+            if (c.latest && c.checkedAt && Date.now() - c.checkedAt < 3 * 3600_000) return c.latest
         } catch {
             /* no/!stale cache → fetch */
         }

@@ -163,7 +163,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Interactive use: tell the user when a newer baro is out (we release often). The
     // network check runs in the JS layer (no HTTP dep here); this only reads its cache.
-    notify_update();
+    // Printed AFTER the TUI restores the terminal (below) — the alternate screen purges it.
+    let update_notice = notify_update();
 
      let (cli, _lock) = cli::cli::parse()?;
 
@@ -201,6 +202,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     terminal.show_cursor()?;
     terminal.backend_mut().flush()?;
 
+    // Terminal is restored now — safe to print the update notice so it survives on screen.
+    if let Some(n) = &update_notice {
+        eprint!("{n}");
+    }
+
     // _lock is dropped here, removing baro.lock
 
     if let Err(err) = result {
@@ -227,28 +233,35 @@ fn semver_lt(a: &str, b: &str) -> bool {
 /// Read the update cache the JS layer maintains (`~/.baro/update-check.json`) and print a
 /// banner if a newer baro is published. If the cache is stale/missing, kick off a detached
 /// background refresh so the NEXT run has current data. Best-effort — never blocks or fails.
-fn notify_update() {
-    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
-        return;
-    };
+/// Returns the update notice (if a newer baro is published) WITHOUT printing it — the caller
+/// prints it after the TUI restores the terminal, because the alternate-screen enter purges
+/// the scrollback (so printing here, before the TUI, would be wiped). Also kicks off a
+/// background cache refresh when the cache is stale. Best-effort — never blocks or fails.
+fn notify_update() -> Option<String> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
     let cache = std::path::PathBuf::from(home).join(".baro").join("update-check.json");
     let mut fresh = false;
+    let mut notice = None;
     if let Ok(s) = std::fs::read_to_string(&cache) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
             let latest = v.get("latest").and_then(|x| x.as_str()).unwrap_or("");
             let checked = v.get("checkedAt").and_then(|x| x.as_u64()).unwrap_or(0);
             if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                fresh = (now.as_millis() as u64).saturating_sub(checked) < 24 * 3600 * 1000;
+                fresh = (now.as_millis() as u64).saturating_sub(checked) < 3 * 3600 * 1000;
             }
             if !latest.is_empty() && semver_lt(env!("CARGO_PKG_VERSION"), latest) {
-                eprintln!("\n  a newer baro is available: {} → {}", env!("CARGO_PKG_VERSION"), latest);
-                eprintln!("  update:  npm i -g baro-ai\n");
+                notice = Some(format!(
+                    "\n  \u{2191} a newer baro is available: {} \u{2192} {}\n    update:  npm i -g baro-ai\n",
+                    env!("CARGO_PKG_VERSION"),
+                    latest,
+                ));
             }
         }
     }
     if !fresh {
         spawn_bg_update_check();
     }
+    notice
 }
 
 /// Fire-and-forget the JS update check so the cache refreshes for next time.
