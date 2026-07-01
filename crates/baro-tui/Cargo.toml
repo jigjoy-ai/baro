@@ -1,6 +1,6 @@
 [package]
 name = "baro-tui"
-version = "0.70.6"
+version = "0.70.7"
 edition = "2021"
 
 [[bin]]
