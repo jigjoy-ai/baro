@@ -780,7 +780,7 @@ export async function orchestrate(
     // Supervisor — mid-run non-convergence detector. Aborts a spinning story
     // early (via StoryFactory.abort) so it settles as a failed StoryResult and
     // the Surgeon can split/escalate it, instead of burning the run budget on a
-    // non-terminal loop (the failure mode that lost run-42-mr27k0vl).
+    // non-terminal loop.
     if (config.withSupervisor) {
         const supervisor = new Supervisor({
             onStall: (storyId, reason) => {

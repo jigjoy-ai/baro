@@ -5,9 +5,7 @@
  * clearly spinning — a long stretch of reads/greps with no edits, the same call
  * on repeat, or wall-clock elapsed with zero file changes — aborts it EARLY via
  * the injected `onStall` callback. That makes the story fail fast instead of
- * burning the whole run budget on non-terminal retries (the failure mode that
- * lost run-42-mr27k0vl: S11 looped ~30 min / 1M+ tokens and the run timed out
- * before it could be split).
+ * burning the whole run budget on non-terminal retries before it can be split.
  *
  * The Supervisor does NOT decide the fix. It just gets the stuck story to a
  * terminal `StoryResult(success=false)` early — the existing Surgeon reacts to

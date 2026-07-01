@@ -614,34 +614,37 @@ async fn run_app(
             app.critic_llm = app::LlmProvider::OpenAI;
             app.surgeon_llm = app::LlmProvider::OpenAI;
 
-            // Per-phase model defaults — only when the user didn't pin one
-            // (the `--*-model` flags are applied above). Names are sent to
-            // the gateway verbatim; it maps them to the real upstream model.
+            // Per-phase model defaults — only when the user didn't pin one (the
+            // `--*-model` flags are applied above). These are the gateway's two
+            // tier tokens; it maps each to a real upstream model. Overridable by
+            // env so a self-hosted gateway can point them at its own models.
+            let strong =
+                std::env::var("BARO_JIGJOY_STRONG_MODEL").unwrap_or_else(|_| "gpt-5.5".to_string());
+            let cheap =
+                std::env::var("BARO_JIGJOY_STORY_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string());
             if app.planner_model.is_none() {
-                app.planner_model = Some("gpt-5.5".to_string());
+                app.planner_model = Some(strong.clone());
             }
             if app.architect_model.is_none() {
-                app.architect_model = Some("gpt-5.5".to_string());
+                app.architect_model = Some(strong.clone());
             }
             if app.surgeon_model.is_none() {
-                app.surgeon_model = Some("gpt-5.5".to_string());
+                app.surgeon_model = Some(strong.clone());
             }
             if app.critic_model.is_none() {
-                app.critic_model = Some("deepseek-chat".to_string());
+                app.critic_model = Some(cheap.clone());
             }
-            // Stories default to the cheap tier via the tier map — NOT a hard
-            // `story-model` override, which wins over per-story models and would
-            // block the Surgeon from escalating a stuck story. The planner tiers
-            // each story haiku/sonnet (→ deepseek, cheap) or opus (→ gpt-5.5,
-            // strong); a Supervisor abort → Surgeon escalation bumps a failed
-            // story to opus → gpt-5.5, and the gateway meters + bills it at the
-            // gpt-5.5 rate (×markup) accordingly. This is the ONLY escalation the
-            // 2-tier gateway offers, so it's the cloud escalation target.
+            // Stories run via a TIER MAP, not a story-model override. Un-tiered
+            // stories (the `default` entry) and the low tiers use the cheap
+            // model; a story tiered `opus` — the planner's high-blast tier, or a
+            // Surgeon escalation of a stuck story — uses the strong model. A map
+            // (rather than an override) is what lets a per-story escalation take
+            // effect; an override would win over it and pin every story to one
+            // model.
             if app.tier_map.is_none() {
-                app.tier_map = Some(
-                    "haiku=openai:deepseek-chat,sonnet=openai:deepseek-chat,opus=openai:gpt-5.5"
-                        .to_string(),
-                );
+                app.tier_map = Some(format!(
+                    "default=openai:{cheap},haiku=openai:{cheap},sonnet=openai:{cheap},opus=openai:{strong}"
+                ));
             }
 
             // Default gateway URL unless the user set --openai-base-url or

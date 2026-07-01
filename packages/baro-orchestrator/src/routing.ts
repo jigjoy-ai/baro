@@ -180,8 +180,17 @@ export function resolveStoryRoute(
 ): StoryRoute {
     const raw = (opts.override ?? rawModel ?? "").trim()
 
-    // Empty → the fallback backend's own default.
-    if (!raw) return defaultRoute(opts.fallbackBackend, opts.openaiDefaultModel)
+    // Empty (no per-story model, no override) → the tier map's "default"/"*" entry
+    // if one is set, else the fallback backend's own default. The default entry lets
+    // an operator route un-tiered stories to a cheap model without a story-model
+    // override (which would win over — and so block — per-story escalation).
+    if (!raw) {
+        const dflt = opts.tierMap?.["default"] ?? opts.tierMap?.["*"]
+        if (dflt) {
+            return resolveStoryRoute(dflt, { ...opts, override: undefined, tierMap: undefined })
+        }
+        return defaultRoute(opts.fallbackBackend, opts.openaiDefaultModel)
+    }
 
     const direct = splitBackendModel(raw)
 

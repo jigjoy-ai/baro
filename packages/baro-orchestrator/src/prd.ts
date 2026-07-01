@@ -53,7 +53,14 @@ export function normalizePrd(input: Partial<PrdFile>, source: string): PrdFile {
         throw new Error(`PRD at ${source} is not a JSON object`)
     }
     const project = typeof input.project === "string" ? input.project : ""
-    const branchName = typeof input.branchName === "string" ? input.branchName : ""
+    // Strip an accidental doubled "baro/baro/…" prefix (a follow-up run on an
+    // already baro-prefixed branch can double it). createOrCheckoutBranch strips
+    // it before pushing, but the Finalizer opens the PR from prd.branchName
+    // verbatim — so without normalizing HERE the PR head points at the doubled
+    // (empty) branch and `gh pr create` fails with "No commits between…". One
+    // canonical name → checkout, push, and PR all agree.
+    let branchName = typeof input.branchName === "string" ? input.branchName : ""
+    while (branchName.startsWith("baro/baro/")) branchName = branchName.slice("baro/".length)
     const description = typeof input.description === "string" ? input.description : ""
     const stories = Array.isArray(input.userStories) ? input.userStories : []
     const decisionDocument =
