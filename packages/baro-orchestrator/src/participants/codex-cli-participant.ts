@@ -130,11 +130,14 @@ export class CodexCliParticipant extends BaseObserver {
         opts: CodexCliParticipantOptions,
     ) {
         super()
+        // Nullish-coalesce each field so an explicit `undefined` from the
+        // caller (e.g. a spec that never set codexBin) doesn't clobber the
+        // default and crash spawn() with `file must be a string`.
         this.options = {
-            codexBin: "codex",
-            bypassSandbox: false,
-            skipGitRepoCheck: false,
             ...opts,
+            codexBin: opts.codexBin ?? "codex",
+            bypassSandbox: opts.bypassSandbox ?? false,
+            skipGitRepoCheck: opts.skipGitRepoCheck ?? false,
         }
         this.ready = new Promise<void>((res, rej) => {
             this.resolveReady = res

@@ -153,9 +153,10 @@ export class PiCliParticipant extends BaseObserver {
         opts: PiCliParticipantOptions,
     ) {
         super()
+        // Nullish-coalesce so an explicit `undefined` can't clobber the default.
         this.options = {
-            piBin: "pi",
             ...opts,
+            piBin: opts.piBin ?? "pi",
         }
         this.ready = new Promise<void>((res, rej) => {
             this.resolveReady = res

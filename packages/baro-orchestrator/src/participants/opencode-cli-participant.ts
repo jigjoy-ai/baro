@@ -131,10 +131,11 @@ export class OpenCodeCliParticipant extends BaseObserver {
         opts: OpenCodeCliParticipantOptions,
     ) {
         super()
+        // Nullish-coalesce so an explicit `undefined` can't clobber a default.
         this.options = {
-            opencodeBin: "opencode",
-            skipPermissions: true,
             ...opts,
+            opencodeBin: opts.opencodeBin ?? "opencode",
+            skipPermissions: opts.skipPermissions ?? true,
         }
         this.ready = new Promise<void>((res, rej) => {
             this.resolveReady = res

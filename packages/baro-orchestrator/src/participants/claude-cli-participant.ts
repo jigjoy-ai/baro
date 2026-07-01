@@ -137,12 +137,14 @@ export class ClaudeCliParticipant extends BaseObserver {
         opts: ClaudeCliParticipantOptions,
     ) {
         super()
+        // Nullish-coalesce so an explicit `undefined` from the caller can't
+        // clobber a default (esp. claudeBin → spawn crash).
         this.options = {
-            includePartialMessages: false,
-            replayUserMessages: true,
-            permissionMode: "bypassPermissions",
-            claudeBin: "claude",
             ...opts,
+            includePartialMessages: opts.includePartialMessages ?? false,
+            replayUserMessages: opts.replayUserMessages ?? true,
+            permissionMode: opts.permissionMode ?? "bypassPermissions",
+            claudeBin: opts.claudeBin ?? "claude",
         }
         this.ready = new Promise<void>((res, rej) => {
             this.resolveReady = res
