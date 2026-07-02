@@ -8,7 +8,10 @@
 import { runOpenCodeOneShot } from "../opencode-one-shot.js"
 import {
     PLANNER_SYSTEM_PROMPT,
+    buildIntakePrompt,
     buildPlannerUserMessage,
+    heuristicModeContract,
+    parseModeContract,
 } from "./planner-prompts.js"
 
 export interface RunPlannerOpenCodeOptions {
@@ -29,11 +32,17 @@ export interface RunPlannerOpenCodeOptions {
 export async function runPlannerOpenCode(
     opts: RunPlannerOpenCodeOptions,
 ): Promise<string> {
+    const modeContract = await runOpenCodeIntake(opts).catch((e) => {
+        process.stderr.write(`[planner-opencode] intake failed (${(e as Error)?.message ?? String(e)}) — using heuristic mode contract\n`)
+        return heuristicModeContract(opts)
+    })
+    process.stderr.write(`[planner-opencode] intake mode=${modeContract.mode} confidence=${modeContract.confidence}\n`)
     const userMessage = buildPlannerUserMessage({
         goal: opts.goal,
         decisionDocument: opts.decisionDocument,
         quick: opts.quick,
         projectContext: opts.projectContext,
+        modeContract,
     })
     const prompt = `${PLANNER_SYSTEM_PROMPT}\n\n${userMessage}`
 
@@ -53,6 +62,19 @@ export async function runPlannerOpenCode(
     // Model sometimes wraps JSON in markdown fences or adds prose despite
     // the "ONLY JSON" instruction — strip back to a bare `{ … }`.
     return extractJsonObject(planText)
+}
+
+async function runOpenCodeIntake(opts: RunPlannerOpenCodeOptions) {
+    if (opts.quick) return heuristicModeContract(opts)
+    const text = await runOpenCodeOneShot({
+        prompt: `You classify software tasks for an autonomous PR workflow. Output JSON only.\n\n${buildIntakePrompt(opts)}`,
+        cwd: opts.cwd,
+        model: opts.model,
+        opencodeBin: opts.opencodeBin,
+        timeoutMs: Math.min(opts.timeoutMs ?? 900_000, 180_000),
+        label: "opencode-intake",
+    })
+    return parseModeContract(text.trim())
 }
 
 /** First balanced `{ … }` block; tolerates markdown fences and leading prose. */

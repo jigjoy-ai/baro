@@ -8,7 +8,10 @@
 import { runPiOneShot } from "../pi-one-shot.js"
 import {
     PLANNER_SYSTEM_PROMPT,
+    buildIntakePrompt,
     buildPlannerUserMessage,
+    heuristicModeContract,
+    parseModeContract,
 } from "./planner-prompts.js"
 
 export interface RunPlannerPiOptions {
@@ -30,11 +33,17 @@ export interface RunPlannerPiOptions {
 export async function runPlannerPi(
     opts: RunPlannerPiOptions,
 ): Promise<string> {
+    const modeContract = await runPiIntake(opts).catch((e) => {
+        process.stderr.write(`[planner-pi] intake failed (${(e as Error)?.message ?? String(e)}) — using heuristic mode contract\n`)
+        return heuristicModeContract(opts)
+    })
+    process.stderr.write(`[planner-pi] intake mode=${modeContract.mode} confidence=${modeContract.confidence}\n`)
     const userMessage = buildPlannerUserMessage({
         goal: opts.goal,
         decisionDocument: opts.decisionDocument,
         quick: opts.quick,
         projectContext: opts.projectContext,
+        modeContract,
     })
     const prompt = `${PLANNER_SYSTEM_PROMPT}\n\n${userMessage}`
 
@@ -55,6 +64,20 @@ export async function runPlannerPi(
     // Model sometimes wraps JSON in markdown fences or adds prose despite
     // the "ONLY JSON" instruction — strip back to a bare `{ … }`.
     return extractJsonObject(planText)
+}
+
+async function runPiIntake(opts: RunPlannerPiOptions) {
+    if (opts.quick) return heuristicModeContract(opts)
+    const text = await runPiOneShot({
+        prompt: `You classify software tasks for an autonomous PR workflow. Output JSON only.\n\n${buildIntakePrompt(opts)}`,
+        cwd: opts.cwd,
+        provider: opts.provider,
+        model: opts.model,
+        piBin: opts.piBin,
+        timeoutMs: Math.min(opts.timeoutMs ?? 900_000, 180_000),
+        label: "pi-intake",
+    })
+    return parseModeContract(text.trim())
 }
 
 /** First balanced `{ … }` block; tolerates markdown fences and leading prose. */

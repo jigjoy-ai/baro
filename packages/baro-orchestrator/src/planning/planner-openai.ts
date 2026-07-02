@@ -27,7 +27,12 @@ import {
 import { createCodebaseTools } from "./codebase-tools.js"
 import {
     PLANNER_SYSTEM_PROMPT,
+    buildIntakePrompt,
     buildPlannerUserMessage,
+    extractJsonObject,
+    parseModeContract,
+    renderModeContract,
+    type ModeContract,
 } from "./planner-prompts.js"
 
 export interface RunPlannerOpenAIOptions {
@@ -71,6 +76,17 @@ export async function runPlannerOpenAI(
     opts: RunPlannerOpenAIOptions,
 ): Promise<string> {
     const model = pickModel(opts.model ?? "gpt-5.5")
+    const intake = await decideExecutionMode(opts, model).catch((e) => {
+        process.stderr.write(`[planner-openai] intake failed (${(e as Error)?.message ?? String(e)}) — defaulting to focused\n`)
+        return {
+            mode: "focused" as const,
+            confidence: 0,
+            reason: "Intake failed, so Baro uses the conservative focused mode instead of unsafe parallel decomposition.",
+            maxStories: 1,
+            parallelism: 1,
+        }
+    })
+    process.stderr.write(`[planner-openai] intake mode=${intake.mode} confidence=${intake.confidence} reason=${oneLine(intake.reason).slice(0, 180)}\n`)
     const tools = createCodebaseTools(opts.cwd)
     setModelTools(model, tools)
 
@@ -83,6 +99,7 @@ export async function runPlannerOpenAI(
                     decisionDocument: opts.decisionDocument,
                     quick: opts.quick,
                     projectContext: opts.projectContext,
+                    modeContract: renderModeContract(intake),
                 }),
             ),
         )
@@ -179,6 +196,36 @@ export async function runPlannerOpenAI(
     return fallbackPrdJson(opts.goal, `Planner exceeded maxRounds=${maxRounds} without producing a final plan.`)
 }
 
+async function decideExecutionMode(
+    opts: RunPlannerOpenAIOptions,
+    plannerModel: GenerativeModel,
+): Promise<ModeContract> {
+    if (opts.quick) {
+        return {
+            mode: "focused",
+            confidence: 1,
+            reason: "The user explicitly invoked quick mode.",
+            maxStories: 1,
+            parallelism: 1,
+        }
+    }
+
+    const intakeModel = pickModel(process.env.BARO_INTAKE_MODEL || plannerModel.specification.name)
+    setModelTools(intakeModel, [])
+    const prompt = buildIntakePrompt(opts)
+
+    const context = ModelContext.create("intake")
+        .addContextItem(SystemMessageItem.create("You classify software tasks for an autonomous PR workflow. Output JSON only."))
+        .addContextItem(UserMessageItem.create(prompt))
+    const result = await runInferenceRound(context, intakeModel)
+    const raw = result.items
+        .filter((i) => i.type === "message")
+        .map((i) => ((i.toJSON() as { content?: Array<{ text?: string }> }).content?.[0]?.text ?? ""))
+        .join("\n")
+        .trim()
+    return parseModeContract(raw)
+}
+
 function numberEnv(name: string, fallback: number): number {
     const n = Number(process.env[name])
     return Number.isFinite(n) && n > 0 ? n : fallback
@@ -247,26 +294,4 @@ function setModelTools(model: GenerativeModel, tools: Tool[]): void {
         )
     }
     m.setTools(tools)
-}
-
-/** Tolerate markdown fences or leading prose around the PRD JSON. */
-function extractJsonObject(text: string): string {
-    const trimmed = text.trim()
-    if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed
-    const fence = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/)
-    if (fence) return fence[1]!
-    const start = trimmed.indexOf("{")
-    if (start < 0) {
-        throw new Error(`PlannerOpenAI: no JSON object in response: ${trimmed.slice(0, 200)}`)
-    }
-    let depth = 0
-    for (let i = start; i < trimmed.length; i++) {
-        const ch = trimmed[i]
-        if (ch === "{") depth++
-        else if (ch === "}") {
-            depth--
-            if (depth === 0) return trimmed.slice(start, i + 1)
-        }
-    }
-    throw new Error(`PlannerOpenAI: unbalanced JSON in response: ${trimmed.slice(0, 200)}`)
 }

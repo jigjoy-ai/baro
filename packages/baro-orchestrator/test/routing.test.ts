@@ -346,31 +346,30 @@ describe("helpers", () => {
     })
 })
 
-describe("resolveStoryRoute — cheap-by-default + Surgeon escalation route (cloud jigjoy)", () => {
-    // The hosted-gateway tier map: EVERY planner tier maps to the cheap model.
-    // The planner's blast-radius tier does NOT pick the story model — stories
-    // run cheap by default and only reach the strong model through an explicit
-    // escalation route the Surgeon sets on a stuck story.
+describe("resolveStoryRoute — DeepSeek Flash default + Pro opus route (cloud jigjoy)", () => {
+    // The hosted-gateway tier map: default/haiku/sonnet run on cheap Flash,
+    // while opus goes to Pro for focused or high-blast-radius work selected by
+    // the Intake + Planner contract.
     const jigjoy: ResolveOpts = {
         fallbackBackend: "openai",
-        openaiDefaultModel: "gpt-5.5",
+        openaiDefaultModel: "deepseek-v4-pro",
         tierMap: {
-            default: "openai:deepseek-chat",
-            haiku: "openai:deepseek-chat",
-            sonnet: "openai:deepseek-chat",
-            opus: "openai:deepseek-chat",
+            default: "openai:deepseek-v4-flash",
+            haiku: "openai:deepseek-v4-flash",
+            sonnet: "openai:deepseek-v4-flash",
+            opus: "openai:deepseek-v4-pro",
         },
     }
     it("routes an un-tiered story to the cheap default (NOT the openai default)", () => {
-        assert.deepEqual(resolveStoryRoute(undefined, jigjoy), { backend: "openai", model: "deepseek-chat" })
-        assert.deepEqual(resolveStoryRoute("", jigjoy), { backend: "openai", model: "deepseek-chat" })
+        assert.deepEqual(resolveStoryRoute(undefined, jigjoy), { backend: "openai", model: "deepseek-v4-flash" })
+        assert.deepEqual(resolveStoryRoute("", jigjoy), { backend: "openai", model: "deepseek-v4-flash" })
     })
-    it("keeps EVERY planner tier — including opus — on the cheap model", () => {
-        assert.deepEqual(resolveStoryRoute("haiku", jigjoy), { backend: "openai", model: "deepseek-chat" })
-        assert.deepEqual(resolveStoryRoute("sonnet", jigjoy), { backend: "openai", model: "deepseek-chat" })
-        assert.deepEqual(resolveStoryRoute("opus", jigjoy), { backend: "openai", model: "deepseek-chat" })
+    it("keeps low/medium tiers cheap and routes opus to Pro", () => {
+        assert.deepEqual(resolveStoryRoute("haiku", jigjoy), { backend: "openai", model: "deepseek-v4-flash" })
+        assert.deepEqual(resolveStoryRoute("sonnet", jigjoy), { backend: "openai", model: "deepseek-v4-flash" })
+        assert.deepEqual(resolveStoryRoute("opus", jigjoy), { backend: "openai", model: "deepseek-v4-pro" })
     })
     it("runs the Surgeon's explicit escalation route on the strong model (bypasses the cheap tier map)", () => {
-        assert.deepEqual(resolveStoryRoute("openai:gpt-5.5", jigjoy), { backend: "openai", model: "gpt-5.5" })
+        assert.deepEqual(resolveStoryRoute("openai:deepseek-v4-pro", jigjoy), { backend: "openai", model: "deepseek-v4-pro" })
     })
 })

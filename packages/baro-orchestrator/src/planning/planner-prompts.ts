@@ -39,38 +39,29 @@ If the goal is NON-TRIVIAL: decompose normally per the rules below.
 When in doubt, prefer FEWER stories over more. A single 2-file story is better
 than two artificially-split 1-file stories.
 
-PARALLELISM IS THE WHOLE POINT — DO NOT BUILD LINEAR CHAINS:
-baro spawns one agent per DAG level concurrently. A plan where every story
-depends on the previous one (S1 → S2 → S3 → S4 → S5) collapses that into a
-sequential run and wastes the orchestrator. This is a BUG in the plan, not a
-feature. Treat \`dependsOn\` as expensive: every edge you add removes a parallel
-slot. Only add a dependency when story B literally cannot start until A is
-merged because B imports a symbol A defines, modifies a file A creates, or
-relies on a schema A introduces.
+RUN SHAPE:
+baro can run focused, sequential, or parallel work. Parallelism is valuable only
+when stories have independent write surfaces. Do NOT create parallel stories
+that edit the same file, component, state machine, schema, or API contract.
 
-Heuristics for parallel-friendly DAGs:
-  - Stories touching disjoint files/modules → NO dependency, same level.
-  - Multiple provider/integration/feature variants of the same shape (e.g.
-    "Add provider X", "Add provider Y", "Add provider Z" after a shared
-    abstraction exists) → all parallel siblings.
-  - Tests, docs, and config changes that don't read newly-introduced symbols
-    → usually parallel to the implementation, not downstream of it.
-  - "Wiring" stories that connect already-existing pieces → depend only on
-    the pieces they actually wire, not on every prior story.
+Mode semantics:
+  - focused: exactly one story. Use this for one bug, one UI/component issue,
+    one failing build/runtime error, or anything likely centered on a shared
+    file/surface. The story should carry enough context to finish the PR.
+  - sequential: several small stories with real dependencies. Use this when the
+    work is one feature that must be implemented in ordered steps.
+  - parallel: a DAG with sibling stories only where you can prove independence
+    (different files/modules/contracts). Parallelism requires a reason; do not
+    fan out just to use agents.
 
-Anti-patterns (DO NOT DO):
-  - Decorative chains: S2 dependsOn S1, S3 dependsOn S2, S4 dependsOn S3 with
-    no real symbol/import/schema reason. If you cannot name the specific
-    symbol or file that forces the order, REMOVE the edge.
-  - "S1 = setup, then everything dependsOn S1" when S1 only adds an
-    interface/abstraction the other stories don't actually consume.
-  - One-story-per-level "staircase" plans for goals that obviously have
-    independent pieces (e.g. five new providers, three new endpoints, four
-    new components).
-
-Target shape: most non-trivial plans should have AT LEAST one DAG level with
-2+ siblings. If your output is a single linear chain, re-examine — you almost
-certainly over-specified \`dependsOn\`.
+Dependency rules:
+  - Stories touching disjoint files/modules may run in parallel.
+  - Stories touching the same file/component/state/API must be sequential or one
+    focused story.
+  - Only add dependsOn when story B literally cannot start until A is merged
+    because B imports a symbol A defines, modifies a file A creates, or relies
+    on a schema/API A introduces.
+  - Decorative chains are bad, but unsafe parallel edits are worse.
 
 Output ONLY valid JSON matching this exact schema (no markdown, no explanation, just JSON):
 {
@@ -133,11 +124,174 @@ Rules:
 - Output ONLY the JSON, nothing else`
 
 /** Shared by all planner backends so the prompt shape is identical across providers. */
+export type ExecutionMode = "focused" | "sequential" | "parallel"
+
+export interface ModeContract {
+    mode: ExecutionMode
+    confidence: number
+    reason: string
+    maxStories?: number
+    parallelism?: number
+}
+
+export function heuristicModeContract(args: {
+    goal: string
+    quick?: boolean
+    decisionDocument?: string
+}): ModeContract {
+    if (args.quick) {
+        return {
+            mode: "focused",
+            confidence: 1,
+            reason: "Quick mode was explicitly requested.",
+            maxStories: 1,
+            parallelism: 1,
+        }
+    }
+    const goal = args.goal.toLowerCase()
+    const bugLike = /\b(fix|bug|error|crash|broken|console|build|doesn'?t|isn'?t|still|again|issue|problem|wrong|shifted|display|render)\b/.test(goal)
+    const uiLike = /\b(ui|frontend|react|component|button|card|tab|modal|page|screen|css|style|layout|episode|season)\b/.test(goal)
+    const bigLike = /\b(refactor|rewrite|migrate|redesign|implement|add support|multiple|several|backend|frontend|database|api|tests|docs)\b/.test(goal)
+    if (bugLike || (uiLike && !bigLike)) {
+        return {
+            mode: "focused",
+            confidence: 0.7,
+            reason: "The goal looks like a localized bugfix/follow-up likely centered on shared UI or one code surface.",
+            maxStories: 1,
+            parallelism: 1,
+        }
+    }
+    if (bigLike) {
+        return {
+            mode: "sequential",
+            confidence: 0.55,
+            reason: "The goal may need multiple steps, but no LLM intake proved independent write surfaces.",
+            maxStories: 5,
+            parallelism: 1,
+        }
+    }
+    return {
+        mode: "focused",
+        confidence: 0.5,
+        reason: "Uncertain goals default to focused mode to avoid unsafe parallel decomposition.",
+        maxStories: 1,
+        parallelism: 1,
+    }
+}
+
+export function renderModeContract(decision: ModeContract): string {
+    const lines = [
+        `mode: ${decision.mode}`,
+        `confidence: ${decision.confidence}`,
+        `reason: ${decision.reason}`,
+    ]
+    if (decision.maxStories) lines.push(`maxStories: ${decision.maxStories}`)
+    if (decision.parallelism) lines.push(`parallelism: ${decision.parallelism}`)
+    if (decision.mode === "focused") {
+        lines.push(
+            "Planner rules: output EXACTLY ONE story. Do not split. Set model to \"opus\" so this focused run uses the strong route.",
+            "The story must include enough implementation context and acceptance criteria for one agent to finish the PR.",
+        )
+    } else if (decision.mode === "sequential") {
+        lines.push(
+            "Planner rules: output a small ordered chain. Use dependsOn for real shared-surface dependencies.",
+            "Do not create parallel siblings that edit the same file/component/state/API. Keep each story cheap-model-capable.",
+        )
+    } else {
+        lines.push(
+            "Planner rules: output parallel siblings only where write surfaces are independent.",
+            "For each sibling story, name its expected write surface in the description. Shared files/components must be sequential.",
+        )
+    }
+    return lines.join("\n")
+}
+
+export function buildIntakePrompt(args: {
+    goal: string
+    quick?: boolean
+    projectContext?: string
+    decisionDocument?: string
+}): string {
+    if (args.quick) {
+        return JSON.stringify({
+            mode: "focused",
+            confidence: 1,
+            reason: "Quick mode was explicitly requested.",
+            maxStories: 1,
+            parallelism: 1,
+        })
+    }
+    return [
+        "You are Baro Intake. Choose the execution shape BEFORE planning.",
+        "",
+        "Return ONLY valid JSON with this schema:",
+        "{\"mode\":\"focused|sequential|parallel\",\"confidence\":0.0,\"reason\":\"short\",\"maxStories\":1,\"parallelism\":1}",
+        "",
+        "Definitions:",
+        "- focused: one strong agent/story. Use for small bugfixes, UI tweaks, build/runtime errors, one component/file/surface, or unclear shared-write work.",
+        "- sequential: multiple small ordered stories. Use when one feature naturally requires steps that touch shared code.",
+        "- parallel: only when there are independent write surfaces (different modules/files/contracts) that can safely run at the same time.",
+        "",
+        "Bias rules:",
+        "- If several agents would edit the same file/component/state/schema, choose focused or sequential, not parallel.",
+        "- If the prompt is a follow-up bug report from screenshots/console output, choose focused unless it clearly spans independent surfaces.",
+        "- If uncertain, choose focused. Unsafe parallelism is worse than leaving speed on the table.",
+        "- maxStories is a cap for the planner, not a target.",
+        "",
+        args.projectContext?.trim()
+            ? `Project context summary:\n${args.projectContext.trim().slice(0, 3000)}\n`
+            : "",
+        args.decisionDocument?.trim()
+            ? `Architect decision exists; prefer a compact plan that implements it.\n${args.decisionDocument.trim().slice(0, 3000)}\n`
+            : "",
+        `User goal:\n${args.goal.trim()}`,
+    ].filter(Boolean).join("\n")
+}
+
+export function parseModeContract(text: string): ModeContract {
+    const json = JSON.parse(extractJsonObject(text)) as Partial<ModeContract>
+    const mode = json.mode === "parallel" || json.mode === "sequential" || json.mode === "focused"
+        ? json.mode
+        : "focused"
+    const confidence = Number.isFinite(Number(json.confidence))
+        ? Math.max(0, Math.min(1, Number(json.confidence)))
+        : 0.5
+    return {
+        mode,
+        confidence,
+        reason: typeof json.reason === "string" && json.reason.trim()
+            ? json.reason.trim()
+            : "No reason supplied by intake.",
+        maxStories: Number.isFinite(Number(json.maxStories)) ? Math.max(1, Math.floor(Number(json.maxStories))) : undefined,
+        parallelism: Number.isFinite(Number(json.parallelism)) ? Math.max(1, Math.floor(Number(json.parallelism))) : undefined,
+    }
+}
+
+export function extractJsonObject(text: string): string {
+    const trimmed = text.trim()
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed
+    const fence = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/)
+    if (fence) return fence[1]!
+    const start = trimmed.indexOf("{")
+    if (start < 0) throw new Error(`no JSON object in response: ${trimmed.slice(0, 200)}`)
+    let depth = 0
+    for (let i = start; i < trimmed.length; i++) {
+        const ch = trimmed[i]
+        if (ch === "{") depth++
+        else if (ch === "}") {
+            depth--
+            if (depth === 0) return trimmed.slice(start, i + 1)
+        }
+    }
+    throw new Error(`unbalanced JSON in response: ${trimmed.slice(0, 200)}`)
+}
+
 export function buildPlannerUserMessage(args: {
     goal: string
     decisionDocument?: string
     quick?: boolean
     projectContext?: string
+    modeContract?: string | ModeContract
 }): string {
     const sections: string[] = []
 
@@ -158,6 +312,20 @@ export function buildPlannerUserMessage(args: {
         )
         sections.push("")
         sections.push(args.decisionDocument.trim())
+        sections.push("")
+        sections.push("---")
+        sections.push("")
+    }
+
+    const modeContract = typeof args.modeContract === "string"
+        ? args.modeContract
+        : args.modeContract
+          ? renderModeContract(args.modeContract)
+          : undefined
+    if (modeContract && modeContract.trim().length > 0) {
+        sections.push("EXECUTION MODE CONTRACT (chosen by Baro Intake — obey it):")
+        sections.push("")
+        sections.push(modeContract.trim())
         sections.push("")
         sections.push("---")
         sections.push("")

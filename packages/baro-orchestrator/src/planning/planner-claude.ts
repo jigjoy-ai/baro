@@ -9,7 +9,10 @@ import { promisify } from "util"
 
 import {
     PLANNER_SYSTEM_PROMPT,
+    buildIntakePrompt,
     buildPlannerUserMessage,
+    heuristicModeContract,
+    parseModeContract,
 } from "./planner-prompts.js"
 
 const execFileAsync = promisify(execFile)
@@ -46,11 +49,17 @@ export function effortTimeoutMs(effort?: string): number {
 export async function runPlannerClaude(
     opts: RunPlannerClaudeOptions,
 ): Promise<string> {
+    const modeContract = await runClaudeIntake(opts).catch((e) => {
+        process.stderr.write(`[planner-claude] intake failed (${(e as Error)?.message ?? String(e)}) — using heuristic mode contract\n`)
+        return heuristicModeContract(opts)
+    })
+    process.stderr.write(`[planner-claude] intake mode=${modeContract.mode} confidence=${modeContract.confidence}\n`)
     const userMessage = buildPlannerUserMessage({
         goal: opts.goal,
         decisionDocument: opts.decisionDocument,
         quick: opts.quick,
         projectContext: opts.projectContext,
+        modeContract,
     })
 
     const { stdout } = await execFileAsync(
@@ -83,6 +92,35 @@ export async function runPlannerClaude(
     // The model occasionally wraps the JSON in a markdown fence or adds
     // prose despite the "ONLY JSON" instruction — strip back to a bare `{ … }`.
     return extractJsonObject(planText)
+}
+
+async function runClaudeIntake(opts: RunPlannerClaudeOptions) {
+    if (opts.quick) return heuristicModeContract(opts)
+    const { stdout } = await execFileAsync(
+        opts.claudeBin ?? "claude",
+        [
+            "--print",
+            "--output-format",
+            "json",
+            ...(opts.model ? ["--model", opts.model] : []),
+            ...(opts.effort ? ["--effort", opts.effort] : []),
+            "--permission-mode",
+            "bypassPermissions",
+            "--system-prompt",
+            "You classify software tasks for an autonomous PR workflow. Output JSON only.",
+            "-p",
+            buildIntakePrompt(opts),
+        ],
+        {
+            cwd: opts.cwd,
+            timeout: Math.min(opts.timeoutMs ?? effortTimeoutMs(opts.effort), 180_000),
+            maxBuffer: 2 * 1024 * 1024,
+        },
+    )
+    const wrapper = JSON.parse(stdout) as { result?: string }
+    const text = typeof wrapper.result === "string" ? wrapper.result.trim() : ""
+    if (!text) throw new Error("empty intake result")
+    return parseModeContract(text)
 }
 
 /** First balanced `{ … }` block; tolerates markdown fences and leading prose. */

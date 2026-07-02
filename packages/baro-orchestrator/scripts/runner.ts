@@ -45,7 +45,7 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.70.12"
+const VERSION = "0.70.13"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
 function semverLt(a: string, b: string): boolean {

@@ -592,7 +592,7 @@ async fn run_app(
             let strong =
                 std::env::var("BARO_JIGJOY_STRONG_MODEL").unwrap_or_else(|_| "deepseek-v4-pro".to_string());
             let cheap =
-                std::env::var("BARO_JIGJOY_STORY_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string());
+                std::env::var("BARO_JIGJOY_STORY_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
             if app.planner_model.is_none() {
                 app.planner_model = Some(strong.clone());
             }
@@ -605,13 +605,13 @@ async fn run_app(
             if app.critic_model.is_none() {
                 app.critic_model = Some(cheap.clone());
             }
-            // EVERY planner tier — including `opus` — maps to the cheap
-            // model: a story landing on the strong tier is what ran up
-            // surprise cost. Escalation stays explicit (Surgeon splits /
-            // future per-story route), never a silent promotion.
+            // Most story tiers map to the cheap model; `opus` maps to the
+            // strong route for focused/high-blast-radius work selected by the
+            // Intake + Planner contract. DeepSeek Pro is cheap enough to use
+            // as the safe lane while we evaluate quality.
             if app.tier_map.is_none() {
                 app.tier_map = Some(format!(
-                    "default=openai:{cheap},haiku=openai:{cheap},sonnet=openai:{cheap},opus=openai:{cheap}"
+                    "default=openai:{cheap},haiku=openai:{cheap},sonnet=openai:{cheap},opus=openai:{strong}"
                 ));
             }
 
