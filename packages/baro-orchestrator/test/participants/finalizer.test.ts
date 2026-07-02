@@ -59,10 +59,10 @@ describe("Finalizer", () => {
             assert.deepEqual(event.data, {
                 url: null,
                 branch: "baro/finalizer-test",
-                baseBranch: "",
+                baseBranch: "main",
             })
             assert.ok(
-                logs.some((line) => line.includes("run did not complete successfully")),
+                logs.some((line) => line.includes("run failed with no branch changes")),
                 "skip reason logged",
             )
         })
