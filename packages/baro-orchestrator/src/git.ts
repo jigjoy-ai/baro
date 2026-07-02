@@ -313,12 +313,32 @@ export async function getDiff(
     return { files, diff }
 }
 
-async function hasRemoteOrigin(cwd: string): Promise<boolean> {
+export async function hasRemoteOrigin(cwd: string): Promise<boolean> {
     try {
         await exec("git", ["remote", "get-url", "origin"], { cwd })
         return true
     } catch {
         return false
+    }
+}
+
+/**
+ * Keep baro's own working artifacts (prd.json, generated context docs, ADRs)
+ * out of the user's diff/PR. Repo-local .git/info/exclude — never the user's
+ * tracked .gitignore — and only affects UNTRACKED files, so a repo that
+ * already tracks e.g. CLAUDE.md is untouched. Worktrees share the common
+ * dir's info/exclude, so one write covers story worktrees too.
+ */
+export async function excludeBaroArtifacts(cwd: string): Promise<void> {
+    try {
+        const { appendFileSync } = await import("fs")
+        const patterns = ["prd.json", "adr/", "AGENTS.md", "CLAUDE.md"]
+        appendFileSync(
+            `${cwd}/.git/info/exclude`,
+            `\n# baro: run artifacts (never commit into the user's branch)\n${patterns.join("\n")}\n`,
+        )
+    } catch {
+        /* best-effort */
     }
 }
 
