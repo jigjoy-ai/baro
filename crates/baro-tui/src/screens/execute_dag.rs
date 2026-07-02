@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::App;
+use crate::app::{App, LevelRunState, ReplanMark};
 use crate::screens::execute::status_icon_color;
 use crate::theme;
 
@@ -50,6 +50,20 @@ pub fn render_dag_full(f: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Span::raw("")
                 },
+                // Level lifecycle from level_started/level_completed; silent
+                // until the orchestrator says something.
+                match app.level_states.get(&i) {
+                    Some(LevelRunState::Running) => {
+                        Span::styled("  \u{25CF} running", Style::default().fg(theme::ACCENT))
+                    }
+                    Some(LevelRunState::Done { failed: false }) => {
+                        Span::styled("  ✓ done", Style::default().fg(theme::SUCCESS))
+                    }
+                    Some(LevelRunState::Done { failed: true }) => {
+                        Span::styled("  ✗ failed", Style::default().fg(theme::ERROR))
+                    }
+                    None => Span::raw(""),
+                },
             ]));
             lines.push(Line::from(vec![
                 Span::styled("  \u{2514}", Style::default().fg(theme::ACCENT_DIM)),
@@ -80,23 +94,43 @@ pub fn render_dag_full(f: &mut Frame, app: &App, area: Rect) {
                         "  \u{2502}   \u{251c}\u{2500}\u{2500} "
                     };
 
+                    let removed_reason = match &story.replan {
+                        Some(ReplanMark::Removed(reason)) => Some(reason.clone()),
+                        _ => None,
+                    };
+                    let name_style = if removed_reason.is_some() {
+                        Style::default().fg(theme::MUTED).add_modifier(Modifier::CROSSED_OUT)
+                    } else {
+                        Style::default().fg(color)
+                    };
+
                     let mut spans = vec![
                         Span::styled(connector, Style::default().fg(theme::BORDER)),
+                    ];
+                    if matches!(story.replan, Some(ReplanMark::Added)) {
+                        spans.push(Span::styled("+", Style::default().fg(theme::REPLAN)));
+                    }
+                    spans.extend([
                         Span::styled(
                             format!("{} ", icon),
                             Style::default().fg(color),
                         ),
                         Span::styled(
                             story.id.to_string(),
-                            Style::default()
-                                .fg(color)
-                                .add_modifier(Modifier::BOLD),
+                            name_style.add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             format!(" {}", story.title),
-                            Style::default().fg(color),
+                            name_style,
                         ),
-                    ];
+                    ]);
+
+                    if let Some(reason) = &removed_reason {
+                        spans.push(Span::styled(
+                            format!("  ✂ {}", reason),
+                            Style::default().fg(theme::REPLAN),
+                        ));
+                    }
 
                     if !duration.is_empty() {
                         spans.push(Span::styled(
@@ -141,6 +175,71 @@ pub fn render_dag_full(f: &mut Frame, app: &App, area: Rect) {
                 )));
             }
 
+            lines.push(Line::from(""));
+        }
+
+        // Recovery levels re-run failed stories after the planned DAG; layout
+        // mirrors a level box (3-line header + stories + blank) so the
+        // scroll math in dag_line_count stays exact.
+        for (attempt, ids) in &app.recoveries {
+            let label = format!(" Recovery attempt {} ", attempt);
+            lines.push(Line::from(vec![
+                Span::styled("  \u{250c}", Style::default().fg(theme::WARNING_DIM)),
+                Span::styled(
+                    "\u{2500}".repeat(label.len()),
+                    Style::default().fg(theme::WARNING_DIM),
+                ),
+                Span::styled("\u{2510}", Style::default().fg(theme::WARNING_DIM)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  \u{2502}", Style::default().fg(theme::WARNING_DIM)),
+                Span::styled(
+                    label.clone(),
+                    Style::default().fg(theme::WARNING).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("\u{2502}", Style::default().fg(theme::WARNING_DIM)),
+                Span::styled(
+                    format!(
+                        "  {} {}",
+                        ids.len(),
+                        if ids.len() == 1 { "story" } else { "stories" }
+                    ),
+                    Style::default().fg(theme::MUTED),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  \u{2514}", Style::default().fg(theme::WARNING_DIM)),
+                Span::styled(
+                    "\u{2500}".repeat(label.len()),
+                    Style::default().fg(theme::WARNING_DIM),
+                ),
+                Span::styled("\u{2518}", Style::default().fg(theme::WARNING_DIM)),
+            ]));
+            for (j, story_id) in ids.iter().enumerate() {
+                let connector = if j == ids.len() - 1 {
+                    "  \u{2502}   \u{2514}\u{2500}\u{2500} "
+                } else {
+                    "  \u{2502}   \u{251c}\u{2500}\u{2500} "
+                };
+                let (icon, color, title) = app
+                    .stories
+                    .iter()
+                    .find(|s| s.id == *story_id)
+                    .map(|s| {
+                        let (i, c) = status_icon_color(&s.status);
+                        (i, c, s.title.clone())
+                    })
+                    .unwrap_or(("○", theme::MUTED, String::new()));
+                lines.push(Line::from(vec![
+                    Span::styled(connector, Style::default().fg(theme::BORDER)),
+                    Span::styled(format!("{} ", icon), Style::default().fg(color)),
+                    Span::styled(
+                        story_id.clone(),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!(" {}", title), Style::default().fg(color)),
+                ]));
+            }
             lines.push(Line::from(""));
         }
     }

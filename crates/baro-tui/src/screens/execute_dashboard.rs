@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{ActivityEntry, App, StoryStatus};
+use crate::app::{ActivityEntry, App, ReplanMark, StoryStatus};
 use crate::theme;
 
 pub fn render_dashboard(f: &mut Frame, app: &mut App, area: Rect) {
@@ -125,11 +125,6 @@ fn story_list_item(
         .map(|d| format!(" ({}:{:02})", d / 60, d % 60))
         .unwrap_or_default();
 
-    let retry_info = match &story.status {
-        StoryStatus::Retrying(n) => format!(" retry #{}", n),
-        _ => String::new(),
-    };
-
     let push_indicator = if story.status == StoryStatus::Complete {
         if let Some((_, success, _)) = push_results.iter().find(|(id, _, _)| id == &story.id) {
             if *success {
@@ -146,28 +141,73 @@ fn story_list_item(
 
     // Truncate title with an ellipsis if it would exceed a reasonable
     // budget for the 35%-width Stories column. The fixed prefix
-    // ("   {icon} {id}: ") is ~7-8 chars, suffixes (duration + retry +
+    // ("   {icon} {id}: ") is ~7-8 chars, suffixes (duration + pills +
     // push indicator) can add ~15 more, so 32 chars for the title keeps
     // the line below ~55 chars total — fits a 35% column on terminals
     // ≥ 160 cols and degrades gracefully (List truncates, scrollbar
     // works) on narrower ones.
     let title = truncate_for_panel(&story.title, 32);
 
+    // Removed-by-replan stories read as struck plan surgery, not failure.
+    let title_style = if matches!(story.replan, Some(ReplanMark::Removed(_))) {
+        Style::default().fg(theme::MUTED).add_modifier(Modifier::CROSSED_OUT)
+    } else {
+        style
+    };
+
     let mut spans = vec![
         Span::raw("   "),
-        Span::styled(
-            format!(
-                "{} {}: {}{}{}",
-                icon, story.id, title, duration, retry_info
-            ),
-            style,
-        ),
+        Span::styled(format!("{} {}: ", icon, story.id), style),
+        Span::styled(title, title_style),
+        Span::styled(duration, style),
     ];
     if let Some(indicator) = push_indicator {
         spans.push(indicator);
     }
+    spans.extend(story_pills(story));
+    if let Some(route) = &story.route {
+        spans.push(Span::styled(
+            format!("  {}", route),
+            Style::default().fg(theme::MUTED),
+        ));
+    }
 
     ListItem::new(Line::from(spans))
+}
+
+/// Compact signal pills after the title — only rendered when the signal
+/// actually fired, so quiet stories stay quiet.
+fn story_pills(story: &crate::app::StoryState) -> Vec<Span<'static>> {
+    let mut pills: Vec<Span> = Vec::new();
+    let mut pill = |text: String, color: ratatui::style::Color| {
+        pills.push(Span::styled(format!(" {}", text), Style::default().fg(color)));
+    };
+
+    let retries = match story.status {
+        StoryStatus::Retrying(n) => n.max(story.retry_count),
+        _ => story.retry_count,
+    };
+    if retries > 0 {
+        pill(format!("↻{}", retries), theme::WARNING);
+    }
+    match story.critic_pass {
+        Some(true) => pill("✓critic".into(), theme::SUCCESS),
+        Some(false) => pill("✗critic".into(), theme::ERROR),
+        None => {}
+    }
+    if let Some(action) = &story.intervened {
+        let color = if action.contains("abort") { theme::ERROR } else { theme::WARNING };
+        pill("⚠stall".into(), color);
+    }
+    match story.merge {
+        Some(true) => pill("✓merged".into(), theme::SUCCESS),
+        Some(false) => pill("✗merge".into(), theme::ERROR),
+        None => {}
+    }
+    if story.replan.is_some() {
+        pill("✂replan".into(), theme::REPLAN);
+    }
+    pills
 }
 
 /// Truncate a string to `max` *characters* (not bytes), appending an
@@ -270,7 +310,7 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
             if i == app.selected_log_index {
                 Span::styled(
                     label,
-                    Style::default().fg(theme::WARNING).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
                 )
             } else {
                 Span::styled(label, Style::default().fg(theme::MUTED))
@@ -283,7 +323,7 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(theme::MUTED))
         .highlight_style(
             Style::default()
-                .fg(theme::WARNING)
+                .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )
         .divider(Span::styled("\u{2502}", Style::default().fg(theme::BORDER)));
@@ -296,24 +336,39 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
         .unwrap_or_default();
 
     if let Some(story) = app.active_stories.get(&selected_id) {
-        let total_logs = story.activity.len();
+        // Structured activity is the preferred feed; fall back to raw
+        // story_log lines for backends that emit no activity events.
+        let use_activity = !story.activity.is_empty();
+        let total_logs = if use_activity { story.activity.len() } else { story.logs.len() };
         let inner_height = log_chunks[1].height.saturating_sub(2) as usize;
         let tail = total_logs.saturating_sub(inner_height);
         let stored = app.log_scroll_offsets.get(&selected_id).copied().unwrap_or(usize::MAX);
         let skip = if stored == usize::MAX { tail } else { stored.min(tail) };
         let inner_w = log_chunks[1].width.saturating_sub(3) as usize;
-        let visible_logs: Vec<Line> = story.activity[skip..]
-            .iter()
-            .map(|e| activity_line(e, inner_w))
-            .collect();
+        let visible_logs: Vec<Line> = if use_activity {
+            story.activity[skip..]
+                .iter()
+                .map(|e| activity_line(e, inner_w))
+                .collect()
+        } else {
+            story.logs[skip..]
+                .iter()
+                .map(|l| {
+                    Line::from(Span::styled(
+                        format!(" {}", truncate_for_panel(l, inner_w.saturating_sub(1).max(8))),
+                        Style::default().fg(theme::TEXT_DIM),
+                    ))
+                })
+                .collect()
+        };
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::WARNING))
+            .border_style(Style::default().fg(theme::BORDER_ACTIVE))
             .title(Span::styled(
                 format!(" {} ", story.id),
                 Style::default()
-                    .fg(theme::WARNING)
+                    .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD),
             ));
 
@@ -325,7 +380,7 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
             let mut scrollbar_state =
                 ScrollbarState::new(total_logs.saturating_sub(inner_height)).position(skip);
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .style(Style::default().fg(theme::WARNING_DIM));
+                .style(Style::default().fg(theme::ACCENT_DIM));
             f.render_stateful_widget(scrollbar, log_chunks[1], &mut scrollbar_state);
         }
     }
@@ -333,8 +388,27 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
 
 /// One Activity entry → a color-coded line. Icon carries the type signal;
 /// file changes + test verdicts color the whole line (diff-like). The panel
-/// is already scoped to one story, so no per-line agent prefix.
+/// is already scoped to one story, so no per-line agent prefix. System
+/// entries (replan/intervention/recovery/merge) get a ▸ accent prefix so run
+/// machinery stands apart from agent output.
 fn activity_line(e: &ActivityEntry, width: usize) -> Line<'static> {
+    if e.system {
+        let text_color = match e.kind.as_str() {
+            "replan" => theme::REPLAN,
+            "warn" | "conflict" => theme::WARNING,
+            "error" => theme::ERROR,
+            "merge" => theme::SUCCESS,
+            "verdict" => {
+                if e.ok == Some(true) { theme::SUCCESS } else { theme::ERROR }
+            }
+            _ => theme::ACCENT,
+        };
+        let budget = width.saturating_sub(2).max(8);
+        return Line::from(vec![
+            Span::styled("▸ ", Style::default().fg(theme::ACCENT)),
+            Span::styled(truncate_for_panel(&e.text, budget), Style::default().fg(text_color)),
+        ]);
+    }
     let (icon, icon_color, text_color) = match e.kind.as_str() {
         "tool_call" => match e.tool.as_deref() {
             Some("bash") => ("$ ", theme::ACCENT, theme::TEXT),

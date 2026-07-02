@@ -15,6 +15,10 @@ pub const WARNING_DIM: Color = Color::Rgb(122, 110, 70);
 pub const ERROR: Color = Color::Rgb(255, 122, 122); // #ff7a7a
 pub const ERROR_DIM: Color = Color::Rgb(120, 70, 70);
 
+// Replan marker — muted magenta, deliberately outside the amber family so
+// DAG surgery reads as "the plan changed", not success/failure.
+pub const REPLAN: Color = Color::Rgb(201, 138, 214); // #c98ad6
+
 pub const TEXT: Color = Color::Rgb(230, 230, 235); // #e6e6eb foreground
 pub const TEXT_DIM: Color = Color::Rgb(139, 139, 143); // #8b8b8f muted-foreground
 pub const MUTED: Color = Color::Rgb(90, 90, 96); // #5a5a60
