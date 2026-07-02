@@ -217,3 +217,8 @@ async function main(): Promise<void> {
     )
     process.stdout.write(prdJson)
 }
+
+main().catch((e) => {
+    process.stderr.write(`[run-planner] crashed: ${e?.stack ?? String(e)}\n`)
+    process.exit(3)
+})
