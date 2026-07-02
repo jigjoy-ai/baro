@@ -20,9 +20,7 @@ import {
     getDiff,
     getGitFileStats,
     getHeadSha,
-    gitPushWithRetry,
     isInsideGitRepo,
-    safePullRebase,
 } from "./git.js"
 import { WorktreeManager } from "./worktree.js"
 import { buildDag } from "./dag.js"
@@ -42,6 +40,7 @@ import { CriticOpenAI } from "./participants/critic-openai.js"
 import { CriticOpenCode } from "./participants/critic-opencode.js"
 import { CriticPi } from "./participants/critic-pi.js"
 import { Finalizer } from "./participants/finalizer.js"
+import { GitCoordinator } from "./participants/git-coordinator.js"
 import { joinBaroEventForwarders } from "./participants/forwarders/index.js"
 import { Librarian } from "./participants/librarian.js"
 import { MemoryLibrarian } from "./participants/memory-librarian.js"
@@ -371,12 +370,20 @@ export async function orchestrate(
                       emitTui && emit({ type: "story_log", id: "_git", line }),
               })
             : null
-    // Non-worktree story pushes run off the Conductor's critical path and are
-    // awaited before the run finishes. Worktree merge-backs stay on the LOCAL
-    // run branch and push once at the end — a per-story push would re-stall
-    // the Conductor, since it shares gitGate with the merge-back.
-    const storyPushes: Promise<void>[] = []
-    let worktreePushNeeded = false
+    // Owns merge-back/push/cleanup and reports StoryMerged/StoryMergeFailed
+    // on the bus. Non-worktree pushes run off the Conductor's critical path;
+    // worktree merge-backs stay LOCAL and push once in finish() — a per-story
+    // push would re-stall the Conductor, since it shares gitGate with the
+    // merge-back.
+    const gitCoordinator = useGit
+        ? new GitCoordinator({
+              cwd: config.cwd,
+              gitGate,
+              worktrees,
+              emitTui,
+          })
+        : null
+    if (gitCoordinator) gitCoordinator.join(env)
 
     const useLibrarian = config.withLibrarian ?? true
     const useSentry = config.withSentry ?? true
@@ -589,75 +596,11 @@ export async function orchestrate(
                   return librarian.gatherContext(storyId, hints)
               }
             : undefined,
-        onStoryPassed: useGit
-            ? async (storyId) => {
-                  const log = (line: string) =>
-                      emitTui && emit({ type: "story_log", id: storyId, line })
-                  // Run-branch HEAD before this story merges, so we can diff
-                  // exactly what the story added once merge-back lands.
-                  const beforeMerge = emitTui ? await getHeadSha(config.cwd) : null
-                  // Merge-back happens on the critical path (fast, local) so
-                  // the next DAG level sees it. mergeBack returns false when
-                  // the story had no worktree — that story still needs the
-                  // shared-tree remote reconciliation below.
-                  if (worktrees) {
-                      let merged = false
-                      try {
-                          merged = await worktrees.mergeBack(storyId)
-                      } catch (e) {
-                          // Unresolvable merge: keep the worktree + branch so
-                          // the passed work can be recovered, don't push/clean.
-                          log(`[git] merge-back failed; worktree preserved for recovery: ${(e as Error)?.message ?? String(e)}`)
-                          if (emitTui) {
-                              emit({ type: "push_status", id: storyId, success: false, error: (e as Error)?.message ?? String(e) })
-                          }
-                          return
-                      }
-                      if (merged) {
-                          // Diff for the TUI Changes view, captured before the
-                          // worktree is cleaned up.
-                          if (emitTui && beforeMerge) {
-                              const d = await getDiff(config.cwd, beforeMerge, "HEAD")
-                              if (d.files.length) {
-                                  emit({
-                                      type: "story_diff",
-                                      id: storyId,
-                                      files: d.files,
-                                      diff: d.diff || undefined,
-                                  })
-                              }
-                          }
-                          // Push happens once after the run so this
-                          // critical-path callback never waits on the network.
-                          await worktrees.cleanup(storyId)
-                          worktreePushNeeded = true
-                          if (emitTui) {
-                              emit({ type: "push_status", id: storyId, success: true, error: null })
-                          }
-                          return
-                      }
-                      // merged === false → shared-tree fallback; reconcile +
-                      // push like the non-worktree path below.
-                  }
-                  await safePullRebase(config.cwd, log, gitGate)
-                  storyPushes.push(
-                      (async () => {
-                          try {
-                              await gitPushWithRetry(gitGate, { cwd: config.cwd, onLog: log })
-                              if (emitTui) {
-                                  emit({ type: "push_status", id: storyId, success: true, error: null })
-                              }
-                          } catch (e) {
-                              if (emitTui) {
-                                  emit({ type: "push_status", id: storyId, success: false, error: (e as Error)?.message ?? String(e) })
-                              }
-                          }
-                      })(),
-                  )
-              }
+        onStoryPassed: gitCoordinator
+            ? (storyId) => gitCoordinator.onStoryPassed(storyId)
             : undefined,
-        onStoryFailed: worktrees
-            ? (storyId) => worktrees.cleanup(storyId)
+        onStoryFailed: worktrees && gitCoordinator
+            ? (storyId) => gitCoordinator.onStoryFailed(storyId)
             : undefined,
     })
     conductor.setEnvironment(env)
@@ -680,24 +623,11 @@ export async function orchestrate(
     storyFactory.setEnvironment(env)
     storyFactory.join(env)
 
-    // Aborts a spinning story early so it settles as a failed StoryResult the
-    // Surgeon can split/escalate, instead of burning the run budget.
+    // Emits StoryIntervention(abort) for a spinning story so it settles as a
+    // failed StoryResult the Surgeon can split/escalate, instead of burning
+    // the run budget. StoryFactory consumes the event off the bus.
     if (config.withSupervisor) {
-        const supervisor = new Supervisor({
-            onStall: (storyId, reason) => {
-                const aborted = storyFactory.abort(storyId)
-                if (aborted && emitTui) {
-                    emit({ type: "story_log", id: storyId, line: `⚠ ${reason} — aborting so it can be split/escalated` })
-                    emit({
-                        type: "activity",
-                        id: storyId,
-                        kind: "warn",
-                        text: `Supervisor paused ${storyId}: ${reason}. It will be retried or replanned.`,
-                    })
-                }
-            },
-        })
-        supervisor.join(env)
+        new Supervisor().join(env)
     }
 
     // Emit `init` + `dag` before any agent spawns — without `dag` the TUI's
@@ -731,22 +661,10 @@ export async function orchestrate(
     )
     const summary = await conductor.done
 
-    // Drain detached fallback/non-worktree pushes before finishing.
-    await Promise.allSettled(storyPushes)
-
-    // One push for all worktree merge-backs: after conductor.done so the
-    // network can't stall the run, before the Finalizer so its PR sees
-    // every commit.
-    if (worktreePushNeeded) {
-        const log = (line: string) =>
-            emitTui && emit({ type: "story_log", id: "_git", line })
-        try {
-            await gitPushWithRetry(gitGate, { cwd: config.cwd, onLog: log })
-            if (emitTui) emit({ type: "push_status", id: "_git", success: true, error: null })
-        } catch (e) {
-            if (emitTui) emit({ type: "push_status", id: "_git", success: false, error: (e as Error)?.message ?? String(e) })
-        }
-    }
+    // Drain detached pushes + the single worktree merge-back push: after
+    // conductor.done so the network can't stall the run, before the
+    // Finalizer so its PR sees every commit.
+    if (gitCoordinator) await gitCoordinator.finish()
 
     // Backstop sweep for straggler worktrees + temp dir + dangling branches.
     await worktrees?.cleanupAll()

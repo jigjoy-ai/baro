@@ -36,6 +36,18 @@ See the `mozaik-3.10-upgrade` branch root commit and memory
     interface is camelCase; no in-process consumer reads snake_case keys, so
     any snake_case mapping would happen at the audit-log boundary.
 
+## Post-migration additions (event-driven pass, 2026-07)
+
+New wire types with no legacy counterpart (added AFTER the freeze, so they
+carry no compat constraint beyond "don't rename once shipped"):
+
+- `story_intervention` — a participant (Supervisor) requests an abort of a
+  RUNNING story; StoryFactory consumes it. Replaced the `onStall` callback so
+  interventions are observable on the bus (audit log, TUI, kaleidoskop).
+- `story_merged` / `story_merge_failed` — emitted by the GitCoordinator when a
+  passed story's work lands on the run branch (worktree merge-back or
+  shared-tree reconcile) or the merge-back fails and the worktree is preserved.
+
 ## Why type discriminators, not `instanceof`
 
 Class instances don't survive JSON serialisation (audit log → reload,

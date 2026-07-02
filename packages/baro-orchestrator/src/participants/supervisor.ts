@@ -1,22 +1,17 @@
 /**
  * Supervisor — live non-convergence detector (mid-run adaptation).
  *
- * Watches each story's tool-call stream on the Mozaik bus and, when a story is
- * clearly spinning — a long stretch of reads/greps with no edits, the same call
- * on repeat, or wall-clock elapsed with zero file changes — aborts it EARLY via
- * the injected `onStall` callback. That makes the story fail fast instead of
- * burning the whole run budget on non-terminal retries before it can be split.
- *
- * The Supervisor does NOT decide the fix. It just gets the stuck story to a
- * terminal `StoryResult(success=false)` early — the existing Surgeon reacts to
- * that and splits the too-broad story into smaller ones (or escalates its
- * model tier). Detection here, remediation there; both over the bus.
- *
- * Read-only on the bus (a BaseObserver); the only side effect is `onStall`, so
- * it's trivially unit-testable and can never corrupt run state.
+ * Watches each story's tool-call stream and, on a clear stall (long
+ * read-only stretch, the same call on repeat, or wall-clock with zero file
+ * changes), emits a StoryIntervention(abort) on the bus. StoryFactory aborts
+ * the story so it settles as a failed StoryResult EARLY — the Surgeon then
+ * splits/escalates it instead of the run burning its budget on non-terminal
+ * retries. Detection here, remediation there; both over the bus.
  */
 
 import { BaseObserver, FunctionCallItem, Participant } from "@mozaik-ai/core"
+
+import { StoryIntervention } from "../semantic-events.js"
 
 /** Tool names that mean the agent is CHANGING the codebase (progress), not just exploring. */
 const WRITE_TOOLS = new Set([
@@ -34,11 +29,6 @@ const WRITE_TOOLS = new Set([
 ])
 
 export interface SupervisorOptions {
-    /**
-     * Abort a stalled story. Wired to StoryFactory.abort() so the story settles
-     * with StoryResult(success=false) → the Surgeon then splits/escalates it.
-     */
-    onStall: (storyId: string, reason: string) => void
     /** Consecutive tool calls with NO file change before we call it a non-converging loop. Default 50. */
     noProgressToolCalls?: number
     /** Same tool+args signature seen this many times → looping. Default 6. */
@@ -65,10 +55,9 @@ export class Supervisor extends BaseObserver {
     private readonly stories = new Map<string, StoryProgress>()
     private interventions = 0
 
-    constructor(opts: SupervisorOptions) {
+    constructor(opts: SupervisorOptions = {}) {
         super()
         this.opts = {
-            onStall: opts.onStall,
             noProgressToolCalls: opts.noProgressToolCalls ?? 50,
             repeatThreshold: opts.repeatThreshold ?? 6,
             softCapMs: opts.softCapMs ?? 12 * 60_000,
@@ -103,7 +92,17 @@ export class Supervisor extends BaseObserver {
         if (!reason) return
         st.intervened = true
         this.interventions += 1
-        this.opts.onStall(id, `supervisor: ${reason}`)
+        for (const env of this.getEnvironments()) {
+            env.deliverSemanticEvent(
+                this,
+                StoryIntervention.create({
+                    storyId: id,
+                    source: "supervisor",
+                    action: "abort",
+                    reason,
+                }),
+            )
+        }
     }
 
     private stallReason(st: StoryProgress, repeats: number): string | null {

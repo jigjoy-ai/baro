@@ -304,6 +304,35 @@ export interface StoryResultData {
 }
 export const StoryResult = defineSemanticEvent<StoryResultData>("story_result")
 
+/**
+ * A participant (Supervisor today) requests intervention on a RUNNING story.
+ * StoryFactory consumes "abort": the story settles as a failed StoryResult,
+ * which the Surgeon can then split/escalate.
+ */
+export interface StoryInterventionData {
+    storyId: string
+    source: string
+    action: "abort"
+    reason: string
+}
+export const StoryIntervention =
+    defineSemanticEvent<StoryInterventionData>("story_intervention")
+
+/** A passed story's work landed on the run branch (worktree merge-back or shared-tree reconcile). */
+export interface StoryMergedData {
+    storyId: string
+    mode: "worktree" | "shared-tree"
+}
+export const StoryMerged = defineSemanticEvent<StoryMergedData>("story_merged")
+
+/** Merge-back failed; the story's worktree + branch are preserved for recovery. */
+export interface StoryMergeFailedData {
+    storyId: string
+    error: string
+}
+export const StoryMergeFailed =
+    defineSemanticEvent<StoryMergeFailedData>("story_merge_failed")
+
 // OpenCode CLI passthrough types — see docs/stream-protocols.md ("OpenCode").
 
 export interface OpenCodeSystemData {

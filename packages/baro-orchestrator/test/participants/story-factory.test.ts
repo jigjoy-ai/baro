@@ -12,6 +12,7 @@ import type {
 } from "../../src/participants/story-executor.js"
 import type { StoryRoute } from "../../src/routing.js"
 import {
+    StoryIntervention,
     StoryResult,
     StorySpawnRequest,
     StorySpawned,
@@ -161,6 +162,53 @@ describe("StoryFactory", () => {
             )
 
             assert.deepEqual(executor.disposeCalls, [env])
+        })
+    })
+
+    it("aborts a running story on a StoryIntervention(abort) bus event", async () => {
+        await withTempDir("story-factory-test-", async (dir) => {
+            const aborted: string[] = []
+            const executor: StoryExecutor = {
+                start: (req) => ({
+                    dispose: () => {},
+                    abort: () => aborted.push(req.storyId),
+                }),
+            }
+            const factory = new StoryFactory({ cwd: dir, executor, llm: "claude" })
+            joinWithCapture(factory)
+            await factory.onExternalEvent(
+                source("conductor"),
+                StorySpawnRequest.create({
+                    storyId: "S4",
+                    prompt: "Implement S4",
+                    model: "sonnet",
+                    retries: 1,
+                    timeoutSecs: 30,
+                }),
+            )
+
+            await factory.onExternalEvent(
+                source("supervisor"),
+                StoryIntervention.create({
+                    storyId: "S4",
+                    source: "supervisor",
+                    action: "abort",
+                    reason: "stuck in a loop",
+                }),
+            )
+            assert.deepEqual(aborted, ["S4"])
+
+            // Unknown story → no crash, no abort.
+            await factory.onExternalEvent(
+                source("supervisor"),
+                StoryIntervention.create({
+                    storyId: "S99",
+                    source: "supervisor",
+                    action: "abort",
+                    reason: "stall",
+                }),
+            )
+            assert.deepEqual(aborted, ["S4"])
         })
     })
 
