@@ -40,6 +40,10 @@ export interface RunPlannerOpenAIOptions {
     quick?: boolean
     /** Cap on inference rounds; errors if exceeded. */
     maxRounds?: number
+    /** How many tool-using rounds the Planner may spend exploring before it must finalize. */
+    maxExplorationRounds?: number
+    /** Token budget for planning. After this, tools are disabled and the Planner must finalize. */
+    maxTokens?: number
     /** Default 600 s — reasoning models routinely need minutes per round;
      *  the old 120 s killed planning mid-round. */
     perRoundTimeoutSecs?: number
@@ -84,8 +88,12 @@ export async function runPlannerOpenAI(
         )
 
     const maxRounds = opts.maxRounds ?? 8
+    const defaultExploration = opts.decisionDocument?.trim() ? 1 : 2
+    const maxExplorationRounds = Math.max(1, Math.min(opts.maxExplorationRounds ?? numberEnv("BARO_PLANNER_MAX_EXPLORATION_ROUNDS", defaultExploration), maxRounds - 1))
+    const maxTokens = Math.max(50_000, opts.maxTokens ?? numberEnv("BARO_PLANNER_MAX_TOKENS", 150_000))
     const perRoundTimeoutMs = (opts.perRoundTimeoutSecs ?? 600) * 1000
     const usage = new UsageAccumulator()
+    let finalRequested = false
 
     for (let round = 1; round <= maxRounds; round++) {
         const newItems: Array<{
@@ -96,6 +104,7 @@ export async function runPlannerOpenAI(
             text?: string
         }> = []
 
+        if (finalRequested) setModelTools(model, [])
         const roundPromise = runInferenceRound(context, model)
         // Clear the timer once the round settles — a pending setTimeout keeps the
         // process alive for the full 600s after the work is done (see architect-openai).
@@ -141,7 +150,13 @@ export async function runPlannerOpenAI(
             )
         }
 
-        if (calls.length === 0) {
+        if (calls.length > 0) {
+            if (!finalRequested && (round >= maxExplorationRounds || usage.totalTokens >= maxTokens)) {
+                finalRequested = true
+                setModelTools(model, [])
+                context = context.addContextItem(UserMessageItem.create(finalPlanInstruction(usage.summary(), round, maxExplorationRounds, maxTokens)))
+            }
+        } else {
             const messages = newItems.filter((i) => i.type === "message")
             if (messages.length === 0) {
                 throw new Error(
@@ -151,14 +166,62 @@ export async function runPlannerOpenAI(
             const raw = messages.map((m) => m.text ?? "").join("\n").trim()
             if (!raw) throw new Error("PlannerOpenAI: empty final response")
             process.stderr.write(`[planner-openai] ${usage.summary()}\n`)
-            return extractJsonObject(raw)
+            try {
+                return extractJsonObject(raw)
+            } catch (e) {
+                process.stderr.write(`[planner-openai] invalid final JSON (${(e as Error)?.message ?? String(e)}) — using fallback PRD\n`)
+                return fallbackPrdJson(opts.goal, "Planner returned invalid JSON after exploration.")
+            }
         }
     }
 
-    throw new Error(
-        `PlannerOpenAI: exceeded maxRounds=${maxRounds} without producing a final ` +
-        `plan. Increase maxRounds or simplify the goal.`,
-    )
+    process.stderr.write(`[planner-openai] ${usage.summary()} — exceeded maxRounds=${maxRounds}, using fallback PRD\n`)
+    return fallbackPrdJson(opts.goal, `Planner exceeded maxRounds=${maxRounds} without producing a final plan.`)
+}
+
+function numberEnv(name: string, fallback: number): number {
+    const n = Number(process.env[name])
+    return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
+function finalPlanInstruction(summary: string, round: number, maxExplorationRounds: number, maxTokens: number): string {
+    return [
+        "You have explored enough. Stop calling tools.",
+        `Exploration round ${round}/${maxExplorationRounds}; planning budget ${maxTokens} tokens; usage so far: ${summary}.`,
+        "Now output ONLY the final PRD JSON matching the required schema. No markdown, no prose, no more inspection.",
+        "If some details remain uncertain, encode them as acceptance criteria/tests inside the relevant story instead of continuing exploration.",
+    ].join("\n")
+}
+
+export function fallbackPrdJson(goal: string, reason: string): string {
+    const title = oneLine(goal).slice(0, 80) || "Implement requested change"
+    return JSON.stringify({
+        project: "baro-run",
+        branchName: `baro/${slug(title)}`,
+        description: title,
+        userStories: [
+            {
+                id: "S1",
+                priority: 1,
+                title,
+                description: `${goal.trim()}\n\nPlanner fallback: ${reason}`,
+                dependsOn: [],
+                retries: 2,
+                acceptance: ["The requested change is implemented without regressing existing behavior."],
+                tests: ["echo \"planner fallback: run the project's relevant checks\""],
+                model: "opus",
+            },
+        ],
+    })
+}
+
+function oneLine(s: string): string {
+    return s.replace(/\s+/g, " ").trim()
+}
+
+function slug(s: string): string {
+    const out = s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48)
+    return out || "planner-fallback"
 }
 
 async function runToolSafely(tool: Tool, argsJson: string): Promise<string> {
