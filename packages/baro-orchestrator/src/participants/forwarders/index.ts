@@ -2,6 +2,7 @@ import { AgenticEnvironment } from "@mozaik-ai/core"
 
 import { AgentStreamForwarder } from "./agent-stream.js"
 import { CoordinationForwarder } from "./coordination.js"
+import { DagForwarder } from "./dag.js"
 import { FinalizationForwarder } from "./finalization.js"
 import { ProgressForwarder } from "./progress.js"
 import { StoryLifecycleForwarder } from "./story-lifecycle.js"
@@ -18,6 +19,7 @@ export function joinBaroEventForwarders(env: AgenticEnvironment): void {
         new TokenUsageForwarder(),
         new ProgressForwarder(),
         new CoordinationForwarder(),
+        new DagForwarder(),
         new FinalizationForwarder(),
     ]
     for (const f of forwarders) f.join(env)

@@ -20,6 +20,7 @@ import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
     StoryIntervention,
     StoryResult,
+    StoryRouted,
     StorySpawnRequest,
     StorySpawned,
     type StorySpawnRequestData,
@@ -202,6 +203,14 @@ export class StoryFactory extends BaseObserver {
             `[story-factory] ${req.storyId} → ${formatRoute(route)}` +
                 (req.model ? ` (model="${req.model}")` : "") +
                 "\n",
+        )
+        this.envRef.deliverSemanticEvent(
+            this,
+            StoryRouted.create({
+                storyId: req.storyId,
+                backend: route.backend,
+                model: route.model ?? "default",
+            }),
         )
 
         // Per-story worktree isolation (#50); falls back to the shared cwd.

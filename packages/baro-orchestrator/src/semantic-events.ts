@@ -245,6 +245,18 @@ export const LevelCompleted =
     defineSemanticEvent<LevelCompletedData>("level_completed")
 
 /**
+ * Conductor actually started a recovery level (visibility only; the
+ * recovery flow itself stays hook-driven). `attempt` counts recovery
+ * levels started in this run, 1-based.
+ */
+export interface RecoveryStartedData {
+    attempt: number
+    storyIds: readonly string[]
+}
+export const RecoveryStarted =
+    defineSemanticEvent<RecoveryStartedData>("recovery_started")
+
+/**
  * Unlike the old toJSON() (which logged only `promptLen`), the wire format
  * carries the full prompt — StoryFactory needs it, and audit-log
  * round-tripping is worth the size for replay/debug.
@@ -263,6 +275,17 @@ export interface StorySpawnedData {
     storyId: string
 }
 export const StorySpawned = defineSemanticEvent<StorySpawnedData>("story_spawned")
+
+/**
+ * Which backend + model a story was routed to (machine-readable twin of
+ * StoryFactory's `[story-factory] S1 → backend:model` stderr line).
+ */
+export interface StoryRoutedData {
+    storyId: string
+    backend: string
+    model: string
+}
+export const StoryRouted = defineSemanticEvent<StoryRoutedData>("story_routed")
 
 export interface FinalizeStartedData {
     branch: string
