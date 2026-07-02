@@ -206,20 +206,6 @@ export class Finalizer extends BaseObserver {
     private async finalize(run: RunCompletedData): Promise<void> {
         if (!this.opts.createPr) return
 
-        if (!run.success) {
-            this.log(
-                `[finalizer] run did not complete successfully (${run.abortReason ?? "no reason"}); skipping PR`,
-            )
-            this.emit(
-                PrCreated.create({
-                    url: null,
-                    branch: this.branchName ?? "",
-                    baseBranch: "",
-                }),
-            )
-            return
-        }
-
         if (!(await this.hasGhBinary())) {
             this.log("[finalizer] `gh` not found on PATH; skipping PR creation")
             this.emit(
@@ -258,6 +244,23 @@ export class Finalizer extends BaseObserver {
         // straight to the completion screen.
         this.emit(FinalizeStarted.create({ branch }))
 
+        const preAdrCommits = await this.collectCommitsSinceBase()
+        const preAdrStats = await this.collectFileStats()
+        const hasRunChanges =
+            preAdrCommits.length > 0 || preAdrStats.created + preAdrStats.modified > 0
+        if (!run.success && !hasRunChanges) {
+            this.log(
+                `[finalizer] run failed with no branch changes (${run.abortReason ?? "no reason"}); skipping PR`,
+            )
+            this.emit(PrCreated.create({ url: null, branch, baseBranch }))
+            return
+        }
+        if (!run.success) {
+            this.log(
+                `[finalizer] run failed after producing changes; opening checkpoint PR (${run.abortReason ?? "no reason"})`,
+            )
+        }
+
         // Hydrate story titles from the canonical PRD that Conductor was
         // working from at the moment the run ended. This is important
         // when Surgeon replans midway through — we want the user to see
@@ -287,10 +290,12 @@ export class Finalizer extends BaseObserver {
         const filesStats = await this.collectFileStats()
         const totalSecs = run.totalDurationSecs
 
-        const title = this.buildPrTitle(prd, passed.length, orderedStories.length)
+        const checkpoint = !run.success
+        const title = this.buildPrTitle(prd, passed.length, orderedStories.length, checkpoint)
         const body = this.buildPrBody({
             prd,
             run,
+            checkpoint,
             orderedStories,
             passed,
             failed,
@@ -306,7 +311,7 @@ export class Finalizer extends BaseObserver {
         // head (awaited) here so the remote branch has the run's commits first.
         await this.pushBranch(branch)
 
-        this.log(`[finalizer] opening PR on ${baseBranch} ← ${branch}`)
+        this.log(`[finalizer] opening ${checkpoint ? "checkpoint " : ""}PR on ${baseBranch} ← ${branch}`)
         const url = await this.openPr({ title, body, baseBranch, branch })
 
         if (url) {
@@ -519,17 +524,20 @@ export class Finalizer extends BaseObserver {
         prd: PrdFile | null,
         passed: number,
         total: number,
+        checkpoint = false,
     ): string {
         const project = prd?.project ?? "baro run"
+        const prefix = checkpoint ? "Checkpoint: " : ""
         if (passed === total) {
-            return `${project} (${total} ${total === 1 ? "story" : "stories"})`
+            return `${prefix}${project} (${total} ${total === 1 ? "story" : "stories"})`
         }
-        return `${project} (${passed}/${total} stories)`
+        return `${prefix}${project} (${passed}/${total} stories)`
     }
 
     private buildPrBody(args: {
         prd: PrdFile | null
         run: RunCompletedData
+        checkpoint: boolean
         orderedStories: StoryRecord[]
         passed: StoryRecord[]
         failed: StoryRecord[]
@@ -546,6 +554,10 @@ export class Finalizer extends BaseObserver {
             `> Opened by [baro](https://baro.rs) — Mozaik-orchestrated parallel coding agents.`,
         )
         lines.push("")
+        if (args.checkpoint) {
+            lines.push("> **Checkpoint PR:** baro produced branch changes, but the run failed during verification/retry/replan. Review this as a candidate fix, not a fully verified completion.")
+            lines.push("")
+        }
 
         if (prd?.description) {
             lines.push("## Goal")

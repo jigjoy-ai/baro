@@ -808,6 +808,12 @@ export async function orchestrate(
                 const aborted = storyFactory.abort(storyId)
                 if (aborted && emitTui) {
                     emit({ type: "story_log", id: storyId, line: `⚠ ${reason} — aborting so it can be split/escalated` })
+                    emit({
+                        type: "activity",
+                        id: storyId,
+                        kind: "warn",
+                        text: `Supervisor paused ${storyId}: ${reason}. It will be retried or replanned.`,
+                    })
                 }
             },
         })

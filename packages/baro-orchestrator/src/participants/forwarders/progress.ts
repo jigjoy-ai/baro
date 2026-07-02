@@ -1,6 +1,13 @@
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
-import { ConductorState, type ConductorStateData } from "../../semantic-events.js"
+import {
+    ConductorState,
+    Critique,
+    Replan,
+    type ConductorStateData,
+    type CritiqueData,
+    type ReplanData,
+} from "../../semantic-events.js"
 import { emit } from "../../tui-protocol.js"
 
 /**
@@ -15,8 +22,21 @@ export class ProgressForwarder extends BaseObserver {
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        if (!ConductorState.is(event)) return
-        const item: ConductorStateData = event.data
+        if (ConductorState.is(event)) {
+            this.handleConductorState(event.data)
+            return
+        }
+        if (Replan.is(event)) {
+            this.handleReplan(event.data)
+            return
+        }
+        if (Critique.is(event)) {
+            this.handleCritique(event.data)
+            return
+        }
+    }
+
+    private handleConductorState(item: ConductorStateData): void {
         if (
             item.phase === "running_level" &&
             item.currentLevel != null &&
@@ -31,5 +51,37 @@ export class ProgressForwarder extends BaseObserver {
                 ),
             })
         }
+        if (item.detail) {
+            emit({
+                type: "activity",
+                id: "plan",
+                kind: item.phase === "failed" ? "error" : "warn",
+                text: item.detail,
+            })
+        }
+    }
+
+    private handleReplan(item: ReplanData): void {
+        const added = item.addedStories.length
+        const removed = item.removedStoryIds.length
+        emit({
+            type: "activity",
+            id: "plan",
+            kind: "warn",
+            text: `Replanned (${item.source}): +${added}/-${removed} — ${item.reason}`,
+        })
+    }
+
+    private handleCritique(item: CritiqueData): void {
+        emit({
+            type: "activity",
+            id: item.agentId,
+            kind: "verdict",
+            ok: item.verdict === "pass",
+            text:
+                item.verdict === "pass"
+                    ? `Critic accepted ${item.agentId}`
+                    : `Critic rejected ${item.agentId}: ${item.reasoning}`,
+        })
     }
 }
