@@ -576,7 +576,9 @@ async fn run_app(
         "jigjoy" => {
             // Hosted preset: every phase talks to the baro gateway, an
             // OpenAI-compatible proxy that holds the upstream keys and
-            // maps model names to tiers (gpt* strong, deepseek* cheap).
+            // maps model names to tiers. Strong defaults to DeepSeek V4 Pro
+            // while we validate cost/quality; set BARO_JIGJOY_STRONG_MODEL to
+            // gpt-5.5 to opt back into OpenAI for planning/replanning.
             app.llm = app::LlmProvider::OpenAI;
             app.architect_llm = app::LlmProvider::OpenAI;
             app.planner_llm = app::LlmProvider::OpenAI;
@@ -588,7 +590,7 @@ async fn run_app(
             // These are the gateway's tier tokens; env-overridable so a
             // self-hosted gateway can point them at its own models.
             let strong =
-                std::env::var("BARO_JIGJOY_STRONG_MODEL").unwrap_or_else(|_| "gpt-5.5".to_string());
+                std::env::var("BARO_JIGJOY_STRONG_MODEL").unwrap_or_else(|_| "deepseek-v4-pro".to_string());
             let cheap =
                 std::env::var("BARO_JIGJOY_STORY_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string());
             if app.planner_model.is_none() {
