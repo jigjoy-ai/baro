@@ -27,14 +27,16 @@ pub async fn run_planner(
     openai_api_key: Option<&str>,
     openai_base_url: Option<&str>,
     effort: &str,
+    mode_json: Option<&str>,
 ) -> Result<String, ProcessRunError> {
     let entry = discovery::locate_script(cwd, SCRIPT_REL_PATH, BUNDLE_NAME).map_err(|e| {
         ProcessRunError { message: e, log_path: None }
     })?;
 
-    // Both tempfiles must stay alive until the child exits.
+    // All tempfiles must stay alive until the child exits.
     let ctx_tempfile = write_optional_tempfile("context", context)?;
     let dec_tempfile = write_optional_tempfile("decision", decision_doc)?;
+    let mode_tempfile = write_optional_tempfile("mode", mode_json)?;
 
     let mut cmd = match &entry {
         ScriptEntry::Tsx { tsx, script } => {
@@ -61,6 +63,9 @@ pub async fn run_planner(
     if let Some(ref f) = dec_tempfile {
         cmd.arg("--decision-file").arg(f.path());
     }
+    if let Some(ref f) = mode_tempfile {
+        cmd.arg("--mode-file").arg(f.path());
+    }
     if quick {
         cmd.arg("--quick");
     }
@@ -76,6 +81,7 @@ pub async fn run_planner(
     let captured = subprocess::spawn_and_capture(cmd, "planner").await?;
     drop(ctx_tempfile);
     drop(dec_tempfile);
+    drop(mode_tempfile);
 
     let raw = captured.stdout.trim().to_string();
     if raw.is_empty() {
