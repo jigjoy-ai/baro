@@ -30,14 +30,12 @@ pub async fn build_context(cwd: &Path) -> BaroResult<String> {
 
     let mut md = String::new();
 
-    // Project Overview
     md.push_str(&format!("# Project Overview\n\n**{}**", project_name));
     if !description.is_empty() {
         md.push_str(&format!(" — {}", description));
     }
     md.push('\n');
 
-    // Tech Stack
     md.push_str("\n## Tech Stack\n\n");
     if tech_stack.is_empty() {
         md.push_str("No recognized config files found.\n");
@@ -54,12 +52,10 @@ pub async fn build_context(cwd: &Path) -> BaroResult<String> {
         }
     }
 
-    // Directory Structure
     md.push_str("\n## Directory Structure\n\n```\n");
     md.push_str(&dir_tree);
     md.push_str("```\n");
 
-    // Build and Test Commands
     md.push_str("\n## Build and Test Commands\n\n");
     if build_commands.is_empty() {
         md.push_str("No build commands detected.\n");
@@ -69,7 +65,6 @@ pub async fn build_context(cwd: &Path) -> BaroResult<String> {
         }
     }
 
-    // Key Files
     md.push_str("\n## Key Files\n\n");
     if entry_points.is_empty() {
         md.push_str("No standard entry points detected.\n");
@@ -78,12 +73,10 @@ pub async fn build_context(cwd: &Path) -> BaroResult<String> {
             md.push_str(&format!("- `{}`\n", ep));
         }
     }
-    // Add detected config files
     for ts in &tech_stack {
         md.push_str(&format!("- `{}`\n", ts.config_file));
     }
 
-    // Conventions
     md.push_str("\n## Conventions\n\n");
     if conventions.linter_configs.is_empty() && conventions.test_dirs.is_empty() {
         md.push_str("No linter/formatter configs or test directories detected.\n");
@@ -102,7 +95,6 @@ pub async fn build_context(cwd: &Path) -> BaroResult<String> {
         }
     }
 
-    // Enhance the raw scan output with haiku model for a better-structured CLAUDE.md
     if let Some(enhanced) = enhance_with_haiku(&md).await {
         Ok(enhanced)
     } else {
@@ -163,28 +155,23 @@ struct TechStackEntry {
 async fn detect_tech_stack(cwd: &Path) -> Vec<TechStackEntry> {
     let mut entries = Vec::new();
 
-    // package.json
     if let Some(e) = parse_package_json(cwd).await {
         entries.push(e);
     }
-    // Cargo.toml
     if let Some(e) = parse_cargo_toml(cwd).await {
         entries.push(e);
     }
-    // go.mod
     if let Some(e) = parse_go_mod(cwd).await {
         entries.push(e);
     }
-    // pyproject.toml
     if let Some(e) = parse_pyproject_toml(cwd).await {
         entries.push(e);
     }
-    // requirements.txt
     if let Some(e) = parse_requirements_txt(cwd).await {
         entries.push(e);
     }
 
-    // Simple presence-based detection for remaining config files
+    // Presence-only detection for configs we don't parse
     let simple_configs = [
         "Makefile",
         "CMakeLists.txt",
@@ -450,11 +437,9 @@ const ENTRY_POINT_FILES: &[&str] = &[
 async fn find_entry_points(cwd: &Path) -> Vec<String> {
     let mut found = Vec::new();
 
-    // Check src/ directory
     let src_dir = cwd.join("src");
     if fs::metadata(&src_dir).await.is_ok() {
         found.push("src/".to_string());
-        // Look for entry points inside src/
         for name in ENTRY_POINT_FILES {
             let p = src_dir.join(name);
             if fs::metadata(&p).await.is_ok() {
@@ -463,13 +448,11 @@ async fn find_entry_points(cwd: &Path) -> Vec<String> {
         }
     }
 
-    // Check bin/ directory
     let bin_dir = cwd.join("bin");
     if fs::metadata(&bin_dir).await.is_ok() {
         found.push("bin/".to_string());
     }
 
-    // Check root-level entry points
     for name in ENTRY_POINT_FILES {
         let p = cwd.join(name);
         if fs::metadata(&p).await.is_ok() {
@@ -483,7 +466,6 @@ async fn find_entry_points(cwd: &Path) -> Vec<String> {
 async fn detect_build_commands(cwd: &Path) -> Vec<(String, String)> {
     let mut commands = Vec::new();
 
-    // package.json scripts
     if let Ok(content) = fs::read_to_string(cwd.join("package.json")).await {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(scripts) = json.get("scripts").and_then(|v| v.as_object()) {
@@ -496,24 +478,21 @@ async fn detect_build_commands(cwd: &Path) -> Vec<(String, String)> {
         }
     }
 
-    // Cargo.toml
     if fs::metadata(cwd.join("Cargo.toml")).await.is_ok() {
         commands.push(("Build (Rust)".to_string(), "cargo build".to_string()));
         commands.push(("Test (Rust)".to_string(), "cargo test".to_string()));
     }
 
-    // go.mod
     if fs::metadata(cwd.join("go.mod")).await.is_ok() {
         commands.push(("Build (Go)".to_string(), "go build ./...".to_string()));
         commands.push(("Test (Go)".to_string(), "go test ./...".to_string()));
     }
 
-    // Makefile targets
     if let Ok(content) = fs::read_to_string(cwd.join("Makefile")).await {
         for line in content.lines() {
             if let Some(target) = line.strip_suffix(':') {
                 let target = target.trim();
-                // Only include simple targets (no variables, no prerequisites on this check)
+                // Only simple targets: no variables, no prerequisites
                 if !target.is_empty()
                     && !target.contains('$')
                     && !target.contains(' ')
@@ -526,7 +505,6 @@ async fn detect_build_commands(cwd: &Path) -> Vec<(String, String)> {
         }
     }
 
-    // pyproject.toml scripts
     if let Ok(content) = fs::read_to_string(cwd.join("pyproject.toml")).await {
         let mut in_scripts = false;
         for line in content.lines() {
@@ -559,7 +537,6 @@ async fn detect_conventions(cwd: &Path) -> Conventions {
     let mut linter_configs = Vec::new();
     let mut test_dirs = Vec::new();
 
-    // Check for linter/formatter configs
     let exact_configs = [
         "rustfmt.toml",
         ".rustfmt.toml",
@@ -577,7 +554,6 @@ async fn detect_conventions(cwd: &Path) -> Conventions {
         }
     }
 
-    // Check for eslintrc/prettierrc variants
     let prefix_configs: BTreeMap<&str, &[&str]> = BTreeMap::from([
         (
             ".eslintrc",
@@ -610,7 +586,6 @@ async fn detect_conventions(cwd: &Path) -> Conventions {
         }
     }
 
-    // Check pyproject.toml for [tool.*] sections
     if let Ok(content) = fs::read_to_string(cwd.join("pyproject.toml")).await {
         for line in content.lines() {
             let trimmed = line.trim();
@@ -629,7 +604,6 @@ async fn detect_conventions(cwd: &Path) -> Conventions {
         }
     }
 
-    // Check for test directories
     let test_dir_names = ["tests", "test", "__tests__", "spec"];
     for name in test_dir_names {
         let path = cwd.join(name);

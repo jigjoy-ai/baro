@@ -1,36 +1,9 @@
 /**
- * Librarian — cross-agent runtime memory observer with mid-flight
- * broadcast.
- *
- * Listens to FunctionCallItem / FunctionCallOutputItem on the bus,
- * extracts knowledge from "exploration" tools (Read, Grep, Bash, Glob,
- * LSP), and shares it three ways:
- *
- *   1. `gatherContext(storyId, hints?)` — at story launch. Conductor's
- *      `onBeforeStoryLaunch` hook calls this and prepends the result
- *      to the story's initial prompt. Same as before, just with much
- *      bigger budget and a stronger authoritative framing.
- *
- *   2. `Knowledge` SemanticEvent — emitted on every new finding so
- *      other observers can react.
- *
- *   3. `AgentTargetedMessage` SemanticEvent — mid-flight broadcasts.
- *      When Story A indexes a finding, Librarian pushes a
- *      just-in-time message into every other *in-flight* story
- *      whose hints match the finding. Those messages reach the
- *      receiving Claude process via its existing stdin user-message
- *      route (ClaudeCliParticipant already handles
- *      `AgentTargetedMessage`). The receiving Claude sees the
- *      finding as authoritative codebase context on its next turn
- *      and skips redundant Read/Grep calls.
- *
- * In-flight tracking:
- *   - StorySpawnRequest → captures story hints (title tokens)
- *     so we can match findings against them later.
- *   - StorySpawned      → mark story as in-flight.
- *   - StoryResult       → clear story from in-flight set.
- *
- * Library-grade: no PRD knowledge, no story specifics.
+ * Librarian — cross-agent runtime memory. Captures exploration-tool
+ * outputs and shares them via `gatherContext` at story launch, Knowledge
+ * events, and mid-flight AgentTargetedMessage broadcasts to in-flight
+ * stories whose hints match. Library-grade: no PRD knowledge, no story
+ * specifics.
  */
 
 import {
@@ -61,11 +34,9 @@ const EXPLORATION_TOOLS = new Set([
 ])
 
 /**
- * Tools whose findings we broadcast mid-flight. Bash is intentionally
- * excluded from broadcast (its output is heterogeneous — sometimes a
- * one-liner, sometimes a 50KB build log — and noise outweighs signal
- * for cross-agent reuse). Bash findings still go into the on-launch
- * `gatherContext` for the next level. Same for WebFetch/WebSearch.
+ * Bash/WebFetch/WebSearch are deliberately excluded from mid-flight
+ * broadcast — their output is too heterogeneous, noise outweighs signal.
+ * Their findings still reach the next level via `gatherContext`.
  */
 const BROADCAST_TOOLS = new Set(["Read", "Grep", "Glob", "LSP"])
 
@@ -86,20 +57,13 @@ interface IndexedKnowledge {
 }
 
 export interface LibrarianOptions {
-    /**
-     * Cap the body of each indexed entry to this many characters
-     * (truncated with a marker). Default: 4000.
-     */
+    /** Per-entry content cap. Default: 4000. */
     maxContentChars?: number
-    /**
-     * Cap the total injected context per story at launch to this
-     * many characters. Default: 20000.
-     */
+    /** Total injected context per story at launch. Default: 20000. */
     maxInjectedChars?: number
     /**
-     * Cap the total mid-flight broadcast bytes pushed into any one
-     * story over the run, to keep a chatty Librarian from drowning
-     * a single agent in injected text. Default: 50000.
+     * Total mid-flight broadcast bytes per story over the run, so a chatty
+     * Librarian can't drown a single agent in injected text. Default: 50000.
      */
     maxBroadcastBytesPerStory?: number
 }
@@ -129,21 +93,18 @@ export class Librarian extends BaseObserver {
     }
 
     /**
-     * Build a context blob to prepend to a new story's prompt. Returns
-     * `null` if there's nothing relevant. Hints (e.g. tags from the
-     * story title/description) bias relevance ranking.
+     * Context blob to prepend to a new story's prompt; null when nothing
+     * relevant. Hints bias relevance ranking.
      */
     gatherContext(storyId: string, hints: readonly string[] = []): string | null {
         if (this.knowledge.length === 0) return null
 
-        // Skip findings the story itself produced — we only inject
-        // *cross-agent* knowledge.
+        // Only inject *cross-agent* knowledge.
         const candidates = this.knowledge.filter(
             (k) => k.sourceAgentId !== storyId,
         )
         if (candidates.length === 0) return null
 
-        // Rank by hint overlap (strict substring match, case-insensitive).
         const lowerHints = hints.map((h) => h.toLowerCase())
         const scored = candidates.map((k) => {
             const haystack = (k.summary + " " + k.tags.join(" ")).toLowerCase()
@@ -258,8 +219,6 @@ export class Librarian extends BaseObserver {
         }
         this.knowledge.push(entry)
 
-        // Surface as a bus event for any other observers (and Phase-3
-        // mid-flight injectors).
         for (const env of this.getEnvironments()) {
             env.deliverSemanticEvent(
                 this,
@@ -273,12 +232,8 @@ export class Librarian extends BaseObserver {
             )
         }
 
-        // Mid-flight broadcast: push this finding to every other
-        // in-flight story whose stored hints overlap with the
-        // finding's tags. The receiving ClaudeCliParticipant already
-        // routes AgentTargetedMessage into its agent's stdin as a
-        // user message, so the next turn opens with the finding
-        // already in context — and the agent skips its own Read.
+        // ClaudeCliParticipant routes AgentTargetedMessage into the agent's
+        // stdin as a user message, so the finding lands before its next turn.
         if (BROADCAST_TOOLS.has(entry.tool)) {
             this.broadcastFinding(entry)
         }
@@ -312,8 +267,6 @@ export class Librarian extends BaseObserver {
         for (const recipientId of this.inFlight) {
             if (recipientId === finding.sourceAgentId) continue
 
-            // Hint overlap: at least one finding token appears in the
-            // recipient's stored hints. Liberal threshold for v1.
             const recipientHints = this.storyHints.get(recipientId) ?? []
             if (recipientHints.length > 0) {
                 const overlap = recipientHints.some((h) =>
@@ -321,11 +274,9 @@ export class Librarian extends BaseObserver {
                 )
                 if (!overlap) continue
             }
-            // If no hints were captured for this recipient, fall through
-            // and broadcast anyway — safer to over-share early than
+            // No hints captured → broadcast anyway; safer to over-share than
             // miss a relevant finding because hints weren't ready.
 
-            // Per-story broadcast budget.
             const already = this.broadcastBytes.get(recipientId) ?? 0
             if (already + bytes > this.opts.maxBroadcastBytesPerStory) continue
             this.broadcastBytes.set(recipientId, already + bytes)
@@ -409,12 +360,7 @@ function formatEntry(k: IndexedKnowledge): string {
     ].join("\n")
 }
 
-/**
- * Pull short, lowercase tokens from a story prompt to use as
- * broadcast-relevance hints. We grab anything alphanumeric with
- * dots/slashes/dashes (so we catch filenames like `invoice.service.ts`),
- * lowercase everything, and drop tokens shorter than 3 chars.
- */
+// Keeps dots/slashes/dashes so filenames like `invoice.service.ts` survive.
 function tokenizeHints(prompt: string): string[] {
     return prompt
         .toLowerCase()

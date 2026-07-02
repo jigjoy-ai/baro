@@ -1,10 +1,8 @@
 /**
- * Git helpers — port of crates/baro-tui/src/git.rs. Direct git CLI
- * calls (no library dependency), matching the original behavior.
+ * Git helpers via direct git CLI calls (no library dependency).
  *
  * Concurrency: writes to git state (push, pull --rebase) must serialize
- * across stories. The `gitGate` helper provides a simple async
- * mutex-of-one for this.
+ * across stories — GitGate is the async mutex-of-one for that.
  */
 
 import { execFile } from "child_process"
@@ -25,8 +23,6 @@ export interface GitPushOptions {
     onLog?: (line: string) => void
 }
 
-// ─── Mutex-of-one for serialized git writes ─────────────────────────
-
 type Releaser = () => void
 
 export class GitGate {
@@ -43,8 +39,6 @@ export class GitGate {
         return release
     }
 }
-
-// ─── Branch helpers ─────────────────────────────────────────────────
 
 export async function getCurrentBranch(cwd: string): Promise<string> {
     try {
@@ -89,9 +83,8 @@ export async function createOrCheckoutBranch(
     branchName: string,
     onLog?: (line: string) => void,
 ): Promise<void> {
-    // Strip accidental double-prefixes ("baro/baro/foo" → "baro/foo").
-    // Happens when the caller is already on a baro-prefixed branch from
-    // a previous run and prepends "baro/" again to the PRD-supplied name.
+    // Strip accidental double-prefixes ("baro/baro/foo") — a caller already
+    // on a baro-prefixed branch can prepend "baro/" again.
     while (branchName.startsWith("baro/baro/")) {
         branchName = branchName.slice("baro/".length)
     }
@@ -116,8 +109,6 @@ export async function createOrCheckoutBranch(
         )
     }
 }
-
-// ─── Pull / rebase ──────────────────────────────────────────────────
 
 export async function safePullRebase(
     cwd: string,
@@ -146,14 +137,12 @@ export async function safePullRebase(
 
         onLog?.("[git] pulling latest...")
 
-        // Stash tracked edits (e.g. prd.json) before rebasing. We use
-        // `stash create` (returns a SHA, does NOT push onto the named
-        // stack) instead of `stash push`/`stash pop` because concurrent
-        // story-passed callbacks would otherwise pop each other's
-        // entries and silently lose work. Untracked files are
-        // intentionally NOT stashed — they can't conflict with a rebase,
-        // and including them previously caused user-managed files (e.g.
-        // BARO_GOAL.md) to vanish whenever stash apply hit a conflict.
+        // Stash tracked edits before rebasing via `stash create` (SHA, not
+        // the named stack) — with `stash push`/`pop`, concurrent story-passed
+        // callbacks would pop each other's entries and silently lose work.
+        // Untracked files are deliberately NOT stashed: they can't conflict
+        // with a rebase, and stashing them made user-managed files vanish
+        // whenever stash apply hit a conflict.
         let stashSha: string | null = null
         try {
             const { stdout } = await exec("git", ["stash", "create"], { cwd })
@@ -166,9 +155,8 @@ export async function safePullRebase(
         }
 
         try {
-            // --rebase=merges so per-story `--no-ff` merge commits (worktree
-            // isolation, issue #50) survive the replay instead of being
-            // flattened or dropped.
+            // --rebase=merges so per-story `--no-ff` merge commits survive
+            // the replay instead of being flattened or dropped.
             await exec("git", ["pull", "--rebase=merges", "origin", branch], { cwd })
             onLog?.("[git] pull ok")
         } catch {
@@ -192,8 +180,6 @@ export async function safePullRebase(
     }
 }
 
-// ─── Push with retry ────────────────────────────────────────────────
-
 export async function gitPushWithRetry(
     gate: GitGate,
     options: GitPushOptions,
@@ -209,10 +195,7 @@ export async function gitPushWithRetry(
         const max = options.maxAttempts ?? GIT_PUSH_MAX_ATTEMPTS
         let lastError = ""
 
-        // Only emit "pushing..." once at the start. Per-attempt lines
-        // turn into a wall of noise when many stories push back-to-back
-        // — the user just wants to see one line per push, with details
-        // only when the final attempt fails.
+        // One line per push; full stderr only when the final attempt fails.
         options.onLog?.("[git] pushing...")
         for (let attempt = 1; attempt <= max; attempt++) {
             try {
@@ -225,15 +208,12 @@ export async function gitPushWithRetry(
 
             if (attempt === max) break
 
-            // One-liner per retry instead of dumping the full stderr
-            // each time. The full stderr is logged exactly once at the
-            // end if every attempt failed.
             options.onLog?.(
                 `[git] push rejected (attempt ${attempt}/${max}), pulling and retrying...`,
             )
             try {
-                // --rebase=merges: preserve per-story `--no-ff` merge commits
-                // (worktree isolation, #50) when reconciling a rejected push.
+                // --rebase=merges: preserve per-story `--no-ff` merge
+                // commits when reconciling a rejected push.
                 await exec("git", ["pull", "--rebase=merges", "origin", branch], {
                     cwd: options.cwd,
                 })
@@ -253,8 +233,6 @@ export async function gitPushWithRetry(
         release()
     }
 }
-
-// ─── File stats ─────────────────────────────────────────────────────
 
 export async function getGitFileStats(
     cwd: string,
@@ -293,11 +271,7 @@ export interface StoryDiffResult {
 /** Max diff lines carried in a story_diff event; the rest is truncated. */
 const DIFF_LINE_CAP = 180
 
-/**
- * Per-story changes between two refs: `--numstat` for the file list +
- * add/remove counts, plus a capped unified diff for the TUI Changes view.
- * Best-effort — returns empty on any git failure.
- */
+/** Best-effort — returns empty on any git failure. */
 export async function getDiff(
     cwd: string,
     fromSha: string,
@@ -338,8 +312,6 @@ export async function getDiff(
     }
     return { files, diff }
 }
-
-// ─── Internal helpers ───────────────────────────────────────────────
 
 async function hasRemoteOrigin(cwd: string): Promise<boolean> {
     try {

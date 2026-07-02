@@ -1,11 +1,7 @@
-//! Pre-orchestration git helpers used by main.rs.
-//!
-//! The TS Mozaik orchestrator (`packages/baro-orchestrator/src/git.ts`)
-//! owns all per-story git activity (push with retry, pull --rebase,
-//! file-stat collection). This module survives only for the
-//! welcome-screen → planning flow which still needs to set up the
-//! `baro/<name>` branch in Rust before handing control off to the
-//! orchestrator.
+//! Pre-orchestration git helpers. The TS orchestrator owns all
+//! per-story git activity; this survives only for the welcome-screen →
+//! planning flow, which sets up the `baro/<name>` branch before
+//! handing off.
 
 use std::path::Path;
 
@@ -29,24 +25,17 @@ pub(crate) async fn get_current_branch(cwd: &Path) -> BaroResult<String> {
     Ok(branch_name)
 }
 
-/// Create a fresh branch for a new baro run. ALWAYS produces a new
-/// branch — appends a Unix-timestamp suffix to the requested base name
-/// so two runs against the same project (e.g. side-by-side
-/// `--llm claude` / `--llm openai` from sibling clones sharing an
-/// origin) can't collide on `git push`. Returns the actual full
-/// branch name used; callers should persist it in `prd.json` so
-/// resume can pick the same branch later.
-///
-/// Push is best-effort: failures are logged to stderr but don't fail
-/// the function. Subsequent per-story pushes from the orchestrator
-/// will retry.
+/// Create a fresh branch for a new baro run. ALWAYS appends a
+/// timestamp suffix so runs from sibling clones sharing an origin
+/// can't collide on `git push`. Returns the actual branch name;
+/// callers must persist it in `prd.json` for resume. Push is
+/// best-effort — the orchestrator's per-story pushes retry later.
 pub async fn create_fresh_branch(cwd: &Path, base_name: &str) -> BaroResult<String> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // Modulo to keep the suffix short and readable; 5 digits handles
-    // ~28 hours of uniqueness which is plenty between runs.
+    // 5 digits ≈ 28h of uniqueness, plenty between runs.
     let suffix = stamp % 100_000;
     let branch_name = format!("{}-{}", base_name, suffix);
 
@@ -58,8 +47,8 @@ pub async fn create_fresh_branch(cwd: &Path, base_name: &str) -> BaroResult<Stri
         .map_err(|e| format!("Failed to run git checkout -b: {}", e))?;
 
     if !create.status.success() {
-        // Same-second name collision (very rare); fall through to a
-        // randomised suffix once. Beyond that, surface the failure.
+        // Same-second name collision: retry once with a randomised
+        // suffix, then surface the failure.
         let extra = format!("{}-x{:x}", branch_name, (stamp ^ 0xdeadbeef) & 0xffff);
         let retry = Command::new("git")
             .args(["checkout", "-b", &extra])
@@ -82,12 +71,8 @@ pub async fn create_fresh_branch(cwd: &Path, base_name: &str) -> BaroResult<Stri
     Ok(branch_name)
 }
 
-/// Checkout an existing local branch for a resumed run.
-///
-/// Used when `prd.json` already has a `branchName` from an earlier
-/// `create_fresh_branch` call; the resume path needs that exact
-/// branch (with the same suffix the prior run wrote) so it can pick
-/// up where the agents left off.
+/// Checkout the exact branch a prior run persisted in `prd.json`
+/// (same suffix) so resume picks up where the agents left off.
 pub async fn checkout_existing_branch(cwd: &Path, branch_name: &str) -> BaroResult<()> {
     let checkout = Command::new("git")
         .args(["checkout", branch_name])

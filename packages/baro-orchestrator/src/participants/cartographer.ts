@@ -1,14 +1,7 @@
 /**
  * Cartographer — observer that translates Mozaik bus events into a
- * coarser-grained "frame stream" suitable for downstream UI rendering.
- *
- * In Phase 1 the consumer is the Rust TUI (line-delimited JSON over
- * stdout). The same Cartographer will later serve a web UI by
- * subscribing a different sink. The protocol is one event object per
- * call to `sink`, no buffering.
- *
- * Library-grade: emits semantic frames (state changes, tool calls,
- * messages, results) regardless of who produced them.
+ * coarser-grained frame stream for UI rendering. One frame object per
+ * `sink` call, no buffering.
  */
 
 import {
@@ -44,12 +37,8 @@ export type Frame =
     | { kind: "unknown"; sourceLabel: string; itemType: string }
 
 export interface CartographerOptions {
-    /** Where each frame is written. */
     sink: (frame: Frame) => void
-    /**
-     * Whether to emit `stream_chunk` frames. Default: false (high volume,
-     * mainly useful for live token-streaming UIs).
-     */
+    /** Default: false — high volume, mainly for live token-streaming UIs. */
     emitStreamChunks?: boolean
 }
 
@@ -62,8 +51,6 @@ export class Cartographer extends BaseObserver {
         this.sink = opts.sink
         this.emitStreamChunks = opts.emitStreamChunks ?? false
     }
-
-    // ─── Mozaik-typed assistant events (now on their dedicated channels) ──
 
     override async onExternalModelMessage(
         source: Participant,
@@ -98,8 +85,6 @@ export class Cartographer extends BaseObserver {
         const output = json.output?.[0]?.text ?? ""
         this.sink({ kind: "tool_result", agentId, callId: json.call_id, output })
     }
-
-    // ─── baro custom semantic events ──────────────────────────────────
 
     override async onExternalEvent(
         source: Participant,
@@ -181,8 +166,7 @@ export class Cartographer extends BaseObserver {
             return
         }
 
-        // Anything else falls through into an "unknown" frame so the sink
-        // sees that something happened.
+        // Unknown frame so the sink still sees that something happened.
         this.sink({
             kind: "unknown",
             sourceLabel: source.constructor.name,

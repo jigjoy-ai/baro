@@ -1,36 +1,8 @@
 /**
- * Map OpenCode CLI `opencode run --format json` stream events to typed
- * items for bus delivery. Sibling of `codex-stream-mapper.ts` (the Codex
- * mapper) and `stream-json-mapper.ts` (the Claude mapper).
- *
- * OpenCode stream shape — observed against real `opencode run --format json`
- * output. Each stdout line is a JSONL envelope:
- *
- *   {"type":"step_start","timestamp":N,"sessionID":"…","part":{…}}
- *   {"type":"text","timestamp":N,"sessionID":"…","part":{"type":"text","text":"…",…}}
- *   {"type":"tool_use","timestamp":N,"sessionID":"…","part":{"type":"tool","tool":"write","callID":"…","state":{"status":"completed","input":{…},"output":"…"}}}
- *   {"type":"step_finish","timestamp":N,"sessionID":"…","part":{"type":"step-finish","tokens":{…},"cost":N,…}}
- *
- * NOTE: a tool invocation arrives as ONE `tool_use` event carrying both
- * the call (`part.state.input`) and its result (`part.state.output`),
- * NOT as a `tool_call`/`tool_result` pair. The pair shape is kept as a
- * fallback for forward/backward compatibility but is not what the
- * current binary emits.
- *
- * Mapping strategy:
- *
- *   - `step_start` → OpenCodeSystem semantic event (subtype "step_start").
- *   - `text` → ModelMessageItem (assistant text) + OpenCodeStepEvent.
- *   - `tool_use` → FunctionCallItem (+ FunctionCallOutputItem once the
- *     tool completed) + OpenCodeStepEvent(s).
- *   - `tool_call` / `tool_result` → fallback for the legacy paired shape.
- *   - `step_finish` → OpenCodeSystem semantic event (subtype "step_finish",
- *     carries token/cost metadata in `raw`).
- *   - Unknown → OpenCodeUnknownEvent so nothing is silently dropped.
- *
- * Every input event maps to a non-empty array — we never silently drop
- * data. Downstream observers (audit log, kaleidoskop replay, debug
- * consoles) see every envelope OpenCode produces.
+ * Map OpenCode CLI `opencode run --format json` JSONL events to typed
+ * items for bus delivery. Every input event maps to a non-empty array —
+ * nothing is silently dropped. Wire format and full mapping table:
+ * docs/stream-protocols.md ("OpenCode").
  */
 
 import {
@@ -46,29 +18,18 @@ import {
     OpenCodeUnknownEvent,
 } from "./semantic-events.js"
 
-/** Union of all item types the OpenCode mapper can produce. */
 export type MappedOpenCodeItem =
     | ModelMessageItem
     | FunctionCallItem
     | FunctionCallOutputItem
     | SemanticEvent<unknown>
 
-/** Result of mapping a single OpenCode JSONL event. */
 export interface OpenCodeMapResult {
-    /** Mapped items to deliver on the bus. Always non-empty. */
+    /** Always non-empty. */
     items: MappedOpenCodeItem[]
-    /** OpenCode `sessionID` observed on this event, if any. */
     sessionId: string | null
 }
 
-/**
- * Map a single parsed OpenCode JSONL event to typed Mozaik items.
- *
- * @param agentId - The baro agent ID (story ID) that owns this stream.
- * @param event - A parsed JSON object from OpenCode's stdout.
- * @returns Mapped items and optional session ID.
- */
-/** Best-effort stable id suffix from an event's own timestamp. */
 function eventTimestamp(event: Record<string, unknown>): string {
     return typeof event.timestamp === "number"
         ? String(event.timestamp)
@@ -84,7 +45,6 @@ export function mapOpenCodeEvent(
     const items: MappedOpenCodeItem[] = []
     const type = typeof event.type === "string" ? event.type : ""
 
-    // ─── step_start ────────────────────────────────────────────────
     if (type === "step_start") {
         items.push(
             OpenCodeSystem.create({
@@ -96,7 +56,6 @@ export function mapOpenCodeEvent(
         return { items, sessionId }
     }
 
-    // ─── text (assistant message) ──────────────────────────────────
     if (type === "text") {
         const part = event.part as Record<string, unknown> | undefined
         const text = typeof part?.text === "string" ? part.text : ""
@@ -113,19 +72,9 @@ export function mapOpenCodeEvent(
         return { items, sessionId }
     }
 
-    // ─── tool_use ──────────────────────────────────────────────────
-    // The real `opencode run --format json` stream emits a SINGLE
-    // `tool_use` event per tool invocation (verified against the live
-    // binary), carrying both the call and its result in `part.state`:
-    //   part.tool             — tool name (e.g. "write", "bash", "read")
-    //   part.callID           — invocation id
-    //   part.state.input      — the arguments object
-    //   part.state.output     — the textual result (present once completed)
-    //   part.state.status     — "completed" | …
-    // The earlier `tool_call` / `tool_result` two-event shape (kept as a
-    // fallback below) was an assumption that never matched real output,
-    // so tool activity silently fell through to OpenCodeUnknownEvent —
-    // breaking function-call delivery and any tool-based success check.
+    // One `tool_use` event carries both the call and its result in
+    // `part.state` — NOT a `tool_call`/`tool_result` pair (the paired
+    // handlers below are only a fallback; see docs/stream-protocols.md).
     if (type === "tool_use") {
         const part = event.part as Record<string, unknown> | undefined
         const state =
@@ -151,8 +100,6 @@ export function mapOpenCodeEvent(
                 raw: event,
             }),
         )
-        // Emit the result too when the tool has finished, so observers see
-        // a matched call/output pair from the single event.
         if (state?.output !== undefined) {
             const result =
                 typeof state.output === "string"
@@ -170,7 +117,6 @@ export function mapOpenCodeEvent(
         return { items, sessionId }
     }
 
-    // ─── tool_call (legacy/fallback shape) ─────────────────────────
     if (type === "tool_call") {
         const part = event.part as Record<string, unknown> | undefined
         const callId = typeof part?.id === "string" ? part.id : `opencode:${eventTimestamp(event)}`
@@ -192,7 +138,6 @@ export function mapOpenCodeEvent(
         return { items, sessionId }
     }
 
-    // ─── tool_result (legacy/fallback shape) ───────────────────────
     if (type === "tool_result") {
         const part = event.part as Record<string, unknown> | undefined
         const callId = typeof part?.id === "string" ? part.id : `opencode:${eventTimestamp(event)}`
@@ -208,7 +153,6 @@ export function mapOpenCodeEvent(
         return { items, sessionId }
     }
 
-    // ─── step_finish ───────────────────────────────────────────────
     if (type === "step_finish") {
         items.push(
             OpenCodeSystem.create({
@@ -220,7 +164,6 @@ export function mapOpenCodeEvent(
         return { items, sessionId }
     }
 
-    // ─── unknown / future event type ───────────────────────────────
     items.push(
         OpenCodeUnknownEvent.create({
             agentId,

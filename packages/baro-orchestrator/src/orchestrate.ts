@@ -70,165 +70,120 @@ export interface OrchestrateConfig {
     timeoutSecs?: number
     overrideModel?: string | null
     defaultModel?: string
-    /** Optional path for the audit JSONL log. If omitted, no Auditor joins. */
+    /** Path for the audit JSONL log. If omitted, no Auditor joins. */
     auditLogPath?: string
-    /**
-     * If true, BaroEvents are emitted to stdout for a TUI consumer.
-     * Default: true.
-     */
+    /** Emit BaroEvents to stdout for a TUI consumer. Default: true. */
     emitTuiEvents?: boolean
     /**
-     * Whether to perform git lifecycle operations (branch create, push,
-     * pull --rebase between stories). If undefined, auto-detected from
-     * whether `cwd` is a git working tree.
+     * Perform git lifecycle operations (branch create, push, pull --rebase).
+     * If undefined, auto-detected from whether `cwd` is a git working tree.
      */
     withGit?: boolean
     /**
-     * Continue mode (`--continue`): keep working on the CURRENT branch instead of
-     * creating a new one, so the run lands on the existing PR (the finalizer's
-     * `gh pr create` finds it and updates in place). Used by follow-up runs — the
-     * branch already holds the prior work, which baro re-reads as context.
+     * `--continue`: stay on the CURRENT branch instead of creating a new one,
+     * so the run lands on the existing PR and re-reads the prior work as
+     * context.
      */
     continueRun?: boolean
     /**
-     * Whether to wire the Librarian (cross-agent runtime memory) into
-     * the run. When on, prompts for stories at later DAG levels are
-     * automatically augmented with relevant findings from earlier
-     * stories. Default: true.
+     * Wire the Librarian (cross-agent runtime memory): later-level story
+     * prompts get augmented with earlier stories' findings. Default: true.
      */
     withLibrarian?: boolean
     /**
-     * Whether to use semantic memory (MemoryLibrarian with Vectra) instead
-     * of the tag-based Librarian. Uses ONNX embeddings + Vectra local
-     * vector DB for cosine similarity search. Same interface, better
-     * context matching, cross-process sharing via disk persistence.
-     * Default: true (when withLibrarian is true).
-     * Pass false (or --no-memory CLI flag) to fall back to tag-based.
+     * Use semantic memory (MemoryLibrarian, ONNX embeddings + Vectra) instead
+     * of the tag-based Librarian. Default: true (when withLibrarian is true);
+     * false (`--no-memory`) falls back to tag-based.
      */
     withMemory?: boolean
     /**
-     * Whether to wire the Sentry (file-touch conflict detector). When
-     * on, overlapping Edit/Write tool calls across agents emit
-     * CoordinationItem warnings on the bus. Default: true.
+     * Wire the Sentry: overlapping Edit/Write tool calls across agents emit
+     * CoordinationItem warnings. Default: true.
      */
     withSentry?: boolean
     /**
-     * Whether to wire the Critic (live acceptance-criteria evaluator).
-     * When on, each story agent's output is evaluated against its
-     * acceptance criteria via a `claude --model haiku` subprocess. Auth
-     * comes through the Claude CLI's existing config — no API key needed.
-     * Default: false (opt-in).
+     * Wire the Critic (live acceptance-criteria evaluator). Auth comes
+     * through the CLI backend's existing config — no API key needed.
+     * Default: false.
      */
     withCritic?: boolean
-    /**
-     * Model passed to the Critic when withCritic is on. Default: "haiku".
-     * Use any alias `claude --model` accepts ("haiku", "sonnet", "opus")
-     * or a fully qualified ID.
-     */
+    /** Critic model. Default: "haiku" (any alias `claude --model` accepts). */
     criticModel?: string
     /**
-     * Whether to wire the Surgeon (Phase 4 adaptive DAG mutation).
-     * When on, terminal story failures trigger ReplanItem-s that
-     * Conductor applies at the next level boundary. Default: false.
+     * Wire the Surgeon (adaptive DAG mutation): terminal story failures
+     * trigger ReplanItems that Conductor applies at the next level boundary.
+     * Default: false.
      */
     withSurgeon?: boolean
     /**
-     * Whether to wire the Supervisor (mid-run non-convergence detector). When on,
-     * a story that spins without progress (many tool calls, no file changes, or a
-     * repeated call) is aborted early so it fails fast and the Surgeon can split /
-     * escalate it — instead of burning the whole run budget on non-terminal
-     * retries. Best paired with `withSurgeon: true`. Default: false.
+     * Wire the Supervisor: a story spinning without progress is aborted early
+     * so it fails fast and the Surgeon can split/escalate it, instead of
+     * burning the run budget on non-terminal retries. Default: false.
      */
     withSupervisor?: boolean
     /**
-     * Use Claude CLI (claude --model …) for Surgeon evaluation.
-     * Default: false (deterministic skip-only strategy). Setting true
-     * costs tokens but lets Surgeon propose richer replans (split,
-     * insert prerequisite, rewire deps).
+     * Use an LLM for Surgeon evaluation. Default false = deterministic
+     * skip-only strategy; true costs tokens but allows richer replans
+     * (split, insert prerequisite, rewire deps).
      */
     surgeonUseLlm?: boolean
     /** Model for the Surgeon LLM. Default: "opus". */
     surgeonModel?: string
     /**
-     * Seconds to wait between successive story spawns inside the
-     * same DAG level. Passed through to Conductor. Default: 10.
-     * Set to 0 to disable staggering.
+     * Seconds between story spawns inside a DAG level. Default: 10;
+     * 0 disables staggering.
      */
     intraLevelDelaySecs?: number
     /**
-     * Run each story in its own git worktree (issue #50) instead of a shared
-     * working tree. Default: true when git lifecycle is on. Set false to keep
-     * the old shared-tree behaviour.
+     * Run each story in its own git worktree. Default: true when git
+     * lifecycle is on; false keeps the shared-tree behaviour.
      */
     withWorktrees?: boolean
     /**
      * Symlink dependency dirs (node_modules, …) from the repo root into each
-     * story worktree so builds/tests resolve. Default: true. Only relevant
-     * when withWorktrees is on.
+     * story worktree so builds/tests resolve. Default: true.
      */
     worktreeLinkDepDirs?: boolean
     /**
-     * Which LLM provider drives the agents. `"claude"` (the current
-     * default) uses the Claude Code CLI for Architect, Planner,
-     * StoryAgent, Critic, and Surgeon. `"openai"` is wired through
-     * end-to-end but no participant yet routes to Mozaik's native
-     * OpenAI runner — each subsequent phase replaces one fallback with
-     * a real OpenAI sibling. Until then, `"openai"` is a no-op
-     * placeholder that runs the Claude flow.
-     *
-     * `"codex"` is the subscription-arbitrage path via OpenAI Codex CLI
-     * (ChatGPT Plus/Pro billing). All phases route through Codex.
-     *
-     * This `llm` field is the **default** every Story/Critic/Surgeon
-     * phase uses unless an explicit per-phase override
-     * (`storyLlm`/`criticLlm`/`surgeonLlm`) is set below. Architect +
-     * Planner phases are wired up in the Rust TUI layer, not here —
-     * orchestrate.ts doesn't see them.
+     * Default backend for every Story/Critic/Surgeon phase unless a per-phase
+     * override (`storyLlm`/`criticLlm`/`surgeonLlm`) is set. Architect +
+     * Planner are routed by the Rust TUI layer — orchestrate.ts never sees
+     * them.
      */
     llm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     /**
-     * Optional per-phase overrides. When set, win over `llm`. Each can
-     * be any of the three providers, independent of the others. Used
-     * by the `--llm hybrid` preset (Story+Critic on Codex bulk-savings,
-     * Surgeon on Claude for rare-but-high-stakes failures).
+     * Per-phase overrides; win over `llm`. Used by the `--llm hybrid` preset
+     * (Story+Critic on the cheap backend, Surgeon on the strong one).
      */
     storyLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     criticLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     surgeonLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     /**
-     * Per-phase model override for StoryAgent. When set, wins over
-     * each story's individual `model` field in the PRD as well as
-     * over the OpenAI default. Plumbed from the Rust CLI flag
-     * `--story-model`.
+     * StoryAgent model override (`--story-model`). Wins over each story's
+     * own `model` field in the PRD as well as over the OpenAI default.
      */
     storyModel?: string
     /**
-     * Effort level for the Claude story path, passed as `claude
-     * --effort` (low|medium|high|xhigh|max). Plumbed from `baro
-     * --effort`. Only the Claude backend honours it.
+     * Passed as `claude --effort` (low|medium|high|xhigh|max). Only the
+     * Claude backend honours it.
      */
     effort?: string
     /**
-     * Tier→`backend:model` bindings (from `--tier-map` / `BARO_TIER_MAP`).
-     * Binds the Planner's per-story blast-radius tier (haiku/sonnet/opus)
-     * to a concrete backend+model, so a single DAG can route cheap
-     * single-concern stories to one backend and cross-cutting stories to
-     * another. Absent → per-story tiers resolve on the phase `llm` as
-     * before.
+     * Tier→`backend:model` bindings (`--tier-map` / `BARO_TIER_MAP`): binds
+     * the Planner's per-story blast-radius tier to a concrete backend+model.
+     * Absent → per-story tiers resolve on the phase `llm`.
      */
     tierMap?: import("./routing.js").TierMap
     /**
-     * Named OpenAI-compatible endpoints (from `--openai-endpoint`).
-     * Routes of the form `openai:model@name` resolve their base URL + key
-     * here, so one DAG can hit several OpenAI-compatible endpoints (e.g.
-     * MiniMax + real OpenAI) at once.
+     * Named OpenAI-compatible endpoints (`--openai-endpoint`). Routes of the
+     * form `openai:model@name` resolve their base URL + key here, so one DAG
+     * can hit several endpoints at once.
      */
     openaiEndpoints?: import("./routing.js").EndpointMap
     /**
-     * Where story agents run. Default: in-process (`LocalStoryExecutor`).
-     * Pass a custom `StoryExecutor` to run the agent loop elsewhere (a mock for
-     * tests, or an out-of-process / remote executor) without changing any other
-     * participant.
+     * Where story agents run. Default: in-process (`LocalStoryExecutor`);
+     * pass a custom StoryExecutor (mock, out-of-process, remote) without
+     * changing any other participant.
      */
     executor?: import("./participants/story-executor.js").StoryExecutor
     /** Hooks for receiving Operator commands externally (Rust TUI). */
@@ -237,27 +192,15 @@ export interface OrchestrateConfig {
         onAbortAll?: () => void
         onShutdown?: () => void
     }
-    /**
-     * Extra participants to attach to the bus before the run starts.
-     * Useful for live debugging, custom observers, or test harnesses.
-     */
+    /** Extra participants to attach to the bus before the run starts. */
     extraParticipants?: import("@mozaik-ai/core").Participant[]
 }
 
 /**
- * Resolve the per-story timeout (seconds).
- *
- * `--timeout N` (any positive value) is an **absolute override** — it wins
- * in both directions, so you can shorten OR lengthen the cap explicitly and
- * nothing here second-guesses it.
- *
- * When `--timeout` is NOT set (`configured` is 0 or undefined — the Rust CLI
- * sends 0 to mean "auto"), the default is **scaled by effort** rather than a
- * hard-coded 600s: a single `--effort max` Opus story (write the layer + its
- * specs + run the suite) routinely exceeds 600s and gets SIGTERM'd (exit 143
- * → wasted full retry; observed: story S8 killed at 600s on a pure-Opus run).
- * low/medium keep the prior 600s. Codex stories finish well under any of
- * these, so the effort default only ever matters on the Claude path.
+ * Per-story timeout (seconds). `--timeout N` is an absolute override in both
+ * directions (the Rust CLI sends 0 to mean "auto"). The auto default scales
+ * by effort because max-effort stories routinely exceeded 600s and got
+ * SIGTERM'd, wasting a full retry.
  */
 export function storyTimeoutSecs(
     configured: number | undefined,
@@ -290,12 +233,9 @@ export interface OrchestrateResult {
 export async function orchestrate(
     config: OrchestrateConfig,
 ): Promise<OrchestrateResult> {
-    // Harden the environment so the tools agents run never hang on a prompt or a watcher,
-    // on ANY stack. Set once here (the chokepoint every run goes through); child agents
-    // spawn inheriting process.env, so this reaches every shell command they issue.
-    //  - CI=1            → vitest/jest/playwright/pytest run once, no watch, no prompts
-    //  - npm_config_yes  → `npx <tool>` auto-confirms instead of "Ok to proceed? (y)"
-    //  - *_PROMPT/INPUT  → pip/git/apt never block waiting on a TTY
+    // Set once at the chokepoint every run passes through; child agents
+    // inherit process.env, so no shell command they issue can hang on a
+    // prompt or a test watcher.
     for (const [k, v] of Object.entries({
         CI: "1",
         npm_config_yes: "true",
@@ -310,22 +250,15 @@ export async function orchestrate(
     const env = new AgenticEnvironment()
     const emitTui = config.emitTuiEvents ?? true
     const llm: "claude" | "openai" | "codex" | "opencode" | "pi" = config.llm ?? "claude"
-    // Per-phase resolution: each falls back to global `llm` when no
-    // explicit override is provided. This is the central place where
-    // hybrid configurations land — every downstream factory branches
-    // on storyLlm / criticLlm / surgeonLlm, not on the global `llm`.
+    // Downstream factories branch on these per-phase values, never on the
+    // global `llm`.
     const storyLlm = config.storyLlm ?? llm
     const criticLlm = config.criticLlm ?? llm
     const surgeonLlm = config.surgeonLlm ?? llm
 
-    // The Critic listens for AgentResult on the bus. The CLI-subprocess
-    // story backends (pi, opencode) emit StoryResult/AgentState and never
-    // AgentResult, so the Critic is silent whenever the STORY backend is one
-    // of them — regardless of which backend the Critic itself runs on. (The
-    // critic backend choice only affects which model evaluates; it can't
-    // observe what the story never emits.) Warn loudly rather than failing
-    // quietly. `--critic-llm pi` over a Claude/OpenAI story still works,
-    // because those story backends DO emit AgentResult.
+    // The Critic fires on AgentResult, which the pi/opencode STORY backends
+    // never emit — so it stays silent regardless of which backend the Critic
+    // itself runs on. Warn loudly rather than failing quietly.
     if (config.withCritic) {
         const noAgentResult = new Set(["pi", "opencode"])
         if (noAgentResult.has(storyLlm)) {
@@ -337,14 +270,8 @@ export async function orchestrate(
         }
     }
 
-    // Provider banner so the stderr / audit log makes the actual
-    // routing obvious. As of 0.33 every LLM-using phase (Architect,
-    // Planner, Critic, Surgeon, StoryAgent) routes end-to-end to the
-    // selected provider — no mixed-mode anymore.
-    // Per-phase banner so the audit log spells out exactly which
-    // backend each in-process phase uses. Architect + Planner are
-    // run by the Rust TUI as separate subprocesses — their llm
-    // routing is logged in their own banners.
+    // Routing banner for stderr / audit log. Architect + Planner run as
+    // separate Rust-TUI subprocesses and log their own banners.
     const isHybrid =
         new Set([storyLlm, criticLlm, surgeonLlm, llm]).size > 1
     if (config.tierMap && Object.keys(config.tierMap).length > 0) {
@@ -392,23 +319,19 @@ export async function orchestrate(
         )
     }
 
-    // Optional audit log (resume + post-mortem).
     if (config.auditLogPath) {
         mkdirSync(dirname(config.auditLogPath), { recursive: true })
         new Auditor({ path: config.auditLogPath }).join(env)
     }
 
-    // Extra observers (live loggers, custom debuggers, test harnesses).
     if (config.extraParticipants) {
         for (const p of config.extraParticipants) p.join(env)
     }
 
-    // BaroEvent forwarder: watch the bus, translate to TUI protocol on stdout.
     if (emitTui) {
         joinBaroEventForwarders(env)
     }
 
-    // Operator listens for external commands (wired from caller).
     const operator = new Operator(config.operatorHooks ?? {})
     operator.setEnvironment(env)
     operator.join(env)
@@ -417,10 +340,9 @@ export async function orchestrate(
     const gitGate = new GitGate()
     let baseSha: string | null = null
 
-    // Continue mode: stay on the CURRENT branch (a follow-up landing on the existing PR)
-    // instead of the planner's fresh branch. Override prd.branchName with the checked-out
-    // branch so createOrCheckoutBranch is a no-op and the Finalizer pushes here → gh pr
-    // create finds the open PR and updates it. The branch already holds the prior work.
+    // Continue mode: override prd.branchName with the checked-out branch so
+    // createOrCheckoutBranch is a no-op and the Finalizer pushes here — `gh
+    // pr create` then finds the open PR and updates it.
     if (config.continueRun && useGit) {
         const cur = await getCurrentBranch(config.cwd)
         if (cur) {
@@ -433,14 +355,12 @@ export async function orchestrate(
         }
     }
 
-    // Unique per-run id, shared by the memory session path and the per-story
-    // worktree branch/dir names so concurrent runs and resumes never collide.
+    // Shared by the memory session path and worktree branch/dir names so
+    // concurrent runs and resumes never collide.
     const runId = `run-${Date.now()}-${process.pid}`
 
-    // Escape hatch: explicit config wins; else the presence of
-    // BARO_NO_WORKTREES disables it (NO_COLOR-style — set to ANY value,
-    // including empty, to turn worktrees off) without needing Rust CLI flag
-    // plumbing; else on by default.
+    // BARO_NO_WORKTREES is NO_COLOR-style: ANY value, including empty,
+    // disables worktrees (no Rust CLI flag plumbing needed).
     const worktreesEnabled =
         config.withWorktrees ?? !("BARO_NO_WORKTREES" in process.env)
     const worktrees =
@@ -451,31 +371,25 @@ export async function orchestrate(
                       emitTui && emit({ type: "story_log", id: "_git", line }),
               })
             : null
-    // Fallback/non-worktree story pushes run off the Conductor's critical
-    // path (see onStoryPassed); awaited before the run finishes so none is
-    // lost. Worktree merge-backs accumulate on the LOCAL run branch and are
-    // pushed once at the end (worktreePushNeeded) instead — a per-story push
-    // would re-stall the Conductor, since it shares gitGate with the
-    // on-critical-path merge-back.
+    // Non-worktree story pushes run off the Conductor's critical path and are
+    // awaited before the run finishes. Worktree merge-backs stay on the LOCAL
+    // run branch and push once at the end — a per-story push would re-stall
+    // the Conductor, since it shares gitGate with the merge-back.
     const storyPushes: Promise<void>[] = []
     let worktreePushNeeded = false
 
-    // Phase-2 observers — Librarian (cross-agent memory) and Sentry
-    // (file conflict detection). Both default ON; either can be turned
-    // off via the OrchestrateConfig flags.
     const useLibrarian = config.withLibrarian ?? true
     const useSentry = config.withSentry ?? true
     const useMemory = config.withMemory ?? true
 
-    // Generate a session-scoped memory path for cross-process sharing.
-    // Vectra index + cache.json live here. CLI reads BARO_MEMORY_PATH.
-    // Include PID to prevent collision if two orchestrators start simultaneously.
+    // Session-scoped memory path (Vectra index + cache.json), shared
+    // cross-process via BARO_MEMORY_PATH.
     const sessionsDir = join(process.env.HOME || "/tmp", ".baro", "sessions")
     const memorySessionPath = useMemory
         ? join(sessionsDir, runId, "memory")
         : undefined
 
-    // Prune stale session directories (>24h old) to prevent unbounded growth.
+    // Prune stale session dirs (>24h old) to prevent unbounded growth.
     if (useMemory) {
         try {
             const { pruneOldSessions } = await import("@baro/memory")
@@ -483,13 +397,10 @@ export async function orchestrate(
         } catch { /* non-critical */ }
     }
 
-    // Expose path via env so child processes (story agents) inherit it.
     if (memorySessionPath) {
         process.env.BARO_MEMORY_PATH = memorySessionPath
     }
 
-    // Use MemoryLibrarian (Vectra-backed semantic) when memory is enabled,
-    // otherwise fall back to tag-based Librarian.
     const librarian = useLibrarian
         ? (useMemory ? new MemoryLibrarian({ sessionPath: memorySessionPath }) : new Librarian())
         : null
@@ -497,8 +408,7 @@ export async function orchestrate(
     if (librarian) librarian.join(env)
     if (sentry) sentry.join(env)
 
-    // Phase-4 observer — Surgeon (adaptive DAG mutation). Opt-in.
-    // Joins early so it sees StoryResultItem-s from the moment the
+    // Surgeon joins early so it sees StoryResultItems from the moment the
     // Conductor starts running.
     let surgeon: Surgeon | SurgeonOpenAI | SurgeonCodex | SurgeonOpenCode | SurgeonPi | null = null
     if (config.withSurgeon) {
@@ -517,10 +427,9 @@ export async function orchestrate(
                 })),
             }
         }
-        // Tell the Surgeon what a story's planner tier actually resolved to,
-        // so its replan reason names the model that ran rather than the tier
-        // an override replaced (issue #48). Only wired when an override is in
-        // play — on a plain run the tier IS the model, so we keep showing it.
+        // Lets the Surgeon's replan reason name the model that actually ran
+        // rather than the tier an override replaced. Only wired when an
+        // override is in play — on a plain run the tier IS the model.
         const storyRouting: ResolveOpts = {
             fallbackBackend: storyLlm,
             openaiDefaultModel: config.storyModel ?? "gpt-5.5",
@@ -540,25 +449,18 @@ export async function orchestrate(
                   }
               }
             : undefined
-        // The escalation route: an explicit `backend:model` the Surgeon may set
-        // on a right-sized-but-stuck story to run it on the stronger model,
-        // bypassing the (cheap-by-default) tier map. It IS the Surgeon's own
-        // model — the strong tier on this setup (openai:gpt-5.5 on the hosted
-        // gateway, claude:opus locally). Stories default to the cheap model and
-        // only reach the strong model through this deliberate, on-failure
-        // escalation — never the planner's up-front tier.
+        // Stories default to the cheap model; the strong model is reached only
+        // through this deliberate on-failure escalation, never the planner's
+        // up-front tier. A global `--story-model` override wins over per-story
+        // routes and would silently defeat it — so don't offer one then.
         const surgeonEscalationModel =
             config.surgeonModel ??
             (surgeonLlm === "openai" ? "gpt-5.5" : surgeonLlm === "claude" ? "opus" : undefined)
-        // A global `--story-model` override wins over any per-story route, so it
-        // would silently defeat an escalation route — don't offer one then.
         const escalationRoute =
             surgeonEscalationModel && !config.storyModel
                 ? `${surgeonLlm}:${surgeonEscalationModel}`
                 : undefined
-        // Factory by provider. Bus contract is identical across all
-        // three — same ReplanItem shape — so downstream observers
-        // (Conductor's replan-applier, Auditor, kaleidoskop) don't
+        // Bus contract is identical across providers, so observers never
         // notice the swap.
         if (surgeonLlm === "openai") {
             surgeon = new SurgeonOpenAI({
@@ -603,9 +505,6 @@ export async function orchestrate(
         surgeon.join(env)
     }
 
-    // Phase-3 observer — Critic (live acceptance-criteria evaluator).
-    // Opt-in (default OFF). Spawns `claude --model haiku` subprocesses
-    // for each evaluation, inheriting Claude CLI auth.
     let critic: Critic | CriticOpenAI | CriticCodex | CriticOpenCode | CriticPi | null = null
     if (config.withCritic) {
         const prd = loadPrd(config.prdPath)
@@ -614,10 +513,8 @@ export async function orchestrate(
                 .filter((s) => s.acceptance && s.acceptance.length > 0)
                 .map((s) => [s.id, s.acceptance] as [string, readonly string[]]),
         )
-        // Factory by provider. Bus contract is identical — same
-        // CritiqueItem shape, same AgentTargetedMessageItem corrective
-        // emission — so downstream observers (Cartographer, Auditor,
-        // kaleidoskop) don't notice the swap.
+        // Bus contract is identical across providers, so observers never
+        // notice the swap.
         if (criticLlm === "openai") {
             critic = new CriticOpenAI({
                 targets,
@@ -647,11 +544,8 @@ export async function orchestrate(
         critic.join(env)
     }
 
-    // Finalizer — opens the PR at the end of the run, listening on the
-    // bus for the canonical end-of-run signals. Only joins when we're
-    // doing git lifecycle (no point composing a PR for a no-commit run)
-    // — `gh` availability is checked inside Finalizer itself so the run
-    // still succeeds even on machines without it.
+    // Finalizer only joins on git runs; `gh` availability is checked inside
+    // it, so the run still succeeds on machines without it.
     const finalizer = useGit
         ? new Finalizer({
               cwd: config.cwd,
@@ -665,7 +559,6 @@ export async function orchestrate(
         finalizer.join(env)
     }
 
-    // Conductor — the work driver.
     const conductor = new Conductor({
         prdPath: config.prdPath,
         cwd: config.cwd,
@@ -689,8 +582,6 @@ export async function orchestrate(
             : undefined,
         onBeforeStoryLaunch: librarian
             ? (storyId, story) => {
-                  // Build hints from the story title + a few description
-                  // tokens so Librarian can rank relevance.
                   const hints: string[] = [
                       ...tokenizeForHints(story.title),
                       ...tokenizeForHints(story.description).slice(0, 8),
@@ -705,11 +596,10 @@ export async function orchestrate(
                   // Run-branch HEAD before this story merges, so we can diff
                   // exactly what the story added once merge-back lands.
                   const beforeMerge = emitTui ? await getHeadSha(config.cwd) : null
-                  // Merge the story into the run branch on the critical path
-                  // (fast, local) so the next DAG level sees it. mergeBack
-                  // returns false when the story had no worktree (create()
-                  // fell back to the shared tree) — that story still needs the
-                  // shared-tree remote reconciliation.
+                  // Merge-back happens on the critical path (fast, local) so
+                  // the next DAG level sees it. mergeBack returns false when
+                  // the story had no worktree — that story still needs the
+                  // shared-tree remote reconciliation below.
                   if (worktrees) {
                       let merged = false
                       try {
@@ -724,9 +614,8 @@ export async function orchestrate(
                           return
                       }
                       if (merged) {
-                          // Surface what the story changed (file list + capped
-                          // diff) for the TUI Changes view, before the worktree
-                          // is cleaned up.
+                          // Diff for the TUI Changes view, captured before the
+                          // worktree is cleaned up.
                           if (emitTui && beforeMerge) {
                               const d = await getDiff(config.cwd, beforeMerge, "HEAD")
                               if (d.files.length) {
@@ -738,8 +627,7 @@ export async function orchestrate(
                                   })
                               }
                           }
-                          // Cleanup is fast + local; the run branch is pushed
-                          // once after the run (worktreePushNeeded) so this
+                          // Push happens once after the run so this
                           // critical-path callback never waits on the network.
                           await worktrees.cleanup(storyId)
                           worktreePushNeeded = true
@@ -748,8 +636,8 @@ export async function orchestrate(
                           }
                           return
                       }
-                      // merged === false → story fell back to the shared tree;
-                      // reconcile + push it like the non-worktree path below.
+                      // merged === false → shared-tree fallback; reconcile +
+                      // push like the non-worktree path below.
                   }
                   await safePullRebase(config.cwd, log, gitGate)
                   storyPushes.push(
@@ -775,14 +663,8 @@ export async function orchestrate(
     conductor.setEnvironment(env)
     conductor.join(env)
 
-    // Story factory — Mozaik-native participant that spawns StoryAgent
-    // instances in response to StorySpawnRequestItem from Conductor.
-    // Replaces the old `new StoryAgent(...).run()` direct call inside
-    // Conductor; now Conductor doesn't import StoryAgent at all.
-    // When --llm openai is set, story execution runs through
-    // OpenAIStoryAgent (Mozaik OpenAIResponses + our tool layer);
-    // otherwise the Claude CLI subprocess path. StoryFactory dispatches
-    // per-spawn, so future per-story overrides could live there too.
+    // Spawns StoryAgents in response to StorySpawnRequests from Conductor,
+    // dispatching per-spawn on the resolved backend.
     const storyFactory = new StoryFactory({
         cwd: config.cwd,
         worktrees: worktrees ?? undefined,
@@ -798,10 +680,8 @@ export async function orchestrate(
     storyFactory.setEnvironment(env)
     storyFactory.join(env)
 
-    // Supervisor — mid-run non-convergence detector. Aborts a spinning story
-    // early (via StoryFactory.abort) so it settles as a failed StoryResult and
-    // the Surgeon can split/escalate it, instead of burning the run budget on a
-    // non-terminal loop.
+    // Aborts a spinning story early so it settles as a failed StoryResult the
+    // Surgeon can split/escalate, instead of burning the run budget.
     if (config.withSupervisor) {
         const supervisor = new Supervisor({
             onStall: (storyId, reason) => {
@@ -820,9 +700,8 @@ export async function orchestrate(
         supervisor.join(env)
     }
 
-    // Emit `init` early so the TUI can render the story list before any
-    // Claude process spawns. Also emit `dag` so the DAG tab has something
-    // to draw — without this it sits on "Waiting for DAG data…" forever.
+    // Emit `init` + `dag` before any agent spawns — without `dag` the TUI's
+    // DAG tab sits on "Waiting for DAG data…" forever.
     if (emitTui) {
         const prd = loadPrd(config.prdPath)
         emit({
@@ -839,17 +718,13 @@ export async function orchestrate(
             lvl.storyIds.map((id) => ({ id })),
         )
         emit({ type: "dag", levels: dagLevels })
-        // Surface the Architect's decision spec so the dashboard can show the
-        // "why" behind the run (it otherwise lives only in prd.json on disk).
+        // The Architect's decision spec otherwise lives only in prd.json.
         if (prd.decisionDocument && prd.decisionDocument.trim()) {
             emit({ type: "decision_document", document: prd.decisionDocument })
         }
     }
 
-    // Mozaik-native: kick the run by emitting a RunStartRequestItem on
-    // the bus. Conductor's onExternalBusEvent handler picks it up and drives
-    // the state machine forward via further bus events. There is no
-    // `conductor.run()` call — the runtime is the loop.
+    // There is no `conductor.run()` call — the bus runtime is the loop.
     env.deliverSemanticEvent(
         operator,
         RunStartRequest.create({ reason: "orchestrate" }),
@@ -859,9 +734,8 @@ export async function orchestrate(
     // Drain detached fallback/non-worktree pushes before finishing.
     await Promise.allSettled(storyPushes)
 
-    // Push the accumulated run branch once (worktree merge-backs only touched
-    // the local branch during the run). Done after conductor.done so the slow
-    // network push can't stall the run; before the Finalizer so its PR sees
+    // One push for all worktree merge-backs: after conductor.done so the
+    // network can't stall the run, before the Finalizer so its PR sees
     // every commit.
     if (worktreePushNeeded) {
         const log = (line: string) =>
@@ -874,17 +748,15 @@ export async function orchestrate(
         }
     }
 
-    // Backstop: per-story worktrees are removed as each story settles, but
-    // sweep any stragglers + the temp dir + dangling branches here.
+    // Backstop sweep for straggler worktrees + temp dir + dangling branches.
     await worktrees?.cleanupAll()
 
-    // Drain in-flight async observers so all side effects (CritiqueItem,
-    // ReplanItem) land in the audit log before this function returns.
+    // Drain in-flight async observers so their side effects land in the
+    // audit log before this function returns.
     if (critic) await critic.idle()
     if (surgeon) await surgeon.idle()
-    // Wait for Finalizer to open (or knowingly skip) the PR before we
-    // emit the TUI `done` event, so the completion screen has the PR
-    // URL the moment it renders instead of after a race.
+    // Await the PR before the TUI `done` event so the completion screen has
+    // the PR URL the moment it renders instead of after a race.
     if (finalizer) await finalizer.complete()
 
     let filesCreated = 0
@@ -894,11 +766,9 @@ export async function orchestrate(
         filesCreated = stats.created
         filesModified = stats.modified
 
-        // Safety net for the Changes view: emit the full run diff (base → HEAD)
-        // at completion so it's reliably populated even when a per-story
-        // merge-back diff was missed (shared-tree fallback) or the user opened
-        // Changes before any story merged. Files dedupe by path in the TUI, so
-        // this is harmless when the per-story diffs already landed.
+        // Full run diff as a safety net for the Changes view (per-story diffs
+        // can be missed on the shared-tree fallback). The TUI dedupes files
+        // by path, so this is harmless when they already landed.
         if (emitTui) {
             const runDiff = await getDiff(config.cwd, baseSha, "HEAD")
             if (runDiff.files.length) {
@@ -936,10 +806,7 @@ export async function orchestrate(
     }
 }
 
-/**
- * Pull a few keyword-shaped tokens out of free text for Librarian
- * relevance hints. Lowercased, alphanumeric runs ≥ 3 chars.
- */
+/** Keyword-shaped tokens for Librarian relevance hints. */
 function tokenizeForHints(text: string): string[] {
     const seen = new Set<string>()
     const out: string[] = []

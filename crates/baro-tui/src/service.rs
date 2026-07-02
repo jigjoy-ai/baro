@@ -1,11 +1,8 @@
-//! Install `baro connect` as a per-user background service so the runner
-//! survives a closed terminal, logout, and reboot — without the user learning
-//! launchd vs systemd vs Task Scheduler. One command, OS-detected plumbing:
-//! launchd LaunchAgent (macOS), systemd `--user` unit (Linux), logon Scheduled
-//! Task (Windows). Each restarts the runner on crash and starts it at login.
-//!
-//! OS is detected at runtime (not `cfg!`), so every backend compiles on every
-//! platform and the unsupported-OS path is a clean error, not a build failure.
+//! Install `baro connect` as a per-user background service — launchd
+//! LaunchAgent (macOS), systemd `--user` unit (Linux), logon Scheduled
+//! Task (Windows) — restarting on crash and starting at login. OS is
+//! detected at runtime (not `cfg!`) so every backend compiles on every
+//! platform and an unsupported OS is a clean error, not a build failure.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -82,8 +79,6 @@ fn connect_args(cfg: &ServiceConfig) -> Vec<String> {
     args
 }
 
-// ───────────────────────────────── macOS ─────────────────────────────────
-
 fn plist_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(home()?.join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
 }
@@ -96,7 +91,6 @@ fn install_macos(cfg: &ServiceConfig) -> R {
     let log = log_path()?;
     let log = log.display().to_string();
 
-    // ProgramArguments: the exe, then `connect …`.
     let mut program = vec![cfg.exe.display().to_string()];
     program.extend(connect_args(cfg));
     let program_xml = program
@@ -105,9 +99,8 @@ fn install_macos(cfg: &ServiceConfig) -> R {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // launchd starts services with a bare PATH (no /usr/local/bin, /opt/homebrew/…),
-    // so node/tsx/claude wouldn't be found. Bake the PATH that was in effect at
-    // install time — whatever made `baro` + `node` resolvable in the user's shell.
+    // launchd starts services with a bare PATH, so node/tsx/claude wouldn't
+    // resolve — bake in the PATH that was in effect at install time.
     let path_env = xml_escape(&install_path());
 
     let plist = format!(
@@ -135,8 +128,7 @@ fn install_macos(cfg: &ServiceConfig) -> R {
     );
     std::fs::write(&path, plist)?;
     let p = path.display().to_string();
-    // Reload: unload any prior copy (silently — it usually isn't loaded), then
-    // load enabled.
+    // Unload any prior copy (usually not loaded), then load enabled.
     let _ = Command::new("launchctl")
         .args(["unload", &p])
         .stdout(std::process::Stdio::null())
@@ -164,8 +156,6 @@ fn uninstall_macos() -> R {
     Ok(())
 }
 
-// ───────────────────────────────── Linux ─────────────────────────────────
-
 fn unit_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(home()?.join(".config/systemd/user").join(format!("{UNIT}.service")))
 }
@@ -180,8 +170,8 @@ fn install_linux(cfg: &ServiceConfig) -> R {
     parts.extend(connect_args(cfg));
     let exec = parts.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
 
-    // Bake the install-time PATH so node/tsx/claude resolve under systemd's
-    // otherwise-minimal environment (same reason as the launchd plist).
+    // Bake the install-time PATH — systemd's environment is otherwise
+    // minimal (same reason as the launchd plist).
     let path_env = install_path();
     let unit = format!(
         "[Unit]\n\
@@ -230,12 +220,10 @@ fn uninstall_linux() -> R {
     Ok(())
 }
 
-// ──────────────────────────────── Windows ────────────────────────────────
-
 fn install_windows(cfg: &ServiceConfig) -> R {
-    // A logon Scheduled Task runs in the user's session (needed for the claude
-    // CLI subscription auth) and survives logout/reboot. No admin, no service
-    // wrapper, no extra dependency — the cleanest dependency-free option.
+    // A logon Scheduled Task runs in the user's session (needed for claude
+    // CLI subscription auth), survives logout/reboot, and needs no admin
+    // rights or service wrapper.
     let mut parts = vec![cfg.exe.display().to_string()];
     parts.extend(connect_args(cfg));
     // The task action is one string; wrap each part in quotes (escaping inner ").
@@ -279,8 +267,6 @@ fn uninstall_windows() -> R {
     println!("✓ Removed Scheduled Task '{UNIT}'.");
     Ok(())
 }
-
-// ──────────────────────────────── helpers ────────────────────────────────
 
 /// Minimal XML escaping for launchd plist string values.
 fn xml_escape(s: &str) -> String {

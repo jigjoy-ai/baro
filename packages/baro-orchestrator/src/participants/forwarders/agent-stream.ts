@@ -9,13 +9,8 @@ import {
 import { emit } from "../../tui-protocol.js"
 
 /**
- * Turns the agent bus stream into the structured Activity feed for the TUI.
- *
- * Subscribes to: ModelMessageItem, FunctionCallItem, FunctionCallOutputItem
- * Emits: BaroEvent { type: "activity" } — ONE condensed, typed line per bus
- * item (not the old line-by-line `story_log` firehose, which split full tool
- * args / file reads / model output into hundreds of raw lines and both pegged
- * the TUI render and was unreadable).
+ * Turns the agent bus stream into the TUI's structured Activity feed:
+ * ONE condensed `activity` event per bus item.
  */
 export class AgentStreamForwarder extends BaseObserver {
     override async onExternalModelMessage(source: Participant, item: ModelMessageItem): Promise<void> {
@@ -34,22 +29,20 @@ export class AgentStreamForwarder extends BaseObserver {
         const args = parseArgs(item.args)
         const tool = item.name
 
-        // File writes/edits surface as file_change (path + op).
-        // Claude: write_file / edit_file. Codex maps file_change → name "edit".
+        // Codex maps file_change → tool name "edit".
         if (tool === "write_file" || tool === "edit_file" || tool === "edit") {
             const path = strField(args, "path", "file_path", "file") ?? "(file)"
             const op = tool === "write_file" ? "create" : "modify"
             emit({ type: "activity", id: agentId, kind: "file_change", tool: "write", op, path, text: path })
             return
         }
-        // Shell/bash commands. Claude: bash. Codex maps command_execution →
-        // name "shell" with the argv in `command` (often ["bash","-lc","<script>"]).
+        // Codex maps command_execution → "shell" with argv in `command`
+        // (often ["bash","-lc","<script>"]).
         if (tool === "bash" || tool === "shell") {
             const cmd = firstLine(cmdText(args))
             emit({ type: "activity", id: agentId, kind: "tool_call", tool: "bash", text: truncate(cmd || tool, 140) })
             return
         }
-        // Read-ish tools: read_file, list_files, file_tree, grep, glob.
         const target = strField(args, "path", "file_path", "pattern", "query", "file") ?? ""
         const text = target ? `${tool} ${target}` : tool
         emit({ type: "activity", id: agentId, kind: "tool_call", tool: "read", text: truncate(text, 140) })
@@ -65,7 +58,6 @@ export class AgentStreamForwarder extends BaseObserver {
         const out = json.output?.[0]?.text ?? ""
         if (!out.trim()) return
 
-        // Detect a test run result and surface it as a typed `test` entry.
         const verdict = testVerdict(out)
         if (verdict !== null) {
             emit({
@@ -77,7 +69,6 @@ export class AgentStreamForwarder extends BaseObserver {
             })
             return
         }
-        // Everything else: a single condensed result line (not the full output).
         emit({ type: "activity", id: agentId, kind: "tool_result", text: truncate(firstLine(out), 120) })
     }
 }

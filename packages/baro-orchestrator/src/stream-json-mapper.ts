@@ -1,18 +1,8 @@
 /**
  * Map Claude Code CLI stream-json events to typed items for bus delivery.
- *
- * Strategy: assistant-side messages and tool I/O map cleanly onto Mozaik
- * built-in items (ModelMessageItem, FunctionCallItem,
- * FunctionCallOutputItem), which `ClaudeCliParticipant` dispatches via
- * the matching `env.deliverModelMessage` / `deliverFunctionCall` /
- * `deliverFunctionCallOutput` channels. The rest (user-side messages,
- * system frames, result frames, rate-limits, stream chunks, unknowns)
- * become `SemanticEvent<T>` payloads wrapped via the factories defined
- * in `semantic-events.ts`.
- *
- * Every input event still maps to a non-empty array — we never silently
- * drop data. Tested against real spike logs in
- * `packages/baro-app/scripts/spike-logs/`.
+ * Every input event maps to a non-empty array — nothing is silently
+ * dropped. Wire format and full mapping table: docs/stream-protocols.md
+ * ("Claude Code").
  */
 
 import {
@@ -31,11 +21,8 @@ import {
     ClaudeUnknownEvent,
 } from "./semantic-events.js"
 
-/**
- * Union of every kind of item the mapper can produce. Mozaik built-in
- * types are dispatched via their native bus channels; `SemanticEvent`
- * ones via `deliverSemanticEvent`.
- */
+// Mozaik built-in types dispatch via their native bus channels;
+// SemanticEvents via deliverSemanticEvent.
 export type MappedItem =
     | ModelMessageItem
     | FunctionCallItem
@@ -80,9 +67,7 @@ export function mapClaudeEvent(
         }
 
         case "user": {
-            // The `user` event carries either:
-            //   1. an input replay  (message.content: string)
-            //   2. a tool_result    (message.content: [{type:"tool_result",...}])
+            // Either an input replay (content: string) or tool_result blocks.
             const content = event?.message?.content
             if (typeof content === "string") {
                 items.push(AgentUserMessage.create({ agentId, text: content }))
@@ -106,9 +91,7 @@ export function mapClaudeEvent(
         }
 
         case "assistant": {
-            // `assistant` carries an array of content blocks. Each block is
-            // either a `text` (→ ModelMessageItem) or a `tool_use`
-            // (→ FunctionCallItem). One `assistant` event can produce both.
+            // One assistant event can produce both text and tool_use items.
             const blocks = event?.message?.content
             if (Array.isArray(blocks)) {
                 for (const block of blocks) {

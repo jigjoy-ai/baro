@@ -1,16 +1,8 @@
-//! Run the Planner phase by spawning the TS subprocess at
-//! `packages/baro-orchestrator/scripts/run-planner.ts`.
-//!
-//! Identical shape to `architect_runner` — Rust is a process
-//! supervisor, the actual Planner lives in TypeScript and decides
-//! Claude vs OpenAI internally based on the `--llm` arg. Returns the
-//! raw PRD JSON string; callers deserialise via `serde_json` into
-//! their `PrdOutput` shape (kept in `main.rs` so the schema stays
-//! one source of truth).
-//!
-//! CLAUDE.md and the Architect's DecisionDocument are passed via
-//! tempfiles so we don't trip over argv length limits with multi-KB
-//! context.
+//! Run the Planner phase by spawning the TS subprocess
+//! (`run-planner.ts`) — same shape as `architect_runner`. Returns the
+//! raw PRD JSON; callers deserialise it in main.rs so the schema has
+//! one source of truth. Context blobs travel via tempfiles to dodge
+//! argv length limits.
 
 use std::io::Write;
 use std::path::Path;
@@ -40,8 +32,7 @@ pub async fn run_planner(
         ProcessRunError { message: e, log_path: None }
     })?;
 
-    // Two optional context blobs, two tempfiles. Both kept alive
-    // until the child exits.
+    // Both tempfiles must stay alive until the child exits.
     let ctx_tempfile = write_optional_tempfile("context", context)?;
     let dec_tempfile = write_optional_tempfile("decision", decision_doc)?;
 

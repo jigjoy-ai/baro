@@ -8,11 +8,7 @@ import {
 } from "../../semantic-events.js"
 import { emit } from "../../tui-protocol.js"
 
-/**
- * Mirrors coordination and critique notices as `story_log` BaroEvents.
- *
- * Subscribes to: Coordination, Critique. Emits: story_log.
- */
+/** Mirrors coordination and critique notices as `story_log` BaroEvents. */
 export class CoordinationForwarder extends BaseObserver {
     override async onExternalEvent(
         _source: Participant,

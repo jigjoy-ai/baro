@@ -1,7 +1,6 @@
 /**
- * PRD types and persistence — compatible with the existing baro
- * `prd.json` schema produced by the planner. Mirrors the Rust types in
- * the original executor.rs so v1 plans drop into v2 without conversion.
+ * PRD types and persistence. CONSTRAINT: must stay compatible with the
+ * `prd.json` schema the planner produces (shared with the Rust side).
  */
 
 import { readFileSync, writeFileSync } from "fs"
@@ -27,11 +26,9 @@ export interface PrdFile {
     description: string
     userStories: PrdStory[]
     /**
-     * Architect's DecisionDocument captured during the planning phase
-     * (Rust side). Authoritative spec for every Story Agent: file
-     * paths, schema/API shapes, naming conventions, dependency
-     * choices. Conductor prepends this verbatim to every story prompt
-     * so agents never re-decide things upstream already pinned down.
+     * Architect's DecisionDocument (file paths, schema shapes, naming).
+     * Conductor prepends it verbatim to every story prompt so agents never
+     * re-decide things upstream already pinned down.
      */
     decisionDocument?: string
 }
@@ -53,12 +50,10 @@ export function normalizePrd(input: Partial<PrdFile>, source: string): PrdFile {
         throw new Error(`PRD at ${source} is not a JSON object`)
     }
     const project = typeof input.project === "string" ? input.project : ""
-    // Strip an accidental doubled "baro/baro/…" prefix (a follow-up run on an
-    // already baro-prefixed branch can double it). createOrCheckoutBranch strips
-    // it before pushing, but the Finalizer opens the PR from prd.branchName
-    // verbatim — so without normalizing HERE the PR head points at the doubled
-    // (empty) branch and `gh pr create` fails with "No commits between…". One
-    // canonical name → checkout, push, and PR all agree.
+    // Strip a doubled "baro/baro/…" prefix HERE, not just in
+    // createOrCheckoutBranch: the Finalizer opens the PR from prd.branchName
+    // verbatim, and a doubled (empty) head makes `gh pr create` fail with
+    // "No commits between…". One canonical name → checkout, push, PR agree.
     let branchName = typeof input.branchName === "string" ? input.branchName : ""
     while (branchName.startsWith("baro/baro/")) branchName = branchName.slice("baro/".length)
     const description = typeof input.description === "string" ? input.description : ""
@@ -124,10 +119,7 @@ function normalizeStory(
     }
 }
 
-/**
- * Mark a story as passing and stamp completion metadata. Returns a new
- * PrdFile (immutable update); caller is responsible for persisting.
- */
+/** Immutable update; caller is responsible for persisting. */
 export function markStoryPassed(
     prd: PrdFile,
     storyId: string,
@@ -149,25 +141,16 @@ export function markStoryPassed(
 }
 
 /**
- * Co-author trailer baro asks every story-side commit to carry, and
- * that Finalizer drops at the bottom of every PR body so squash-merge
- * commits inherit it too. Format is GitHub's canonical noreply email
- * shape: `<numericUserId>+<login>@users.noreply.github.com`, which
- * makes GitHub auto-attribute the commit to the @baro-rs account in
- * the contributors view.
- *
- * Mirrors the Claude Code pattern (`Co-Authored-By: Claude … <noreply@
- * anthropic.com>`): humans stay primary author; the bot is the
- * co-author.
+ * Trailer for every story commit and PR body (so squash-merges inherit it).
+ * The `<numericUserId>+<login>@users.noreply.github.com` shape is what makes
+ * GitHub auto-attribute commits to @baro-rs in the contributors view.
  */
 export const BARO_COAUTHOR_TRAILER =
     "Co-Authored-By: baro <285254893+baro-rs@users.noreply.github.com>"
 
 /**
- * Build the default story prompt from a PrdStory. Mirrors the inline
- * template fallback in baro's executor.rs `build_prompt`. If the project
- * directory contains a `prompt.md` template, callers should use that
- * instead — see `loadPromptTemplate`.
+ * Fallback prompt — callers should prefer a project-local `prompt.md`
+ * template when one exists.
  */
 export function buildDefaultStoryPrompt(story: PrdStory): string {
     const acceptance = story.acceptance.length

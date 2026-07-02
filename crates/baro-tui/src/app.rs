@@ -9,13 +9,11 @@ use crate::constants::MAX_LOG_LINES;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Screen {
-    /// First step (when invoked without a goal): pick Claude Code vs
-    /// Mozaik native (OpenAI) as the backend for every LLM-using
-    /// phase in this run.
+    /// First step when invoked without a goal: pick the backend for
+    /// every LLM-using phase.
     ProviderPicker,
-    /// Shown only when the user picked the OpenAI backend AND
-    /// `OPENAI_API_KEY` was not already set in the environment.
-    /// Held in memory only; never written to disk.
+    /// Shown only for the OpenAI backend when `OPENAI_API_KEY` isn't
+    /// set. Held in memory only; never written to disk.
     ApiKeyInput,
     Welcome,
     Context,
@@ -109,34 +107,22 @@ pub enum ArchitectStatus {
     Running,
     Complete,
     /// Architect phase failed but we're continuing — the planner runs
-    /// without an authoritative spec (legacy behaviour).
+    /// without an authoritative spec.
     Skipped(String),
 }
 
-/// Which LLM provider every phase routes its calls to. Claude (default)
-/// shells out to the Claude Code CLI. OpenAI uses Mozaik 3.9's native
-/// providers/openai inference runner. Selectable via `baro --llm <value>`.
+/// Which backend every phase routes its calls to; selected via `--llm`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmProvider {
     Claude,
     OpenAI,
-    /// OpenAI Codex CLI subprocess. Same subscription-arbitrage shape
-    /// as Claude (subprocess wrapping a vendor CLI billed against a
-    /// consumer ChatGPT plan rather than per-token API), but a
-    /// different binary, different JSONL event schema, and one-shot
-    /// non-interactive invocation per turn (no stdin streaming).
-    /// Implementation: `packages/baro-orchestrator/src/participants/
-    /// codex-cli-participant.ts`.
+    /// OpenAI Codex CLI subprocess — ChatGPT-subscription billing,
+    /// one-shot non-interactive invocation per turn.
     Codex,
-    /// OpenCode CLI subprocess. Multi-provider agent shell that outputs
-    /// JSONL via `opencode run --format json`. Supports any model via
-    /// `-m provider/model` flag. One-shot non-interactive invocation.
-    /// Implementation: `packages/baro-orchestrator/src/participants/
-    /// opencode-cli-participant.ts`.
+    /// OpenCode CLI subprocess (`opencode run --format json`); any
+    /// model via `-m provider/model`.
     OpenCode,
-    /// Pi CLI subprocess. Multi-provider agent shell similar to OpenCode.
-    /// Implementation: `packages/baro-orchestrator/src/participants/
-    /// pi-cli-participant.ts`.
+    /// Pi CLI subprocess, similar to OpenCode.
     Pi,
 }
 
@@ -170,11 +156,9 @@ pub enum StoryStatus {
     Complete,
     Failed,
     Retrying(u32),
-    /// Reserved for stories the orchestrator decides to drop (e.g.
-    /// because a dependency failed terminally). Currently never
-    /// constructed — terminal retry-exhaustion now uses `Failed` so the
-    /// user isn't told their work was "skipped" when it was actually
-    /// attempted. Kept around for an upcoming `story_dropped` event.
+    /// Never constructed — terminal retry-exhaustion uses `Failed` so
+    /// attempted work isn't reported as "skipped". Kept for an upcoming
+    /// `story_dropped` event.
     #[allow(dead_code)]
     Skipped,
 }
@@ -227,28 +211,19 @@ pub struct App {
     pub screen: Screen,
     pub planner: Planner,
 
-    // Provider-picker screen (first step when invoked without a goal).
-    // Index into `provider_picker_options`; the chosen LlmProvider
-    // lands in `self.llm` on confirm.
     pub provider_picker_index: usize,
-    /// Available backends for the picker, populated at startup. Claude
-    /// and OpenAI are always present; Codex and OpenCode are added when
-    /// their CLI is detected on PATH.
+    /// Claude and OpenAI are always present; Codex/OpenCode/Pi are
+    /// added when their CLI is detected on PATH.
     pub provider_picker_options: Vec<LlmProvider>,
 
-    // API-key input screen — buffer for the in-progress text. The
-    // confirmed key (whether from this input or the environment) is
-    // held in `openai_api_key` and passed to subprocesses via env, not
-    // written to disk.
+    /// In-progress text buffer; the confirmed key lives in
+    /// `openai_api_key`, passed via env and never written to disk.
     pub api_key_input: String,
     pub openai_api_key: Option<String>,
-    /// Optional custom base URL for OpenAI-compatible API endpoints
-    /// (e.g. Xiaomi MiMo, OpenRouter, local vLLM). Read from
-    /// `OPENAI_BASE_URL` env var or `--openai-base-url` CLI flag.
+    /// Custom base URL for OpenAI-compatible endpoints
+    /// (`--openai-base-url` / `OPENAI_BASE_URL`).
     pub openai_base_url: Option<String>,
-    /// Effort level passed to spawned `claude` processes via
-    /// `--effort` (low|medium|high|xhigh|max). Default "high". Set via
-    /// `baro --effort`.
+    /// Effort level for spawned `claude` processes (`--effort`).
     pub effort: String,
 
     // Welcome screen
@@ -257,19 +232,16 @@ pub struct App {
 
     // Context building screen
     pub claude_md_content: Option<String>,
-    /// Architect's DecisionDocument for the current run, captured between
-    /// the Architect phase and write_prd. Persists into prd.json so the
-    /// orchestrator can prepend it to every story prompt.
+    /// Architect's DecisionDocument, held until write_prd persists it
+    /// into prd.json for the orchestrator to prepend to story prompts.
     pub decision_document: Option<String>,
     pub architect_status: ArchitectStatus,
 
     // Planning screen
     pub planning_start: Option<Instant>,
     pub planning_error: Option<String>,
-    /// When the planner / architect fails, the path to the full
-    /// stdout+stderr log we persisted at the call site (see
-    /// claude_runner). Surfaced in the planning screen so users have
-    /// somewhere to look when the in-TUI error excerpt isn't enough.
+    /// Persisted log path for a failed planner/architect run, surfaced
+    /// on the planning screen.
     pub planning_log_path: Option<std::path::PathBuf>,
 
     // Review screen
@@ -299,9 +271,8 @@ pub struct App {
     pub done: bool,
     pub final_stats: Option<DoneStats>,
     pub total_time_secs: u64,
-    /// Set when the orchestrator subprocess terminated without sending
-    /// a normal `Done` event. The completion screen surfaces this so
-    /// the user knows the run did not finish cleanly.
+    /// Set when the orchestrator terminated without a normal `Done`
+    /// event; the completion screen surfaces the unclean finish.
     pub exit_reason: Option<String>,
 
     // Push tracking
@@ -345,12 +316,9 @@ pub struct App {
     pub with_surgeon: bool,
     pub surgeon_use_llm: bool,
     pub surgeon_model: Option<String>,
-    /// Per-phase overrides. Each takes precedence over the routed
-    /// default for its phase, but is itself overridden by the
-    /// global `override_model` so `--model X` still wins. Plumbed
-    /// from `--architect-model` / `--planner-model` / `--story-model`
-    /// on the CLI; the per-phase Critic + Surgeon fields above
-    /// predate this group and stay separate for backwards compat.
+    /// Per-phase model overrides; beaten only by the global
+    /// `override_model`. The Critic + Surgeon fields above predate
+    /// this group and stay separate.
     pub architect_model: Option<String>,
     pub planner_model: Option<String>,
     pub story_model: Option<String>,
@@ -362,33 +330,23 @@ pub struct App {
     pub openai_endpoints: Vec<String>,
     pub intra_level_delay_secs: Option<u64>,
 
-    /// Quick mode (`--quick`): user has told us this goal is trivial and they
-    /// want a surgical run. Skips the Architect phase entirely, instructs the
-    /// Planner to emit exactly one story, and disables Critic + Surgeon
-    /// (which are designed for multi-story runs and add latency the user
-    /// explicitly didn't sign up for). The fast path for "fix the typo" goals.
+    /// Quick mode (`--quick`): skip the Architect, plan exactly one
+    /// story, disable Critic + Surgeon.
     pub quick: bool,
 
-    /// Which LLM provider runs the agents. Set via `--llm
-    /// claude|openai|codex|hybrid`. Read as **the default** every
-    /// phase uses unless an explicit per-phase override is set.
+    /// The default backend every phase uses unless a per-phase
+    /// override is set.
     pub llm: LlmProvider,
-    /// Per-phase overrides. Each defaults to `llm` when no override
-    /// is supplied on the command line. `--llm hybrid` is a preset
-    /// that flips these to a sensible split: Architect / Planner /
-    /// Surgeon stay on Claude (high-stakes, low-volume); Story and
-    /// Critic move to Codex (high-volume, cheap on subscription).
+    /// Per-phase overrides; each defaults to `llm`. `--llm hybrid`
+    /// flips Story + Critic to Codex.
     pub architect_llm: LlmProvider,
     pub planner_llm: LlmProvider,
     pub story_llm: LlmProvider,
     pub critic_llm: LlmProvider,
     pub surgeon_llm: LlmProvider,
-    /// True when the user passed `--llm` explicitly (any value, including
-    /// `claude` and `hybrid`). The provider picker is shown only when no
-    /// `--llm` was given — keying on `llm != Claude` was wrong because
-    /// the `hybrid` preset and an explicit `--llm claude` both resolve
-    /// `llm` to Claude, which wrongly re-prompted (and, for hybrid, the
-    /// picker then collapsed the per-phase split).
+    /// True when `--llm` was passed explicitly (any value). The picker
+    /// keys on this, not `llm != Claude` — hybrid and explicit
+    /// `--llm claude` both resolve to Claude.
     pub llm_explicitly_set: bool,
 
     // Notification flag
@@ -565,15 +523,9 @@ impl App {
             .unwrap_or(0)
     }
 
-    // Planner toggle (Welcome screen radio). Cycles the backend AND
-    // reconciles it into the routing fields. Execution routes off
-    // `llm` / `*_llm` / `model_for_phase` — NOT the legacy `planner`
-    // enum — so mutating `planner` alone (the old behaviour) left the
-    // radio cosmetic: picking opencode/codex/openai on the Welcome
-    // screen still ran every phase on Claude. We now propagate the
-    // selection to all routing fields so the chosen backend actually
-    // drives the run, matching what the ProviderPicker Enter handler
-    // does.
+    // Cycles the Welcome-screen backend radio AND propagates it into the
+    // routing fields — execution routes off `llm`/`*_llm`, not the legacy
+    // `planner` enum, so mutating `planner` alone left the radio cosmetic.
     pub fn toggle_planner(&mut self) {
         self.planner = match self.planner {
             Planner::Claude => Planner::OpenAI,
@@ -808,15 +760,10 @@ impl App {
                 self.project = project;
                 self.runner = runner;
                 self.total = stories.len() as u32;
-                // On resume, review_stories was seeded from prd.json with
-                // each story's `completed` flag. The orchestrator emits
-                // Init with every story (not just incomplete ones) and
-                // doesn't replay StoryComplete for prior-run finishes, so
-                // without consulting review_stories here, already-done
-                // stories render as Pending forever and the dashboard
-                // counter starts at 0/N. Seed the initial status from
-                // review_stories when available; on fresh runs that map
-                // is empty and everything starts Pending as before.
+                // On resume the orchestrator emits Init with every story
+                // but doesn't replay StoryComplete for prior-run finishes —
+                // seed status from review_stories (prd.json's `completed`)
+                // or already-done stories render Pending forever.
                 self.stories = stories
                     .into_iter()
                     .map(|s| {
@@ -901,10 +848,9 @@ impl App {
                     story.files_created = files_created;
                     story.files_modified = files_modified;
                 } else {
-                    // Resume mode: story was already complete before this run and is not in
-                    // app.stories (Init only sends incomplete stories). Push a synthetic entry
-                    // so duration_secs is preserved for the completion screen's sequential_time
-                    // calculation (execute_completion.rs sums app.stories duration_secs).
+                    // Resume: the story finished in a prior run and isn't in
+                    // app.stories — push a synthetic entry so duration_secs
+                    // feeds the completion screen's sequential-time sum.
                     self.stories.push(StoryState {
                         id: id.clone(),
                         title: id.clone(),
@@ -930,11 +876,8 @@ impl App {
                 max_retries,
             } => {
                 if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
-                    // A terminal error after exhausted retries is a true
-                    // failure, not a "skipped" — the story actually ran
-                    // (often for many minutes) and could not be made
-                    // green. Show it as Failed so the user isn't told
-                    // their work was just skipped past.
+                    // Retry exhaustion is a true failure — the story ran and
+                    // couldn't be made green — so Failed, not "skipped".
                     story.status = StoryStatus::Failed;
                     story.error = Some(error);
                     if attempt >= max_retries {
@@ -1024,9 +967,8 @@ impl App {
                 self.total_time_secs = total_time_secs;
                 self.final_stats = Some(stats);
                 if !success {
-                    // Surface the run-level failure on the completion
-                    // screen with the explicit reason instead of the
-                    // green "ALL STORIES COMPLETE" banner.
+                    // Show the explicit failure reason instead of the
+                    // green completion banner.
                     self.exit_reason = Some(abort_reason.unwrap_or_else(|| {
                         "Run did not complete the goal.".to_string()
                     }));
@@ -1122,32 +1064,24 @@ impl App {
         if let Some(m) = per_phase {
             return Some(m.clone());
         }
-        // Routed default — must match the provider. Claude phases
-        // return Claude model names (`opus`, `haiku`); OpenAI
-        // phases return gpt-5.x names. Returning a Claude name on
-        // the OpenAI path (the pre-0.36.3 bug) made the TS planner
-        // throw "unknown model 'opus'" before any inference.
+        // Routed defaults must match the provider — returning a Claude
+        // name on the OpenAI path once made the TS planner throw
+        // "unknown model 'opus'" before any inference.
         if self.model_routing {
             return match (self.llm, phase) {
                 (LlmProvider::Claude, "architect" | "planning" | "execution" | "story") => {
                     Some("opus".to_string())
                 }
                 (LlmProvider::Claude, "review") => Some("haiku".to_string()),
-                // Critic-style review work stays on mini — it's the
-                // highest-volume call in a run and the verdict is a
-                // structured PASS/FAIL that doesn't need flagship
-                // reasoning. Everything else gets 5.5.
+                // Review stays on mini — highest-volume call, structured
+                // PASS/FAIL verdict that doesn't need flagship reasoning.
                 (LlmProvider::OpenAI, "architect" | "planning" | "execution" | "story") => {
                     Some("gpt-5.5".to_string())
                 }
                 (LlmProvider::OpenAI, "review") => Some("gpt-5.4-mini".to_string()),
-                // OpenCode: no hardcoded model — let it use whatever the
-                // user configured in their opencode setup. Returning None
-                // means the TS side passes no --model flag and opencode
-                // picks its own default provider + model.
+                // OpenCode/Pi: None → the TS side passes no --model and
+                // the CLI uses the user's own configured default.
                 (LlmProvider::OpenCode, _) => None,
-                // Pi: no hardcoded model — let it use whatever the
-                // user configured in their pi setup.
                 (LlmProvider::Pi, _) => None,
                 _ => None,
             };

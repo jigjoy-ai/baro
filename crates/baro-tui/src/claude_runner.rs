@@ -1,11 +1,7 @@
 //! Thin wrapper that runs `claude --print --output-format json` for
-//! the non-streaming Planner call.
-//!
-//! All the heavy lifting — spawn, capture stdout/stderr, persist log,
-//! turn non-zero exit into a typed error — lives in
-//! `crate::subprocess`. This file is only Claude-specific glue:
-//! the `which::which("claude")` preflight, the Claude CLI args, and
-//! a touch of error-message hand-holding for the auth-failure case.
+//! the non-streaming Planner call. Spawn/capture/log mechanics live in
+//! `crate::subprocess`; this is only the Claude-specific glue
+//! (PATH preflight, CLI args, auth-failure hand-holding).
 
 use std::path::PathBuf;
 
@@ -18,11 +14,9 @@ pub struct ClaudeRunConfig {
     pub prompt: String,
     pub cwd: PathBuf,
     pub model: Option<String>,
-    /// Effort level passed as `--effort` (low|medium|high|xhigh|max).
-    /// Empty string = omit the flag (use the CLI default).
+    /// Passed as `--effort`; empty string omits the flag (CLI default).
     pub effort: String,
-    /// Short tag for the persisted log filename — "planner" today,
-    /// "claude" if you leave it default. Always lowercase-kebab.
+    /// Persisted-log filename tag; defaults to "claude".
     pub log_tag: Option<&'static str>,
 }
 
@@ -31,9 +25,8 @@ pub struct ClaudeJsonOutput {
 }
 
 /// Spawn Claude, wait for completion, return raw stdout (JSON wrapper).
-/// Stdout + stderr are persisted to `~/.baro/runs/<tag>-<ts>.log` by
-/// `subprocess::spawn_and_capture` before either branch returns, so
-/// even a hard-fail leaves a forensic trail.
+/// Both streams are persisted to `~/.baro/runs/` before either branch
+/// returns, so even a hard-fail leaves a forensic trail.
 pub async fn spawn_claude_json(
     config: &ClaudeRunConfig,
 ) -> Result<ClaudeJsonOutput, ProcessRunError> {
@@ -69,10 +62,8 @@ pub async fn spawn_claude_json(
     let tag = config.log_tag.unwrap_or("claude");
     let captured = subprocess::spawn_and_capture(cmd, tag)
         .await
-        // Decorate the "empty output" failure mode with the
-        // Claude-specific hint (auth) so the TUI says something
-        // useful instead of "claude exited with code 1 with empty
-        // output". This is the issue-#17 case from 0.25.1.
+        // "empty output" usually means unauthenticated claude; decorate
+        // with the hint so the TUI says something useful.
         .map_err(|mut err| {
             if err.message.contains("empty output") {
                 err.message = format!(

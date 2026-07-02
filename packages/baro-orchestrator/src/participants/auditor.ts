@@ -1,9 +1,6 @@
 /**
  * Auditor — passive observer that persists every bus event to a JSONL
- * file. Used for replay, post-mortem debugging, and (later) `--resume`
- * by replaying the log into a fresh environment.
- *
- * Library-grade: knows nothing about specific agent types or domains.
+ * file for replay and post-mortem debugging.
  */
 
 import { appendFileSync, mkdirSync } from "fs"
@@ -21,13 +18,9 @@ import {
 
 import { ClaudeStreamChunk } from "../semantic-events.js"
 
-/**
- * Anything the auditor can log: baro's typed semantic bus events plus
- * Mozaik's built-in LLM items. Auditor doesn't call `.toJSON()` itself;
- * `JSON.stringify` walks the value and invokes per-item `.toJSON()`
- * automatically where it exists (`ModelMessageItem` etc.) and falls
- * back to enumerable-property serialisation for `SemanticEvent`.
- */
+// Auditor never calls `.toJSON()` itself — `JSON.stringify` invokes it
+// per-item where it exists and falls back to enumerable properties for
+// `SemanticEvent`.
 type AuditableItem =
     | SemanticEvent<unknown>
     | ModelMessageItem
@@ -39,15 +32,11 @@ export interface AuditorOptions {
     /** Path to the JSONL log file. Parent directories are created if needed. */
     path: string
     /**
-     * If true, `claude_stream_chunk` events are skipped. Default: true,
-     * because partial-message chunks dominate volume and rarely add audit
-     * value.
+     * Skip `claude_stream_chunk` events. Default: true — partial-message
+     * chunks dominate volume and rarely add audit value.
      */
     skipStreamChunks?: boolean
-    /**
-     * Optional custom filter. If provided, an event is written iff this
-     * returns true. Runs after `skipStreamChunks`.
-     */
+    /** Event is written iff this returns true. Runs after `skipStreamChunks`. */
     filter?: (source: Participant, event: AuditableItem) => boolean
 }
 
@@ -56,10 +45,9 @@ export class Auditor extends BaseObserver {
     private readonly skipStreamChunks: boolean
     private readonly filter?: (source: Participant, event: AuditableItem) => boolean
     /**
-     * Flips to true the first time a write fails (e.g. EACCES because
-     * `~/.baro/runs/` is root-owned from a sudo install). Once disabled,
-     * subsequent events are dropped silently — losing the audit log is
-     * better than crashing the orchestrator on every bus event.
+     * Set on the first write failure (e.g. EACCES from a sudo-installed
+     * `~/.baro/runs/`); later events drop silently — losing the audit log
+     * is better than crashing the orchestrator on every bus event.
      */
     private disabled = false
 

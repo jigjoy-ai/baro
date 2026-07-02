@@ -1,13 +1,6 @@
-//! Client for the TypeScript Mozaik orchestrator subprocess.
-//!
-//! Spawns `tsx scripts/cli.ts` (in dev) from the baro-orchestrator
-//! workspace package, streams its stdout (line-delimited BaroEvent JSON)
-//! into the same `mpsc::Sender<BaroEvent>` channel the Rust executor
-//! used to feed, and surfaces stderr to the operator.
-//!
-//! When/if the orchestrator is bundled into the published `baro-ai` npm
-//! package, this module will look for a precompiled `dist/cli.mjs`
-//! before falling back to the dev tsx path.
+//! Client for the TS Mozaik orchestrator subprocess: spawns it,
+//! streams its stdout (line-delimited BaroEvent JSON) into the TUI's
+//! event channel, and surfaces stderr to the operator.
 
 use std::path::PathBuf;
 
@@ -25,78 +18,52 @@ pub struct OrchestratorConfig {
     pub timeout_secs: u64,
     pub override_model: Option<String>,
     pub default_model: Option<String>,
-    /// If true, the orchestrator will skip the git lifecycle (branch/push).
+    /// Skip the git lifecycle (branch/push).
     pub skip_git: bool,
-    /// Optional path for the audit JSONL log.
+    /// Path for the audit JSONL log.
     pub audit_log: Option<PathBuf>,
-    /// Enable Critic (Phase 3 live acceptance evaluator). Default: false.
+    // NOTE: the with_* fields map to mixed-polarity orchestrator flags —
+    // true forwards `--with-critic`/`--with-surgeon`, false forwards
+    // `--no-librarian`/`--no-memory`/`--no-sentry`.
     pub with_critic: bool,
-    /// Model for Critic (default "haiku" inside the orchestrator).
+    /// Default "haiku" inside the orchestrator.
     pub critic_model: Option<String>,
-    /// Disable Librarian (Phase 2 cross-agent memory). Default: false (Librarian on).
     pub with_librarian: bool,
-    /// Disable semantic memory (MemoryLibrarian). Default: false (memory on).
-    /// When false and with_librarian is true, uses tag-based Librarian.
+    /// Semantic MemoryLibrarian; when off, the tag-based Librarian is used.
     pub with_memory: bool,
-    /// Disable Sentry (Phase 2 file conflict detector). Default: false (Sentry on).
     pub with_sentry: bool,
-    /// Enable Surgeon (Phase 4 adaptive DAG mutation). Default: false.
     pub with_surgeon: bool,
-    /// Use Claude CLI for Surgeon evaluation. Default: false (deterministic).
+    /// LLM Surgeon vs deterministic skip-only.
     pub surgeon_use_llm: bool,
-    /// Model for Surgeon LLM (default "opus" inside the orchestrator).
+    /// Default "opus" inside the orchestrator.
     pub surgeon_model: Option<String>,
-    /// Seconds to wait between successive story spawns inside the
-    /// same DAG level. Default (when None): 10 inside the orchestrator.
-    /// Set to Some(0) to disable staggering.
+    /// Seconds between story spawns within a DAG level. None → the
+    /// orchestrator default (10); Some(0) disables staggering.
     pub intra_level_delay_secs: Option<u64>,
-    /// LLM provider. "claude" (default) uses the Claude Code CLI;
-    /// "openai" routes through Mozaik 3.9's native OpenAI participants.
-    /// Currently plumbed end-to-end but the OpenAI siblings are not
-    /// wired yet — a request for "openai" silently falls through to
-    /// Claude behaviour until the per-phase siblings ship in 0.29+.
     pub llm: String,
-    /// Per-phase LLM overrides. Forwarded as `--story-llm` /
-    /// `--critic-llm` / `--surgeon-llm` only when they differ from
-    /// `llm` — that way pure-claude / pure-codex / pure-openai runs
-    /// have a clean command line and the orchestrator's startup
-    /// banner stays terse.
+    /// Per-phase overrides, forwarded as `--story-llm` / `--critic-llm` /
+    /// `--surgeon-llm` only when they differ from `llm`.
     pub story_llm: String,
     pub critic_llm: String,
     pub surgeon_llm: String,
-    /// OpenAI API key to inject as `OPENAI_API_KEY` into the
-    /// orchestrator subprocess when `llm == "openai"`. The TUI gathers
-    /// this from either the user's shell env or the ApiKeyInput
-    /// screen; it isn't written to disk. `None` is a no-op (any value
-    /// already in the parent env is inherited normally).
+    /// Injected as `OPENAI_API_KEY` when a phase uses openai; never
+    /// written to disk. `None` = inherit whatever is in the parent env.
     pub openai_api_key: Option<String>,
-    /// Optional custom base URL for OpenAI-compatible API endpoints
-    /// (e.g. Xiaomi MiMo, OpenRouter, local vLLM). Forwarded as
-    /// `OPENAI_BASE_URL` env var when any phase uses OpenAI.
+    /// Forwarded as `OPENAI_BASE_URL` when any phase uses OpenAI.
     pub openai_base_url: Option<String>,
-    /// Effort level forwarded as `--effort` to the orchestrator
-    /// subprocess (applies to the Claude story path). Default "high".
+    /// Forwarded as `--effort`.
     pub effort: String,
-    /// Per-phase model override for StoryAgent — forwarded as
-    /// `--story-model X` to the orchestrator subprocess. Wins over
-    /// the per-PRD-story `model` field and over the OpenAI default.
+    /// Story-model override; wins over the per-PRD-story `model` field.
     pub story_model: Option<String>,
-    /// Per-story tier→backend:model map, forwarded as `--tier-map`.
-    /// Binds the planner's blast-radius tiers (haiku/sonnet/opus) to
-    /// concrete backends so one DAG can mix claude/openai/codex stories,
-    /// e.g. `"haiku=openai:MiniMax-M3,sonnet=openai:MiniMax-M3,opus=claude:opus"`.
-    /// `None` → per-story tiers resolve on the phase `llm` as before.
+    /// Per-story tier→backend:model map (`--tier-map`); `None` → tiers
+    /// resolve on the phase `llm`.
     pub tier_map: Option<String>,
     /// Named OpenAI-compatible endpoints (`name=url`), each forwarded as
-    /// a `--openai-endpoint` arg. Lets a route say `openai:model@name`,
-    /// so one DAG can hit several OpenAI-compatible endpoints (e.g.
-    /// MiniMax + real OpenAI). Keys are NOT passed here — the orchestrator
-    /// resolves them from `BARO_OPENAI_KEY_<NAME>` / `OPENAI_API_KEY`,
-    /// inherited through the subprocess env.
+    /// `--openai-endpoint`. Keys are NOT passed here — the orchestrator
+    /// resolves `BARO_OPENAI_KEY_<NAME>` / `OPENAI_API_KEY` from its env.
     pub openai_endpoints: Vec<String>,
-    /// Headless mode: echo every raw orchestrator stdout line (the native
-    /// event JSON) to this process's stdout, so a remote runner / CI can
-    /// consume the stream directly without the TUI.
+    /// Headless: echo raw orchestrator stdout lines (event JSON) to our
+    /// stdout so CI / remote runners can consume the stream directly.
     pub echo_raw: bool,
 }
 
@@ -144,11 +111,9 @@ async fn run(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     cmd.stdin(std::process::Stdio::null());
-    // If the Rust process dies before we can ask the orchestrator to
-    // shut down cleanly (panic, OS kill), at least make sure the
-    // orchestrator child gets SIGKILL'd via tokio's Drop impl rather
-    // than orphaning to init. The orchestrator's own ppid watchdog
-    // catches the orphan case if we somehow miss this.
+    // If the Rust process dies uncleanly, SIGKILL the child via tokio's
+    // Drop rather than orphaning it; the orchestrator's ppid watchdog
+    // is the backup if we miss this.
     cmd.kill_on_drop(true);
 
     let mut child = cmd
@@ -174,8 +139,6 @@ async fn run(
             if trimmed.is_empty() {
                 continue;
             }
-            // Headless: pass the orchestrator's native event JSON straight
-            // through to stdout for a remote runner / CI to consume.
             if echo_raw {
                 println!("{}", trimmed);
             }
@@ -186,8 +149,8 @@ async fn run(
                     }
                 }
                 Err(_) => {
-                    // Forward unrecognized output as a story log under
-                    // `_orchestrator`. Older TUIs are forward-compat.
+                    // Unrecognized output becomes a `_orchestrator` story
+                    // log, so older TUIs stay forward-compatible.
                     let _ = stdout_tx
                         .send(BaroEvent::StoryLog {
                             id: "_orchestrator".to_string(),
@@ -199,13 +162,9 @@ async fn run(
         }
     });
 
-    // Drain stderr: emit each line as a StoryLog under `_orchestrator`
-    // so the user can see what the subprocess is doing AND tee every line
-    // to <audit_log>.stderr.txt next to the JSONL audit log so a crash's
-    // stack trace survives the orchestrator's death. Without that, an
-    // unhandled rejection kills the JS process and the stderr lines that
-    // describe the failure go nowhere — the TUI's logs panel is in-memory
-    // only and dies with the parent.
+    // Drain stderr into `_orchestrator` StoryLog lines AND tee to
+    // <audit_log>.stderr.txt — the TUI's logs panel is in-memory only,
+    // so without the tee a JS crash's stack trace dies with the parent.
     let stderr_tx = tx.clone();
     let stderr_log_path = cfg
         .audit_log
@@ -313,10 +272,8 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
         cmd.arg("--intra-level-delay").arg(d.to_string());
     }
     cmd.arg("--llm").arg(&cfg.llm);
-    // Per-phase overrides only sent when they DIFFER from the global
-    // `--llm`. Keeps the command line terse on pure-claude /
-    // pure-codex / pure-openai runs (no `--story-llm claude` noise
-    // when --llm claude already implies it).
+    // Per-phase overrides only sent when they differ from `--llm`,
+    // keeping single-backend command lines terse.
     if cfg.story_llm != cfg.llm {
         cmd.arg("--story-llm").arg(&cfg.story_llm);
     }
@@ -326,11 +283,9 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     if cfg.surgeon_llm != cfg.llm {
         cmd.arg("--surgeon-llm").arg(&cfg.surgeon_llm);
     }
-    // Only forward an explicitly-provided key. If openai_api_key is
-    // None the user might still have the variable in their shell env;
-    // tokio::Command inherits parent env by default, so it'll flow
-    // through naturally without us touching it.
-    // If ANY phase uses openai, the API key needs to be available.
+    // Only forward an explicitly-provided key — tokio::Command inherits
+    // the parent env, so a shell-env key flows through on its own. The
+    // key must be available if ANY phase uses openai.
     let tier_map_uses_openai = cfg
         .tier_map
         .as_deref()
@@ -361,8 +316,3 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     cmd.arg("--effort").arg(&cfg.effort);
     cmd
 }
-
-// EntryPoint + locate_entry moved to `discovery::ScriptEntry` /
-// `discovery::locate_script` — the architect_runner + planner_runner
-// share the same shape and the orchestrator now uses the common
-// helper to avoid a third copy of the same three-tier search.

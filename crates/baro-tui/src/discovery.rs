@@ -1,54 +1,27 @@
-//! Locating TS subprocess entry points from inside the Rust binary.
-//!
-//! Three Rust callers spawn TS subprocesses, and they all need to
-//! answer the same question — "where does this TS script live?" —
-//! whose answer depends on how baro was installed:
-//!
-//!   `orchestrator_client` runs `cli.ts` / `cli.mjs`
-//!   `architect_runner`    runs `run-architect.ts` / `run-architect.mjs`
-//!   `planner_runner`      runs `run-planner.ts`   / `run-planner.mjs`
-//!
-//! Three install modes to resolve, in priority order:
-//!
-//!   1. Production bundle co-located with the binary
-//!      (`~/.baro/bin/<script>.mjs` after `npm install -g baro-ai`
-//!      runs postinstall). Runs via `node`.
-//!
-//!   2. Local-install bundle inside the project being orchestrated
-//!      (`<cwd>/node_modules/baro-ai/dist/<script>.mjs`). Runs via
-//!      `node`.
-//!
-//!   3. Dev tsx — walk upward from the binary (and cwd) looking for
-//!      `packages/baro-orchestrator/scripts/cli.ts` as a marker.
-//!      Runs via `<repo>/node_modules/.bin/tsx <script>.ts`.
+//! Locate TS subprocess entry points from the Rust binary. Where a
+//! script lives depends on install mode, tried in priority order:
+//! production bundle co-located with the binary (`~/.baro/bin/*.mjs`),
+//! local-install bundle in the project's `node_modules/baro-ai/dist`,
+//! then dev mode — walk up from the binary/cwd to the repo root and
+//! run the `.ts` source via `node_modules/.bin/tsx`.
 
 use std::path::{Path, PathBuf};
 
-/// Marker file used to confirm a candidate directory is the baro
-/// repo root. `cli.ts` is the file orchestrator_client has always
-/// used; the new architect / planner runners share this marker so
-/// dev-repo discovery is identical across all three.
+/// Marker confirming a candidate directory is the baro repo root.
 const REPO_MARKER: &str = "packages/baro-orchestrator/scripts/cli.ts";
 
 /// Resolved subprocess entry for a TS script.
 #[derive(Debug)]
 pub enum ScriptEntry {
-    /// Production-bundled `.mjs` next to the binary or inside the
-    /// project's `node_modules`. Invoke with `node <path>`.
+    /// Bundled `.mjs` — invoke with `node <path>`.
     NodeJs(PathBuf),
-    /// Dev mode — invoke with `<tsx> <script>` from a cloned baro
-    /// repo with `npm install` already run.
+    /// Dev mode — invoke with `<tsx> <script>`.
     Tsx { tsx: PathBuf, script: PathBuf },
 }
 
-/// Locate a TS script by name across the three install modes.
-///
-/// `ts_rel` is the relative path of the dev-mode source script
-/// inside the baro repo, e.g.
-/// `"packages/baro-orchestrator/scripts/run-architect.ts"`.
-///
-/// `bundle_name` is the filename of the production-bundled `.mjs`
-/// (no path), e.g. `"run-architect.mjs"`.
+/// Locate a TS script across the install modes. `ts_rel` is the
+/// dev-mode source path inside the repo; `bundle_name` the bundled
+/// `.mjs` filename (no path).
 pub fn locate_script(
     cwd: &Path,
     ts_rel: &str,
@@ -92,13 +65,9 @@ pub fn locate_script(
     Ok(ScriptEntry::Tsx { tsx, script })
 }
 
-/// Walk upward from the running binary (and, as a fallback, from
-/// `cwd`) looking for a directory that contains `REPO_MARKER`.
-/// Returns the first match.
-///
-/// Public so `orchestrator_client` can still use it for legacy
-/// reasons; new callers should prefer `locate_script` which already
-/// covers the production bundle case.
+/// Walk upward from the running binary (fallback: `cwd`) to the first
+/// directory containing `REPO_MARKER`. Prefer `locate_script`, which
+/// also covers the production-bundle modes.
 pub fn find_dev_repo(cwd: &Path) -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(|p| p.to_path_buf());
@@ -117,8 +86,7 @@ pub fn find_dev_repo(cwd: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Path to `tsx` inside the repo's `node_modules`. Returns `None` if
-/// the repo hasn't been `npm install`-ed yet.
+/// Path to `tsx` in the repo's `node_modules`, if installed.
 pub fn find_tsx(repo: &Path) -> Option<PathBuf> {
     let p = repo.join("node_modules/.bin/tsx");
     if p.exists() { Some(p) } else { None }

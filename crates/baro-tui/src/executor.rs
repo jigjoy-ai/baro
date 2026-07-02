@@ -1,17 +1,10 @@
-//! PRD types + a few helpers main.rs still calls.
-//!
-//! The real story execution now happens in the TypeScript Mozaik
-//! orchestrator (`packages/baro-orchestrator/`); this module survives
-//! only as the type surface that crosses the spawn-executor /
-//! orchestrator-client boundary. Everything in here is plain data —
-//! the legacy in-process executor that used to live alongside these
-//! types is gone.
+//! PRD types + a few helpers main.rs still calls. Story execution
+//! happens in the TS orchestrator (`packages/baro-orchestrator/`);
+//! this module is just the type surface crossing that boundary.
 
 use std::path::Path;
 
 use crate::app::ReviewStory;
-
-// ─── PRD types (for reading/writing prd.json) ───────────────────────
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PrdFile {
@@ -22,9 +15,8 @@ pub struct PrdFile {
     pub description: String,
     #[serde(rename = "userStories")]
     pub user_stories: Vec<PrdStory>,
-    /// Architect's DecisionDocument captured during planning. The TS
-    /// orchestrator's Conductor prepends this to every story prompt as
-    /// authoritative spec. Omitted entirely from JSON when None.
+    /// Architect's DecisionDocument; the TS Conductor prepends it to
+    /// every story prompt as authoritative spec.
     #[serde(rename = "decisionDocument", default, skip_serializing_if = "Option::is_none")]
     pub decision_document: Option<String>,
 }
@@ -57,12 +49,10 @@ fn default_retries() -> u32 {
     2
 }
 
-// ─── Executor config (passed across the orchestrator boundary) ───────
-
 /// Knobs that flow from CLI/UI through `spawn_executor` to the TS
-/// orchestrator subprocess. The fields named after observers ("with_critic",
-/// "with_librarian", "with_sentry") map to the orchestrator's CLI flags
-/// (`--with-critic`, `--no-librarian`, `--no-sentry`).
+/// orchestrator subprocess. The `with_*` observer fields map to
+/// mixed-polarity orchestrator flags (`--with-critic`,
+/// `--no-librarian`, `--no-sentry`).
 pub struct ExecutorConfig {
     pub parallel: u32,
     pub timeout_secs: u64,
@@ -77,45 +67,30 @@ pub struct ExecutorConfig {
     pub surgeon_use_llm: bool,
     pub surgeon_model: Option<String>,
     pub intra_level_delay_secs: Option<u64>,
-    /// LLM provider — "claude" routes every phase through the Claude
-    /// CLI (current behaviour); "openai" routes through Mozaik 3.9's
-    /// native OpenAI participants. Plumbed through to orchestrate.ts
-    /// as `--llm`; subsequent phases will use this to pick the right
-    /// participant sibling per LLM-using role.
+    /// Forwarded to orchestrate.ts as `--llm`.
     pub llm: crate::app::LlmProvider,
-    /// Per-phase overrides forwarded to orchestrate.ts as
-    /// `--story-llm` / `--critic-llm` / `--surgeon-llm`. When equal
-    /// to `llm`, the orchestrator treats them as "no override" and
-    /// the global default flows. Used by the `--llm hybrid` preset
-    /// to keep Story + Critic on a different backend than the rest.
+    /// Per-phase overrides forwarded as `--story-llm` / `--critic-llm`
+    /// / `--surgeon-llm`. When equal to `llm` the orchestrator treats
+    /// them as "no override" and the global default flows.
     pub story_llm: crate::app::LlmProvider,
     pub critic_llm: crate::app::LlmProvider,
     pub surgeon_llm: crate::app::LlmProvider,
-    /// OpenAI API key captured by the TUI (either from `OPENAI_API_KEY`
-    /// in the shell env or typed into the ApiKeyInput screen). Forwarded
-    /// to the orchestrator subprocess as an env var when `llm = OpenAI`.
+    /// From `OPENAI_API_KEY` or the ApiKeyInput screen; passed to the
+    /// subprocess env when `llm = OpenAI`.
     pub openai_api_key: Option<String>,
-    /// Optional custom base URL for OpenAI-compatible API endpoints.
-    /// Forwarded to the orchestrator subprocess as `OPENAI_BASE_URL`.
+    /// Forwarded to the subprocess as `OPENAI_BASE_URL`.
     pub openai_base_url: Option<String>,
-    /// Effort level for spawned `claude` processes, forwarded as
-    /// `--effort` to the orchestrator subprocess. Default "high".
+    /// Forwarded as `--effort`.
     pub effort: String,
-    /// Per-phase model override for StoryAgent. When set, overrides
-    /// each story's individual `model` field in the PRD as well as
-    /// the OpenAI default. `--architect-model` and `--planner-model`
-    /// flow through their existing function-arg paths in spawn_planner
-    /// and don't need an executor-side field.
+    /// Story-model override; beats each story's own `model` field in
+    /// the PRD.
     pub story_model: Option<String>,
-    /// Per-story tier→backend:model map, forwarded to the orchestrator as
-    /// `--tier-map`. Lets one DAG mix claude/openai/codex story-by-story.
+    /// Per-story tier→backend:model map, forwarded as `--tier-map`.
     pub tier_map: Option<String>,
     /// Named OpenAI-compatible endpoints (`name=url`), forwarded as
-    /// `--openai-endpoint`. Routes reference them via `openai:model@name`.
+    /// `--openai-endpoint`; routes reference them via `openai:model@name`.
     pub openai_endpoints: Vec<String>,
 }
-
-// ─── Helpers used by main.rs ────────────────────────────────────────
 
 /// Build a PrdFile from the in-memory review-screen story list.
 pub fn prd_from_review(

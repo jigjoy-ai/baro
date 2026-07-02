@@ -1,63 +1,8 @@
 /**
- * Map Pi CLI `pi --mode json -p --no-session` stream events to typed
- * items for bus delivery. Sibling of `opencode-stream-mapper.ts` (the
- * OpenCode mapper) and `stream-json-mapper.ts` (the Claude mapper).
- *
- * Pi stream shape — observed against real `pi --mode json -p --no-session`
- * output. Each stdout line is a JSONL envelope:
- *
- *   {"type":"session","version":3,"id":"<uuid>","timestamp":"ISO","cwd":"…"}
- *   {"type":"agent_start"}
- *   {"type":"turn_start"}
- *   {"type":"message_start","message":{"role":"user"|"assistant","content":[…]}}
- *   {"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"…",…},"message":{…}}
- *   {"type":"tool_execution_start"}
- *   {"type":"tool_execution_update"}
- *   {"type":"tool_execution_end","result":…}
- *   {"type":"message_end","message":{"role":"assistant","content":[…],"usage":{…}}}
- *   {"type":"turn_end","message":{…},"toolResults":[…]}
- *   {"type":"agent_end","messages":[…],"willRetry":false}
- *
- * NOTE: Pi differs from OpenCode in several important ways:
- *  - Session id lives only on the "session" event (field `id`), not on
- *    every envelope.
- *  - Assistant content arrives as streaming deltas via message_update, then
- *    is re-delivered as a finalised block list in message_end. We emit
- *    PiItemEvent for every delta (so nothing is dropped from the bus) but
- *    emit ModelMessageItem / FunctionCallItem only from the final message_end
- *    to avoid duplicates.
- *  - Tool calls and their results are split across separate events:
- *    toolCall blocks (with field `id`) appear in message_end content, while
- *    actual outputs appear in tool_execution_end (with field `toolCallId`).
- *    Those two ids are equal, so call/output reconciliation is exact;
- *    fallback fields are kept only for resilience against shape drift.
- *
- * Mapping strategy:
- *
- *   - "session"               → PiSystem subtype "session" (+ captures id).
- *   - "agent_start"           → PiSystem subtype "agent_start".
- *   - "turn_start"            → PiSystem subtype "turn_start".
- *   - "message_start"         → PiTurnEvent turnType "message_start".
- *   - "message_update"        → PiItemEvent (itemType derived from
- *                               assistantMessageEvent.type: text_* → "text",
- *                               thinking_* → "thinking", toolcall_* →
- *                               "tool_call", other → raw subtype string).
- *   - "message_end" (asst)    → ModelMessageItem(s) + FunctionCallItem(s)
- *                               from content blocks + PiTurnEvent "message_end".
- *   - "message_end" (user)    → PiTurnEvent "message_end" (turn lifecycle
- *                               record only; no content items extracted).
- *   - "tool_execution_start"  → PiItemEvent itemType "tool_start" (raw).
- *   - "tool_execution_update" → PiItemEvent itemType "tool_update" (raw).
- *   - "tool_execution_end"    → FunctionCallOutputItem (callId from
- *                               `toolCallId`, output from result.content[].text)
- *                               + PiItemEvent itemType "tool_result".
- *   - "turn_end"              → PiTurnEvent turnType "turn_end".
- *   - "agent_end"             → PiSystem subtype "agent_end".
- *   - Unknown                 → PiUnknownEvent so nothing is silently dropped.
- *
- * Every input event maps to a non-empty array — we never silently drop
- * data. Downstream observers (audit log, kaleidoskop replay, debug
- * consoles) see every envelope Pi produces.
+ * Map Pi CLI `pi --mode json -p --no-session` JSONL events to typed items
+ * for bus delivery. Every input event maps to a non-empty array — nothing
+ * is silently dropped. Wire format and full mapping table:
+ * docs/stream-protocols.md ("Pi").
  */
 
 import {
@@ -74,27 +19,21 @@ import {
     PiUnknownEvent,
 } from "./semantic-events.js"
 
-/** Union of all item types the Pi mapper can produce. */
 export type MappedPiItem =
     | ModelMessageItem
     | FunctionCallItem
     | FunctionCallOutputItem
     | SemanticEvent<unknown>
 
-/** Result of mapping a single Pi JSONL event. */
 export interface PiMapResult {
-    /** Mapped items to deliver on the bus. Always non-empty. */
+    /** Always non-empty. */
     items: MappedPiItem[]
-    /** Pi session id, present only when the "session" event is parsed. */
+    /** Present only when the "session" event is parsed. */
     sessionId: string | null
 }
 
-/**
- * Best-effort stable id suffix from an event's own timestamp field.
- * Pi's `session` envelope carries an ISO-8601 *string* timestamp (unlike
- * OpenCode's numeric one) and `message_end` carries none at all, so accept
- * both number and string and fall back to "0" only when truly absent.
- */
+// Pi's `session` envelope carries an ISO-8601 *string* timestamp (unlike
+// OpenCode's numeric one) and `message_end` carries none at all.
 function eventTimestamp(event: Record<string, unknown>): string {
     if (typeof event.timestamp === "number") return String(event.timestamp)
     if (typeof event.timestamp === "string" && event.timestamp) {
@@ -103,23 +42,12 @@ function eventTimestamp(event: Record<string, unknown>): string {
     return "0"
 }
 
-/**
- * Extract the human-readable output text from a tool_execution_end envelope.
- *
- * Real Pi shape: `event.result.content` is an array of {type:"text",text}.
- * We concatenate every text block. Legacy/alternate shapes (a plain string
- * output, or a nested `output` field) are honoured as fallbacks. Returns
- * undefined only when no usable output could be found at all.
- */
 function extractToolOutput(event: Record<string, unknown>): string | undefined {
     const resultObj = event.result as Record<string, unknown> | undefined
 
-    // Primary: result.content[] of {type:"text",text}. A content array that
-    // contains at least one text block is authoritative — return its joined
-    // text even when that text is the empty string (e.g. `bash` with no
-    // stdout is a legitimate empty success, NOT "no usable output"). Only
-    // fall through to the fallbacks when the array carried no text block at
-    // all, so we never mis-dump the whole envelope over a real empty result.
+    // A content array with at least one text block is authoritative even
+    // when the joined text is "" (e.g. bash with no stdout is a legitimate
+    // empty success) — only fall through when no text block exists at all.
     const content = resultObj?.content
     if (Array.isArray(content)) {
         const texts: string[] = []
@@ -140,7 +68,7 @@ function extractToolOutput(event: Record<string, unknown>): string | undefined {
         if (sawTextBlock) return texts.join("")
     }
 
-    // Fallbacks (older/alternate shapes): plain string outputs first.
+    // Fallbacks for older/alternate shapes.
     const outputObj = event.output as Record<string, unknown> | undefined
     const toolResultObj = event.toolResult as
         | Record<string, unknown>
@@ -156,11 +84,8 @@ function extractToolOutput(event: Record<string, unknown>): string | undefined {
         if (typeof c === "string") return c
     }
 
-    // Last resort: stringify the whole result object so nothing is lost.
-    // Cap this fallback — a pathological tool result could be arbitrarily
-    // large, and unlike the real content[].text path above this is only a
-    // best-effort dump. Same defensive spirit as the .slice() guards used
-    // elsewhere. The normal output path is never truncated.
+    // Last resort: dump the whole result object. Capped because a
+    // pathological result can be huge; the normal path is never truncated.
     if (resultObj !== undefined) {
         const dump = JSON.stringify(resultObj)
         const MAX = 8 * 1024
@@ -171,10 +96,6 @@ function extractToolOutput(event: Record<string, unknown>): string | undefined {
     return undefined
 }
 
-/**
- * Derive a PiItemEvent itemType string from the assistantMessageEvent.type
- * field found inside a "message_update" envelope.
- */
 function resolveUpdateItemType(subtype: string): string {
     if (subtype.startsWith("text_")) return "text"
     if (subtype.startsWith("thinking_")) return "thinking"
@@ -182,13 +103,6 @@ function resolveUpdateItemType(subtype: string): string {
     return subtype
 }
 
-/**
- * Map a single parsed Pi JSONL event to typed Mozaik items.
- *
- * @param agentId - The baro agent ID (story ID) that owns this stream.
- * @param event   - A parsed JSON object from Pi's stdout.
- * @returns Mapped items and optional session ID.
- */
 export function mapPiEvent(
     agentId: string,
     event: Record<string, unknown>,
@@ -196,11 +110,9 @@ export function mapPiEvent(
     const items: MappedPiItem[] = []
     const type = typeof event.type === "string" ? event.type : ""
 
-    // sessionId is only present on the "session" envelope.
     const sessionId =
         type === "session" && typeof event.id === "string" ? event.id : null
 
-    // ─── session ───────────────────────────────────────────────────
     if (type === "session") {
         items.push(
             PiSystem.create({
@@ -212,7 +124,6 @@ export function mapPiEvent(
         return { items, sessionId }
     }
 
-    // ─── agent_start ───────────────────────────────────────────────
     if (type === "agent_start") {
         items.push(
             PiSystem.create({
@@ -224,7 +135,6 @@ export function mapPiEvent(
         return { items, sessionId }
     }
 
-    // ─── turn_start ────────────────────────────────────────────────
     if (type === "turn_start") {
         items.push(
             PiSystem.create({
@@ -236,7 +146,6 @@ export function mapPiEvent(
         return { items, sessionId }
     }
 
-    // ─── message_start ────────────────────────────────────────────
     if (type === "message_start") {
         items.push(
             PiTurnEvent.create({
@@ -248,10 +157,8 @@ export function mapPiEvent(
         return { items, sessionId }
     }
 
-    // ─── message_update (streaming deltas) ────────────────────────
-    // Deltas are noisy — we emit one PiItemEvent per update so the bus
-    // sees every packet, but we do NOT emit ModelMessageItem here to
-    // avoid duplicating the final text from message_end.
+    // Deltas become PiItemEvents only — no ModelMessageItem here, or we'd
+    // duplicate the final text re-delivered in message_end.
     if (type === "message_update") {
         const ame = event.assistantMessageEvent as
             | Record<string, unknown>
@@ -268,11 +175,6 @@ export function mapPiEvent(
         return { items, sessionId }
     }
 
-    // ─── message_end ──────────────────────────────────────────────
-    // The message object carries the final, resolved content blocks.
-    // For assistant messages we extract text + toolCall blocks into
-    // first-class Mozaik items. For user messages we just record a
-    // turn event for symmetry.
     if (type === "message_end") {
         const message = event.message as Record<string, unknown> | undefined
         const role = typeof message?.role === "string" ? message.role : ""
@@ -322,8 +224,7 @@ export function mapPiEvent(
             }
         }
 
-        // Always emit the turn event regardless of role so the bus has
-        // a complete turn lifecycle record.
+        // Emitted regardless of role so the turn lifecycle is complete.
         items.push(
             PiTurnEvent.create({
                 agentId,
@@ -334,11 +235,6 @@ export function mapPiEvent(
         return { items, sessionId }
     }
 
-    // ─── tool_execution_start ─────────────────────────────────────
-    // Distinct itemType per lifecycle phase ("tool_start"/"tool_update"/
-    // "tool_result") so audit-log readers and itemType-filtering observers
-    // can tell a tool starting from one mid-stream from a completed result
-    // without reaching into the opaque `raw` field.
     if (type === "tool_execution_start") {
         items.push(
             PiItemEvent.create({
@@ -350,7 +246,6 @@ export function mapPiEvent(
         return { items, sessionId }
     }
 
-    // ─── tool_execution_update ────────────────────────────────────
     if (type === "tool_execution_update") {
         items.push(
             PiItemEvent.create({
@@ -362,14 +257,9 @@ export function mapPiEvent(
         return { items, sessionId }
     }
 
-    // ─── tool_execution_end ───────────────────────────────────────
-    // Real Pi shape (verified against live output):
-    //   {"type":"tool_execution_end","toolCallId":"call_…","toolName":"bash",
-    //    "result":{"content":[{"type":"text","text":"hello\n"}]},"isError":false}
-    // The `toolCallId` here EQUALS the `id` of the toolCall block emitted in
-    // message_end, so call/output reconciliation works. The output text lives
-    // in result.content[].text — concatenate those rather than stringifying
-    // the whole result object. Fallbacks remain for forward/backward compat.
+    // `toolCallId` equals the `id` of the toolCall block from message_end,
+    // so call/output reconciliation is exact; legacy candidates are kept as
+    // fallbacks against shape drift.
     if (type === "tool_execution_end") {
         const resultObj = event.result as Record<string, unknown> | undefined
         const outputObj = event.output as Record<string, unknown> | undefined
@@ -377,8 +267,6 @@ export function mapPiEvent(
             | Record<string, unknown>
             | undefined
 
-        // Primary field is `toolCallId`; keep legacy `callId` candidates as
-        // fallbacks so we degrade gracefully if Pi's shape shifts.
         const callId: string | undefined =
             typeof event.toolCallId === "string"
                 ? event.toolCallId
@@ -394,23 +282,17 @@ export function mapPiEvent(
 
         const outputStr = extractToolOutput(event)
 
-        // Emit the output whenever we have a callId — even if no output text
-        // could be extracted. The matching FunctionCallItem was already put on
-        // the bus from message_end; skipping the output here would leave a
-        // dangling, unreconciled tool call (breaks audit replay and any
-        // model-side transcript reconstruction). Default to empty string; on
-        // an error result with no body, surface the failure explicitly.
+        // Emit even with no extractable output text: the FunctionCallItem is
+        // already on the bus from message_end, and skipping here would leave
+        // a dangling unreconciled call (breaks audit replay). The [error]
+        // prefix exists because this bus item has no dedicated error flag.
         if (callId !== undefined) {
             const isError = event.isError === true
             const body = outputStr ?? (isError ? "no output" : "")
-            // Prefix on error so downstream readers can tell a failed tool
-            // run apart from a successful one (the bus item carries no
-            // dedicated error flag for this type).
             const finalOutput = isError ? `[error] ${body}` : body
             items.push(FunctionCallOutputItem.create(callId, finalOutput))
         }
 
-        // Always emit the item event — carries the raw envelope for audit.
         items.push(
             PiItemEvent.create({
                 agentId,
@@ -421,7 +303,6 @@ export function mapPiEvent(
         return { items, sessionId }
     }
 
-    // ─── turn_end ─────────────────────────────────────────────────
     if (type === "turn_end") {
         items.push(
             PiTurnEvent.create({
@@ -433,7 +314,6 @@ export function mapPiEvent(
         return { items, sessionId }
     }
 
-    // ─── agent_end ────────────────────────────────────────────────
     if (type === "agent_end") {
         items.push(
             PiSystem.create({
@@ -445,7 +325,6 @@ export function mapPiEvent(
         return { items, sessionId }
     }
 
-    // ─── unknown / future event type ──────────────────────────────
     items.push(
         PiUnknownEvent.create({
             agentId,

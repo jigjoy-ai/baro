@@ -2,7 +2,6 @@ use std::io::{self, Write};
 
 /// Send a completion notification: terminal bell + OS-specific notification.
 pub fn notify_completion() {
-    // Terminal bell
     print!("\x07");
     // OSC 777 notification (Ghostty)
     print!("\x1b]777;notify;baro;All stories complete\x1b\\");
@@ -12,10 +11,8 @@ pub fn notify_completion() {
     print!("\x1b]9;All stories complete\x1b\\");
     let _ = io::stdout().flush();
 
-    // OS-specific notification
     match std::env::consts::OS {
         "macos" => {
-            // Banner notification
             let _ = std::process::Command::new("osascript")
                 .args(["-e", "display notification \"All stories complete\" with title \"baro\""])
                 .spawn();
