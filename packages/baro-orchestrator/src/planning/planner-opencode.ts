@@ -12,6 +12,7 @@ import {
     buildPlannerUserMessage,
     heuristicModeContract,
     parseModeContract,
+    type ModeContract,
 } from "./planner-prompts.js"
 
 export interface RunPlannerOpenCodeOptions {
@@ -23,6 +24,8 @@ export interface RunPlannerOpenCodeOptions {
     decisionDocument?: string
     /** `--quick` hard override: exactly 1 story. */
     quick?: boolean
+    /** Pre-decided contract (user pick or run-intake step); skips this planner's own intake. */
+    modeContract?: ModeContract
     opencodeBin?: string
     /** Default 15 min — large multi-story PRDs push models past
      *  shorter timeouts. */
@@ -32,7 +35,7 @@ export interface RunPlannerOpenCodeOptions {
 export async function runPlannerOpenCode(
     opts: RunPlannerOpenCodeOptions,
 ): Promise<string> {
-    const modeContract = await runOpenCodeIntake(opts).catch((e) => {
+    const modeContract = opts.modeContract ?? await runOpenCodeIntake(opts).catch((e) => {
         process.stderr.write(`[planner-opencode] intake failed (${(e as Error)?.message ?? String(e)}) — using heuristic mode contract\n`)
         return heuristicModeContract(opts)
     })
@@ -64,7 +67,7 @@ export async function runPlannerOpenCode(
     return extractJsonObject(planText)
 }
 
-async function runOpenCodeIntake(opts: RunPlannerOpenCodeOptions) {
+export async function runOpenCodeIntake(opts: RunPlannerOpenCodeOptions) {
     if (opts.quick) return heuristicModeContract(opts)
     const text = await runOpenCodeOneShot({
         prompt: `You classify software tasks for an autonomous PR workflow. Output JSON only.\n\n${buildIntakePrompt(opts)}`,

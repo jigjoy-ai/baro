@@ -178,6 +178,10 @@ pub struct Cli {
     /// event JSON to stdout (CI / automation). Requires a goal argument.
     #[arg(long)]
     pub headless: bool,
+
+    /// Execution mode: auto (intake proposes, you confirm) or force focused/sequential/parallel.
+    #[arg(long, value_parser=["auto", "focused", "sequential", "parallel"], env = "BARO_MODE", default_value = "auto")]
+    pub mode: String,
 }
 
 pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {

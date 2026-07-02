@@ -19,6 +19,10 @@ pub struct PrdFile {
     /// every story prompt as authoritative spec.
     #[serde(rename = "decisionDocument", default, skip_serializing_if = "Option::is_none")]
     pub decision_document: Option<String>,
+    /// Planner-stamped ModeContract, opaque to Rust — round-tripped into
+    /// prd.json for the orchestrator.
+    #[serde(rename = "executionMode", default, skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -99,6 +103,7 @@ pub fn prd_from_review(
     description: &str,
     stories: &[ReviewStory],
     decision_document: Option<String>,
+    execution_mode: Option<serde_json::Value>,
 ) -> PrdFile {
     PrdFile {
         project: project.to_string(),
@@ -123,6 +128,7 @@ pub fn prd_from_review(
             })
             .collect(),
         decision_document,
+        execution_mode,
     }
 }
 
@@ -131,4 +137,17 @@ pub fn write_prd(prd: &PrdFile, cwd: &Path) -> std::io::Result<()> {
     let prd_path = cwd.join("prd.json");
     let content = serde_json::to_string_pretty(prd).map_err(std::io::Error::other)?;
     std::fs::write(prd_path, format!("{}\n", content))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PrdFile;
+
+    #[test]
+    fn execution_mode_round_trips() {
+        let raw = r#"{"project":"p","branchName":"b","userStories":[],"executionMode":{"mode":"focused","maxStories":1,"source":"user"}}"#;
+        let prd: PrdFile = serde_json::from_str(raw).unwrap();
+        let out = serde_json::to_string(&prd).unwrap();
+        assert!(out.contains(r#""executionMode":{"maxStories":1,"mode":"focused","source":"user"}"#));
+    }
 }

@@ -12,6 +12,7 @@ import {
     buildPlannerUserMessage,
     heuristicModeContract,
     parseModeContract,
+    type ModeContract,
 } from "./planner-prompts.js"
 
 export interface RunPlannerPiOptions {
@@ -24,6 +25,8 @@ export interface RunPlannerPiOptions {
     decisionDocument?: string
     /** `--quick` hard override: exactly 1 story. */
     quick?: boolean
+    /** Pre-decided contract (user pick or run-intake step); skips this planner's own intake. */
+    modeContract?: ModeContract
     piBin?: string
     /** Default 15 min — large multi-story PRDs push models past
      *  shorter timeouts. */
@@ -33,7 +36,7 @@ export interface RunPlannerPiOptions {
 export async function runPlannerPi(
     opts: RunPlannerPiOptions,
 ): Promise<string> {
-    const modeContract = await runPiIntake(opts).catch((e) => {
+    const modeContract = opts.modeContract ?? await runPiIntake(opts).catch((e) => {
         process.stderr.write(`[planner-pi] intake failed (${(e as Error)?.message ?? String(e)}) — using heuristic mode contract\n`)
         return heuristicModeContract(opts)
     })
@@ -66,7 +69,7 @@ export async function runPlannerPi(
     return extractJsonObject(planText)
 }
 
-async function runPiIntake(opts: RunPlannerPiOptions) {
+export async function runPiIntake(opts: RunPlannerPiOptions) {
     if (opts.quick) return heuristicModeContract(opts)
     const text = await runPiOneShot({
         prompt: `You classify software tasks for an autonomous PR workflow. Output JSON only.\n\n${buildIntakePrompt(opts)}`,

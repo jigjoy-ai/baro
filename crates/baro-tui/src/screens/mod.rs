@@ -1,4 +1,5 @@
 pub mod api_key_input;
+pub mod mode_picker;
 pub mod provider_picker;
 pub mod welcome;
 pub mod context;

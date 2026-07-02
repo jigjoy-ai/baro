@@ -132,6 +132,8 @@ export interface ModeContract {
     reason: string
     maxStories?: number
     parallelism?: number
+    /** Who decided: "user" (explicit pick) | "llm" (intake) | "heuristic". */
+    source?: string
 }
 
 export function heuristicModeContract(args: {
@@ -264,6 +266,7 @@ export function parseModeContract(text: string): ModeContract {
             : "No reason supplied by intake.",
         maxStories: Number.isFinite(Number(json.maxStories)) ? Math.max(1, Math.floor(Number(json.maxStories))) : undefined,
         parallelism: Number.isFinite(Number(json.parallelism)) ? Math.max(1, Math.floor(Number(json.parallelism))) : undefined,
+        source: typeof json.source === "string" ? json.source : undefined,
     }
 }
 

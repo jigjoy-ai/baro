@@ -63,6 +63,10 @@ export default defineConfig([
         ...sharedBundleConfig,
     },
     {
+        entry: { "run-intake": "../baro-orchestrator/scripts/run-intake.ts" },
+        ...sharedBundleConfig,
+    },
+    {
         entry: { "baro-memory": "../baro-orchestrator/scripts/baro-memory.ts" },
         ...sharedBundleConfig,
     },

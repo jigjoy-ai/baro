@@ -30,6 +30,7 @@ import {
     buildIntakePrompt,
     buildPlannerUserMessage,
     extractJsonObject,
+    heuristicModeContract,
     parseModeContract,
     renderModeContract,
     type ModeContract,
@@ -43,6 +44,8 @@ export interface RunPlannerOpenAIOptions {
     decisionDocument?: string
     /** `--quick` hard override: exactly 1 story. */
     quick?: boolean
+    /** Pre-decided contract (user pick or run-intake step); skips this planner's own intake. */
+    modeContract?: ModeContract
     /** Cap on inference rounds; errors if exceeded. */
     maxRounds?: number
     /** How many tool-using rounds the Planner may spend exploring before it must finalize. */
@@ -76,15 +79,11 @@ export async function runPlannerOpenAI(
     opts: RunPlannerOpenAIOptions,
 ): Promise<string> {
     const model = pickModel(opts.model ?? "gpt-5.5")
-    const intake = await decideExecutionMode(opts, model).catch((e) => {
-        process.stderr.write(`[planner-openai] intake failed (${(e as Error)?.message ?? String(e)}) — defaulting to focused\n`)
-        return {
-            mode: "focused" as const,
-            confidence: 0,
-            reason: "Intake failed, so Baro uses the conservative focused mode instead of unsafe parallel decomposition.",
-            maxStories: 1,
-            parallelism: 1,
-        }
+    // Same fallback as the CLI planners so intake failure behaves identically
+    // across backends.
+    const intake = opts.modeContract ?? await decideExecutionMode(opts, model).catch((e) => {
+        process.stderr.write(`[planner-openai] intake failed (${(e as Error)?.message ?? String(e)}) — using heuristic mode contract\n`)
+        return heuristicModeContract(opts)
     })
     process.stderr.write(`[planner-openai] intake mode=${intake.mode} confidence=${intake.confidence} reason=${oneLine(intake.reason).slice(0, 180)}\n`)
     const tools = createCodebaseTools(opts.cwd)
@@ -196,8 +195,15 @@ export async function runPlannerOpenAI(
     return fallbackPrdJson(opts.goal, `Planner exceeded maxRounds=${maxRounds} without producing a final plan.`)
 }
 
+/** Standalone intake for scripts/run-intake.ts — no planner run required. */
+export async function runOpenAIIntake(
+    opts: Pick<RunPlannerOpenAIOptions, "goal" | "cwd" | "model" | "quick" | "projectContext" | "decisionDocument">,
+): Promise<ModeContract> {
+    return decideExecutionMode(opts, pickModel(opts.model ?? "gpt-5.5"))
+}
+
 async function decideExecutionMode(
-    opts: RunPlannerOpenAIOptions,
+    opts: Pick<RunPlannerOpenAIOptions, "goal" | "quick" | "projectContext" | "decisionDocument">,
     plannerModel: GenerativeModel,
 ): Promise<ModeContract> {
     if (opts.quick) {

@@ -1,0 +1,114 @@
+import { describe, it } from "node:test"
+import assert from "node:assert/strict"
+
+import {
+    heuristicModeContract,
+    parseModeContract,
+} from "../src/planning/planner-prompts.js"
+import { enforceModeContract } from "../src/planning/mode-enforcement.js"
+import type { PrdFile } from "../src/prd.js"
+
+describe("parseModeContract", () => {
+    it("clamps confidence and floors caps", () => {
+        const c = parseModeContract(`{"mode":"parallel","confidence":7,"reason":"r","maxStories":0.4,"parallelism":2.9}`)
+        assert.equal(c.mode, "parallel")
+        assert.equal(c.confidence, 1)
+        assert.equal(c.maxStories, 1)
+        assert.equal(c.parallelism, 2)
+    })
+
+    it("defaults unknown mode to focused and passes source through", () => {
+        const c = parseModeContract(`{"mode":"yolo","confidence":0.5,"reason":"r","source":"user"}`)
+        assert.equal(c.mode, "focused")
+        assert.equal(c.source, "user")
+    })
+})
+
+describe("heuristicModeContract", () => {
+    it("quick always wins", () => {
+        const c = heuristicModeContract({ goal: "refactor the whole backend", quick: true })
+        assert.equal(c.mode, "focused")
+        assert.equal(c.confidence, 1)
+    })
+
+    it("bug-shaped goals go focused", () => {
+        const c = heuristicModeContract({ goal: "fix the crash when opening settings" })
+        assert.equal(c.mode, "focused")
+        assert.equal(c.maxStories, 1)
+    })
+})
+
+function prd(stories: Array<Partial<PrdFile["userStories"][0]> & { id: string }>): string {
+    return JSON.stringify({
+        project: "p",
+        branchName: "baro/x",
+        description: "d",
+        userStories: stories.map((s, i) => ({
+            priority: i + 1,
+            title: s.id,
+            description: "",
+            dependsOn: [],
+            retries: 2,
+            acceptance: [],
+            tests: [],
+            ...s,
+        })),
+    })
+}
+
+describe("enforceModeContract", () => {
+    it("collapses a multi-story PRD to ONE story in focused mode", () => {
+        const out = JSON.parse(enforceModeContract(
+            prd([
+                { id: "S1", title: "step one", acceptance: ["a1"] },
+                { id: "S2", title: "step two", acceptance: ["a2"], dependsOn: ["S1"] },
+                { id: "S3", title: "step three", acceptance: ["a1"] },
+            ]),
+            { mode: "focused", confidence: 0.9, reason: "bugfix", maxStories: 1, parallelism: 1, source: "llm" },
+            "fix the thing",
+        )) as PrdFile
+        assert.equal(out.userStories.length, 1)
+        const s = out.userStories[0]!
+        assert.equal(s.id, "S1")
+        assert.deepEqual(s.dependsOn, [])
+        assert.deepEqual([...s.acceptance].sort(), ["a1", "a2"])
+        assert.equal(s.model, "opus")
+        assert.match(s.description, /step two/)
+        assert.equal(out.executionMode?.mode, "focused")
+        assert.equal(out.executionMode?.source, "llm")
+    })
+
+    it("trims to maxStories keeping dependency-closed prefix", () => {
+        const out = JSON.parse(enforceModeContract(
+            prd([
+                { id: "S1" },
+                { id: "S2", dependsOn: ["S1"] },
+                { id: "S3", dependsOn: ["S2"] },
+                { id: "S4", dependsOn: ["S3"] },
+            ]),
+            { mode: "sequential", confidence: 0.8, reason: "chain", maxStories: 2, parallelism: 1 },
+            "goal",
+        )) as PrdFile
+        assert.deepEqual(out.userStories.map((s) => s.id), ["S1", "S2"])
+        assert.equal(out.executionMode?.mode, "sequential")
+    })
+
+    it("leaves a compliant PRD alone apart from the stamp", () => {
+        const out = JSON.parse(enforceModeContract(
+            prd([{ id: "S1", model: "sonnet" }]),
+            { mode: "focused", confidence: 1, reason: "single", maxStories: 1, parallelism: 1 },
+            "goal",
+        )) as PrdFile
+        assert.equal(out.userStories.length, 1)
+        assert.equal(out.userStories[0]!.model, "sonnet")
+        assert.equal(out.executionMode?.mode, "focused")
+    })
+
+    it("returns invalid JSON untouched", () => {
+        const raw = "not json at all"
+        assert.equal(
+            enforceModeContract(raw, { mode: "focused", confidence: 1, reason: "r" }, "g"),
+            raw,
+        )
+    })
+})

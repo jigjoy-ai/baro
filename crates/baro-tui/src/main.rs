@@ -9,6 +9,7 @@ mod doctor;
 mod events;
 mod executor;
 mod git;
+mod intake_runner;
 mod notification;
 mod orchestrator_client;
 mod planner_runner;
@@ -85,10 +86,14 @@ enum AppEvent {
     Key(crossterm::event::KeyEvent),
     ContextReady(String),
     ContextError(String),
-    PlanReady(Vec<ReviewStory>, String, String, String),
+    /// Last element is the planner-stamped `executionMode` contract,
+    /// carried opaquely into prd.json.
+    PlanReady(Vec<ReviewStory>, String, String, String, Option<serde_json::Value>),
     /// Planner or Architect failure; second element is the persisted
     /// log path, if any.
     PlanError(String, Option<std::path::PathBuf>),
+    /// Intake finished (`--mode auto`, interactive): show the ModePicker.
+    IntakeReady { decision_doc: Option<String>, contract_json: String },
     RefineReady(Vec<ReviewStory>, String, String, String),
     RefineError(String),
     BranchError(String),
@@ -127,6 +132,19 @@ struct PrdOutput {
     description: String,
     #[serde(rename = "userStories")]
     user_stories: Vec<PrdStoryOutput>,
+    #[serde(default)]
+    #[serde(rename = "executionMode")]
+    execution_mode: Option<serde_json::Value>,
+}
+
+/// Display fields of a ModeContract; the raw JSON stays authoritative.
+#[derive(serde::Deserialize)]
+struct ModeContractView {
+    mode: String,
+    #[serde(default)]
+    confidence: f64,
+    #[serde(default)]
+    reason: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -556,6 +574,7 @@ async fn run_app(
     }
 
     app.effort = cli.effort.clone();
+    app.mode = cli.mode.clone();
 
     // `cli.llm` defaults to "claude", so its value alone can't distinguish
     // an explicit `--llm claude` / `--llm hybrid` from the no-flag default;
@@ -777,7 +796,7 @@ async fn run_app(
                         app.claude_md_content = Some(content);
                     }
                     app.start_planning();
-                    spawn_planner(&app, &cwd, tx.clone());
+                    spawn_planner(&app, &cwd, tx.clone(), headless);
                 } else {
                     app.start_context();
                     spawn_context_builder(&cwd, tx.clone());
@@ -872,7 +891,7 @@ async fn run_app(
             Some(AppEvent::ContextReady(content)) => {
                 app.claude_md_content = Some(content);
                 app.start_planning();
-                spawn_planner(&app, &cwd, tx.clone());
+                spawn_planner(&app, &cwd, tx.clone(), headless);
             }
             Some(AppEvent::ContextError(err)) => {
                 if headless {
@@ -880,10 +899,11 @@ async fn run_app(
                 }
                 app.planning_error = Some(err);
             }
-            Some(AppEvent::PlanReady(stories, project, branch, description)) => {
+            Some(AppEvent::PlanReady(stories, project, branch, description, execution_mode)) => {
                 app.project = project;
                 app.branch_name = branch;
                 app.description = description;
+                app.execution_mode = execution_mode;
                 if headless {
                     // Emit a planning event for the runner/dashboard, then
                     // auto-confirm and execute (no review screen).
@@ -892,6 +912,32 @@ async fn run_app(
                 } else {
                     app.show_review(stories);
                 }
+            }
+            Some(AppEvent::IntakeReady { decision_doc, contract_json }) => {
+                if app.decision_document.is_none() {
+                    app.decision_document = decision_doc;
+                }
+                // Unparseable contracts collapse to the Rust fallback so the
+                // picker always has something coherent to propose.
+                let (view, json) = match serde_json::from_str::<ModeContractView>(&contract_json) {
+                    Ok(v) => (v, contract_json),
+                    Err(_) => (
+                        serde_json::from_str::<ModeContractView>(intake_runner::FALLBACK_CONTRACT)
+                            .expect("fallback contract is valid"),
+                        intake_runner::FALLBACK_CONTRACT.to_string(),
+                    ),
+                };
+                app.mode_picker_index = app::MODE_OPTIONS
+                    .iter()
+                    .position(|m| *m == view.mode)
+                    .unwrap_or(0);
+                app.mode_proposal = Some(app::ModeProposal {
+                    mode: view.mode,
+                    reason: view.reason,
+                    confidence: view.confidence,
+                    contract_json: json,
+                });
+                app.screen = Screen::ModePicker;
             }
             Some(AppEvent::PlanError(err, log_path)) => {
                 if headless {
@@ -1029,7 +1075,7 @@ async fn run_app(
                                             app.claude_md_content = Some(content);
                                         }
                                         app.start_planning();
-                                        spawn_planner(&app, &cwd, tx.clone());
+                                        spawn_planner(&app, &cwd, tx.clone(), headless);
                                     } else {
                                         app.start_context();
                                         spawn_context_builder(&cwd, tx.clone());
@@ -1044,6 +1090,35 @@ async fn run_app(
                         }
                         KeyCode::Char(c) => {
                             app.api_key_input.push(c);
+                        }
+                        _ => {}
+                    },
+                    Screen::ModePicker => match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if app.mode_picker_index > 0 {
+                                app.mode_picker_index -= 1;
+                            } else {
+                                app.mode_picker_index = app::MODE_OPTIONS.len() - 1;
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            app.mode_picker_index =
+                                (app.mode_picker_index + 1) % app::MODE_OPTIONS.len();
+                        }
+                        KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
+                            let chosen = app::MODE_OPTIONS[app.mode_picker_index];
+                            // Confirming the proposal forwards the intake JSON
+                            // verbatim; an override becomes a "user" contract.
+                            let mode_json = match app.mode_proposal.take() {
+                                Some(p) if p.mode == chosen => p.contract_json,
+                                _ => user_mode_contract(
+                                    chosen,
+                                    &format!("User selected {} mode.", chosen),
+                                ),
+                            };
+                            app.start_planning();
+                            spawn_planner_stage_b(&app, &cwd, tx.clone(), mode_json);
                         }
                         _ => {}
                     },
@@ -1063,7 +1138,7 @@ async fn run_app(
                                         app.claude_md_content = Some(content);
                                     }
                                     app.start_planning();
-                                    spawn_planner(&app, &cwd, tx.clone());
+                                    spawn_planner(&app, &cwd, tx.clone(), headless);
                                 } else {
                                     app.start_context();
                                     spawn_context_builder(&cwd, tx.clone());
@@ -1142,7 +1217,7 @@ async fn run_app(
                             if app.planning_error.is_some() {
                                 app.planning_error = None;
                                 app.start_planning();
-                                spawn_planner(&app, &cwd, tx.clone());
+                                spawn_planner(&app, &cwd, tx.clone(), headless);
                             }
                         }
                         _ => {}
@@ -1269,6 +1344,7 @@ async fn run_app(
                                     &app.description,
                                     &app.review_stories,
                                     app.decision_document.clone(),
+                                    app.execution_mode.clone(),
                                 );
                                 if let Err(e) = executor::write_prd(&prd, &cwd) {
                                     app.planning_error = Some(format!("Failed to write prd.json: {}", e));
@@ -1393,7 +1469,7 @@ async fn run_app(
                                 app.is_followup = true;
                                 app.goal_input = goal;
                                 app.start_planning();
-                                spawn_planner(&app, &cwd, tx.clone());
+                                spawn_planner(&app, &cwd, tx.clone(), headless);
                             }
                         }
                         // Follow-up works on the current branch via --continue, with or
@@ -1530,7 +1606,11 @@ async fn run_app(
     Ok(())
 }
 
-fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
+/// Stage A of planning: Architect, then execution-mode contract
+/// resolution. `--mode auto` runs the intake; interactively that pauses
+/// at the ModePicker (IntakeReady) and stage B is spawned on confirm,
+/// otherwise the flow continues straight into the planner.
+fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bool) {
     let goal = app.goal_input.clone();
     let planner = app.planner;
     let cwd = cwd.to_path_buf();
@@ -1538,6 +1618,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     let architect_model = app.model_for_phase("architect");
     let context = app.claude_md_content.clone();
     let quick = app.quick;
+    let mode = app.mode.clone();
     // Per-phase routing lets hybrid runs split Architect/Planner from
     // Story/Critic/Surgeon; unset overrides fall back to the global --llm.
     let architect_llm = app.architect_llm;
@@ -1591,55 +1672,168 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
         };
 
         let _ = planner; // legacy field kept on App for the welcome-screen wizard
-        let result = planner_runner::run_planner(
-            &goal,
-            &cwd,
-            planner_llm,
-            model.as_deref(),
-            context.as_deref(),
-            decision_doc.as_deref(),
-            quick,
-            openai_api_key.as_deref(),
-            openai_base_url.as_deref(),
-            &effort,
-        ).await;
 
-        match result.and_then(|raw_json| {
-            let prd: PrdOutput = serde_json::from_str(&raw_json).map_err(|e| {
-                subprocess::ProcessRunError {
-                    message: format!(
-                        "Failed to parse PRD JSON from planner: {}\nRaw (first 500 chars): {}",
-                        e,
-                        &raw_json[..raw_json.len().min(500)],
-                    ),
-                    log_path: None,
-                }
-            })?;
-            let stories: Vec<ReviewStory> = prd.user_stories
-                .into_iter()
-                .map(|s| ReviewStory {
-                    id: s.id,
-                    title: s.title,
-                    description: s.description,
-                    depends_on: s.depends_on,
-                    completed: false,
-                    model: s.model,
-                })
-                .collect();
-            Ok((stories, prd.project, prd.branch_name, prd.description))
-        }) {
-            Ok((stories, project, branch, description)) => {
+        // Contract resolution: --quick and an explicit --mode never
+        // consult the intake; auto runs it, and interactive auto pauses
+        // for the picker instead of continuing.
+        let mode_json = if quick {
+            Some(user_mode_contract("focused", "Quick mode"))
+        } else if mode != "auto" {
+            Some(user_mode_contract(&mode, &format!("User selected {} mode.", mode)))
+        } else {
+            let contract = intake_runner::run_intake(
+                &goal,
+                &cwd,
+                planner_llm,
+                model.as_deref(),
+                context.as_deref(),
+                decision_doc.as_deref(),
+                openai_api_key.as_deref(),
+                openai_base_url.as_deref(),
+            ).await;
+            if headless {
+                Some(contract)
+            } else {
                 let _ = tx
-                    .send(AppEvent::PlanReady(stories, project, branch, description))
+                    .send(AppEvent::IntakeReady { decision_doc, contract_json: contract })
                     .await;
+                return;
             }
-            Err(err) => {
-                let _ = tx
-                    .send(AppEvent::PlanError(err.message.clone(), err.log_path))
-                    .await;
-            }
-        }
+        };
+
+        run_planner_and_report(
+            goal,
+            cwd,
+            planner_llm,
+            model,
+            context,
+            decision_doc,
+            quick,
+            openai_api_key,
+            openai_base_url,
+            effort,
+            mode_json,
+            tx,
+        )
+        .await;
     });
+}
+
+/// Stage B: the planner proper, then PlanReady/PlanError.
+fn spawn_planner_stage_b(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, mode_json: String) {
+    let goal = app.goal_input.clone();
+    let cwd = cwd.to_path_buf();
+    let model = app.model_for_phase("planning");
+    let context = app.claude_md_content.clone();
+    let decision_doc = app.decision_document.clone();
+    let planner_llm = app.planner_llm;
+    let openai_api_key = app.openai_api_key.clone();
+    let openai_base_url = app.openai_base_url.clone();
+    let effort = app.effort.clone();
+    tokio::spawn(async move {
+        run_planner_and_report(
+            goal,
+            cwd,
+            planner_llm,
+            model,
+            context,
+            decision_doc,
+            false, // the picker never shows in quick mode
+            openai_api_key,
+            openai_base_url,
+            effort,
+            Some(mode_json),
+            tx,
+        )
+        .await;
+    });
+}
+
+/// Build a "user"-sourced ModeContract for an explicitly chosen mode
+/// (--mode, --quick, or a picker override). Shapes mirror the TS
+/// heuristic contracts.
+fn user_mode_contract(mode: &str, reason: &str) -> String {
+    let v = match mode {
+        "sequential" => serde_json::json!({
+            "mode": "sequential", "confidence": 1, "reason": reason,
+            "maxStories": 5, "parallelism": 1, "source": "user",
+        }),
+        "parallel" => serde_json::json!({
+            "mode": "parallel", "confidence": 1, "reason": reason,
+            "parallelism": 4, "source": "user",
+        }),
+        _ => serde_json::json!({
+            "mode": "focused", "confidence": 1, "reason": reason,
+            "maxStories": 1, "parallelism": 1, "source": "user",
+        }),
+    };
+    v.to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_planner_and_report(
+    goal: String,
+    cwd: PathBuf,
+    planner_llm: app::LlmProvider,
+    model: Option<String>,
+    context: Option<String>,
+    decision_doc: Option<String>,
+    quick: bool,
+    openai_api_key: Option<String>,
+    openai_base_url: Option<String>,
+    effort: String,
+    mode_json: Option<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    let result = planner_runner::run_planner(
+        &goal,
+        &cwd,
+        planner_llm,
+        model.as_deref(),
+        context.as_deref(),
+        decision_doc.as_deref(),
+        quick,
+        openai_api_key.as_deref(),
+        openai_base_url.as_deref(),
+        &effort,
+        mode_json.as_deref(),
+    ).await;
+
+    match result.and_then(|raw_json| {
+        let prd: PrdOutput = serde_json::from_str(&raw_json).map_err(|e| {
+            subprocess::ProcessRunError {
+                message: format!(
+                    "Failed to parse PRD JSON from planner: {}\nRaw (first 500 chars): {}",
+                    e,
+                    &raw_json[..raw_json.len().min(500)],
+                ),
+                log_path: None,
+            }
+        })?;
+        let stories: Vec<ReviewStory> = prd.user_stories
+            .into_iter()
+            .map(|s| ReviewStory {
+                id: s.id,
+                title: s.title,
+                description: s.description,
+                depends_on: s.depends_on,
+                completed: false,
+                model: s.model,
+            })
+            .collect();
+        Ok((stories, prd.project, prd.branch_name, prd.description, prd.execution_mode))
+    }) {
+        Ok((stories, project, branch, description, execution_mode)) => {
+            let _ = tx
+                .send(AppEvent::PlanReady(stories, project, branch, description, execution_mode))
+                .await;
+        }
+        Err(err) => {
+            let _ = tx
+                .send(AppEvent::PlanError(err.message.clone(), err.log_path))
+                .await;
+        }
+    }
 }
 
 /// Mirror CLAUDE.md into AGENTS.md so backends following that
@@ -1785,6 +1979,7 @@ fn confirm_and_execute(
         &app.description,
         &app.review_stories,
         app.decision_document.clone(),
+        app.execution_mode.clone(),
     );
     if let Err(e) = executor::write_prd(&prd, cwd) {
         let _ = tx.try_send(AppEvent::BranchError(format!("Failed to write prd.json: {}", e)));

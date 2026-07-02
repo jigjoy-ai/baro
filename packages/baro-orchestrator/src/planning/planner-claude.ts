@@ -13,6 +13,7 @@ import {
     buildPlannerUserMessage,
     heuristicModeContract,
     parseModeContract,
+    type ModeContract,
 } from "./planner-prompts.js"
 
 const execFileAsync = promisify(execFile)
@@ -26,6 +27,8 @@ export interface RunPlannerClaudeOptions {
     decisionDocument?: string
     /** `--quick` hard override: exactly 1 story. */
     quick?: boolean
+    /** Pre-decided contract (user pick or run-intake step); skips this planner's own intake. */
+    modeContract?: ModeContract
     claudeBin?: string
     /** Defaults scale with `effort` ({@link effortTimeoutMs}) — the flat
      *  4-minute default was SIGTERM'ing `--effort max` runs mid-thought. */
@@ -49,7 +52,7 @@ export function effortTimeoutMs(effort?: string): number {
 export async function runPlannerClaude(
     opts: RunPlannerClaudeOptions,
 ): Promise<string> {
-    const modeContract = await runClaudeIntake(opts).catch((e) => {
+    const modeContract = opts.modeContract ?? await runClaudeIntake(opts).catch((e) => {
         process.stderr.write(`[planner-claude] intake failed (${(e as Error)?.message ?? String(e)}) — using heuristic mode contract\n`)
         return heuristicModeContract(opts)
     })
@@ -94,7 +97,7 @@ export async function runPlannerClaude(
     return extractJsonObject(planText)
 }
 
-async function runClaudeIntake(opts: RunPlannerClaudeOptions) {
+export async function runClaudeIntake(opts: RunPlannerClaudeOptions) {
     if (opts.quick) return heuristicModeContract(opts)
     const { stdout } = await execFileAsync(
         opts.claudeBin ?? "claude",

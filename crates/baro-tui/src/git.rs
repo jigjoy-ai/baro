@@ -90,6 +90,19 @@ pub async fn checkout_existing_branch(cwd: &Path, branch_name: &str) -> BaroResu
 }
 
 async fn push_branch_best_effort(cwd: &Path, branch_name: &str) -> BaroResult<()> {
+    // Preview/local runs have no origin (the cloud runner strips it in
+    // diffOnly mode) — skip quietly instead of failing noisily.
+    let has_origin = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(cwd)
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !has_origin {
+        eprintln!("[git] no origin remote — skipping push (preview/local run)");
+        return Ok(());
+    }
     let push = Command::new("git")
         .args(["push", "-u", "origin", branch_name])
         .current_dir(cwd)

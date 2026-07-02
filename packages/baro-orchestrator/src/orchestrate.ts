@@ -16,10 +16,12 @@ import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
     GitGate,
     createOrCheckoutBranch,
+    excludeBaroArtifacts,
     getCurrentBranch,
     getDiff,
     getGitFileStats,
     getHeadSha,
+    hasRemoteOrigin,
     isInsideGitRepo,
 } from "./git.js"
 import { WorktreeManager } from "./worktree.js"
@@ -551,9 +553,14 @@ export async function orchestrate(
         critic.join(env)
     }
 
-    // Finalizer only joins on git runs; `gh` availability is checked inside
-    // it, so the run still succeeds on machines without it.
-    const finalizer = useGit
+    // Finalizer only joins on git runs WITH an origin remote — a preview
+    // (diffOnly) or local-only run has none, and running `gh pr create`/push
+    // there just produces noisy failures. `gh` availability is checked inside.
+    const hasOrigin = useGit ? await hasRemoteOrigin(config.cwd) : false
+    if (useGit && !hasOrigin) {
+        process.stderr.write("[orchestrate] no origin remote — skipping push/PR (preview/local run)\n")
+    }
+    const finalizer = useGit && hasOrigin
         ? new Finalizer({
               cwd: config.cwd,
               prdPath: config.prdPath,
@@ -566,10 +573,27 @@ export async function orchestrate(
         finalizer.join(env)
     }
 
+    // The intake contract's parallelism is a hard cap, enforced here — not
+    // just prompt advice to the planner. focused/sequential = 1 at a time.
+    const executionMode = loadPrd(config.prdPath).executionMode
+    let effectiveParallel = config.parallel ?? 0
+    if (executionMode?.mode === "focused" || executionMode?.mode === "sequential") {
+        effectiveParallel = 1
+    } else if (executionMode?.parallelism) {
+        effectiveParallel = effectiveParallel === 0
+            ? executionMode.parallelism
+            : Math.min(effectiveParallel, executionMode.parallelism)
+    }
+    if (executionMode) {
+        process.stderr.write(
+            `[orchestrate] execution mode: ${executionMode.mode} (${executionMode.source ?? "contract"}) — parallel cap ${effectiveParallel === 0 ? "none" : effectiveParallel}\n`,
+        )
+    }
+
     const conductor = new Conductor({
         prdPath: config.prdPath,
         cwd: config.cwd,
-        parallel: config.parallel ?? 0,
+        parallel: effectiveParallel,
         timeoutSecs: storyTimeoutSecs(config.timeoutSecs, config.effort),
         overrideModel: config.overrideModel ?? undefined,
         defaultModel: config.defaultModel ?? "opus",
@@ -577,6 +601,7 @@ export async function orchestrate(
         onRunStart: useGit
             ? async (prd) => {
                   baseSha = await getHeadSha(config.cwd)
+                  await excludeBaroArtifacts(config.cwd)
                   if (prd.branchName) {
                       await createOrCheckoutBranch(
                           config.cwd,
@@ -643,6 +668,8 @@ export async function orchestrate(
                 depends_on: s.dependsOn,
             })),
             runner: hostname(),
+            mode: prd.executionMode?.mode,
+            mode_reason: prd.executionMode?.reason,
         })
         const dagLevels = buildDag(prd.userStories).map((lvl) =>
             lvl.storyIds.map((id) => ({ id })),

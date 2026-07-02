@@ -15,6 +15,9 @@ pub enum Screen {
     /// Shown only for the OpenAI backend when `OPENAI_API_KEY` isn't
     /// set. Held in memory only; never written to disk.
     ApiKeyInput,
+    /// Interactive confirm/override of the intake's proposed execution
+    /// mode (`--mode auto` only); sits between Architect and Planner.
+    ModePicker,
     Welcome,
     Context,
     Planning,
@@ -196,6 +199,20 @@ pub struct ActiveStory {
     pub start_time: Instant,
 }
 
+/// Order matches the ModePicker screen rows.
+pub const MODE_OPTIONS: [&str; 3] = ["focused", "sequential", "parallel"];
+
+/// Intake's proposed execution mode, parsed for display; the raw
+/// contract JSON is kept verbatim so confirming the proposal forwards
+/// exactly what the intake produced.
+#[derive(Debug, Clone)]
+pub struct ModeProposal {
+    pub mode: String,
+    pub reason: String,
+    pub confidence: f64,
+    pub contract_json: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReviewStory {
     pub id: String,
@@ -334,6 +351,15 @@ pub struct App {
     /// story, disable Critic + Surgeon.
     pub quick: bool,
 
+    /// `--mode` / `BARO_MODE`: "auto" runs intake (+ picker in the TUI);
+    /// anything else forces that mode and skips both.
+    pub mode: String,
+    pub mode_picker_index: usize,
+    pub mode_proposal: Option<ModeProposal>,
+    /// Planner-stamped `executionMode` contract, passed through opaquely
+    /// so it survives into prd.json for the orchestrator.
+    pub execution_mode: Option<serde_json::Value>,
+
     /// The default backend every phase uses unless a per-phase
     /// override is set.
     pub llm: LlmProvider,
@@ -452,6 +478,10 @@ impl App {
             openai_endpoints: Vec::new(),
             intra_level_delay_secs: None,
             quick: false,
+            mode: "auto".to_string(),
+            mode_picker_index: 0,
+            mode_proposal: None,
+            execution_mode: None,
             llm: LlmProvider::Claude,
             architect_llm: LlmProvider::Claude,
             planner_llm: LlmProvider::Claude,
