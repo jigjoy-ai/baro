@@ -12,6 +12,7 @@ import {
     buildPlannerUserMessage,
     heuristicModeContract,
     parseModeContract,
+    type ModeContract,
 } from "./planner-prompts.js"
 
 export interface RunPlannerCodexOptions {
@@ -21,6 +22,8 @@ export interface RunPlannerCodexOptions {
     projectContext?: string
     decisionDocument?: string
     quick?: boolean
+    /** Pre-decided contract (user pick or run-intake step); skips this planner's own intake. */
+    modeContract?: ModeContract
     codexBin?: string
     /** Default 15 min — large multi-story PRDs pushed Codex past the
      *  old 4-minute ceiling. */
@@ -30,7 +33,7 @@ export interface RunPlannerCodexOptions {
 export async function runPlannerCodex(
     opts: RunPlannerCodexOptions,
 ): Promise<string> {
-    const modeContract = await runCodexIntake(opts).catch((e) => {
+    const modeContract = opts.modeContract ?? await runCodexIntake(opts).catch((e) => {
         process.stderr.write(`[planner-codex] intake failed (${(e as Error)?.message ?? String(e)}) — using heuristic mode contract\n`)
         return heuristicModeContract(opts)
     })
@@ -62,7 +65,7 @@ export async function runPlannerCodex(
     return extractJsonObject(planText)
 }
 
-async function runCodexIntake(opts: RunPlannerCodexOptions) {
+export async function runCodexIntake(opts: RunPlannerCodexOptions) {
     if (opts.quick) return heuristicModeContract(opts)
     const text = await runCodexOneShot({
         prompt: `You classify software tasks for an autonomous PR workflow. Output JSON only.\n\n${buildIntakePrompt(opts)}`,

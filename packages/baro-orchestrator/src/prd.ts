@@ -20,6 +20,17 @@ export interface PrdStory {
     model?: string
 }
 
+/** Intake's (or the user's) execution-mode decision, stamped by run-planner. */
+export interface PrdExecutionMode {
+    mode: "focused" | "sequential" | "parallel"
+    reason: string
+    confidence?: number
+    maxStories?: number
+    parallelism?: number
+    /** "user" (explicit pick) | "llm" (intake) | "heuristic" (fallback). */
+    source?: string
+}
+
 export interface PrdFile {
     project: string
     branchName: string
@@ -31,6 +42,7 @@ export interface PrdFile {
      * re-decide things upstream already pinned down.
      */
     decisionDocument?: string
+    executionMode?: PrdExecutionMode
 }
 
 const STORY_DEFAULTS: Pick<PrdStory, "retries"> = { retries: 2 }
@@ -62,12 +74,17 @@ export function normalizePrd(input: Partial<PrdFile>, source: string): PrdFile {
         typeof input.decisionDocument === "string" && input.decisionDocument.trim().length > 0
             ? input.decisionDocument
             : undefined
+    const executionMode =
+        input.executionMode && typeof input.executionMode === "object" && typeof input.executionMode.mode === "string"
+            ? input.executionMode
+            : undefined
     return {
         project,
         branchName,
         description,
         userStories: stories.map((s, i) => normalizeStory(s, i, source)),
         decisionDocument,
+        executionMode,
     }
 }
 

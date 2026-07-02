@@ -304,6 +304,7 @@ export class Conductor extends BaseObserver {
             RunStarted.create({
                 project: this.prd.project,
                 storyCount: this.prd.userStories.length,
+                mode: this.prd.executionMode?.mode,
             }),
         )
         this.phase = "computing"

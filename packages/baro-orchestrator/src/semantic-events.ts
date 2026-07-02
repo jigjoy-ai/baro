@@ -218,6 +218,8 @@ export const RunStartRequest =
 export interface RunStartedData {
     project: string
     storyCount: number
+    /** Execution mode from the intake contract ("focused" | "sequential" | "parallel"), when one was decided. */
+    mode?: string
 }
 export const RunStarted = defineSemanticEvent<RunStartedData>("run_started")
 

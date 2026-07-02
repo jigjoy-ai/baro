@@ -566,10 +566,27 @@ export async function orchestrate(
         finalizer.join(env)
     }
 
+    // The intake contract's parallelism is a hard cap, enforced here — not
+    // just prompt advice to the planner. focused/sequential = 1 at a time.
+    const executionMode = loadPrd(config.prdPath).executionMode
+    let effectiveParallel = config.parallel ?? 0
+    if (executionMode?.mode === "focused" || executionMode?.mode === "sequential") {
+        effectiveParallel = 1
+    } else if (executionMode?.parallelism) {
+        effectiveParallel = effectiveParallel === 0
+            ? executionMode.parallelism
+            : Math.min(effectiveParallel, executionMode.parallelism)
+    }
+    if (executionMode) {
+        process.stderr.write(
+            `[orchestrate] execution mode: ${executionMode.mode} (${executionMode.source ?? "contract"}) — parallel cap ${effectiveParallel === 0 ? "none" : effectiveParallel}\n`,
+        )
+    }
+
     const conductor = new Conductor({
         prdPath: config.prdPath,
         cwd: config.cwd,
-        parallel: config.parallel ?? 0,
+        parallel: effectiveParallel,
         timeoutSecs: storyTimeoutSecs(config.timeoutSecs, config.effort),
         overrideModel: config.overrideModel ?? undefined,
         defaultModel: config.defaultModel ?? "opus",
@@ -643,6 +660,8 @@ export async function orchestrate(
                 depends_on: s.dependsOn,
             })),
             runner: hostname(),
+            mode: prd.executionMode?.mode,
+            mode_reason: prd.executionMode?.reason,
         })
         const dagLevels = buildDag(prd.userStories).map((lvl) =>
             lvl.storyIds.map((id) => ({ id })),

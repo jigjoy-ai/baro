@@ -12,6 +12,8 @@ import { runPlannerCodex } from "../src/planning/planner-codex.js"
 import { runPlannerOpenAI } from "../src/planning/planner-openai.js"
 import { runPlannerOpenCode } from "../src/planning/planner-opencode.js"
 import { runPlannerPi } from "../src/planning/planner-pi.js"
+import { parseModeContract, type ModeContract } from "../src/planning/planner-prompts.js"
+import { enforceModeContract } from "../src/planning/mode-enforcement.js"
 
 interface Args {
     goal: string
@@ -25,6 +27,8 @@ interface Args {
     effort?: string
     contextFile?: string
     decisionFile?: string
+    /** JSON ModeContract from the run-intake step (user-confirmed); skips planner intake. */
+    modeFile?: string
     quick: boolean
 }
 
@@ -36,6 +40,7 @@ function parseArgs(argv: string[]): Args {
     let effort: string | undefined
     let contextFile: string | undefined
     let decisionFile: string | undefined
+    let modeFile: string | undefined
     let quick = false
 
     for (let i = 0; i < argv.length; i++) {
@@ -67,6 +72,9 @@ function parseArgs(argv: string[]): Args {
             case "--decision-file":
                 decisionFile = required(argv, ++i, "--decision-file")
                 break
+            case "--mode-file":
+                modeFile = required(argv, ++i, "--mode-file")
+                break
             case "--quick":
                 quick = true
                 break
@@ -85,6 +93,7 @@ function parseArgs(argv: string[]): Args {
         effort,
         contextFile,
         decisionFile,
+        modeFile,
         quick,
     }
 }
@@ -116,9 +125,22 @@ async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2))
     const projectContext = tryRead(args.contextFile)
     const decisionDocument = tryRead(args.decisionFile)
+    let modeContract: ModeContract | undefined
+    const modeJson = tryRead(args.modeFile)
+    if (modeJson) {
+        try {
+            modeContract = parseModeContract(modeJson)
+        } catch (e) {
+            process.stderr.write(
+                `[run-planner] warning: invalid --mode-file (${(e as Error).message}) — planner will run its own intake\n`,
+            )
+        }
+    }
 
     process.stderr.write(
-        `[run-planner] llm=${args.llm} model=${args.model ?? "(default)"} quick=${args.quick}\n`,
+        `[run-planner] llm=${args.llm} model=${args.model ?? "(default)"} quick=${args.quick}` +
+            (modeContract ? ` mode=${modeContract.mode} (pre-decided)` : "") +
+            "\n",
     )
 
     let prdJson: string
@@ -135,6 +157,7 @@ async function main(): Promise<void> {
                 projectContext,
                 decisionDocument,
                 quick: args.quick,
+                modeContract,
             })
         } else if (args.llm === "codex") {
             prdJson = await runPlannerCodex({
@@ -144,6 +167,7 @@ async function main(): Promise<void> {
                 projectContext,
                 decisionDocument,
                 quick: args.quick,
+                modeContract,
             })
         } else if (args.llm === "opencode") {
             prdJson = await runPlannerOpenCode({
@@ -153,6 +177,7 @@ async function main(): Promise<void> {
                 projectContext,
                 decisionDocument,
                 quick: args.quick,
+                modeContract,
             })
         } else if (args.llm === "pi") {
             prdJson = await runPlannerPi({
@@ -162,6 +187,7 @@ async function main(): Promise<void> {
                 projectContext,
                 decisionDocument,
                 quick: args.quick,
+                modeContract,
             })
         } else {
             prdJson = await runPlannerClaude({
@@ -172,6 +198,7 @@ async function main(): Promise<void> {
                 projectContext,
                 decisionDocument,
                 quick: args.quick,
+                modeContract,
             })
         }
     } catch (e) {
@@ -181,13 +208,12 @@ async function main(): Promise<void> {
         process.exit(1)
     }
 
+    if (modeContract) {
+        prdJson = enforceModeContract(prdJson, modeContract, args.goal)
+    }
+
     process.stderr.write(
         `[run-planner] ok in ${Date.now() - t0}ms (${prdJson.length} chars)\n`,
     )
     process.stdout.write(prdJson)
 }
-
-main().catch((e) => {
-    process.stderr.write(`[run-planner] crashed: ${e?.stack ?? String(e)}\n`)
-    process.exit(3)
-})

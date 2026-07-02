@@ -36,7 +36,7 @@ export interface DiffFileInfo {
 }
 
 export type BaroEvent =
-    | { type: "init"; project: string; stories: StoryInfo[]; runner?: string }
+    | { type: "init"; project: string; stories: StoryInfo[]; runner?: string; mode?: string; mode_reason?: string }
     // The Architect's design/decision spec (markdown), emitted once after
     // planning so the dashboard can surface it.
     | { type: "decision_document"; document: string }
