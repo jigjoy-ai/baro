@@ -31,6 +31,8 @@ interface RunDispatchMsg {
     diffOnly?: boolean
     // Skip planning (architect + planner) — single-agent fast path for trivial goals.
     quick?: boolean
+    // Execution mode for baro's intake (BARO_MODE env — older binaries just ignore it).
+    mode?: "auto" | "focused" | "sequential" | "parallel"
     // Follow-up: check out this PR's branch and run with --continue so it updates in place.
     followUp?: { prNumber: number }
 }
@@ -200,6 +202,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
     // makes the claude CLI use API auth. Strip it for the child.
     const env: Record<string, string | undefined> = { ...process.env }
     delete env.ANTHROPIC_API_KEY
+    if (d.mode) env.BARO_MODE = d.mode
 
     let cwd = workspaceDir
     let cleanup: (() => void) | undefined
