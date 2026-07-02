@@ -1,23 +1,8 @@
 /**
- * Integration test: Pi backend.
- *
- * Exercises the full stack — stream mapper, CLI participant, story agent,
- * and one-shot runner — against a real `pi` process in a temporary git
- * repository. Validates that:
- *
- *   1. The stream mapper correctly parses Pi's JSONL output
- *   2. The CLI participant transitions through expected phases
- *   3. The one-shot runner returns assistant text
- *   4. The story agent completes a simple task end-to-end
- *
- * Usage:
- *   npx tsx packages/baro-orchestrator/scripts/test-pi-integration.ts
- *
- * Prerequisites:
- *   - `pi` binary on PATH
- *   - A configured LLM provider for pi (any will do)
- *
- * Exit code 0 = all tests passed, non-zero = failure.
+ * Pi backend integration test: stream mapper (unit), then one-shot runner,
+ * CLI participant, and story agent against a real `pi` process in a temp git
+ * repo. Fixtures use Pi's real wire shapes — see docs/stream-protocols.md,
+ * "Pi (pi-stream-mapper.ts)". Run with npx tsx; exits non-zero on failure.
  */
 
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from "fs"
@@ -37,14 +22,11 @@ import { PiCliParticipant } from "../src/participants/pi-cli-participant.js"
 import { PiStoryAgent } from "../src/participants/pi-story-agent.js"
 import { runPiOneShot } from "../src/pi-one-shot.js"
 
-// ─── Helpers ──────────────────────────────────────────────────────────
-
 let testDir: string
 let passed = 0
 let failed = 0
 let skipped = 0
 
-/** True when the `pi` binary is resolvable on PATH. */
 function piAvailable(): boolean {
     try {
         execSync("command -v pi", { stdio: "ignore" })
@@ -83,8 +65,6 @@ function assert(condition: boolean, msg: string): void {
     }
 }
 
-// ─── Test 1: Stream Mapper ────────────────────────────────────────────
-
 function testStreamMapper(): void {
     process.stderr.write("\n[test] 1. Stream mapper\n")
 
@@ -118,7 +98,6 @@ function testStreamMapper(): void {
         "text_delta does NOT emit a ModelMessageItem (no dup with message_end)",
     )
 
-    // message_end (assistant) with a text content block → ModelMessageItem.
     const messageEndEvent = {
         type: "message_end",
         message: {
@@ -144,8 +123,7 @@ function testStreamMapper(): void {
         "message_end produces a ModelMessageItem with the correct text",
     )
 
-    // message_end with a toolCall content block → FunctionCallItem.
-    // Uses the REAL block shape: {type:"toolCall",id,name,arguments}.
+    // Real toolCall block shape: {type:"toolCall",id,name,arguments}.
     const realCallId = "call_0a69297a"
     const toolCallEnd = {
         type: "message_end",
@@ -170,10 +148,9 @@ function testStreamMapper(): void {
         "message_end with a toolCall block produces a FunctionCallItem",
     )
 
-    // tool_execution_end → FunctionCallOutputItem, using the REAL shape:
-    //   {type, toolCallId, toolName, result:{content:[{type:"text",text}]}, isError}
-    // The toolCallId EQUALS the toolCall block id from message_end, so the
-    // call and its output must reconcile to the same callId.
+    // Real tool_execution_end shape: {type, toolCallId, toolName,
+    // result:{content:[{type:"text",text}]}, isError}. Its toolCallId equals
+    // the toolCall block id from message_end — call and output must reconcile.
     const toolExecEnd = {
         type: "tool_execution_end",
         toolCallId: realCallId,
@@ -192,11 +169,9 @@ function testStreamMapper(): void {
         "tool_execution_end (real shape) emits a FunctionCallOutputItem",
     )
 
-    // The load-bearing reconciliation assertion: call.call_id === output.call_id
-    // === the real toolCallId. Round-1 bug: tool_execution_end read `callId`
-    // (never present) so this item was never emitted at all.
-    // NB: the serialized Mozaik field is `call_id` (snake_case), and the
-    // output is an array of {type:"input_text",text}, not a bare string.
+    // Load-bearing reconciliation: call.call_id === output.call_id === the real
+    // toolCallId (a past bug read `callId`, never present, so no item was emitted).
+    // NB: serialized Mozaik field is `call_id`; output is [{type:"input_text",text}].
     const callId = fnCall
         ? (JSON.parse(JSON.stringify(fnCall)).call_id as string | undefined)
         : undefined
@@ -216,8 +191,7 @@ function testStreamMapper(): void {
         "call and output reconcile to the same call_id",
     )
 
-    // The output text must come from result.content[].text, not a stringified
-    // result object.
+    // Output text must come from result.content[].text, not a stringified result object.
     const outParts = fnOut
         ? (JSON.parse(JSON.stringify(fnOut)).output as
               | Array<{ text?: string }>
@@ -231,10 +205,9 @@ function testStreamMapper(): void {
         `output text extracted from result.content[].text (got: ${outText})`,
     )
 
-    // Regression (HIGH-1): an empty-but-successful tool result (e.g. bash with
-    // no stdout → content:[{type:"text",text:""}]) must STILL emit a
-    // FunctionCallOutputItem (reconciled to the callId), not fall through to a
-    // stringified-envelope dump and not be dropped.
+    // Regression (HIGH-1): an empty-but-successful tool result (bash with no
+    // stdout) must STILL emit a reconciled FunctionCallOutputItem — not be
+    // dropped or fall through to a stringified-envelope dump.
     const emptyOutEnd = {
         type: "tool_execution_end",
         toolCallId: realCallId,
@@ -263,13 +236,9 @@ function testStreamMapper(): void {
         `empty result yields empty output, not a stringified envelope (got: ${JSON.stringify(emptyText)})`,
     )
 
-    // Regression (HIGH-1, load-bearing): a tool_execution_end with NO `result`
-    // field at all (interrupted/cancelled/error path) — this is the shape that
-    // makes extractToolOutput return undefined. The OLD emit guard
-    // (`callId !== undefined && outputStr !== undefined`) would DROP the
-    // FunctionCallOutputItem here, orphaning the FunctionCallItem from
-    // message_end. The fix emits it anyway (body defaults to ""/"no output").
-    // This assertion FAILS if the fix is reverted.
+    // Regression (HIGH-1): tool_execution_end with NO `result` field at all
+    // (interrupted/cancelled/error path). The old emit guard dropped the
+    // FunctionCallOutputItem here, orphaning the FunctionCallItem; fails on revert.
     const noBodyEnd = {
         type: "tool_execution_end",
         toolCallId: realCallId,
@@ -286,8 +255,7 @@ function testStreamMapper(): void {
     )
 
     // Regression (HIGH-1): same shape but isError → output must be the explicit
-    // failure sentinel, not dropped. The 'no output' default branch is only
-    // reachable when result is entirely absent, so this exercises it.
+    // failure sentinel, not dropped ('no output' is only reachable with result absent).
     const errEnd = {
         type: "tool_execution_end",
         toolCallId: realCallId,
@@ -320,13 +288,10 @@ function testStreamMapper(): void {
     const agentEndResult = mapPiEvent("agent-1", agentEndEvent)
     assert(agentEndResult.items.length >= 1, "agent_end produces items")
 
-    // unknown
     const unknownEvent = { type: "foobar", timestamp: 1239 }
     const unknownResult = mapPiEvent("agent-1", unknownEvent)
     assert(unknownResult.items.length >= 1, "unknown event produces items (not dropped)")
 }
-
-// ─── Test 2: One-Shot Runner (live) ───────────────────────────────────
 
 async function testOneShot(): Promise<void> {
     process.stderr.write("\n[test] 2. One-shot runner (live pi invocation)\n")
@@ -344,8 +309,6 @@ async function testOneShot(): Promise<void> {
         assert(false, `one-shot threw: ${(e as Error).message}`)
     }
 }
-
-// ─── Test 3: CLI Participant (live) ───────────────────────────────────
 
 async function testCliParticipant(): Promise<void> {
     process.stderr.write("\n[test] 3. CLI participant (live pi invocation)\n")
@@ -375,15 +338,11 @@ async function testCliParticipant(): Promise<void> {
     participant.leave(env)
 }
 
-// ─── Test 4: Story Agent (live) ───────────────────────────────────────
-
 async function testStoryAgent(): Promise<void> {
     process.stderr.write("\n[test] 4. Story agent (live pi invocation)\n")
 
-    // A story is real work: edit the worktree. Use a file-mutation prompt
-    // (not a prose echo) so success means the agent actually did something
-    // — and so the success predicate (which requires >=1 tool call) is
-    // exercised on a genuine task.
+    // File-mutation prompt (not a prose echo) so the success predicate
+    // (requires >=1 tool call) is exercised on a genuine task.
     const targetFile = "STORY_AGENT_OK.txt"
     const env = new AgenticEnvironment()
     const agent = new PiStoryAgent({
@@ -410,13 +369,9 @@ async function testStoryAgent(): Promise<void> {
     agent.leave(env)
 }
 
-// ─── Test 5: Success predicate rejects no-op (regression guard) ───────
-//
-// `pi` exits 0 even when the model just talks and does no work. A
-// prose-only prompt invokes no tools, so the success predicate MUST
-// reject it — otherwise a refused/no-op story would be reported as a
-// false PASS to the Conductor. This guards that predicate against
-// regressing back to exit-code-only.
+// `pi` exits 0 even when the model just talks and does no work, so the
+// success predicate must reject a zero-tool run — otherwise a refused/no-op
+// story is a false PASS to the Conductor. Guards against exit-code-only regression.
 async function testNoOpRejected(): Promise<void> {
     process.stderr.write("\n[test] 5. No-op story is rejected (regression guard)\n")
 
@@ -444,22 +399,16 @@ async function testNoOpRejected(): Promise<void> {
     agent.leave(env)
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────
-
 async function main(): Promise<void> {
     process.stderr.write("═══ Pi Backend Integration Test ═══\n")
 
     setup()
 
     try {
-        // Unit-level test (no live process needed)
         testStreamMapper()
 
-        // Live integration tests need `pi` on PATH + a configured
-        // provider. Probe up front and SKIP (not fail) when it's absent,
-        // so CI / machines without pi don't conflate "environment not
-        // provisioned" with "code regression". A genuine failure still
-        // exits non-zero; a missing binary exits 0 after the unit test.
+        // Live tests need `pi` on PATH + a configured provider: SKIP (not fail)
+        // when absent so CI doesn't conflate "not provisioned" with "regression".
         if (piAvailable()) {
             await testOneShot()
             await testCliParticipant()

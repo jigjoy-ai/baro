@@ -18,6 +18,7 @@ import {
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
+    StoryIntervention,
     StoryResult,
     StorySpawnRequest,
     StorySpawned,
@@ -129,6 +130,16 @@ export class StoryFactory extends BaseObserver {
             return
         }
 
+        if (StoryIntervention.is(event) && event.data.action === "abort") {
+            const aborted = this.abort(event.data.storyId)
+            if (aborted) {
+                process.stderr.write(
+                    `[story-factory] ${event.data.storyId} aborted (${event.data.source}): ${event.data.reason}\n`,
+                )
+            }
+            return
+        }
+
         // When a story finishes (passes or fails), dispose its execution so we
         // can clean up its bus membership / executor resources.
         if (StoryResult.is(event)) {
@@ -141,10 +152,10 @@ export class StoryFactory extends BaseObserver {
     }
 
     /**
-     * Abort a running story mid-flight (the Supervisor calls this on a detected
-     * stall). The agent settles with a failed StoryResult, which the Surgeon
-     * then reacts to (split/escalate). Returns false if the story isn't active
-     * or its executor doesn't support abort.
+     * Abort a running story mid-flight (StoryIntervention from the bus, or the
+     * Operator's external abort). The agent settles with a failed StoryResult,
+     * which the Surgeon then reacts to (split/escalate). Returns false if the
+     * story isn't active or its executor doesn't support abort.
      */
     abort(storyId: string): boolean {
         const exec = this.active.get(storyId)

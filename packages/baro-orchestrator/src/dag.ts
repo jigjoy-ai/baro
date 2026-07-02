@@ -1,12 +1,6 @@
 /**
- * DAG levels via Kahn-style topological sort, ported from
- * crates/baro-tui/src/dag.rs. Stories at the same level have no
- * dependencies on each other and run in parallel; subsequent levels
- * unlock as their dependencies complete.
- *
- * Generic over the node shape — operates on objects exposing `id`,
- * `priority`, `dependsOn`, and an optional `passes` flag (so we can
- * compute either the full DAG or the remaining-work DAG).
+ * DAG levels via Kahn-style topological sort. Stories at the same level
+ * have no dependencies on each other and run in parallel.
  */
 
 export interface DagNode {
@@ -22,9 +16,8 @@ export interface DagLevel {
 
 export interface BuildOptions {
     /**
-     * If true, stories with `passes: true` are excluded and any deps on
-     * already-passing stories are treated as satisfied. Default: false
-     * (build full DAG including completed stories).
+     * Exclude stories with `passes: true` and treat deps on them as
+     * satisfied (the remaining-work DAG). Default: false.
      */
     onlyIncomplete?: boolean
 }

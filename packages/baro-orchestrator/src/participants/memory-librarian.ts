@@ -1,14 +1,8 @@
 /**
- * MemoryLibrarian — semantic memory for cross-agent context sharing.
- *
- * Architecture:
- * 1. Agents use tools (Read, Grep, etc.) → outputs intercepted and stored
- * 2. New story launches → semantic search for relevant context
- * 3. Context + CLI instructions injected at launch
- * 4. Agents can query mid-flight via baro-memory CLI
- *
- * Log: ~/.baro/runs/memory-*.log
- * Debug: BARO_DEBUG=memory
+ * MemoryLibrarian — semantic (Vectra-backed) cross-agent memory: stores
+ * exploration-tool outputs, injects semantically relevant context + CLI
+ * instructions at story launch; agents can also query mid-flight via the
+ * baro-memory CLI. Log: ~/.baro/runs/memory-*.log; debug: BARO_DEBUG=memory.
  */
 
 import {
@@ -26,8 +20,6 @@ import {
     StoryResult,
     StorySpawned,
 } from "../semantic-events.js"
-
-// ── Logging ──────────────────────────────────────────────────
 
 const DEBUG = process.env.BARO_DEBUG?.includes("memory") ?? false
 import { appendFileSync, mkdirSync } from "fs"
@@ -67,11 +59,9 @@ function logStats(): void {
     log("╚═══════════════════════════════════════════════════════════╝")
 }
 
-// ── Types ────────────────────────────────────────────────────
-
 const EXPLORATION_TOOLS = new Set(["Read", "Grep", "Glob", "Bash", "LSP"])
 
-/** Pending tool call awaiting its output. TTL-based cleanup prevents leaks. */
+/** TTL-based cleanup prevents leaks from timed-out agents. */
 interface PendingCall {
     agentId: string
     tool: string
@@ -79,7 +69,6 @@ interface PendingCall {
     timestamp: number
 }
 
-/** Maximum age for a pending call before it's discarded (5 minutes). */
 const PENDING_TTL_MS = 5 * 60 * 1000
 
 export interface MemoryLibrarianOptions {
@@ -87,15 +76,11 @@ export interface MemoryLibrarianOptions {
     minSimilarity?: number
     maxInjectedChars?: number
     /**
-     * Session path for persisting memory to disk.
-     * When set, the memory store writes to Vectra index here so the CLI
-     * and orchestrator can share state across processes.
-     * Typically: ~/.baro/sessions/<session-id>/memory
+     * When set, the Vectra index persists here so the CLI and orchestrator
+     * share state across processes.
      */
     sessionPath?: string
 }
-
-// ── Implementation ───────────────────────────────────────────
 
 export class MemoryLibrarian extends BaseObserver {
     private readonly opts: Required<MemoryLibrarianOptions>
@@ -123,7 +108,6 @@ export class MemoryLibrarian extends BaseObserver {
 
     private async ensureStore(): Promise<MemoryStore | null> {
         if (this.opts.disabled) return null
-        // Give up after MAX_INIT_ATTEMPTS failures (handles persistent errors)
         if (this.initAttempts >= MemoryLibrarian.MAX_INIT_ATTEMPTS && !this.store) return null
 
         if (!this.store && !this.initPromise) {
@@ -150,7 +134,6 @@ export class MemoryLibrarian extends BaseObserver {
         return this.store
     }
 
-    /** Cleanup stale pending calls (prevents memory leak from timed-out agents). */
     private pruneStalePending(): void {
         const now = Date.now()
         for (const [callId, pending] of this.pending) {
@@ -160,15 +143,9 @@ export class MemoryLibrarian extends BaseObserver {
         }
     }
 
-    // ── Called at story launch ────────────────────────────────
-
     /**
-     * Semantic search for relevant context from other agents.
-     * Called by Conductor's onBeforeStoryLaunch hook.
-     * Returns context + CLI instructions that survive compaction.
-     *
-     * ALWAYS returns instructions (even when store is empty) so agents
-     * know they can query mid-flight as other agents store findings.
+     * ALWAYS returns the CLI instructions (even when the store is empty) so
+     * agents know they can query mid-flight as other agents store findings.
      */
     async gatherContext(storyId: string, hints: readonly string[] = []): Promise<string | null> {
         const store = await this.ensureStore()
@@ -179,16 +156,13 @@ export class MemoryLibrarian extends BaseObserver {
 
         log(`gatherContext(${storyId}): ${storeStats.totalFindings} findings, ${storeStats.cachedFiles} cached files`)
 
-        // Get relevant context via semantic search (may be empty if no findings yet)
         let context: string | null = null
         if (storeStats.totalFindings > 0) {
             context = await store.gatherContext(storyId, [...hints], this.opts.maxInjectedChars)
         }
 
-        // Get list of cached files
         const cachedPaths = await store.getCachedPaths()
 
-        // ALWAYS inject CLI instructions so agents can query mid-flight
         const parts: string[] = []
 
         parts.push("## Shared Memory System (from parallel agents)")
@@ -213,7 +187,6 @@ export class MemoryLibrarian extends BaseObserver {
         parts.push("If a file is cached, use `baro-memory cache get` instead of Read.")
         parts.push("")
 
-        // List cached files
         if (cachedPaths.length > 0) {
             parts.push("### Cached files (already read by other agents):")
             for (const p of cachedPaths.slice(0, 20)) {
@@ -225,7 +198,7 @@ export class MemoryLibrarian extends BaseObserver {
             parts.push("")
         }
 
-        // Add relevant context with boundary markers (reduces prompt injection risk)
+        // Boundary markers reduce prompt-injection risk from agent content.
         if (context) {
             stats.hits++
             stats.charsReturned += context.length
@@ -245,14 +218,11 @@ export class MemoryLibrarian extends BaseObserver {
         return result
     }
 
-    // ── Bus observers: store findings ─────────────────────────
-
     override async onExternalFunctionCall(source: Participant, item: FunctionCallItem): Promise<void> {
         if (!EXPLORATION_TOOLS.has(item.name)) return
         const agentId = (source as unknown as { agentId?: string }).agentId
         if (typeof agentId !== "string") return
 
-        // Prune stale entries periodically
         if (this.pending.size > 100) this.pruneStalePending()
 
         let args: Record<string, unknown> = {}
@@ -272,7 +242,7 @@ export class MemoryLibrarian extends BaseObserver {
                 .filter((b): b is { text: string } => typeof b?.text === "string")
                 .map(b => b.text)
         } catch {
-            return // Malformed output — skip silently
+            return // malformed output — skip silently
         }
 
         const pending = this.pending.get(callId)
@@ -283,13 +253,12 @@ export class MemoryLibrarian extends BaseObserver {
         if (!store) return
 
         const content = outputTexts.join("\n")
-        if (!content.trim()) return // Skip empty outputs
+        if (!content.trim()) return
 
         const filePath = pending.tool === "Read"
             ? (pending.args.file_path ?? pending.args.path) as string | undefined
             : undefined
 
-        // Cache file reads
         if (pending.tool === "Read" && filePath && content.length > 0) {
             try {
                 await store.cacheFile(filePath, content, pending.agentId)
@@ -300,7 +269,6 @@ export class MemoryLibrarian extends BaseObserver {
             }
         }
 
-        // Store finding for semantic search
         try {
             await store.remember({
                 tool: pending.tool,
@@ -316,7 +284,6 @@ export class MemoryLibrarian extends BaseObserver {
             log(`STORE FAILED: ${pending.tool} from ${pending.agentId}: ${err}`)
         }
 
-        // Emit Knowledge event (only for high-value tools)
         if (pending.tool === "Read" || pending.tool === "Grep") {
             for (const env of this.getEnvironments()) {
                 env.deliverSemanticEvent(this, Knowledge.create({

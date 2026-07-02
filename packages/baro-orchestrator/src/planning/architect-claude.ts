@@ -1,15 +1,7 @@
 /**
  * ArchitectClaude — one-shot Architect call via `claude --print`.
- *
- * Replaces the Rust-side `run_claude_architect` from `crates/baro-tui/
- * src/main.rs`. The TUI now invokes a tsx subprocess
- * (`scripts/run-architect.ts`) which dispatches into this function or
- * `architect-openai.ts` based on `--llm`.
- *
- * Same prompt as ArchitectOpenAI so the two providers produce
- * comparable decision documents. Claude's own built-in tools (Read,
- * Grep, Glob, Bash, LSP) do the codebase exploration — we don't need
- * to ship our `codebase-tools.ts` to it.
+ * Same prompt as ArchitectOpenAI so providers produce comparable
+ * decision documents; Claude's built-in tools do the exploration.
  */
 
 import { execFile } from "child_process"
@@ -24,25 +16,14 @@ import { effortTimeoutMs } from "./planner-claude.js"
 const execFileAsync = promisify(execFile)
 
 export interface RunArchitectClaudeOptions {
-    /** The user's goal — verbatim. */
     goal: string
-    /** Working directory the Architect explores in. */
     cwd: string
-    /** Claude model. Default: "opus" (the heavy-reasoning architect tier). */
     model?: string
-    /** Effort level passed as `claude --effort` (low|medium|high|xhigh|max). */
     effort?: string
-    /** Optional CLAUDE.md / project-context blob to prepend. */
     projectContext?: string
-    /** Path to the `claude` binary. Default: "claude" (resolved via PATH). */
     claudeBin?: string
-    /**
-     * Per-call timeout in milliseconds. Defaults scale with `effort`
-     * (shared with the Planner via {@link effortTimeoutMs}) — at
-     * `--effort max` a single exploratory architect turn routinely
-     * exceeds the old flat 3-minute default and was being SIGTERM'd
-     * mid-thought.
-     */
+    /** Defaults scale with `effort` ({@link effortTimeoutMs}) — a flat
+     *  3-minute timeout SIGTERM'd `--effort max` turns mid-thought. */
     timeoutMs?: number
 }
 

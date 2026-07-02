@@ -1,17 +1,9 @@
 /**
- * Codebase-exploration tools for OpenAI-backed planning participants
- * (Architect, Planner, and — later — the OpenAI StoryAgent).
- *
- * Shape: Mozaik 3.9's `FunctionTool`. Bound to a cwd at construction
- * time so the same OpenAIInferenceRunner instance can serve multiple
- * concurrent runs with different roots. All tools refuse to traverse
- * out of cwd via path resolution.
- *
- * NOT used by the Claude side — `claude --print` ships its own
- * Read/Grep/Glob/Bash. These exist only because the OpenAI Responses
- * API expects function definitions to be supplied per request and
- * because we want the Architect/Planner reasoning to be reproducible
- * with the same tool semantics across providers.
+ * Codebase-exploration tools (Mozaik `FunctionTool` shape) for the
+ * OpenAI-backed planning participants. Bound to a cwd at construction so
+ * one runner instance can serve concurrent runs with different roots;
+ * every tool refuses paths that resolve outside cwd. Not used by the
+ * Claude side — `claude --print` ships its own Read/Grep/Glob/Bash.
  */
 
 import { execSync } from "child_process"
@@ -262,8 +254,7 @@ function globTool(cwd: string): Tool {
         },
         async invoke(args: { pattern: string }) {
             try {
-                // Use shell glob via `find` so we don't take a new dep.
-                // Translate the most common glob features into find args.
+                // Shell glob via `find` + grep so we don't take a new dep.
                 const cmd = `cd ${JSON.stringify(cwd)} && find . -path './node_modules' -prune -o -path './.git' -prune -o -path './target' -prune -o -path './dist' -prune -o -path './build' -prune -o -type f -print | grep -E ${JSON.stringify(
                     globToRegex(args.pattern),
                 )} 2>/dev/null | head -200 || true`
@@ -306,8 +297,7 @@ function bashTool(cwd: string): Tool {
                     cwd,
                     encoding: "utf-8",
                     maxBuffer: 4 * 1024 * 1024,
-                    // Real builds/test suites (e.g. a Next.js `npm run build`) take minutes;
-                    // 30s was far too short. Default 5min, overridable per environment.
+                    // Real builds/test suites take minutes; 30s was far too short.
                     timeout: Number(process.env.BARO_BASH_TIMEOUT_MS) || 300_000,
                     stdio: ["ignore", "pipe", "pipe"],
                 })
@@ -334,12 +324,7 @@ function safePath(cwd: string, filePath: string): string | null {
     return resolved
 }
 
-/**
- * Tiny glob → regex translator. Covers `*`, `**`, `?`, and literal
- * characters. Good enough for the common cases ("src/**\/*.ts",
- * "packages/*\/package.json"); falls back to literal matching for
- * anything fancier.
- */
+/** Tiny glob → regex translator: covers `*`, `**`, `?` — enough for the common cases. */
 function globToRegex(glob: string): string {
     let regex = "^"
     let i = 0

@@ -1,46 +1,11 @@
 /**
- * OpenAIStoryAgent — Mozaik-native story executor that drives a
- * multi-turn coding loop on the OpenAI Responses API via Mozaik 3.9's
- * native inference runner. Sibling of `StoryAgent` (which wraps a
- * Claude CLI subprocess); both share the same bus contract so
- * downstream observers (Critic, Surgeon, Sentry, Librarian,
- * Cartographer) can't tell which is running.
- *
- * Lifecycle parity with Claude's StoryAgent:
- *   idle ─► starting ─► running ─► done | failed | aborted
- *                               ╰► retrying ─► running ─► …
- *
- * Multi-turn parity:
- *   1. System + initial user (story prompt) seed the ModelContext.
- *   2. One TURN = one or more inference ROUNDS until the model
- *      returns a final assistant message with no tool calls.
- *      Tool calls are executed against `createStoryTools` and their
- *      outputs are appended to the context for the next round.
- *   3. After a turn ends, we emit `AgentResultItem`-shaped event
- *      so Critic can evaluate (yes, the name still says "Claude" —
- *      a planned rename; observers all watch this exact class).
- *   4. We then wait `quietTimeoutMs` for an
- *      `AgentTargetedMessageItem` addressed to this agent. If one
- *      arrives (typically a corrective message from Critic), we
- *      append it as a user message and start another turn. If the
- *      timer expires, the attempt is done.
- *   5. `maxTurns` and `hardTimeoutSecs` bound the worst case.
- *
- * Bus events emitted:
- *   - AgentStateItem on every lifecycle transition.
- *   - FunctionCallItem + FunctionCallOutputItem via Mozaik's typed
- *     channels (Sentry watches FunctionCallItem for file conflicts,
- *     Librarian indexes both for cross-agent knowledge).
- *   - ModelMessageItem for assistant turns (Cartographer surfaces
- *     these as `model_message` frames).
- *   - AgentUserMessageItem for the initial story prompt + any
- *     mid-flight corrective messages (Cartographer renders them as
- *     `user_message` frames the user sees in the dashboard).
- *   - AgentResultItem at the end of each turn (Critic depends on
- *     this to fire its verdict).
- *
- * Not emitted: Claude-specific stream chunks / rate-limit / system
- * frames. OpenAI doesn't have the equivalent stream-json wire format.
+ * OpenAIStoryAgent — multi-turn coding loop on the OpenAI Responses API via
+ * Mozaik's native inference runner. Emits the same bus contract as StoryAgent
+ * (Claude) so downstream observers (Critic, Surgeon, Sentry, Librarian,
+ * Cartographer) can't tell which backend ran. One TURN = inference rounds
+ * until the model replies with no tool calls; end-of-turn AgentResult fires
+ * Critic, then we wait quietTimeoutMs for an AgentTargetedMessage before
+ * either running another turn or finishing.
  */
 
 import {
@@ -111,22 +76,15 @@ follow-up user message, treat it as additional acceptance criteria
 and revise.`
 
 export interface OpenAIStoryAgentOptions {
-    /** Mozaik model name. Default: "gpt-5.5". */
     model?: string
-    /**
-     * Cap on inference rounds within a single TURN — each round = one
-     * `runner.run()` invocation, optionally followed by tool execution.
-     * Default: 30 (a comfortable ceiling for typical story sizes).
-     */
+    /** Cap on inference rounds within one TURN (round = one runner.run() + tool exec). */
     maxRoundsPerTurn?: number
-    /** Per-round inference timeout. Default: 180s. */
     perRoundTimeoutSecs?: number
     /**
-     * Per-story OpenAI-compatible endpoint base URL. When set, THIS story
-     * runs against it instead of the process-global `OPENAI_BASE_URL` —
-     * and the model is always driven through `GenericOpenAIModel` (the
-     * built-in gpt-5.x classes are hard-wired to OpenAI). Used to mix
-     * endpoints (e.g. MiniMax + real OpenAI) in one run.
+     * Per-story OpenAI-compatible endpoint. Overrides the process-global
+     * `OPENAI_BASE_URL` for this story only and forces `GenericOpenAIModel`
+     * (the built-in gpt-5.x classes are hard-wired to OpenAI). Lets one run
+     * mix endpoints (e.g. MiniMax + real OpenAI).
      */
     baseUrl?: string
     /** API key paired with `baseUrl`. */
@@ -156,9 +114,8 @@ export class OpenAIStoryAgent extends BaseObserver {
     private resolveDone!: (outcome: StoryOutcome) => void
     public readonly done: Promise<StoryOutcome>
 
-    /** Resolved by `onExternalBusEvent` when a targeted message arrives. */
     private notifyMessage: (() => void) | null = null
-    /** Most recent pending message text (set alongside notifyMessage). */
+    /** Set alongside notifyMessage when a targeted message arrives. */
     private pendingMessage: string | null = null
 
     constructor(spec: StorySpec, opts: OpenAIStoryAgentOptions = {}) {
@@ -228,8 +185,6 @@ export class OpenAIStoryAgent extends BaseObserver {
         }
     }
 
-    // ─── Attempt orchestration ──────────────────────────────────────
-
     private async executeAllAttempts(): Promise<void> {
         const maxAttempts = this.spec.retries + 1
         let lastError: string | null = null
@@ -247,10 +202,8 @@ export class OpenAIStoryAgent extends BaseObserver {
             attempts = i + 1
             if (this.currentPhase === "aborted") break
             if (i > 0) {
-                // Brief pause + a state ping with detail; we re-use
-                // the "starting" phase since AgentPhase doesn't have
-                // a dedicated retry state. The detail string carries
-                // the attempt number for observers.
+                // AgentPhase has no retry state; re-use "starting" with the
+                // attempt number in the detail string.
                 this.transition("starting", `retry ${attempts}/${maxAttempts}`)
                 await sleep(this.spec.retryDelayMs)
             }
@@ -297,9 +250,8 @@ export class OpenAIStoryAgent extends BaseObserver {
     }
 
     private async runOneAttempt(): Promise<void> {
-        // Seed the conversation with the story prompt, and surface it
-        // on the bus as an AgentUserMessageItem so Cartographer renders
-        // it the same way it renders the Claude side's user echoes.
+        // Echo the prompt on the bus so Cartographer renders it the same
+        // way as the Claude side's user echoes.
         const userMessageText = this.spec.prompt
         this.envRef?.deliverSemanticEvent(
             this,
@@ -319,12 +271,9 @@ export class OpenAIStoryAgent extends BaseObserver {
             const turnResult = await this.runOneTurn(context)
             context = turnResult.context
 
-            // Emit the end-of-turn AgentResultItem so Critic can fire.
-            // For OpenAI the "subtype" maps loosely: success = the
-            // assistant produced a message and the turn ended cleanly.
-            // `usage` carries the per-turn token totals Mozaik handed
-            // us on each inference round, summed; same shape Claude's
-            // stream-json mapper produces (snake_case keys).
+            // End-of-turn AgentResult is what fires Critic. `usage` is the
+            // per-turn round sum, same snake_case shape as Claude's
+            // stream-json mapper produces.
             const usageJson = turnResult.usage.isEmpty ? null : turnResult.usage.toJSON()
             this.envRef?.deliverSemanticEvent(
                 this,
@@ -349,9 +298,6 @@ export class OpenAIStoryAgent extends BaseObserver {
                 return
             }
 
-            // Wait for either a follow-up message (Critic feedback) or
-            // the quiet timeout. If a message arrives, append it and
-            // run another turn; if the timer expires, we're done.
             const gotMessage = await this.waitForMessageOrQuiet()
             if (!gotMessage) {
                 this.transition("done", `${turn} turn(s)`)
@@ -374,10 +320,8 @@ export class OpenAIStoryAgent extends BaseObserver {
     }
 
     /**
-     * Drive a single TURN — repeated inference rounds with tool
-     * execution in between — until the model returns a final
-     * assistant message without tool calls. That terminal message
-     * IS the end of the turn.
+     * One TURN: repeated inference rounds with tool execution in between,
+     * until the model returns an assistant message with no tool calls.
      */
     private async runOneTurn(
         initialContext: ModelContext,
@@ -385,10 +329,7 @@ export class OpenAIStoryAgent extends BaseObserver {
         let context = initialContext
         let assistantText: string | null = null
         const perRoundMs = this.opts.perRoundTimeoutSecs * 1000
-        // Per-turn token usage. Multiple inference rounds within
-        // one turn (tool-call → response → tool-call → …) all
-        // accumulate here; the final AgentResultItem ships the
-        // sum.
+        // Accumulates across all rounds in the turn; the AgentResult ships the sum.
         const usage = new UsageAccumulator()
 
         for (let round = 1; round <= this.opts.maxRoundsPerTurn; round++) {
@@ -438,7 +379,6 @@ export class OpenAIStoryAgent extends BaseObserver {
                 }
             }
 
-            // Execute any tool calls the model emitted this round.
             for (const call of calls) {
                 const tool = this.tools.find((t) => t.name === call.name)
                 const output = tool
@@ -449,9 +389,6 @@ export class OpenAIStoryAgent extends BaseObserver {
                 context = context.addContextItem(outItem)
             }
 
-            // Terminal condition: the model produced an assistant
-            // message AND no tool calls this round. That means the
-            // model is signalling "turn is over".
             if (sawMessage && calls.length === 0) {
                 return {
                     context,
@@ -461,9 +398,8 @@ export class OpenAIStoryAgent extends BaseObserver {
                 }
             }
 
-            // Defensive: model returned neither a message nor calls.
-            // Mozaik shouldn't let this happen but we'd rather abort
-            // the turn than loop forever.
+            // Defensive: neither message nor calls shouldn't happen
+            // (Mozaik-level invariant), but abort rather than loop forever.
             if (!sawMessage && calls.length === 0) {
                 return {
                     context,
@@ -475,7 +411,6 @@ export class OpenAIStoryAgent extends BaseObserver {
             }
 
             assistantText = lastMessageText ?? assistantText
-            // Otherwise loop: more tool calls to feed back.
         }
 
         return {
@@ -488,9 +423,8 @@ export class OpenAIStoryAgent extends BaseObserver {
     }
 
     /**
-     * Resolves `true` if an `AgentTargetedMessageItem` arrives within
-     * `quietTimeoutMs`, `false` if the timer fires first. Mirrors
-     * Claude side's quiet timer that closes stdin after silence.
+     * True if a targeted message arrives within quietTimeoutMs, false if the
+     * timer fires first. Mirrors the Claude side's quiet timer.
      */
     private async waitForMessageOrQuiet(): Promise<boolean> {
         return new Promise<boolean>((resolve) => {
@@ -521,12 +455,9 @@ export class OpenAIStoryAgent extends BaseObserver {
     }
 }
 
-// ─── module helpers ────────────────────────────────────────────────
-
 function pickModel(name: string, connection?: OpenAIConnection): GenerativeModel {
-    // A per-story endpoint always goes through GenericOpenAIModel — the
-    // built-in gpt-5.x classes bind to OpenAI's own endpoint and can't be
-    // redirected, so "openai:gpt-4o@myproxy" must use the generic model.
+    // Per-story endpoints must use GenericOpenAIModel — the built-in gpt-5.x
+    // classes bind to OpenAI's own endpoint and can't be redirected.
     if (connection?.baseURL) {
         return new GenericOpenAIModel(name, connection)
     }

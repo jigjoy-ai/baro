@@ -3,10 +3,11 @@ import assert from "node:assert/strict"
 
 import {
     buildSurgeonPrompt,
+    CritiqueLog,
     type PrdSnapshot,
 } from "../src/participants/surgeon.js"
 import { formatRoute, resolveStoryRoute } from "../src/routing.js"
-import type { StoryResultData } from "../src/semantic-events.js"
+import { Critique, type StoryResultData } from "../src/semantic-events.js"
 
 const snap: PrdSnapshot = {
     project: "demo",
@@ -52,5 +53,45 @@ describe("buildSurgeonPrompt — names the model that actually ran (#48)", () =>
         const p = buildSurgeonPrompt(snap, failure, () => null)
         assert.doesNotMatch(p, /Model that actually ran/)
         assert.match(p, /Tier that just failed: sonnet/)
+    })
+})
+
+describe("buildSurgeonPrompt — Critic verdicts feed the replan decision", () => {
+    function critique(turn: number, reasoning: string, violated: string[] = []) {
+        return Critique.create({
+            agentId: "S1",
+            verdict: "fail" as const,
+            reasoning,
+            violatedCriteria: violated,
+            turn,
+            modelUsed: "haiku",
+        })
+    }
+
+    it("includes the story's recent critiques with violated criteria", () => {
+        const log = new CritiqueLog()
+        log.record(critique(1, "tests missing", ["A1"]))
+        log.record(critique(2, "still no tests", ["A1", "A2"]))
+        const p = buildSurgeonPrompt(snap, failure, undefined, undefined, log.forStory("S1"))
+        assert.match(p, /# Critic verdicts on this story/)
+        assert.match(p, /turn 1: FAIL — tests missing \(violated: A1\)/)
+        assert.match(p, /turn 2: FAIL — still no tests \(violated: A1; A2\)/)
+    })
+
+    it("keeps only the latest N critiques and separates stories", () => {
+        const log = new CritiqueLog(2)
+        log.record(critique(1, "first"))
+        log.record(critique(2, "second"))
+        log.record(critique(3, "third"))
+        assert.deepEqual(
+            log.forStory("S1").map((c) => c.turn),
+            [2, 3],
+        )
+        assert.deepEqual(log.forStory("S2"), [])
+    })
+
+    it("omits the section when there are no critiques", () => {
+        const p = buildSurgeonPrompt(snap, failure, undefined, undefined, [])
+        assert.doesNotMatch(p, /Critic verdicts/)
     })
 })

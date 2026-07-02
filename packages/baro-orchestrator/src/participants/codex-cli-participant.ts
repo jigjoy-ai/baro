@@ -1,17 +1,8 @@
 /**
- * CodexCliParticipant — wraps an OpenAI Codex CLI process as a
- * first-class Mozaik Participant. Sibling of `ClaudeCliParticipant`.
- *
- * Spawned with `codex exec --json <prompt>`. Codex exec is one-shot
- * non-interactive: takes a single prompt as argv, streams JSONL events
- * to stdout, exits when the agent finishes. There is no stdin event
- * loop (unlike Claude Code's stream-json input). That makes this
- * participant simpler than ClaudeCliParticipant in one respect —
- * `onExternalEvent` doesn't forward AgentTargetedMessage to a running
- * process; new prompts mean a new Codex invocation.
- *
- * Library-grade: knows nothing about baro, PRD, or stories. Only knows
- * about agent IDs, working directories, and Codex.
+ * Wraps a one-shot `codex exec --json <prompt>` subprocess as a Mozaik
+ * Participant. No stdin event loop (unlike Claude Code's stream-json input).
+ * Event shapes: docs/stream-protocols.md § Codex.
+ * Library-grade: knows agent IDs, cwds, and Codex — nothing about baro/PRD/stories.
  */
 
 import { ChildProcess, spawn } from "child_process"
@@ -36,42 +27,23 @@ import {
 import { mapCodexEvent } from "../codex-stream-mapper.js"
 
 export interface CodexCliParticipantOptions {
-    /** Working directory for the Codex process. Required. */
     cwd: string
-    /** Initial prompt — passed as the final argv to `codex exec`. */
     prompt: string
-    /**
-     * Model identifier. Codex defaults to gpt-5.5 on accounts that have
-     * Plus+ access; on Free it routes to whatever Codex Mini variant the
-     * promo is currently exposing. Pass undefined to let Codex pick.
-     */
+    /** Omit to let Codex pick (gpt-5.5 on Plus+, a Mini variant on Free). */
     model?: string
     /**
-     * Bypass Codex's sandbox AND approval prompts. Equivalent to
-     * `--dangerously-bypass-approvals-and-sandbox` (alias `--yolo`)
-     * on the CLI. Replaces the deprecated `--full-auto` flag —
-     * which was just sandbox=workspace-write + no-approvals, but
-     * workspace-write blocks writes to `.git/` so the agent can't
-     * commit. Baro story workers run in a per-story git worktree
-     * (WorktreeManager, #50) — an isolated tree merged back only on
-     * success — so the "danger" is bounded; the agent NEEDS .git/
-     * writes to land commits and let Finalizer push.
-     *
-     * Default: false. Callers that don't need autonomous .git
-     * writes (e.g. read-only probes) should leave it off.
+     * Pass `--dangerously-bypass-approvals-and-sandbox` (`--yolo`).
+     * workspace-write sandboxing blocks `.git/` writes so the agent can't
+     * commit; per-story worktrees (#50) bound the blast radius.
+     * Default: false — leave off for read-only probes.
      */
     bypassSandbox?: boolean
     /**
-     * If true, pass `--skip-git-repo-check`. Required when the cwd is
-     * not a git repo (Codex refuses to run otherwise). baro's story
-     * workers run inside a per-story git worktree (a valid git repo), so
-     * the default is false — set this only when wiring up tests or
-     * one-off runs from /tmp.
+     * Pass `--skip-git-repo-check` — Codex refuses to run when cwd is not a
+     * git repo. Only needed for tests or one-off runs from /tmp.
      */
     skipGitRepoCheck?: boolean
-    /** Extra CLI arguments appended after the standard set. */
     extraArgs?: string[]
-    /** Path to the `codex` binary. Default: "codex" (resolved via PATH). */
     codexBin?: string
 }
 
@@ -83,10 +55,8 @@ export interface CodexRunSummary {
 
 export class CodexCliParticipant extends BaseObserver {
     /**
-     * Process-wide registry of every Codex child currently running. Used
-     * by the orchestrator's SIGINT/SIGTERM handlers to nuke orphans so a
-     * killed baro doesn't leave a swarm of background agents burning
-     * quota.
+     * Process-wide registry for the orchestrator's SIGINT/SIGTERM handlers,
+     * so a killed baro doesn't leave orphaned agents burning quota.
      */
     private static readonly active = new Set<CodexCliParticipant>()
 
@@ -130,9 +100,8 @@ export class CodexCliParticipant extends BaseObserver {
         opts: CodexCliParticipantOptions,
     ) {
         super()
-        // Nullish-coalesce each field so an explicit `undefined` from the
-        // caller (e.g. a spec that never set codexBin) doesn't clobber the
-        // default and crash spawn() with `file must be a string`.
+        // Nullish-coalesce so an explicit `undefined` can't clobber a default
+        // (esp. codexBin → spawn crash).
         this.options = {
             ...opts,
             codexBin: opts.codexBin ?? "codex",
@@ -156,10 +125,7 @@ export class CodexCliParticipant extends BaseObserver {
         return this.currentPhase
     }
 
-    /**
-     * Spawn the Codex process and start streaming its events into the
-     * environment. Idempotent: subsequent calls are a no-op.
-     */
+    /** Idempotent: subsequent calls are a no-op. */
     start(environment: AgenticEnvironment): void {
         if (this.proc) return
         this.envRef = environment
@@ -224,13 +190,8 @@ export class CodexCliParticipant extends BaseObserver {
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        // No-op for now. Codex exec is one-shot: it doesn't have a stdin
-        // user-message channel like Claude Code. AgentTargetedMessage
-        // delivery to a running Codex would require either a new
-        // invocation or future Codex SDK support for session resumption.
-        // Surface this as a noisy warning during M3/M4 so we catch any
-        // assumption from the orchestrator that messages route the way
-        // they do for Claude.
+        // Codex exec is one-shot — no stdin channel; targeted messages are
+        // logged and dropped.
         if (
             AgentTargetedMessage.is(event) &&
             event.data.recipientId === this.agentId
@@ -242,23 +203,15 @@ export class CodexCliParticipant extends BaseObserver {
     }
 
     private buildArgs(): string[] {
-        // `codex exec --json` — non-interactive JSONL stream.
         const args = ["exec", "--json"]
         if (this.options.skipGitRepoCheck) args.push("--skip-git-repo-check")
         if (this.options.bypassSandbox) {
-            // `--dangerously-bypass-approvals-and-sandbox` is the
-            // modern replacement for the deprecated `--full-auto`.
-            // workspace-write isn't enough — `.git/` is read-only
-            // even in workspace-write mode (per openai/codex#15505).
-            // baro stories need `.git/` writes to commit, so we go
-            // full bypass and rely on the per-story worktree (#50) for
-            // isolation.
+            // Full bypass, not workspace-write: `.git/` is read-only in
+            // workspace-write mode (openai/codex#15505) and stories must commit.
             args.push("--dangerously-bypass-approvals-and-sandbox")
         }
         if (this.options.model) args.push("--model", this.options.model)
         if (this.options.extraArgs?.length) args.push(...this.options.extraArgs)
-        // Prompt is the final positional. Codex expects it as a single
-        // shell arg; spawn() passes argv directly so no quoting needed.
         args.push(this.options.prompt)
         return args
     }
@@ -298,15 +251,9 @@ export class CodexCliParticipant extends BaseObserver {
 
         for (const item of items) {
             if (item instanceof SemanticEvent) {
-                // Lifecycle signals. Real Codex stream shape (observed
-                // 2026-05-22, codex v0.133.0):
-                //   thread.started   → ready
-                //   turn.started     → no-op (we're already running)
-                //   turn.completed   → success terminal for one-shot
-                //                      exec (thread.completed is only
-                //                      emitted on multi-turn sessions)
-                //   turn.failed      → failure terminal
-                //   thread.completed → process is shutting down cleanly
+                // Lifecycle mapping per docs/stream-protocols.md § Codex.
+                // Gotcha: one-shot exec ends at turn.completed;
+                // thread.completed appears only on multi-turn sessions.
                 if (
                     CodexSystem.is(item) &&
                     item.data.subtype === "thread.started"
@@ -320,20 +267,14 @@ export class CodexCliParticipant extends BaseObserver {
                         this.transition("failed", "codex turn failed")
                     }
                 }
-                // Don't transition to "done" on thread.completed either —
-                // the process-exit listener owns that, so we observe the
-                // real exit code before locking in the AgentPhase.
+                // Don't transition to "done" on thread.completed — the
+                // process-exit listener owns that, so the real exit code is
+                // observed first.
             }
             this.dispatch(item)
         }
     }
 
-    /**
-     * Route a mapped event to the right Mozaik delivery channel.
-     * Mirror of ClaudeCliParticipant.dispatch — assistant-side LLM items
-     * use Mozaik's typed channels; everything else goes through
-     * deliverSemanticEvent.
-     */
     private dispatch(
         item:
             | ModelMessageItem

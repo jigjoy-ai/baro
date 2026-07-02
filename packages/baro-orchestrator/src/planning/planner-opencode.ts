@@ -11,36 +11,21 @@ import {
     buildPlannerUserMessage,
 } from "./planner-prompts.js"
 
-/** Options for `runPlannerOpenCode`. */
 export interface RunPlannerOpenCodeOptions {
-    /** The user's goal — verbatim. */
     goal: string
-    /** Working directory. */
     cwd: string
     /** OpenCode model in `provider/model` format. */
     model?: string
-    /** Optional project context blob. */
     projectContext?: string
-    /** Optional decision document from the Architect phase. */
     decisionDocument?: string
-    /** If true, use a shorter planning prompt. */
+    /** `--quick` hard override: exactly 1 story. */
     quick?: boolean
-    /** Path to the `opencode` binary. Default: "opencode". */
     opencodeBin?: string
-    /**
-     * Per-call timeout in milliseconds. Default: 900_000 (15 minutes).
-     * Planner is the longest phase — large multi-story PRDs with strict
-     * JSON output frequently push models past shorter timeouts.
-     */
+    /** Default 15 min — large multi-story PRDs push models past
+     *  shorter timeouts. */
     timeoutMs?: number
 }
 
-/**
- * Run the Planner phase using OpenCode as the backend.
- *
- * @returns The PRD as a raw JSON string (a single `{ … }` object).
- * @throws Error if OpenCode returns empty or the result contains no valid JSON.
- */
 export async function runPlannerOpenCode(
     opts: RunPlannerOpenCodeOptions,
 ): Promise<string> {
@@ -70,10 +55,7 @@ export async function runPlannerOpenCode(
     return extractJsonObject(planText)
 }
 
-/**
- * Pull the first balanced `{ … }` block out of a raw string. Tolerates
- * markdown fences and leading prose.
- */
+/** First balanced `{ … }` block; tolerates markdown fences and leading prose. */
 function extractJsonObject(text: string): string {
     const trimmed = text.trim()
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed

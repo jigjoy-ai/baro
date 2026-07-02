@@ -1,11 +1,7 @@
-//! `baro doctor` — quick self-diagnostic that verifies the moving parts
-//! baro depends on before a real run starts. Run when a run fails in
-//! a way that doesn't make it clear which piece broke (e.g. issue #17,
-//! where the planner exited with code 1 and an empty stderr because
-//! `claude` wasn't authenticated).
-//!
-//! Exits 0 if every check passes, 1 if any fail. Prints a colored
-//! report to stderr with concrete remediation hints per failure.
+//! `baro doctor` — self-diagnostic for the moving parts baro depends
+//! on, for runs that fail without saying which piece broke. Exits 0 if
+//! every check passes, 1 otherwise; prints a colored report with
+//! remediation hints to stderr.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -20,7 +16,6 @@ const ANSI_GREEN: &str = "\x1b[32m";
 const ANSI_RED: &str = "\x1b[31m";
 const ANSI_YELLOW: &str = "\x1b[33m";
 
-/// Result of one check.
 struct CheckResult {
     name: &'static str,
     ok: bool,
@@ -55,10 +50,6 @@ pub async fn run() -> i32 {
     if results.iter().all(|r| r.ok) { 0 } else { 1 }
 }
 
-// ─── Individual checks ─────────────────────────────────────────────
-
-/// Verify `claude` binary is reachable. Resolves PATH lookup and
-/// returns the full path if found.
 async fn check_claude_on_path() -> CheckResult {
     match which::which("claude") {
         Ok(path) => CheckResult::pass(
@@ -73,8 +64,7 @@ async fn check_claude_on_path() -> CheckResult {
     }
 }
 
-/// Run `claude --version`. Hard timeout 5s so a hung install can't
-/// freeze the doctor.
+/// Hard 5s timeout so a hung install can't freeze the doctor.
 async fn check_claude_version() -> CheckResult {
     let mut cmd = Command::new("claude");
     cmd.arg("--version");
@@ -118,10 +108,9 @@ async fn check_claude_version() -> CheckResult {
     }
 }
 
-/// Run a trivial authenticated `claude --print` call. This is the
-/// real test — if this succeeds, the planner will run. If it fails,
-/// the user is almost certainly not logged in (which is the issue
-/// #17 scenario: empty stderr, exit 1, no clue why).
+/// Trivial authenticated `claude --print` call — the real test: if it
+/// succeeds the planner will run; if it fails the user is almost
+/// certainly not logged in (empty stderr, exit 1, no clue why).
 async fn check_claude_print_call() -> CheckResult {
     let mut cmd = Command::new("claude");
     cmd.args([
@@ -183,13 +172,8 @@ async fn check_claude_print_call() -> CheckResult {
     }
 }
 
-/// `gh` is only required for the Finalizer (PR creation). A failing
-/// gh check is a warning, not a fatal error — the run will still
-/// complete, the user just won't get an auto-PR.
-/// Verify `codex` binary is reachable (optional — only needed for
-/// `baro --llm codex`). Soft failure: codex is optional infrastructure
-/// for the third backend; not having it doesn't block Claude or
-/// OpenAI workflows.
+/// Optional — only needed for `--llm codex`; absence doesn't block
+/// other backends.
 async fn check_codex_on_path() -> CheckResult {
     match which::which("codex") {
         Ok(path) => CheckResult::pass(
@@ -204,10 +188,7 @@ async fn check_codex_on_path() -> CheckResult {
     }
 }
 
-/// Verify `opencode` binary is reachable (optional — only needed for
-/// `baro --llm opencode`). Soft failure: opencode is optional
-/// infrastructure for the OpenCode backend; not having it doesn't
-/// block Claude, OpenAI, or Codex workflows.
+/// Optional — only needed for `--llm opencode`.
 async fn check_opencode_on_path() -> CheckResult {
     match which::which("opencode") {
         Ok(path) => CheckResult::pass(
@@ -222,10 +203,7 @@ async fn check_opencode_on_path() -> CheckResult {
     }
 }
 
-/// Verify `pi` binary is reachable (optional — only needed for
-/// `baro --llm pi`). Soft failure: pi is optional
-/// infrastructure for the Pi backend; not having it doesn't
-/// block Claude, OpenAI, Codex, or OpenCode workflows.
+/// Optional — only needed for `--llm pi`.
 async fn check_pi_on_path() -> CheckResult {
     match which::which("pi") {
         Ok(path) => CheckResult::pass(
@@ -254,9 +232,8 @@ async fn check_gh_on_path() -> CheckResult {
     }
 }
 
-/// Verify we can write to ~/.baro/runs/. Audit logs and stderr
-/// sidecars from real runs land here. If it's root-owned (sudo
-/// install accident) we want to know now, not mid-run.
+/// Audit logs land in ~/.baro/runs — if it's root-owned (sudo install
+/// accident) we want to know now, not mid-run.
 async fn check_audit_dir_writable() -> CheckResult {
     let home = match std::env::var_os("HOME") {
         Some(h) => PathBuf::from(h),
@@ -292,8 +269,6 @@ async fn check_audit_dir_writable() -> CheckResult {
         ),
     }
 }
-
-// ─── Reporting ─────────────────────────────────────────────────────
 
 fn print_report(results: &[CheckResult]) {
     eprintln!();

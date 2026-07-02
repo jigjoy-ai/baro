@@ -29,6 +29,7 @@ import {
     type RouteDescriber,
     SURGEON_SYSTEM_PROMPT,
     buildSurgeonPrompt,
+    CritiqueLog,
     extractJsonObject,
     surgeonDeterministicReplan,
 } from "./surgeon.js"
@@ -73,6 +74,7 @@ export class SurgeonPi extends BaseObserver {
     }
 
     private replansEmitted = 0
+    private readonly critiques = new CritiqueLog()
     private readonly pending = new Set<Promise<void>>()
 
     constructor(opts: SurgeonPiOptions) {
@@ -98,6 +100,7 @@ export class SurgeonPi extends BaseObserver {
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
+        this.critiques.record(event)
         if (!StoryResult.is(event)) return
         if (event.data.success) return
         if (this.replansEmitted >= this.opts.maxReplans) return
@@ -122,7 +125,13 @@ export class SurgeonPi extends BaseObserver {
         failure: StoryResultData,
     ): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute, this.opts.escalationRoute)
+        const userPrompt = buildSurgeonPrompt(
+            snap,
+            failure,
+            this.opts.resolveRoute,
+            this.opts.escalationRoute,
+            this.critiques.forStory(failure.storyId),
+        )
         const prompt = `${SURGEON_SYSTEM_PROMPT}\n\n${userPrompt}`
 
         try {

@@ -32,12 +32,37 @@ import { promisify } from "util"
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
 import {
+    Critique,
+    type CritiqueData,
     Replan,
     type ReplanData,
     type ReplanStoryAdd,
     StoryResult,
     type StoryResultData,
 } from "../semantic-events.js"
+
+/**
+ * Rolling per-story log of Critic verdicts, so a Surgeon evaluating a
+ * terminal failure sees WHY the Critic kept failing the story — not just
+ * the final error string. Shared by all Surgeon variants.
+ */
+export class CritiqueLog {
+    private readonly byStory = new Map<string, CritiqueData[]>()
+
+    constructor(private readonly keep = 3) {}
+
+    record(event: SemanticEvent<unknown>): void {
+        if (!Critique.is(event)) return
+        const list = this.byStory.get(event.data.agentId) ?? []
+        list.push(event.data)
+        if (list.length > this.keep) list.shift()
+        this.byStory.set(event.data.agentId, list)
+    }
+
+    forStory(storyId: string): readonly CritiqueData[] {
+        return this.byStory.get(storyId) ?? []
+    }
+}
 
 const execFileAsync = promisify(execFile)
 
@@ -169,6 +194,7 @@ export class Surgeon extends BaseObserver {
 
     private replansEmitted = 0
     private readonly pending = new Set<Promise<void>>()
+    private readonly critiques = new CritiqueLog()
 
     constructor(opts: SurgeonOptions) {
         super()
@@ -193,6 +219,7 @@ export class Surgeon extends BaseObserver {
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
+        this.critiques.record(event)
         if (!StoryResult.is(event)) return
         if (event.data.success) return
         if (this.replansEmitted >= this.opts.maxReplans) return
@@ -232,7 +259,13 @@ export class Surgeon extends BaseObserver {
         failure: StoryResultData,
     ): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const prompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute, this.opts.escalationRoute)
+        const prompt = buildSurgeonPrompt(
+            snap,
+            failure,
+            this.opts.resolveRoute,
+            this.opts.escalationRoute,
+            this.critiques.forStory(failure.storyId),
+        )
         try {
             const { stdout } = await execFileAsync(
                 this.opts.claudeBin,
@@ -300,6 +333,7 @@ export function buildSurgeonPrompt(
     failure: StoryResultData,
     resolveRoute?: RouteDescriber,
     escalationRoute?: string,
+    critiques?: readonly CritiqueData[],
 ): string {
     const storyLines = snap.stories
         .map(
@@ -333,6 +367,19 @@ export function buildSurgeonPrompt(
             : []),
         `Attempts: ${failure.attempts}`,
         `Error: ${failure.error ?? "(no reason captured)"}`,
+        ...(critiques && critiques.length
+            ? [
+                  "",
+                  `# Critic verdicts on this story (oldest → latest)`,
+                  ...critiques.map(
+                      (c) =>
+                          `- turn ${c.turn}: ${c.verdict.toUpperCase()} — ${c.reasoning}` +
+                          (c.violatedCriteria.length
+                              ? ` (violated: ${c.violatedCriteria.join("; ")})`
+                              : ""),
+                  ),
+              ]
+            : []),
         ...(escalationRoute
             ? [
                   "",

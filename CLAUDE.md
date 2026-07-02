@@ -68,6 +68,16 @@ npm run [script] # Run scripts defined in package.json
 - Release workflow defined in GitHub Actions
 - No linter or formatter configuration detected in scan (may exist but not documented)
 
+## Comment Style
+
+Keep comments lean: a comment earns its place only by stating a non-obvious
+constraint or "why" the code can't show. Do NOT write: narration of the next
+line, section banner dividers, JSDoc/field docs that repeat the name or the
+clap attribute, multi-paragraph rationale essays (compress to 1-3 lines), or
+changelog-style history. Stream/protocol format specs live in `docs/`, not in
+file headers. Exception: `///` doc comments on clap args in `cli/cli.rs` are
+user-facing `--help` text — keep them, but one concise line each.
+
 ## Notes
 
 - Both Rust and Node.js must be installed for full development

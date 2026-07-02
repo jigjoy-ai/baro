@@ -19,10 +19,8 @@ export interface RunPlannerCodexOptions {
     decisionDocument?: string
     quick?: boolean
     codexBin?: string
-    /** Per-call timeout in milliseconds. Default: 900_000 (15 minutes).
-     *  Planner is the longest phase — large multi-story PRDs with
-     *  strict JSON output frequently push Codex past the 4-minute
-     *  ceiling that was killing runs on 0.43.0. */
+    /** Default 15 min — large multi-story PRDs pushed Codex past the
+     *  old 4-minute ceiling. */
     timeoutMs?: number
 }
 
@@ -55,10 +53,7 @@ export async function runPlannerCodex(
     return extractJsonObject(planText)
 }
 
-/**
- * Pull the first balanced `{ … }` block out of a raw string. Tolerates
- * markdown fences and leading prose.
- */
+/** First balanced `{ … }` block; tolerates markdown fences and leading prose. */
 function extractJsonObject(text: string): string {
     const trimmed = text.trim()
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed

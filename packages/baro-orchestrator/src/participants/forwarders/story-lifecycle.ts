@@ -10,6 +10,7 @@ import {
     type AgentStateData,
     StoryResult,
     type StoryResultData,
+    StorySpawnRequest,
 } from "../../semantic-events.js"
 import { emit } from "../../tui-protocol.js"
 
@@ -28,6 +29,8 @@ const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "NotebookEdit", "edit_file"])
 export class StoryLifecycleForwarder extends BaseObserver {
     private startedStories = new Set<string>()
     private retryCounts = new Map<string, number>()
+    /** storyId → retry budget from its spawn request, so story_error reports the real max. */
+    private retryBudget = new Map<string, number>()
     // storyId → (path → first-touch kind). Distinct paths per story, so a
     // file touched many times counts once, classified by its first write.
     // Reset on each retry so story_complete reflects only the winning
@@ -40,6 +43,10 @@ export class StoryLifecycleForwarder extends BaseObserver {
     ): Promise<void> {
         if (AgentState.is(event)) {
             this.handleAgentState(event.data)
+            return
+        }
+        if (StorySpawnRequest.is(event)) {
+            this.retryBudget.set(event.data.storyId, event.data.retries)
             return
         }
         if (StoryResult.is(event)) {
@@ -117,7 +124,7 @@ export class StoryLifecycleForwarder extends BaseObserver {
                 id: item.storyId,
                 error: item.error ?? "unknown error",
                 attempt: item.attempts,
-                max_retries: item.attempts,
+                max_retries: this.retryBudget.get(item.storyId) ?? item.attempts,
             })
         }
     }

@@ -1,13 +1,9 @@
 /**
- * Planner system prompt. Used by both PlannerClaude and PlannerOpenAI
- * so the two providers produce comparable DAGs. Ported from the Rust
- * constant in `crates/baro-tui/src/main.rs`.
- *
- * The triage block at the top mirrors the Architect's: trivial goals
- * collapse to a single story instead of being artificially split.
- * baro 0.26+ relies on this. The schema block at the bottom is the
- * shape Rust's `PrdOutput` deserialises, so do not change keys without
- * updating `crates/baro-tui/src/main.rs` too.
+ * Planner system prompt, shared by all planner backends so providers
+ * produce comparable DAGs. The triage block collapses trivial goals to a
+ * single story (baro 0.26+ relies on this). The schema block is the shape
+ * Rust's `PrdOutput` deserialises — do not change keys without updating
+ * `crates/baro-tui/src/main.rs` too.
  */
 export const PLANNER_SYSTEM_PROMPT = `You are an expert software architect. Break down the user's project goal into concrete user stories that form a dependency DAG.
 
@@ -136,11 +132,7 @@ Rules:
 - Build on existing code, don't recreate what exists
 - Output ONLY the JSON, nothing else`
 
-/**
- * Decorate the user's raw goal with the (optional) Architect design
- * spec and the (optional) `--quick` hard override. Shared by both
- * planner backends so the prompt shape is identical across providers.
- */
+/** Shared by all planner backends so the prompt shape is identical across providers. */
 export function buildPlannerUserMessage(args: {
     goal: string
     decisionDocument?: string

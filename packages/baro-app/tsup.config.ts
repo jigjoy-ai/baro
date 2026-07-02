@@ -1,28 +1,12 @@
 import { defineConfig } from "tsup"
 
 /**
- * Three bundles ship inside the npm `baro-ai` package's `dist/`
- * directory:
- *
- *   - `cli.mjs`            — the Mozaik orchestrator CLI. Spawned by
- *                            `orchestrator_client.rs` once a story
- *                            execution starts.
- *   - `run-architect.mjs`  — TS Architect dispatcher. Spawned by
- *                            `architect_runner.rs` before planning.
- *   - `run-planner.mjs`    — TS Planner dispatcher. Spawned by
- *                            `planner_runner.rs` after the Architect.
- *
- * All three live next to the binary after `npm install -g baro-ai`
- * (postinstall.js copies them from `dist/` to `~/.baro/bin/`). The
- * Rust runners check that location first, then the cwd's
- * `node_modules/baro-ai/dist/`, then fall back to running the
- * TypeScript sources via `tsx` from a dev baro checkout.
- *
- * tsup follows imports across the workspace boundary so the
- * `@baro/orchestrator` source AND its `@mozaik-ai/core` dep are
- * bundled directly into each `.mjs` — published `.mjs` files have
- * zero runtime deps beyond Node + the npm packages already required
- * by baro-ai itself.
+ * Bundles shipped in baro-ai's dist/ and spawned by the Rust runners
+ * (orchestrator_client.rs, architect_runner.rs, planner_runner.rs).
+ * postinstall.js stages them to ~/.baro/bin; the runners check there, then
+ * the cwd's node_modules/baro-ai/dist/, then fall back to tsx from a dev
+ * checkout. Workspace sources + @mozaik-ai/core are bundled in — published
+ * .mjs files must have zero runtime deps beyond Node.
  */
 const sharedBundleConfig = {
     format: ["esm" as const],
@@ -31,45 +15,31 @@ const sharedBundleConfig = {
     target: "node20" as const,
     platform: "node" as const,
     bundle: true,
-    // Each entry must be a SINGLE self-contained .mjs. tsup defaults
-    // `splitting: true` for esm, which hoists code shared across the
-    // three entries into `chunk-*.mjs` siblings — and those chunks were
-    // not staged into ~/.baro/bin by postinstall, so the runners died
-    // with ERR_MODULE_NOT_FOUND (chunk-*.mjs). Disabling splitting
-    // inlines everything back into each entry, matching the
-    // "zero runtime deps, self-contained" contract documented above.
+    // esm splitting would emit shared chunk-*.mjs siblings that postinstall
+    // doesn't stage into ~/.baro/bin — runners died with ERR_MODULE_NOT_FOUND.
+    // Each entry must stay a single self-contained .mjs.
     splitting: false,
-    // Force the Mozaik framework + the workspace orchestrator code
-    // *into* the bundle so the published package is self-contained
-    // (no runtime dependency on @mozaik-ai/core or @baro/orchestrator).
     noExternal: [
         /^@mozaik-ai\//,
-        // Bundle @baro/memory's OWN source (plain TS: Vectra wrapper +
-        // cache). Its heavy ML deps stay external (below) — they have
-        // wasm/native assets esbuild can't inline. Bundling the wrapper
-        // is what makes the published package able to LOAD memory at all:
-        // before this, `import("@baro/memory")` resolved to nothing from
-        // the staged ~/.baro/bin/cli.mjs and threw ERR_MODULE_NOT_FOUND,
-        // silently disabling semantic memory on every npm install.
+        // @baro/memory's own TS must be bundled or the staged cli.mjs can't
+        // resolve it (ERR_MODULE_NOT_FOUND silently disabled semantic memory
+        // on every npm install). Its heavy ML deps stay external below —
+        // they carry wasm/native assets esbuild can't inline.
         /^@baro\//,
     ],
     external: [
-        // The embedding stack — resolved at runtime from the node_modules
-        // postinstall links next to the staged bundle (see postinstall.js).
+        // Embedding stack: resolved at runtime from node_modules links that
+        // postinstall.js places next to the staged bundle.
         '@xenova/transformers',
         'sharp',
         'onnxruntime-node',
     ],
     clean: false,
     sourcemap: true,
-    // The bundle is ESM, but some transitive deps are CommonJS and call
-    // `require(...)` at load time (e.g. google-auth-library, pulled in
-    // via @mozaik-ai/core, does `require("child_process")`). esbuild
-    // rewrites those to its `__require` helper, which throws
-    // "Dynamic require of X is not supported" UNLESS a real `require`
-    // exists in scope — its fallback is `typeof require !== "undefined"`.
-    // Defining `require` via createRequire in the banner satisfies that
-    // fallback so CJS deps and Node builtins resolve at runtime.
+    // Some transitive CJS deps call require() at load time (google-auth-library
+    // via @mozaik-ai/core). esbuild's __require helper throws "Dynamic require
+    // not supported" unless a real `require` is in scope — createRequire in
+    // the banner provides it so CJS deps and Node builtins resolve at runtime.
     banner: {
         js: [
             "#!/usr/bin/env node",

@@ -12,10 +12,7 @@ import { emit } from "../../tui-protocol.js"
 
 /**
  * Mirrors Conductor lifecycle as a `progress` BaroEvent — the Rust TUI
- * doesn't (yet) understand `conductor_state` directly.
- *
- * Subscribes to: ConductorState
- * Emits: BaroEvent { type: "progress" }
+ * doesn't understand `conductor_state` directly.
  */
 export class ProgressForwarder extends BaseObserver {
     override async onExternalEvent(

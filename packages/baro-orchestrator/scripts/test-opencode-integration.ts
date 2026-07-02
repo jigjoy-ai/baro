@@ -1,23 +1,9 @@
 /**
- * Integration test: OpenCode backend.
- *
- * Exercises the full stack — stream mapper, CLI participant, story agent,
- * and one-shot runner — against a real `opencode` process in a temporary
- * git repository. Validates that:
- *
- *   1. The stream mapper correctly parses OpenCode's JSONL output
- *   2. The CLI participant transitions through expected phases
- *   3. The one-shot runner returns assistant text
- *   4. The story agent completes a simple task end-to-end
- *
- * Usage:
- *   npx tsx packages/baro-orchestrator/scripts/test-opencode-integration.ts
- *
- * Prerequisites:
- *   - `opencode` binary on PATH
- *   - A configured LLM provider in opencode (any will do)
- *
- * Exit code 0 = all tests passed, non-zero = failure.
+ * OpenCode backend integration test: stream mapper (unit), then one-shot
+ * runner, CLI participant, and story agent against a real `opencode` process
+ * in a temp git repo. Fixtures use OpenCode's real wire shapes — see
+ * docs/stream-protocols.md, "OpenCode (opencode-stream-mapper.ts)".
+ * Run with npx tsx; exits non-zero on failure.
  */
 
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from "fs"
@@ -37,14 +23,11 @@ import { OpenCodeCliParticipant } from "../src/participants/opencode-cli-partici
 import { OpenCodeStoryAgent } from "../src/participants/opencode-story-agent.js"
 import { runOpenCodeOneShot } from "../src/opencode-one-shot.js"
 
-// ─── Helpers ──────────────────────────────────────────────────────────
-
 let testDir: string
 let passed = 0
 let failed = 0
 let skipped = 0
 
-/** True when the `opencode` binary is resolvable on PATH. */
 function opencodeAvailable(): boolean {
     try {
         execSync("command -v opencode", { stdio: "ignore" })
@@ -83,12 +66,9 @@ function assert(condition: boolean, msg: string): void {
     }
 }
 
-// ─── Test 1: Stream Mapper ────────────────────────────────────────────
-
 function testStreamMapper(): void {
     process.stderr.write("\n[test] 1. Stream mapper\n")
 
-    // step_start
     const startEvent = {
         type: "step_start",
         timestamp: 1234,
@@ -99,7 +79,6 @@ function testStreamMapper(): void {
     assert(startResult.sessionId === "ses_test123", "extracts sessionId")
     assert(startResult.items.length >= 1, "step_start produces items")
 
-    // text
     const textEvent = {
         type: "text",
         timestamp: 1235,
@@ -108,10 +87,9 @@ function testStreamMapper(): void {
     }
     const textResult = mapOpenCodeEvent("agent-1", textEvent)
     assert(textResult.items.length >= 1, "text event produces items")
-    // Assert an actual ModelMessageItem carrying the text — not a
-    // stringified substring match, which would also pass if "Hello world"
-    // landed in some other item's raw passthrough. ModelMessageItem keeps
-    // its text in content parts (content[].text), not a top-level field.
+    // Assert an actual ModelMessageItem — a stringified substring match would
+    // also pass if "Hello world" landed in another item's raw passthrough.
+    // ModelMessageItem keeps its text in content[].text, not a top-level field.
     const modelMsg = textResult.items.find(
         (item): item is ModelMessageItem => item instanceof ModelMessageItem,
     )
@@ -125,9 +103,9 @@ function testStreamMapper(): void {
         "text event produces a ModelMessageItem with the correct text",
     )
 
-    // tool_use — the REAL opencode shape: one event carrying both the
-    // call (state.input) and result (state.output). Must yield a
-    // FunctionCallItem AND a FunctionCallOutputItem.
+    // Real opencode tool_use shape: one event carrying both the call
+    // (state.input) and result (state.output) — must yield a FunctionCallItem
+    // AND a FunctionCallOutputItem.
     const toolUseEvent = {
         type: "tool_use",
         timestamp: 1236,
@@ -154,7 +132,7 @@ function testStreamMapper(): void {
         "completed tool_use produces a FunctionCallOutputItem",
     )
 
-    // tool_call / tool_result — legacy fallback shape still maps.
+    // Legacy fallback shape must still map.
     const toolCallEvent = {
         type: "tool_call",
         timestamp: 1237,
@@ -167,7 +145,6 @@ function testStreamMapper(): void {
         "legacy tool_call event still maps to a FunctionCallItem",
     )
 
-    // step_finish
     const finishEvent = {
         type: "step_finish",
         timestamp: 1238,
@@ -181,13 +158,10 @@ function testStreamMapper(): void {
     const finishResult = mapOpenCodeEvent("agent-1", finishEvent)
     assert(finishResult.items.length >= 1, "step_finish produces items")
 
-    // unknown
     const unknownEvent = { type: "foobar", timestamp: 1239, sessionID: "ses_test123" }
     const unknownResult = mapOpenCodeEvent("agent-1", unknownEvent)
     assert(unknownResult.items.length >= 1, "unknown event produces items (not dropped)")
 }
-
-// ─── Test 2: One-Shot Runner (live) ───────────────────────────────────
 
 async function testOneShot(): Promise<void> {
     process.stderr.write("\n[test] 2. One-shot runner (live opencode invocation)\n")
@@ -205,8 +179,6 @@ async function testOneShot(): Promise<void> {
         assert(false, `one-shot threw: ${(e as Error).message}`)
     }
 }
-
-// ─── Test 3: CLI Participant (live) ───────────────────────────────────
 
 async function testCliParticipant(): Promise<void> {
     process.stderr.write("\n[test] 3. CLI participant (live opencode invocation)\n")
@@ -236,15 +208,11 @@ async function testCliParticipant(): Promise<void> {
     participant.leave(env)
 }
 
-// ─── Test 4: Story Agent (live) ───────────────────────────────────────
-
 async function testStoryAgent(): Promise<void> {
     process.stderr.write("\n[test] 4. Story agent (live opencode invocation)\n")
 
-    // A story is real work: edit the worktree. Use a file-mutation
-    // prompt (not a prose echo) so success means the agent actually did
-    // something — and so the strengthened success predicate (which
-    // requires >=1 tool call) is exercised on a genuine task.
+    // File-mutation prompt (not a prose echo) so the success predicate
+    // (requires >=1 tool call) is exercised on a genuine task.
     const targetFile = "STORY_AGENT_OK.txt"
     const env = new AgenticEnvironment()
     const agent = new OpenCodeStoryAgent({
@@ -271,14 +239,9 @@ async function testStoryAgent(): Promise<void> {
     agent.leave(env)
 }
 
-// ─── Test 5: Success predicate rejects no-op (regression guard) ───────
-//
-// `opencode run` exits 0 even when the model just talks and does no
-// work. A prose-only prompt invokes no tools, so the success predicate
-// MUST reject it — otherwise a refused/no-op story would be reported as
-// a false PASS to the Conductor (the exact gap this backend's review
-// surfaced). This guards that predicate against regressing back to
-// exit-code-only.
+// `opencode run` exits 0 even when the model just talks and does no work, so
+// the success predicate must reject a zero-tool run — otherwise a refused/no-op
+// story is a false PASS to the Conductor. Guards against exit-code-only regression.
 async function testNoOpRejected(): Promise<void> {
     process.stderr.write("\n[test] 5. No-op story is rejected (regression guard)\n")
 
@@ -306,23 +269,16 @@ async function testNoOpRejected(): Promise<void> {
     agent.leave(env)
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────
-
 async function main(): Promise<void> {
     process.stderr.write("═══ OpenCode Backend Integration Test ═══\n")
 
     setup()
 
     try {
-        // Unit-level test (no live process needed)
         testStreamMapper()
 
-        // Live integration tests need `opencode` on PATH + a configured
-        // provider. Probe up front and SKIP (not fail) when it's absent,
-        // so CI / machines without opencode don't conflate "environment
-        // not provisioned" with "code regression". A genuine failure
-        // still exits non-zero; a missing binary exits 0 after the unit
-        // test.
+        // Live tests need `opencode` on PATH + a configured provider: SKIP (not
+        // fail) when absent so CI doesn't conflate "not provisioned" with "regression".
         if (opencodeAvailable()) {
             await testOneShot()
             await testCliParticipant()

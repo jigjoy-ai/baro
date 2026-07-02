@@ -1,28 +1,15 @@
 /**
- * JSON-RPC-ish line-delimited protocol between the orchestrator (this
- * package) and any UI consumer (Rust TUI today, web UI later).
+ * Line-delimited JSON protocol between the orchestrator and UI consumers:
+ * BaroEvents out on stdout, BaroCommands in on stdin, one object per line.
+ * Both sides ignore unknown fields and unknown `type` values (forward compat).
  *
- * Semantics:
- *   - Orchestrator emits `BaroEvent`s on stdout, one JSON object per line.
- *   - UI emits `BaroCommand`s on stdin, one JSON object per line.
- *   - Both sides ignore unknown fields and unknown `type` values
- *     (forward-compat with future versions).
- *
- * The event shapes mirror the Rust `BaroEvent` enum in
- * crates/baro-tui/src/events.rs so the existing TUI parser keeps working.
- * Phase 1 emits the subset needed for current TUI screens; later phases
- * add more granular events (agent_state, conductor_state, etc).
+ * CONSTRAINT: shapes and snake_case field names must mirror the Rust
+ * `BaroEvent` serde enum in crates/baro-tui/src/events.rs — JSON keys cross
+ * the language boundary verbatim.
  */
 
 import { stdin } from "process"
 import { createInterface } from "readline"
-
-// ─── Shared shapes ──────────────────────────────────────────────────
-
-// Field names use snake_case to match the Rust BaroEvent serde shape
-// (crates/baro-tui/src/events.rs) — JSON keys cross the language boundary
-// verbatim. Internal TS code that builds these objects translates from
-// camelCase as needed.
 
 export interface StoryInfo {
     id: string
@@ -48,14 +35,10 @@ export interface DiffFileInfo {
     removed: number
 }
 
-// ─── Outbound: orchestrator → TUI ───────────────────────────────────
-
 export type BaroEvent =
     | { type: "init"; project: string; stories: StoryInfo[]; runner?: string }
-    // The Architect's design/decision spec (markdown) — the authoritative set of
-    // file paths, schema/API shapes, naming + dependency choices every story works
-    // from. Emitted once after planning so the dashboard can surface it (it was
-    // previously only ever written to prd.json on disk).
+    // The Architect's design/decision spec (markdown), emitted once after
+    // planning so the dashboard can surface it.
     | { type: "decision_document"; document: string }
     | { type: "dag"; levels: DagNodeInfo[][] }
     | { type: "story_start"; id: string; title: string }
@@ -87,8 +70,7 @@ export type BaroEvent =
           abort_reason?: string
       }
     | { type: "notification_ready" }
-    // Per-story changes merged into the run branch: file list with add/remove
-    // counts + a capped unified diff, so the TUI can show a Changes/diff view.
+    // Per-story changes merged into the run branch, for the Changes view.
     | {
           type: "story_diff"
           id: string
@@ -100,25 +82,21 @@ export type BaroEvent =
           id: string
           input_tokens: number
           output_tokens: number
-          // Per-story cost in USD when the backend reports it (Claude CLI's
-          // total_cost_usd). Absent for subscription paths (codex/openai) that
-          // have no per-call dollar cost. Summed downstream.
+          // Absent for subscription paths (codex/openai) that have no
+          // per-call dollar cost. Summed downstream.
           cost_usd?: number
       }
-    // Live, cumulative-per-agent token estimate streamed WHILE a story runs (so the UI
-    // can show tokens climbing in real time). Distinct from token_usage, which is the
-    // authoritative total emitted once the agent finishes. Throttled by the forwarder;
-    // consumers should treat it as the latest snapshot, not a delta to sum.
+    // Live cumulative-per-agent token estimate streamed WHILE a story runs;
+    // token_usage remains the authoritative total on finish. Consumers must
+    // treat it as the latest snapshot, not a delta to sum.
     | {
           type: "token_progress"
           id: string
           input_tokens: number
           output_tokens: number
       }
-    // One condensed, typed line for the structured Activity feed. Replaces the
-    // raw `story_log` firehose (full tool args / file reads / model output split
-    // line-by-line) with a single meaningful entry per bus item, so the TUI can
-    // render a readable, color-coded feed instead of a wall of streamed text.
+    // One condensed, typed line per bus item for the structured Activity
+    // feed (vs the raw story_log firehose).
     | {
           type: "activity"
           id: string
@@ -131,16 +109,11 @@ export type BaroEvent =
           ok?: boolean // test / verdict pass-fail
       }
 
-/**
- * Write a single event as a JSON line to stdout. Caller should not
- * include trailing newlines in any field.
- */
+/** Caller must not include trailing newlines in any field. */
 export function emit(event: BaroEvent): void {
     const line = JSON.stringify(event) + "\n"
     process.stdout.write(line)
 }
-
-// ─── Inbound: TUI → orchestrator ────────────────────────────────────
 
 export type BaroCommand =
     | {
@@ -160,8 +133,7 @@ export type BaroCommand =
 export type CommandHandler = (cmd: BaroCommand) => Promise<void> | void
 
 /**
- * Subscribe to commands arriving on stdin. Returns a function that
- * shuts the listener down. Each line is parsed as JSON; non-JSON lines
+ * Subscribe to commands on stdin; returns an unsubscribe. Non-JSON lines
  * are silently ignored to keep the protocol forward-compatible.
  */
 export function subscribeCommands(handler: CommandHandler): () => void {
@@ -179,8 +151,7 @@ export function subscribeCommands(handler: CommandHandler): () => void {
             return
         }
         Promise.resolve(handler(cmd)).catch((err: unknown) => {
-            // Surface handler failures via stderr — stdout is reserved
-            // for the event stream.
+            // stderr — stdout is reserved for the event stream.
             process.stderr.write(
                 `[tui-protocol] command handler error: ${(err as Error)?.message ?? String(err)}\n`,
             )

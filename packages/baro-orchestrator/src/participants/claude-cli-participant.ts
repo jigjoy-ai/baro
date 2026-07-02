@@ -1,15 +1,6 @@
 /**
- * ClaudeCliParticipant — wraps a long-lived Claude Code CLI process as a
- * first-class Mozaik Participant.
- *
- * Spawned with `--print --input-format stream-json --output-format
- * stream-json --verbose`. Each line in is a JSON event Claude consumes,
- * each line out is a JSON event Claude emits. We map outbound events
- * through the stream-json mapper into typed Mozaik ContextItems and
- * deliver them to the environment.
- *
- * Library-grade: knows nothing about baro, PRD, or stories. Only knows
- * about agent IDs, working directories, and Claude.
+ * Wraps a long-lived Claude Code CLI process (stream-json in/out) as a
+ * Mozaik Participant. Event shapes: docs/stream-protocols.md § Claude Code.
  */
 
 import { ChildProcess, spawn } from "child_process"
@@ -35,42 +26,23 @@ import {
 import { mapClaudeEvent } from "../stream-json-mapper.js"
 
 export interface ClaudeCliParticipantOptions {
-    /** Working directory for the Claude process. Required. */
     cwd: string
-    /** Model to use (e.g. "sonnet", "opus", "haiku"). Optional. */
     model?: string
     /**
-     * If true, pass `--include-partial-messages` so Claude emits
-     * `stream_event` chunks for each token delta. Adds ~80% bus volume.
-     * Default: false.
+     * Pass `--include-partial-messages` (a `stream_event` chunk per token
+     * delta — adds ~80% bus volume). Default: false.
      */
     includePartialMessages?: boolean
     /**
-     * If true, pass `--replay-user-messages` so Claude echoes received
-     * stdin user events back as `user` events on stdout. Useful for
-     * confirming bus → Claude routing. Default: true.
+     * Pass `--replay-user-messages` so Claude echoes stdin user events back
+     * on stdout. Default: true.
      */
     replayUserMessages?: boolean
-    /**
-     * Permission mode passed to Claude. Default: "bypassPermissions".
-     * Production multi-agent runs may want stricter modes.
-     */
     permissionMode?: "default" | "acceptEdits" | "auto" | "bypassPermissions" | "dontAsk" | "plan"
-    /** Extra CLI arguments appended after the standard set. */
     extraArgs?: string[]
-    /** Path to the `claude` binary. Default: "claude" (resolved via PATH). */
     claudeBin?: string
-    /**
-     * Effort level passed as `claude --effort <level>` (low | medium |
-     * high | xhigh | max). When unset, the `claude` CLI uses its own
-     * default. Plumbed from `baro --effort`.
-     */
     effort?: string
-    /**
-     * If provided, pass `--resume <sessionId>` so Claude continues an
-     * existing session instead of starting fresh. Required for
-     * multi-turn agents that survive across multiple infer() calls.
-     */
+    /** `--resume <sessionId>` — needed by agents that span multiple infer() calls. */
     resumeSessionId?: string
 }
 
@@ -79,20 +51,16 @@ export interface ClaudeRunSummary {
     exitCode: number | null
     error: Error | null
     /**
-     * Last `result` event observed for this agent. Stored as the
-     * SemanticEvent payload shape (AgentResultData), not the live
-     * SemanticEvent instance, so callers don't have to peel `.data` to
-     * read out `.isError`, `.resultText` etc.
+     * Last `result` event observed. Stored as the payload shape, not the
+     * live SemanticEvent, so callers don't have to peel `.data`.
      */
     lastResult: AgentResultData | null
 }
 
 export class ClaudeCliParticipant extends BaseObserver {
     /**
-     * Process-wide registry of every Claude child currently running.
-     * Used by the orchestrator's SIGINT/SIGTERM handlers to nuke
-     * orphaned Claude processes so a killed baro doesn't leave a swarm
-     * of background agents burning quota.
+     * Process-wide registry for the orchestrator's SIGINT/SIGTERM handlers,
+     * so a killed baro doesn't leave orphaned agents burning quota.
      */
     private static readonly active = new Set<ClaudeCliParticipant>()
 
@@ -163,10 +131,7 @@ export class ClaudeCliParticipant extends BaseObserver {
         return this.currentPhase
     }
 
-    /**
-     * Spawn the Claude process and start streaming its events into the
-     * environment. Idempotent: subsequent calls are a no-op.
-     */
+    /** Idempotent: subsequent calls are a no-op. */
     start(environment: AgenticEnvironment): void {
         if (this.proc) return
         this.envRef = environment
@@ -220,12 +185,6 @@ export class ClaudeCliParticipant extends BaseObserver {
         })
     }
 
-    /**
-     * Send a user message into the Claude process. Used by both bus
-     * routing (via onContextItem) and direct callers (the orchestrator
-     * may want to inject the initial prompt directly to avoid a circular
-     * AgentTargetedMessageItem dance).
-     */
     sendUserMessage(text: string): void {
         if (!this.proc?.stdin) {
             throw new Error(`[${this.agentId}] proc not started`)
@@ -252,10 +211,9 @@ export class ClaudeCliParticipant extends BaseObserver {
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        // ClaudeCliParticipant owns bus → stdin forwarding for messages
-        // addressed to its agentId. StoryAgent (when present) observes
-        // these events for lifecycle/timing purposes only — it does NOT
-        // also write to stdin, to avoid double-delivery.
+        // This participant owns bus → stdin forwarding for its agentId;
+        // StoryAgent observes these events for lifecycle only and must NOT
+        // also write to stdin (double-delivery).
         if (
             AgentTargetedMessage.is(event) &&
             event.data.recipientId === this.agentId
@@ -311,8 +269,7 @@ export class ClaudeCliParticipant extends BaseObserver {
     private handleStderr(chunk: string): void {
         const trimmed = chunk.trimEnd()
         if (!trimmed) return
-        // Stderr is informational only; surface via state detail rather
-        // than as an error so observers can decide what to do with it.
+        // Informational only — not an error.
         process.stderr.write(`[claude:${this.agentId}/stderr] ${trimmed}\n`)
     }
 
@@ -333,9 +290,6 @@ export class ClaudeCliParticipant extends BaseObserver {
         }
 
         for (const item of items) {
-            // SemanticEvent instances carry our typed payload events.
-            // LLM items (FunctionCallItem etc.) take the dedicated
-            // delivery channels and aren't inspected here.
             if (item instanceof SemanticEvent) {
                 if (ClaudeSystem.is(item) && item.data.subtype === "init") {
                     this.transition("running", "claude init received")
@@ -353,13 +307,6 @@ export class ClaudeCliParticipant extends BaseObserver {
         }
     }
 
-    /**
-     * Route a mapped stream-json item to the right Mozaik delivery channel.
-     * Assistant-side LLM items get Mozaik's dedicated typed channels
-     * (deliverModelMessage/FunctionCall/FunctionCallOutput); everything
-     * else (user-side messages, system frames, result frames, custom
-     * Claude wrappers) goes through Mozaik's `deliverSemanticEvent`.
-     */
     private dispatch(
         item:
             | ModelMessageItem

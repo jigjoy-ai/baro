@@ -47,6 +47,7 @@ import {
 import {
     SURGEON_SYSTEM_PROMPT,
     buildSurgeonPrompt,
+    CritiqueLog,
     extractJsonObject,
     surgeonDeterministicReplan,
     type PrdSnapshot,
@@ -93,6 +94,7 @@ export class SurgeonOpenAI extends BaseObserver {
     private readonly model: GenerativeModel
 
     private replansEmitted = 0
+    private readonly critiques = new CritiqueLog()
     private readonly pending = new Set<Promise<void>>()
 
     constructor(opts: SurgeonOpenAIOptions) {
@@ -115,6 +117,7 @@ export class SurgeonOpenAI extends BaseObserver {
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
+        this.critiques.record(event)
         if (!StoryResult.is(event)) return
         if (event.data.success) return
         if (this.replansEmitted >= this.opts.maxReplans) return
@@ -142,7 +145,13 @@ export class SurgeonOpenAI extends BaseObserver {
      */
     private async evaluate(failure: StoryResultData): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
-        const userPrompt = buildSurgeonPrompt(snap, failure, this.opts.resolveRoute, this.opts.escalationRoute)
+        const userPrompt = buildSurgeonPrompt(
+            snap,
+            failure,
+            this.opts.resolveRoute,
+            this.opts.escalationRoute,
+            this.critiques.forStory(failure.storyId),
+        )
         const context = ModelContext.create("surgeon")
             .addContextItem(SystemMessageItem.create(SURGEON_SYSTEM_PROMPT))
             .addContextItem(UserMessageItem.create(userPrompt))

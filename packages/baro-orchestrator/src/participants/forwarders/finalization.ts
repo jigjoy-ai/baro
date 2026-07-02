@@ -8,12 +8,7 @@ import {
 } from "../../semantic-events.js"
 import { emit } from "../../tui-protocol.js"
 
-/**
- * Mirrors finalization lifecycle events as BaroEvents for the Rust TUI.
- *
- * Subscribes to: FinalizeStarted, PrCreated.
- * Emits: finalize_start, finalize_complete.
- */
+/** Mirrors finalization lifecycle events as BaroEvents for the Rust TUI. */
 export class FinalizationForwarder extends BaseObserver {
     override async onExternalEvent(
         _source: Participant,

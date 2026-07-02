@@ -86,19 +86,15 @@ enum AppEvent {
     ContextReady(String),
     ContextError(String),
     PlanReady(Vec<ReviewStory>, String, String, String),
-    /// Planner or Architect failed. Second tuple element is the path
-    /// to the full stdout+stderr log on disk (if claude_runner managed
-    /// to persist one). The planning screen surfaces both.
+    /// Planner or Architect failure; second element is the persisted
+    /// log path, if any.
     PlanError(String, Option<std::path::PathBuf>),
     RefineReady(Vec<ReviewStory>, String, String, String),
     RefineError(String),
     BranchError(String),
-    /// Fresh branch creation succeeded. Payload is the suffixed full
-    /// branch name (e.g. `baro/add-anthropic-provider-12345`) that the
-    /// async git task settled on. The handler mutates `app.branch_name`
-    /// so the TUI and any later `_baro` snapshot reflect the actual
-    /// branch the orchestrator is working on. Without this the display
-    /// stays stuck on the pre-suffix name from the planner.
+    /// Payload is the suffixed branch name the async git task settled
+    /// on; the handler updates `app.branch_name` so the TUI shows the
+    /// actual branch, not the pre-suffix name from the planner.
     BranchReady(String),
     ArchitectStarted,
     ArchitectComplete(String), // decision document (markdown)
@@ -161,17 +157,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_login().await;
     }
 
-    // Interactive use: tell the user when a newer baro is out (we release often). The
-    // network check runs in the JS layer (no HTTP dep here); this only reads its cache.
-    // Printed AFTER the TUI restores the terminal (below) — the alternate screen purges it.
+    // Update notice: the network check runs in the JS layer (no HTTP dep
+    // here); this reads its cache. Printed AFTER the TUI restores the
+    // terminal (below) — the alternate screen purges it.
     let update_notice = notify_update();
 
      let (cli, _lock) = cli::cli::parse()?;
 
-    // `baro --doctor` short-circuits before any TUI setup. It's a
-    // diagnostic command, not a run, and it has to work even when the
-    // things a real run depends on (e.g. claude CLI auth) are broken
-    // — that's the whole point of it existing.
+    // --doctor short-circuits before any TUI setup — it must work even
+    // when the things a real run depends on (e.g. claude auth) are broken.
     if cli.doctor {
         std::process::exit(doctor::run().await);
     }
@@ -230,13 +224,10 @@ fn semver_lt(a: &str, b: &str) -> bool {
     false
 }
 
-/// Read the update cache the JS layer maintains (`~/.baro/update-check.json`) and print a
-/// banner if a newer baro is published. If the cache is stale/missing, kick off a detached
-/// background refresh so the NEXT run has current data. Best-effort — never blocks or fails.
-/// Returns the update notice (if a newer baro is published) WITHOUT printing it — the caller
-/// prints it after the TUI restores the terminal, because the alternate-screen enter purges
-/// the scrollback (so printing here, before the TUI, would be wiped). Also kicks off a
-/// background cache refresh when the cache is stale. Best-effort — never blocks or fails.
+/// Read the update cache the JS layer maintains (`~/.baro/update-check.json`)
+/// and return — not print — a banner if a newer baro is published; the caller
+/// prints it after the TUI restores the terminal. Kicks off a detached cache
+/// refresh when stale. Best-effort — never blocks or fails.
 fn notify_update() -> Option<String> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
     let cache = std::path::PathBuf::from(home).join(".baro").join("update-check.json");
@@ -322,8 +313,8 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let mut control_url = std::env::var("CONTROL_URL").ok();
     let mut install = false;
     let mut uninstall = false;
-    // Single-run mode (for ephemeral cloud/Fargate workers): pair, take exactly one
-    // dispatched run, then exit — no reconnect loop. Env or flag.
+    // Single-run mode for ephemeral cloud workers: take exactly one
+    // dispatched run, then exit — no reconnect loop.
     let mut once = std::env::var("BARO_RUN_ONCE").as_deref() == Ok("1");
     // Set by the managed service invocation → the runner may self-update + exit-to-restart.
     let mut service = std::env::var("BARO_SERVICE").as_deref() == Ok("1");
@@ -441,10 +432,8 @@ async fn run_app(
     let mut app = App::new();
     let cwd = std::fs::canonicalize(&cli.cwd)?;
 
-    // Load .barorc config (defaults if not found)
     let rc = config::load_config(&cwd);
 
-    // Apply config defaults, then CLI overrides
     app.parallel_limit = rc.parallel.unwrap_or(0);
     // 0 = "auto": the orchestrator effort-scales the per-story timeout.
     app.timeout_secs = rc.timeout.unwrap_or(0);
@@ -465,7 +454,6 @@ async fn run_app(
         _ => {} // "routed" or None = keep defaults
     }
 
-    // CLI args override config
     if cli.parallel != 0 { app.parallel_limit = cli.parallel; }
     if let Some(t) = cli.timeout { app.timeout_secs = t; }
 
@@ -490,14 +478,10 @@ async fn run_app(
     }
 
     if let Some(ref model) = cli.model {
-        // `--model` is a GLOBAL override applied to every phase. We
-        // accept it verbatim here (no clap value_parser) so non-Claude
-        // backends can name any provider/model string — e.g.
-        // `--llm opencode -m anthropic/claude-sonnet-4`. The Claude-only
-        // opus/sonnet/haiku vocabulary is validated AFTER per-phase
-        // backends are resolved (see the model-vs-backend check below),
-        // because that's the point where we know which phases actually
-        // run on Claude and would choke on a provider/model string.
+        // Accepted verbatim so non-Claude backends can name any
+        // provider/model string; the Claude-only opus/sonnet/haiku
+        // vocabulary is validated after per-phase backends are
+        // resolved (see the check below).
         app.override_model = Some(model.clone());
         app.model_routing = false;
     } else if cli.no_model_routing {
@@ -505,9 +489,8 @@ async fn run_app(
         app.model_routing = false;
     }
 
-    // Critic + Surgeon (with LLM) are now ON by default. The historical
-    // --with-critic / --with-surgeon / --surgeon-use-llm flags are still
-    // accepted (hidden) for backwards compatibility; --no-* flags opt out.
+    // Critic + Surgeon (LLM) default ON; the hidden legacy --with-*
+    // flags are still accepted, --no-* opts out.
     if cli.no_critic {
         app.with_critic = false;
     } else {
@@ -557,37 +540,26 @@ async fn run_app(
         app.intra_level_delay_secs = Some(d);
     }
 
-    // --quick is the user telling us "this is trivial, don't ceremony it".
-    // We honour that on three fronts: skip Architect (no design doc),
-    // tell Planner to emit a 1-story DAG, and silence Critic + Surgeon
-    // (their value is in coordinating parallel work that --quick doesn't
-    // have). Librarian + Sentry stay on — they're cheap and harmless.
+    // --quick silences Critic + Surgeon — their value is coordinating
+    // parallel work a single-story run doesn't have. Librarian + Sentry
+    // stay on (cheap, harmless).
     if cli.quick {
         app.quick = true;
         app.with_critic = false;
         app.with_surgeon = false;
     }
 
-    // --continue: keep working on the current branch (follow-up onto the existing PR).
-    // The branch override happens in the JS orchestrator; the spawned cli.mjs inherits
-    // this env (orchestrator_client doesn't clear it), so we don't thread a config field.
+    // --continue: the branch override happens in the JS orchestrator; the
+    // spawned cli.mjs inherits this env var, so no config field is threaded.
     if cli.continue_run {
         std::env::set_var("BARO_CONTINUE", "1");
     }
 
-    // Effort level for spawned `claude` processes (default "high").
     app.effort = cli.effort.clone();
 
-    // --llm picks the LLM provider. Three legacy values (claude /
-    // openai / codex) route every phase through one backend. The
-    // `hybrid` preset splits per-phase: Claude for Architect /
-    // Planner / Surgeon (high-stakes, low-volume calls), Codex for
-    // Story + Critic (high-volume, cheap on subscription).
-    // Did the user actually type `--llm`? `cli.llm` has a default of
-    // "claude", so its value alone can't distinguish an explicit
-    // `--llm claude` (or `--llm hybrid`, which also resolves llm to
-    // Claude) from the no-flag default. We need that distinction to
-    // decide whether to show the provider picker, so scan the raw argv.
+    // `cli.llm` defaults to "claude", so its value alone can't distinguish
+    // an explicit `--llm claude` / `--llm hybrid` from the no-flag default;
+    // the provider picker needs that distinction, so scan the raw argv.
     app.llm_explicitly_set = std::env::args().any(|a| a == "--llm" || a.starts_with("--llm="));
 
     match cli.llm.as_str() {
@@ -602,11 +574,9 @@ async fn run_app(
             app.surgeon_llm = app::LlmProvider::Claude;
         }
         "jigjoy" => {
-            // Hosted preset. Every phase talks to the baro gateway (an
-            // OpenAI-compatible proxy) which holds the real upstream keys
-            // and classifies by model name: gpt* -> strong tier, deepseek*
-            // -> cheap tier. The user supplies only their hosted key
-            // (JIGJOY_API_KEY) and never sees the upstream keys.
+            // Hosted preset: every phase talks to the baro gateway, an
+            // OpenAI-compatible proxy that holds the upstream keys and
+            // maps model names to tiers (gpt* strong, deepseek* cheap).
             app.llm = app::LlmProvider::OpenAI;
             app.architect_llm = app::LlmProvider::OpenAI;
             app.planner_llm = app::LlmProvider::OpenAI;
@@ -614,10 +584,9 @@ async fn run_app(
             app.critic_llm = app::LlmProvider::OpenAI;
             app.surgeon_llm = app::LlmProvider::OpenAI;
 
-            // Per-phase model defaults — only when the user didn't pin one (the
-            // `--*-model` flags are applied above). These are the gateway's two
-            // tier tokens; it maps each to a real upstream model. Overridable by
-            // env so a self-hosted gateway can point them at its own models.
+            // Per-phase defaults only when the user didn't pin a model.
+            // These are the gateway's tier tokens; env-overridable so a
+            // self-hosted gateway can point them at its own models.
             let strong =
                 std::env::var("BARO_JIGJOY_STRONG_MODEL").unwrap_or_else(|_| "gpt-5.5".to_string());
             let cheap =
@@ -634,26 +603,19 @@ async fn run_app(
             if app.critic_model.is_none() {
                 app.critic_model = Some(cheap.clone());
             }
-            // Stories run on the cheap tier via a TIER MAP (not a story-model
-            // override). EVERY planner tier — including `opus` — maps to the cheap
-            // model: the planner tiers by blast radius and readily marks a story
-            // `opus`, but on the two-tier hosted gateway the strong model is many
-            // times pricier per token, so a story-level agent must never land
-            // there by default (a big-context story on the strong tier is what
-            // ran up surprise cost). Self-healing for a stuck story is handled by
-            // SPLITTING it into smaller (still cheap) stories, not by silently
-            // promoting it to the strong model. Keeping a map (rather than an
-            // override) leaves room for a future explicit per-story escalation
-            // route the Surgeon could emit for a genuinely stuck story.
+            // EVERY planner tier — including `opus` — maps to the cheap
+            // model: a story landing on the strong tier is what ran up
+            // surprise cost. Escalation stays explicit (Surgeon splits /
+            // future per-story route), never a silent promotion.
             if app.tier_map.is_none() {
                 app.tier_map = Some(format!(
                     "default=openai:{cheap},haiku=openai:{cheap},sonnet=openai:{cheap},opus=openai:{cheap}"
                 ));
             }
 
-            // Default gateway URL unless the user set --openai-base-url or
-            // OPENAI_BASE_URL. Set the env var so the resolution below picks
-            // it up. Override per-deploy with BARO_JIGJOY_URL.
+            // Default gateway URL unless --openai-base-url / OPENAI_BASE_URL
+            // is set; the env var feeds the resolution below. Override
+            // per-deploy with BARO_JIGJOY_URL.
             let base_url_set = cli.openai_base_url.is_some()
                 || std::env::var("OPENAI_BASE_URL")
                     .map(|v| !v.is_empty())
@@ -716,15 +678,10 @@ async fn run_app(
         }
     }
 
-    // Validate a global `--model` against the resolved per-phase
-    // backends. `--model` is applied verbatim to EVERY phase, but the
-    // Claude CLI only understands opus/sonnet/haiku — a provider/model
-    // string like `anthropic/claude-sonnet-4` would make any Claude
-    // phase fail. So if `--model` isn't a Claude model name AND at
-    // least one phase still routes through Claude, reject early with a
-    // clear message instead of letting the Claude subprocess choke.
-    // (This is why the check lives here, after per-phase resolution,
-    // rather than at parse time.)
+    // A global `--model` hits EVERY phase, but the Claude CLI only
+    // accepts opus/sonnet/haiku — reject early if any phase still
+    // routes through Claude. The check lives here, after per-phase
+    // resolution, because only now do we know which phases those are.
     if let Some(ref model) = cli.model {
         let is_claude_model = matches!(model.as_str(), "opus" | "sonnet" | "haiku");
         let any_claude_phase = [
@@ -779,12 +736,9 @@ async fn run_app(
         }
     }
 
-    // Pre-fill OpenAI key and base URL from env BEFORE the goal branching below.
-    // Was previously inside the no-goal else-branch -- that meant
-    // `baro --llm openai "<goal>"` skipped both the env-read AND the
-    // API-key entry screen, so if the user didn't have OPENAI_API_KEY
-    // in their shell the planner subprocess started with no key and
-    // crashed on "OPENAI_API_KEY is not set".
+    // Pre-fill OpenAI key/base URL from env BEFORE the goal branching —
+    // a CLI-goal run skips the ApiKeyInput screen, so this is its only
+    // chance to pick up OPENAI_API_KEY.
     if let Ok(env_key) = std::env::var("OPENAI_API_KEY") {
         if !env_key.is_empty() {
             app.openai_api_key = Some(env_key);
@@ -799,19 +753,14 @@ async fn run_app(
         }
     }
 
-    // If goal provided via CLI (and not resuming), skip welcome and start context/planning.
-    // Otherwise: if there's no goal and we're not resuming, start at the
-    // ProviderPicker so the user picks Claude vs OpenAI before typing
-    // anything. They can still skip the picker by passing `--llm` (we
-    // honour the explicit choice and jump straight to Welcome).
+    // CLI goal (not resuming): skip welcome and start planning.
+    // No goal: start at the ProviderPicker unless --llm was explicit.
     if !entered_resume {
         if let Some(goal) = cli.goal {
             app.goal_input = goal;
-            // CLI-goal + --llm openai + no API key anywhere → detour
-            // through the ApiKeyInput screen first. The ApiKeyInput
-            // Enter handler sees `goal_input` is already set and jumps
-            // straight to planning after the key is captured, so the
-            // user never goes through Welcome.
+            // CLI-goal + openai + no key → detour through ApiKeyInput;
+            // its Enter handler sees `goal_input` set and jumps straight
+            // to planning, so the user never goes through Welcome.
             if app.llm == app::LlmProvider::OpenAI && app.openai_api_key.is_none() {
                 if headless {
                     return Err("--headless with --llm openai requires OPENAI_API_KEY".into());
@@ -836,15 +785,10 @@ async fn run_app(
             if headless {
                 return Err("--headless requires a goal argument".into());
             }
-            // No goal: show ProviderPicker first — UNLESS the user
-            // explicitly chose a backend via --llm. Gate on whether
-            // --llm was actually passed, NOT on `llm != Claude`: the
-            // `hybrid` preset and an explicit `--llm claude` both
-            // resolve `llm` to Claude, and the old guard wrongly
-            // re-prompted them. Worse, for hybrid the picker's Enter
-            // handler then overwrote every per-phase backend with one
-            // provider, silently destroying the hybrid split the user
-            // asked for.
+            // Gate on whether --llm was actually passed, NOT on
+            // `llm != Claude`: hybrid and explicit `--llm claude` both
+            // resolve to Claude, and re-prompting would let the picker
+            // overwrite the hybrid per-phase split.
             if app.llm_explicitly_set {
                 app.screen = app::Screen::Welcome;
             } else {
@@ -869,7 +813,6 @@ async fn run_app(
         });
     }
 
-    // Tick timer
     let tx_tick = tx.clone();
     tokio::spawn(async move {
         loop {
@@ -878,11 +821,10 @@ async fn run_app(
         }
     });
 
-    // Throttle drawing to ~30fps. During a run the orchestrator floods the
-    // channel with log events; drawing once per event pegs the CPU and starves
-    // keyboard input (the lag). We still apply every event immediately so state
-    // stays current — we just coalesce the redraws. The 100ms tick guarantees an
-    // idle refresh, so the final frame after a burst is never more than a tick late.
+    // Throttle drawing to ~30fps: the orchestrator floods the channel with
+    // log events, and drawing per event pegs the CPU and starves keyboard
+    // input. Events still apply immediately; the 100ms tick guarantees an
+    // idle refresh so the final frame after a burst is at most a tick late.
     let mut last_draw = Instant::now()
         .checked_sub(Duration::from_millis(100))
         .unwrap_or_else(Instant::now);
@@ -895,7 +837,6 @@ async fn run_app(
         }
         match rx.recv().await {
             Some(AppEvent::Baro(ev)) => {
-                // Fire notification immediately when stories complete
                 if matches!(ev, BaroEvent::NotificationReady) {
                     notification::notify_completion();
                 }
@@ -906,9 +847,8 @@ async fn run_app(
                     None
                 };
                 app.handle_event(ev);
-                // Headless: orchestrator_client streams every event to stdout
-                // (echo_raw). When the orchestrator exits the run is done —
-                // leave the loop so the process exits.
+                // Headless: events already stream to stdout via echo_raw;
+                // orchestrator exit means the run is done.
                 if headless {
                     if is_exit {
                         break;
@@ -1001,12 +941,11 @@ async fn run_app(
                 // real handle so the screen handlers below are unchanged.
                 let Some(terminal) = terminal.as_deref_mut() else { continue };
                 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
-                // Ghostty (and other terminals that enable the kitty
-                // keyboard protocol) emit Enter as a Release-only event
-                // or as a literal CR/LF Char. The general Press-only
-                // filter would swallow those. Let Enter-like events
-                // through any kind; everything else still requires
-                // Press so we don't double-fire on Release.
+                // Kitty-protocol terminals (Ghostty) emit Enter as a
+                // Release-only event or literal CR/LF Char, which a
+                // Press-only filter would swallow. Let Enter-like events
+                // through any kind; the rest still require Press so we
+                // don't double-fire on Release.
                 let is_enter_like = matches!(
                     key.code,
                     KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n')
@@ -1065,9 +1004,7 @@ async fn run_app(
                     },
                     Screen::ApiKeyInput => match key.code {
                         KeyCode::Esc => {
-                            // Back to provider picker — let the user
-                            // change their mind without quitting the
-                            // whole TUI.
+                            // Back to the picker, not out of the TUI.
                             app.api_key_input.clear();
                             app.screen = Screen::ProviderPicker;
                         }
@@ -1079,11 +1016,9 @@ async fn run_app(
                             if !trimmed.is_empty() {
                                 app.openai_api_key = Some(trimmed.to_string());
                                 app.api_key_input.clear();
-                                // If the user invoked baro with a CLI
-                                // goal, they already finished the "what
-                                // should I do" step on the command line
-                                // — jump straight to planning instead of
-                                // dragging them through Welcome.
+                                // A CLI goal means "what should I do" is
+                                // already answered — jump straight to
+                                // planning instead of Welcome.
                                 if !app.goal_input.is_empty() {
                                     let claude_md_path = cwd.join("CLAUDE.md");
                                     if claude_md_path.exists() {
@@ -1227,10 +1162,9 @@ async fn run_app(
                             _ => {}
                         }
                     } else if app.planning_error.is_some() {
-                        // A branch/planning error is shown on the Review
-                        // screen (#47). Enter/Esc dismisses it rather than
-                        // re-triggering the doomed run or quitting; any other
-                        // key is ignored while the error modal is up.
+                        // Branch/planning errors surface as a modal here;
+                        // Enter/Esc dismisses rather than re-triggering the
+                        // doomed run or quitting.
                         match key.code {
                             KeyCode::Enter
                             | KeyCode::Char('\r')
@@ -1257,10 +1191,8 @@ async fn run_app(
                                     .and_then(|c| serde_json::from_str::<executor::PrdFile>(&c).map_err(|e| e.to_string()))
                                 {
                                     Ok(prd) => {
-                                        // 0.45.3+ persists the full "baro/<slug>-<suffix>"
-                                        // name in prd.json; pre-0.45.3 stored the bare slug.
-                                        // Accept either: use as-is when already prefixed,
-                                        // otherwise prepend so legacy prd.json still resolves.
+                                        // prd.json holds either the full "baro/<slug>-<suffix>"
+                                        // name or (legacy) the bare slug — prefix only when missing.
                                         let full_branch = if prd.branch_name.starts_with("baro/") {
                                             prd.branch_name.clone()
                                         } else {
@@ -1297,11 +1229,9 @@ async fn run_app(
                                         let oep = app.openai_endpoints.clone();
                                         let err_tx = tx.clone();
                                         tokio::spawn(async move {
-                                            // Resume path: prd.json already holds the
-                                            // suffixed branch name from the prior fresh
-                                            // run, so just check it out — never create a
-                                            // new branch here (that would silently drift
-                                            // off the user's prior work).
+                                            // Resume: check out the suffixed branch prd.json
+                                            // holds — never create a new one (that would
+                                            // silently drift off the prior work).
                                             if let Err(e) = git::checkout_existing_branch(&branch_cwd, &branch_name_clone).await {
                                                 let _ = err_tx.send(AppEvent::BranchError(
                                                     format!("Branch checkout failed: {}. Cannot resume run on this branch.", e)
@@ -1331,7 +1261,6 @@ async fn run_app(
                                     }
                                 }
                             } else {
-                                // Normal mode: write prd.json and start execution
                                 let prd = executor::prd_from_review(
                                     &app.project,
                                     &app.branch_name,
@@ -1342,7 +1271,6 @@ async fn run_app(
                                 if let Err(e) = executor::write_prd(&prd, &cwd) {
                                     app.planning_error = Some(format!("Failed to write prd.json: {}", e));
                                 } else {
-                                    // Create git branch baro/<branchName>
                                     let full_branch = format!("baro/{}", app.branch_name);
                                     let branch_cwd = cwd.clone();
                                     let branch_name_clone = full_branch.clone();
@@ -1377,14 +1305,10 @@ async fn run_app(
                                     let oep = app.openai_endpoints.clone();
                                     let err_tx = tx.clone();
                                     tokio::spawn(async move {
-                                        // Fresh run: ALWAYS create a new suffixed branch
-                                        // (no fallback to checkout). Side-by-side runs
-                                        // from sibling clones with the same origin would
-                                        // otherwise collide on `git push`, and the user
-                                        // explicitly wants every run on its own branch.
-                                        // Follow-up (continue): stay on the branch we're already
-                                        // on (the prior run's) so it lands on the same PR — don't
-                                        // cut a fresh branch. Otherwise: a new suffixed branch.
+                                        // Follow-up (--continue): stay on the current branch
+                                        // so it lands on the same PR. Otherwise ALWAYS cut a
+                                        // fresh suffixed branch — sibling clones sharing an
+                                        // origin would collide on `git push`.
                                         let actual_full_branch = if is_followup {
                                             match git::get_current_branch(&branch_cwd).await {
                                                 Ok(name) => name,
@@ -1406,17 +1330,11 @@ async fn run_app(
                                                 }
                                             }
                                         };
-                                        // Persist the FULL "baro/<slug>-<suffix>" name back
-                                        // to prd.json — exactly the branch Rust just created
-                                        // and checked out. The Mozaik orchestrator reads
-                                        // prd.branchName verbatim for its own
-                                        // createOrCheckoutBranch + Finalizer; stripping the
-                                        // "baro/" prefix here made it create a SECOND,
-                                        // un-prefixed branch ("<slug>-<suffix>") and commit
-                                        // every story there, leaving the prefixed branch empty
-                                        // and breaking resume (which looks for the prefixed
-                                        // one). Storing the prefixed name keeps Rust, Mozaik,
-                                        // and resume on a single branch.
+                                        // Persist the FULL "baro/<slug>-<suffix>" name to
+                                        // prd.json — the TS orchestrator reads prd.branchName
+                                        // verbatim, and a stripped name once made it commit
+                                        // every story to a second un-prefixed branch,
+                                        // breaking resume.
                                         let mut exec_prd = exec_prd;
                                         exec_prd.branch_name = actual_full_branch.clone();
                                         if let Err(e) = executor::write_prd(&exec_prd, &exec_cwd) {
@@ -1537,14 +1455,9 @@ async fn run_app(
                             }
                         }
                         KeyCode::Char('q') => return Ok(()),
-                        // Force a full terminal clear on every tab change.
-                        // ratatui's `Clear` widget only marks cells stale in
-                        // its own buffer and isn't reliably writing spaces to
-                        // every cell of the rect, so old tab content bleeds
-                        // through (the "es';"/"mon';" debris on the right
-                        // side, vertical bars in the stories panel, etc.).
-                        // terminal.clear() blanks the actual terminal cells;
-                        // the next render redraws from a clean slate.
+                        // Full terminal clear on tab change — ratatui's
+                        // `Clear` widget doesn't reliably blank every cell,
+                        // so old tab content bleeds through otherwise.
                         KeyCode::Char('1') => {
                             app.global_tab = app::GlobalTab::Dashboard;
                             let _ = terminal.clear();
@@ -1623,11 +1536,8 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     let architect_model = app.model_for_phase("architect");
     let context = app.claude_md_content.clone();
     let quick = app.quick;
-    // Per-phase routing: architect_llm and planner_llm let hybrid
-    // runs route Architect / Planner through Claude even when
-    // Story/Critic/Surgeon move to Codex (and vice versa). When the
-    // user didn't set per-phase overrides, both fall back to the
-    // global --llm value (set during CLI parsing).
+    // Per-phase routing lets hybrid runs split Architect/Planner from
+    // Story/Critic/Surgeon; unset overrides fall back to the global --llm.
     let architect_llm = app.architect_llm;
     let planner_llm = app.planner_llm;
     let openai_api_key = app.openai_api_key.clone();
@@ -1635,11 +1545,9 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     let effort = app.effort.clone();
 
     tokio::spawn(async move {
-        // Phase 1 — Architect. In quick mode we skip this entirely:
-        // the Architect's job is to align multiple parallel agents on
-        // cross-cutting decisions, and quick runs are single-agent. We
-        // still emit ArchitectSkipped so the TUI shows the user *why*
-        // there's no design document for this run.
+        // Quick mode skips the Architect — its job is aligning parallel
+        // agents, and quick runs are single-agent. Still emit
+        // ArchitectSkipped so the TUI shows why there's no design doc.
         let decision_doc = if quick {
             let _ = tx
                 .send(AppEvent::ArchitectSkipped(
@@ -1648,16 +1556,9 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
                 .await;
             None
         } else {
-            // Run the Architect for every backend. The TS architect
-            // (run-architect.ts) has a path for all four providers
-            // (claude / openai / codex / opencode), so gating on the
-            // backend was both unnecessary and incoherent: upstream ran
-            // it for Claude only, this branch had widened it to
-            // Claude|Codex|OpenCode (silently changing Codex behaviour
-            // and still excluding OpenAI for no reason). Gate purely on
-            // `!quick` — quick mode is the only case that legitimately
-            // skips the design document. Routing keys off `architect_llm`
-            // (the real per-phase field), not the legacy `planner` enum.
+            // The Architect runs for every backend (run-architect.ts
+            // handles all providers) — only quick mode skips it. Routing
+            // keys off `architect_llm`, not the legacy `planner` enum.
             let _ = tx.send(AppEvent::ArchitectStarted).await;
             match architect_runner::run_architect(
                 &goal,
@@ -1674,9 +1575,8 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
                     Some(doc)
                 }
                 Err(e) => {
-                    // Non-fatal: planner runs without authoritative spec,
-                    // matching pre-0.25 behaviour. The TUI surfaces this
-                    // so the user knows why this run might drift.
+                    // Non-fatal: the planner runs without an authoritative
+                    // spec; the TUI surfaces why this run might drift.
                     let _ = tx
                         .send(AppEvent::ArchitectSkipped(format!(
                             "Architect phase failed: {}. Falling back to planner-only flow.",
@@ -1688,10 +1588,6 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
             }
         };
 
-        // Phase 2 — Planner. TS subprocess decides Claude vs OpenAI
-        // based on --llm, prints the PRD JSON to stdout. The legacy
-        // `app.planner` enum is now redundant with `app.llm`; we
-        // route entirely off the latter.
         let _ = planner; // legacy field kept on App for the welcome-screen wizard
         let result = planner_runner::run_planner(
             &goal,
@@ -1707,9 +1603,6 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
         ).await;
 
         match result.and_then(|raw_json| {
-            // Parse the PRD JSON the TS planner emitted. Same schema
-            // as the old Rust path consumed — Rust stays the single
-            // source of truth for `PrdOutput`.
             let prd: PrdOutput = serde_json::from_str(&raw_json).map_err(|e| {
                 subprocess::ProcessRunError {
                     message: format!(
@@ -1747,14 +1640,10 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     });
 }
 
-/// Mirror CLAUDE.md content into AGENTS.md so subprocess backends
-/// that follow the AGENTS.md convention (OpenAI Codex CLI) pick up
-/// the same project context Claude Code reads from CLAUDE.md.
-///
-/// Idempotent: only writes if AGENTS.md doesn't already exist (so a
-/// hand-curated AGENTS.md from the user is never overwritten). Soft-
-/// fail: any write error is silently ignored — CLAUDE.md path stays
-/// authoritative.
+/// Mirror CLAUDE.md into AGENTS.md so backends following that
+/// convention (OpenAI Codex CLI) see the same project context. Never
+/// overwrites an existing AGENTS.md; write errors are silently
+/// ignored — CLAUDE.md stays authoritative.
 fn ensure_agents_md_mirror(cwd: &Path, content: &str) {
     let agents_md_path = cwd.join("AGENTS.md");
     if agents_md_path.exists() {
@@ -1773,15 +1662,9 @@ fn spawn_context_builder(cwd: &Path, tx: mpsc::Sender<AppEvent>) {
                     let _ = tx.send(AppEvent::ContextError(format!("Failed to write CLAUDE.md: {}", e))).await;
                     return;
                 }
-                // Mirror the same content to AGENTS.md so subprocess
-                // backends that use the AGENTS.md convention (OpenAI
-                // Codex CLI, future agents) auto-pick up the project
-                // context the same way Claude Code picks up CLAUDE.md.
-                // Both files carry identical bytes — neither backend
-                // gets unique context the other doesn't have. Soft-
-                // fail: if AGENTS.md write errors, log + continue,
-                // since CLAUDE.md is still written and Claude path
-                // still works.
+                // Mirror the same bytes to AGENTS.md for backends that
+                // follow that convention. Soft-fail: CLAUDE.md is already
+                // written, so the Claude path still works.
                 let agents_md_path = cwd.join("AGENTS.md");
                 if let Err(e) = tokio::fs::write(&agents_md_path, &content).await {
                     let _ = tx
@@ -1940,9 +1823,8 @@ fn spawn_executor(
     config: executor::ExecutorConfig,
     echo_raw: bool,
 ) {
-    // The orchestrator (TS, Mozaik-based) replaces the in-process Rust
-    // executor. Bridge BaroEvent → AppEvent::Baro the same way the old
-    // executor did so app/screens stay untouched.
+    // Bridge the orchestrator's BaroEvents to AppEvent::Baro so
+    // app/screens stay untouched.
     let (exec_tx, mut exec_rx) = mpsc::channel::<BaroEvent>(256);
 
     let tx_fwd = tx.clone();
@@ -1960,21 +1842,11 @@ fn spawn_executor(
         Some("opus".to_string())
     };
 
-    // Default audit log path: ~/.baro/runs/<project>-<unix-secs>.jsonl.
-    // Living under the user's home directory (not the project's <cwd>/.baro/)
-    // means the diagnostic trail survives anything that touches the
-    // project working tree: git checkouts, branch switches, manual
-    // cleanups, IDE indexers — none of those reach into ~. We had a
-    // run where 495 KB of audit data vanished from <cwd>/.baro/runs/
-    // between the run ending and the user kill; we still don't know
-    // what wiped it, but moving the file out of the project dir means
-    // we don't have to find out.
-    //
-    // Always-on so post-mortems on stuck/abnormal runs are possible
-    // without rerunning. We pre-touch BOTH the audit JSONL and the
-    // stderr.txt sidecar before spawning the orchestrator so the
-    // diagnostic surface exists even if the JS process explodes inside
-    // its first 50ms.
+    // The always-on audit log lives under ~/.baro/runs (not the project
+    // tree) so the diagnostic trail survives checkouts, branch switches,
+    // and cleanups — we once lost a run's audit data from <cwd>/.baro.
+    // Pre-touch both the JSONL and the stderr sidecar so the diagnostic
+    // surface exists even if the JS process dies in its first 50ms.
     let project_name = cwd
         .file_name()
         .and_then(|n| n.to_str())
@@ -2000,8 +1872,6 @@ fn spawn_executor(
             );
         }
     }
-    // Pre-touch the JSONL so external watchers (and our own diagnostics)
-    // can rely on the file existing even before the Auditor opens it.
     if let Err(e) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -2013,7 +1883,6 @@ fn spawn_executor(
             e
         );
     }
-    // Pre-touch the stderr sidecar for the same reason.
     let stderr_sidecar = audit_log_default.with_extension("stderr.txt");
     if let Err(e) = std::fs::OpenOptions::new()
         .create(true)

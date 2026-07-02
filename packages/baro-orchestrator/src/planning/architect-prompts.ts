@@ -1,17 +1,9 @@
 /**
- * Architect system prompt. Used by every provider's architect backend
- * (claude/openai/codex/opencode/pi) so they produce comparable decision
- * documents — now formatted as Architecture Decision Records (ADRs):
- * one numbered record per cross-cutting decision, each with
- * Status / Context / Decision / Consequences. The Decision field still
- * carries the exact, exhaustive spec (file paths, schemas, API shapes)
- * the Conductor prepends to every story prompt, so structure changed but
- * the authoritative content agents rely on did not.
- *
- * The triage block at the top is critical: for trivial goals, the
- * Architect emits ONE short ADR ("no cross-cutting decisions needed")
- * instead of a full design spec. baro 0.26+ relies on this to avoid
- * ceremony on goals like "fix the typo".
+ * Architect system prompt, shared by every provider backend so they
+ * produce comparable ADR decision documents. The ADRs' Decision fields
+ * are what the Conductor prepends to every story prompt as authoritative
+ * spec. The triage block is load-bearing: trivial goals emit ONE short
+ * ADR instead of a full design spec (baro 0.26+ relies on this).
  */
 export const ARCHITECT_SYSTEM_PROMPT = `You are the architect for this engineering run. ONE focused turn, before anyone writes code.
 
@@ -84,10 +76,6 @@ Rules:
 - Reference exact existing files when leveraging current conventions.
 - Output ONLY the markdown document. No preamble, no "Here are the ADRs:". Start with the \`## Existing context\` heading.`
 
-/**
- * The framing line that wraps the user's goal into a coherent user
- * message for the Architect. Same for both providers.
- */
 export function buildArchitectUserMessage(goal: string, projectContext?: string): string {
     const parts: string[] = []
     if (projectContext && projectContext.trim().length > 0) {

@@ -1,43 +1,20 @@
 /**
- * Mozaik 3.10 SemanticEvent definitions for every baro orchestrator bus
- * event. Drop-in replacement target for the BusEvent class hierarchy in
- * `types.ts` + the two BusEvent subclasses defined alongside their emitters
- * (`ConductorStateItem` in `participants/conductor.ts`, `StoryResultItem`
- * in `participants/story-agent.ts`).
+ * SemanticEvent definitions for every baro orchestrator bus event.
  *
- * Migration policy (this is "Commit 2" of the Mozaik 3.10 upgrade — see
- * the `mozaik-3.10-upgrade` branch root commit and the migration plan in
- * memory `mozaik-3-10-blocker.md`):
+ * CONSTRAINT: each event's wire `type` string must stay identical to the
+ * pre-migration BusEvent `toJSON().type` — audit-log readers (mozaik-replay
+ * legacy adapter, baro's older replay tooling) match on those names.
+ * Migration history and per-event wire-format deltas: docs/semantic-events.md.
  *
- *   - Pure addition. None of the old `BusEvent` classes are touched. Sites
- *     can mix old `BusEvent`/`instanceof` and new `SemanticEvent`/`*.is`
- *     during the migration without conflict.
- *   - Each event keeps its wire `type` string identical to the
- *     pre-migration `toJSON.type` so audit log readers (mozaik-replay
- *     legacy adapter, baro itself's older replay tooling) recognise the
- *     same event names across the cutover.
- *   - Each data interface matches what receivers actually use at runtime.
- *     Where the previous `toJSON()` deliberately dropped or renamed a
- *     field (e.g. `prompt` → `promptLen`, `raw` excluded entirely) those
- *     decisions are noted per-event. In the new world the wire format
- *     follows the data interface — slight verbosity change, all
- *     documented.
- *
- * Type-discriminator pattern, not `instanceof`. Class instances don't
- * survive JSON serialisation (audit log → reload, WebSocket → reload),
- * but a `event.type === "knowledge"` check does. Every event below comes
- * with both a `create()` factory (typed input → SemanticEvent) and an
- * `is()` user-defined type guard.
+ * Type discriminators, not `instanceof`: class instances don't survive JSON
+ * round-trips (audit log → reload, WebSocket → reload); a `type` check does.
  */
 
 import { SemanticEvent } from "@mozaik-ai/core"
 
 /**
- * Defines one semantic-event "kind": its wire type string, a factory that
- * builds a properly-typed `SemanticEvent<TData>`, and a user-defined type
- * guard. Together these give call sites the ergonomics of class-based
- * events (typed payload access, exhaustive discrimination) without
- * coupling identity to a JS class.
+ * One event "kind": wire type string + typed `create()` factory + `is()`
+ * type guard — class-event ergonomics without a JS class identity.
  */
 export function defineSemanticEvent<TData>(type: string) {
     return {
@@ -49,7 +26,7 @@ export function defineSemanticEvent<TData>(type: string) {
     } as const
 }
 
-// ─── Bus routing ──────────────────────────────────────────────────────
+// Bus routing
 
 export interface KnowledgeData {
     /** Source agent that produced the underlying tool call. */
@@ -82,12 +59,7 @@ export interface ReplanData {
     reason: string
     addedStories: readonly ReplanStoryAdd[]
     removedStoryIds: readonly string[]
-    /**
-     * `Record<storyId, dependsOn>` — flat object, not `Map`, for JSON
-     * compatibility (the previous BusEvent class used `Map` and serialised
-     * via `Array.from(entries)`; the SemanticEvent payload skips that
-     * dance).
-     */
+    /** `Record<storyId, dependsOn>` — flat object, not `Map`, for JSON. */
     modifiedDeps: Readonly<Record<string, readonly string[]>>
 }
 export const Replan = defineSemanticEvent<ReplanData>("replan")
@@ -109,7 +81,7 @@ export interface AgentTargetedMessageData {
 export const AgentTargetedMessage =
     defineSemanticEvent<AgentTargetedMessageData>("agent_targeted_message")
 
-// ─── Agent lifecycle ──────────────────────────────────────────────────
+// Agent lifecycle
 
 export type AgentPhase =
     | "idle"
@@ -127,7 +99,7 @@ export interface AgentStateData {
 }
 export const AgentState = defineSemanticEvent<AgentStateData>("agent_state")
 
-// ─── Claude CLI passthrough types ─────────────────────────────────────
+// Claude CLI passthrough types
 
 export interface AgentUserMessageData {
     agentId: string
@@ -144,10 +116,9 @@ export interface ClaudeSystemData {
 export const ClaudeSystem = defineSemanticEvent<ClaudeSystemData>("claude_system")
 
 /**
- * Claude `result` event (one per agent turn). Wire type is still
- * `claude_result` for audit-log compatibility; the in-memory `raw` field
- * from the previous `AgentResultItem` is deliberately not included here
- * because the previous `toJSON()` already excluded it.
+ * Claude `result` event (one per agent turn). Wire type stays
+ * `claude_result` for audit-log compatibility; `raw` is deliberately
+ * excluded (the old toJSON() already dropped it).
  */
 export interface AgentResultData {
     agentId: string
@@ -176,19 +147,7 @@ export interface ClaudeRateLimitData {
 export const ClaudeRateLimit =
     defineSemanticEvent<ClaudeRateLimitData>("claude_rate_limit")
 
-// ─── Codex CLI passthrough types ──────────────────────────────────────
-// Codex emits a stream of JSONL events under three families:
-//   - thread.*  → lifecycle of the whole codex exec session
-//   - turn.*    → lifecycle of a single agent turn inside the session
-//   - item.*    → individual artefacts produced by a turn (messages,
-//                 reasoning, command executions, file changes, MCP tool
-//                 calls, plan updates …)
-//
-// All three families fall back to opaque `raw` payloads in our event
-// objects — the mapper extracts known fields (text, tool name, exit
-// code) into dedicated Mozaik typed items where it can, and otherwise
-// passes the whole event through so downstream observers (audit log,
-// kaleidoskop replay, debug consoles) still see everything.
+// Codex CLI passthrough types — see docs/stream-protocols.md ("Codex").
 
 export interface CodexSystemData {
     agentId: string
@@ -226,12 +185,9 @@ export const CodexUnknownEvent =
     defineSemanticEvent<CodexUnknownEventData>("codex_unknown_event")
 
 /**
- * Verdict from the Critic participant. Wire JSON uses snake_case keys
- * (`agent_id`, `violated_criteria`, `model_used`) to match the Rust TUI
- * wire format. The data interface here uses camelCase to match TS
- * convention; the snake_case mapping happens at the audit-log boundary
- * if anything needs the historic shape (none of the in-process consumers
- * read snake_case keys).
+ * Verdict from the Critic. Historic wire JSON used snake_case keys to
+ * match the Rust TUI; the interface is camelCase — no in-process consumer
+ * reads snake_case, so any mapping happens at the audit-log boundary.
  */
 export interface CritiqueData {
     agentId: string
@@ -251,7 +207,7 @@ export interface ClaudeUnknownEventData {
 export const ClaudeUnknownEvent =
     defineSemanticEvent<ClaudeUnknownEventData>("claude_unknown_event")
 
-// ─── Orchestration control events ─────────────────────────────────────
+// Orchestration control events
 
 export interface RunStartRequestData {
     reason: string
@@ -287,11 +243,9 @@ export const LevelCompleted =
     defineSemanticEvent<LevelCompletedData>("level_completed")
 
 /**
- * Note: previous `StorySpawnRequestItem.toJSON()` replaced the full
- * prompt with its length (`promptLen`) to keep audit logs small. The
- * new wire format carries the full prompt — receivers (StoryFactory)
- * need it to construct the StoryAgent, and round-tripping the prompt
- * through the audit log is worth the size for replay/debug.
+ * Unlike the old toJSON() (which logged only `promptLen`), the wire format
+ * carries the full prompt — StoryFactory needs it, and audit-log
+ * round-tripping is worth the size for replay/debug.
  */
 export interface StorySpawnRequestData {
     storyId: string
@@ -350,13 +304,36 @@ export interface StoryResultData {
 }
 export const StoryResult = defineSemanticEvent<StoryResultData>("story_result")
 
-// ─── OpenCode CLI passthrough types ───────────────────────────────────
-// OpenCode emits a stream of JSONL events with these envelope types:
-//   - step_start   → beginning of an inference step
-//   - text         → assistant text output
-//   - tool_call    → tool invocation
-//   - tool_result  → tool output
-//   - step_finish  → end of step with token/cost metadata
+/**
+ * A participant (Supervisor today) requests intervention on a RUNNING story.
+ * StoryFactory consumes "abort": the story settles as a failed StoryResult,
+ * which the Surgeon can then split/escalate.
+ */
+export interface StoryInterventionData {
+    storyId: string
+    source: string
+    action: "abort"
+    reason: string
+}
+export const StoryIntervention =
+    defineSemanticEvent<StoryInterventionData>("story_intervention")
+
+/** A passed story's work landed on the run branch (worktree merge-back or shared-tree reconcile). */
+export interface StoryMergedData {
+    storyId: string
+    mode: "worktree" | "shared-tree"
+}
+export const StoryMerged = defineSemanticEvent<StoryMergedData>("story_merged")
+
+/** Merge-back failed; the story's worktree + branch are preserved for recovery. */
+export interface StoryMergeFailedData {
+    storyId: string
+    error: string
+}
+export const StoryMergeFailed =
+    defineSemanticEvent<StoryMergeFailedData>("story_merge_failed")
+
+// OpenCode CLI passthrough types — see docs/stream-protocols.md ("OpenCode").
 
 export interface OpenCodeSystemData {
     agentId: string
@@ -383,12 +360,7 @@ export interface OpenCodeUnknownEventData {
 export const OpenCodeUnknownEvent =
     defineSemanticEvent<OpenCodeUnknownEventData>("opencode_unknown_event")
 
-// ─── Pi CLI passthrough types ─────────────────────────────────────────
-// Pi emits a stream of JSONL events with these envelope types:
-//   - session / agent_start / turn_start / agent_end → lifecycle
-//   - message_start / message_end / turn_end          → turn boundaries
-//   - message_update (assistantMessageEvent deltas)    → streamed items
-//   - tool_execution_start / _update / _end           → tool activity
+// Pi CLI passthrough types — see docs/stream-protocols.md ("Pi").
 
 export interface PiSystemData {
     agentId: string

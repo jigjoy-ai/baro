@@ -8,10 +8,8 @@ import { StoryLifecycleForwarder } from "./story-lifecycle.js"
 import { TokenUsageForwarder } from "./token-usage.js"
 
 /**
- * Wire every BaroEvent forwarder into the given environment. Each
- * forwarder is independently constructible/joinable — callers that want
- * a custom subset can skip this helper and `new XxxForwarder().join(env)`
- * directly.
+ * Wire every BaroEvent forwarder into the environment. Callers wanting a
+ * subset can `new XxxForwarder().join(env)` directly instead.
  */
 export function joinBaroEventForwarders(env: AgenticEnvironment): void {
     const forwarders = [

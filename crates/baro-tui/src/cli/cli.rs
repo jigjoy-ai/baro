@@ -31,26 +31,18 @@ pub struct Cli {
     #[arg(long, default_value = "0")]
     pub parallel: u32,
 
-    /// Per-story timeout in seconds. Omit for an effort-scaled default
-    /// (--effort max ≈ 25 min, xhigh ≈ 20, high ≈ 15, else 10); pass a
-    /// value to override it absolutely — shorter OR longer.
+    /// Per-story timeout in seconds. Default scales with --effort
+    /// (max ≈ 25 min, xhigh ≈ 20, high ≈ 15, else 10).
     #[arg(long)]
     pub timeout: Option<u64>,
 
-    /// Override model for all phases. For `--llm claude` the valid
-    /// values are opus / sonnet / haiku; for openai / codex / opencode
-    /// the value is passed through verbatim (e.g.
-    /// `anthropic/claude-sonnet-4`, `openai/gpt-4o`,
-    /// `lmstudio/qwen3-coder`). Validation is per-backend at runtime
-    /// rather than a fixed clap allow-list, so non-Claude backends can
-    /// name any provider/model their CLI understands.
+    /// Override model for all phases: opus/sonnet/haiku for claude;
+    /// passed through verbatim for other backends (e.g. `openai/gpt-4o`).
     #[arg(long = "model", short = 'm')]
     pub model: Option<String>,
 
-    /// Effort level for spawned `claude` processes (the Architect,
-    /// Planner, and Story agents on the `claude` backend). Higher =
-    /// more thinking per turn at more tokens. `max` matches Claude
-    /// Code's max-effort dynamic-workflows mode. Default: high.
+    /// Effort level for spawned `claude` processes; higher = more
+    /// thinking per turn (`max` matches Claude Code's max-effort mode).
     #[arg(long, value_parser=["low", "medium", "high", "xhigh", "max"], default_value="high")]
     pub effort: String,
 
@@ -58,9 +50,8 @@ pub struct Cli {
     #[arg(long = "no-model-routing")]
     pub no_model_routing: bool,
 
-    /// Enable the live Critic: evaluates each agent turn against its
-    /// acceptance criteria via `claude --model haiku` and injects
-    /// corrective feedback when a turn doesn't satisfy them. Default: ON.
+    /// Disable the live Critic (evaluates each turn against its acceptance
+    /// criteria and injects corrective feedback). Default: ON.
     #[arg(long)]
     pub no_critic: bool,
 
@@ -76,9 +67,8 @@ pub struct Cli {
     #[arg(long)]
     pub no_sentry: bool,
 
-    /// Disable the Surgeon: observes terminal story failures and proposes
-    /// replans (split / prereq / rewire) so failed work gets done in a
-    /// different shape rather than dropped. Default: ON.
+    /// Disable the Surgeon (replans terminal story failures:
+    /// split / prereq / rewire). Default: ON.
     #[arg(long)]
     pub no_surgeon: bool,
 
@@ -86,10 +76,8 @@ pub struct Cli {
     #[arg(long, hide = true)]
     with_surgeon: bool,
 
-    /// Use deterministic Surgeon (skip-only) instead of the LLM-driven
-    /// replanner. The LLM Surgeon is on by default — it produces richer
-    /// replans (split, prereq, rewire) at the cost of an Opus call per
-    /// terminal failure.
+    /// Use the deterministic skip-only Surgeon instead of the LLM replanner
+    /// (default: LLM, one Opus call per terminal failure).
     #[arg(long)]
     pub no_surgeon_llm: bool,
 
@@ -101,15 +89,12 @@ pub struct Cli {
     #[arg(long)]
     pub surgeon_model: Option<String>,
 
-    /// Model used for the Architect phase. Overrides the routed default
-    /// (opus) and any `--llm`-side default (gpt-5.5). Beaten only by
-    /// the global `--model` flag, which forces every phase to one model.
+    /// Model for the Architect phase. Overrides the routed/backend
+    /// default; only the global `--model` beats it.
     #[arg(long)]
     pub architect_model: Option<String>,
 
-    /// Model used for the Planner phase. Same precedence rules as
-    /// `--architect-model`. Default: routed (opus) for Claude, gpt-5.4
-    /// for OpenAI.
+    /// Model for the Planner phase (same precedence as --architect-model).
     #[arg(long)]
     pub planner_model: Option<String>,
 
@@ -117,101 +102,62 @@ pub struct Cli {
     #[arg(long)]
     pub critic_model: Option<String>,
 
-    /// Model used for every Story Agent in the run. Same precedence
-    /// rules. Default: routed (opus) for Claude, gpt-5.5 for OpenAI.
+    /// Model for every Story Agent (same precedence as --architect-model).
     #[arg(long)]
     pub story_model: Option<String>,
 
-    /// Per-story tier→backend:model map. Binds the planner's blast-radius
-    /// tiers to concrete backends so ONE run can mix claude/openai/codex
-    /// story-by-story (cheap stories on one model, cross-cutting stories
-    /// on another). Example:
+    /// Per-story tier→backend:model map, so one run can mix backends
+    /// story-by-story. Example:
     ///   --tier-map "haiku=openai:MiniMax-M3,sonnet=openai:MiniMax-M3,opus=claude:opus"
-    /// Without this, per-story tiers run on the phase backend as before.
     #[arg(long = "tier-map")]
     pub tier_map: Option<String>,
 
-    /// Register a named OpenAI-compatible endpoint, `name=url` (repeatable).
-    /// Reference it from a route as `openai:<model>@<name>`, so one run can
-    /// hit several OpenAI-compatible endpoints (e.g. MiniMax + real OpenAI):
-    ///   --openai-endpoint minimax=https://api.minimax.io/v1
-    ///   --tier-map "haiku=openai:MiniMax-M3@minimax,opus=claude:opus"
-    /// The API key per endpoint is read from `BARO_OPENAI_KEY_<NAME>` (else
-    /// `OPENAI_API_KEY`) — never passed on the command line.
+    /// Register a named OpenAI-compatible endpoint, `name=url` (repeatable);
+    /// reference it from a route as `openai:<model>@<name>`. The key is read
+    /// from `BARO_OPENAI_KEY_<NAME>` (else `OPENAI_API_KEY`), never the CLI.
     #[arg(long = "openai-endpoint")]
     pub openai_endpoint: Vec<String>,
 
-    /// Seconds to wait between successive story spawns inside the same
-    /// DAG level. Gives Librarian a window to capture and broadcast
-    /// the first agent's exploratory tool calls so its peers don't
-    /// repeat the same Reads/Greps. Default: 10. Set to 0 to disable.
+    /// Seconds between story spawns within a DAG level, giving the Librarian
+    /// time to broadcast the first agent's discoveries. Default: 10; 0 disables.
     #[arg(long = "intra-level-delay")]
     pub intra_level_delay: Option<u64>,
 
-    /// Run a self-diagnostic and exit. Verifies the `claude` CLI is on
-    /// PATH, can return a version, can complete a trivial authenticated
-    /// call, plus checks for `gh` and a writable audit directory.
-    /// Use this when a baro run fails before any agents start.
+    /// Run a self-diagnostic (claude CLI on PATH, auth, gh, writable
+    /// audit dir) and exit.
     #[arg(long)]
     pub doctor: bool,
 
-    /// Quick mode for trivial goals. Skips the Architect phase, forces
-    /// the Planner to emit exactly one story, and disables Critic +
-    /// Surgeon. Use this when you'd otherwise type your prompt directly
-    /// into Claude Code: `baro --quick "fix the typo on line 42"`.
-    /// One agent, tight scope, no design-document overhead.
+    /// Quick mode for trivial goals: skips the Architect, plans exactly
+    /// one story, disables Critic + Surgeon.
     #[arg(long)]
     pub quick: bool,
 
-    /// Continue a previous run on the CURRENT branch instead of opening a new
-    /// one — the follow-up lands on the existing PR. The branch already holds
-    /// the prior work, which baro re-reads as context.
-    /// `baro --continue "now add error handling"`
+    /// Continue a previous run on the CURRENT branch (follow-up lands on
+    /// the existing PR); prior work on the branch is re-read as context.
     #[arg(long = "continue")]
     pub continue_run: bool,
 
-    /// LLM provider for the run.
-    ///
-    ///   claude (default) — drives Architect, Planner, Critic, Surgeon,
-    ///                      and StoryAgent through the Claude Code CLI.
-    ///   openai           — drives all five through Mozaik's native
-    ///                      OpenAI runner (gpt-5.x). Requires
-    ///                      OPENAI_API_KEY in the environment OR entered
-    ///                      on the provider-picker screen when running
-    ///                      interactively.
-    ///   codex            — subscription-arbitrage path via OpenAI Codex
-    ///                      CLI (ChatGPT Plus/Pro billing). All five
-    ///                      phases route through Codex.
-    ///   hybrid           — preset that mixes vendors per phase:
-    ///                      Architect / Planner / Surgeon stay on
-    ///                      Claude (high-stakes, low-volume), Story and
-    ///                      Critic move to Codex (high-volume, cheap
-    ///                      on ChatGPT subscription). Individual phase
-    ///                      overrides win when set.
-    ///   jigjoy           — hosted preset: every phase talks to the
-    ///                      baro gateway (an OpenAI-compatible proxy)
-    ///                      that holds the upstream keys and routes
-    ///                      planner/architect/surgeon to a strong model
-    ///                      and story/critic to a cheap one. Supply only
-    ///                      your hosted key via JIGJOY_API_KEY; override
-    ///                      the gateway URL with BARO_JIGJOY_URL.
+    /// LLM provider for the run:
+    ///   claude (default) — all phases via the Claude Code CLI.
+    ///   openai           — all phases via the native OpenAI runner
+    ///                      (needs OPENAI_API_KEY or the picker screen).
+    ///   codex            — all phases via the OpenAI Codex CLI
+    ///                      (ChatGPT Plus/Pro billing).
+    ///   hybrid           — Architect/Planner/Surgeon on Claude,
+    ///                      Story/Critic on Codex; phase overrides win.
+    ///   jigjoy           — hosted baro gateway holding the upstream keys
+    ///                      (JIGJOY_API_KEY; URL via BARO_JIGJOY_URL).
     #[arg(long, default_value="claude", value_parser=["claude", "openai", "codex", "opencode", "pi", "hybrid", "jigjoy"])]
     pub llm: String,
 
-    /// Custom base URL for OpenAI-compatible API endpoints. When set,
-    /// all OpenAI-routed calls (Architect, Planner, Story, Critic,
-    /// Surgeon) are sent to this URL instead of api.openai.com.
-    /// Useful for providers that expose an OpenAI-compatible API:
-    /// Xiaomi MiMo, OpenRouter, vLLM, Ollama, etc. Can also be set
-    /// via the OPENAI_BASE_URL environment variable (flag wins).
+    /// Base URL for all OpenAI-routed calls instead of api.openai.com,
+    /// for OpenAI-compatible providers (OpenRouter, vLLM, Ollama, ...).
     #[arg(long, env = "OPENAI_BASE_URL")]
     pub openai_base_url: Option<String>,
 
-    /// Per-phase overrides. Each accepts claude | openai | codex | opencode and
-    /// wins over `--llm` (including the `hybrid` preset) for that one
-    /// phase. Useful for surgical tuning: e.g. `--llm hybrid
-    /// --critic-llm claude` for a hybrid run that uses Claude for
-    /// Critic instead of Codex.
+    /// Per-phase backend overrides; each wins over `--llm` (including
+    /// the `hybrid` preset) for that one phase.
     #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi"])]
     pub architect_llm: Option<String>,
     #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi"])]
@@ -223,16 +169,13 @@ pub struct Cli {
     #[arg(long, value_parser=["claude", "openai", "codex", "opencode", "pi"])]
     pub surgeon_llm: Option<String>,
 
-    /// Disable semantic memory (MemoryLibrarian). Uses tag-based
-    /// Librarian instead. Semantic memory uses ONNX embeddings for
-    /// better context matching between agents. Default: ON.
+    /// Disable semantic memory (ONNX-embedding MemoryLibrarian); falls
+    /// back to the tag-based Librarian. Default: ON.
     #[arg(long)]
     pub no_memory: bool,
 
-    /// Run without the TUI: plan and execute the goal autonomously,
-    /// auto-confirming the plan, and stream the orchestrator's event
-    /// JSON to stdout. For CI / automation / remote runners. Requires a
-    /// goal argument.
+    /// Run without the TUI: auto-confirm the plan and stream orchestrator
+    /// event JSON to stdout (CI / automation). Requires a goal argument.
     #[arg(long)]
     pub headless: bool,
 }

@@ -1,16 +1,8 @@
 /**
- * StoryExecutor — the seam between "decide a story should run" and "actually
- * run its agent loop somewhere".
- *
- * The default implementation (`LocalStoryExecutor`) builds the right backend
- * agent and runs it in-process — the historical behaviour. The seam lets that
- * be swapped: a mock executor for tests, or an out-of-process / remote executor
- * that runs the agent elsewhere and re-emits its streamed bus events onto the
- * local `env`. Whatever the implementation, it must deliver the agent's events,
- * including the terminal `StoryResult`, onto the bus — so Conductor / Critic /
- * Surgeon / Sentry / Librarian / Cartographer can't tell which executor ran.
- * That indistinguishability is the point: every other participant stays
- * unchanged regardless of where execution happens.
+ * StoryExecutor — the seam between "decide a story should run" and "run its
+ * agent loop somewhere" (in-process, mock, or remote). Every implementation
+ * must deliver the agent's bus events — ending in the terminal `StoryResult` —
+ * onto the local env, so other participants can't tell which executor ran.
  */
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
@@ -23,7 +15,6 @@ import { OpenCodeStoryAgent } from "./opencode-story-agent.js"
 import { PiStoryAgent } from "./pi-story-agent.js"
 import { StoryAgent } from "./story-agent.js"
 
-/** Backend-shaping knobs the factory owns and forwards to the executor. */
 export interface StoryExecOpts {
     /** Default model for the OpenAI path when the route names none. */
     openaiModel?: string
@@ -31,23 +22,17 @@ export interface StoryExecOpts {
     effort?: string
 }
 
-/** A story that has started running. `dispose` detaches it once it settles. */
 export interface StoryExecution {
     /** Release bus membership / resources after the StoryResult lands. */
     dispose(env: AgenticEnvironment): void
     /**
-     * Abort the running agent early (Supervisor uses this on a detected stall).
-     * The agent settles with a failed StoryResult, which the Surgeon then reacts
-     * to. Optional so custom executors need not implement it.
+     * Abort early (Supervisor uses this on a detected stall); the agent then
+     * settles with a failed StoryResult, which the Surgeon reacts to.
+     * Optional so custom executors need not implement it.
      */
     abort?(): void
 }
 
-/**
- * Where a story's agent loop runs. `start` must kick off execution and ensure
- * the agent's bus events (ending in `StoryResult`) reach `env`; it returns a
- * handle the factory disposes when the story settles.
- */
 export interface StoryExecutor {
     start(
         req: StorySpawnRequestData,
@@ -65,11 +50,7 @@ type AnyStoryAgent =
     | OpenCodeStoryAgent
     | PiStoryAgent
 
-/**
- * In-process executor — the historical path. Builds the backend agent for the
- * resolved route, joins it to the bus, and fire-and-forgets its run loop; the
- * StoryResult arrives on the bus when it settles.
- */
+/** In-process executor: builds the backend agent for the resolved route. */
 export class LocalStoryExecutor implements StoryExecutor {
     start(
         req: StorySpawnRequestData,
@@ -136,8 +117,7 @@ export class LocalStoryExecutor implements StoryExecutor {
 
         agent.join(env)
 
-        // Fire-and-forget: the StoryResult event arrives on the bus when the
-        // run settles, and Conductor reacts to that.
+        // Fire-and-forget: Conductor reacts to the StoryResult bus event.
         void agent.run(env)
 
         return {

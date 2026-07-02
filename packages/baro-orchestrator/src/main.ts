@@ -1,12 +1,4 @@
-/**
- * @baro/orchestrator — TypeScript Mozaik orchestrator that replaces baro's
- * Rust executor. This module is the public entry point of the package.
- *
- * Phase 1 milestone A: exports the building blocks needed to run a single
- * story end-to-end (ClaudeCliParticipant, Auditor, Cartographer, custom
- * ContextItem types, DAG helpers). Conductor / TUI bridge / Operator
- * land in milestone B.
- */
+/** @baro/orchestrator — public entry point of the package. */
 
 export {
     AgentTargetedMessage,
@@ -100,9 +92,8 @@ export {
 } from "./participants/story-agent.js"
 export { StoryResult } from "./semantic-events.js"
 
-// The StoryExecutor seam — implement `StoryExecutor` and pass it as
-// `OrchestrateConfig.executor` to run a story's agent loop somewhere other
-// than in-process (the default is `LocalStoryExecutor`).
+// The StoryExecutor seam: pass a custom implementation as
+// `OrchestrateConfig.executor` to run story agent loops out of process.
 export {
     LocalStoryExecutor,
     type StoryExecutor,

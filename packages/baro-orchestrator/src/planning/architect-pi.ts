@@ -1,13 +1,7 @@
 /**
  * ArchitectPi — one-shot Architect call via the `pi` CLI.
- *
- * Same prompt shape as ArchitectClaude / ArchitectCodex / ArchitectOpenCode
- * so the providers produce comparable decision documents. Pi's built-in
- * tools (file read, grep, bash, etc.) handle codebase exploration; we don't
- * ship a separate tool layer.
- *
- * Wire shape: combined `${SYSTEM}\n\n${USER}` prompt → pi run
- * → final text output → return as markdown.
+ * Same prompt shape as the other architect backends so providers produce
+ * comparable decision documents; Pi's built-in tools explore.
  */
 
 import { runPiOneShot } from "../pi-one-shot.js"
@@ -16,35 +10,19 @@ import {
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
 
-/** Options for `runArchitectPi`. */
 export interface RunArchitectPiOptions {
-    /** The user's goal — verbatim. */
     goal: string
-    /** Working directory the Architect explores in. */
     cwd: string
-    /** Provider to use (e.g. "anthropic", "openai"). Default: undefined (use Pi default). */
+    /** Pi provider (e.g. "anthropic", "openai"). */
     provider?: string
-    /** Pi model identifier. Default: undefined (use Pi default). */
     model?: string
-    /** Optional CLAUDE.md / project-context blob to prepend. */
     projectContext?: string
-    /** Path to the `pi` binary. Default: "pi". */
     piBin?: string
-    /**
-     * Per-call timeout in milliseconds. Default: 600_000 (10 minutes).
-     * Pi with tool-call exploration can be materially slower than
-     * a direct API call — the original 3-minute timeout was killing runs
-     * mid-exploration.
-     */
+    /** Default 10 min — tool-call exploration blew past the old
+     *  3-minute timeout mid-exploration. */
     timeoutMs?: number
 }
 
-/**
- * Run the Architect phase using Pi as the backend.
- *
- * @returns The decision document (markdown) produced by the Architect.
- * @throws Error if Pi returns empty or fails.
- */
 export async function runArchitectPi(
     opts: RunArchitectPiOptions,
 ): Promise<string> {

@@ -1,19 +1,8 @@
 /**
- * CodexStoryAgent — story-level wrapper that drives a
- * CodexCliParticipant through a single piece of work, with retries
- * and per-attempt timeout. Sibling of `story-agent.ts` (Claude) and
- * `openai-story-agent.ts` (OpenAI API).
- *
- * Lifecycle is simpler than the Claude variant because Codex exec is
- * one-shot: each attempt spawns a fresh `codex exec --json` process,
- * which streams events and exits when the agent finishes. There is no
- * multi-turn quiet-timer / stdin-injection dance.
- *
- *   idle ─► starting ─► running ─► done | failed
- *                              ╰► retrying ─► running ─► …
- *
- * Outer retry budget and hard timeout match StoryAgent's defaults so
- * the orchestrator-level semantics are uniform across backends.
+ * CodexStoryAgent — drives a CodexCliParticipant through one story with
+ * retries and per-attempt timeout. `codex exec` is one-shot (fresh process
+ * per attempt, no multi-turn stdin dance); retry/timeout defaults match
+ * StoryAgent so orchestrator-level semantics stay uniform.
  */
 
 import { setTimeout as setTimeoutPromise } from "timers/promises"
@@ -34,40 +23,28 @@ import {
 export interface CodexStorySpec {
     /** Story ID, used as agentId for observer attribution. */
     id: string
-    /** The prompt sent to Codex as the initial user message. */
     prompt: string
-    /** Working directory for Codex. Must be a git repo (Codex enforces). */
+    /** Must be a git repo (Codex enforces). */
     cwd: string
-    /** Optional model override (e.g. "gpt-5.5"). */
     model?: string
-    /** Path to the `codex` binary. Default: "codex" (resolved via PATH). */
     codexBin?: string
-    /** Retry budget (number of *additional* attempts after the first). */
+    /** Number of *additional* attempts after the first. */
     retries?: number
-    /** Per-attempt timeout in seconds. Default: 600. */
+    /** Per-attempt timeout in seconds. */
     timeoutSecs?: number
-    /** Delay between retries in milliseconds. Default: 1500. */
     retryDelayMs?: number
-    /**
-     * Hard cap in seconds for the entire story across all attempts. The
-     * Codex process is aborted unconditionally when this fires. <= 0
-     * disables the absolute kill timer. Default: 0 (matches StoryAgent).
-     */
+    /** Hard cap in seconds for the whole story across all attempts; <= 0 disables. */
     hardTimeoutSecs?: number
     /**
-     * Bypass Codex's sandbox + approval prompts (i.e. pass
-     * `--dangerously-bypass-approvals-and-sandbox`). Required for
-     * autonomous baro runs because Codex's `workspace-write` sandbox
-     * mode blocks `.git/` writes — without bypass the agent can't
-     * commit. The "danger" is bounded by the per-story git worktree
-     * (WorktreeManager, #50): the agent's writes land in an isolated
-     * tree that's merged back only on success. Default: true.
+     * Pass `--dangerously-bypass-approvals-and-sandbox`. Required: Codex's
+     * `workspace-write` sandbox blocks `.git/` writes, so the agent can't
+     * commit. The danger is bounded by the per-story git worktree
+     * (WorktreeManager, #50), merged back only on success.
      */
     bypassSandbox?: boolean
     /**
-     * Pass `--skip-git-repo-check`. baro story workers run inside a
-     * per-story git worktree (a valid git repo), so the default is false;
-     * set this only when wiring up tests or one-off runs.
+     * Pass `--skip-git-repo-check`. Story workers run inside a per-story git
+     * worktree (a valid repo), so default false; only for tests/one-offs.
      */
     skipGitRepoCheck?: boolean
 }
@@ -134,10 +111,7 @@ export class CodexStoryAgent extends BaseObserver {
         return this.currentCodex
     }
 
-    /**
-     * Begin executing the story. Idempotent. Returns the `done` promise
-     * for the caller's convenience.
-     */
+    /** Idempotent; returns the `done` promise. */
     run(environment: AgenticEnvironment): Promise<CodexStoryOutcome> {
         if (this.startedAt != null) {
             return this.done
@@ -149,20 +123,13 @@ export class CodexStoryAgent extends BaseObserver {
         return this.done
     }
 
-    /**
-     * No-op: Codex exec is one-shot, there's no stdin channel to forward
-     * mid-flight messages to. Logged at the participant level if we ever
-     * see an AgentTargetedMessage addressed here.
-     */
+    /** No-op: Codex exec is one-shot — no stdin channel for mid-flight messages. */
     override async onExternalEvent(
         _source: Participant,
         _event: SemanticEvent<unknown>,
     ): Promise<void> {
-        // Intentionally empty — Codex exec doesn't have the multi-turn
-        // stdin lifecycle that StoryAgent uses for Claude.
     }
 
-    /** Abort the story, killing the running Codex (if any). */
     abort(): void {
         this.currentCodex?.abort()
         this.transition("aborted", "external abort")

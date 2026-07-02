@@ -1,17 +1,8 @@
 /**
- * PlannerOpenAI — Mozaik-native Planner. Multi-turn inference loop
- * with our codebase tools, terminating on an assistant message that
- * carries the PRD JSON. Same prompt as PlannerClaude so the two
- * providers produce comparable DAGs.
- *
- * Returns the raw JSON string (the body of the model's final
- * message). The Rust caller parses it; this layer doesn't reparse.
- *
- * Replaces the legacy `packages/baro-app/src/core/openai-planner.ts`
- * + standalone `node openai-planner.js` subprocess. That path used a
- * raw OpenAI Chat Completions client; this one rides Mozaik 3.9's
- * native runner so it shares model wrappers, reasoning-effort, and
- * tool-calling shapes with the Architect / Critic / Surgeon.
+ * PlannerOpenAI — Mozaik-native Planner: multi-turn tool loop that ends
+ * on an assistant message carrying the PRD JSON. Same prompt as
+ * PlannerClaude so providers produce comparable DAGs. Returns the raw
+ * JSON string; the Rust caller parses it.
  */
 
 import {
@@ -40,29 +31,17 @@ import {
 } from "./planner-prompts.js"
 
 export interface RunPlannerOpenAIOptions {
-    /** The user's goal — verbatim. */
     goal: string
-    /** Working directory the Planner explores in. */
     cwd: string
-    /** Mozaik model name. Default: "gpt-5.5" — flagship reasoning across all five OpenAI phases. */
     model?: string
-    /** Optional CLAUDE.md / project-context blob to prepend. */
     projectContext?: string
-    /** Architect's DecisionDocument, prepended as authoritative spec. */
     decisionDocument?: string
-    /** `--quick` hard override: 1 story, regardless of triage. */
+    /** `--quick` hard override: exactly 1 story. */
     quick?: boolean
-    /**
-     * Cap on inference rounds. Each round = one model response,
-     * optionally with tool calls + their outputs in the next round.
-     * Planner generally needs fewer rounds than Architect (no schema
-     * to design) — 8 is generous. Triggers an error if exceeded.
-     */
+    /** Cap on inference rounds; errors if exceeded. */
     maxRounds?: number
-    /** Per-round inference timeout in seconds. Default: 600 — reasoning models
-     * (gpt-5.5 on the Responses API) routinely need minutes per round; the old
-     * 120 s killed planning mid-round. Matches the 10-min default the
-     * pi/codex/opencode architect backends already use. */
+    /** Default 600 s — reasoning models routinely need minutes per round;
+     *  the old 120 s killed planning mid-round. */
     perRoundTimeoutSecs?: number
 }
 

@@ -1,21 +1,7 @@
 /**
- * baro-orchestrator CLI — standalone entry for end-user testing.
- *
- * Until the Rust TUI is rewired to spawn this as a subprocess, you can
- * run the orchestrator directly:
- *
- *   tsx packages/baro-orchestrator/scripts/cli.ts \
- *       --prd ./prd.json \
- *       --cwd . \
- *       --parallel 0 \
- *       --timeout 600 \
- *       [--model sonnet|opus|haiku] \
- *       [--no-git] \
- *       [--no-tui-events] \
- *       [--audit-log ./audit.jsonl]
- *
- * Prints BaroEvents to stdout (one JSON per line) by default, plus a
- * compact human summary on stderr.
+ * Standalone orchestrator CLI (run directly with tsx; the Rust TUI also
+ * spawns it as a subprocess). Prints BaroEvents to stdout (one JSON per
+ * line) plus a compact human summary on stderr. See --help for flags.
  */
 
 import { existsSync } from "fs"
@@ -282,11 +268,9 @@ async function main(): Promise<void> {
         }
     }
 
-    // Build the OpenAI endpoint registry. API keys are resolved from the
-    // environment (per-endpoint `BARO_OPENAI_KEY_<NAME>`, else
-    // `OPENAI_API_KEY`) so secrets never travel on the command line. Specs
-    // come from repeated `--openai-endpoint` flags, or BARO_OPENAI_ENDPOINTS
-    // (comma-separated) as a fallback for manual runs.
+    // API keys come from env (per-endpoint BARO_OPENAI_KEY_<NAME>, else
+    // OPENAI_API_KEY) so secrets never travel on the command line. Specs:
+    // repeated --openai-endpoint flags, else BARO_OPENAI_ENDPOINTS (comma-sep).
     let endpointSpecs = args.endpointSpecs
     if (endpointSpecs.length === 0 && process.env.BARO_OPENAI_ENDPOINTS) {
         endpointSpecs = process.env.BARO_OPENAI_ENDPOINTS.split(",")
@@ -399,11 +383,9 @@ async function main(): Promise<void> {
     }
 }
 
-// Catch-all guards so any async failure that isn't already inside
-// main()'s try/catch still gets a stack on stderr before the process
-// dies. Without these, an unhandled rejection in a Participant's
-// onContextItem handler kills the orchestrator silently and the TUI
-// is left in "Waiting for next story…" forever.
+// Without these guards, an unhandled rejection in a Participant's
+// onContextItem handler kills the orchestrator silently and the TUI is
+// left in "Waiting for next story…" forever.
 process.on("unhandledRejection", (reason) => {
     const stack = (reason as Error)?.stack ?? String(reason)
     process.stderr.write(`[cli] unhandledRejection: ${stack}\n`)
@@ -417,10 +399,9 @@ process.on("uncaughtException", (err) => {
     process.exit(1)
 })
 
-// Forward SIGINT/SIGTERM to every active Claude child so a killed baro
-// doesn't leave a swarm of background agents burning quota. The Rust
-// TUI sends SIGTERM on user-initiated shutdown; the user's own ctrl-c
-// in dev arrives as SIGINT.
+// Forward SIGINT/SIGTERM to every active child so a killed baro doesn't
+// leave a swarm of agents burning quota. The Rust TUI sends SIGTERM on
+// shutdown; a dev ctrl-c arrives as SIGINT.
 let shuttingDown = false
 function shutdown(signal: NodeJS.Signals): void {
     if (shuttingDown) return
@@ -442,12 +423,9 @@ function shutdown(signal: NodeJS.Signals): void {
 process.on("SIGINT", () => shutdown("SIGINT"))
 process.on("SIGTERM", () => shutdown("SIGTERM"))
 
-// Parent-death watchdog: if the Rust TUI is killed with SIGKILL it has
-// no chance to send us SIGTERM, and we'd be left running with our
-// Claude children alive. Detect re-parenting to PID 1 (init / launchd)
-// and self-terminate, killing our children on the way out. The
-// orchestrator only ever has one legit parent (the Rust baro-tui or a
-// dev tsx invocation), so any change is fatal.
+// Parent-death watchdog: a SIGKILLed Rust TUI can't send us SIGTERM, so
+// detect re-parenting (ppid change → init/launchd) and self-terminate,
+// killing our children on the way out. Any ppid change is fatal.
 const initialPpid = process.ppid
 const orphanWatchdog = setInterval(() => {
     if (process.ppid !== initialPpid) {
@@ -462,10 +440,9 @@ orphanWatchdog.unref()
 
 main().catch((e: unknown) => {
     process.stderr.write(`[cli] unhandled: ${(e as Error)?.stack ?? String(e)}\n`)
-    // Reap in-flight children before bailing. process.exit() gives no grace
-    // window for SIGTERM to land, so SIGKILL directly — otherwise an unhandled
-    // crash orphans live claude/codex/opencode/pi subprocesses that keep
-    // burning quota and holding worktrees with no parent to clean them up.
+    // process.exit() gives no grace window for SIGTERM to land, so SIGKILL
+    // directly — otherwise a crash orphans live agent subprocesses that keep
+    // burning quota and holding worktrees.
     ClaudeCliParticipant.killAll("SIGKILL")
     CodexCliParticipant.killAll("SIGKILL")
     OpenCodeCliParticipant.killAll("SIGKILL")

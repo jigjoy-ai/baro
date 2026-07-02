@@ -1,13 +1,7 @@
 /**
  * ArchitectCodex — one-shot Architect call via `codex exec --json`.
- *
- * Same prompt shape as ArchitectClaude / ArchitectOpenAI so the three
- * providers produce comparable decision documents. Codex's built-in
- * tools (shell, file edits, MCP) do codebase exploration; we don't
- * ship a separate tool layer to it.
- *
- * Wire shape: combined `${SYSTEM}\n\n${USER}` prompt → codex exec
- * → JSONL stream → final agent_message text → return as markdown.
+ * Same prompt shape as ArchitectClaude / ArchitectOpenAI so providers
+ * produce comparable decision documents; Codex's built-in tools explore.
  */
 
 import { runCodexOneShot } from "../codex-one-shot.js"
@@ -17,21 +11,13 @@ import {
 } from "./architect-prompts.js"
 
 export interface RunArchitectCodexOptions {
-    /** The user's goal — verbatim. */
     goal: string
-    /** Working directory the Architect explores in. */
     cwd: string
-    /** Codex model. Default: undefined (let Codex pick — gpt-5.5 on Plus+). */
     model?: string
-    /** Optional CLAUDE.md / project-context blob to prepend. */
     projectContext?: string
-    /** Path to the `codex` binary. Default: "codex". */
     codexBin?: string
-    /** Per-call timeout in milliseconds. Default: 600_000 (10 minutes).
-     *  Codex with reasoning + tool-call exploration is materially
-     *  slower than Claude opus on the architect role — the original
-     *  3-minute timeout from architect-claude was killing runs mid-
-     *  exploration. */
+    /** Default 10 min — codex with reasoning + tool exploration blew
+     *  past the old 3-minute timeout mid-exploration. */
     timeoutMs?: number
 }
 

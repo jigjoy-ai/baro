@@ -1,16 +1,7 @@
 /**
  * PlannerClaude — one-shot Planner call via `claude --print`.
- *
- * Replaces the Rust-side `run_claude_planner` from `crates/baro-tui/
- * src/main.rs`. The TUI now invokes a tsx subprocess
- * (`scripts/run-planner.ts`) which dispatches into this function or
- * `planner-openai.ts` based on `--llm`.
- *
- * Output contract: a JSON string matching the shape Rust's
- * `PrdOutput` deserialises. We do NOT parse it on this side — the
- * Rust caller already knows how to consume the wire format, and
- * keeping the parsing in one place avoids a second source of truth
- * for the PRD schema.
+ * Returns the raw PRD JSON string; the Rust caller deserialises it
+ * (`PrdOutput`) so the schema has a single source of truth.
  */
 
 import { execFile } from "child_process"
@@ -24,38 +15,21 @@ import {
 const execFileAsync = promisify(execFile)
 
 export interface RunPlannerClaudeOptions {
-    /** The user's goal — verbatim. */
     goal: string
-    /** Working directory the Planner explores in. */
     cwd: string
-    /** Claude model. Default: routed (let Claude decide). */
     model?: string
-    /** Effort level passed as `claude --effort` (low|medium|high|xhigh|max). */
     effort?: string
-    /** Optional CLAUDE.md / project-context blob to prepend. */
     projectContext?: string
-    /** Architect's DecisionDocument, if available, prepended as authoritative spec. */
     decisionDocument?: string
-    /** Whether the user invoked `--quick` (hard override = 1 story). */
+    /** `--quick` hard override: exactly 1 story. */
     quick?: boolean
-    /** Path to the `claude` binary. Default: "claude" (resolved via PATH). */
     claudeBin?: string
-    /**
-     * Per-call timeout in milliseconds. Default scales with `effort`:
-     * a single `claude --print` planning turn at `--effort max` must
-     * explore the codebase AND emit the full DAG in one subprocess, so
-     * the flat 4-minute default that suited `high` was killing `max`
-     * runs mid-thought (SIGTERM → "Command failed"). See
-     * {@link effortTimeoutMs}.
-     */
+    /** Defaults scale with `effort` ({@link effortTimeoutMs}) — the flat
+     *  4-minute default was SIGTERM'ing `--effort max` runs mid-thought. */
     timeoutMs?: number
 }
 
-/**
- * Default per-call timeout as a function of effort. Higher effort means
- * Claude thinks/explores longer in a single `--print` turn, so the
- * watchdog must wait proportionally longer before declaring failure.
- */
+/** Higher effort = longer single `--print` turns, so the watchdog waits longer. */
 export function effortTimeoutMs(effort?: string): number {
     switch (effort) {
         case "max":
@@ -69,11 +43,6 @@ export function effortTimeoutMs(effort?: string): number {
     }
 }
 
-/**
- * Returns the raw PRD JSON string (the body of Claude's `result`
- * field). The Rust caller parses it via serde_json; we don't reparse
- * on this side to keep the schema in one place.
- */
 export async function runPlannerClaude(
     opts: RunPlannerClaudeOptions,
 ): Promise<string> {
@@ -111,17 +80,12 @@ export async function runPlannerClaude(
     if (!planText) {
         throw new Error("PlannerClaude: claude returned empty result")
     }
-    // The model occasionally wraps the JSON in a markdown fence or
-    // adds leading prose despite the "ONLY JSON" instruction. Strip
-    // both back to a bare `{ … }` so the Rust serde_json pass that
-    // follows doesn't choke on fence delimiters.
+    // The model occasionally wraps the JSON in a markdown fence or adds
+    // prose despite the "ONLY JSON" instruction — strip back to a bare `{ … }`.
     return extractJsonObject(planText)
 }
 
-/**
- * Pull the first balanced `{ … }` block out of a raw string. Tolerates
- * markdown fences, leading prose, and trailing trailing punctuation.
- */
+/** First balanced `{ … }` block; tolerates markdown fences and leading prose. */
 function extractJsonObject(text: string): string {
     const trimmed = text.trim()
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed

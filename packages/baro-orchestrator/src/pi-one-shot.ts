@@ -1,59 +1,36 @@
 /**
- * Shared helper: run a one-shot `pi --mode json -p --no-session` invocation
- * against a single combined prompt, collect the JSONL stream, and return
- * the concatenated assistant `text` output. Used by planning phases so
- * the spawn + parse logic lives in one place.
- *
- * Implementation note: uses `spawn()` + streaming rather than
- * `execFile()` + buffer because execFile discards stdout on timeout.
- * Streaming lets us:
- *   - forward Pi's structured events to stderr live so the audit
- *     log captures them even on timeout
- *   - track which event subtypes were observed for the error message
- *   - kill Pi with SIGTERM on timeout instead of execFile's
- *     harsher escalation
+ * One-shot `pi --mode json -p --no-session` against a combined prompt;
+ * returns the concatenated assistant text. Uses spawn() + streaming rather
+ * than execFile() because execFile discards stdout on timeout — streaming
+ * keeps the live stderr audit trail and allows a gentler SIGTERM.
  */
 
 import { ChildProcess, spawn } from "child_process"
 
-/** Options for `runPiOneShot`. */
 export interface RunPiOneShotOptions {
     /** Combined system+user prompt. Passed as the final positional argv. */
     prompt: string
-    /** Working directory for the Pi process. */
     cwd: string
-    /**
-     * Provider override (e.g. "google", "anthropic"). Pi's default is
-     * "google". Omit to use Pi's configured default.
-     */
+    /** Provider override (e.g. "google"); omit for Pi's configured default. */
     provider?: string
-    /**
-     * Model identifier. Treated as an opaque string and forwarded via
-     * `--model`. Omit to use Pi's configured default.
-     */
+    /** Model id, forwarded opaquely via `--model`; omit for Pi's default. */
     model?: string
     /** Path to the `pi` binary. Default: "pi". */
     piBin?: string
     /** Per-call timeout in milliseconds. Default: 600_000 (10 minutes). */
     timeoutMs?: number
-    /**
-     * Per-phase label written into the live stderr stream so users can
-     * tell traffic apart in one log tail. Defaults to "pi".
-     */
+    /** Per-phase prefix for the live stderr stream. Default: "pi". */
     label?: string
 }
 
 /**
- * Spawn `pi --mode json -p --no-session`, collect all assistant `text`
- * content from `message_end` events, and return the concatenated string.
- *
- * @throws Error if the process exits without producing any text output.
+ * Collects assistant text from `message_end` events; throws if the process
+ * exits without producing any.
  */
 export async function runPiOneShot(
     opts: RunPiOneShotOptions,
 ): Promise<string> {
     const label = opts.label ?? "pi"
-    // Build args: flags first, then optional provider/model, then prompt.
     const args = ["--mode", "json", "-p", "--no-session"]
     if (opts.provider) args.push("--provider", opts.provider)
     if (opts.model) args.push("--model", opts.model)
@@ -66,7 +43,6 @@ export async function runPiOneShot(
         try {
             proc = spawn(opts.piBin ?? "pi", args, {
                 cwd: opts.cwd,
-                // stdin: ignore (one-shot, no interactive input)
                 stdio: ["ignore", "pipe", "pipe"],
             })
         } catch (e) {
@@ -111,9 +87,8 @@ export async function runPiOneShot(
 
         const maxBufferBytes = 16 * 1024 * 1024
 
-        // Process a single complete JSONL line. Pulled out of the data
-        // handler so the stream-`end` flush can reuse it for a final line
-        // that arrives without a trailing newline.
+        // Shared with the stream-`end` flush so a final line without a
+        // trailing newline still parses.
         const processLine = (rawLine: string): void => {
                 const line = rawLine.trim()
                 if (!line) return
@@ -131,9 +106,8 @@ export async function runPiOneShot(
                 if (type === "message_end") {
                     const message = event.message as Record<string, unknown> | undefined
                     if (message?.role === "assistant") {
-                        // Pi's usage keys are `input`/`output` (NOT
-                        // `input_tokens`/`output_tokens`) — verified against
-                        // live message_end output.
+                        // Pi's usage keys are `input`/`output`, NOT
+                        // `input_tokens`/`output_tokens`.
                         const usage = message.usage as { input?: number; output?: number } | undefined
                         if (usage) {
                             process.stderr.write(
@@ -154,9 +128,8 @@ export async function runPiOneShot(
                     return
                 }
 
-                // Log tool executions so the audit trail shows agent activity.
-                // Real Pi field is `toolName` on tool_execution_start; keep
-                // `tool`/`name` only as defensive fallbacks.
+                // Real Pi field is `toolName`; `tool`/`name` are defensive
+                // fallbacks against shape drift.
                 if (type === "tool_execution_start") {
                     const toolName =
                         typeof event.toolName === "string"
@@ -169,9 +142,8 @@ export async function runPiOneShot(
                     process.stderr.write(`[${label}] tool: ${toolName}\n`)
                     return
                 }
-                // Also catch the toolcall_start shape carried inside
-                // message_update.assistantMessageEvent. The tool name lives on
-                // the toolCall content block (`name`), not on the event itself.
+                // toolcall_start also arrives inside message_update; the tool
+                // name lives on the toolCall block, not the event itself.
                 if (type === "message_update") {
                     const ame = event.assistantMessageEvent as Record<string, unknown> | undefined
                     if (ame?.type === "toolcall_start") {
@@ -199,9 +171,8 @@ export async function runPiOneShot(
                 stdoutBuffer = stdoutBuffer.slice(nl + 1)
                 processLine(line)
             }
-            // Guard against unbounded growth from a newline-less stream
-            // (a wedged Pi or one enormous line). Drop the partial so
-            // memory can't balloon; well-formed lines that follow still parse.
+            // A newline-less stream (wedged Pi, one enormous line) would grow
+            // unbounded; drop the partial — later well-formed lines still parse.
             if (stdoutBuffer.length > maxBufferBytes) {
                 process.stderr.write(
                     `[${label}] stdout buffer exceeded ${maxBufferBytes} bytes without a newline — discarding partial line\n`,
@@ -209,10 +180,8 @@ export async function runPiOneShot(
                 stdoutBuffer = ""
             }
         })
-        // Flush a final line that arrives without a trailing newline — a Pi
-        // version or wrapper that omits the last `\n` would otherwise drop its
-        // `message_end`, leaving assistantText empty and failing a successful
-        // run. The 'end' event fires after the last 'data' and before 'exit'.
+        // Flush a final newline-less line — dropping it would lose message_end
+        // and fail a successful run. 'end' fires after the last 'data', before 'exit'.
         proc.stdout!.on("end", () => {
             if (stdoutBuffer.length > 0) {
                 processLine(stdoutBuffer)
@@ -250,12 +219,10 @@ export async function runPiOneShot(
                 .filter((x): x is string => x !== null)
                 .join(" ")
 
-            // Abnormal termination must fail even if SOME text accumulated.
-            // The callers feed the returned string into a markdown doc /
-            // JSON extractor — resolving partial text on a timeout (SIGTERM)
-            // or crash silently produces an incomplete doc with no error
-            // surfaced. Treat timeout, a terminating signal, or a non-zero
-            // exit as failure.
+            // Abnormal termination must fail even if SOME text accumulated:
+            // callers feed the string into a markdown/JSON extractor, so
+            // partial text on timeout/crash would silently yield an
+            // incomplete doc with no error surfaced.
             if (timedOut || signal != null || (code != null && code !== 0)) {
                 reject(
                     new Error(

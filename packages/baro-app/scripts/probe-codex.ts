@@ -1,41 +1,17 @@
 #!/usr/bin/env tsx
 /**
- * Probe: Codex CLI as a Mozaik Participant.
- *
- * Validates milestones M1–M3 of the codex backend plan:
- *
- *   M1  — `codex exec --json` runs against a context-free cwd, JSONL
- *          stream lands on stdout (no Mozaik wiring; pure CLI smoke).
- *
- *   M2  — same, but run from inside the baro repo so we measure the
- *          incremental cost of Codex indexing a non-trivial repo.
- *
- *   M3  — CodexCliParticipant spawns `codex exec --json` and the
- *          codex-stream-mapper translates JSONL → Mozaik items, with
- *          every emitted event captured to `spike-logs/codex-<ts>.jsonl`
- *          for offline analysis.
- *
- * This script implements M3. M1 and M2 are one-liner shell commands the
- * user runs directly (no orchestrator wiring needed); see the comments
- * at the bottom of this file.
+ * Probe: Codex CLI as a Mozaik Participant (milestone M3 of the codex plan).
+ * CodexCliParticipant spawns `codex exec --json`; the codex-stream-mapper
+ * translates JSONL → Mozaik items, each event summarized on stdout and logged
+ * to spike-logs/codex-<ts>.jsonl for comparison with the Claude spike logs.
+ * M1/M2 are plain shell one-liners — see the block at the bottom.
  *
  * Usage:
- *   tsx packages/baro-app/scripts/probe-codex.ts \
- *     --prompt "list files in packages/baro-orchestrator/src/participants/ and output their count" \
+ *   tsx packages/baro-app/scripts/probe-codex.ts --prompt "<text>" \
  *     [--cwd <path>] [--model gpt-5.5] [--full-auto]
  *
- * Output:
- *   - Every Mozaik bus event printed to stdout with a brief one-liner
- *     summary so you can see the run unfold.
- *   - Full raw JSONL audit log written to
- *     packages/baro-app/scripts/spike-logs/codex-<unix-ts>.jsonl. Compare
- *     side-by-side with the Claude spike logs in the same directory
- *     to verify the mapper produces the same Mozaik shape from both
- *     backends.
- *
- * Budget caution: each invocation costs ~3% of the ChatGPT Free weekly
- * cap (per Codex documentation; observed 2026-05-22). Don't run this
- * casually.
+ * Budget caution: each invocation costs ~3% of the ChatGPT Free weekly cap.
+ * Don't run this casually.
  */
 
 import { appendFileSync, mkdirSync, writeFileSync } from "fs"
@@ -89,10 +65,7 @@ function parseArgs(): ProbeArgs {
                 model = argv[++i]
                 break
             case "--bypass-sandbox":
-            case "--full-auto":
-                // --full-auto kept as alias for the old behaviour;
-                // both now route to Codex's new
-                // --dangerously-bypass-approvals-and-sandbox flag.
+            case "--full-auto": // legacy alias; both map to Codex's --dangerously-bypass-approvals-and-sandbox
                 bypassSandbox = true
                 break
             case "--skip-git-repo-check":
@@ -217,21 +190,11 @@ main().catch((err) => {
     process.exit(1)
 })
 
-/* ─── M1 & M2: one-liner shell commands (no Node wiring needed) ──────
- *
- * M1 — context-free baseline (non-repo dir needs --skip-git-repo-check
- *      because Codex refuses to run outside a trusted git repo by
- *      default):
+/* M1 & M2 manual probes (both consume weekly-cap units):
+ * M1 — context-free baseline (--skip-git-repo-check needed: Codex refuses to
+ *      run outside a trusted git repo by default):
  *   mkdir -p /tmp/codex-probe && cd /tmp/codex-probe
- *   codex exec --json --skip-git-repo-check \
- *     "print the word hello and exit" \
- *     | tee ~/Desktop/codex-probe-M1.jsonl
- *
- * M2 — baro-repo indexing cost (no flag needed; baro is a git repo):
- *   cd ~/Desktop/baro
- *   codex exec --json "print the word hello and exit" \
- *     | tee ~/Desktop/codex-probe-M2.jsonl
- *
- * Diff the resulting JSONLs to measure repo-indexing overhead. Both
- * runs cost weekly-cap units even on success, so plan carefully.
- * ─────────────────────────────────────────────────────────────────── */
+ *   codex exec --json --skip-git-repo-check "print the word hello and exit"
+ * M2 — repo-indexing cost: run the same (no flag) from ~/Desktop/baro and
+ *      diff the JSONL streams against M1.
+ */
