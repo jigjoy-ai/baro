@@ -1,19 +1,9 @@
 /**
- * Tool layer for OpenAI-backed StoryAgent. Read tools are reused
- * from `codebase-tools.ts` (same shapes Architect + Planner see);
- * Write + Edit + the looser `bash` add the mutation surface a
- * coding agent needs.
- *
- * Trust model: the StoryAgent runs inside a feature branch that
- * Conductor created before spawn — anything it writes is recoverable
- * via git. We deliberately do NOT sandbox writes to specific paths
- * here, because real refactors touch arbitrary parts of the tree;
- * baro relies on the per-story branch + scope-discipline prompt
- * (from `buildDefaultStoryPrompt`) to keep things in line.
- *
- * Path safety: write_file and edit_file still refuse paths that
- * resolve outside cwd. So even if the agent tries `../../etc/passwd`,
- * the tool returns an error string.
+ * Tool layer for the OpenAI-backed StoryAgent: the read tools from
+ * `codebase-tools.ts` plus write_file / edit_file. Writes are deliberately
+ * not sandboxed to specific paths (real refactors touch arbitrary parts of
+ * the tree) — the per-story branch makes anything recoverable via git.
+ * write_file / edit_file still refuse paths that resolve outside cwd.
  */
 
 import * as fs from "fs"
@@ -26,15 +16,8 @@ import { createCodebaseTools } from "./codebase-tools.js"
 const MAX_WRITE_BYTES = 500_000
 
 /**
- * The full tool set an OpenAI StoryAgent gets: the read-only
- * Architect/Planner tools plus write_file + edit_file.
- *
- * NOTE: `bash` in codebase-tools is currently documented as
- * "non-destructive read-only" — that hint is a soft convention,
- * not enforced. The StoryAgent system prompt explicitly overrides
- * it. We don't replace the tool here because the JSON schema +
- * implementation are identical; only the surrounding contract
- * changes.
+ * NOTE: the shared `bash` tool describes itself as read-only — a soft
+ * convention, not enforced; the StoryAgent system prompt overrides it.
  */
 export function createStoryTools(cwd: string): Tool[] {
     return [...createCodebaseTools(cwd), writeFileTool(cwd), editFileTool(cwd)]

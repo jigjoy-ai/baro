@@ -1,19 +1,8 @@
 /**
- * PiStoryAgent — story-level wrapper that drives a PiCliParticipant
- * through a single piece of work, with retries and per-attempt timeout.
- * Sibling of `opencode-story-agent.ts` (OpenCode) and `story-agent.ts`
- * (Claude).
- *
- * Lifecycle mirrors OpenCodeStoryAgent because Pi `-p` is also one-shot:
- * each attempt spawns a fresh process, which streams events and exits
- * when the agent finishes. There is no multi-turn quiet-timer /
- * stdin-injection dance.
- *
- *   idle ─► starting ─► running ─► done | failed
- *                              ╰► retrying ─► running ─► …
- *
- * Outer retry budget and hard timeout match StoryAgent's defaults so
- * the orchestrator-level semantics are uniform across backends.
+ * PiStoryAgent — drives a PiCliParticipant through one story with retries and
+ * per-attempt timeout. Pi `-p` is one-shot (fresh process per attempt, no
+ * multi-turn stdin dance); retry/timeout defaults match StoryAgent so
+ * orchestrator-level semantics stay uniform across backends.
  */
 
 import { setTimeout as setTimeoutPromise } from "timers/promises"
@@ -31,38 +20,25 @@ import {
     type PiRunSummary,
 } from "./pi-cli-participant.js"
 
-/** Specification for a Pi-backed story execution. */
 export interface PiStorySpec {
     /** Story ID, used as agentId for observer attribution. */
     id: string
-    /** The prompt sent to Pi as the initial user message. */
     prompt: string
-    /** Working directory for Pi. */
     cwd: string
-    /**
-     * Provider override (e.g. "google", "anthropic"). Pi's default is
-     * "google". Omit to use Pi's configured default.
-     */
+    /** Provider override; omit to use Pi's configured default ("google"). */
     provider?: string
-    /** Optional model override. Treated as an opaque string. */
+    /** Model override, passed through as an opaque string. */
     model?: string
-    /** Path to the `pi` binary. Default: "pi" (resolved via PATH). */
     piBin?: string
-    /** Retry budget (number of *additional* attempts after the first). */
+    /** Number of *additional* attempts after the first. */
     retries?: number
-    /** Per-attempt timeout in seconds. Default: 600. */
+    /** Per-attempt timeout in seconds. */
     timeoutSecs?: number
-    /** Delay between retries in milliseconds. Default: 1500. */
     retryDelayMs?: number
-    /**
-     * Hard cap in seconds for the entire story across all attempts. The
-     * Pi process is aborted unconditionally when this fires. <= 0
-     * disables the absolute kill timer. Default: 0 (matches StoryAgent).
-     */
+    /** Hard cap in seconds for the whole story across all attempts; <= 0 disables. */
     hardTimeoutSecs?: number
 }
 
-/** Outcome of a completed (passed or exhausted) story execution. */
 export interface PiStoryOutcome {
     storyId: string
     success: boolean
@@ -72,10 +48,6 @@ export interface PiStoryOutcome {
     error: string | null
 }
 
-/**
- * Mozaik observer that runs a story on the Pi backend with retry logic
- * and timeout management.
- */
 export class PiStoryAgent extends BaseObserver {
     private readonly spec: Required<
         Pick<
@@ -125,10 +97,7 @@ export class PiStoryAgent extends BaseObserver {
         return this.currentPi
     }
 
-    /**
-     * Begin executing the story. Idempotent. Returns the `done` promise
-     * for the caller's convenience.
-     */
+    /** Idempotent; returns the `done` promise. */
     run(environment: AgenticEnvironment): Promise<PiStoryOutcome> {
         if (this.startedAt != null) {
             return this.done
@@ -140,27 +109,17 @@ export class PiStoryAgent extends BaseObserver {
         return this.done
     }
 
-    /**
-     * No-op: Pi `-p` is one-shot, there's no stdin channel to forward
-     * mid-flight messages to.
-     */
+    /** No-op: Pi `-p` is one-shot — no stdin channel for mid-flight messages. */
     override async onExternalEvent(
         _source: Participant,
         _event: SemanticEvent<unknown>,
     ): Promise<void> {
-        // Intentionally empty — Pi run doesn't have the multi-turn stdin
-        // lifecycle that StoryAgent uses for Claude.
     }
 
     /**
-     * Abort the story, killing the running Pi process (if any).
-     *
-     * Note: this does NOT itself settle the `done` promise. It only
-     * signals the in-flight Pi child to die; `done` settles later via the
-     * attempt's normal exit/timeout path in `executeAllAttempts`
-     * (`runOneAttempt` awaits `pi.done` and `resolveDone` runs once the
-     * loop resolves or exhausts). The phase transition to "aborted" here
-     * is cosmetic and does not short-circuit that flow.
+     * Kills the in-flight Pi child but does NOT settle `done` — that happens
+     * via the attempt's normal exit/timeout path in `executeAllAttempts`.
+     * The "aborted" transition is cosmetic and doesn't short-circuit it.
      */
     abort(): void {
         this.currentPi?.abort()
@@ -292,14 +251,9 @@ export class PiStoryAgent extends BaseObserver {
         pi.leave(this.envRef)
         this.currentPi = null
 
-        // Success requires POSITIVE evidence of completed work, not
-        // merely the absence of a crash. Pi exits 0 even when the model
-        // refuses the task or produces no edits, so a clean exit alone
-        // would mark a no-op story as passed. We therefore also require
-        // the agent loop to have actually finished (`sawAgentEnd`) and to
-        // have invoked at least one tool — a code-writing story that
-        // claims success having touched no tools almost certainly answered
-        // in prose instead of editing the worktree.
+        // Pi exits 0 even on a refusal or no-op, so success needs positive
+        // evidence: the agent loop finished (`sawAgentEnd`) and at least one
+        // tool call succeeded — no tools ⇒ it answered in prose, not edits.
         if (summary.exitCode !== 0 || summary.error != null) {
             const reason = summary.error
                 ? summary.error.message
@@ -362,10 +316,6 @@ export class PiStoryAgent extends BaseObserver {
     }
 }
 
-/**
- * Race a promise against a timeout. Rejects with an Error carrying the
- * label on timeout.
- */
 function raceWithTimeout<T>(
     p: Promise<T>,
     ms: number,
@@ -375,15 +325,11 @@ function raceWithTimeout<T>(
     const timeout = new Promise<T>(
         (_, rej) => { timer = setTimeout(() => rej(new Error(label)), ms) },
     )
-    // Clear the timeout timer whether `p` fulfils OR rejects — clearing on
-    // the fulfil branch only would leave the timer pending (and keeping the
-    // event loop alive up to `ms`) on any rejection of `p`.
+    // finally (not then) so a rejection of `p` also clears the timer,
+    // which would otherwise keep the event loop alive up to `ms`.
     const settled = p.finally(() => clearTimeout(timer))
-    // If the timeout wins the race, `settled` stays pending and would surface
-    // an UnhandledPromiseRejection should `p` later reject (Node ≥ 15). The
-    // race already propagates the real outcome to the caller, so swallow the
-    // now-unobserved rejection on the losing branch. Harmless for the current
-    // sole caller (`pi.done` never rejects); makes the helper safe to reuse.
-    settled.catch(() => { /* observed via the race; ignore late rejection */ })
+    // If the timeout wins, a later rejection of `p` would be unhandled
+    // (Node >= 15); the race already propagated the outcome, so swallow it.
+    settled.catch(() => {})
     return Promise.race([settled, timeout])
 }

@@ -1,7 +1,6 @@
 /**
- * ClaudeCliParticipant — wraps a long-lived Claude Code CLI process
- * (stream-json in/out) as a Mozaik Participant, mapping its events via
- * the stream-json mapper onto the bus.
+ * Wraps a long-lived Claude Code CLI process (stream-json in/out) as a
+ * Mozaik Participant. Event shapes: docs/stream-protocols.md § Claude Code.
  */
 
 import { ChildProcess, spawn } from "child_process"
@@ -39,18 +38,11 @@ export interface ClaudeCliParticipantOptions {
      * on stdout. Default: true.
      */
     replayUserMessages?: boolean
-    /** Default: "bypassPermissions". */
     permissionMode?: "default" | "acceptEdits" | "auto" | "bypassPermissions" | "dontAsk" | "plan"
-    /** Extra CLI arguments appended after the standard set. */
     extraArgs?: string[]
-    /** Path to the `claude` binary. Default: "claude" (resolved via PATH). */
     claudeBin?: string
-    /** Passed as `claude --effort`; unset lets the CLI use its own default. */
     effort?: string
-    /**
-     * Pass `--resume <sessionId>`. Required for multi-turn agents that
-     * survive across multiple infer() calls.
-     */
+    /** `--resume <sessionId>` — needed by agents that span multiple infer() calls. */
     resumeSessionId?: string
 }
 

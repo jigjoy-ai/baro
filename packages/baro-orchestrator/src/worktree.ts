@@ -1,13 +1,10 @@
 /**
- * Per-story git worktree isolation (issue #50). Each story runs in its own
- * `git worktree` on branch `baro-wt/<runId>/<storyId>` off the run-branch
- * HEAD, commits in isolation, and merges back onto the run branch on success.
- * Replaces the old shared-tree behaviour where parallel `git add -A` swept up
- * siblings' in-flight edits.
- *
- * All state-mutating ops acquire the shared {@link GitGate} so they never race
- * the per-story push/pull in git.ts. Agent commits inside a worktree touch
- * only that worktree's private index and need no serialization.
+ * Per-story git worktree isolation (issue #50): each story works on branch
+ * `baro-wt/<runId>/<storyId>` in its own worktree and merges back on success,
+ * so parallel `git add -A` can't sweep up siblings' in-flight edits.
+ * State-mutating ops acquire the shared {@link GitGate} so they never race
+ * the per-story push/pull in git.ts; agent commits inside a worktree touch
+ * only its private index and need no serialization.
  */
 
 import { execFile } from "child_process"
@@ -20,12 +17,10 @@ import { GitGate } from "./git.js"
 
 const exec = promisify(execFile)
 
-// A fresh worktree only checks out git-tracked files, so it has none of the installed
-// dependency artifacts (node_modules, …). We SHARE these across all worktrees by
-// symlinking them to one persistent location, so a story that runs `npm install` (or
-// pip/composer/…) makes the result visible to every other story — exactly like the old
-// single shared workspace, on any stack. Discovery is manifest-driven so we share them
-// wherever a package lives, including monorepo subdirs (e.g. `frontend/node_modules`).
+// A fresh worktree has no installed dependency artifacts, so dep dirs are
+// symlinked to one shared location: one story's `npm install` (pip/composer/…)
+// is visible to every other, like the old shared workspace. Manifest-driven
+// discovery covers monorepo subdirs (e.g. `frontend/node_modules`).
 const DEP_DIR_BY_MANIFEST: Record<string, string> = {
     "package.json": "node_modules",
     "pnpm-workspace.yaml": "node_modules",
@@ -50,12 +45,10 @@ export interface WorktreeManagerOptions {
 }
 
 /**
- * Manages the lifecycle of per-story git worktrees for a single run.
- * One instance per orchestrate() call; the run id scopes branch + dir names
- * so concurrent runs never collide. (Crashed prior runs leave their worktree
- * dirs behind; `git worktree prune` reclaims their admin entries once the
- * dirs are gone, but their branch refs are not swept — they're inert and
- * harmless since each run uses a fresh id.)
+ * Per-story worktree lifecycle for one run (one instance per orchestrate()
+ * call); the run id scopes branch + dir names so concurrent runs never
+ * collide. Crashed prior runs leave inert worktree dirs / branch refs
+ * behind — harmless, since each run uses a fresh id.
  */
 export class WorktreeManager {
     private readonly paths = new Map<string, string>()
@@ -86,18 +79,17 @@ export class WorktreeManager {
     }
 
     /**
-     * Create an isolated worktree for a story, branched off the current
-     * run-branch HEAD. Returns the worktree path, or null on any failure so
-     * the caller can fall back to the shared repo cwd (preserving the old
-     * behavior rather than failing the story).
+     * Create a story's worktree off the current run-branch HEAD. Returns
+     * its path, or null on any failure so the caller can fall back to the
+     * shared repo cwd instead of failing the story.
      */
     async create(storyId: string): Promise<string | null> {
         const release = await this.gate.acquire()
         try {
             const branch = this.branchOf(storyId)
             const path = this.pathOf(storyId)
-            // Defensive: a leftover dir/branch from a crash would make
-            // `worktree add` fail. Best-effort clear before adding.
+            // A leftover dir/branch from a crash would make `worktree add`
+            // fail; best-effort clear first.
             await this.removeWorktreeQuiet(path)
             await this.deleteBranchQuiet(branch)
 
@@ -122,12 +114,11 @@ export class WorktreeManager {
     }
 
     /**
-     * Merge a passed story's branch onto the run branch. Returns true if a
-     * worktree merge happened, false if the story had no worktree (create()
-     * fell back to the shared tree). On any merge failure, retries once with
-     * `-X theirs` (the merging story wins). Throws — leaving the run branch
-     * clean (`merge --abort`) — only when even that can't resolve it; the
-     * caller must then preserve the branch rather than discard the work.
+     * Merge a passed story's branch onto the run branch; false if the story
+     * had no worktree (create() fell back to the shared tree). On merge
+     * failure retries once with `-X theirs` (the merging story wins); throws
+     * — leaving the run branch clean — only when even that fails, so the
+     * caller preserves the branch rather than discarding the work.
      */
     async mergeBack(storyId: string): Promise<boolean> {
         const path = this.paths.get(storyId)
@@ -143,8 +134,6 @@ export class WorktreeManager {
                 })
                 return true
             } catch {
-                // Any first-merge failure (content, modify/delete, rename, …)
-                // → abort and retry favouring the merging story.
                 const conflicts = await this.conflictedPaths()
                 await this.abortMerge(storyId)
                 this.log(
@@ -161,8 +150,8 @@ export class WorktreeManager {
                     return true
                 } catch (e) {
                     await this.abortMerge(storyId)
-                    // Keep the branch out of the cleanup sweep so its commits
-                    // survive the run and stay recoverable.
+                    // Keep the branch out of the cleanup sweep so the
+                    // commits stay recoverable after the run.
                     this.preserved.add(storyId)
                     throw new Error(
                         `could not merge story ${storyId} even with -X theirs: ${errMsg(e)}`,
@@ -175,9 +164,8 @@ export class WorktreeManager {
     }
 
     /**
-     * Abort an in-progress merge, logging if the abort itself fails. A
-     * lingering MERGE_HEAD (e.g. a held index.lock) would otherwise make the
-     * NEXT story's merge fail and be misdiagnosed against the wrong story.
+     * A lingering MERGE_HEAD (e.g. a held index.lock) would make the NEXT
+     * story's merge fail and be misdiagnosed against the wrong story.
      */
     private async abortMerge(storyId: string): Promise<void> {
         try {
@@ -207,9 +195,8 @@ export class WorktreeManager {
     }
 
     /**
-     * Remove every worktree this manager created, plus its temp dir. Branches
-     * are deleted too — EXCEPT those marked preserved (an unresolvable
-     * merge-back): their worktree dir is freed but the branch ref is kept so
+     * Remove every worktree plus the temp dir. Branches are deleted too —
+     * EXCEPT preserved ones (unresolvable merge-back), whose ref is kept so
      * the commits stay recoverable after the run.
      */
     async cleanupAll(): Promise<void> {
@@ -235,10 +222,9 @@ export class WorktreeManager {
     }
 
     /**
-     * Reclaim worktree admin entries whose dirs are already gone
-     * (`git worktree prune`) and delete any branches under THIS run id
-     * (defensive re-entrancy guard — ids are unique per process, so this
-     * does not touch a concurrent run's worktrees).
+     * Prune worktree admin entries whose dirs are already gone and delete
+     * branches under THIS run id (ids are unique per process, so this never
+     * touches a concurrent run's worktrees).
      */
     async cleanupStaleOnStart(): Promise<void> {
         const release = await this.gate.acquire()
@@ -264,12 +250,9 @@ export class WorktreeManager {
         }
     }
 
-    // ── internals ────────────────────────────────────────────────────
-
     /**
-     * Package roots in the repo (root + nested), each mapped to the dep dir its stack
-     * installs into. Computed once per run and cached. Manifest-driven so it works on
-     * any stack and finds monorepo subpackages (e.g. `frontend` → node_modules).
+     * Package roots (root + nested) mapped to their stack's dep dir; cached
+     * per run. Manifest-driven so monorepo subpackages are found.
      */
     private depLocs?: Array<{ rel: string; dir: string }>
     private depLocations(): Array<{ rel: string; dir: string }> {
@@ -310,9 +293,9 @@ export class WorktreeManager {
 
     private symlinkDepDirs(worktreePath: string): void {
         for (const { rel, dir } of this.depLocations()) {
-            // ONE shared, run-persistent location every worktree points at. Pre-create it
-            // (empty) if no story has installed yet, so the first `npm install` writes
-            // through the symlink into here and the rest see it — like a shared workspace.
+            // ONE shared, run-persistent target per dep dir. Pre-create it
+            // empty so the first `npm install` writes through the symlink
+            // and every other story sees the result.
             const shared = join(this.repoRoot, rel, dir)
             const dest = join(worktreePath, rel, dir)
             if (existsSync(dest)) continue
@@ -347,10 +330,9 @@ export class WorktreeManager {
         }
         if (!dirty) return
 
-        // Stage all non-ignored work. No pathspec (so the exit code reflects
-        // real failures, not the benign "some paths are gitignored" advice
-        // that an explicit `.` pathspec triggers); .gitignore already keeps
-        // node_modules out in the common case.
+        // No pathspec: an explicit `.` makes the exit code reflect the benign
+        // "some paths are gitignored" advice rather than real failures;
+        // .gitignore already keeps node_modules out in the common case.
         try {
             await exec("git", ["add", "-A"], { cwd: worktreePath })
         } catch (e) {
@@ -445,8 +427,6 @@ export class WorktreeManager {
         await execQuiet("git", ["branch", "-D", branch], this.repoRoot)
     }
 }
-
-// ── module helpers ───────────────────────────────────────────────────
 
 function sanitize(storyId: string): string {
     // Story ids are short slugs (S1, S2, …) but guard against anything that

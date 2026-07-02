@@ -11,38 +11,22 @@ import {
     buildPlannerUserMessage,
 } from "./planner-prompts.js"
 
-/** Options for `runPlannerPi`. */
 export interface RunPlannerPiOptions {
-    /** The user's goal — verbatim. */
     goal: string
-    /** Working directory. */
     cwd: string
-    /** Provider to use (e.g. "anthropic", "openai"). Default: undefined (use Pi default). */
+    /** Pi provider (e.g. "anthropic", "openai"). */
     provider?: string
-    /** Pi model identifier. */
     model?: string
-    /** Optional project context blob. */
     projectContext?: string
-    /** Optional decision document from the Architect phase. */
     decisionDocument?: string
-    /** If true, use a shorter planning prompt. */
+    /** `--quick` hard override: exactly 1 story. */
     quick?: boolean
-    /** Path to the `pi` binary. Default: "pi". */
     piBin?: string
-    /**
-     * Per-call timeout in milliseconds. Default: 900_000 (15 minutes).
-     * Planner is the longest phase — large multi-story PRDs with strict
-     * JSON output frequently push models past shorter timeouts.
-     */
+    /** Default 15 min — large multi-story PRDs push models past
+     *  shorter timeouts. */
     timeoutMs?: number
 }
 
-/**
- * Run the Planner phase using Pi as the backend.
- *
- * @returns The PRD as a raw JSON string (a single `{ … }` object).
- * @throws Error if Pi returns empty or the result contains no valid JSON.
- */
 export async function runPlannerPi(
     opts: RunPlannerPiOptions,
 ): Promise<string> {
@@ -73,10 +57,7 @@ export async function runPlannerPi(
     return extractJsonObject(planText)
 }
 
-/**
- * Pull the first balanced `{ … }` block out of a raw string. Tolerates
- * markdown fences and leading prose.
- */
+/** First balanced `{ … }` block; tolerates markdown fences and leading prose. */
 function extractJsonObject(text: string): string {
     const trimmed = text.trim()
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed

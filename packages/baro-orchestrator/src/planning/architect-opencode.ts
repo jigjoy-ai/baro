@@ -1,13 +1,7 @@
 /**
  * ArchitectOpenCode — one-shot Architect call via `opencode run --format json`.
- *
- * Same prompt shape as ArchitectClaude / ArchitectCodex so the providers
- * produce comparable decision documents. OpenCode's built-in tools
- * (file read, grep, bash, etc.) handle codebase exploration; we don't
- * ship a separate tool layer.
- *
- * Wire shape: combined `${SYSTEM}\n\n${USER}` prompt → opencode run
- * → JSONL stream → final text output → return as markdown.
+ * Same prompt shape as ArchitectClaude / ArchitectCodex so providers produce
+ * comparable decision documents; OpenCode's built-in tools explore.
  */
 
 import { runOpenCodeOneShot } from "../opencode-one-shot.js"
@@ -16,33 +10,18 @@ import {
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
 
-/** Options for `runArchitectOpenCode`. */
 export interface RunArchitectOpenCodeOptions {
-    /** The user's goal — verbatim. */
     goal: string
-    /** Working directory the Architect explores in. */
     cwd: string
-    /** OpenCode model in `provider/model` format. Default: undefined (use OpenCode default). */
+    /** OpenCode model in `provider/model` format. */
     model?: string
-    /** Optional CLAUDE.md / project-context blob to prepend. */
     projectContext?: string
-    /** Path to the `opencode` binary. Default: "opencode". */
     opencodeBin?: string
-    /**
-     * Per-call timeout in milliseconds. Default: 600_000 (10 minutes).
-     * OpenCode with tool-call exploration can be materially slower than
-     * a direct API call — the original 3-minute timeout was killing runs
-     * mid-exploration.
-     */
+    /** Default 10 min — tool-call exploration blew past the old
+     *  3-minute timeout mid-exploration. */
     timeoutMs?: number
 }
 
-/**
- * Run the Architect phase using OpenCode as the backend.
- *
- * @returns The decision document (markdown) produced by the Architect.
- * @throws Error if OpenCode returns empty or fails.
- */
 export async function runArchitectOpenCode(
     opts: RunArchitectOpenCodeOptions,
 ): Promise<string> {

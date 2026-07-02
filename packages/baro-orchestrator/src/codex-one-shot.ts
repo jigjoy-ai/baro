@@ -1,22 +1,9 @@
 /**
- * Shared helper: run a one-shot `codex exec --json` invocation against
- * a single combined prompt, collect the JSONL stream, and return the
- * concatenated `agent_message` text. Used by `architect-codex.ts`,
- * `planner-codex.ts`, `critic-codex.ts`, and `surgeon-codex.ts` so the
- * spawn + parse logic lives in one place.
- *
- * Implementation note: uses `spawn()` + streaming rather than
- * `execFile()` + buffer because execFile discards stdout on timeout
- * (the error object contains it, but observed in practice that long
- * Codex runs hit the wall-clock cap before emitting a final
- * `agent_message`, and we want to *see* what Codex did with those
- * minutes — not just "codex produced no agent_message"). Streaming
- * lets us:
- *   - forward Codex's structured events to stderr live so the audit
- *     log captures them even on timeout
- *   - track which event subtypes were observed for the error message
- *   - kill Codex with SIGTERM on timeout instead of execFile's harsher
- *     SIGTERM-then-SIGKILL escalation
+ * One-shot `codex exec --json` against a combined prompt; returns the
+ * concatenated `agent_message` text. Uses spawn() + streaming rather than
+ * execFile() because execFile discards stdout on timeout — long Codex runs
+ * often hit the wall-clock cap, and streaming keeps the live stderr audit
+ * trail of what Codex did with those minutes, plus a gentler SIGTERM.
  */
 
 import { ChildProcess, spawn } from "child_process"
@@ -37,11 +24,7 @@ export interface RunCodexOneShotOptions {
     codexBin?: string
     /** Per-call timeout in milliseconds. Default: 600_000 (10 minutes). */
     timeoutMs?: number
-    /**
-     * Per-phase label written into the live stderr stream so users can
-     * tell architect/planner/critic/surgeon traffic apart in one log
-     * tail. Defaults to "codex".
-     */
+    /** Per-phase prefix for the live stderr stream. Default: "codex". */
     label?: string
 }
 

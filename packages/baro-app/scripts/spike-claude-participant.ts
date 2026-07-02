@@ -1,16 +1,13 @@
 #!/usr/bin/env tsx
 /**
- * Spike: Claude Code CLI as a Mozaik Participant.
- *
- * Goal: prove that bidirectional stream-json works end-to-end inside a
- * Mozaik AgenticEnvironment, and capture a real event log against which the
- * Phase 1 stream-json mapper will be designed.
+ * Spike: Claude Code CLI as a Mozaik Participant — proves bidirectional
+ * stream-json works inside an AgenticEnvironment and captures a real event
+ * log to design the Phase 1 stream-json mapper against.
  *
  * Modes:
  *   (default)        single Claude participant + logger, one user message
  *   --two-stories    two parallel Claude participants in same env
- *   --midflight      send a second user message via the bus while Claude is
- *                    still working on the first
+ *   --midflight      inject a second user message via the bus mid-turn
  */
 
 import { ChildProcess, spawn } from "child_process"
@@ -25,12 +22,8 @@ import {
     UserMessageItem,
 } from "@mozaik-ai/core"
 
-// ─── Custom ContextItem for raw Claude stream-json events ───────────
-//
-// During spike we don't yet map Claude events to Mozaik's typed items
-// (that's Phase 1 work). We carry them raw so the logger can record the
-// actual event shape we'll be mapping against.
-
+// Claude events are carried raw (mapping to Mozaik typed items is Phase 1)
+// so the logger records the actual event shapes we'll be mapping against.
 class RawClaudeEventItem extends ContextItem {
     readonly type = "raw_claude_event"
 
@@ -50,11 +43,8 @@ class RawClaudeEventItem extends ContextItem {
     }
 }
 
-// ─── Targeted user message item (for mid-flight bus injection test) ─
-//
-// Phase 1 will need a way to address messages to a specific agent. For the
-// spike we cheat with a tiny subclass that carries recipientId.
-
+// Phase 1 will need a way to address messages to a specific agent; the spike
+// cheats with a subclass carrying recipientId.
 class TargetedUserMessageItem extends ContextItem {
     readonly type = "targeted_user_message"
 
@@ -73,8 +63,6 @@ class TargetedUserMessageItem extends ContextItem {
         }
     }
 }
-
-// ─── SpikeClaudeParticipant ─────────────────────────────────────────
 
 class SpikeClaudeParticipant extends Participant {
     private proc: ChildProcess | null = null
@@ -198,8 +186,6 @@ class SpikeClaudeParticipant extends Participant {
     }
 }
 
-// ─── TranscriptLogger ───────────────────────────────────────────────
-
 class TranscriptLogger extends Participant {
     constructor(
         private readonly logPath: string,
@@ -235,17 +221,13 @@ class TranscriptLogger extends Participant {
     }
 }
 
-// ─── SpikeOriginator ────────────────────────────────────────────────
-// A passive participant whose only role is to be a valid `source` for
-// initial bus deliveries. (Mozaik's deliverContextItem requires a source.)
-
+// Passive participant that exists only to be a valid `source` for initial
+// bus deliveries (Mozaik's deliverContextItem requires one).
 class SpikeOriginator extends Participant {
     async onContextItem(): Promise<void> {
         return
     }
 }
-
-// ─── Test repo setup ────────────────────────────────────────────────
 
 function setupTestRepo(): string {
     const dir = mkdtempSync(join(tmpdir(), "baro-spike-"))
@@ -261,8 +243,6 @@ function setupTestRepo(): string {
     writeFileSync(join(dir, "utils.ts"), "export const add = (a: number, b: number) => a + b\n")
     return dir
 }
-
-// ─── Modes ──────────────────────────────────────────────────────────
 
 async function runSingle(logPath: string): Promise<void> {
     const env = new AgenticEnvironment()
@@ -379,8 +359,6 @@ async function runMidflight(logPath: string): Promise<void> {
     process.stderr.write(`[spike] done. log: ${logPath}\n`)
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────
-
 function raceWithTimeout<T>(
     p: Promise<T>,
     ms: number,
@@ -391,8 +369,6 @@ function raceWithTimeout<T>(
         new Promise<T>((_, rej) => setTimeout(() => rej(new Error(label)), ms)),
     ])
 }
-
-// ─── Main ───────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
     const args = process.argv.slice(2)

@@ -1,21 +1,8 @@
 /**
  * Planner CLI — the Rust TUI invokes this as a subprocess instead of
- * shelling out to `claude` (or `node openai-planner.js`) directly.
- * Picks the right backend based on `--llm`, prints the PRD JSON to
- * stdout, exits 0 on success / non-zero on error.
- *
- * Stdout = bare PRD JSON, the shape Rust's `PrdOutput` deserialises.
- * Stderr = progress notes + error messages.
- *
- * Usage:
- *   tsx packages/baro-orchestrator/scripts/run-planner.ts \\
- *       --goal "Add JWT auth with RBAC" \\
- *       --cwd /path/to/project \\
- *       --llm claude|openai \\
- *       [--model <model-name>] \\
- *       [--context-file CLAUDE.md] \\
- *       [--decision-file <path>] \\
- *       [--quick]
+ * shelling out to `claude` directly. Stdout = bare PRD JSON, the shape
+ * Rust's `PrdOutput` deserialises; stderr = progress + errors; non-zero
+ * exit on failure.
  */
 
 import { readFileSync } from "fs"
@@ -30,10 +17,8 @@ interface Args {
     goal: string
     cwd: string
     /**
-     * "codex" is accepted at the boundary but currently routes through
-     * the Claude planner path — codex-planner.ts is a v2 follow-up.
-     * v1 positioning: Codex covers the Story phase; Architect and
-     * Planner stay on Claude.
+     * "codex" is accepted at the boundary but currently routes through the
+     * Claude planner path — codex-planner.ts is a v2 follow-up.
      */
     llm: "claude" | "openai" | "codex" | "opencode" | "pi"
     model?: string

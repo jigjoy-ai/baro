@@ -1,26 +1,9 @@
 /**
- * StoryAgent — story-level wrapper that drives a ClaudeCliParticipant
- * through a single piece of work, with retries and timeout.
- *
- * Lifecycle:
- *   idle ─► starting ─► running ─► done | failed
- *                               ╰► retrying ─► running ─► …
- *
- * Multi-turn lifecycle (per attempt):
- *   1. Claude process starts; the initial prompt is written to stdin.
- *   2. Stdin stays OPEN so further user messages can be injected.
- *   3. A quiet timer (quietTimeoutMs, default 2 000 ms) starts after the
- *      first AgentResultItem arrives for this story. It resets whenever
- *      another AgentResultItem arrives or whenever an AgentTargetedMessageItem
- *      addressed to this story is forwarded to Claude stdin.
- *   4. Stdin is closed (ending the turn stream) when EITHER:
- *      (a) the quiet timer fires — Claude has been silent for quietTimeoutMs, or
- *      (b) maxTurns AgentResultItems have been observed for this agentId.
- *   5. A per-story hard timeout (hardTimeoutSecs, default 300 s) caps the
- *      entire story across all attempts, aborting Claude unconditionally.
- *
- * Single-turn stories work unchanged: the quiet timer fires 2 s after the
- * lone result event, closeStdin() is called, and claude.done resolves normally.
+ * StoryAgent — drives a ClaudeCliParticipant through one story with retries
+ * and timeouts. Multi-turn: stdin stays OPEN after the initial prompt so
+ * corrective messages can be injected; a quiet timer (started on the first
+ * AgentResult, reset on further results/targeted messages) or the maxTurns
+ * cap closes stdin to end the session.
  */
 
 import { setTimeout as setTimeoutPromise } from "timers/promises"
@@ -43,36 +26,22 @@ import {
 export interface StorySpec {
     /** Story ID, used as agentId for observer attribution. */
     id: string
-    /** The prompt sent to Claude as the initial user message. */
     prompt: string
-    /** Working directory for Claude. */
     cwd: string
-    /** Optional model override (e.g. "sonnet", "opus", "haiku"). */
     model?: string
-    /** Optional effort level passed as `claude --effort` (low|medium|high|xhigh|max). */
+    /** Passed as `claude --effort` (low|medium|high|xhigh|max). */
     effort?: string
-    /** Path to the `claude` binary. Default: "claude" (resolved via PATH). */
     claudeBin?: string
-    /** Retry budget (number of *additional* attempts after the first). */
+    /** Number of *additional* attempts after the first. */
     retries?: number
-    /** Per-attempt timeout in seconds. Default: 600. */
+    /** Per-attempt timeout in seconds. */
     timeoutSecs?: number
-    /** Delay between retries in milliseconds. Default: 1500. */
     retryDelayMs?: number
-    /**
-     * Milliseconds of silence (no AgentResultItem for this story) after which
-     * stdin is closed to end the multi-turn session. Default: 2000.
-     */
+    /** Ms of silence (no AgentResult for this story) before stdin is closed. */
     quietTimeoutMs?: number
-    /**
-     * Maximum number of AgentResultItem events (turns) to observe before
-     * closing stdin unconditionally. Default: 4.
-     */
+    /** Max AgentResult events (turns) before stdin is closed unconditionally. */
     maxTurns?: number
-    /**
-     * Hard cap in seconds for the entire story across all attempts. The
-     * Claude process is aborted unconditionally when this fires. Default: 300.
-     */
+    /** Hard cap in seconds for the whole story across all attempts; <= 0 disables. */
     hardTimeoutSecs?: number
 }
 
@@ -84,10 +53,6 @@ export interface StoryOutcome {
     finalSummary: ClaudeRunSummary | null
     error: string | null
 }
-
-// StoryResultItem (was a BusEvent subclass defined here) moves to
-// semantic-events.ts as `StoryResult` (defineSemanticEvent factory). The
-// wire `type` string stays "story_result".
 
 export class StoryAgent extends BaseObserver {
     private readonly spec: Required<
@@ -110,8 +75,7 @@ export class StoryAgent extends BaseObserver {
     private resolveDone!: (outcome: StoryOutcome) => void
     public readonly done: Promise<StoryOutcome>
 
-    // Callbacks wired up during an attempt's multi-turn lifecycle.
-    // Nulled out when the attempt ends.
+    // Wired up per attempt by setupMultiTurnLifecycle; nulled when it ends.
     private notifyStoryResult: (() => void) | null = null
     private notifyStoryMessage: (() => void) | null = null
 
@@ -123,12 +87,9 @@ export class StoryAgent extends BaseObserver {
             retryDelayMs: 1500,
             quietTimeoutMs: 2000,
             maxTurns: 4,
-            // hardTimeoutSecs <= 0 disables the absolute kill timer.
-            // The previous default of 300s was killing real refactor
-            // work mid-flight (e.g. "delete SEF module" touches dozens
-            // of files and routinely needs >5 minutes); we'd rather
-            // let the per-attempt timeoutSecs and the quiet-timer
-            // close out idle agents than guillotine a productive one.
+            // Kill timer disabled by default: a 300s cap was guillotining
+            // productive refactors mid-flight; per-attempt timeoutSecs and the
+            // quiet timer still close out idle agents.
             hardTimeoutSecs: 0,
             ...spec,
         }
@@ -154,10 +115,7 @@ export class StoryAgent extends BaseObserver {
         return this.currentClaude
     }
 
-    /**
-     * Begin executing the story. Idempotent. Returns the `done` promise
-     * for the caller's convenience.
-     */
+    /** Idempotent; returns the `done` promise. */
     run(environment: AgenticEnvironment): Promise<StoryOutcome> {
         if (this.startedAt != null) {
             return this.done
@@ -170,21 +128,14 @@ export class StoryAgent extends BaseObserver {
     }
 
     /**
-     * Forward bus messages targeted at this story to its current Claude
-     * process. Resets the multi-turn quiet timer on both result and message
-     * events so the session stays open while activity is ongoing.
-     *
-     * StoryAgent is the sole owner of AgentTargetedMessageItem → stdin
-     * forwarding. ClaudeCliParticipant.onContextItem does NOT do this.
+     * Observes AgentTargetedMessage / AgentResult for quiet-timer timing only.
+     * Stdin forwarding is owned by ClaudeCliParticipant.onExternalEvent —
+     * doing it here too would double-deliver.
      */
     override async onExternalEvent(
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        // StoryAgent observes AgentTargetedMessage and AgentResult for
-        // lifecycle/timing purposes only. The actual stdin forwarding is
-        // owned by ClaudeCliParticipant.onExternalEvent to avoid
-        // double-delivery.
         if (
             AgentTargetedMessage.is(event) &&
             event.data.recipientId === this.spec.id
@@ -197,7 +148,6 @@ export class StoryAgent extends BaseObserver {
         }
     }
 
-    /** Abort the story, killing the running Claude (if any). */
     abort(): void {
         this.currentClaude?.abort()
         this.transition("aborted", "external abort")
@@ -209,10 +159,6 @@ export class StoryAgent extends BaseObserver {
         let lastError: string | null = null
         let hardTimedOut = false
 
-        // hardTimeoutSecs <= 0 means "no absolute cap" — the timer is
-        // not started. The per-attempt timeoutSecs still bounds each
-        // individual Claude invocation, and the quiet timer still
-        // closes idle stdin streams.
         const hardTimer =
             this.spec.hardTimeoutSecs > 0
                 ? setTimeout(() => {
@@ -304,13 +250,12 @@ export class StoryAgent extends BaseObserver {
         claude.join(this.envRef)
         claude.start(this.envRef)
 
-        // Claude --print --input-format stream-json doesn't begin
-        // emitting events until it has consumed at least one input event
-        // OR stdin is closed. Waiting on `claude.ready` first would
-        // deadlock — send the prompt up front, then await events.
+        // Claude --print --input-format stream-json emits nothing until it
+        // consumes an input event or stdin closes — waiting on `claude.ready`
+        // first would deadlock. Send the prompt up front; stdin stays open
+        // and the multi-turn lifecycle closes it.
         try {
             claude.sendUserMessage(this.spec.prompt)
-            // stdin stays open — multi-turn lifecycle closes it
         } catch (e) {
             const error = e instanceof Error ? e.message : String(e)
             claude.abort()
@@ -366,9 +311,8 @@ export class StoryAgent extends BaseObserver {
     }
 
     /**
-     * Wires up the multi-turn quiet timer and turn counter for one attempt.
-     * Returns a cancel function that stops the timer and clears callbacks
-     * without closing stdin (used when aborting due to timeout/error).
+     * Wires the quiet timer + turn counter for one attempt. The returned
+     * cancel stops the timer WITHOUT closing stdin (for timeout/error aborts).
      */
     private setupMultiTurnLifecycle(claude: ClaudeCliParticipant): () => void {
         let turnsObserved = 0

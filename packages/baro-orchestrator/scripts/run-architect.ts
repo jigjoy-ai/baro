@@ -1,20 +1,7 @@
 /**
- * Architect CLI — the Rust TUI invokes this as a subprocess instead
- * of shelling out to `claude` directly. Picks the right backend
- * based on `--llm`, prints the resulting markdown decision document
- * to stdout, exits 0 on success / non-zero on error (the error
- * message is on stderr in that case).
- *
- * Usage:
- *   tsx packages/baro-orchestrator/scripts/run-architect.ts \\
- *       --goal "Add JWT auth with role-based access control" \\
- *       --cwd /path/to/project \\
- *       --llm claude|openai \\
- *       [--model <model-name>] \\
- *       [--context-file CLAUDE.md]
- *
- * Stdout = markdown design document (or empty on error).
- * Stderr = progress notes + error message.
+ * Architect CLI — the Rust TUI invokes this as a subprocess instead of
+ * shelling out to `claude` directly. Stdout = the markdown decision document
+ * (empty on error); stderr = progress + errors; non-zero exit on failure.
  */
 
 import { readFileSync } from "fs"
@@ -29,11 +16,9 @@ interface Args {
     goal: string
     cwd: string
     /**
-     * "codex" is accepted at the boundary but currently routes through
-     * the Claude architect path — codex-architect.ts is a planned v2
-     * follow-up to the codex story-agent backend. v1's positioning is:
-     * Codex covers the Story phase (which dominates token spend);
-     * Architect and Planner stay on Claude.
+     * "codex" is accepted at the boundary but currently routes through the
+     * Claude architect path — codex-architect.ts is a planned v2 follow-up.
+     * v1: Codex covers the Story phase; Architect/Planner stay on Claude.
      */
     llm: "claude" | "openai" | "codex" | "opencode" | "pi"
     model?: string

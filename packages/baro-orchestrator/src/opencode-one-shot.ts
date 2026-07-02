@@ -1,50 +1,29 @@
 /**
- * Shared helper: run a one-shot `opencode run --format json` invocation
- * against a single combined prompt, collect the JSONL stream, and return
- * the concatenated assistant `text` output. Used by
- * `architect-opencode.ts`, `planner-opencode.ts`, and similar planning
- * phases so the spawn + parse logic lives in one place.
- *
- * Implementation note: uses `spawn()` + streaming rather than
- * `execFile()` + buffer because execFile discards stdout on timeout.
- * Streaming lets us:
- *   - forward OpenCode's structured events to stderr live so the audit
- *     log captures them even on timeout
- *   - track which event subtypes were observed for the error message
- *   - kill OpenCode with SIGTERM on timeout instead of execFile's
- *     harsher escalation
+ * One-shot `opencode run --format json` against a combined prompt; returns
+ * the concatenated assistant text. Uses spawn() + streaming rather than
+ * execFile() because execFile discards stdout on timeout — streaming keeps
+ * the live stderr audit trail and allows a gentler SIGTERM.
  */
 
 import { ChildProcess, spawn } from "child_process"
 
-/** Options for `runOpenCodeOneShot`. */
 export interface RunOpenCodeOneShotOptions {
     /** Combined system+user prompt. Passed as the final positional argv. */
     prompt: string
-    /** Working directory for the OpenCode process. */
     cwd: string
-    /**
-     * Model identifier in `provider/model` format. Omit to use
-     * OpenCode's configured default.
-     */
+    /** Model in `provider/model` format; omit for OpenCode's configured default. */
     model?: string
     /** Path to the `opencode` binary. Default: "opencode". */
     opencodeBin?: string
     /** Per-call timeout in milliseconds. Default: 600_000 (10 minutes). */
     timeoutMs?: number
-    /**
-     * Per-phase label written into the live stderr stream so users can
-     * tell architect/planner/critic traffic apart in one log tail.
-     * Defaults to "opencode".
-     */
+    /** Per-phase prefix for the live stderr stream. Default: "opencode". */
     label?: string
 }
 
 /**
- * Spawn `opencode run --format json --dangerously-skip-permissions`,
- * collect all `text` events, and return the concatenated assistant text.
- *
- * @throws Error if the process exits without producing any text output.
+ * Collects assistant text from `text` events; throws if the process exits
+ * without producing any. Runs with `--dangerously-skip-permissions`.
  */
 export async function runOpenCodeOneShot(
     opts: RunOpenCodeOneShotOptions,
@@ -166,13 +145,10 @@ export async function runOpenCodeOneShot(
                 .filter((x): x is string => x !== null)
                 .join(" ")
 
-            // Abnormal termination must fail even if SOME text accumulated.
-            // The architect/planner callers feed the returned string into a
-            // markdown doc / JSON extractor that happily accepts a truncated
-            // but syntactically-closed fragment — so resolving partial text
-            // on a timeout (SIGTERM) or crash silently produces an
-            // incomplete design doc or PRD with no error surfaced. Treat
-            // timeout, a terminating signal, or a non-zero exit as failure.
+            // Abnormal termination must fail even if SOME text accumulated:
+            // callers feed the string into a markdown/JSON extractor that
+            // accepts truncated-but-closed fragments, so partial text on
+            // timeout/crash would silently yield an incomplete doc or PRD.
             if (timedOut || signal != null || (code != null && code !== 0)) {
                 reject(
                     new Error(

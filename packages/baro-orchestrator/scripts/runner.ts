@@ -41,15 +41,13 @@ const encode = (m: unknown): string => JSON.stringify(m)
 const url = process.env.CONTROL_URL ?? "wss://api.baro.jigjoy.ai"
 let token = process.env.RUNNER_TOKEN
 
-// The HTTP origin of the control plane (the WS url with the scheme swapped) — used by
-// `baro login` and runner self-registration. wss://host → https://host.
+// HTTP origin of the control plane — used by `baro login` and runner self-registration.
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
 const VERSION = "0.70.9"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
-// a.b.c < x.y.z, numeric per-segment.
 function semverLt(a: string, b: string): boolean {
     const pa = a.split(".").map(Number)
     const pb = b.split(".").map(Number)
@@ -161,8 +159,7 @@ interface RunOutcome {
     diff?: string
 }
 
-// Clone a repo into a fresh temp dir. With a token, authenticate (private repos + push);
-// without one, a plain public clone (diffOnly preview). Returns the dir.
+// With a token, authenticated clone (private repos + push); without, public clone (diffOnly preview).
 function cloneRepo(fullName: string, token: string | undefined, emit: (e: WireEvent) => void): Promise<string> {
     return new Promise((resolve, reject) => {
         const dir = mkdtempSync(join(tmpdir(), "baro-clone-"))
@@ -174,11 +171,9 @@ function cloneRepo(fullName: string, token: string | undefined, emit: (e: WireEv
     })
 }
 
-// Keep baro's dep-sharing symlinks (node_modules/.venv/vendor — see worktree.ts) out of every
-// git operation: `git add -A`, the Finalizer's commits, and captureDiff. Otherwise the symlink
-// lands in the PR / patch (e.g. a `node_modules → /tmp/baro-clone-…/node_modules` symlink). Uses
-// the repo-local .git/info/exclude — never touches the user's tracked .gitignore. Worktrees
-// share the common dir's info/exclude, so one write covers them too.
+// Keep baro's dep-sharing symlinks (node_modules/.venv/vendor — see worktree.ts) out of the
+// PR / patch. Uses the repo-local .git/info/exclude — never the user's tracked .gitignore —
+// and worktrees share the common dir's info/exclude, so one write covers them too.
 function excludeDepDirs(cwd: string): void {
     try {
         const patterns = ["node_modules", "**/node_modules", ".venv", "**/.venv", "vendor", "**/vendor"]
@@ -188,7 +183,6 @@ function excludeDepDirs(cwd: string): void {
     }
 }
 
-// Capture everything baro changed vs the base commit as one unified patch (bounded).
 function captureDiff(cwd: string, base: string): string {
     try {
         execFileSync("git", ["add", "-A"], { cwd })
@@ -219,7 +213,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         } catch (e) {
             return { success: false, durationSecs: 1, error: `clone failed: ${(e as Error).message}` }
         }
-        excludeDepDirs(cwd) // keep node_modules/.venv/vendor symlinks out of the PR / patch
+        excludeDepDirs(cwd)
         if (d.diffOnly) {
             // Drop the origin remote so baro skips ALL push/PR steps cleanly ("no remote,
             // skipping push") instead of failing them noisily without a token — we return
@@ -259,17 +253,15 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
             }
         }
     } else if (!d.repo) {
-        // No repo selected → from-scratch build. The runner's default workspace isn't a
-        // git repo, so baro would die on branch creation ("not a git repository"). Give it
-        // a clean, git-initialized scratch dir (like the hosted sandbox) and return the
-        // result as a patch — so a repo-less first run works on self-hosted runners too,
-        // and the user actually sees what baro built.
+        // No repo → from-scratch build. The default workspace isn't a git repo, so baro
+        // would die on branch creation; give it a git-initialized scratch dir (like the
+        // hosted sandbox) and return the result as a patch so the user sees what was built.
         scratch = true
         cwd = mkdtempSync(join(tmpdir(), "baro-scratch-"))
         try {
             const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "baro", GIT_AUTHOR_EMAIL: "baro@baro.rs", GIT_COMMITTER_NAME: "baro", GIT_COMMITTER_EMAIL: "baro@baro.rs" }
             execFileSync("git", ["init", "-q"], { cwd })
-            excludeDepDirs(cwd) // keep dep-sharing symlinks out of the scratch diff
+            excludeDepDirs(cwd)
             execFileSync("git", ["commit", "--allow-empty", "-q", "-m", "baro: initial workspace"], { cwd, env: gitEnv })
             diffBase = execFileSync("git", ["rev-parse", "HEAD"], { cwd }).toString().trim()
         } catch (e) {
@@ -354,15 +346,14 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
                 .slice(-3)
                 .join(" · ")
                 .slice(-500)
-            // The agent CLI produced nothing usable (e.g. it isn't signed in on this
-            // self-hosted machine) — say so clearly and point at the zero-setup path.
+            // No usable output at all usually means the agent CLI isn't signed in on this
+            // self-hosted machine — say so and point at the zero-setup path.
             const cliHint = `the agent CLI on this runner produced no output — make sure \`claude\` (or \`codex\`) is installed and signed in here (run it once), or run on baro's cloud instead (no setup)`
             resolve({
                 success: ok,
                 durationSecs: secs(),
                 storiesPassed: passed,
                 storiesTotal: stories.size || passed + failed,
-                // Prefer the real reason from the stream, then cleaned stderr, then a fallback.
                 error: ok ? null : lastErr || errTail || (doneSuccess === false ? "run reported failure" : cliHint),
             })
         })
@@ -439,9 +430,8 @@ async function watchCi(cwd: string, emit: (e: WireEvent) => void, signal: AbortS
 let rejected: string | undefined
 
 // The live socket. An in-flight run streams through *this*, not the socket it
-// started on, so events + run_result keep flowing after a reconnect: the control
-// plane re-attaches by runnerId and only fails the run after a grace window. A
-// brief network blip mid-run no longer kills work that's still executing here.
+// started on, so events + run_result survive a reconnect: the control plane
+// re-attaches by runnerId and only fails the run after a grace window.
 let currentWs: WebSocket | null = null
 const inflight = new Map<string, AbortController>()
 const send = (m: unknown): void => {

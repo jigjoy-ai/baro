@@ -1,20 +1,9 @@
 /**
- * ArchitectOpenAI — one-shot Architect via Mozaik 3.9's native OpenAI
- * inference runner. Multi-turn inference loop with our codebase tools
- * (read_file, list_files, file_tree, grep, glob, bash) until the
- * model emits a final assistant message with no tool calls — that
- * message is the design document.
- *
- * Same system prompt as ArchitectClaude so the two providers produce
- * comparable decision documents.
- *
- * Why a hand-rolled loop instead of `BaseAgentParticipant`:
- * `BaseAgentParticipant` is built around an `AgenticEnvironment` that
- * fans events out to subscribers. The Architect is a one-shot call
- * with no peers to react to — direct iteration over the inference
- * runner is half the code and the right granularity for the use case.
- * Phase 6 (StoryAgent OpenAI) is where the participant pattern earns
- * its keep.
+ * ArchitectOpenAI — one-shot Architect via Mozaik's native OpenAI
+ * runner: a multi-turn tool loop that ends on an assistant message with
+ * no tool calls (that message is the design document). Hand-rolled
+ * instead of `BaseAgentParticipant` because the Architect has no peers
+ * to react to — direct iteration is half the code.
  */
 
 import {
@@ -43,25 +32,13 @@ import {
 import { createCodebaseTools } from "./codebase-tools.js"
 
 export interface RunArchitectOpenAIOptions {
-    /** The user's goal — verbatim. */
     goal: string
-    /** Working directory the Architect explores in. */
     cwd: string
-    /** Mozaik model name. Default: "gpt-5.5" — Architect is one-shot but consequential. */
     model?: string
-    /** Optional CLAUDE.md / project-context blob to prepend. */
     projectContext?: string
-    /**
-     * Cap on inference rounds (each round = one model response, optionally
-     * with tool calls + their outputs in the next round). Default: 12 —
-     * generous since Architect needs to read multiple files but not so
-     * generous that a runaway loop costs a fortune. Triggers an error
-     * if exceeded.
-     */
+    /** Cap on inference rounds; errors if exceeded. */
     maxRounds?: number
-    /** Per-round inference timeout in seconds. Default: 600 — reasoning models
-     * (gpt-5.5 on the Responses API) can need minutes per round; matches the
-     * 10-min default the pi/codex/opencode architect backends use. */
+    /** Default 600 s — reasoning models can need minutes per round. */
     perRoundTimeoutSecs?: number
 }
 
@@ -101,10 +78,6 @@ export async function runArchitectOpenAI(
     const usage = new UsageAccumulator()
 
     for (let round = 1; round <= maxRounds; round++) {
-        // Per-round timeout so a single hung inference can't lock
-        // the whole architect call. `runInferenceRound` doesn't
-        // expose AbortSignal (Mozaik's ModelRuntime.infer() doesn't
-        // either), so we wrap the promise in Promise.race instead.
         const newItems: Array<{
             type: string
             callId?: string
@@ -113,11 +86,11 @@ export async function runArchitectOpenAI(
             text?: string
         }> = []
 
+        // Per-round timeout via Promise.race — Mozaik's infer() exposes no
+        // AbortSignal. Clear the timer once the round settles: a pending
+        // setTimeout kept the subprocess alive ~10 min after finishing,
+        // stalling `baro --headless`.
         const roundPromise = runInferenceRound(context, model)
-        // Clear the timeout once the round settles. Leaving it pending kept the
-        // 600s timer alive and so kept the whole run-architect process from
-        // exiting for 10 minutes after the architect had already finished —
-        // which stalled `baro --headless` waiting on the subprocess.
         let timer: ReturnType<typeof setTimeout> | undefined
         const timeoutPromise = new Promise<never>((_, rej) => {
             timer = setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs)
@@ -145,15 +118,12 @@ export async function runArchitectOpenAI(
             }
         }
 
-        // If the model produced no items at all, we're stuck — error out.
         if (newItems.length === 0) {
             throw new Error(
                 `ArchitectOpenAI: round ${round} returned no items. Aborting.`,
             )
         }
 
-        // Execute every function call this round produced, in order,
-        // and feed the outputs back into the context for the next round.
         const calls = newItems.filter((i) => i.type === "function_call")
         for (const call of calls) {
             const tool = tools.find((t) => t.name === call.name)
@@ -165,8 +135,6 @@ export async function runArchitectOpenAI(
             )
         }
 
-        // If no tool calls AND we got at least one assistant message,
-        // we're done. The last assistant text is the design document.
         if (calls.length === 0) {
             const messages = newItems.filter((i) => i.type === "message")
             if (messages.length === 0) {
@@ -189,7 +157,7 @@ export async function runArchitectOpenAI(
     )
 }
 
-/** Run a tool's invoke() while turning any throw into a string the model can read. */
+/** Turn any tool throw into an error string the model can read. */
 async function runToolSafely(tool: Tool, argsJson: string): Promise<string> {
     let parsed: unknown
     try {
@@ -205,12 +173,7 @@ async function runToolSafely(tool: Tool, argsJson: string): Promise<string> {
     }
 }
 
-/**
- * Mozaik models implement `ToolCallingCapability` (setTools/getTools).
- * Older versions of `GenerativeModel` didn't, so we duck-type rather
- * than `instanceof` to keep the failure mode obvious if a future
- * model omits the capability.
- */
+/** Duck-typed rather than `instanceof`: older `GenerativeModel`s lacked ToolCallingCapability. */
 function setModelTools(model: GenerativeModel, tools: Tool[]): void {
     const m = model as unknown as { setTools?: (t: Tool[]) => void }
     if (typeof m.setTools !== "function") {

@@ -1,19 +1,8 @@
 /**
- * OpenCodeStoryAgent — story-level wrapper that drives an
- * OpenCodeCliParticipant through a single piece of work, with retries
- * and per-attempt timeout. Sibling of `codex-story-agent.ts` (Codex)
- * and `story-agent.ts` (Claude).
- *
- * Lifecycle is simpler than the Claude variant because OpenCode `run` is
- * one-shot: each attempt spawns a fresh `opencode run --format json`
- * process, which streams events and exits when the agent finishes. There
- * is no multi-turn quiet-timer / stdin-injection dance.
- *
- *   idle ─► starting ─► running ─► done | failed
- *                              ╰► retrying ─► running ─► …
- *
- * Outer retry budget and hard timeout match StoryAgent's defaults so
- * the orchestrator-level semantics are uniform across backends.
+ * OpenCodeStoryAgent — drives an OpenCodeCliParticipant through one story
+ * with retries and per-attempt timeout. `opencode run` is one-shot (fresh
+ * process per attempt, no multi-turn stdin dance); retry/timeout defaults
+ * match StoryAgent so orchestrator-level semantics stay uniform.
  */
 
 import { setTimeout as setTimeoutPromise } from "timers/promises"
@@ -31,39 +20,28 @@ import {
     type OpenCodeRunSummary,
 } from "./opencode-cli-participant.js"
 
-/** Specification for an OpenCode-backed story execution. */
 export interface OpenCodeStorySpec {
     /** Story ID, used as agentId for observer attribution. */
     id: string
-    /** The prompt sent to OpenCode as the initial user message. */
     prompt: string
-    /** Working directory for OpenCode. */
     cwd: string
-    /** Optional model override (e.g. "anthropic/claude-sonnet-4-20250514"). */
+    /** Provider-qualified model, e.g. "anthropic/claude-sonnet-4-20250514". */
     model?: string
-    /** Path to the `opencode` binary. Default: "opencode" (resolved via PATH). */
     opencodeBin?: string
-    /** Retry budget (number of *additional* attempts after the first). */
+    /** Number of *additional* attempts after the first. */
     retries?: number
-    /** Per-attempt timeout in seconds. Default: 600. */
+    /** Per-attempt timeout in seconds. */
     timeoutSecs?: number
-    /** Delay between retries in milliseconds. Default: 1500. */
     retryDelayMs?: number
-    /**
-     * Hard cap in seconds for the entire story across all attempts. The
-     * OpenCode process is aborted unconditionally when this fires. <= 0
-     * disables the absolute kill timer. Default: 0 (matches StoryAgent).
-     */
+    /** Hard cap in seconds for the whole story across all attempts; <= 0 disables. */
     hardTimeoutSecs?: number
     /**
-     * Whether to pass `--dangerously-skip-permissions`. Required for
-     * autonomous baro runs because OpenCode's default mode prompts for
-     * tool approvals. Default: true.
+     * Pass `--dangerously-skip-permissions`. Required for autonomous baro
+     * runs — OpenCode's default mode prompts for tool approvals.
      */
     skipPermissions?: boolean
 }
 
-/** Outcome of a completed (passed or exhausted) story execution. */
 export interface OpenCodeStoryOutcome {
     storyId: string
     success: boolean
@@ -73,10 +51,6 @@ export interface OpenCodeStoryOutcome {
     error: string | null
 }
 
-/**
- * Mozaik observer that runs a story on the OpenCode backend with retry
- * logic and timeout management.
- */
 export class OpenCodeStoryAgent extends BaseObserver {
     private readonly spec: Required<
         Pick<
@@ -128,10 +102,7 @@ export class OpenCodeStoryAgent extends BaseObserver {
         return this.currentOpenCode
     }
 
-    /**
-     * Begin executing the story. Idempotent. Returns the `done` promise
-     * for the caller's convenience.
-     */
+    /** Idempotent; returns the `done` promise. */
     run(environment: AgenticEnvironment): Promise<OpenCodeStoryOutcome> {
         if (this.startedAt != null) {
             return this.done
@@ -143,19 +114,13 @@ export class OpenCodeStoryAgent extends BaseObserver {
         return this.done
     }
 
-    /**
-     * No-op: OpenCode run is one-shot, there's no stdin channel to forward
-     * mid-flight messages to.
-     */
+    /** No-op: OpenCode run is one-shot — no stdin channel for mid-flight messages. */
     override async onExternalEvent(
         _source: Participant,
         _event: SemanticEvent<unknown>,
     ): Promise<void> {
-        // Intentionally empty — OpenCode run doesn't have the multi-turn
-        // stdin lifecycle that StoryAgent uses for Claude.
     }
 
-    /** Abort the story, killing the running OpenCode (if any). */
     abort(): void {
         this.currentOpenCode?.abort()
         this.transition("aborted", "external abort")
@@ -286,17 +251,10 @@ export class OpenCodeStoryAgent extends BaseObserver {
         opencode.leave(this.envRef)
         this.currentOpenCode = null
 
-        // Success requires POSITIVE evidence of completed work, not
-        // merely the absence of a crash. `opencode run` exits 0 even when
-        // the model refuses the task or produces no edits (verified
-        // empirically: a refusal turn returns exitCode 0), so a clean exit
-        // alone would mark a no-op story as passed. We therefore also
-        // require the agent loop to have actually finished (`sawStepFinish`)
-        // and to have invoked at least one tool — a code-writing story that
-        // claims success having touched no tools almost certainly answered
-        // in prose instead of editing the worktree. This brings the
-        // OpenCode predicate up to (and slightly past) the Claude path,
-        // which gates on a non-error result payload.
+        // `opencode run` exits 0 even on a refusal or no-op (verified
+        // empirically), so success needs positive evidence: the agent loop
+        // finished (`sawStepFinish`) and at least one tool was invoked —
+        // no tools ⇒ it answered in prose, not edits.
         if (summary.exitCode !== 0 || summary.error != null) {
             const reason = summary.error
                 ? summary.error.message
@@ -356,10 +314,6 @@ export class OpenCodeStoryAgent extends BaseObserver {
     }
 }
 
-/**
- * Race a promise against a timeout. Rejects with an Error carrying the
- * label on timeout.
- */
 function raceWithTimeout<T>(
     p: Promise<T>,
     ms: number,

@@ -1,18 +1,7 @@
-/**
- * Vectra-backed semantic memory store for baro agents.
- *
- * Architecture:
- * - Vectra LocalIndex for vector storage + similarity search (persisted to disk)
- * - @xenova/transformers ONNX model for embedding generation (CPU-only)
- * - Separate cache.json for file content dedup (not vectorized)
- *
- * Cross-process sharing: Vectra reads/writes index.json on every operation,
- * so the orchestrator's writes are immediately visible to CLI invocations.
- *
- * ID strategy: IDs are deterministic (agent:tool:file/pattern/command).
- * This means repeated reads of the same file by the same agent upsert
- * (update in place) rather than accumulate duplicate entries.
- */
+// Cross-process sharing: Vectra reads/writes index.json on every operation,
+// so the orchestrator's writes are immediately visible to CLI invocations.
+// IDs are deterministic (agent:tool:file/pattern/command), so repeated reads
+// of the same file by the same agent upsert rather than duplicate.
 
 import { LocalIndex } from 'vectra'
 import type { QueryResult } from 'vectra'
@@ -31,24 +20,11 @@ import type {
     RecallOptions,
 } from './types.js'
 
-// ── Constants ────────────────────────────────────────────────────────────
-
-/** Maximum characters stored per finding content. */
 const MAX_CONTENT_CHARS = 4000
-
-/** Maximum bytes for a single cached file (5MB). */
 const MAX_CACHE_FILE_BYTES = 5 * 1024 * 1024
-
-/** Maximum total cache size (50MB). Beyond this, oldest entries are evicted. */
 const MAX_TOTAL_CACHE_BYTES = 50 * 1024 * 1024
-
-/** Stale session threshold: 24 hours. */
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000
-
-/** Allowed parent directories for session paths (prevent path traversal). */
 const ALLOWED_SESSION_PARENTS = ['.baro', 'baro-memory', 'tmp']
-
-// ── Defaults ─────────────────────────────────────────────────────────────
 
 const DEFAULTS = {
     embeddingModel: 'Xenova/all-MiniLM-L6-v2',
@@ -58,15 +34,11 @@ const DEFAULTS = {
     sessionPath: '',
 } satisfies Required<MemoryStoreConfig>
 
-// ── Types ────────────────────────────────────────────────────────────────
-
-/** Typed embedding pipeline from @xenova/transformers. */
 type EmbeddingPipeline = (
     text: string,
     opts: { pooling: string; normalize: boolean },
 ) => Promise<{ data: ArrayLike<number> }>
 
-/** Metadata stored alongside each vector in Vectra. */
 interface VectraItemMetadata {
     [key: string]: string  // Index signature for Vectra compatibility
     tool: string
@@ -76,28 +48,18 @@ interface VectraItemMetadata {
     pattern: string
     command: string
     tags: string
-    /** The original text content (stored for retrieval). */
     content: string
 }
 
-// ── Factory ──────────────────────────────────────────────────────────────
-
 /**
- * Create a memory store backed by Vectra (local vector DB).
- *
- * - If `sessionPath` is set, the index + cache persist there.
- * - If not set, a temp directory is used (ephemeral, single-process).
- * - If `disabled`, returns a no-op store.
- *
- * @param config - Optional configuration
- * @returns MemoryStore instance
+ * Create a Vectra-backed memory store. Without `sessionPath` the index lives
+ * in a temp dir (ephemeral, single-process); `disabled` returns a no-op store.
  */
 export async function createMemoryStore(
     config?: MemoryStoreConfig,
 ): Promise<MemoryStore> {
     const cfg = { ...DEFAULTS, ...config }
 
-    // Validate config
     if (cfg.defaultMinSimilarity < 0 || cfg.defaultMinSimilarity > 1) {
         cfg.defaultMinSimilarity = DEFAULTS.defaultMinSimilarity
     }
@@ -109,12 +71,10 @@ export async function createMemoryStore(
         return new NoOpMemoryStore()
     }
 
-    // Resolve and validate session path (prevent path traversal)
     const sessionPath = cfg.sessionPath || join(tmpdir(), `baro-memory-${process.pid}-${Date.now()}`)
     validateSessionPath(sessionPath)
     mkdirSync(sessionPath, { recursive: true })
 
-    // Initialize Vectra index
     const indexPath = join(sessionPath, 'index')
     mkdirSync(indexPath, { recursive: true })
     const index = new LocalIndex<VectraItemMetadata>(indexPath)
@@ -123,12 +83,9 @@ export async function createMemoryStore(
         await index.createIndex({ version: 1 })
     }
 
-    // Load ONNX embedding model (cached after first load by transformers.js).
-    // Pin the cache to a writable, persistent baro-owned dir: the default is
-    // `node_modules/@xenova/transformers/.cache`, which on a global install
-    // (e.g. /usr/local/lib) can be read-only — the model would fail to
-    // download. ~/.baro/models is user-writable and survives across runs so
-    // MiniLM is fetched only once. Override with TRANSFORMERS_CACHE if set.
+    // Pin the transformers.js model cache to a writable persistent dir: the
+    // default node_modules/@xenova/transformers/.cache can be read-only on a
+    // global install, and ~/.baro/models survives so MiniLM downloads once.
     const transformers = await import('@xenova/transformers')
     transformers.env.cacheDir = process.env.TRANSFORMERS_CACHE || join(homedir(), '.baro', 'models')
     const { pipeline } = transformers
@@ -137,24 +94,18 @@ export async function createMemoryStore(
     return new VectraMemoryStore(index, extractor, sessionPath, cfg)
 }
 
-/**
- * Validate that sessionPath is safe (not a sensitive system directory).
- * Prevents path traversal attacks via BARO_MEMORY_PATH env var.
- */
+/** Prevents path traversal / sensitive-dir writes via BARO_MEMORY_PATH. */
 function validateSessionPath(sessionPath: string): void {
     const resolved = join(sessionPath) // normalize
-    // Reject paths containing '..' traversal
     if (resolved.includes('..')) {
         throw new Error(`Invalid session path (contains ..): ${resolved}`)
     }
-    // Reject obvious sensitive directories
     const dangerous = ['/etc', '/usr', '/bin', '/sbin', '/var/run', '/System', '/Library']
     for (const d of dangerous) {
         if (resolved.startsWith(d + '/') || resolved === d) {
             throw new Error(`Invalid session path (sensitive directory): ${resolved}`)
         }
     }
-    // Must contain a baro-related segment or be in tmpdir
     const normalizedPath = resolved.toLowerCase()
     const isSafe = ALLOWED_SESSION_PARENTS.some(p => normalizedPath.includes(p)) ||
         normalizedPath.startsWith(tmpdir().toLowerCase())
@@ -166,9 +117,8 @@ function validateSessionPath(sessionPath: string): void {
 }
 
 /**
- * Prune stale session directories older than SESSION_TTL_MS.
- * Call on orchestrator startup to prevent unbounded growth.
- * Uses lstatSync to avoid following symlinks (prevents symlink attacks).
+ * Prune session dirs older than SESSION_TTL_MS; call on orchestrator startup.
+ * lstatSync avoids following symlinks (symlink attack).
  */
 export function pruneOldSessions(sessionsDir: string): void {
     try {
@@ -179,7 +129,6 @@ export function pruneOldSessions(sessionsDir: string): void {
             const entryPath = join(sessionsDir, entry)
             try {
                 const stat = lstatSync(entryPath)
-                // Skip symlinks entirely (potential attack vector)
                 if (stat.isSymbolicLink()) continue
                 if (stat.isDirectory() && now - stat.mtimeMs > SESSION_TTL_MS) {
                     rmSync(entryPath, { recursive: true, force: true })
@@ -189,12 +138,6 @@ export function pruneOldSessions(sessionsDir: string): void {
     } catch { /* non-critical — don't crash if cleanup fails */ }
 }
 
-// ── Embedding helper ─────────────────────────────────────────────────────
-
-/**
- * Generate a normalized embedding vector for text.
- * @throws Error if embedding generation fails (empty text, model error)
- */
 async function embed(extractor: EmbeddingPipeline, text: string): Promise<number[]> {
     if (!text || !text.trim()) {
         throw new Error('Cannot embed empty text')
@@ -205,8 +148,6 @@ async function embed(extractor: EmbeddingPipeline, text: string): Promise<number
     }
     return Array.from(output.data) as number[]
 }
-
-// ── VectraMemoryStore ────────────────────────────────────────────────────
 
 class VectraMemoryStore implements MemoryStore {
     // Not readonly: the reader re-instantiates the index to pick up writes
@@ -240,33 +181,19 @@ class VectraMemoryStore implements MemoryStore {
     }
 
     /**
-     * Pick up cross-process writes to the shared on-disk index.
-     *
-     * Vectra's LocalIndex loads the whole index into a private in-memory
-     * `_data` field on first query and never reloads it. Findings written by
-     * story agents in SEPARATE processes (via the baro-memory CLI) land on
-     * disk but stay invisible to this long-lived reader — so recall/getStats
-     * see a frozen (usually empty) snapshot and always return 0 (issue #51).
-     *
-     * There is no public reload on LocalIndex, so we detect a change via the
-     * index file's mtime and swap in a fresh LocalIndex, which lazily loads
-     * the current on-disk data on its next query. Throttled by mtime so we
-     * don't re-read every call — cheap relative to an LLM turn. Read paths
-     * only; writers (remember/upsertItem) already refresh Vectra's `_data`
-     * via beginUpdate, and reloading mid-write could clobber a pending batch.
-     *
-     * Never throws: on any stat/instantiation error we keep the current
-     * index and degrade gracefully.
+     * Vectra's LocalIndex caches index.json in memory and never reloads, so
+     * writes from other processes stay invisible to this long-lived reader
+     * (issue #51). No public reload exists — on mtime change we swap in a
+     * fresh LocalIndex. Read paths only: writers refresh via beginUpdate, and
+     * reloading mid-write could clobber a pending batch. Never throws.
      */
     private refreshIndexIfChanged(): void {
         try {
             if (!existsSync(this.indexFilePath)) return
             const mtimeMs = statSync(this.indexFilePath).mtimeMs
             if (mtimeMs === this.lastIndexMtimeMs) return
-            // Create the new index BEFORE advancing the mtime watermark: if
-            // instantiation throws, we keep the old index AND the old mtime,
-            // so the next call retries instead of locking onto a stale
-            // snapshot for this mtime (Greptile #52 P2).
+            // Instantiate BEFORE advancing the mtime watermark: if this throws
+            // we keep the old index AND old mtime, so the next call retries.
             const newIndex = new LocalIndex<VectraItemMetadata>(this.indexPath)
             this.lastIndexMtimeMs = mtimeMs
             this.index = newIndex
@@ -274,8 +201,6 @@ class VectraMemoryStore implements MemoryStore {
             // Keep the existing index on any error.
         }
     }
-
-    // ── Semantic memory ──────────────────────────────────────────
 
     async remember(finding: Finding): Promise<boolean> {
         try {
@@ -297,7 +222,7 @@ class VectraMemoryStore implements MemoryStore {
             await this.index.upsertItem({ id, vector, metadata })
             return true
         } catch {
-            // Graceful degradation: don't crash if embedding/storage fails
+            // Never crash the agent if embedding/storage fails
             return false
         }
     }
@@ -311,7 +236,6 @@ class VectraMemoryStore implements MemoryStore {
 
             if (!query?.trim()) return []
 
-            // Reload the on-disk index if other processes wrote to it.
             this.refreshIndexIfChanged()
 
             const vector = await embed(this.extractor, query)
@@ -320,7 +244,6 @@ class VectraMemoryStore implements MemoryStore {
             const fetchK = Math.min(Math.max(maxResults * 3, 30), 200)
             const results: QueryResult<VectraItemMetadata>[] = await this.index.queryItems(vector, fetchK)
 
-            // Post-filter and collect
             const output: RecalledFinding[] = []
 
             for (const result of results) {
@@ -348,7 +271,7 @@ class VectraMemoryStore implements MemoryStore {
 
             return output
         } catch {
-            // Graceful degradation: return empty on failure
+            // Never crash the agent: return empty on failure
             return []
         }
     }
@@ -397,13 +320,10 @@ class VectraMemoryStore implements MemoryStore {
         return lines.join('\n')
     }
 
-    // ── File cache ───────────────────────────────────────────────
-    // Simple JSON file (not vectorized -- exact key-value lookup).
-    // NOTE: Multi-process writes use merge-on-write to reduce data loss.
-    // This is best-effort — not ACID. For guaranteed consistency, use SQLite.
+    // File cache is a plain JSON file (exact-path lookup, not vectorized).
+    // Multi-process writes are merge-on-write best-effort — not ACID.
 
     async cacheFile(path: string, content: string, agentId: string): Promise<void> {
-        // Skip excessively large files
         if (content.length > MAX_CACHE_FILE_BYTES) return
 
         // Merge-on-write: reload fresh state before modifying (reduces race window)
@@ -411,7 +331,6 @@ class VectraMemoryStore implements MemoryStore {
         const existing = cache[path]
         if (!existing || existing.content !== content) {
             cache[path] = { path, content, readByAgent: agentId, timestamp: Date.now() }
-            // Evict oldest entries if total cache exceeds limit
             this.evictIfNeeded(cache)
             this.saveCache(cache)
         }
@@ -432,11 +351,8 @@ class VectraMemoryStore implements MemoryStore {
         return Object.keys(cache)
     }
 
-    // ── Stats ────────────────────────────────────────────────────
-
     async getStats(): Promise<MemoryStats> {
         try {
-            // Reload the on-disk index if other processes wrote to it.
             this.refreshIndexIfChanged()
             const items = await this.index.listItems<VectraItemMetadata>()
             const tools = new Set<string>()
@@ -475,12 +391,6 @@ class VectraMemoryStore implements MemoryStore {
         try { rmSync(this.lockPath, { force: true }) } catch {}
     }
 
-    // ── Private helpers ──────────────────────────────────────────
-
-    /**
-     * Evict oldest cache entries until total size is under MAX_TOTAL_CACHE_BYTES.
-     * LRU-style: removes entries with oldest timestamps first.
-     */
     private evictIfNeeded(cache: Record<string, CachedFile>): void {
         let totalBytes = 0
         for (const entry of Object.values(cache)) {
@@ -488,7 +398,6 @@ class VectraMemoryStore implements MemoryStore {
         }
         if (totalBytes <= MAX_TOTAL_CACHE_BYTES) return
 
-        // Sort by timestamp ascending (oldest first)
         const entries = Object.entries(cache).sort((a, b) => a[1].timestamp - b[1].timestamp)
         for (const [key, entry] of entries) {
             if (totalBytes <= MAX_TOTAL_CACHE_BYTES) break
@@ -517,9 +426,8 @@ class VectraMemoryStore implements MemoryStore {
     }
 
     /**
-     * Load cache from disk. Reads are not locked — if another process is
-     * mid-write using the atomic rename strategy, we'll either get the old
-     * complete version or the new complete version (never a partial write).
+     * Reads are not locked: the atomic-rename write strategy means we see
+     * either the old or new complete version, never a partial write.
      */
     private loadCache(): Record<string, CachedFile> {
         try {
@@ -536,9 +444,8 @@ class VectraMemoryStore implements MemoryStore {
     }
 
     /**
-     * Save cache atomically (write to PID-scoped tmp file, then rename).
-     * The rename is atomic on POSIX, so concurrent readers see either the
-     * old or new version — never a partial write.
+     * Write to a PID-scoped tmp file then rename — atomic on POSIX, so
+     * concurrent readers never see a partial write.
      */
     private saveCache(cache: Record<string, CachedFile>): void {
         try {
@@ -559,11 +466,6 @@ class VectraMemoryStore implements MemoryStore {
     }
 }
 
-// ── NoOp store ───────────────────────────────────────────────────────────
-
-/**
- * No-op implementation for when memory is disabled.
- */
 class NoOpMemoryStore implements MemoryStore {
     async remember(_finding: Finding): Promise<boolean> { return false }
     async recall(_query: string, _options?: RecallOptions): Promise<RecalledFinding[]> { return [] }

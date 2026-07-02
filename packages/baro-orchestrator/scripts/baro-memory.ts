@@ -1,20 +1,7 @@
 /**
- * baro-memory CLI - Query and store findings in the shared Vectra memory.
- *
- * Connects to the same Vectra index as the orchestrator via the
- * BARO_MEMORY_PATH environment variable. Story agents can use this
+ * baro-memory CLI — connects to the same Vectra index as the orchestrator
+ * (via BARO_MEMORY_PATH, set by the orchestrator). Story agents use it
  * mid-flight to query context and store findings for sibling agents.
- *
- * Usage:
- *   baro-memory query "JWT authentication" [--top 5] [--agent story-1]
- *   baro-memory store "found auth pattern" --tool Read --file src/auth.ts --agent story-1
- *   baro-memory cache list
- *   baro-memory cache get src/auth.ts
- *   baro-memory stats
- *
- * Environment:
- *   BARO_MEMORY_PATH - Path to the shared session memory directory.
- *                      Set automatically by the baro orchestrator.
  */
 
 import { createMemoryStore, type MemoryStore } from "@baro/memory"
@@ -26,7 +13,6 @@ function getFlag(name: string): string | undefined {
     const idx = args.indexOf(`--${name}`)
     if (idx < 0 || idx + 1 >= args.length) return undefined
     const value = args[idx + 1]
-    // Don't treat the next flag as a value
     if (value.startsWith('--')) return undefined
     return value
 }
@@ -38,7 +24,6 @@ function getPositionalArg(index: number): string | undefined {
 }
 
 async function main() {
-    // Read session path from env (set by orchestrator) or --path flag
     const sessionPath = getFlag("path") || process.env.BARO_MEMORY_PATH
 
     if (!sessionPath) {
@@ -172,7 +157,6 @@ async function main() {
                 console.log("  BARO_MEMORY_PATH  Session memory directory (set by orchestrator)")
         }
     } finally {
-        // Always close store to release resources
         if (store) await store.close()
     }
 }

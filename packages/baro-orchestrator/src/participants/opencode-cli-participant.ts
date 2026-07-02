@@ -1,18 +1,8 @@
 /**
- * OpenCodeCliParticipant — wraps an OpenCode CLI process as a
- * first-class Mozaik Participant. Sibling of `CodexCliParticipant`
- * and `ClaudeCliParticipant`.
- *
- * Spawned with `opencode run --format json --dangerously-skip-permissions "PROMPT"`.
- * OpenCode `run` is one-shot non-interactive: takes a single prompt as
- * argv, streams JSONL events to stdout, exits when the agent finishes.
- * There is no stdin event loop (unlike Claude Code's stream-json input).
- * That makes this participant simpler than ClaudeCliParticipant in one
- * respect — `onExternalEvent` doesn't forward AgentTargetedMessage to a
- * running process; new prompts mean a new OpenCode invocation.
- *
- * Library-grade: knows nothing about baro, PRD, or stories. Only knows
- * about agent IDs, working directories, and OpenCode.
+ * Wraps a one-shot `opencode run --format json` subprocess as a Mozaik
+ * Participant. No stdin event loop (unlike Claude Code's stream-json input).
+ * Event shapes: docs/stream-protocols.md § OpenCode.
+ * Library-grade: knows agent IDs, cwds, and OpenCode — nothing about baro/PRD/stories.
  */
 
 import { ChildProcess, spawn } from "child_process"
@@ -35,59 +25,40 @@ import {
 } from "../semantic-events.js"
 import { mapOpenCodeEvent } from "../opencode-stream-mapper.js"
 
-/** Options for constructing an OpenCodeCliParticipant. */
 export interface OpenCodeCliParticipantOptions {
-    /** Working directory for the OpenCode process. Required. */
     cwd: string
-    /** Initial prompt — passed as the final argv to `opencode run`. */
     prompt: string
-    /**
-     * Model identifier in `provider/model` format (e.g.
-     * "anthropic/claude-sonnet-4-20250514", "openai/gpt-4o").
-     * Passed via `-m`. Omit to let OpenCode use its configured default.
-     */
+    /** `provider/model` format (e.g. "anthropic/claude-sonnet-4-20250514"). */
     model?: string
-    /** Path to the `opencode` binary. Default: "opencode" (resolved via PATH). */
     opencodeBin?: string
     /**
-     * Whether to pass `--dangerously-skip-permissions`. Required for
-     * autonomous baro runs because OpenCode's default mode prompts for
-     * tool approvals. Default: true.
+     * Pass `--dangerously-skip-permissions` — OpenCode's default mode prompts
+     * for tool approvals, which blocks autonomous runs. Default: true.
      */
     skipPermissions?: boolean
 }
 
-/** Summary emitted when the OpenCode process exits. */
 export interface OpenCodeRunSummary {
     sessionId: string | null
     exitCode: number | null
     error: Error | null
     /**
-     * True once at least one `step_finish` event was observed — i.e. the
-     * agent loop actually completed a step rather than the process simply
-     * exiting. `opencode run` exits 0 even when the model refuses or
-     * produces no work, so exit code alone is NOT proof of task success
-     * (verified empirically). Callers should require this before treating
-     * exitCode 0 as a real completion.
+     * At least one `step_finish` seen. `opencode run` exits 0 even on a
+     * refused/no-op turn (verified empirically), so exitCode alone is not
+     * proof of completion — require this too.
      */
     sawStepFinish: boolean
     /**
-     * Number of `tool_call` events observed. A code-writing story that
-     * claims success having invoked zero tools is suspect — the agent
-     * likely answered in prose instead of editing the worktree.
+     * `tool_use`/`tool_call` count. Zero tools on a code-writing story means
+     * the agent likely answered in prose instead of editing the worktree.
      */
     toolCallCount: number
 }
 
-/**
- * Mozaik participant that wraps a single `opencode run` CLI subprocess.
- * Streams JSONL events to the bus and manages lifecycle transitions.
- */
 export class OpenCodeCliParticipant extends BaseObserver {
     /**
-     * Process-wide registry of every OpenCode child currently running.
-     * Used by the orchestrator's SIGINT/SIGTERM handlers to nuke orphans
-     * so a killed baro doesn't leave background agents burning quota.
+     * Process-wide registry for the orchestrator's SIGINT/SIGTERM handlers,
+     * so a killed baro doesn't leave orphaned agents burning quota.
      */
     private static readonly active = new Set<OpenCodeCliParticipant>()
 
@@ -141,11 +112,8 @@ export class OpenCodeCliParticipant extends BaseObserver {
             this.resolveReady = res
             this.rejectReady = rej
         })
-        // Suppress UnhandledPromiseRejection when callers only await
-        // `done` and never attach a rejection handler to `ready`. The
-        // rejection is still observable by callers who do await `ready`;
-        // the no-op catch here only prevents the Node.js warning when no
-        // one is listening.
+        // No-op catch prevents UnhandledPromiseRejection when callers only
+        // await `done`; awaiting `ready` still observes the rejection.
         this.ready.catch(() => { /* suppressed — callers use `done` */ })
         this.done = new Promise<OpenCodeRunSummary>((res) => {
             this.resolveDone = res
@@ -153,13 +121,9 @@ export class OpenCodeCliParticipant extends BaseObserver {
     }
 
     /**
-     * Settle the `done` promise exactly once. Both the `exit` and
-     * `error` process listeners can fire (in either order, or one
-     * without the other), so every resolution path goes through here to
-     * avoid a double-resolve and, more importantly, to guarantee `done`
-     * always settles — the previous `error` handler rejected `ready` but
-     * never resolved `done`, so an async spawn error with no following
-     * `exit` left `done` pending forever and any awaiter hung.
+     * `exit` and `error` can fire in either order, or one without the other;
+     * every resolution path goes through here so `done` settles exactly once
+     * (an async spawn error with no `exit` used to leave `done` pending forever).
      */
     private settleDone(summary: OpenCodeRunSummary): void {
         if (this.doneSettled) return
@@ -175,10 +139,7 @@ export class OpenCodeCliParticipant extends BaseObserver {
         return this.currentPhase
     }
 
-    /**
-     * Spawn the OpenCode process and start streaming its events into the
-     * environment. Idempotent: subsequent calls are a no-op.
-     */
+    /** Idempotent: subsequent calls are a no-op. */
     start(environment: AgenticEnvironment): void {
         if (this.proc) return
         this.envRef = environment
@@ -213,11 +174,8 @@ export class OpenCodeCliParticipant extends BaseObserver {
         proc.stdout!.on("data", (chunk: string) => this.handleStdout(chunk))
         proc.stderr!.on("data", (chunk: string) => this.handleStderr(chunk))
         proc.on("error", (err) => {
-            // Async process error (e.g. EACCES/EPIPE surfaced after a
-            // successful spawn). An 'exit' event may NOT follow, so settle
-            // `done` here too — otherwise the story agent's `await
-            // opencode.done` recovery path (and the one-shot caller) hang
-            // until their outer timeout, or forever where there is none.
+            // An 'exit' may NOT follow an async process error (EACCES/EPIPE
+            // after spawn), so settle `done` here too or awaiters hang.
             OpenCodeCliParticipant.active.delete(this)
             this.spawnError = err
             this.transition("failed", err.message)
@@ -261,9 +219,8 @@ export class OpenCodeCliParticipant extends BaseObserver {
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        // No-op for now. OpenCode run is one-shot: it doesn't have a
-        // stdin user-message channel like Claude Code. AgentTargetedMessage
-        // delivery to a running OpenCode would require a new invocation.
+        // OpenCode run is one-shot — no stdin channel; targeted messages are
+        // logged and dropped.
         if (
             AgentTargetedMessage.is(event) &&
             event.data.recipientId === this.agentId
@@ -275,15 +232,12 @@ export class OpenCodeCliParticipant extends BaseObserver {
     }
 
     private buildArgs(): string[] {
-        // `opencode run --format json --dangerously-skip-permissions`
         const args = ["run", "--format", "json"]
         if (this.options.skipPermissions) {
             args.push("--dangerously-skip-permissions")
         }
         if (this.options.model) args.push("-m", this.options.model)
         if (this.options.cwd) args.push("--dir", this.options.cwd)
-        // Prompt is the final positional. spawn() passes argv directly
-        // so no quoting needed.
         args.push(this.options.prompt)
         return args
     }
@@ -320,21 +274,16 @@ export class OpenCodeCliParticipant extends BaseObserver {
         if (sessionId && !this.sessionId) {
             this.sessionId = sessionId
         }
-        // Track completion evidence for the success predicate. exitCode 0
-        // is necessary but not sufficient — `opencode run` exits 0 on a
-        // refused/no-op turn — so the story agent additionally requires a
-        // step_finish (the agent loop actually completed) and at least one
-        // tool_call (it did work rather than answering in prose).
+        // Completion evidence for the success predicate — exit 0 alone is
+        // not sufficient (see OpenCodeRunSummary field docs).
         if (parsed.type === "step_finish") this.sawStepFinish = true
-        // Real opencode emits `tool_use`; `tool_call` is the legacy
-        // fallback shape. Count either as evidence the agent did work.
+        // Real opencode emits `tool_use`; `tool_call` is the legacy fallback.
         if (parsed.type === "tool_use" || parsed.type === "tool_call") {
             this.toolCallCount += 1
         }
 
         for (const item of items) {
             if (item instanceof SemanticEvent) {
-                // Lifecycle signals: step_start → ready + running.
                 if (
                     OpenCodeSystem.is(item) &&
                     item.data.subtype === "step_start"
@@ -342,19 +291,13 @@ export class OpenCodeCliParticipant extends BaseObserver {
                     this.transition("running", "opencode step started")
                     this.resolveReady()
                 }
-                // Don't transition to "done" on step_finish — the
-                // process-exit listener owns that, so we observe the real
-                // exit code before locking in the AgentPhase.
+                // Don't transition to "done" on step_finish — the process-exit
+                // listener owns that, so the real exit code is observed first.
             }
             this.dispatch(item)
         }
     }
 
-    /**
-     * Route a mapped event to the right Mozaik delivery channel.
-     * Assistant-side LLM items use Mozaik's typed channels; everything
-     * else goes through deliverSemanticEvent.
-     */
     private dispatch(
         item:
             | ModelMessageItem

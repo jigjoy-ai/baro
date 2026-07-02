@@ -1,19 +1,8 @@
 /**
- * PiCliParticipant — wraps a Pi CLI process as a first-class Mozaik
- * Participant. Sibling of `OpenCodeCliParticipant` and `CodexCliParticipant`.
- *
- * Spawned with `pi --mode json -p --no-session "PROMPT"`.
- * Pi in `-p` mode is one-shot non-interactive: takes a single prompt as
- * argv, streams JSONL events to stdout, exits when the agent finishes.
- * There is no stdin event loop and no permissions prompt — Pi runs tools
- * autonomously when invoked with `-p`. That makes this participant
- * structurally identical to OpenCodeCliParticipant; the key differences
- * are CLI flags, event shapes, and the completion evidence tokens
- * (`agent_end` / `tool_execution_start` instead of `step_finish` /
- * `tool_use`).
- *
- * Library-grade: knows nothing about baro, PRD, or stories. Only knows
- * about agent IDs, working directories, and Pi.
+ * Wraps a one-shot `pi --mode json -p --no-session "PROMPT"` subprocess as a
+ * Mozaik Participant. No stdin channel or permission prompts in `-p` mode.
+ * Event shapes: docs/stream-protocols.md § Pi.
+ * Library-grade: knows agent IDs, cwds, and Pi — nothing about baro/PRD/stories.
  */
 
 import { ChildProcess, spawn } from "child_process"
@@ -36,75 +25,45 @@ import {
 } from "../semantic-events.js"
 import { mapPiEvent } from "../pi-stream-mapper.js"
 
-/** Options for constructing a PiCliParticipant. */
 export interface PiCliParticipantOptions {
-    /** Working directory for the Pi process. Required. */
     cwd: string
-    /** Initial prompt — passed as the final argv to `pi`. */
     prompt: string
-    /**
-     * Provider override (e.g. "google", "anthropic"). Pi's default is
-     * "google". Omit to use Pi's configured default.
-     */
+    /** Provider override (e.g. "anthropic"); Pi's default is "google". */
     provider?: string
-    /**
-     * Model identifier. Treated as an opaque string and forwarded via
-     * `--model`. Omit to use Pi's configured default.
-     */
     model?: string
-    /** Path to the `pi` binary. Default: "pi" (resolved via PATH). */
     piBin?: string
 }
 
-/** Summary emitted when the Pi process exits. */
 export interface PiRunSummary {
     sessionId: string | null
     exitCode: number | null
     error: Error | null
     /**
-     * True once at least one `agent_end` event was observed — i.e. the
-     * agent loop actually completed rather than the process simply exiting.
-     * Pi exits 0 even when the model produces no work, so exit code alone
-     * is NOT proof of task success. Callers should require this before
-     * treating exitCode 0 as a real completion.
+     * At least one `agent_end` seen. Pi exits 0 even on a no-op/refused
+     * turn, so exitCode alone is not proof of completion — require this too.
      */
     sawAgentEnd: boolean
     /**
-     * Number of `tool_execution_start` events observed. A code-writing
-     * story that claims success having invoked zero tools is suspect — the
-     * agent likely answered in prose instead of editing the worktree.
+     * `tool_execution_start` count. Zero tools on a code-writing story means
+     * the agent likely answered in prose instead of editing the worktree.
      */
     toolCallCount: number
     /**
-     * Number of `tool_execution_end` events whose `isError` was NOT true —
-     * i.e. tools that actually succeeded. A story whose every tool call
-     * failed (all writes 500'd, etc.) still emits agent_end with
-     * toolCallCount > 0, so gating success on attempts alone marks a
-     * do-nothing run as passed. Callers should require at least one
-     * SUCCESSFUL tool, not merely one attempted.
+     * `tool_execution_end` events with `isError !== true`. Gate success on
+     * this, not attempts — a run where every tool failed still emits
+     * agent_end with toolCallCount > 0.
      */
     toolSuccessCount: number
 }
 
-/**
- * Mozaik participant that wraps a single `pi -p` CLI subprocess.
- * Streams JSONL events to the bus and manages lifecycle transitions.
- */
 export class PiCliParticipant extends BaseObserver {
     /**
-     * Process-wide registry of every Pi child currently running.
-     * Used by the orchestrator's SIGINT/SIGTERM handlers to nuke orphans
-     * so a killed baro doesn't leave background agents burning quota.
+     * Process-wide registry for the orchestrator's SIGINT/SIGTERM handlers,
+     * so a killed baro doesn't leave orphaned agents burning quota.
      */
     private static readonly active = new Set<PiCliParticipant>()
 
-    /**
-     * Send a signal to every active Pi child, then escalate to SIGKILL
-     * after a grace period for any child that ignored the soft signal.
-     * Idempotent. A Pi child that ignores SIGTERM (e.g. blocked in a
-     * syscall or holding its own child group) would otherwise outlive a
-     * killed baro and keep burning quota.
-     */
+    /** Signal every active Pi child; each escalates per {@link abort}. Idempotent. */
     static killAll(signal: NodeJS.Signals = "SIGTERM"): void {
         for (const p of PiCliParticipant.active) {
             p.abort(signal)
@@ -134,9 +93,8 @@ export class PiCliParticipant extends BaseObserver {
     private rejectReady!: (e: Error) => void
 
     /**
-     * Grace period (ms) between SIGTERM and the SIGKILL escalation in
-     * {@link abort}. A Pi child wedged in a blocking syscall ignores
-     * SIGTERM; without escalation `await done` would hang forever.
+     * SIGTERM→SIGKILL grace (ms) in {@link abort}. A child wedged in a
+     * blocking syscall ignores SIGTERM; without escalation `await done` hangs.
      */
     private static readonly KILL_GRACE_MS = 5_000
 
@@ -162,11 +120,8 @@ export class PiCliParticipant extends BaseObserver {
             this.resolveReady = res
             this.rejectReady = rej
         })
-        // Suppress UnhandledPromiseRejection when callers only await
-        // `done` and never attach a rejection handler to `ready`. The
-        // rejection is still observable by callers who do await `ready`;
-        // the no-op catch here only prevents the Node.js warning when no
-        // one is listening.
+        // No-op catch prevents UnhandledPromiseRejection when callers only
+        // await `done`; awaiting `ready` still observes the rejection.
         this.ready.catch(() => { /* suppressed — callers use `done` */ })
         this.done = new Promise<PiRunSummary>((res) => {
             this.resolveDone = res
@@ -174,20 +129,15 @@ export class PiCliParticipant extends BaseObserver {
     }
 
     /**
-     * Settle the `done` promise exactly once. Both the `exit` and
-     * `error` process listeners can fire (in either order, or one
-     * without the other), so every resolution path goes through here to
-     * avoid a double-resolve and, more importantly, to guarantee `done`
-     * always settles — the previous `error` handler rejected `ready` but
-     * never resolved `done`, so an async spawn error with no following
-     * `exit` left `done` pending forever and any awaiter hung.
+     * `exit` and `error` can fire in either order, or one without the other;
+     * every resolution path goes through here so `done` settles exactly once
+     * (an async spawn error with no `exit` used to leave `done` pending forever).
      */
     private settleDone(summary: PiRunSummary): void {
         if (this.doneSettled) return
         this.doneSettled = true
-        // The process is gone (or never started); cancel any pending
-        // SIGKILL escalation so it can't fire against a recycled pid and
-        // so the timer doesn't keep the event loop alive.
+        // Cancel pending SIGKILL escalation — it could fire against a
+        // recycled pid and its timer keeps the event loop alive.
         if (this.killTimer !== null) {
             clearTimeout(this.killTimer)
             this.killTimer = null
@@ -195,9 +145,6 @@ export class PiCliParticipant extends BaseObserver {
         this.resolveDone(summary)
     }
 
-    /**
-     * Resolve `ready` exactly once (first `session`/`agent_start` seen).
-     */
     private settleReady(): void {
         if (this.readySettled) return
         this.readySettled = true
@@ -205,10 +152,8 @@ export class PiCliParticipant extends BaseObserver {
     }
 
     /**
-     * Reject `ready` exactly once. Used on spawn/async error AND on a clean
-     * process exit that never produced a `session`/`agent_start` — without
-     * this the public `ready` promise would stay pending forever for any
-     * caller that awaits it (e.g. a wedged Pi that exits 0 with no events).
+     * Also called on a clean exit that never produced `session`/`agent_start`
+     * — otherwise `ready` would stay pending forever for any awaiter.
      */
     private failReady(e: Error): void {
         if (this.readySettled) return
@@ -224,10 +169,7 @@ export class PiCliParticipant extends BaseObserver {
         return this.currentPhase
     }
 
-    /**
-     * Spawn the Pi process and start streaming its events into the
-     * environment. Idempotent: subsequent calls are a no-op.
-     */
+    /** Idempotent: subsequent calls are a no-op. */
     start(environment: AgenticEnvironment): void {
         if (this.proc) return
         this.envRef = environment
@@ -237,7 +179,6 @@ export class PiCliParticipant extends BaseObserver {
         try {
             proc = spawn(this.options.piBin, args, {
                 cwd: this.options.cwd,
-                // stdin: "ignore" — one-shot, no interactive input
                 stdio: ["ignore", "pipe", "pipe"],
             })
         } catch (e) {
@@ -262,18 +203,14 @@ export class PiCliParticipant extends BaseObserver {
         proc.stdout!.setEncoding("utf8")
         proc.stderr!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => this.handleStdout(chunk))
-        // Flush any trailing line that arrived without a newline before the
-        // stream closed — a Pi build/wrapper omitting the final `\n` would
-        // otherwise drop its last event (e.g. agent_end), corrupting the
-        // success predicate. 'end' fires after the last 'data', before 'exit'.
+        // A final line without `\n` (e.g. agent_end) would otherwise be
+        // dropped, corrupting the success predicate. 'end' fires after the
+        // last 'data', before 'exit'.
         proc.stdout!.on("end", () => this.flushStdout())
         proc.stderr!.on("data", (chunk: string) => this.handleStderr(chunk))
         proc.on("error", (err) => {
-            // Async process error (e.g. EACCES/EPIPE surfaced after a
-            // successful spawn). An 'exit' event may NOT follow, so settle
-            // `done` here too — otherwise the story agent's `await pi.done`
-            // recovery path hangs until its outer timeout, or forever where
-            // there is none.
+            // An 'exit' may NOT follow an async process error (EACCES/EPIPE
+            // after spawn), so settle `done` here too or awaiters hang.
             PiCliParticipant.active.delete(this)
             this.spawnError = err
             this.transition("failed", err.message)
@@ -298,9 +235,8 @@ export class PiCliParticipant extends BaseObserver {
                 finalPhase,
                 code != null ? `exit code ${code}` : "no exit code",
             )
-            // If Pi exited without ever emitting session/agent_start, `ready`
-            // was never resolved. Settle it now so an awaiter can't hang:
-            // reject, because the agent provably never reached "running".
+            // Reject `ready` if Pi exited without ever emitting
+            // session/agent_start, so an awaiter can't hang.
             this.failReady(
                 new Error(
                     `pi exited (code ${code}) before signalling ready`,
@@ -318,10 +254,8 @@ export class PiCliParticipant extends BaseObserver {
     }
 
     /**
-     * Kill the Pi process. `done` resolves once `exit`/`error` fires.
-     * Sends the soft signal first, then escalates to SIGKILL after a
-     * grace period if the child is still alive — otherwise a Pi process
-     * that ignores SIGTERM would leave any `await done` hanging forever.
+     * Soft signal first, SIGKILL after KILL_GRACE_MS — a child that ignores
+     * SIGTERM would otherwise leave `await done` hanging forever.
      */
     abort(signal: NodeJS.Signals = "SIGTERM"): void {
         this.transition("aborted")
@@ -332,8 +266,7 @@ export class PiCliParticipant extends BaseObserver {
         } catch {
             // best-effort
         }
-        // SIGKILL is unconditional; if we're already escalating, don't
-        // stack timers.
+        // SIGKILL is unconditional; if already escalating, don't stack timers.
         if (signal === "SIGKILL" || this.killTimer !== null) return
         this.killTimer = setTimeout(() => {
             this.killTimer = null
@@ -344,8 +277,7 @@ export class PiCliParticipant extends BaseObserver {
                 // best-effort
             }
         }, PiCliParticipant.KILL_GRACE_MS)
-        // Don't let the escalation timer hold the process open if the
-        // story already settled through another path.
+        // unref: don't let the escalation timer hold the process open.
         this.killTimer.unref?.()
     }
 
@@ -353,9 +285,8 @@ export class PiCliParticipant extends BaseObserver {
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        // No-op. Pi `-p` is one-shot: it doesn't have a stdin user-message
-        // channel like Claude Code. AgentTargetedMessage delivery to a
-        // running Pi would require a new invocation.
+        // Pi `-p` is one-shot — no stdin channel; targeted messages are
+        // logged and dropped.
         if (
             AgentTargetedMessage.is(event) &&
             event.data.recipientId === this.agentId
@@ -367,12 +298,9 @@ export class PiCliParticipant extends BaseObserver {
     }
 
     private buildArgs(): string[] {
-        // `pi --mode json -p --no-session [--provider P] [--model M] PROMPT`
         const args = ["--mode", "json", "-p", "--no-session"]
         if (this.options.provider) args.push("--provider", this.options.provider)
         if (this.options.model) args.push("--model", this.options.model)
-        // Prompt is the final positional. spawn() passes argv directly
-        // so no shell quoting needed.
         args.push(this.options.prompt)
         return args
     }
@@ -386,10 +314,9 @@ export class PiCliParticipant extends BaseObserver {
             if (!line) continue
             this.processLine(line)
         }
-        // Guard against unbounded growth from a pathological newline-less
-        // stream (a wedged Pi, or a single enormous tool-result line). A
-        // bare JSONL event is never this large; drop the partial so memory
-        // can't balloon while still parsing well-formed lines that follow.
+        // A pathological newline-less stream (wedged Pi, one enormous
+        // tool-result line) must not balloon memory; drop the partial but
+        // keep parsing well-formed lines that follow.
         if (this.buffer.length > PiCliParticipant.MAX_BUFFER_BYTES) {
             process.stderr.write(
                 `[pi:${this.agentId}] stdout buffer exceeded ${PiCliParticipant.MAX_BUFFER_BYTES} bytes without a newline — discarding partial line\n`,
@@ -398,11 +325,6 @@ export class PiCliParticipant extends BaseObserver {
         }
     }
 
-    /**
-     * Process any trailing buffered bytes left when stdout closes without a
-     * final newline. Called from the stream's 'end' handler so a final
-     * `message_end`/`agent_end` line that lacks a trailing `\n` is not lost.
-     */
     private flushStdout(): void {
         const line = this.buffer.trim()
         this.buffer = ""
@@ -431,23 +353,16 @@ export class PiCliParticipant extends BaseObserver {
             this.sessionId = sessionId
         }
 
-        // Track completion evidence for the success predicate. exitCode 0
-        // is necessary but not sufficient — Pi exits 0 even on a refused
-        // or no-op turn — so the story agent additionally requires an
-        // agent_end (the agent loop actually completed) and at least one
-        // tool_execution_start (it did work rather than answering in prose).
+        // Completion evidence for the success predicate — exit 0 alone is
+        // not sufficient (see PiRunSummary field docs).
         if (parsed.type === "agent_end") this.sawAgentEnd = true
         if (parsed.type === "tool_execution_start") this.toolCallCount += 1
-        // Count tools that actually succeeded (isError !== true) separately
-        // from attempts — the story success predicate gates on successes so a
-        // run where every tool failed is not reported as done.
         if (parsed.type === "tool_execution_end" && parsed.isError !== true) {
             this.toolSuccessCount += 1
         }
 
         for (const item of items) {
             if (item instanceof SemanticEvent) {
-                // Lifecycle signals: agent_start / session → ready + running.
                 if (
                     PiSystem.is(item) &&
                     (item.data.subtype === "session" ||
@@ -456,19 +371,13 @@ export class PiCliParticipant extends BaseObserver {
                     this.transition("running", "pi agent started")
                     this.settleReady()
                 }
-                // Don't transition to "done" on agent_end — the
-                // process-exit listener owns that, so we observe the real
-                // exit code before locking in the AgentPhase.
+                // Don't transition to "done" on agent_end — the process-exit
+                // listener owns that, so the real exit code is observed first.
             }
             this.dispatch(item)
         }
     }
 
-    /**
-     * Route a mapped event to the right Mozaik delivery channel.
-     * Assistant-side LLM items use Mozaik's typed channels; everything
-     * else goes through deliverSemanticEvent.
-     */
     private dispatch(
         item:
             | ModelMessageItem
