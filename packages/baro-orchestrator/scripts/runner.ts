@@ -7,7 +7,9 @@ import { execFileSync, spawn } from "node:child_process"
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { hostname, homedir, tmpdir } from "node:os"
 import { join } from "node:path"
+import { createInterface } from "node:readline/promises"
 import { WebSocket } from "ws"
+import { buildInstallServiceArgs, buildReexec, semverLt } from "./runner-helpers.js"
 
 interface WireEvent {
     type: string
@@ -56,17 +58,6 @@ const credsPath = join(homedir(), ".baro", "credentials.json")
 const VERSION = "0.72.1"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
-function semverLt(a: string, b: string): boolean {
-    const pa = a.split(".").map(Number)
-    const pb = b.split(".").map(Number)
-    for (let i = 0; i < 3; i++) {
-        const x = pa[i] ?? 0
-        const y = pb[i] ?? 0
-        if (x !== y) return x < y
-    }
-    return false
-}
-
 // Latest published baro-ai version, cached ~24h in ~/.baro so we don't hit npm on every
 // start. The cache file is ALSO what the Rust binary reads to print its update banner —
 // one network check (here) serves both the runner self-update and the interactive notice.
@@ -106,6 +97,19 @@ async function selfUpdate(latest: string): Promise<boolean> {
         const child = spawn("npm", ["install", "-g", `baro-ai@${latest}`], { stdio: "inherit", shell: process.platform === "win32" })
         child.on("exit", (code) => resolve(code === 0))
         child.on("error", () => resolve(false))
+    })
+}
+
+// Foreground restart after a self-update: the global install now holds the new
+// runner.mjs at the same path, so re-running the same script picks it up. The
+// child re-pairs with the same credentials/runnerId; we exit when it does.
+function reexecUpdated(): void {
+    const { cmd, args, env } = buildReexec(process.execPath, process.argv, process.env)
+    const child = spawn(cmd, args, { stdio: "inherit", detached: false, env })
+    child.on("exit", (code, signal) => process.exit(signal ? 0 : (code ?? 0)))
+    child.on("error", (e) => {
+        console.error(`[baro] could not restart into the updated runner (${e.message}) — run \`baro connect\` again`)
+        process.exit(1)
     })
 }
 
@@ -156,6 +160,7 @@ const runnerId = process.env.RUNNER_ID ?? hostname()
 // Single-run mode for ephemeral cloud workers (Fargate): take one dispatched run,
 // deliver its result, then exit — no reconnect loop.
 const runOnce = process.env.BARO_RUN_ONCE === "1"
+const isService = process.env.BARO_SERVICE === "1"
 
 interface RunOutcome {
     success: boolean
@@ -493,6 +498,49 @@ function handleMessage(m: ToRunner): void {
     }
 }
 
+function goodbyeAndExit(): void {
+    console.log("\n[baro] runner going offline — runs will fall back to cloud. Keep it always-on: baro connect --install-service")
+    process.exit(0)
+}
+
+// Casual foreground runners die with the terminal and never come back (real
+// users got stranded this way) — so after the first successful pairing, offer
+// once to install the login service, then hand off to it.
+let serviceOffered = false
+async function maybeOfferServiceInstall(): Promise<void> {
+    if (serviceOffered || isService || runOnce || process.env.BARO_NO_SERVICE_PROMPT === "1") return
+    serviceOffered = true
+    if (!process.stdin.isTTY || !process.stdout.isTTY) return
+    // Let a token rejection arrive before offering to persist that token.
+    await new Promise((r) => setTimeout(r, 1500))
+    if (rejected || !token || currentWs?.readyState !== WebSocket.OPEN) return
+    const rl = createInterface({ input: process.stdin, output: process.stdout })
+    rl.on("SIGINT", () => {
+        rl.close()
+        goodbyeAndExit()
+    })
+    const answer = (await rl.question("\nKeep this runner online in the background (installs a login service)? [Y/n] ")).trim().toLowerCase()
+    rl.close()
+    if (answer === "n" || answer === "no") {
+        console.log("[baro] staying in the foreground — this runner goes offline when the terminal closes.\n[baro] install the service any time: baro connect --install-service --token <rt_…>")
+        return
+    }
+    console.log("[baro] installing the background service…")
+    const args = buildInstallServiceArgs({ token, workspace: workspaceDir, controlUrl: process.env.CONTROL_URL })
+    const ok = await new Promise<boolean>((resolve) => {
+        const ch = spawn(baroBin, args, { stdio: "inherit", shell: process.platform === "win32" })
+        ch.on("exit", (code) => resolve(code === 0))
+        ch.on("error", () => resolve(false))
+    })
+    if (ok) {
+        console.log("[baro] ✓ service installed — the runner now stays online across terminal close, logout, and reboot.")
+        console.log("[baro] handing off to the service; this foreground runner is exiting.")
+        currentWs?.close()
+        process.exit(0)
+    }
+    console.warn("[baro] service install failed — staying in the foreground. Try manually: baro connect --install-service --token <rt_…>")
+}
+
 // One connection: register, then resolve when the socket closes so the outer loop
 // reconnects. Any in-flight run keeps streaming through `currentWs` across the gap.
 function connectOnce(): Promise<void> {
@@ -502,6 +550,7 @@ function connectOnce(): Promise<void> {
         ws.on("open", () => {
             ws.send(encode({ t: "register", runnerId, hostname: hostname(), token, backends: ["claude"], workspaceIds: ["default"], version: VERSION }))
             console.log(inflight.size ? `[baro] reconnected to ${url} — resuming ${inflight.size} in-flight run(s)` : `[baro] connected to ${url} — workspace ${workspaceDir}`)
+            void maybeOfferServiceInstall()
         })
         ws.on("message", (data: Buffer) => {
             let m: ToRunner
@@ -531,24 +580,46 @@ async function main() {
         await getLatest(true)
         return
     }
-    // Keep runners current. We release often and a stale runner re-runs bugs we've already
-    // fixed (e.g. the worktree dep-sharing fix). Check npm; if behind, self-update under a
-    // background service (it restarts into the new version) or just notify in foreground.
-    try {
-        const latest = await getLatest()
-        if (latest && semverLt(VERSION, latest)) {
-            if (process.env.BARO_SERVICE === "1") {
+    // Keep runners current. We release often and a stale runner re-runs bugs we've
+    // already fixed (5 field runners got stranded on 0.58–0.64 this way). Fresh check,
+    // not the cache — starts are rare enough that one npm hit is fine. BARO_UPDATED
+    // marks the post-update re-exec: skip the check so a bad publish that still
+    // reports an old version can't loop update→restart forever.
+    if (process.env.BARO_UPDATED !== "1") {
+        try {
+            const latest = await getLatest(true)
+            if (latest && semverLt(VERSION, latest)) {
                 if (await selfUpdate(latest)) {
-                    console.log(`[baro] updated to ${latest} — restarting service…`)
-                    process.exit(0) // launchd/systemd/Task Scheduler relaunches with the new version
+                    if (isService) {
+                        console.log(`[baro] updated to ${latest} — restarting service…`)
+                        process.exit(0) // launchd/systemd/Task Scheduler relaunches with the new version
+                    }
+                    console.log(`[baro] updated to ${latest} — restarting the runner…`)
+                    reexecUpdated()
+                    return // the child owns the terminal now; this process exits when it does
                 }
                 console.warn(`[baro] could not self-update (likely a root-owned global install). Update manually: npm i -g baro-ai@latest`)
-            } else {
-                console.warn(`[baro] a newer baro is available (${VERSION} → ${latest}). Update: npm i -g baro-ai`)
             }
+        } catch {
+            /* never let the update check block the runner */
         }
-    } catch {
-        /* never let the update check block the runner */
+    }
+    // A service stays up for weeks; recheck every 6h and restart into updates
+    // (launchd/systemd/schtasks relaunch it) — but never yank a machine mid-run.
+    if (isService) {
+        setInterval(() => {
+            void (async () => {
+                try {
+                    const latest = await getLatest(true)
+                    if (latest && semverLt(VERSION, latest) && inflight.size === 0 && (await selfUpdate(latest))) {
+                        console.log(`[baro] updated to ${latest} — restarting service…`)
+                        process.exit(0)
+                    }
+                } catch {
+                    /* retry next tick */
+                }
+            })()
+        }, 6 * 3600_000).unref()
     }
     // No --token? If `baro login` left credentials, register a runner with them — no
     // dashboard visit, no token to paste.
@@ -566,6 +637,12 @@ async function main() {
     if (!token) {
         console.error("[baro] not signed in. Run `baro login` first, or pass --token <rt_…> (get one from the dashboard).")
         process.exit(1)
+    }
+    // Casual foreground exit (Ctrl+C, terminal close) silently strands the org
+    // with no runner — say what that means and how to avoid it next time.
+    if (!isService && !runOnce) {
+        process.on("SIGINT", goodbyeAndExit)
+        process.on("SIGTERM", goodbyeAndExit)
     }
     // Ephemeral worker safety: if nothing is dispatched within 3 min of starting,
     // exit so an orphaned cloud task (paired but never given work) can't linger.
