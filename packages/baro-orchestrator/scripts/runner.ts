@@ -36,7 +36,13 @@ interface RunDispatchMsg {
     // Follow-up: check out this PR's branch and run with --continue so it updates in place.
     followUp?: { prNumber: number }
 }
-type ToRunner = RunDispatchMsg | { t: "cancel"; storyId: string } | { t: "ping"; ts: number } | { t: "rejected"; reason: string } | { t: string }
+type ToRunner =
+    | RunDispatchMsg
+    | { t: "cancel"; storyId: string }
+    | { t: "agent_message"; storyId: string; text: string }
+    | { t: "ping"; ts: number }
+    | { t: "rejected"; reason: string }
+    | { t: string }
 
 const encode = (m: unknown): string => JSON.stringify(m)
 
@@ -285,8 +291,11 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         const child = spawn(
             baroBin,
             ["--headless", d.goal, "--cwd", cwd, "--llm", d.route?.backend ?? "claude", "--parallel", String(d.parallel), "--timeout", String(d.timeoutSecs), ...(d.quick ? ["--quick"] : []), ...(d.followUp ? ["--continue"] : [])],
-            { cwd, env, stdio: ["ignore", "pipe", "pipe"] },
+            // stdin is piped: baro --headless forwards JSON command lines
+            // (agent_message) into the orchestrator's stdin lane.
+            { cwd, env, stdio: ["pipe", "pipe", "pipe"] },
         )
+        activeChild = child
 
         const started = Date.now()
         const secs = () => Math.max(1, Math.round((Date.now() - started) / 1000))
@@ -335,6 +344,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         })
         signal.addEventListener("abort", () => child.kill("SIGTERM"))
         child.on("close", (code) => {
+            if (activeChild === child) activeChild = null
             const ok = doneSuccess ?? (code === 0 && failed === 0 && passed > 0)
             // Don't let baro's startup "User goal:" banner (it echoes the goal to stderr)
             // or the agent CLI's harmless "no stdin" warning masquerade as the failure
@@ -437,6 +447,8 @@ let rejected: string | undefined
 // re-attaches by runnerId and only fails the run after a grace window.
 let currentWs: WebSocket | null = null
 const inflight = new Map<string, AbortController>()
+// The active run's baro child — its stdin is the mid-run agent-message lane.
+let activeChild: ReturnType<typeof spawn> | null = null
 const send = (m: unknown): void => {
     if (currentWs?.readyState === WebSocket.OPEN) currentWs.send(encode(m))
 }
@@ -450,6 +462,14 @@ function handleMessage(m: ToRunner): void {
         send({ t: "pong", ts: (m as { ts: number }).ts })
     } else if (m.t === "cancel") {
         inflight.get((m as { storyId: string }).storyId)?.abort()
+    } else if (m.t === "agent_message") {
+        // Mid-run operator message → the active run's stdin command lane.
+        // Dropped silently when no run is live or stdin already closed.
+        const { storyId, text } = m as { storyId: string; text: string }
+        const stdin = activeChild?.stdin
+        if (stdin && stdin.writable && !stdin.destroyed) {
+            stdin.write(`${JSON.stringify({ type: "agent_message", id: storyId, text })}\n`)
+        }
     } else if (m.t === "dispatch_run") {
         const d = m as RunDispatchMsg
         if (inflight.has(d.runId)) return // already running — ignore a duplicate dispatch
