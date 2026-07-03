@@ -867,6 +867,7 @@ async fn run_app(
     let mut last_draw = Instant::now()
         .checked_sub(Duration::from_millis(100))
         .unwrap_or_else(Instant::now);
+    let mut stdin_forwarder_started = false;
     loop {
         if let Some(t) = terminal.as_deref_mut() {
             if last_draw.elapsed() >= Duration::from_millis(33) {
@@ -1715,6 +1716,25 @@ async fn run_app(
                 }
             }
             Some(AppEvent::OrchestratorStdin(sender)) => {
+                // Headless: our own stdin is the cloud→run command lane.
+                // A plain std thread (like the keyboard reader) so a
+                // forever-blocked read can't stall runtime shutdown; send
+                // errors after child exit just end the thread.
+                if headless && !stdin_forwarder_started {
+                    stdin_forwarder_started = true;
+                    let cmd_tx = sender.clone();
+                    std::thread::spawn(move || {
+                        use std::io::BufRead;
+                        for line in std::io::stdin().lock().lines() {
+                            let Ok(line) = line else { break };
+                            if let Some(cmd) = stdin_command_line(&line) {
+                                if cmd_tx.blocking_send(cmd).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
                 app.orchestrator_stdin = Some(sender);
             }
             Some(AppEvent::Tick) => {
@@ -2251,6 +2271,18 @@ fn spawn_executor(
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx, stdin_rx);
 }
 
+/// Headless command lane: keep a stdin line only if it's a JSON object
+/// with a "type" field — anything else is dropped silently.
+fn stdin_command_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    v.get("type")?;
+    Some(trimmed.to_string())
+}
+
 /// Delete the previous word from the goal input, terminal-style: drop any
 /// trailing whitespace, then the trailing run of non-whitespace characters.
 fn delete_prev_word(s: &mut String) {
@@ -2267,7 +2299,7 @@ fn delete_prev_word(s: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::delete_prev_word;
+    use super::{delete_prev_word, stdin_command_line};
 
     fn deleted(input: &str) -> String {
         let mut s = input.to_string();
@@ -2281,5 +2313,18 @@ mod tests {
         assert_eq!(deleted("hello world   "), "hello ");
         assert_eq!(deleted("hello"), "");
         assert_eq!(deleted(""), "");
+    }
+
+    #[test]
+    fn stdin_command_line_cases() {
+        let msg = r#"{"type":"agent_message","id":"S2","text":"hi"}"#;
+        assert_eq!(stdin_command_line(msg).as_deref(), Some(msg));
+        // Trimmed before forwarding.
+        assert_eq!(stdin_command_line(&format!("  {msg}  ")).as_deref(), Some(msg));
+        assert_eq!(stdin_command_line(""), None);
+        assert_eq!(stdin_command_line("   "), None);
+        assert_eq!(stdin_command_line("not json"), None);
+        assert_eq!(stdin_command_line(r#"{"id":"S2"}"#), None); // no "type"
+        assert_eq!(stdin_command_line(r#"["type"]"#), None); // not an object
     }
 }
