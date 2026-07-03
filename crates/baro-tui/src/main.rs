@@ -104,7 +104,25 @@ enum AppEvent {
     ArchitectStarted,
     ArchitectComplete(String), // decision document (markdown)
     ArchitectSkipped(String),  // reason (not fatal — planner will still run)
+    /// Handle to the live orchestrator's stdin (JSON command lines);
+    /// arrives once per spawn, replacing any stale handle from a
+    /// previous run.
+    OrchestratorStdin(mpsc::Sender<String>),
     Tick,
+}
+
+/// The focus zone ↑↓ should act on: explorer zones only count while the
+/// explorer is actually on screen at the current terminal width.
+fn effective_focus(
+    app: &app::App,
+    terminal: &Terminal<CrosstermBackend<Box<dyn Write>>>,
+) -> app::WorkbenchFocus {
+    let width = terminal.size().map(|s| s.width).unwrap_or(120);
+    if app.explorer_visible && width >= screens::execute::BP_EXPLORER {
+        app.focus
+    } else {
+        app::WorkbenchFocus::Main
+    }
 }
 
 fn open_terminal_writer() -> io::Result<Box<dyn Write>> {
@@ -1476,11 +1494,48 @@ async fn run_app(
                                 spawn_planner(&app, &cwd, tx.clone(), headless);
                             }
                         }
+                        // Mid-run agent chat: same bottom-strip input, one JSON
+                        // line to the orchestrator's stdin on Enter.
+                        KeyCode::Esc if app.agent_msg_input.is_some() => {
+                            app.agent_msg_input = None;
+                        }
+                        KeyCode::Backspace if app.agent_msg_input.is_some() => {
+                            if let Some((_, s)) = app.agent_msg_input.as_mut() {
+                                s.pop();
+                            }
+                        }
+                        KeyCode::Char(c) if app.agent_msg_input.is_some() => {
+                            if let Some((_, s)) = app.agent_msg_input.as_mut() {
+                                s.push(c);
+                            }
+                        }
+                        KeyCode::Enter if app.agent_msg_input.is_some() => {
+                            if let Some((id, text)) = app.agent_msg_input.take() {
+                                let text = text.trim().to_string();
+                                if !text.is_empty() {
+                                    if let Some(sender) = &app.orchestrator_stdin {
+                                        let line = serde_json::json!({
+                                            "type": "agent_message",
+                                            "id": id,
+                                            "text": text,
+                                        })
+                                        .to_string();
+                                        let _ = sender.try_send(line);
+                                    }
+                                    app.echo_user_message(&id, &text);
+                                }
+                            }
+                        }
                         // Follow-up works on the current branch via --continue, with or
                         // without a PR — don't gate on pr_url (local/no-remote runs can
                         // still continue the run in place).
                         KeyCode::Char('f') if app.done && app.exit_reason.is_none() && app.followup_input.is_none() => {
                             app.followup_input = Some(String::new());
+                        }
+                        KeyCode::Char('m') if !app.done && app.followup_input.is_none() => {
+                            if let Some(id) = app.message_target() {
+                                app.agent_msg_input = Some((id, String::new()));
+                            }
                         }
                         KeyCode::Char('r') if app.done && app.exit_reason.is_some() => {
                             let prd_path = cwd.join("prd.json");
@@ -1592,7 +1647,10 @@ async fn run_app(
                         }
                         KeyCode::Left => app.prev_view(),
                         KeyCode::Right => app.next_view(),
-                        KeyCode::Up | KeyCode::Char('k') => match app.focus {
+                        // ↑↓ act on the *visible* focus zone: a hidden explorer
+                        // (toggled off or narrow terminal) can't be current, so
+                        // its stale focus must not swallow scrolling.
+                        KeyCode::Up | KeyCode::Char('k') => match effective_focus(&app, terminal) {
                             app::WorkbenchFocus::Agents => app.explorer_agents_move(-1),
                             app::WorkbenchFocus::Changes => app.explorer_files_move(-1),
                             app::WorkbenchFocus::Main => match app.main_view {
@@ -1620,7 +1678,7 @@ async fn run_app(
                                 app::MainView::Stats => {}
                             },
                         },
-                        KeyCode::Down | KeyCode::Char('j') => match app.focus {
+                        KeyCode::Down | KeyCode::Char('j') => match effective_focus(&app, terminal) {
                             app::WorkbenchFocus::Agents => app.explorer_agents_move(1),
                             app::WorkbenchFocus::Changes => app.explorer_files_move(1),
                             app::WorkbenchFocus::Main => match app.main_view {
@@ -1655,6 +1713,9 @@ async fn run_app(
                         _ => {}
                     },
                 }
+            }
+            Some(AppEvent::OrchestratorStdin(sender)) => {
+                app.orchestrator_stdin = Some(sender);
             }
             Some(AppEvent::Tick) => {
                 app.tick_count += 1;
@@ -2083,6 +2144,11 @@ fn spawn_executor(
     // app/screens stay untouched.
     let (exec_tx, mut exec_rx) = mpsc::channel::<BaroEvent>(256);
 
+    // TUI→orchestrator command lane (agent chat): hand the app loop the
+    // sender, the child-stdin writer consumes the receiver.
+    let (stdin_tx, stdin_rx) = mpsc::channel::<String>(64);
+    let _ = tx.try_send(AppEvent::OrchestratorStdin(stdin_tx));
+
     let tx_fwd = tx.clone();
     tokio::spawn(async move {
         while let Some(ev) = exec_rx.recv().await {
@@ -2182,7 +2248,7 @@ fn spawn_executor(
         openai_endpoints: config.openai_endpoints,
         echo_raw,
     };
-    orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
+    orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx, stdin_rx);
 }
 
 /// Delete the previous word from the goal input, terminal-style: drop any

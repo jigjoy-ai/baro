@@ -29,12 +29,15 @@ pub fn render_explorer(f: &mut Frame, app: &mut App, area: Rect) {
 /// and auto-scroll index through that mirror.
 fn render_agents(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == WorkbenchFocus::Agents;
-    let title_budget = (area.width.saturating_sub(16) as usize).clamp(8, 32);
+    // Compact (≤20-col) explorer keeps single-line rows; wider explorers
+    // add the route lane as a second line so it never truncates.
+    let route_line = area.width > crate::app::EXPLORER_MIN_WIDTH;
+    let title_budget = (area.width.saturating_sub(12) as usize).clamp(8, 40);
     let mut items: Vec<ListItem> = Vec::new();
 
     if app.dag_levels.is_empty() {
         for story in &app.stories {
-            items.push(story_list_item(story, &app.push_results, title_budget));
+            items.push(story_list_item(story, &app.push_results, title_budget, route_line));
         }
     } else {
         // Pad level headers to the inner width so stale characters from a
@@ -53,7 +56,7 @@ fn render_agents(f: &mut Frame, app: &mut App, area: Rect) {
 
             for story_id in level {
                 if let Some(story) = app.stories.iter().find(|s| s.id == *story_id) {
-                    items.push(story_list_item(story, &app.push_results, title_budget));
+                    items.push(story_list_item(story, &app.push_results, title_budget, route_line));
                 }
             }
 

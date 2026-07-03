@@ -69,13 +69,16 @@ pub struct OrchestratorConfig {
 
 /// Spawn the orchestrator subprocess and return a channel that receives
 /// the BaroEvents it emits. Errors during spawn become a single
-/// `StoryError` event so the TUI surfaces them.
+/// `StoryError` event so the TUI surfaces them. `stdin_rx` lines are
+/// written verbatim (newline-terminated) to the child's stdin — the
+/// TUI→orchestrator command lane.
 pub fn spawn_orchestrator(
     cfg: OrchestratorConfig,
     tx: mpsc::Sender<BaroEvent>,
+    stdin_rx: mpsc::Receiver<String>,
 ) {
     tokio::spawn(async move {
-        let result = run(cfg, &tx).await;
+        let result = run(cfg, &tx, stdin_rx).await;
         let (code, reason) = match result {
             Ok(()) => (Some(0), None),
             Err(err) => {
@@ -101,6 +104,7 @@ pub fn spawn_orchestrator(
 async fn run(
     cfg: OrchestratorConfig,
     tx: &mpsc::Sender<BaroEvent>,
+    mut stdin_rx: mpsc::Receiver<String>,
 ) -> Result<(), String> {
     let entry = discovery::locate_script(
         &cfg.cwd,
@@ -110,7 +114,7 @@ async fn run(
     let mut cmd = build_command(&entry, &cfg);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    cmd.stdin(std::process::Stdio::null());
+    cmd.stdin(std::process::Stdio::piped());
     // If the Rust process dies uncleanly, SIGKILL the child via tokio's
     // Drop rather than orphaning it; the orchestrator's ppid watchdog
     // is the backup if we miss this.
@@ -128,6 +132,25 @@ async fn run(
         .stderr
         .take()
         .ok_or_else(|| "orchestrator stderr missing".to_string())?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "orchestrator stdin missing".to_string())?;
+
+    // Command lane: TUI lines → child stdin. Write errors just end the
+    // task — the child exiting is reported through the wait path.
+    let stdin_task = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        while let Some(line) = stdin_rx.recv().await {
+            if stdin.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+            if stdin.write_all(b"\n").await.is_err() {
+                break;
+            }
+            let _ = stdin.flush().await;
+        }
+    });
 
     // Drain stdout: each line is a BaroEvent JSON.
     let stdout_tx = tx.clone();
@@ -204,6 +227,9 @@ async fn run(
         .await
         .map_err(|e| format!("orchestrator wait failed: {}", e))?;
 
+    // The writer may be parked on recv() forever (the app keeps its
+    // sender alive across runs) — abort rather than await.
+    stdin_task.abort();
     let _ = stdout_task.await;
     let _ = stderr_task.await;
 

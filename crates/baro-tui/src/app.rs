@@ -505,6 +505,11 @@ pub struct App {
     pub diff_target: Option<String>,
     pub diff_scroll_pending: bool,
     pub decisions_scroll: u16,
+    /// Mid-run chat input: (target story id, buffer). Rendered in the
+    /// bottom strip; Enter sends an `agent_message` command line.
+    pub agent_msg_input: Option<(String, String)>,
+    /// Live orchestrator stdin (JSON command lines); refreshed per spawn.
+    pub orchestrator_stdin: Option<tokio::sync::mpsc::Sender<String>>,
 }
 
 impl App {
@@ -629,6 +634,8 @@ impl App {
             diff_target: None,
             diff_scroll_pending: false,
             decisions_scroll: 0,
+            agent_msg_input: None,
+            orchestrator_stdin: None,
         }
     }
 
@@ -655,6 +662,7 @@ impl App {
         self.start_time = Instant::now();
         self.dag_scroll_offset = 0;
         self.active_stories.clear();
+        self.agent_msg_input = None;
         self.selected_log_index = 0;
         self.completed = 0;
         self.percentage = 0;
@@ -775,6 +783,45 @@ impl App {
             }
             ix += delta;
         }
+    }
+
+    /// Story id currently selected in the explorer Agents section.
+    pub fn selected_agent_id(&self) -> Option<String> {
+        let rows = self.agent_item_rows();
+        self.story_list_state
+            .selected()
+            .and_then(|ix| rows.get(ix).cloned())
+            .flatten()
+    }
+
+    /// Target for a mid-run agent message: the explorer-selected agent when
+    /// the Agents section has focus, else the pinned agent, else the
+    /// tab-selected active story. Only *running* agents can receive one.
+    pub fn message_target(&self) -> Option<String> {
+        let candidate = if self.focus == WorkbenchFocus::Agents {
+            self.selected_agent_id()
+        } else {
+            None
+        }
+        .or_else(|| self.activity_filter.clone())
+        .or_else(|| self.active_story_ids().get(self.selected_log_index).cloned());
+        candidate.filter(|id| self.active_stories.contains_key(id))
+    }
+
+    /// Local echo of a user→agent message so it shows in the feed
+    /// immediately, before (and regardless of) orchestrator round-trip.
+    pub fn echo_user_message(&mut self, id: &str, text: &str) {
+        self.push_story_activity(
+            id,
+            ActivityEntry {
+                kind: "user".to_string(),
+                text: format!("you → {}: {}", id, text),
+                tool: None,
+                op: None,
+                ok: None,
+                system: false,
+            },
+        );
     }
 
     /// Move the Changes selection and point the diff view at that file.
@@ -1577,6 +1624,38 @@ mod tests {
 
         app.explorer_agents_move(-1);
         assert_eq!(app.activity_filter.as_deref(), Some("S1"));
+    }
+
+    #[test]
+    fn message_target_prefers_explorer_selection_then_pin_then_tab() {
+        let mut app = app_with_run();
+        feed(&mut app, r#"{"type":"dag","levels":[[{"id":"S1"}],[{"id":"S2"}]]}"#);
+
+        // Default: tab-selected active story.
+        assert_eq!(app.message_target().as_deref(), Some("S1"));
+
+        // Pinned agent wins, but only while it's running.
+        app.activity_filter = Some("S2".to_string());
+        assert_eq!(app.message_target(), None); // S2 not active
+        feed(&mut app, r#"{"type":"story_start","id":"S2","title":"Two"}"#);
+        assert_eq!(app.message_target().as_deref(), Some("S2"));
+
+        // Agents-focus selection wins over the pin.
+        app.focus = WorkbenchFocus::Agents;
+        app.story_list_state.select(Some(1)); // S1's row (header at 0)
+        assert_eq!(app.message_target().as_deref(), Some("S1"));
+    }
+
+    #[test]
+    fn echo_user_message_lands_in_the_agent_feed() {
+        let mut app = app_with_run();
+        app.echo_user_message("S1", "check the edge cases");
+        let entry = app.active_stories.get("S1").unwrap().activity.last().unwrap();
+        assert_eq!(entry.kind, "user");
+        assert!(!entry.system);
+        assert_eq!(entry.text, "you → S1: check the edge cases");
+        // Echo to a non-active story is a no-op, not a panic.
+        app.echo_user_message("S9", "hello");
     }
 
     #[test]

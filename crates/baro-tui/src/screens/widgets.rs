@@ -86,10 +86,14 @@ pub(crate) fn story_pills(story: &StoryState) -> Vec<Span<'static>> {
 /// One agent/story row: status icon, id, truncated title, duration, push
 /// indicator, signal pills, model lane. `title_budget` scales with the
 /// hosting panel's width so the explorer's compact variant stays readable.
+/// `route_line` renders the routed backend:model lane as a dimmed second
+/// line under the title (dropped in the compact explorer, where it could
+/// never fit anyway).
 pub(crate) fn story_list_item(
     story: &StoryState,
     push_results: &[(String, bool, Option<String>)],
     title_budget: usize,
+    route_line: bool,
 ) -> ListItem<'static> {
     let (icon, color) = status_icon_color(&story.status);
     let style = Style::default().fg(color);
@@ -132,14 +136,39 @@ pub(crate) fn story_list_item(
         spans.push(indicator);
     }
     spans.extend(story_pills(story));
-    if let Some(route) = &story.route {
-        spans.push(Span::styled(
-            format!("  {}", route),
-            Style::default().fg(theme::MUTED),
-        ));
-    }
 
-    ListItem::new(Line::from(spans))
+    let mut lines = vec![Line::from(spans)];
+    if route_line {
+        if let Some(route) = &story.route {
+            lines.push(Line::from(Span::styled(
+                format!("      {}", route_display(route)),
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+    }
+    ListItem::new(lines)
+}
+
+/// "backend:model" route → display form. A "default" (or empty) model
+/// carries no information, so show just the backend name.
+pub(crate) fn route_display(route: &str) -> &str {
+    match route.split_once(':') {
+        Some((backend, model)) if model.is_empty() || model == "default" => backend,
+        _ => route,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::route_display;
+
+    #[test]
+    fn route_display_hides_meaningless_default_model() {
+        assert_eq!(route_display("codex:default"), "codex");
+        assert_eq!(route_display("codex:"), "codex");
+        assert_eq!(route_display("claude:opus"), "claude:opus");
+        assert_eq!(route_display("codex"), "codex");
+    }
 }
 
 /// One Activity entry → a color-coded line. Icon carries the type signal;
@@ -187,6 +216,8 @@ pub(crate) fn activity_line(e: &ActivityEntry, width: usize) -> Line<'static> {
         "decision" => ("◆ ", theme::ACCENT, theme::TEXT),
         "conflict" | "warn" => ("! ", theme::WARNING, theme::WARNING),
         "error" => ("✗ ", theme::ERROR, theme::ERROR),
+        // Local echo of the user's mid-run message to this agent.
+        "user" => ("▷ ", theme::ACCENT, theme::ACCENT),
         _ => ("  ", theme::TEXT, theme::TEXT),
     };
     // Truncate to the panel width (minus the 2-char icon) so long lines get a

@@ -150,31 +150,33 @@ pub(crate) fn workbench_columns(
 // --- Rail: main-view switcher anchor ---
 
 fn render_rail(f: &mut Frame, app: &App, area: Rect) {
-    let mut entries: Vec<(&str, MainView)> = vec![
-        ("A", MainView::Activity),
-        ("P", MainView::Plan),
-        ("D", MainView::Diff),
-        ("S", MainView::Stats),
+    // Same order as the number keys, digit rendered next to the letter so
+    // the key→icon mapping is self-evident.
+    let mut entries: Vec<(&str, &str, MainView)> = vec![
+        ("1", "A", MainView::Activity),
+        ("2", "P", MainView::Plan),
+        ("3", "S", MainView::Stats),
+        ("4", "D", MainView::Diff),
     ];
     if app.decision_document.is_some() {
-        entries.push(("◆", MainView::Decisions));
+        entries.push(("5", "◆", MainView::Decisions));
     }
 
     let mut lines = vec![Line::from("")];
-    for (icon, view) in entries {
+    for (digit, icon, view) in entries {
         if app.main_view == view {
             lines.push(Line::from(Span::styled(
-                format!(" {} ", icon),
+                format!(" {}{}", digit, icon),
                 Style::default()
                     .fg(theme::BG)
                     .bg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD),
             )));
         } else {
-            lines.push(Line::from(Span::styled(
-                format!(" {} ", icon),
-                Style::default().fg(theme::MUTED),
-            )));
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {}", digit), Style::default().fg(theme::MUTED)),
+                Span::styled(icon.to_string(), Style::default().fg(theme::TEXT_DIM)),
+            ]));
         }
         lines.push(Line::from(""));
     }
@@ -554,6 +556,16 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
+    // Active input replaces the hint line entirely.
+    if let Some(buf) = &app.followup_input {
+        render_input_line(f, area, "follow-up", buf);
+        return;
+    }
+    if let Some((id, buf)) = &app.agent_msg_input {
+        render_input_line(f, area, &format!("\u{2192} {}", id), buf);
+        return;
+    }
+
     let line = if app.finalize_in_progress {
         Line::from(Span::styled(
             " Finalizing...",
@@ -575,11 +587,43 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         ))
     } else {
         Line::from(Span::styled(
-            " 1-5 views \u{00B7} Tab focus \u{00B7} \u{2191}\u{2193} scroll/select \u{00B7} e explorer \u{00B7} [ ] width \u{00B7} q quit",
+            " 1-5 views \u{00B7} Tab focus \u{00B7} \u{2191}\u{2193} scroll/select \u{00B7} m msg agent \u{00B7} e explorer \u{00B7} [ ] width \u{00B7} q quit",
             Style::default().fg(theme::MUTED),
         ))
     };
 
+    f.render_widget(Paragraph::new(line), area);
+}
+
+/// Single-line input in the bottom strip: accent label, live buffer with a
+/// block cursor, right-aligned send/cancel hint. Long buffers show their
+/// tail so the cursor never scrolls out of view.
+fn render_input_line(f: &mut Frame, area: Rect, label: &str, buf: &str) {
+    let label_str = format!(" {} \u{25B8} ", label);
+    let hint = "Enter send \u{00B7} Esc cancel ";
+    let w = area.width as usize;
+    let label_len = label_str.chars().count();
+    let hint_len = hint.chars().count();
+
+    let avail = w.saturating_sub(label_len + 1 + hint_len + 2);
+    let count = buf.chars().count();
+    let shown: String = if count > avail {
+        buf.chars().skip(count - avail).collect()
+    } else {
+        buf.to_string()
+    };
+    let pad = w.saturating_sub(label_len + shown.chars().count() + 1 + hint_len);
+
+    let line = Line::from(vec![
+        Span::styled(
+            label_str,
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(shown, Style::default().fg(theme::TEXT)),
+        Span::styled("\u{258C}", Style::default().fg(theme::ACCENT)),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(hint, Style::default().fg(theme::MUTED)),
+    ]);
     f.render_widget(Paragraph::new(line), area);
 }
 
@@ -702,6 +746,44 @@ mod tests {
                 draw(&mut app, w, h);
             }
         }
+    }
+
+    #[test]
+    fn rail_matches_key_order_with_digits() {
+        let mut app = app_mid_run();
+        let content = draw(&mut app, 160, 48);
+        for cell in ["1A", "2P", "3S", "4D", "5◆"] {
+            assert!(content.contains(cell), "rail cell {} missing", cell);
+        }
+    }
+
+    #[test]
+    fn route_lane_hides_default_model_and_never_needs_resizing() {
+        let mut app = app_mid_run();
+        feed(&mut app, r#"{"type":"routed","id":"S2","backend":"codex","model":"default"}"#);
+        // Default 30-col explorer: routes live on their own line now.
+        let content = draw(&mut app, 160, 48);
+        assert!(content.contains("claude:opus"));
+        assert!(content.contains("codex"));
+        assert!(!content.contains("codex:default"));
+    }
+
+    #[test]
+    fn bottom_strip_input_widgets_render() {
+        let mut app = app_mid_run();
+        app.agent_msg_input = Some(("S1".to_string(), "focus on the tests".to_string()));
+        let content = draw(&mut app, 120, 40);
+        assert!(content.contains("→ S1 ▸"));
+        assert!(content.contains("focus on the tests"));
+        assert!(content.contains("Enter send"));
+
+        let mut app = app_mid_run();
+        app.done = true;
+        app.followup_input = Some("ship the docs too".to_string());
+        let content = draw(&mut app, 120, 40);
+        assert!(content.contains("follow-up ▸"));
+        assert!(content.contains("ship the docs too"));
+        assert!(content.contains("Esc cancel"));
     }
 
     #[test]
