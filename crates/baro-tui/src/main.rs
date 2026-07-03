@@ -354,6 +354,8 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let mut once = std::env::var("BARO_RUN_ONCE").as_deref() == Ok("1");
     // Set by the managed service invocation → the runner may self-update + exit-to-restart.
     let mut service = std::env::var("BARO_SERVICE").as_deref() == Ok("1");
+    // Suppress the runner's post-pairing "install a background service?" prompt.
+    let mut no_service_prompt = std::env::var("BARO_NO_SERVICE_PROMPT").as_deref() == Ok("1");
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -385,6 +387,10 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 once = true;
                 i += 1;
             }
+            "--no-service" => {
+                no_service_prompt = true;
+                i += 1;
+            }
             "-h" | "--help" => {
                 println!("Usage: baro connect [--token <rt_…>] [--workspace <git repo>]");
                 println!("Pairs this machine with baro-cloud and runs dispatched goals over your subscription.");
@@ -393,6 +399,7 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 println!("  --install-service    install a background service (launchd/systemd/Task Scheduler)");
                 println!("                       so the runner survives terminal close, logout, and reboot");
                 println!("  --uninstall-service  remove that service");
+                println!("  --no-service         don't offer to install the background service after pairing");
                 println!("  --once               run exactly one dispatched goal, then exit (cloud workers)");
                 return Ok(());
             }
@@ -445,11 +452,15 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     if service {
         cmd.env("BARO_SERVICE", "1");
     }
+    if no_service_prompt {
+        cmd.env("BARO_NO_SERVICE_PROMPT", "1");
+    }
     // The runner spawns `baro --headless`; point it at this very binary.
     if let Ok(exe) = std::env::current_exe() {
         cmd.env("BARO_BIN", exe);
     }
-    cmd.stdin(std::process::Stdio::null());
+    // stdin stays attached (inherit): the runner asks its one-time
+    // "keep this runner online?" question on a TTY. It reads nothing else.
 
     println!("baro connect — starting runner (workspace: {})", cwd.display());
     let status = cmd
