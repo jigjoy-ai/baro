@@ -47,6 +47,13 @@ carry no compat constraint beyond "don't rename once shipped"):
 - `story_merged` / `story_merge_failed` — emitted by the GitCoordinator when a
   passed story's work lands on the run branch (worktree merge-back or
   shared-tree reconcile) or the merge-back fails and the worktree is preserved.
+- `recovery_started` — emitted by the Conductor when `tryStartRecoveryLevel`
+  actually starts a recovery level (`attempt` is a 1-based run-level counter).
+  Visibility only: the recovery flow itself stays hook-driven.
+- `story_routed` — emitted by StoryFactory right after `resolveStoryRoute`;
+  the machine-readable twin of the `[story-factory] S1 → backend:model`
+  stderr line (which stays). See docs/tui-protocol-v2.md for the structured
+  BaroEvents these feed.
 
 ## Why type discriminators, not `instanceof`
 

@@ -33,6 +33,24 @@ pub struct DiffFile {
     pub removed: u32,
 }
 
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ReplanStory {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ReplanRewire {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type")]
 pub enum BaroEvent {
@@ -44,6 +62,9 @@ pub enum BaroEvent {
         /// backwards-compat with orchestrators that don't emit it.
         #[serde(default)]
         runner: Option<String>,
+        /// Resolved execution mode (focused/sequential/parallel).
+        #[serde(default)]
+        mode: Option<String>,
     },
 
     #[serde(rename = "dag")]
@@ -71,6 +92,10 @@ pub enum BaroEvent {
         text: String,
         #[serde(default)]
         tool: Option<String>,
+        // Contract field (file_change); not rendered yet.
+        #[allow(dead_code)]
+        #[serde(default)]
+        path: Option<String>,
         #[serde(default)]
         op: Option<String>,
         #[serde(default)]
@@ -175,6 +200,103 @@ pub enum BaroEvent {
         diff: Option<String>,
     },
 
+    // --- v2 structured semantic events (docs/tui-protocol-v2.md). All
+    // fields default so the TUI tolerates partial/growing payloads.
+    #[serde(rename = "replan")]
+    Replan {
+        #[serde(default)]
+        source: String,
+        #[serde(default)]
+        reason: String,
+        #[serde(default)]
+        added: Vec<ReplanStory>,
+        #[serde(default)]
+        removed: Vec<String>,
+        #[serde(default)]
+        rewired: Vec<ReplanRewire>,
+    },
+
+    #[serde(rename = "intervention")]
+    Intervention {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        source: String,
+        #[serde(default)]
+        action: String,
+        #[serde(default)]
+        reason: String,
+    },
+
+    #[serde(rename = "story_merged")]
+    StoryMerged {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        mode: String,
+    },
+
+    #[serde(rename = "merge_failed")]
+    MergeFailed {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        error: String,
+    },
+
+    #[serde(rename = "level_started")]
+    LevelStarted {
+        #[serde(default)]
+        ordinal: usize,
+        // Contract field; per-story state comes from story events.
+        #[allow(dead_code)]
+        #[serde(default)]
+        story_ids: Vec<String>,
+    },
+
+    #[serde(rename = "level_completed")]
+    LevelCompleted {
+        #[serde(default)]
+        ordinal: usize,
+        // Contract field; per-story state comes from story events.
+        #[allow(dead_code)]
+        #[serde(default)]
+        passed: Vec<String>,
+        #[serde(default)]
+        failed: Vec<String>,
+    },
+
+    #[serde(rename = "recovery_started")]
+    RecoveryStarted {
+        #[serde(default)]
+        attempt: u32,
+        #[serde(default)]
+        story_ids: Vec<String>,
+    },
+
+    #[serde(rename = "routed")]
+    Routed {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        backend: String,
+        #[serde(default)]
+        model: String,
+    },
+
+    #[serde(rename = "critique")]
+    Critique {
+        #[serde(default)]
+        id: String,
+        /// "pass" | "fail"
+        #[serde(default)]
+        verdict: String,
+        #[serde(default)]
+        reasoning: String,
+        #[serde(default)]
+        violated: Vec<String>,
+    },
+
     /// Synthetic event the orchestrator client emits exactly once when
     /// the orchestrator subprocess terminates — whether cleanly with a
     /// preceding `Done` event or abruptly. Lets the TUI escape any
@@ -185,4 +307,115 @@ pub enum BaroEvent {
         code: Option<i32>,
         reason: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> BaroEvent {
+        serde_json::from_str(json).expect(json)
+    }
+
+    #[test]
+    fn parses_replan() {
+        let e = parse(
+            r#"{"type":"replan","source":"sentry","reason":"scope shift",
+                "added":[{"id":"S9","title":"New story","depends_on":["S1"]}],
+                "removed":["S3"],"rewired":[{"id":"S4","depends_on":["S9"]}]}"#,
+        );
+        match e {
+            BaroEvent::Replan { added, removed, rewired, .. } => {
+                assert_eq!(added[0].id, "S9");
+                assert_eq!(added[0].depends_on, vec!["S1"]);
+                assert_eq!(removed, vec!["S3"]);
+                assert_eq!(rewired[0].depends_on, vec!["S9"]);
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_intervention_and_merge_events() {
+        match parse(r#"{"type":"intervention","id":"S1","source":"sentry","action":"aborted","reason":"stall"}"#) {
+            BaroEvent::Intervention { id, action, .. } => {
+                assert_eq!(id, "S1");
+                assert_eq!(action, "aborted");
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+        match parse(r#"{"type":"story_merged","id":"S1","mode":"worktree"}"#) {
+            BaroEvent::StoryMerged { id, mode } => {
+                assert_eq!((id.as_str(), mode.as_str()), ("S1", "worktree"));
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+        match parse(r#"{"type":"merge_failed","id":"S2","error":"conflict"}"#) {
+            BaroEvent::MergeFailed { id, error } => {
+                assert_eq!((id.as_str(), error.as_str()), ("S2", "conflict"));
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_level_and_recovery_events() {
+        match parse(r#"{"type":"level_started","ordinal":2,"story_ids":["S3","S4"]}"#) {
+            BaroEvent::LevelStarted { ordinal, story_ids } => {
+                assert_eq!(ordinal, 2);
+                assert_eq!(story_ids, vec!["S3", "S4"]);
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+        match parse(r#"{"type":"level_completed","ordinal":2,"passed":["S3"],"failed":["S4"]}"#) {
+            BaroEvent::LevelCompleted { passed, failed, .. } => {
+                assert_eq!(passed, vec!["S3"]);
+                assert_eq!(failed, vec!["S4"]);
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+        match parse(r#"{"type":"recovery_started","attempt":1,"story_ids":["S4"]}"#) {
+            BaroEvent::RecoveryStarted { attempt, story_ids } => {
+                assert_eq!(attempt, 1);
+                assert_eq!(story_ids, vec!["S4"]);
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_routed_and_critique() {
+        match parse(r#"{"type":"routed","id":"S1","backend":"codex","model":"gpt-5.3-codex"}"#) {
+            BaroEvent::Routed { id, backend, model } => {
+                assert_eq!((id.as_str(), backend.as_str(), model.as_str()), ("S1", "codex", "gpt-5.3-codex"));
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+        match parse(r#"{"type":"critique","id":"S1","verdict":"fail","reasoning":"missing tests","violated":["AC2"]}"#) {
+            BaroEvent::Critique { verdict, violated, .. } => {
+                assert_eq!(verdict, "fail");
+                assert_eq!(violated, vec!["AC2"]);
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tolerates_missing_and_unknown_fields() {
+        // Minimal payloads (defaults) and unknown extra fields must both parse.
+        parse(r#"{"type":"replan"}"#);
+        parse(r#"{"type":"critique","id":"S1"}"#);
+        parse(r#"{"type":"routed","id":"S1","backend":"claude","model":"opus","future_field":42}"#);
+        match parse(r#"{"type":"activity","id":"S1","kind":"file_change","text":"src/a.rs","path":"src/a.rs","op":"modify"}"#) {
+            BaroEvent::Activity { path, op, .. } => {
+                assert_eq!(path.as_deref(), Some("src/a.rs"));
+                assert_eq!(op.as_deref(), Some("modify"));
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+        match parse(r#"{"type":"init","project":"p","stories":[],"mode":"focused"}"#) {
+            BaroEvent::Init { mode, .. } => assert_eq!(mode.as_deref(), Some("focused")),
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
 }

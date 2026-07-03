@@ -10,7 +10,11 @@ import {
 } from "../../semantic-events.js"
 import { emit } from "../../tui-protocol.js"
 
-/** Mirrors coordination, critique and intervention notices as `story_log` BaroEvents. */
+/**
+ * Forwards coordination, critique and intervention notices. Critique and
+ * intervention get structured BaroEvents (protocol v2) plus their legacy
+ * `story_log` mirrors for one release.
+ */
 export class CoordinationForwarder extends BaseObserver {
     override async onExternalEvent(
         _source: Participant,
@@ -31,6 +35,13 @@ export class CoordinationForwarder extends BaseObserver {
     }
 
     private handleIntervention(item: StoryInterventionData): void {
+        emit({
+            type: "intervention",
+            id: item.storyId,
+            source: item.source,
+            action: item.action,
+            reason: item.reason,
+        })
         emit({
             type: "story_log",
             id: item.storyId,
@@ -53,6 +64,13 @@ export class CoordinationForwarder extends BaseObserver {
     }
 
     private handleCritique(item: CritiqueData): void {
+        emit({
+            type: "critique",
+            id: item.agentId,
+            verdict: item.verdict,
+            reasoning: item.reasoning,
+            violated: [...item.violatedCriteria],
+        })
         emit({
             type: "story_log",
             id: item.agentId,

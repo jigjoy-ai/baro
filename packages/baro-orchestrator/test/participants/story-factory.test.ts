@@ -14,6 +14,7 @@ import type { StoryRoute } from "../../src/routing.js"
 import {
     StoryIntervention,
     StoryResult,
+    StoryRouted,
     StorySpawnRequest,
     StorySpawned,
     type StorySpawnRequestData,
@@ -85,6 +86,14 @@ describe("StoryFactory", () => {
             const spawned = env.events.find(StorySpawned.is)
             assert.ok(spawned)
             assert.deepEqual(spawned.data, { storyId: "S1" })
+
+            const routed = env.events.find(StoryRouted.is)
+            assert.ok(routed)
+            assert.deepEqual(routed.data, {
+                storyId: "S1",
+                backend: "claude",
+                model: "sonnet",
+            })
 
             await factory.onExternalEvent(
                 source("S1"),

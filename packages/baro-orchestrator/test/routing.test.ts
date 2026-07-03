@@ -53,6 +53,13 @@ describe("resolveStoryRoute — bare tier names (back-compat)", () => {
         })
     })
 
+    it("trims route whitespace before parsing", () => {
+        assert.deepEqual(resolveStoryRoute("  openai: MiniMax-M3  ", claudeFallback), {
+            backend: "openai",
+            model: "MiniMax-M3",
+        })
+    })
+
     it("treats an unknown prefix as part of the model name, not a backend", () => {
         assert.deepEqual(resolveStoryRoute("deepseek:chat", openaiFallback), {
             backend: "openai",
@@ -151,6 +158,33 @@ describe("resolveStoryRoute — tier map (the operator's seniority table)", () =
             { backend: "openai", model: "gpt-5.5" },
         )
     })
+
+    it("uses default and star entries for un-tiered stories", () => {
+        assert.deepEqual(
+            resolveStoryRoute(undefined, {
+                ...openaiFallback,
+                tierMap: { default: "codex" },
+            }),
+            { backend: "codex" },
+        )
+        assert.deepEqual(
+            resolveStoryRoute("", {
+                ...openaiFallback,
+                tierMap: { "*": "openai:gpt-4o-mini" },
+            }),
+            { backend: "openai", model: "gpt-4o-mini" },
+        )
+    })
+
+    it("allows a mapped tier to select a backend default only", () => {
+        assert.deepEqual(
+            resolveStoryRoute("haiku", {
+                ...claudeFallback,
+                tierMap: { haiku: "codex" },
+            }),
+            { backend: "codex" },
+        )
+    })
 })
 
 describe("resolveStoryRoute — --story-model override", () => {
@@ -219,6 +253,21 @@ describe("resolveStoryRoute — per-story OpenAI endpoint (@)", () => {
     it("resolves a named endpoint to baseUrl + apiKey", () => {
         assert.deepEqual(
             resolveStoryRoute("openai:MiniMax-M3@minimax", {
+                fallbackBackend: "claude",
+                endpoints,
+            }),
+            {
+                backend: "openai",
+                model: "MiniMax-M3",
+                baseUrl: "https://api.minimax.io/v1",
+                apiKey: "mm-key",
+            },
+        )
+    })
+
+    it("matches endpoint names case-insensitively and trims model/ref whitespace", () => {
+        assert.deepEqual(
+            resolveStoryRoute("openai: MiniMax-M3 @ MINIMAX ", {
                 fallbackBackend: "claude",
                 endpoints,
             }),
@@ -318,6 +367,8 @@ describe("parseEndpoints", () => {
 
     it("throws on a malformed spec", () => {
         assert.throws(() => parseEndpoints(["minimax"]), /expected name=url/)
+        assert.throws(() => parseEndpoints(["=https://api.minimax.io/v1"]), /expected name=url/)
+        assert.throws(() => parseEndpoints(["minimax="]), /expected name=url/)
     })
 })
 
@@ -341,6 +392,15 @@ describe("helpers", () => {
         assert.equal(formatRoute({ backend: "codex" }), "codex")
         assert.equal(
             formatRoute({ backend: "openai", model: "MiniMax-M3", baseUrl: "https://api.minimax.io/v1" }),
+            "openai:MiniMax-M3@https://api.minimax.io/v1",
+        )
+        assert.equal(
+            formatRoute({
+                backend: "openai",
+                model: "MiniMax-M3",
+                baseUrl: "https://api.minimax.io/v1",
+                apiKey: "secret",
+            }),
             "openai:MiniMax-M3@https://api.minimax.io/v1",
         )
     })

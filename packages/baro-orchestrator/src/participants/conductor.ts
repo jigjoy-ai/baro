@@ -56,6 +56,7 @@ import {
     LevelCompleted,
     LevelComputeRequest,
     LevelStarted,
+    RecoveryStarted,
     Replan,
     RunCompleted,
     RunStartRequest,
@@ -168,6 +169,8 @@ export class Conductor extends BaseObserver {
      */
     private readonly recoveryAttempts: Map<string, number> = new Map()
     private readonly maxRecoveryAttemptsPerStory = 1
+    /** Recovery levels started in this run (1-based `attempt` for RecoveryStarted). */
+    private recoveryLevelsStarted = 0
     private totalAttempts = 0
     private appliedReplans = 0
 
@@ -775,6 +778,13 @@ export class Conductor extends BaseObserver {
             perStoryAttempts: new Map(),
         }
 
+        this.recoveryLevelsStarted += 1
+        this.emit(
+            RecoveryStarted.create({
+                attempt: this.recoveryLevelsStarted,
+                storyIds: this.currentLevel.storyIds,
+            }),
+        )
         this.emit(
             LevelStarted.create({
                 ordinal,

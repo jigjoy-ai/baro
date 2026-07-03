@@ -96,7 +96,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
     let elapsed = app.elapsed_secs();
     let counts = count_stories(app);
 
-    let info_line = Line::from(vec![
+    let mut info_spans = vec![
         Span::styled(
             " BARO ",
             Style::default().fg(theme::LOGO_1).add_modifier(Modifier::BOLD),
@@ -106,6 +106,16 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
             &app.project,
             Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
         ),
+    ];
+    if let Some(mode) = &app.run_mode {
+        if !mode.is_empty() {
+            info_spans.push(Span::styled(
+                format!(" {} ", mode),
+                Style::default().fg(theme::TEXT_DIM),
+            ));
+        }
+    }
+    info_spans.extend([
         Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
         Span::styled(
             format!("{}/{}", counts.passed, counts.total),
@@ -117,6 +127,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(theme::MUTED),
         ),
     ]);
+    let info_line = Line::from(info_spans);
 
     let info = Paragraph::new(info_line).block(
         Block::default()
@@ -220,8 +231,7 @@ fn render_progress(f: &mut Frame, app: &App, area: Rect) {
 
 // --- Shared: Status Bar ---
 // Full-width run status, mirroring the web run-view bar:
-//   ● status · elapsed · agents · tokens · files · repo
-// (cost + runner id are not tracked in App yet — see report.)
+//   ● status · elapsed · agents · tokens · files [· cost] · repo [· runner] [· branch] [· PR]
 
 fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let counts = count_stories(app);
@@ -301,6 +311,20 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(theme::MUTED),
             ));
         }
+    }
+    if !app.branch_name.is_empty() {
+        spans.push(sep());
+        spans.push(Span::styled(
+            format!("\u{2387} {}", app.branch_name),
+            Style::default().fg(theme::TEXT_DIM),
+        ));
+    }
+    if let Some(pr_url) = &app.pr_url {
+        spans.push(sep());
+        spans.push(Span::styled(
+            pr_url.clone(),
+            Style::default().fg(theme::ACCENT_DIM),
+        ));
     }
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);

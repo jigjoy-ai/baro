@@ -3,7 +3,13 @@ import assert from "node:assert/strict"
 
 import { FunctionCallItem } from "@mozaik-ai/core"
 
-import { AgentState, StoryResult } from "../../../src/semantic-events.js"
+import {
+    AgentState,
+    StoryMergeFailed,
+    StoryMerged,
+    StoryResult,
+    StoryRouted,
+} from "../../../src/semantic-events.js"
 import type { BaroEvent } from "../../../src/tui-protocol.js"
 import { StoryLifecycleForwarder } from "../../../src/participants/forwarders/story-lifecycle.js"
 import { captureStdout, source } from "../helpers.js"
@@ -96,6 +102,35 @@ describe("StoryLifecycleForwarder", () => {
                 attempt: 3,
                 max_retries: 3,
             },
+        ])
+    })
+
+    it("emits structured routed, story_merged, and merge_failed BaroEvents", async () => {
+        const forwarder = new StoryLifecycleForwarder()
+
+        const events = parseEvents(await captureStdout(async () => {
+            await forwarder.onExternalEvent(
+                source("story-factory"),
+                StoryRouted.create({
+                    storyId: "S3",
+                    backend: "openai",
+                    model: "gpt-5.5",
+                }),
+            )
+            await forwarder.onExternalEvent(
+                source("git-coordinator"),
+                StoryMerged.create({ storyId: "S3", mode: "worktree" }),
+            )
+            await forwarder.onExternalEvent(
+                source("git-coordinator"),
+                StoryMergeFailed.create({ storyId: "S4", error: "conflict in a.ts" }),
+            )
+        }))
+
+        assert.deepEqual(events, [
+            { type: "routed", id: "S3", backend: "openai", model: "gpt-5.5" },
+            { type: "story_merged", id: "S3", mode: "worktree" },
+            { type: "merge_failed", id: "S4", error: "conflict in a.ts" },
         ])
     })
 })

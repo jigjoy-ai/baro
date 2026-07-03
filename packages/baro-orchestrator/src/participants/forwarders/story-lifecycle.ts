@@ -8,8 +8,11 @@ import {
 import {
     AgentState,
     type AgentStateData,
+    StoryMergeFailed,
+    StoryMerged,
     StoryResult,
     type StoryResultData,
+    StoryRouted,
     StorySpawnRequest,
 } from "../../semantic-events.js"
 import { emit } from "../../tui-protocol.js"
@@ -23,8 +26,10 @@ const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "NotebookEdit", "edit_file"])
 /**
  * Mirrors story lifecycle transitions as BaroEvents consumed by the Rust TUI.
  *
- * Subscribes to: AgentState, StoryResult, and per-agent function calls.
- * Emits: story_start, story_complete, story_error, story_retry.
+ * Subscribes to: AgentState, StoryResult, StoryRouted, StoryMerged,
+ * StoryMergeFailed, and per-agent function calls.
+ * Emits: story_start, story_complete, story_error, story_retry, routed,
+ * story_merged, merge_failed.
  */
 export class StoryLifecycleForwarder extends BaseObserver {
     private startedStories = new Set<string>()
@@ -51,6 +56,31 @@ export class StoryLifecycleForwarder extends BaseObserver {
         }
         if (StoryResult.is(event)) {
             this.handleStoryResult(event.data)
+            return
+        }
+        if (StoryRouted.is(event)) {
+            emit({
+                type: "routed",
+                id: event.data.storyId,
+                backend: event.data.backend,
+                model: event.data.model,
+            })
+            return
+        }
+        if (StoryMerged.is(event)) {
+            emit({
+                type: "story_merged",
+                id: event.data.storyId,
+                mode: event.data.mode,
+            })
+            return
+        }
+        if (StoryMergeFailed.is(event)) {
+            emit({
+                type: "merge_failed",
+                id: event.data.storyId,
+                error: event.data.error,
+            })
             return
         }
     }

@@ -8,6 +8,7 @@ import type { PrdFile } from "../../src/prd.js"
 import {
     LevelCompleted,
     LevelStarted,
+    RecoveryStarted,
     RunCompleted,
     RunStartRequest,
     RunStarted,
@@ -143,6 +144,10 @@ describe("Conductor", () => {
             const levelEvents = env.events.filter(LevelStarted.is)
             assert.equal(levelEvents.length, 2)
             assert.deepEqual(levelEvents.map((event) => event.data.ordinal), [1, 2])
+
+            const recoveries = env.events.filter(RecoveryStarted.is)
+            assert.equal(recoveries.length, 1)
+            assert.deepEqual(recoveries[0].data, { attempt: 1, storyIds: ["S1"] })
 
             const savedPrd = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
             assert.equal(savedPrd.userStories[0]?.passes, false)

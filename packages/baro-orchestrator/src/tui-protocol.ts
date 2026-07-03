@@ -108,6 +108,30 @@ export type BaroEvent =
           op?: string // file_change: create | modify
           ok?: boolean // test / verdict pass-fail
       }
+    // Protocol v2 structured events (docs/tui-protocol-v2.md). Each keeps
+    // its legacy story_log mirror for one release.
+    | {
+          type: "replan"
+          source: string
+          reason: string
+          added: StoryInfo[]
+          removed: string[]
+          rewired: { id: string; depends_on: string[] }[]
+      }
+    | { type: "intervention"; id: string; source: string; action: string; reason: string }
+    | { type: "story_merged"; id: string; mode: "worktree" | "shared-tree" }
+    | { type: "merge_failed"; id: string; error: string }
+    | { type: "level_started"; ordinal: number; story_ids: string[] }
+    | { type: "level_completed"; ordinal: number; passed: string[]; failed: string[] }
+    | { type: "recovery_started"; attempt: number; story_ids: string[] }
+    | { type: "routed"; id: string; backend: string; model: string }
+    | {
+          type: "critique"
+          id: string
+          verdict: "pass" | "fail"
+          reasoning: string
+          violated: string[]
+      }
 
 /** Caller must not include trailing newlines in any field. */
 export function emit(event: BaroEvent): void {
