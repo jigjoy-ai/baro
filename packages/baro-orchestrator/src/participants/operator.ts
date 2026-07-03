@@ -14,7 +14,8 @@ import { AgenticEnvironment, BaseObserver, SemanticEvent } from "@mozaik-ai/core
 import { AgentTargetedMessage } from "../semantic-events.js"
 
 export type OperatorCommand =
-    | { kind: "redirect"; storyId: string; message: string }
+    /** `source` tags who authored the message ("user" for TUI chat); defaults to "operator". */
+    | { kind: "redirect"; storyId: string; message: string; source?: string }
     | { kind: "abort"; storyId: string }
     | { kind: "abort_all" }
     | { kind: "shutdown" }
@@ -51,7 +52,7 @@ export class Operator extends BaseObserver {
                     AgentTargetedMessage.create({
                         recipientId: cmd.storyId,
                         text: cmd.message,
-                        metadata: { source: "operator" },
+                        metadata: { source: cmd.source ?? "operator" },
                     }),
                 )
                 return
