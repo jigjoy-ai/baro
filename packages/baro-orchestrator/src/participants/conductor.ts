@@ -99,6 +99,19 @@ export interface ConductorOptions {
      * Default: 10 seconds.
      */
     intraLevelDelaySecs?: number
+    /**
+     * Healing actions (applied replans + recovery-level starts) allowed
+     * without any story passing before the run aborts gracefully. 0
+     * disables. Default 3, or env BARO_REPLAN_PROGRESS_BUDGET.
+     */
+    replanProgressBudget?: number
+    /**
+     * Soft wall-clock ceiling in seconds, checked only at level
+     * boundaries (never mid-story). Default 0 = off, or env
+     * BARO_RUN_SOFT_DEADLINE_SECS — kept off locally; the hosted
+     * control plane sets the env var for cloud runs.
+     */
+    softDeadlineSecs?: number
 }
 
 export interface ConductorRunSummary {
@@ -173,6 +186,15 @@ export class Conductor extends BaseObserver {
     private recoveryLevelsStarted = 0
     private totalAttempts = 0
     private appliedReplans = 0
+    /**
+     * Healing actions (replan applications + recovery-level starts) since
+     * the last successful story. The Surgeon may propose forever; this is
+     * the Conductor's brake — when it reaches the budget the run ends
+     * gracefully so the Finalizer can ship completed work (checkpoint PR).
+     */
+    private replansSinceProgress = 0
+    private readonly replanProgressBudget: number
+    private readonly softDeadlineSecs: number
 
     private currentLevel: RunningLevelState | null = null
 
@@ -216,6 +238,11 @@ export class Conductor extends BaseObserver {
         if (this.opts.intraLevelDelaySecs == null) {
             this.opts.intraLevelDelaySecs = 10
         }
+        this.replanProgressBudget =
+            opts.replanProgressBudget ??
+            envNonNegativeInt("BARO_REPLAN_PROGRESS_BUDGET", 3)
+        this.softDeadlineSecs =
+            opts.softDeadlineSecs ?? envNonNegativeInt("BARO_RUN_SOFT_DEADLINE_SECS", 0)
         this.done = new Promise<ConductorRunSummary>((resolve) => {
             this.resolveDone = resolve
         })
@@ -337,6 +364,11 @@ export class Conductor extends BaseObserver {
                 this.prd.userStories.every((s) => s.passes) &&
                 this.globalDropped.length === 0
             if (!allPassed && this.globalFailed.length > 0) {
+                const halt = this.healingHaltReason()
+                if (halt) {
+                    this.terminateRun(false, halt)
+                    return
+                }
                 const recovered = await this.tryStartRecoveryLevel(
                     this.globalFailed,
                     blockedStoryIds.size > 0
@@ -353,6 +385,16 @@ export class Conductor extends BaseObserver {
                       : `stories failed: ${this.globalFailed.join(", ")}`
                   : null
             this.terminateRun(allPassed, abortReason)
+            return
+        }
+
+        // Soft wall-clock ceiling: only ever checked here (a level
+        // boundary, before new work spawns) so a mid-story run is
+        // never cut. A run about to complete cleanly still completes —
+        // the levels.length === 0 path above wins.
+        const softDeadline = this.softDeadlineReason()
+        if (softDeadline) {
+            this.terminateRun(false, softDeadline)
             return
         }
 
@@ -416,6 +458,8 @@ export class Conductor extends BaseObserver {
             this.currentLevel.passed.push(item.storyId)
             this.globalCompleted.push(item.storyId)
             this.removeGlobalFailed(item.storyId)
+            // Real progress: the healing budget starts over.
+            this.replansSinceProgress = 0
             if (this.prd) {
                 this.prd = markStoryPassed(this.prd, item.storyId, item.durationSecs)
                 savePrd(this.opts.prdPath, this.prd)
@@ -559,6 +603,7 @@ export class Conductor extends BaseObserver {
 
         // Apply ReplanItem-s buffered during this level.
         let replannedThisLevel = false
+        let healingHalt: string | null = null
         if (this.pendingReplans.length > 0 && this.prd) {
             const drained = this.pendingReplans.splice(0)
             for (const replan of drained) {
@@ -582,8 +627,11 @@ export class Conductor extends BaseObserver {
                     )
                     continue
                 }
+                healingHalt = this.healingHaltReason()
+                if (healingHalt) break
                 this.prd = applyReplan(this.prd, replan)
                 this.appliedReplans += 1
+                this.noteHealingAction(lvl.ordinal)
                 replannedThisLevel = true
                 // Track stories that were removed without a replacement.
                 // If the replan only removes (no addedStories), it's a
@@ -622,11 +670,21 @@ export class Conductor extends BaseObserver {
             savePrd(this.opts.prdPath, this.prd)
         }
 
+        if (healingHalt) {
+            this.terminateRun(false, healingHalt)
+            return
+        }
+
         // If every story in the level failed terminally AND no replan
         // mutated the plan in response, abort the run.
         const anySuccess = lvl.passed.length > 0
         const totalThisLevel = lvl.passed.length + lvl.failed.length
         if (!anySuccess && totalThisLevel > 0 && !replannedThisLevel) {
+            const halt = this.healingHaltReason()
+            if (halt) {
+                this.terminateRun(false, halt)
+                return
+            }
             const recovered = await this.tryStartRecoveryLevel(
                 lvl.failed,
                 "all stories in level failed",
@@ -724,6 +782,42 @@ export class Conductor extends BaseObserver {
         return blocked
     }
 
+    /**
+     * Non-null when healing must stop: the progress budget is spent or
+     * the soft deadline has passed. Callers terminate the run with the
+     * returned reason instead of applying a replan / starting recovery.
+     */
+    private healingHaltReason(): string | null {
+        if (
+            this.replanProgressBudget > 0 &&
+            this.replansSinceProgress >= this.replanProgressBudget
+        ) {
+            const n = this.replansSinceProgress
+            return `no progress after ${n} replan${n === 1 ? "" : "s"} — stopping so completed work can ship`
+        }
+        return this.softDeadlineReason()
+    }
+
+    private softDeadlineReason(): string | null {
+        if (this.softDeadlineSecs <= 0) return null
+        const elapsedSecs = (Date.now() - this.startedAt) / 1000
+        if (elapsedSecs < this.softDeadlineSecs) return null
+        return `soft deadline reached (${this.softDeadlineSecs}s) — stopping so completed work can ship`
+    }
+
+    private noteHealingAction(currentLevel?: number): void {
+        this.replansSinceProgress += 1
+        if (this.replanProgressBudget > 0) {
+            this.emit(
+                ConductorState.create({
+                    phase: "running_level",
+                    detail: `replan ${this.replansSinceProgress}/${this.replanProgressBudget} without progress`,
+                    ...(currentLevel != null ? { currentLevel } : {}),
+                }),
+            )
+        }
+    }
+
     private addGlobalFailed(storyId: string): void {
         if (!this.globalFailed.includes(storyId)) {
             this.globalFailed.push(storyId)
@@ -757,6 +851,8 @@ export class Conductor extends BaseObserver {
         }
 
         if (stories.length === 0) return false
+
+        this.noteHealingAction(this.currentLevel?.ordinal)
 
         for (const story of stories) {
             this.recoveryAttempts.set(
@@ -896,6 +992,13 @@ export function applyReplan(prd: PrdFile, replan: ReplanData): PrdFile {
     }
 
     return { ...prd, userStories: stories }
+}
+
+function envNonNegativeInt(name: string, fallback: number): number {
+    const raw = process.env[name]
+    if (raw == null || raw.trim() === "") return fallback
+    const n = Number(raw)
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback
 }
 
 function readFileSyncSafe(path: string): string | null {

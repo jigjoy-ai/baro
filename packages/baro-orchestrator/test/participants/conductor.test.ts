@@ -6,14 +6,17 @@ import { join } from "node:path"
 import { Conductor } from "../../src/participants/conductor.js"
 import type { PrdFile } from "../../src/prd.js"
 import {
+    ConductorState,
     LevelCompleted,
     LevelStarted,
     RecoveryStarted,
+    Replan,
     RunCompleted,
     RunStartRequest,
     RunStarted,
     StoryResult,
     StorySpawnRequest,
+    type ReplanStoryAdd,
 } from "../../src/semantic-events.js"
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
 
@@ -154,7 +157,257 @@ describe("Conductor", () => {
             assert.equal(savedPrd.userStories[0]?.durationSecs, null)
         })
     })
+
+    it("resets the progress budget when a replanned story passes and the run continues", async () => {
+        await withTempDir("conductor-test-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(oneStoryPrd(), null, 2) + "\n")
+
+            const conductor = new Conductor({
+                prdPath,
+                cwd: dir,
+                parallel: 1,
+                timeoutSecs: 45,
+                defaultModel: "sonnet",
+                intraLevelDelaySecs: 0,
+                replanProgressBudget: 1,
+            })
+            const env = joinWithCapture(conductor)
+
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "unit test" }),
+            )
+
+            // Level 1: S1 fails, Surgeon replaces it with S2 → S3 chain.
+            await waitForEvents(env.events, StorySpawnRequest.is, 1)
+            env.deliverSemanticEvent(
+                source("surgeon"),
+                replanEvent("S1", [storyAdd("S2"), storyAdd("S3", ["S2"])]),
+            )
+            env.deliverSemanticEvent(source("S1"), failResult("S1"))
+
+            // Level 2: S2 passes — budget (1) was fully consumed by the
+            // first replan, so the run only survives if success resets it.
+            const spawns2 = await waitForEvents(env.events, StorySpawnRequest.is, 2)
+            assert.equal(spawns2[1].data.storyId, "S2")
+            env.deliverSemanticEvent(source("S2"), passResult("S2"))
+
+            // Level 3: S3 fails, Surgeon replaces it with S4.
+            const spawns3 = await waitForEvents(env.events, StorySpawnRequest.is, 3)
+            assert.equal(spawns3[2].data.storyId, "S3")
+            env.deliverSemanticEvent(
+                source("surgeon"),
+                replanEvent("S3", [storyAdd("S4")]),
+            )
+            env.deliverSemanticEvent(source("S3"), failResult("S3"))
+
+            // Level 4: S4 passes → clean completion despite two replans.
+            const spawns4 = await waitForEvents(env.events, StorySpawnRequest.is, 4)
+            assert.equal(spawns4[3].data.storyId, "S4")
+            env.deliverSemanticEvent(source("S4"), passResult("S4"))
+
+            const completed = await waitForEvent(env.events, RunCompleted.is)
+            assert.equal(completed.data.success, true)
+            assert.equal(completed.data.abortReason, null)
+            assert.deepEqual(completed.data.completedStories, ["S2", "S4"])
+        })
+    })
+
+    it("terminates gracefully when the progress budget is exhausted, without recovery", async () => {
+        await withTempDir("conductor-test-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(oneStoryPrd(), null, 2) + "\n")
+
+            const conductor = new Conductor({
+                prdPath,
+                cwd: dir,
+                parallel: 1,
+                timeoutSecs: 45,
+                defaultModel: "sonnet",
+                intraLevelDelaySecs: 0,
+                replanProgressBudget: 1,
+            })
+            const env = joinWithCapture(conductor)
+
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "unit test" }),
+            )
+
+            await waitForEvents(env.events, StorySpawnRequest.is, 1)
+            env.deliverSemanticEvent(
+                source("surgeon"),
+                replanEvent("S1", [storyAdd("S2")]),
+            )
+            env.deliverSemanticEvent(source("S1"), failResult("S1"))
+
+            const spawns = await waitForEvents(env.events, StorySpawnRequest.is, 2)
+            assert.equal(spawns[1].data.storyId, "S2")
+            env.deliverSemanticEvent(source("S2"), failResult("S2"))
+
+            const completed = await waitForEvent(env.events, RunCompleted.is)
+            assert.equal(completed.data.success, false)
+            assert.equal(
+                completed.data.abortReason,
+                "no progress after 1 replan — stopping so completed work can ship",
+            )
+            assert.deepEqual(completed.data.failedStories, ["S2"])
+            assert.equal(env.events.filter(RecoveryStarted.is).length, 0)
+            assert.equal(env.events.filter(StorySpawnRequest.is).length, 2)
+            assert.ok(
+                env.events
+                    .filter(ConductorState.is)
+                    .some((e) => e.data.detail === "replan 1/1 without progress"),
+            )
+        })
+    })
+
+    it("terminates gracefully at a level boundary when the soft deadline is exceeded", async () => {
+        await withTempDir("conductor-test-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            const prd = oneStoryPrd()
+            prd.userStories.push({
+                ...prd.userStories[0],
+                id: "S2",
+                title: "Second story",
+                dependsOn: ["S1"],
+            })
+            writeFileSync(prdPath, JSON.stringify(prd, null, 2) + "\n")
+
+            const conductor = new Conductor({
+                prdPath,
+                cwd: dir,
+                parallel: 1,
+                timeoutSecs: 45,
+                defaultModel: "sonnet",
+                intraLevelDelaySecs: 0,
+                softDeadlineSecs: 0.05,
+            })
+            const env = joinWithCapture(conductor)
+
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "unit test" }),
+            )
+
+            await waitForEvents(env.events, StorySpawnRequest.is, 1)
+            // Let the deadline lapse mid-story; the check must only fire
+            // at the level boundary, after S1's result lands.
+            await new Promise((resolve) => setTimeout(resolve, 80))
+            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+
+            const completed = await waitForEvent(env.events, RunCompleted.is)
+            assert.equal(completed.data.success, false)
+            assert.match(completed.data.abortReason ?? "", /soft deadline reached/)
+            assert.deepEqual(completed.data.completedStories, ["S1"])
+            // S2 was never spawned — the run stopped before the next level.
+            assert.equal(env.events.filter(StorySpawnRequest.is).length, 1)
+        })
+    })
+
+    it("budget 0 (via env) disables the progress budget", async () => {
+        await withTempDir("conductor-test-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(oneStoryPrd(), null, 2) + "\n")
+
+            const prevEnv = process.env.BARO_REPLAN_PROGRESS_BUDGET
+            process.env.BARO_REPLAN_PROGRESS_BUDGET = "0"
+            try {
+                const conductor = new Conductor({
+                    prdPath,
+                    cwd: dir,
+                    parallel: 1,
+                    timeoutSecs: 45,
+                    defaultModel: "sonnet",
+                    intraLevelDelaySecs: 0,
+                })
+                const env = joinWithCapture(conductor)
+
+                env.deliverSemanticEvent(
+                    source("operator"),
+                    RunStartRequest.create({ reason: "unit test" }),
+                )
+
+                // Four fruitless replans in a row — more than the default
+                // budget of 3 — must not abort the run when disabled.
+                let current = "S1"
+                for (let i = 2; i <= 5; i += 1) {
+                    const next = `S${i}`
+                    const spawns = await waitForEvents(
+                        env.events,
+                        StorySpawnRequest.is,
+                        i - 1,
+                    )
+                    assert.equal(spawns[i - 2].data.storyId, current)
+                    env.deliverSemanticEvent(
+                        source("surgeon"),
+                        replanEvent(current, [storyAdd(next)]),
+                    )
+                    env.deliverSemanticEvent(source(current), failResult(current))
+                    current = next
+                }
+
+                const spawns = await waitForEvents(env.events, StorySpawnRequest.is, 5)
+                assert.equal(spawns[4].data.storyId, "S5")
+                env.deliverSemanticEvent(source("S5"), passResult("S5"))
+
+                const completed = await waitForEvent(env.events, RunCompleted.is)
+                assert.equal(completed.data.success, true)
+                assert.equal(completed.data.abortReason, null)
+            } finally {
+                if (prevEnv === undefined) {
+                    delete process.env.BARO_REPLAN_PROGRESS_BUDGET
+                } else {
+                    process.env.BARO_REPLAN_PROGRESS_BUDGET = prevEnv
+                }
+            }
+        })
+    })
 })
+
+function storyAdd(id: string, dependsOn: string[] = []): ReplanStoryAdd {
+    return {
+        id,
+        priority: 1,
+        title: `Replacement ${id}`,
+        description: `Replacement story ${id}.`,
+        dependsOn,
+        retries: 1,
+        acceptance: [],
+        tests: [],
+    }
+}
+
+function replanEvent(removedId: string, added: ReplanStoryAdd[]) {
+    return Replan.create({
+        source: "surgeon",
+        reason: `replace ${removedId}`,
+        addedStories: added,
+        removedStoryIds: [removedId],
+        modifiedDeps: {},
+    })
+}
+
+function passResult(storyId: string) {
+    return StoryResult.create({
+        storyId,
+        success: true,
+        attempts: 1,
+        durationSecs: 1,
+        error: null,
+    })
+}
+
+function failResult(storyId: string) {
+    return StoryResult.create({
+        storyId,
+        success: false,
+        attempts: 1,
+        durationSecs: 1,
+        error: "boom",
+    })
+}
 
 function oneStoryPrd(): PrdFile {
     return {
