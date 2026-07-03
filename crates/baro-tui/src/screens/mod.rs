@@ -10,3 +10,4 @@ pub mod execute_completion;
 pub mod execute_dashboard;
 pub mod execute_dag;
 pub mod execute_stats;
+pub mod widgets;

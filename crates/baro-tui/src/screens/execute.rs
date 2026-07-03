@@ -453,15 +453,3 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(footer, area);
 }
 
-// --- Helpers ---
-
-pub(crate) fn status_icon_color(status: &StoryStatus) -> (&'static str, ratatui::style::Color) {
-    match status {
-        StoryStatus::Complete => ("✓", theme::SUCCESS),
-        StoryStatus::Running => ("▶", theme::WARNING),
-        StoryStatus::Failed => ("✗", theme::ERROR),
-        StoryStatus::Retrying(_) => ("↻", theme::WARNING),
-        StoryStatus::Skipped => ("⊘", theme::MUTED), // dropped (e.g. dep failed)
-        StoryStatus::Pending => ("○", theme::MUTED),
-    }
-}
