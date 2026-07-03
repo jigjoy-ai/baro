@@ -281,9 +281,9 @@ impl ActivityEntry {
     }
 }
 
+/// Keyed by story id in `App::active_stories`.
 #[derive(Debug, Clone)]
 pub struct ActiveStory {
-    pub id: String,
     pub title: String,
     pub logs: Vec<String>,
     pub activity: Vec<ActivityEntry>,
@@ -1082,9 +1082,8 @@ impl App {
                     story.status = StoryStatus::Running;
                 }
                 self.active_stories.insert(
-                    id.clone(),
+                    id,
                     ActiveStory {
-                        id,
                         title,
                         logs: Vec::new(),
                         activity: Vec::new(),
@@ -1221,7 +1220,6 @@ impl App {
                 self.active_stories.insert(
                     "finalize".to_string(),
                     ActiveStory {
-                        id: "finalize".to_string(),
                         title: "Finalizing".to_string(),
                         logs: Vec::new(),
                         activity: Vec::new(),
@@ -1552,6 +1550,56 @@ mod tests {
         // Run-level system entry is fanned out to active feeds.
         let feed_s1 = &app.active_stories.get("S1").unwrap().activity;
         assert!(feed_s1.last().unwrap().text.contains("scope shift"));
+    }
+
+    #[test]
+    fn explorer_agent_navigation_skips_header_rows() {
+        let mut app = app_with_run();
+        feed(&mut app, r#"{"type":"dag","levels":[[{"id":"S1"}],[{"id":"S2"}]]}"#);
+        // header, S1, connector, header, S2
+        assert_eq!(
+            app.agent_item_rows(),
+            vec![None, Some("S1".into()), None, None, Some("S2".into())]
+        );
+
+        app.explorer_agents_move(1);
+        assert_eq!(app.story_list_state.selected(), Some(1));
+        assert_eq!(app.activity_filter.as_deref(), Some("S1"));
+        assert_eq!(app.main_view, MainView::Activity);
+
+        app.explorer_agents_move(1);
+        assert_eq!(app.story_list_state.selected(), Some(4));
+        assert_eq!(app.activity_filter.as_deref(), Some("S2"));
+
+        // At the bottom edge: stays put.
+        app.explorer_agents_move(1);
+        assert_eq!(app.story_list_state.selected(), Some(4));
+
+        app.explorer_agents_move(-1);
+        assert_eq!(app.activity_filter.as_deref(), Some("S1"));
+    }
+
+    #[test]
+    fn explorer_file_navigation_targets_diff() {
+        let mut app = app_with_run();
+        feed(
+            &mut app,
+            r#"{"type":"story_diff","id":"S1",
+                "files":[{"path":"src/a.rs","added":3,"removed":1},{"path":"src/b.rs","added":2,"removed":0}],
+                "diff":"+++ b/src/a.rs\n+x\n+++ b/src/b.rs\n+y"}"#,
+        );
+        app.explorer_files_move(1);
+        assert_eq!(app.explorer_file_ix, 1);
+        assert_eq!(app.diff_target.as_deref(), Some("src/b.rs"));
+        assert!(app.diff_scroll_pending);
+        assert_eq!(app.main_view, MainView::Diff);
+
+        // Clamped at both ends.
+        app.explorer_files_move(5);
+        assert_eq!(app.explorer_file_ix, 1);
+        app.explorer_files_move(-5);
+        assert_eq!(app.explorer_file_ix, 0);
+        assert_eq!(app.diff_target.as_deref(), Some("src/a.rs"));
     }
 
     #[test]
