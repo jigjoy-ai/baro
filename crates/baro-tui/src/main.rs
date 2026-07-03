@@ -1349,7 +1349,11 @@ async fn run_app(
                                 if let Err(e) = executor::write_prd(&prd, &cwd) {
                                     app.planning_error = Some(format!("Failed to write prd.json: {}", e));
                                 } else {
-                                    let full_branch = format!("baro/{}", app.branch_name);
+                                    let full_branch = if app.branch_name.starts_with("baro/") {
+                                        app.branch_name.clone()
+                                    } else {
+                                        format!("baro/{}", app.branch_name)
+                                    };
                                     let branch_cwd = cwd.clone();
                                     let branch_name_clone = full_branch.clone();
                                     app.branch_name = full_branch;
