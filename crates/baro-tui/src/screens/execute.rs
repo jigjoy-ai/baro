@@ -643,4 +643,101 @@ mod tests {
             assert!(main.width <= w);
         }
     }
+
+    // --- Full-frame smoke tests: drive the real render path through a
+    // TestBackend so panics in any pane surface in CI. ---
+
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn feed(app: &mut App, json: &str) {
+        app.handle_event(serde_json::from_str(json).expect(json));
+    }
+
+    fn app_mid_run() -> App {
+        let mut app = App::new();
+        app.goal_input = "rebuild the execute screen into a workbench".into();
+        app.decision_document = Some("# Decisions\n- keep event bus\n- reuse pills".into());
+        feed(
+            &mut app,
+            r#"{"type":"init","project":"baro","mode":"parallel","runner":"macbook",
+                "stories":[{"id":"S1","title":"First story"},{"id":"S2","title":"Second story","depends_on":["S1"]}]}"#,
+        );
+        feed(&mut app, r#"{"type":"dag","levels":[[{"id":"S1"}],[{"id":"S2"}]]}"#);
+        feed(&mut app, r#"{"type":"story_start","id":"S1","title":"First story"}"#);
+        feed(&mut app, r#"{"type":"routed","id":"S1","backend":"claude","model":"opus"}"#);
+        feed(&mut app, r#"{"type":"activity","id":"S1","kind":"tool_call","text":"cargo test","tool":"bash"}"#);
+        feed(&mut app, r#"{"type":"critique","id":"S1","verdict":"pass","reasoning":"","violated":[]}"#);
+        feed(
+            &mut app,
+            r#"{"type":"story_diff","id":"S1",
+                "files":[{"path":"src/lib.rs","added":10,"removed":2}],
+                "diff":"diff --git a/src/lib.rs b/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new"}"#,
+        );
+        app
+    }
+
+    fn draw(app: &mut App, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| render(f, app)).unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn full_frame_renders_every_view_at_every_breakpoint() {
+        for view in [
+            MainView::Activity,
+            MainView::Plan,
+            MainView::Stats,
+            MainView::Diff,
+            MainView::Decisions,
+        ] {
+            for (w, h) in [(160, 48), (100, 30), (80, 24), (70, 20), (60, 18), (40, 10), (12, 4)] {
+                let mut app = app_mid_run();
+                app.main_view = view;
+                draw(&mut app, w, h);
+            }
+        }
+    }
+
+    #[test]
+    fn wide_frame_shows_explorer_and_agent_signals() {
+        let mut app = app_mid_run();
+        // Route lane sits last on the row; it needs the widened explorer.
+        app.explorer_width = EXPLORER_MAX_WIDTH;
+        let content = draw(&mut app, 160, 48);
+        assert!(content.contains("BARO"));
+        assert!(content.contains("Agents"));
+        assert!(content.contains("Changes (1)"));
+        assert!(content.contains("✓critic"));
+        assert!(content.contains("claude:opus"));
+    }
+
+    #[test]
+    fn explorer_file_selection_drives_diff_view() {
+        let mut app = app_mid_run();
+        app.focus = WorkbenchFocus::Changes;
+        app.explorer_files_move(1); // clamped to the single file, still targets it
+        assert_eq!(app.main_view, MainView::Diff);
+        let content = draw(&mut app, 160, 48);
+        assert!(content.contains("diff — src/lib.rs"));
+        assert!(!app.diff_scroll_pending, "render applies the pending file jump");
+    }
+
+    #[test]
+    fn done_frame_shows_followup_affordance() {
+        let mut app = app_mid_run();
+        feed(&mut app, r#"{"type":"story_complete","id":"S1","duration_secs":61,"files_created":1,"files_modified":2}"#);
+        feed(
+            &mut app,
+            r#"{"type":"done","total_time_secs":100,
+                "stats":{"stories_completed":2,"stories_skipped":0,"total_commits":2,"files_created":1,"files_modified":2}}"#,
+        );
+        let content = draw(&mut app, 120, 40);
+        assert!(content.contains("follow-up: press f"));
+    }
 }
