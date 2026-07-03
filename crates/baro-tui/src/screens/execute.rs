@@ -6,9 +6,14 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, GlobalTab, StoryStatus};
+use crate::app::{App, MainView, StoryStatus};
 use crate::theme;
 use crate::utils::format_commas;
+
+// Workbench breakpoints: below BP_EXPLORER the explorer is hidden (single
+// pane); below BP_WIDE the rail collapses and the explorer goes compact.
+pub const BP_EXPLORER: u16 = 70;
+pub const BP_WIDE: u16 = 100;
 
 /// Count stories by status for use in headers and progress widgets.
 /// Derived from `app.stories` directly so the counter reflects real
@@ -66,11 +71,11 @@ pub fn render(f: &mut Frame, app: &mut App) {
     // when the new tab renders less content than the old one).
     f.render_widget(Clear, chunks[1]);
 
-    match app.global_tab {
-        GlobalTab::Dashboard => render_dashboard(f, app, chunks[1]),
-        GlobalTab::Dag => render_dag_full(f, app, chunks[1]),
-        GlobalTab::Stats => render_stats_full(f, app, chunks[1]),
-        GlobalTab::Changes => render_changes(f, app, chunks[1]),
+    match app.main_view {
+        MainView::Activity => render_dashboard(f, app, chunks[1]),
+        MainView::Plan => render_dag_full(f, app, chunks[1]),
+        MainView::Stats => render_stats_full(f, app, chunks[1]),
+        MainView::Diff | MainView::Decisions => render_changes(f, app, chunks[1]),
     }
 
     render_progress(f, app, chunks[2]);
@@ -136,7 +141,12 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(info, header_chunks[0]);
 
-    let active_tab = app.global_tab.index();
+    let active_tab = match app.main_view {
+        MainView::Activity => 0,
+        MainView::Plan => 1,
+        MainView::Stats => 2,
+        MainView::Diff | MainView::Decisions => 3,
+    };
     let tab_line = Line::from(vec![
         Span::styled(
             "1:Dashboard",

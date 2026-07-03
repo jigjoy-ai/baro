@@ -880,7 +880,7 @@ async fn run_app(
                     app.auto_scroll_to_running();
                 }
                 if let Some(ref sid) = story_start_id {
-                    if app.global_tab == app::GlobalTab::Dag {
+                    if app.main_view == app::MainView::Plan {
                         if let Some(t) = terminal.as_deref_mut() {
                             let visible = t.size().map(|s| s.height.saturating_sub(10)).unwrap_or(20);
                             app.dag_auto_scroll_to_story(sid, visible);
@@ -1537,66 +1537,121 @@ async fn run_app(
                             }
                         }
                         KeyCode::Char('q') => return Ok(()),
-                        // Full terminal clear on tab change — ratatui's
+                        // Un-pin the activity view from an explorer-selected agent.
+                        KeyCode::Esc => {
+                            app.activity_filter = None;
+                        }
+                        // Full terminal clear on view change — ratatui's
                         // `Clear` widget doesn't reliably blank every cell,
-                        // so old tab content bleeds through otherwise.
+                        // so old view content bleeds through otherwise.
                         KeyCode::Char('1') => {
-                            app.global_tab = app::GlobalTab::Dashboard;
+                            app.main_view = app::MainView::Activity;
                             let _ = terminal.clear();
                         }
                         KeyCode::Char('2') => {
-                            app.global_tab = app::GlobalTab::Dag;
+                            app.main_view = app::MainView::Plan;
                             let _ = terminal.clear();
                         }
                         KeyCode::Char('3') => {
-                            app.global_tab = app::GlobalTab::Stats;
+                            app.main_view = app::MainView::Stats;
                             let _ = terminal.clear();
                         }
                         KeyCode::Char('4') => {
-                            app.global_tab = app::GlobalTab::Changes;
+                            app.main_view = app::MainView::Diff;
                             let _ = terminal.clear();
                         }
-                        KeyCode::Tab => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) { app.prev_log(); }
-                            else { app.next_log(); }
+                        KeyCode::Char('5') => {
+                            app.main_view = app::MainView::Decisions;
+                            let _ = terminal.clear();
                         }
-                        KeyCode::BackTab => app.prev_log(),
-                        KeyCode::Left => app.prev_tab(),
-                        KeyCode::Right => app.next_tab(),
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if app.global_tab == app::GlobalTab::Dashboard {
-                                let inner_h = terminal.size().map(|s| s.height.saturating_sub(12) as usize).unwrap_or(20);
-                                let active_ids = app.active_story_ids();
-                                let selected_id = active_ids.get(app.selected_log_index).cloned().unwrap_or_default();
-                                if !app.review_logs.is_empty() && active_ids.is_empty() {
-                                    let total = app.review_logs.len();
-                                    app.review_log_scroll_up(1, total, inner_h);
-                                } else if let Some(story) = app.active_stories.get(&selected_id) {
-                                    let total = story.logs.len();
-                                    app.log_scroll_up(1, total, inner_h);
-                                }
-                            } else if app.global_tab == app::GlobalTab::Dag {
-                                app.dag_scroll_up();
+                        KeyCode::Char('e') => {
+                            app.explorer_visible = !app.explorer_visible;
+                            if !app.explorer_visible {
+                                app.focus = app::WorkbenchFocus::Main;
+                            }
+                            let _ = terminal.clear();
+                        }
+                        KeyCode::Char('[') => app.explorer_narrower(),
+                        KeyCode::Char(']') => app.explorer_wider(),
+                        // With the explorer on screen Tab cycles focus zones;
+                        // when it's hidden (`e` or a narrow terminal) it keeps
+                        // the legacy active-agent switching.
+                        KeyCode::Tab | KeyCode::BackTab => {
+                            let back = key.code == KeyCode::BackTab
+                                || key.modifiers.contains(KeyModifiers::SHIFT);
+                            let width = terminal.size().map(|s| s.width).unwrap_or(120);
+                            let explorer_shown = app.explorer_visible
+                                && width >= screens::execute::BP_EXPLORER;
+                            if explorer_shown {
+                                app.focus = if back { app.focus.prev() } else { app.focus.next() };
+                            } else if back {
+                                app.prev_log();
+                            } else {
+                                app.next_log();
                             }
                         }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if app.global_tab == app::GlobalTab::Dashboard {
-                                let inner_h = terminal.size().map(|s| s.height.saturating_sub(12) as usize).unwrap_or(20);
-                                let active_ids = app.active_story_ids();
-                                let selected_id = active_ids.get(app.selected_log_index).cloned().unwrap_or_default();
-                                if !app.review_logs.is_empty() && active_ids.is_empty() {
-                                    let total = app.review_logs.len();
-                                    app.review_log_scroll_down(1, total, inner_h);
-                                } else if let Some(story) = app.active_stories.get(&selected_id) {
-                                    let total = story.logs.len();
-                                    app.log_scroll_down(1, total, inner_h);
+                        KeyCode::Left => app.prev_view(),
+                        KeyCode::Right => app.next_view(),
+                        KeyCode::Up | KeyCode::Char('k') => match app.focus {
+                            app::WorkbenchFocus::Agents => app.explorer_agents_move(-1),
+                            app::WorkbenchFocus::Changes => app.explorer_files_move(-1),
+                            app::WorkbenchFocus::Main => match app.main_view {
+                                app::MainView::Activity => {
+                                    let inner_h = terminal.size().map(|s| s.height.saturating_sub(12) as usize).unwrap_or(20);
+                                    let active_ids = app.active_story_ids();
+                                    let selected_id = app
+                                        .activity_filter
+                                        .clone()
+                                        .or_else(|| active_ids.get(app.selected_log_index).cloned())
+                                        .unwrap_or_default();
+                                    if !app.review_logs.is_empty() && active_ids.is_empty() {
+                                        let total = app.review_logs.len();
+                                        app.review_log_scroll_up(1, total, inner_h);
+                                    } else if let Some(story) = app.active_stories.get(&selected_id) {
+                                        let total = if story.activity.is_empty() { story.logs.len() } else { story.activity.len() };
+                                        app.log_scroll_up(1, total, inner_h);
+                                    }
                                 }
-                            } else if app.global_tab == app::GlobalTab::Dag {
-                                let total = app.dag_line_count();
-                                let visible = terminal.size().map(|s| s.height.saturating_sub(10)).unwrap_or(20);
-                                app.dag_scroll_down(total, visible);
-                            }
-                        }
+                                app::MainView::Plan => app.dag_scroll_up(),
+                                app::MainView::Diff => app.diff_scroll_up(),
+                                app::MainView::Decisions => {
+                                    app.decisions_scroll = app.decisions_scroll.saturating_sub(1);
+                                }
+                                app::MainView::Stats => {}
+                            },
+                        },
+                        KeyCode::Down | KeyCode::Char('j') => match app.focus {
+                            app::WorkbenchFocus::Agents => app.explorer_agents_move(1),
+                            app::WorkbenchFocus::Changes => app.explorer_files_move(1),
+                            app::WorkbenchFocus::Main => match app.main_view {
+                                app::MainView::Activity => {
+                                    let inner_h = terminal.size().map(|s| s.height.saturating_sub(12) as usize).unwrap_or(20);
+                                    let active_ids = app.active_story_ids();
+                                    let selected_id = app
+                                        .activity_filter
+                                        .clone()
+                                        .or_else(|| active_ids.get(app.selected_log_index).cloned())
+                                        .unwrap_or_default();
+                                    if !app.review_logs.is_empty() && active_ids.is_empty() {
+                                        let total = app.review_logs.len();
+                                        app.review_log_scroll_down(1, total, inner_h);
+                                    } else if let Some(story) = app.active_stories.get(&selected_id) {
+                                        let total = if story.activity.is_empty() { story.logs.len() } else { story.activity.len() };
+                                        app.log_scroll_down(1, total, inner_h);
+                                    }
+                                }
+                                app::MainView::Plan => {
+                                    let total = app.dag_line_count();
+                                    let visible = terminal.size().map(|s| s.height.saturating_sub(10)).unwrap_or(20);
+                                    app.dag_scroll_down(total, visible);
+                                }
+                                app::MainView::Diff => app.diff_scroll_down(),
+                                app::MainView::Decisions => {
+                                    app.decisions_scroll = app.decisions_scroll.saturating_add(1);
+                                }
+                                app::MainView::Stats => {}
+                            },
+                        },
                         _ => {}
                     },
                 }

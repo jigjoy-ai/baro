@@ -64,42 +64,70 @@ impl WelcomeField {
     }
 }
 
+/// What the workbench main pane shows. Number keys keep the historical
+/// tab mapping (1 activity, 2 plan, 3 stats, 4 diff) for muscle memory;
+/// Decisions is reachable via `5` or Left/Right cycling.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum GlobalTab {
-    Dashboard,
-    Dag,
+pub enum MainView {
+    Activity,
+    Plan,
     Stats,
-    Changes,
+    Diff,
+    Decisions,
 }
 
-impl GlobalTab {
+impl MainView {
     pub fn next(self) -> Self {
         match self {
-            Self::Dashboard => Self::Dag,
-            Self::Dag => Self::Stats,
-            Self::Stats => Self::Changes,
-            Self::Changes => Self::Dashboard,
+            Self::Activity => Self::Plan,
+            Self::Plan => Self::Stats,
+            Self::Stats => Self::Diff,
+            Self::Diff => Self::Decisions,
+            Self::Decisions => Self::Activity,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Dashboard => Self::Changes,
-            Self::Dag => Self::Dashboard,
-            Self::Stats => Self::Dag,
-            Self::Changes => Self::Stats,
-        }
-    }
-
-    pub fn index(self) -> usize {
-        match self {
-            Self::Dashboard => 0,
-            Self::Dag => 1,
-            Self::Stats => 2,
-            Self::Changes => 3,
+            Self::Activity => Self::Decisions,
+            Self::Plan => Self::Activity,
+            Self::Stats => Self::Plan,
+            Self::Diff => Self::Stats,
+            Self::Decisions => Self::Diff,
         }
     }
 }
+
+/// Keyboard focus zone; Tab cycles Main → Agents → Changes when the
+/// explorer is visible.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WorkbenchFocus {
+    Main,
+    Agents,
+    Changes,
+}
+
+impl WorkbenchFocus {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Main => Self::Agents,
+            Self::Agents => Self::Changes,
+            Self::Changes => Self::Main,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Main => Self::Changes,
+            Self::Agents => Self::Main,
+            Self::Changes => Self::Agents,
+        }
+    }
+}
+
+pub const EXPLORER_MIN_WIDTH: u16 = 20;
+pub const EXPLORER_MAX_WIDTH: u16 = 45;
+pub const EXPLORER_DEFAULT_WIDTH: u16 = 30;
 
 /// Lifecycle of the pre-planner Architect phase. Reflected in the TUI
 /// welcome / planning view so the user knows whether they're waiting on
@@ -454,13 +482,29 @@ pub struct App {
     pub total_output_tokens: u64,
 
     // UI state
-    pub global_tab: GlobalTab,
+    pub main_view: MainView,
     pub selected_log_index: usize,
     pub tick_count: u64,
     pub story_list_state: ListState,
     pub dag_scroll_offset: u16,
     pub log_scroll_offsets: HashMap<String, usize>,
     pub review_log_scroll_offset: usize,
+
+    // Workbench state
+    pub focus: WorkbenchFocus,
+    pub explorer_visible: bool,
+    pub explorer_width: u16,
+    /// Explorer Changes selection (index into `changed_files`).
+    pub explorer_file_ix: usize,
+    /// When Some, the activity view is pinned to this story instead of
+    /// following the active-agent tab strip.
+    pub activity_filter: Option<String>,
+    pub diff_scroll_offset: u16,
+    /// File the diff view should scroll to; applied at render (only there
+    /// is the composed diff's line layout known), then the flag clears.
+    pub diff_target: Option<String>,
+    pub diff_scroll_pending: bool,
+    pub decisions_scroll: u16,
 }
 
 impl App {
@@ -569,13 +613,22 @@ impl App {
             changed_files: Vec::new(),
             story_diffs: HashMap::new(),
             total_cost_usd: 0.0,
-            global_tab: GlobalTab::Dashboard,
+            main_view: MainView::Activity,
             selected_log_index: 0,
             tick_count: 0,
             story_list_state: ListState::default(),
             dag_scroll_offset: 0,
             log_scroll_offsets: HashMap::new(),
             review_log_scroll_offset: usize::MAX,
+            focus: WorkbenchFocus::Main,
+            explorer_visible: true,
+            explorer_width: EXPLORER_DEFAULT_WIDTH,
+            explorer_file_ix: 0,
+            activity_filter: None,
+            diff_scroll_offset: 0,
+            diff_target: None,
+            diff_scroll_pending: false,
+            decisions_scroll: 0,
         }
     }
 
@@ -654,13 +707,99 @@ impl App {
         self.surgeon_llm = provider;
     }
 
-    // Execute screen tab navigation
-    pub fn next_tab(&mut self) {
-        self.global_tab = self.global_tab.next();
+    pub fn next_view(&mut self) {
+        self.main_view = self.main_view.next();
     }
 
-    pub fn prev_tab(&mut self) {
-        self.global_tab = self.global_tab.prev();
+    pub fn prev_view(&mut self) {
+        self.main_view = self.main_view.prev();
+    }
+
+    pub fn explorer_wider(&mut self) {
+        self.explorer_width = (self.explorer_width + 2).min(EXPLORER_MAX_WIDTH);
+    }
+
+    pub fn explorer_narrower(&mut self) {
+        self.explorer_width = self.explorer_width.saturating_sub(2).max(EXPLORER_MIN_WIDTH);
+    }
+
+    /// Selectable story ids in the exact item order of the explorer Agents
+    /// list (None = level header / spinner / connector row). Must stay in
+    /// sync with the explorer's item layout — both key handling and
+    /// auto_scroll_to_running index through this.
+    pub fn agent_item_rows(&self) -> Vec<Option<String>> {
+        let mut rows: Vec<Option<String>> = Vec::new();
+        if self.dag_levels.is_empty() {
+            for s in &self.stories {
+                rows.push(Some(s.id.clone()));
+            }
+        } else {
+            for (i, level) in self.dag_levels.iter().enumerate() {
+                rows.push(None); // level header
+                for sid in level {
+                    if self.stories.iter().any(|s| s.id == *sid) {
+                        rows.push(Some(sid.clone()));
+                    }
+                }
+                if self.review_in_progress && self.review_level == i {
+                    rows.push(None); // review spinner
+                }
+                if i < self.dag_levels.len() - 1 {
+                    rows.push(None); // connector
+                }
+            }
+        }
+        rows
+    }
+
+    /// Move the Agents selection to the previous/next story row, pinning
+    /// the activity view to that agent.
+    pub fn explorer_agents_move(&mut self, delta: i64) {
+        let rows = self.agent_item_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let cur = self
+            .story_list_state
+            .selected()
+            .map(|ix| ix.min(rows.len() - 1) as i64)
+            // No selection yet: enter from the edge the user is moving away from.
+            .unwrap_or(if delta > 0 { -1 } else { rows.len() as i64 });
+        let mut ix = cur + delta;
+        while ix >= 0 && (ix as usize) < rows.len() {
+            if let Some(id) = &rows[ix as usize] {
+                self.story_list_state.select(Some(ix as usize));
+                self.activity_filter = Some(id.clone());
+                self.main_view = MainView::Activity;
+                return;
+            }
+            ix += delta;
+        }
+    }
+
+    /// Move the Changes selection and point the diff view at that file.
+    pub fn explorer_files_move(&mut self, delta: i64) {
+        if self.changed_files.is_empty() {
+            return;
+        }
+        let max = self.changed_files.len() - 1;
+        let ix = (self.explorer_file_ix as i64 + delta).clamp(0, max as i64) as usize;
+        self.explorer_file_ix = ix;
+        self.diff_target = Some(self.changed_files[ix].path.clone());
+        self.diff_scroll_pending = true;
+        self.main_view = MainView::Diff;
+    }
+
+    pub fn diff_scroll_up(&mut self) {
+        self.diff_scroll_offset = self.diff_scroll_offset.saturating_sub(1);
+        self.diff_scroll_pending = false;
+    }
+
+    /// Upper bound is clamped at render time (only there is the composed
+    /// diff's total line count known).
+    pub fn diff_scroll_down(&mut self) {
+        self.diff_scroll_offset = self.diff_scroll_offset.saturating_add(1);
+        self.diff_scroll_pending = false;
     }
 
     pub fn next_log(&mut self) {
@@ -681,12 +820,19 @@ impl App {
         }
     }
 
-    /// Scroll the active story's log panel up by `lines`. Pins position (stops auto-scroll).
+    /// Story whose feed the activity view is showing: the explorer-pinned
+    /// filter wins, otherwise the tab-selected active story.
+    pub fn activity_story_id(&self) -> Option<String> {
+        self.activity_filter
+            .clone()
+            .or_else(|| self.active_story_ids().get(self.selected_log_index).cloned())
+    }
+
+    /// Scroll the shown story's log panel up by `lines`. Pins position (stops auto-scroll).
     pub fn log_scroll_up(&mut self, lines: usize, total_logs: usize, inner_height: usize) {
         let tail = total_logs.saturating_sub(inner_height);
-        let ids = self.active_story_ids();
-        if let Some(id) = ids.get(self.selected_log_index) {
-            let entry = self.log_scroll_offsets.entry(id.clone()).or_insert(usize::MAX);
+        if let Some(id) = self.activity_story_id() {
+            let entry = self.log_scroll_offsets.entry(id).or_insert(usize::MAX);
             if *entry == usize::MAX {
                 *entry = tail.saturating_sub(lines);
             } else {
@@ -695,12 +841,11 @@ impl App {
         }
     }
 
-    /// Scroll the active story's log panel down by `lines`. Returns to tail (auto-scroll) at MAX.
+    /// Scroll the shown story's log panel down by `lines`. Returns to tail (auto-scroll) at MAX.
     pub fn log_scroll_down(&mut self, lines: usize, total_logs: usize, inner_height: usize) {
-        let ids = self.active_story_ids();
-        if let Some(id) = ids.get(self.selected_log_index) {
+        if let Some(id) = self.activity_story_id() {
             let tail = total_logs.saturating_sub(inner_height);
-            let entry = self.log_scroll_offsets.entry(id.clone()).or_insert(usize::MAX);
+            let entry = self.log_scroll_offsets.entry(id).or_insert(usize::MAX);
             if *entry == usize::MAX {
                 return;
             }
@@ -802,6 +947,11 @@ impl App {
     }
 
     pub fn auto_scroll_to_running(&mut self) {
+        // Don't yank the selection out from under a user navigating the
+        // Agents explorer.
+        if self.focus == WorkbenchFocus::Agents {
+            return;
+        }
         let mut index = 0;
         if self.dag_levels.is_empty() {
             for story in &self.stories {
