@@ -193,6 +193,12 @@ export interface OrchestrateConfig {
         onAbortAll?: () => void
         onShutdown?: () => void
     }
+    /**
+     * Called once the Operator has joined the bus — the caller can then
+     * dispatch external commands (TUI stdin lane) mid-run instead of
+     * waiting for the OrchestrateResult.
+     */
+    onOperatorReady?: (operator: Operator) => void
     /** Extra participants to attach to the bus before the run starts. */
     extraParticipants?: import("@mozaik-ai/core").Participant[]
 }
@@ -336,6 +342,7 @@ export async function orchestrate(
     const operator = new Operator(config.operatorHooks ?? {})
     operator.setEnvironment(env)
     operator.join(env)
+    config.onOperatorReady?.(operator)
 
     const useGit = config.withGit ?? (await isInsideGitRepo(config.cwd))
     const gitGate = new GitGate()

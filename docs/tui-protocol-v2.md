@@ -43,3 +43,24 @@ source of truth for new consumers.
 Existing `activity` events are unchanged; the TUI should now render them
 (kind-colored, story-grouped) instead of relying on the raw `story_log`
 firehose.
+
+## Stdin commands (TUI → orchestrator)
+
+The reverse channel: the Rust TUI pipes the orchestrator's stdin and writes
+one JSON command per line (`subscribeCommands` in tui-protocol.ts parses
+them). The channel is additive and fault-tolerant by contract: malformed
+lines and unknown `type`s are ignored silently — a bad command must never
+crash a run.
+
+| type | fields | effect |
+|---|---|---|
+| `agent_message` | `id, text` | Operator emits `AgentTargetedMessage { recipientId: id, text, metadata: { source: "user" } }` on the bus; the running story agent consumes it between turns (same delivery path as Critic corrective feedback). A `story_log` line `[you → <id>] <text>` is mirrored to stdout so the message lands in the TUI log, audit JSONL and cloud. |
+
+Notes:
+- Commands arriving before the Operator has joined the bus (startup window)
+  are dropped, like any other unparseable line.
+- Backends that don't poll `AgentTargetedMessage` simply never see the
+  message — acceptable for v1.
+- TUI side: `m` targets the explorer-selected / pinned / tab-selected
+  running agent and sends on Enter, echoing `you → <id>: <text>` into that
+  agent's activity feed immediately.

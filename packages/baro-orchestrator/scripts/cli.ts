@@ -12,6 +12,9 @@ import { ClaudeCliParticipant } from "../src/participants/claude-cli-participant
 import { CodexCliParticipant } from "../src/participants/codex-cli-participant.js"
 import { OpenCodeCliParticipant } from "../src/participants/opencode-cli-participant.js"
 import { PiCliParticipant } from "../src/participants/pi-cli-participant.js"
+import type { Operator } from "../src/participants/operator.js"
+import { handleStdinCommand } from "../src/stdin-commands.js"
+import { subscribeCommands } from "../src/tui-protocol.js"
 import {
     parseEndpoints,
     parseTierMap,
@@ -314,9 +317,20 @@ async function main(): Promise<void> {
         process.exit(2)
     }
 
+    // TUI→orchestrator command lane on stdin (agent chat). The Operator
+    // joins the bus a beat after startup; commands arriving before that
+    // are dropped, like any other malformed/unknown line.
+    let operatorRef: Operator | null = null
+    subscribeCommands((cmd) => {
+        handleStdinCommand(cmd, { getOperator: () => operatorRef })
+    })
+
     const config: OrchestrateConfig = {
         prdPath,
         cwd,
+        onOperatorReady: (operator) => {
+            operatorRef = operator
+        },
         parallel: args.parallel,
         timeoutSecs: args.timeout,
         overrideModel: args.model ?? null,

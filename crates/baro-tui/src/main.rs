@@ -104,7 +104,25 @@ enum AppEvent {
     ArchitectStarted,
     ArchitectComplete(String), // decision document (markdown)
     ArchitectSkipped(String),  // reason (not fatal — planner will still run)
+    /// Handle to the live orchestrator's stdin (JSON command lines);
+    /// arrives once per spawn, replacing any stale handle from a
+    /// previous run.
+    OrchestratorStdin(mpsc::Sender<String>),
     Tick,
+}
+
+/// The focus zone ↑↓ should act on: explorer zones only count while the
+/// explorer is actually on screen at the current terminal width.
+fn effective_focus(
+    app: &app::App,
+    terminal: &Terminal<CrosstermBackend<Box<dyn Write>>>,
+) -> app::WorkbenchFocus {
+    let width = terminal.size().map(|s| s.width).unwrap_or(120);
+    if app.explorer_visible && width >= screens::execute::BP_EXPLORER {
+        app.focus
+    } else {
+        app::WorkbenchFocus::Main
+    }
 }
 
 fn open_terminal_writer() -> io::Result<Box<dyn Write>> {
@@ -880,7 +898,7 @@ async fn run_app(
                     app.auto_scroll_to_running();
                 }
                 if let Some(ref sid) = story_start_id {
-                    if app.global_tab == app::GlobalTab::Dag {
+                    if app.main_view == app::MainView::Plan {
                         if let Some(t) = terminal.as_deref_mut() {
                             let visible = t.size().map(|s| s.height.saturating_sub(10)).unwrap_or(20);
                             app.dag_auto_scroll_to_story(sid, visible);
@@ -1476,11 +1494,48 @@ async fn run_app(
                                 spawn_planner(&app, &cwd, tx.clone(), headless);
                             }
                         }
+                        // Mid-run agent chat: same bottom-strip input, one JSON
+                        // line to the orchestrator's stdin on Enter.
+                        KeyCode::Esc if app.agent_msg_input.is_some() => {
+                            app.agent_msg_input = None;
+                        }
+                        KeyCode::Backspace if app.agent_msg_input.is_some() => {
+                            if let Some((_, s)) = app.agent_msg_input.as_mut() {
+                                s.pop();
+                            }
+                        }
+                        KeyCode::Char(c) if app.agent_msg_input.is_some() => {
+                            if let Some((_, s)) = app.agent_msg_input.as_mut() {
+                                s.push(c);
+                            }
+                        }
+                        KeyCode::Enter if app.agent_msg_input.is_some() => {
+                            if let Some((id, text)) = app.agent_msg_input.take() {
+                                let text = text.trim().to_string();
+                                if !text.is_empty() {
+                                    if let Some(sender) = &app.orchestrator_stdin {
+                                        let line = serde_json::json!({
+                                            "type": "agent_message",
+                                            "id": id,
+                                            "text": text,
+                                        })
+                                        .to_string();
+                                        let _ = sender.try_send(line);
+                                    }
+                                    app.echo_user_message(&id, &text);
+                                }
+                            }
+                        }
                         // Follow-up works on the current branch via --continue, with or
                         // without a PR — don't gate on pr_url (local/no-remote runs can
                         // still continue the run in place).
                         KeyCode::Char('f') if app.done && app.exit_reason.is_none() && app.followup_input.is_none() => {
                             app.followup_input = Some(String::new());
+                        }
+                        KeyCode::Char('m') if !app.done && app.followup_input.is_none() => {
+                            if let Some(id) = app.message_target() {
+                                app.agent_msg_input = Some((id, String::new()));
+                            }
                         }
                         KeyCode::Char('r') if app.done && app.exit_reason.is_some() => {
                             let prd_path = cwd.join("prd.json");
@@ -1537,69 +1592,130 @@ async fn run_app(
                             }
                         }
                         KeyCode::Char('q') => return Ok(()),
-                        // Full terminal clear on tab change — ratatui's
+                        // Un-pin the activity view from an explorer-selected agent.
+                        KeyCode::Esc => {
+                            app.activity_filter = None;
+                        }
+                        // Full terminal clear on view change — ratatui's
                         // `Clear` widget doesn't reliably blank every cell,
-                        // so old tab content bleeds through otherwise.
+                        // so old view content bleeds through otherwise.
                         KeyCode::Char('1') => {
-                            app.global_tab = app::GlobalTab::Dashboard;
+                            app.main_view = app::MainView::Activity;
                             let _ = terminal.clear();
                         }
                         KeyCode::Char('2') => {
-                            app.global_tab = app::GlobalTab::Dag;
+                            app.main_view = app::MainView::Plan;
                             let _ = terminal.clear();
                         }
                         KeyCode::Char('3') => {
-                            app.global_tab = app::GlobalTab::Stats;
+                            app.main_view = app::MainView::Stats;
                             let _ = terminal.clear();
                         }
                         KeyCode::Char('4') => {
-                            app.global_tab = app::GlobalTab::Changes;
+                            app.main_view = app::MainView::Diff;
                             let _ = terminal.clear();
                         }
-                        KeyCode::Tab => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) { app.prev_log(); }
-                            else { app.next_log(); }
+                        KeyCode::Char('5') => {
+                            app.main_view = app::MainView::Decisions;
+                            let _ = terminal.clear();
                         }
-                        KeyCode::BackTab => app.prev_log(),
-                        KeyCode::Left => app.prev_tab(),
-                        KeyCode::Right => app.next_tab(),
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if app.global_tab == app::GlobalTab::Dashboard {
-                                let inner_h = terminal.size().map(|s| s.height.saturating_sub(12) as usize).unwrap_or(20);
-                                let active_ids = app.active_story_ids();
-                                let selected_id = active_ids.get(app.selected_log_index).cloned().unwrap_or_default();
-                                if !app.review_logs.is_empty() && active_ids.is_empty() {
-                                    let total = app.review_logs.len();
-                                    app.review_log_scroll_up(1, total, inner_h);
-                                } else if let Some(story) = app.active_stories.get(&selected_id) {
-                                    let total = story.logs.len();
-                                    app.log_scroll_up(1, total, inner_h);
-                                }
-                            } else if app.global_tab == app::GlobalTab::Dag {
-                                app.dag_scroll_up();
+                        KeyCode::Char('e') => {
+                            app.explorer_visible = !app.explorer_visible;
+                            if !app.explorer_visible {
+                                app.focus = app::WorkbenchFocus::Main;
+                            }
+                            let _ = terminal.clear();
+                        }
+                        KeyCode::Char('[') => app.explorer_narrower(),
+                        KeyCode::Char(']') => app.explorer_wider(),
+                        // With the explorer on screen Tab cycles focus zones;
+                        // when it's hidden (`e` or a narrow terminal) it keeps
+                        // the legacy active-agent switching.
+                        KeyCode::Tab | KeyCode::BackTab => {
+                            let back = key.code == KeyCode::BackTab
+                                || key.modifiers.contains(KeyModifiers::SHIFT);
+                            let width = terminal.size().map(|s| s.width).unwrap_or(120);
+                            let explorer_shown = app.explorer_visible
+                                && width >= screens::execute::BP_EXPLORER;
+                            if explorer_shown {
+                                app.focus = if back { app.focus.prev() } else { app.focus.next() };
+                            } else if back {
+                                app.prev_log();
+                            } else {
+                                app.next_log();
                             }
                         }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if app.global_tab == app::GlobalTab::Dashboard {
-                                let inner_h = terminal.size().map(|s| s.height.saturating_sub(12) as usize).unwrap_or(20);
-                                let active_ids = app.active_story_ids();
-                                let selected_id = active_ids.get(app.selected_log_index).cloned().unwrap_or_default();
-                                if !app.review_logs.is_empty() && active_ids.is_empty() {
-                                    let total = app.review_logs.len();
-                                    app.review_log_scroll_down(1, total, inner_h);
-                                } else if let Some(story) = app.active_stories.get(&selected_id) {
-                                    let total = story.logs.len();
-                                    app.log_scroll_down(1, total, inner_h);
+                        KeyCode::Left => app.prev_view(),
+                        KeyCode::Right => app.next_view(),
+                        // ↑↓ act on the *visible* focus zone: a hidden explorer
+                        // (toggled off or narrow terminal) can't be current, so
+                        // its stale focus must not swallow scrolling.
+                        KeyCode::Up | KeyCode::Char('k') => match effective_focus(&app, terminal) {
+                            app::WorkbenchFocus::Agents => app.explorer_agents_move(-1),
+                            app::WorkbenchFocus::Changes => app.explorer_files_move(-1),
+                            app::WorkbenchFocus::Main => match app.main_view {
+                                app::MainView::Activity => {
+                                    let inner_h = terminal.size().map(|s| s.height.saturating_sub(12) as usize).unwrap_or(20);
+                                    let active_ids = app.active_story_ids();
+                                    let selected_id = app
+                                        .activity_filter
+                                        .clone()
+                                        .or_else(|| active_ids.get(app.selected_log_index).cloned())
+                                        .unwrap_or_default();
+                                    if !app.review_logs.is_empty() && active_ids.is_empty() {
+                                        let total = app.review_logs.len();
+                                        app.review_log_scroll_up(1, total, inner_h);
+                                    } else if let Some(story) = app.active_stories.get(&selected_id) {
+                                        let total = if story.activity.is_empty() { story.logs.len() } else { story.activity.len() };
+                                        app.log_scroll_up(1, total, inner_h);
+                                    }
                                 }
-                            } else if app.global_tab == app::GlobalTab::Dag {
-                                let total = app.dag_line_count();
-                                let visible = terminal.size().map(|s| s.height.saturating_sub(10)).unwrap_or(20);
-                                app.dag_scroll_down(total, visible);
-                            }
-                        }
+                                app::MainView::Plan => app.dag_scroll_up(),
+                                app::MainView::Diff => app.diff_scroll_up(),
+                                app::MainView::Decisions => {
+                                    app.decisions_scroll = app.decisions_scroll.saturating_sub(1);
+                                }
+                                app::MainView::Stats => {}
+                            },
+                        },
+                        KeyCode::Down | KeyCode::Char('j') => match effective_focus(&app, terminal) {
+                            app::WorkbenchFocus::Agents => app.explorer_agents_move(1),
+                            app::WorkbenchFocus::Changes => app.explorer_files_move(1),
+                            app::WorkbenchFocus::Main => match app.main_view {
+                                app::MainView::Activity => {
+                                    let inner_h = terminal.size().map(|s| s.height.saturating_sub(12) as usize).unwrap_or(20);
+                                    let active_ids = app.active_story_ids();
+                                    let selected_id = app
+                                        .activity_filter
+                                        .clone()
+                                        .or_else(|| active_ids.get(app.selected_log_index).cloned())
+                                        .unwrap_or_default();
+                                    if !app.review_logs.is_empty() && active_ids.is_empty() {
+                                        let total = app.review_logs.len();
+                                        app.review_log_scroll_down(1, total, inner_h);
+                                    } else if let Some(story) = app.active_stories.get(&selected_id) {
+                                        let total = if story.activity.is_empty() { story.logs.len() } else { story.activity.len() };
+                                        app.log_scroll_down(1, total, inner_h);
+                                    }
+                                }
+                                app::MainView::Plan => {
+                                    let total = app.dag_line_count();
+                                    let visible = terminal.size().map(|s| s.height.saturating_sub(10)).unwrap_or(20);
+                                    app.dag_scroll_down(total, visible);
+                                }
+                                app::MainView::Diff => app.diff_scroll_down(),
+                                app::MainView::Decisions => {
+                                    app.decisions_scroll = app.decisions_scroll.saturating_add(1);
+                                }
+                                app::MainView::Stats => {}
+                            },
+                        },
                         _ => {}
                     },
                 }
+            }
+            Some(AppEvent::OrchestratorStdin(sender)) => {
+                app.orchestrator_stdin = Some(sender);
             }
             Some(AppEvent::Tick) => {
                 app.tick_count += 1;
@@ -2028,6 +2144,11 @@ fn spawn_executor(
     // app/screens stay untouched.
     let (exec_tx, mut exec_rx) = mpsc::channel::<BaroEvent>(256);
 
+    // TUI→orchestrator command lane (agent chat): hand the app loop the
+    // sender, the child-stdin writer consumes the receiver.
+    let (stdin_tx, stdin_rx) = mpsc::channel::<String>(64);
+    let _ = tx.try_send(AppEvent::OrchestratorStdin(stdin_tx));
+
     let tx_fwd = tx.clone();
     tokio::spawn(async move {
         while let Some(ev) = exec_rx.recv().await {
@@ -2127,7 +2248,7 @@ fn spawn_executor(
         openai_endpoints: config.openai_endpoints,
         echo_raw,
     };
-    orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx);
+    orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx, stdin_rx);
 }
 
 /// Delete the previous word from the goal input, terminal-style: drop any

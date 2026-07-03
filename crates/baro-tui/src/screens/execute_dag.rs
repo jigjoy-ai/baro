@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{App, LevelRunState, ReplanMark};
-use crate::screens::execute::status_icon_color;
+use crate::screens::widgets::status_icon_color;
 use crate::theme;
 
 pub fn render_dag_full(f: &mut Frame, app: &App, area: Rect) {
@@ -248,7 +248,7 @@ pub fn render_dag_full(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER))
         .title(Span::styled(
-            " Dependency Graph ",
+            " plan — dependency graph ",
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),

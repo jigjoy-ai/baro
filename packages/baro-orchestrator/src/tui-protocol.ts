@@ -152,6 +152,8 @@ export type BaroCommand =
     | { type: "abort"; story_id: string }
     | { type: "abort_all" }
     | { type: "redirect"; story_id: string; message: string }
+    /** Mid-run user chat with a running agent (TUI `m` key). */
+    | { type: "agent_message"; id: string; text: string }
     | { type: "shutdown" }
 
 export type CommandHandler = (cmd: BaroCommand) => Promise<void> | void

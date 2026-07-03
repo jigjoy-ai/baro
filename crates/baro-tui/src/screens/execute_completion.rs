@@ -294,7 +294,9 @@ pub fn render_completion(f: &mut Frame, app: &App) {
     }
 
     lines.push(Line::from(""));
-    if let Some(ref fu) = app.followup_input {
+    if app.followup_input.is_some() {
+        // The input itself lives in the bottom strip (always visible);
+        // embedding it here once clipped past the popup's fixed height.
         let fu_label = if app.pr_url.is_some() {
             "Follow up — continue on this PR:"
         } else {
@@ -304,9 +306,8 @@ pub fn render_completion(f: &mut Frame, app: &App) {
             fu_label,
             Style::default().fg(banner_color).add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::from(format!("> {}", fu)));
         lines.push(Line::from(Span::styled(
-            "Enter to run  ·  Esc to cancel",
+            "type below \u{25BE}  ·  Enter run  ·  Esc cancel",
             Style::default().fg(theme::MUTED),
         )));
     } else {

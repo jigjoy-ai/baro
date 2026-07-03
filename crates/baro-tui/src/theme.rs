@@ -26,6 +26,7 @@ pub const MUTED: Color = Color::Rgb(90, 90, 96); // #5a5a60
 pub const BG: Color = Color::Rgb(10, 10, 11); // #0a0a0b background
 pub const BORDER: Color = Color::Rgb(58, 58, 64); // #3a3a40 subtle
 pub const BORDER_ACTIVE: Color = Color::Rgb(255, 181, 71); // amber — active = brand
+pub const SELECTION_BG: Color = Color::Rgb(48, 42, 30); // amber-tinted row highlight
 
 // Logo — warm amber gradient (fan → converge)
 pub const LOGO_1: Color = Color::Rgb(255, 209, 128); // #ffd180
