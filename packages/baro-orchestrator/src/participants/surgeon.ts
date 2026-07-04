@@ -80,7 +80,7 @@ export interface PrdSnapshot {
         description: string
         dependsOn: readonly string[]
         passes: boolean
-        /** Current routing tier ("haiku" | "sonnet" | "opus" | backend:model). */
+        /** Current routing tier ("light" | "standard" | "heavy", legacy haiku/sonnet/opus, or backend:model). */
         model?: string
     }[]
 }
@@ -167,7 +167,7 @@ Rules:
 - "abort" → empty added/removed/modifiedDeps arrays.
 - MODEL: LEAVE "model" UNSET on the stories you add — they run on the
   default (cheaper) model, which is exactly what split children want.
-  Do NOT use planner tier names ("haiku"/"sonnet"/"opus") — the story
+  Do NOT use planner tier names ("light"/"standard"/"heavy") — the story
   model is not chosen by tier here; it is either the default or an
   explicit escalation route (below).
 - ESCALATION vs SPLIT — the failing story already burned its retries on

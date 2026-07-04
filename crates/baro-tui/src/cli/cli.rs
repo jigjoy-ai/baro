@@ -106,9 +106,10 @@ pub struct Cli {
     #[arg(long)]
     pub story_model: Option<String>,
 
-    /// Per-story tier→backend:model map, so one run can mix backends
+    /// Per-story tier→backend:model map (tiers: light/standard/heavy;
+    /// legacy haiku/sonnet/opus accepted), so one run can mix backends
     /// story-by-story. Example:
-    ///   --tier-map "haiku=openai:MiniMax-M3,sonnet=openai:MiniMax-M3,opus=claude:opus"
+    ///   --tier-map "light=openai:MiniMax-M3,standard=openai:MiniMax-M3,heavy=claude:opus"
     #[arg(long = "tier-map")]
     pub tier_map: Option<String>,
 

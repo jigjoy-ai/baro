@@ -70,8 +70,8 @@ export interface StoryFactoryOptions {
      * for both Claude and OpenAI paths. Wins over the per-PRD-story
      * `model`. `openaiModel` above is still applied when this is
      * undefined and the path is OpenAI, since the PRD's `model`
-     * names ("opus", "sonnet", …) are Claude-flavoured and not
-     * meaningful for OpenAI.
+     * names are tiers ("heavy", "standard", …) and not meaningful
+     * for OpenAI.
      */
     storyModelOverride?: string
     /**
@@ -89,7 +89,7 @@ export interface StoryFactoryOptions {
     effort?: string
     /**
      * Tier→`backend:model` bindings. When a story's `model` is a bare
-     * tier name (e.g. "opus" from the Planner's blast-radius
+     * tier name (e.g. "heavy" from the Planner's blast-radius
      * classification) and a binding exists, the story is routed to that
      * concrete backend+model — independent of `llm`. This is what lets a
      * single DAG mix claude / openai / codex stories. Absent → bare tier

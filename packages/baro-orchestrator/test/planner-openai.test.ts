@@ -12,7 +12,7 @@ describe("PlannerOpenAI fallback PRD", () => {
         assert.equal(prd.userStories.length, 1)
         assert.equal(prd.userStories[0].id, "S1")
         assert.deepEqual(prd.userStories[0].dependsOn, [])
-        assert.equal(prd.userStories[0].model, "opus")
+        assert.equal(prd.userStories[0].model, "heavy")
         assert.ok(prd.userStories[0].description.includes("Planner fallback: test"))
     })
 })

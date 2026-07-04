@@ -2,8 +2,9 @@
  * Per-story model routing: which backend and model run one story, so a
  * single DAG can mix backends. A route is a bare tier/model name or an
  * explicit `backend:model`; a TierMap binds the Planner's semantic tiers
- * (haiku/sonnet/opus) to concrete routes. Back-compat: with no TierMap, a
- * bare tier name resolves as the old phase-level wiring did.
+ * (light/standard/heavy — legacy spellings haiku/sonnet/opus) to concrete
+ * routes. Back-compat: with no TierMap, a bare tier name resolves as the
+ * old phase-level wiring did.
  */
 
 export type Backend = "claude" | "openai" | "codex" | "opencode" | "pi"
@@ -49,12 +50,29 @@ export type EndpointMap = Record<string, Endpoint>
  */
 export type TierMap = Record<string, string>
 
-// Claude tier names (optionally date-suffixed, e.g. "sonnet-4-6") are
-// meaningless to non-Claude backends, which fall back to their own default.
+/**
+ * Neutral tier spelling → canonical internal spelling. The canonical form
+ * stays the legacy Claude names because on the Claude backend a bare tier
+ * doubles as a real model name; everything else normalizes at the
+ * boundaries via `canonicalTier`.
+ */
+export const TIER_ALIASES: Readonly<Record<string, string>> = {
+    light: "haiku",
+    standard: "sonnet",
+    heavy: "opus",
+}
+
+/** Map a neutral tier name to its canonical spelling; anything else passes through. */
+export function canonicalTier(name: string): string {
+    return TIER_ALIASES[name.trim().toLowerCase()] ?? name
+}
+
+// Tier names (optionally date-suffixed, e.g. "sonnet-4-6") are meaningless
+// to non-Claude backends, which fall back to their own default.
 const CLAUDE_TIER_RE = /^(opus|sonnet|haiku)\b/i
 
 export function isClaudeTierName(s: string): boolean {
-    return CLAUDE_TIER_RE.test(s.trim())
+    return CLAUDE_TIER_RE.test(canonicalTier(s).trim())
 }
 
 /**
@@ -153,10 +171,11 @@ export function resolveStoryRoute(
     const direct = splitBackendModel(raw)
 
     // Bare names expand through the tier map; explicit `backend:model`
-    // bypasses it. Recurse with the map removed so the mapped value can
-    // never re-expand into a loop.
+    // bypasses it. Both the story's tier and the map's keys accept either
+    // spelling — canonicalize each side before the lookup. Recurse with
+    // the map removed so the mapped value can never re-expand into a loop.
     if (direct.backend === undefined && opts.tierMap) {
-        const mapped = opts.tierMap[raw.toLowerCase()] ?? opts.tierMap[raw]
+        const mapped = canonicalTierMap(opts.tierMap)[canonicalTier(raw).toLowerCase()]
         if (mapped) {
             return resolveStoryRoute(mapped, {
                 ...opts,
@@ -172,13 +191,14 @@ export function resolveStoryRoute(
     }
 
     const backend = opts.fallbackBackend
+    const model = direct.model === undefined ? undefined : canonicalTier(direct.model)
     if (backend === "claude") {
-        return { backend, model: direct.model }
+        return { backend, model }
     }
-    // A Claude tier name is meaningless on a non-Claude backend → its
-    // default model; a real model name passes through.
-    if (direct.model && !isClaudeTierName(direct.model)) {
-        return buildRoute(backend, direct.model, opts)
+    // A tier name is meaningless on a non-Claude backend → its default
+    // model; a real model name passes through.
+    if (model && !isClaudeTierName(model)) {
+        return buildRoute(backend, model, opts)
     }
     return defaultRoute(backend, opts.openaiDefaultModel)
 }
@@ -193,6 +213,15 @@ function buildRoute(backend: Backend, model: string, opts: ResolveOpts): StoryRo
     if (!endpointRef) return { backend, model: bareModel }
     const ep = resolveEndpoint(endpointRef, opts)
     return { backend, model: bareModel, baseUrl: ep.baseUrl, apiKey: ep.apiKey }
+}
+
+/** Lower-case + canonicalize every tier key so `heavy=` and `opus=` bind the same tier. */
+function canonicalTierMap(map: TierMap): TierMap {
+    const out: TierMap = {}
+    for (const [k, v] of Object.entries(map)) {
+        out[canonicalTier(k).toLowerCase()] = v
+    }
+    return out
 }
 
 function defaultRoute(backend: Backend, openaiDefaultModel?: string): StoryRoute {

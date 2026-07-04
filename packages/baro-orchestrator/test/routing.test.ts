@@ -2,12 +2,14 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
 import {
+    canonicalTier,
     formatRoute,
     isBackend,
     isClaudeTierName,
     parseEndpoints,
     parseTierMap,
     resolveStoryRoute,
+    TIER_ALIASES,
     type EndpointMap,
     type ResolveOpts,
 } from "../src/routing.js"
@@ -65,6 +67,84 @@ describe("resolveStoryRoute — bare tier names (back-compat)", () => {
             backend: "openai",
             model: "deepseek:chat",
         })
+    })
+})
+
+describe("resolveStoryRoute — neutral tier names (light/standard/heavy)", () => {
+    it("resolves each neutral tier identically to its legacy spelling", () => {
+        for (const [neutral, legacy] of Object.entries(TIER_ALIASES)) {
+            assert.deepEqual(
+                resolveStoryRoute(neutral, claudeFallback),
+                resolveStoryRoute(legacy, claudeFallback),
+            )
+            assert.deepEqual(
+                resolveStoryRoute(neutral, openaiFallback),
+                resolveStoryRoute(legacy, openaiFallback),
+            )
+        }
+        assert.deepEqual(resolveStoryRoute("light", claudeFallback), {
+            backend: "claude",
+            model: "haiku",
+        })
+    })
+
+    it("drops a neutral tier on a non-Claude backend exactly like the legacy name", () => {
+        assert.deepEqual(resolveStoryRoute("heavy", openaiFallback), {
+            backend: "openai",
+            model: "gpt-5.5",
+        })
+        assert.deepEqual(resolveStoryRoute("light", codexFallback), {
+            backend: "codex",
+        })
+    })
+
+    it("a neutral story tier hits a legacy-keyed tier map", () => {
+        const tierMap = { haiku: "openai:MiniMax-M3", opus: "claude:opus" }
+        assert.deepEqual(
+            resolveStoryRoute("light", { ...claudeFallback, tierMap }),
+            { backend: "openai", model: "MiniMax-M3" },
+        )
+        assert.deepEqual(
+            resolveStoryRoute("HEAVY", { ...claudeFallback, tierMap }),
+            { backend: "claude", model: "opus" },
+        )
+    })
+
+    it("a legacy story tier hits a neutral-keyed tier map", () => {
+        const tierMap = { light: "openai:MiniMax-M3", heavy: "claude:opus" }
+        assert.deepEqual(
+            resolveStoryRoute("haiku", { ...claudeFallback, tierMap }),
+            { backend: "openai", model: "MiniMax-M3" },
+        )
+        assert.deepEqual(
+            resolveStoryRoute("opus", { ...openaiFallback, tierMap }),
+            { backend: "claude", model: "opus" },
+        )
+    })
+
+    it("parseTierMap accepts neutral keys and either spelling resolves through it", () => {
+        const tierMap = parseTierMap(
+            "light=openai:MiniMax-M3,standard=openai:MiniMax-M3,heavy=openai:gpt-5.5",
+        )
+        assert.deepEqual(
+            resolveStoryRoute("sonnet", { ...claudeFallback, tierMap }),
+            { backend: "openai", model: "MiniMax-M3" },
+        )
+        assert.deepEqual(
+            resolveStoryRoute("heavy", { ...claudeFallback, tierMap }),
+            { backend: "openai", model: "gpt-5.5" },
+        )
+    })
+
+    it("canonicalTier / isClaudeTierName cover both spellings", () => {
+        assert.equal(canonicalTier("light"), "haiku")
+        assert.equal(canonicalTier(" Standard "), "sonnet")
+        assert.equal(canonicalTier("HEAVY"), "opus")
+        assert.equal(canonicalTier("gpt-5.5"), "gpt-5.5")
+        assert.equal(isClaudeTierName("light"), true)
+        assert.equal(isClaudeTierName("standard"), true)
+        assert.equal(isClaudeTierName("heavy"), true)
+        assert.equal(isClaudeTierName("deepseek-v4-pro"), false)
     })
 })
 
@@ -406,25 +486,31 @@ describe("helpers", () => {
     })
 })
 
-describe("resolveStoryRoute — DeepSeek Flash default + Pro opus route (cloud jigjoy)", () => {
-    // The hosted-gateway tier map: default/haiku/sonnet run on cheap Flash,
-    // while opus goes to Pro for focused or high-blast-radius work selected by
-    // the Intake + Planner contract.
+describe("resolveStoryRoute — DeepSeek Flash default + Pro heavy route (cloud jigjoy)", () => {
+    // The hosted-gateway tier map (mirrors the BARO_JIGJOY default in
+    // crates/baro-tui/src/main.rs): default/light/standard run on cheap
+    // Flash, while heavy goes to Pro for focused or high-blast-radius work
+    // selected by the Intake + Planner contract.
     const jigjoy: ResolveOpts = {
         fallbackBackend: "openai",
         openaiDefaultModel: "deepseek-v4-pro",
         tierMap: {
             default: "openai:deepseek-v4-flash",
-            haiku: "openai:deepseek-v4-flash",
-            sonnet: "openai:deepseek-v4-flash",
-            opus: "openai:deepseek-v4-pro",
+            light: "openai:deepseek-v4-flash",
+            standard: "openai:deepseek-v4-flash",
+            heavy: "openai:deepseek-v4-pro",
         },
     }
     it("routes an un-tiered story to the cheap default (NOT the openai default)", () => {
         assert.deepEqual(resolveStoryRoute(undefined, jigjoy), { backend: "openai", model: "deepseek-v4-flash" })
         assert.deepEqual(resolveStoryRoute("", jigjoy), { backend: "openai", model: "deepseek-v4-flash" })
     })
-    it("keeps low/medium tiers cheap and routes opus to Pro", () => {
+    it("keeps low/medium tiers cheap and routes heavy to Pro", () => {
+        assert.deepEqual(resolveStoryRoute("light", jigjoy), { backend: "openai", model: "deepseek-v4-flash" })
+        assert.deepEqual(resolveStoryRoute("standard", jigjoy), { backend: "openai", model: "deepseek-v4-flash" })
+        assert.deepEqual(resolveStoryRoute("heavy", jigjoy), { backend: "openai", model: "deepseek-v4-pro" })
+    })
+    it("legacy-tiered stories from old PRDs still hit the neutral-keyed map", () => {
         assert.deepEqual(resolveStoryRoute("haiku", jigjoy), { backend: "openai", model: "deepseek-v4-flash" })
         assert.deepEqual(resolveStoryRoute("sonnet", jigjoy), { backend: "openai", model: "deepseek-v4-flash" })
         assert.deepEqual(resolveStoryRoute("opus", jigjoy), { backend: "openai", model: "deepseek-v4-pro" })

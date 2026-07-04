@@ -262,7 +262,7 @@ export function fallbackPrdJson(goal: string, reason: string): string {
                 retries: 2,
                 acceptance: ["The requested change is implemented without regressing existing behavior."],
                 tests: ["echo \"planner fallback: run the project's relevant checks\""],
-                model: "opus",
+                model: "heavy",
             },
         ],
     })

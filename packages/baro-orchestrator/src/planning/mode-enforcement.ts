@@ -38,7 +38,7 @@ export function enforceModeContract(prdJson: string, contract: ModeContract, goa
                 dependsOn: [],
                 acceptance: [...new Set(stories.flatMap((s) => s.acceptance ?? []))],
                 tests: [...new Set(stories.flatMap((s) => s.tests ?? []))],
-                model: first.model ?? "opus",
+                model: first.model ?? "heavy",
             },
         ]
     } else if (contract.maxStories && stories.length > contract.maxStories) {
