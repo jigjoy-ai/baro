@@ -150,16 +150,21 @@ economics, per-phase routing, and the side-by-side benchmark across three real t
 
 `--llm` / `--story-llm` pick a backend per *phase* — every story runs on the same one. With
 `--tier-map` you tier per *story* instead: the Planner tags each story with a blast-radius tier
-(`haiku` = mechanical/self-contained, `sonnet` = one contained module, `opus` = cross-cutting /
+(`light` = mechanical/self-contained, `standard` = one contained module, `heavy` = cross-cutting /
 schema / a DAG hub — "what breaks if an agent gets this wrong?"), and the tier map binds each
 tier to a concrete `backend:model`. One DAG, several backends, chosen by risk:
 
 ```bash
 # Cheap single-concern stories on MiniMax, cross-cutting stories on Claude Opus
 baro --openai-endpoint minimax=https://api.minimax.io/v1 \
-     --tier-map "haiku=openai:MiniMax-M3@minimax,sonnet=openai:MiniMax-M3@minimax,opus=claude:opus" \
+     --tier-map "light=openai:MiniMax-M3@minimax,standard=openai:MiniMax-M3@minimax,heavy=claude:opus" \
      "Your goal"
 ```
+
+Tiers are a blast-radius class, not a model: a `heavy` story may well run on DeepSeek or GPT —
+whatever its route says. The legacy tier spellings `haiku`/`sonnet`/`opus` are still accepted
+everywhere a tier can appear (story `model` fields, `--tier-map` keys, `BARO_TIER_MAP`), so old
+PRDs and maps keep working unchanged.
 
 A story's route can name **any** backend (`claude:opus`, `openai:MiniMax-M3`, `codex:gpt-5.5`) and
 an OpenAI route can name its **own endpoint** with `@` — a registered name (`--openai-endpoint

@@ -4,6 +4,8 @@ import assert from "node:assert/strict"
 import {
     heuristicModeContract,
     parseModeContract,
+    PLANNER_SYSTEM_PROMPT,
+    renderModeContract,
 } from "../src/planning/planner-prompts.js"
 import { enforceModeContract } from "../src/planning/mode-enforcement.js"
 import type { PrdFile } from "../src/prd.js"
@@ -21,6 +23,20 @@ describe("parseModeContract", () => {
         const c = parseModeContract(`{"mode":"yolo","confidence":0.5,"reason":"r","source":"user"}`)
         assert.equal(c.mode, "focused")
         assert.equal(c.source, "user")
+    })
+})
+
+describe("planner prompt tiers", () => {
+    it("tiers stories with the neutral names, not Claude model names", () => {
+        assert.match(PLANNER_SYSTEM_PROMPT, /"light" \| "standard" \| "heavy"/)
+        assert.match(PLANNER_SYSTEM_PROMPT, /"model": "heavy"/)
+        assert.doesNotMatch(PLANNER_SYSTEM_PROMPT, /"haiku"|"sonnet"|"opus"/)
+    })
+
+    it("focused-mode contract escalates via the neutral heavy tier", () => {
+        const text = renderModeContract({ mode: "focused", confidence: 1, reason: "r" })
+        assert.match(text, /"heavy"/)
+        assert.doesNotMatch(text, /"opus"/)
     })
 })
 
@@ -72,7 +88,7 @@ describe("enforceModeContract", () => {
         assert.equal(s.id, "S1")
         assert.deepEqual(s.dependsOn, [])
         assert.deepEqual([...s.acceptance].sort(), ["a1", "a2"])
-        assert.equal(s.model, "opus")
+        assert.equal(s.model, "heavy")
         assert.match(s.description, /step two/)
         assert.equal(out.executionMode?.mode, "focused")
         assert.equal(out.executionMode?.source, "llm")

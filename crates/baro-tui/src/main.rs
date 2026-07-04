@@ -653,13 +653,15 @@ async fn run_app(
             if app.critic_model.is_none() {
                 app.critic_model = Some(cheap.clone());
             }
-            // Most story tiers map to the cheap model; `opus` maps to the
+            // Most story tiers map to the cheap model; `heavy` maps to the
             // strong route for focused/high-blast-radius work selected by the
-            // Intake + Planner contract. DeepSeek Pro is cheap enough to use
-            // as the safe lane while we evaluate quality.
+            // Intake + Planner contract. Routing accepts the legacy
+            // haiku/sonnet/opus spellings as aliases, so old PRDs still hit
+            // these keys. DeepSeek Pro is cheap enough to use as the safe
+            // lane while we evaluate quality.
             if app.tier_map.is_none() {
                 app.tier_map = Some(format!(
-                    "default=openai:{cheap},haiku=openai:{cheap},sonnet=openai:{cheap},opus=openai:{strong}"
+                    "default=openai:{cheap},light=openai:{cheap},standard=openai:{cheap},heavy=openai:{strong}"
                 ));
             }
 
