@@ -141,11 +141,6 @@ export async function runCodexOneShot(
             clearTimeout(timer)
             const elapsedMs = Date.now() - startedAt
 
-            if (agentMessage.trim()) {
-                resolve(agentMessage)
-                return
-            }
-
             const ctx = [
                 `elapsed=${elapsedMs}ms`,
                 `exit=${code}`,
@@ -162,6 +157,25 @@ export async function runCodexOneShot(
             ]
                 .filter((x): x is string => x !== null)
                 .join(" ")
+
+            // Abnormal termination must fail even if SOME text accumulated:
+            // callers feed the string into a markdown/JSON extractor that
+            // accepts truncated-but-closed fragments, so partial text on
+            // timeout/crash would silently yield an incomplete doc or PRD.
+            if (timedOut || signal != null || (code != null && code !== 0)) {
+                reject(
+                    new Error(
+                        `runCodexOneShot: codex terminated abnormally before completing (${ctx})`,
+                    ),
+                )
+                return
+            }
+
+            if (agentMessage.trim()) {
+                resolve(agentMessage)
+                return
+            }
+
             reject(
                 new Error(
                     `runCodexOneShot: codex produced no agent_message (${ctx})`,
