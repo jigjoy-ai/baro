@@ -110,4 +110,22 @@ describe("AgentStreamForwarder", () => {
             },
         ])
     })
+
+    // Wiring check: the forwarder must use the counts-based testVerdict —
+    // a green node:test summary ("fail 0") is a passed test entry, not a ✗.
+    it("reads zero-failure summaries as passed", async () => {
+        const forwarder = new AgentStreamForwarder()
+        const agent = source("S3")
+
+        const events = parseEvents(await captureStdout(async () => {
+            await forwarder.onExternalFunctionCallOutput(
+                agent,
+                FunctionCallOutputItem.create("call-1", "ℹ tests 144\nℹ pass 144\nℹ fail 0"),
+            )
+        }))
+
+        assert.deepEqual(events, [
+            { type: "activity", id: "S3", kind: "test", ok: true, text: "ℹ tests 144" },
+        ])
+    })
 })
