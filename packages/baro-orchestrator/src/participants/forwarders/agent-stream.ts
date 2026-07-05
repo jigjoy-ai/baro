@@ -7,6 +7,7 @@ import {
 } from "@mozaik-ai/core"
 
 import { emit } from "../../tui-protocol.js"
+import { testVerdict } from "./test-verdict.js"
 
 /**
  * Turns the agent bus stream into the TUI's structured Activity feed:
@@ -121,15 +122,4 @@ function firstLine(s: string): string {
 
 function truncate(s: string, max: number): string {
     return s.length <= max ? s : s.slice(0, max - 1) + "…"
-}
-
-/** true = passed, false = failed, null = not a recognizable test result. */
-function testVerdict(out: string): boolean | null {
-    const s = out.toLowerCase()
-    const failed = /\b\d+\s+fail(ed|ing|ures?)?\b/.test(s) || /(^|\s)fail\b/.test(s)
-    const passed =
-        /\b(all\s+)?\d+\s+(tests?\s+)?(pass(ed|ing)?|ok)\b/.test(s) || /\btests?\s+pass(ed)?\b/.test(s)
-    if (failed) return false
-    if (passed) return true
-    return null
 }
