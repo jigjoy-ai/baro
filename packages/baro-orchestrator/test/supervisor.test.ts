@@ -40,14 +40,24 @@ test("a file change resets the no-progress counter", async () => {
     assert.equal(interventions(env).length, 0)
 })
 
-test("aborts on a repeated identical tool call", async () => {
-    const { sup, env } = supervised({ repeatThreshold: 3, noProgressToolCalls: 999 })
+test("aborts on a repeated identical tool call with no progress", async () => {
+    // repeatsNeedNoProgress defaults to floor(noProgressToolCalls/2) = 3, and the
+    // 3 read-only greps push sinceLastChange to 3 — so the loop guard is satisfied.
+    const { sup, env } = supervised({ repeatThreshold: 3, noProgressToolCalls: 6 })
     await feed(sup, "S1", "grep", `{"q":"x"}`)
     await feed(sup, "S1", "grep", `{"q":"x"}`)
     await feed(sup, "S1", "grep", `{"q":"x"}`) // 3rd identical
     const got = interventions(env)
     assert.equal(got.length, 1)
     assert.match(got[0]!.reason, /repeated/)
+})
+
+test("does NOT abort a repeated call while file changes keep happening", async () => {
+    // Same edit signature over and over, but each is a write → sinceLastChange
+    // stays 0, so the repeat is real progress, not a stuck loop.
+    const { sup, env } = supervised({ repeatThreshold: 3, noProgressToolCalls: 6 })
+    for (let i = 0; i < 10; i++) await feed(sup, "S1", "edit_file", `{"path":"a.ts"}`)
+    assert.equal(interventions(env).length, 0, "re-editing the same file is progress, not a loop")
 })
 
 test("wall-clock with zero file changes trips", async () => {

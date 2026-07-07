@@ -29,10 +29,17 @@ const WRITE_TOOLS = new Set([
 ])
 
 export interface SupervisorOptions {
-    /** Consecutive tool calls with NO file change before we call it a non-converging loop. Default 50. */
+    /** Consecutive tool calls with NO file change before we call it a non-converging loop. Default 80. */
     noProgressToolCalls?: number
-    /** Same tool+args signature seen this many times → looping. Default 6. */
+    /** Same tool+args signature seen this many times → looping. Default 12. */
     repeatThreshold?: number
+    /**
+     * Repeats only count as a loop if the story is ALSO making no progress —
+     * i.e. sinceLastChange is at least this high. A story re-editing the same
+     * file (making changes) resets sinceLastChange and is never a "loop".
+     * Defaults to half of noProgressToolCalls.
+     */
+    repeatsNeedNoProgress?: number
     /** Wall-clock (ms) with zero file changes before intervening regardless. Default 12 min. */
     softCapMs?: number
     /** Safety cap on total interventions per run. Default 25. */
@@ -57,9 +64,11 @@ export class Supervisor extends BaseObserver {
 
     constructor(opts: SupervisorOptions = {}) {
         super()
+        const noProgressToolCalls = opts.noProgressToolCalls ?? 80
         this.opts = {
-            noProgressToolCalls: opts.noProgressToolCalls ?? 50,
-            repeatThreshold: opts.repeatThreshold ?? 6,
+            noProgressToolCalls,
+            repeatThreshold: opts.repeatThreshold ?? 12,
+            repeatsNeedNoProgress: opts.repeatsNeedNoProgress ?? Math.floor(noProgressToolCalls / 2),
             softCapMs: opts.softCapMs ?? 12 * 60_000,
             maxInterventions: opts.maxInterventions ?? 25,
             now: opts.now ?? (() => Date.now()),
@@ -109,8 +118,11 @@ export class Supervisor extends BaseObserver {
         if (st.sinceLastChange >= this.opts.noProgressToolCalls) {
             return `${st.sinceLastChange} tool calls with no file change — exploring, not converging`
         }
-        if (repeats >= this.opts.repeatThreshold) {
-            return `same tool call repeated ${repeats}× — stuck in a loop`
+        // A repeated call is only a loop if the story is also making no
+        // progress — legitimately re-editing the same file keeps sinceLastChange
+        // low, so we don't abort work that's actually changing the codebase.
+        if (repeats >= this.opts.repeatThreshold && st.sinceLastChange >= this.opts.repeatsNeedNoProgress) {
+            return `same tool call repeated ${repeats}× with no file change — stuck in a loop`
         }
         const elapsed = this.opts.now() - st.startedAt
         if (elapsed >= this.opts.softCapMs && st.fileChanges === 0) {
