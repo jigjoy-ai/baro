@@ -642,16 +642,24 @@ async fn run_app(
             //  - Planner lane (planner + architect) = `strong` frontier model.
             //    Planning quality is what scales with the subscription tier, so
             //    this is where a frontier model (e.g. glm) earns its cost.
-            //  - Executor lane (surgeon + `heavy` stories) = `story_heavy`,
-            //    DeepSeek V4 Pro. Executing/fixing code is not planning, so it
-            //    must NOT get pulled onto the frontier just because planning did.
+            //  - Executor lane (ALL story tiers) = `cheap` Flash. Execution is a
+            //    commodity: cheap and robust to the planner's (unreliable) tiering.
+            //    A story Flash can't do is a decomposition smell, not a reason to
+            //    pay more per story.
+            //  - Surgeon lane (fixing a failed story) = `surgeon`, a stronger
+            //    model. The ESCALATION path — a smarter fixer only when execution
+            //    fails, instead of pricing every "heavy"-tiered story up front.
             // Critic + light/standard/default stay on the cheap Flash model.
             let strong =
                 std::env::var("BARO_JIGJOY_STRONG_MODEL").unwrap_or_else(|_| "deepseek-v4-pro".to_string());
-            let story_heavy = std::env::var("BARO_JIGJOY_STORY_HEAVY_MODEL")
-                .unwrap_or_else(|_| "deepseek-v4-pro".to_string());
             let cheap =
                 std::env::var("BARO_JIGJOY_STORY_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
+            let surgeon =
+                std::env::var("BARO_JIGJOY_SURGEON_MODEL").unwrap_or_else(|_| "deepseek-v4-pro".to_string());
+            // `heavy` stories default to the cheap Flash lane too (executor is
+            // always cheap); the knob remains for a self-hosted override.
+            let story_heavy =
+                std::env::var("BARO_JIGJOY_STORY_HEAVY_MODEL").unwrap_or_else(|_| cheap.clone());
             if app.planner_model.is_none() {
                 app.planner_model = Some(strong.clone());
             }
@@ -659,7 +667,7 @@ async fn run_app(
                 app.architect_model = Some(strong.clone());
             }
             if app.surgeon_model.is_none() {
-                app.surgeon_model = Some(story_heavy.clone());
+                app.surgeon_model = Some(surgeon.clone());
             }
             if app.critic_model.is_none() {
                 app.critic_model = Some(cheap.clone());
