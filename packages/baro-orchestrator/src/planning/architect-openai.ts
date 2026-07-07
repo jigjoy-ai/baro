@@ -30,12 +30,16 @@ import {
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
 import { createCodebaseTools } from "./codebase-tools.js"
+import { decideExecutionMode, resolvePlannerModelName } from "./planner-openai.js"
+import { heuristicModeContract, type ModeContract } from "./planner-prompts.js"
 
 export interface RunArchitectOpenAIOptions {
     goal: string
     cwd: string
     model?: string
     projectContext?: string
+    /** Pre-decided contract (user pick or run-intake step); skips this architect's own intake. */
+    modeContract?: ModeContract
     /** Cap on inference rounds; errors if exceeded. */
     maxRounds?: number
     /** Default 600 s — reasoning models can need minutes per round. */
@@ -63,7 +67,16 @@ function pickModel(name: string): GenerativeModel {
 export async function runArchitectOpenAI(
     opts: RunArchitectOpenAIOptions,
 ): Promise<string> {
-    const model = pickModel(opts.model ?? "gpt-5.5")
+    // Intake first (cheap classifier via BARO_INTAKE_MODEL), then route the
+    // architect model off the resolved mode — a pre-decided contract skips intake.
+    const intake = opts.modeContract ?? await decideExecutionMode(opts, pickModel(opts.model ?? "gpt-5.5")).catch((e) => {
+        process.stderr.write(`[architect-openai] intake failed (${(e as Error)?.message ?? String(e)}) — using heuristic mode contract\n`)
+        return heuristicModeContract(opts)
+    })
+    const architectModelName = resolvePlannerModelName(intake.mode, opts.model)
+    process.stderr.write(`[architect-openai] architect model=${architectModelName} (${intake.mode === "focused" ? "floor" : "ceiling"}, mode=${intake.mode})\n`)
+
+    const model = pickModel(architectModelName)
     const tools = createCodebaseTools(opts.cwd)
     setModelTools(model, tools)
 

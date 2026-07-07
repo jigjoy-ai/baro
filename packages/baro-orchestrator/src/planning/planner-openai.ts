@@ -33,6 +33,7 @@ import {
     heuristicModeContract,
     parseModeContract,
     renderModeContract,
+    type ExecutionMode,
     type ModeContract,
 } from "./planner-prompts.js"
 
@@ -75,17 +76,35 @@ function pickModel(name: string): GenerativeModel {
     }
 }
 
+/**
+ * Complexity-route the planner. Focused runs use the cheap floor model even on
+ * high tiers; sequential/parallel burn the tier ceiling on genuine decomposition.
+ * Focused precedence: BARO_PLANNER_FOCUSED_MODEL, else the passed ceiling (no
+ * surprise downgrade for a local `--model`), else a cheap default.
+ */
+export function resolvePlannerModelName(mode: ExecutionMode, ceiling: string | undefined): string {
+    if (mode === "focused") {
+        return process.env.BARO_PLANNER_FOCUSED_MODEL || ceiling || "deepseek-v4-pro"
+    }
+    return ceiling ?? "gpt-5.5"
+}
+
 export async function runPlannerOpenAI(
     opts: RunPlannerOpenAIOptions,
 ): Promise<string> {
-    const model = pickModel(opts.model ?? "gpt-5.5")
-    // Same fallback as the CLI planners so intake failure behaves identically
-    // across backends.
-    const intake = opts.modeContract ?? await decideExecutionMode(opts, model).catch((e) => {
+    // Intake first (cheap classifier via BARO_INTAKE_MODEL), then route the
+    // planner model off the resolved mode — a pre-decided contract skips intake.
+    // Same fallback as the CLI planners so intake failure behaves identically.
+    const intake = opts.modeContract ?? await decideExecutionMode(opts, pickModel(opts.model ?? "gpt-5.5")).catch((e) => {
         process.stderr.write(`[planner-openai] intake failed (${(e as Error)?.message ?? String(e)}) — using heuristic mode contract\n`)
         return heuristicModeContract(opts)
     })
     process.stderr.write(`[planner-openai] intake mode=${intake.mode} confidence=${intake.confidence} reason=${oneLine(intake.reason).slice(0, 180)}\n`)
+
+    const plannerModelName = resolvePlannerModelName(intake.mode, opts.model)
+    process.stderr.write(`[planner-openai] planner model=${plannerModelName} (${intake.mode === "focused" ? "floor" : "ceiling"}, mode=${intake.mode})\n`)
+    const model = pickModel(plannerModelName)
+
     const tools = createCodebaseTools(opts.cwd)
     setModelTools(model, tools)
 
@@ -202,7 +221,7 @@ export async function runOpenAIIntake(
     return decideExecutionMode(opts, pickModel(opts.model ?? "gpt-5.5"))
 }
 
-async function decideExecutionMode(
+export async function decideExecutionMode(
     opts: Pick<RunPlannerOpenAIOptions, "goal" | "quick" | "projectContext" | "decisionDocument">,
     plannerModel: GenerativeModel,
 ): Promise<ModeContract> {
