@@ -637,8 +637,19 @@ async fn run_app(
             // Per-phase defaults only when the user didn't pin a model.
             // These are the gateway's tier tokens; env-overridable so a
             // self-hosted gateway can point them at its own models.
+            //
+            // Two lanes, deliberately separate:
+            //  - Planner lane (planner + architect) = `strong` frontier model.
+            //    Planning quality is what scales with the subscription tier, so
+            //    this is where a frontier model (e.g. glm) earns its cost.
+            //  - Executor lane (surgeon + `heavy` stories) = `story_heavy`,
+            //    DeepSeek V4 Pro. Executing/fixing code is not planning, so it
+            //    must NOT get pulled onto the frontier just because planning did.
+            // Critic + light/standard/default stay on the cheap Flash model.
             let strong =
                 std::env::var("BARO_JIGJOY_STRONG_MODEL").unwrap_or_else(|_| "deepseek-v4-pro".to_string());
+            let story_heavy = std::env::var("BARO_JIGJOY_STORY_HEAVY_MODEL")
+                .unwrap_or_else(|_| "deepseek-v4-pro".to_string());
             let cheap =
                 std::env::var("BARO_JIGJOY_STORY_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
             if app.planner_model.is_none() {
@@ -648,20 +659,19 @@ async fn run_app(
                 app.architect_model = Some(strong.clone());
             }
             if app.surgeon_model.is_none() {
-                app.surgeon_model = Some(strong.clone());
+                app.surgeon_model = Some(story_heavy.clone());
             }
             if app.critic_model.is_none() {
                 app.critic_model = Some(cheap.clone());
             }
             // Most story tiers map to the cheap model; `heavy` maps to the
-            // strong route for focused/high-blast-radius work selected by the
-            // Intake + Planner contract. Routing accepts the legacy
-            // haiku/sonnet/opus spellings as aliases, so old PRDs still hit
-            // these keys. DeepSeek Pro is cheap enough to use as the safe
-            // lane while we evaluate quality.
+            // executor lane (story_heavy) for focused/high-blast-radius work
+            // selected by the Intake + Planner contract — NOT the planner's
+            // frontier model. Routing accepts the legacy haiku/sonnet/opus
+            // spellings as aliases, so old PRDs still hit these keys.
             if app.tier_map.is_none() {
                 app.tier_map = Some(format!(
-                    "default=openai:{cheap},light=openai:{cheap},standard=openai:{cheap},heavy=openai:{strong}"
+                    "default=openai:{cheap},light=openai:{cheap},standard=openai:{cheap},heavy=openai:{story_heavy}"
                 ));
             }
 
