@@ -28,6 +28,7 @@ pub async fn run_planner(
     openai_base_url: Option<&str>,
     effort: &str,
     mode_json: Option<&str>,
+    on_event: impl Fn(&str),
 ) -> Result<String, ProcessRunError> {
     let entry = discovery::locate_script(cwd, SCRIPT_REL_PATH, BUNDLE_NAME).map_err(|e| {
         ProcessRunError { message: e, log_path: None }
@@ -37,6 +38,12 @@ pub async fn run_planner(
     let ctx_tempfile = write_optional_tempfile("context", context)?;
     let dec_tempfile = write_optional_tempfile("decision", decision_doc)?;
     let mode_tempfile = write_optional_tempfile("mode", mode_json)?;
+    // The child writes the PRD here so its stdout is free for the event
+    // stream; we read the file back after it exits.
+    let result_tempfile = tempfile::NamedTempFile::new().map_err(|e| ProcessRunError {
+        message: format!("could not create planner result tempfile: {}", e),
+        log_path: None,
+    })?;
 
     let mut cmd = match &entry {
         ScriptEntry::Tsx { tsx, script } => {
@@ -66,6 +73,7 @@ pub async fn run_planner(
     if let Some(ref f) = mode_tempfile {
         cmd.arg("--mode-file").arg(f.path());
     }
+    cmd.arg("--result-file").arg(result_tempfile.path());
     if quick {
         cmd.arg("--quick");
     }
@@ -78,16 +86,23 @@ pub async fn run_planner(
         }
     }
 
-    let captured = subprocess::spawn_and_capture(cmd, "planner").await?;
+    // Stdout is now the planner's live BaroEvent stream; forward each line.
+    let log_path = subprocess::spawn_and_stream_events(cmd, "planner", on_event).await?;
     drop(ctx_tempfile);
     drop(dec_tempfile);
     drop(mode_tempfile);
 
-    let raw = captured.stdout.trim().to_string();
+    let raw = std::fs::read_to_string(result_tempfile.path())
+        .map_err(|e| ProcessRunError {
+            message: format!("could not read planner result file: {}", e),
+            log_path: log_path.clone(),
+        })?
+        .trim()
+        .to_string();
     if raw.is_empty() {
         return Err(ProcessRunError {
             message: "planner returned an empty response".into(),
-            log_path: captured.log_path,
+            log_path,
         });
     }
     Ok(raw)

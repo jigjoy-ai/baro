@@ -30,6 +30,7 @@ import {
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
 import { createCodebaseTools } from "./codebase-tools.js"
+import { emitPlanLine, emitToolCall } from "./plan-events.js"
 import { decideExecutionMode, resolvePlannerModelName } from "./planner-openai.js"
 import { heuristicModeContract, type ModeContract } from "./planner-prompts.js"
 
@@ -75,6 +76,7 @@ export async function runArchitectOpenAI(
     })
     const architectModelName = resolvePlannerModelName(intake.mode, opts.model)
     process.stderr.write(`[architect-openai] architect model=${architectModelName} (${intake.mode === "focused" ? "floor" : "ceiling"}, mode=${intake.mode})\n`)
+    emitPlanLine("designing the architecture")
 
     const model = pickModel(architectModelName)
     const tools = createCodebaseTools(opts.cwd)
@@ -138,6 +140,10 @@ export async function runArchitectOpenAI(
         }
 
         const calls = newItems.filter((i) => i.type === "function_call")
+        if (calls.length > 0) {
+            emitPlanLine(`exploring — round ${round}`)
+            for (const call of calls) emitToolCall(call.name ?? "tool", call.args)
+        }
         for (const call of calls) {
             const tool = tools.find((t) => t.name === call.name)
             const output = tool

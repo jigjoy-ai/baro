@@ -101,6 +101,9 @@ enum AppEvent {
     /// on; the handler updates `app.branch_name` so the TUI shows the
     /// actual branch, not the pre-suffix name from the planner.
     BranchReady(String),
+    /// A `@baro-progress` line streamed from the planner/architect
+    /// subprocess during the otherwise-silent planning wait.
+    PlanProgress(String),
     ArchitectStarted,
     ArchitectComplete(String), // decision document (markdown)
     ArchitectSkipped(String),  // reason (not fatal — planner will still run)
@@ -1007,6 +1010,11 @@ async fn run_app(
                 app.refining = false;
                 app.planning_error = Some(err);
             }
+            Some(AppEvent::PlanProgress(msg)) => {
+                // Headless prints its own story_log line from the runner
+                // callback; here we only feed the TUI planning screen.
+                app.planning_progress = Some(msg);
+            }
             Some(AppEvent::ArchitectStarted) => {
                 if headless {
                     println!(r#"{{"type":"architect_start"}}"#);
@@ -1781,6 +1789,52 @@ async fn run_app(
 /// resolution. `--mode auto` runs the intake; interactively that pauses
 /// at the ModePicker (IntakeReady) and stage B is spawned on confirm,
 /// otherwise the flow continues straight into the planner.
+/// Per-line progress sink for the planner/architect/intake phases.
+/// Headless emits a `story_log` JSON line to stdout (serde-escaped) that the
+/// dashboard renders under `id:"plan"`; TUI routes to the planning screen via
+/// AppEvent. `try_send` keeps the sink synchronous for the subprocess reader.
+fn plan_progress_sink(headless: bool, tx: mpsc::Sender<AppEvent>) -> impl Fn(&str) {
+    move |msg: &str| {
+        if headless {
+            if let Ok(line) = serde_json::to_string(&serde_json::json!({
+                "type": "story_log", "id": "plan", "line": msg,
+            })) {
+                println!("{}", line);
+            }
+        } else {
+            let _ = tx.try_send(AppEvent::PlanProgress(msg.to_string()));
+        }
+    }
+}
+
+/// Per-event sink for the planner/architect phases, whose stdout is now a
+/// live BaroEvent stream (`story_log`/`activity` under id "plan"). Headless
+/// echoes each raw JSON line to our stdout so the control plane forwards it
+/// verbatim — mirrors `orchestrator_client`'s `echo_raw`; TUI parses out the
+/// human line into the planning screen via AppEvent. `try_send` keeps the
+/// sink synchronous for the subprocess reader.
+fn plan_event_sink(headless: bool, tx: mpsc::Sender<AppEvent>) -> impl Fn(&str) {
+    move |raw: &str| {
+        if headless {
+            println!("{}", raw);
+        } else if let Some(line) = plan_line_from_event(raw) {
+            let _ = tx.try_send(AppEvent::PlanProgress(line));
+        }
+    }
+}
+
+/// Pull the human-readable line out of a planner/architect BaroEvent JSON:
+/// `story_log.line` or `activity.text`. Unrecognized/non-JSON lines are
+/// dropped from the TUI (they still reach headless via the raw echo).
+fn plan_line_from_event(raw: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    match v.get("type").and_then(|t| t.as_str())? {
+        "story_log" => v.get("line").and_then(|l| l.as_str()).map(str::to_string),
+        "activity" => v.get("text").and_then(|t| t.as_str()).map(str::to_string),
+        _ => None,
+    }
+}
+
 fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bool) {
     let goal = app.goal_input.clone();
     let planner = app.planner;
@@ -1823,6 +1877,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
                 openai_api_key.as_deref(),
                 openai_base_url.as_deref(),
                 &effort,
+                plan_event_sink(headless, tx.clone()),
             ).await {
                 Ok(doc) => {
                     let _ = tx.send(AppEvent::ArchitectComplete(doc.clone())).await;
@@ -1861,6 +1916,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
                 decision_doc.as_deref(),
                 openai_api_key.as_deref(),
                 openai_base_url.as_deref(),
+                plan_progress_sink(headless, tx.clone()),
             ).await;
             if headless {
                 Some(contract)
@@ -1885,6 +1941,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
             effort,
             mode_json,
             tx,
+            headless,
         )
         .await;
     });
@@ -1915,6 +1972,7 @@ fn spawn_planner_stage_b(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, mode
             effort,
             Some(mode_json),
             tx,
+            false, // stage B only runs interactively (the picker never shows headless)
         )
         .await;
     });
@@ -1955,6 +2013,7 @@ async fn run_planner_and_report(
     effort: String,
     mode_json: Option<String>,
     tx: mpsc::Sender<AppEvent>,
+    headless: bool,
 ) {
     let result = planner_runner::run_planner(
         &goal,
@@ -1968,6 +2027,7 @@ async fn run_planner_and_report(
         openai_base_url.as_deref(),
         &effort,
         mode_json.as_deref(),
+        plan_event_sink(headless, tx.clone()),
     ).await;
 
     match result.and_then(|raw_json| {
