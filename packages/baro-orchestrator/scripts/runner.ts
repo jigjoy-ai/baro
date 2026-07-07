@@ -4,7 +4,7 @@
 // Self-contained: the wire protocol is vendored (mirrors @jigjoy-ai/baro-protocol).
 
 import { execFileSync, spawn } from "node:child_process"
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { hostname, homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { createInterface } from "node:readline/promises"
@@ -196,6 +196,64 @@ function excludeDepDirs(cwd: string): void {
     }
 }
 
+// Package manager + ordered install attempts, chosen by lockfile. The frozen
+// variant runs first; a loose install is the fallback when it fails. undefined =
+// no lockfile, so nothing to install here.
+function depCommand(dir: string): { tool: string; attempts: string[][] } | undefined {
+    if (existsSync(join(dir, "pnpm-lock.yaml"))) return { tool: "pnpm", attempts: [["install", "--frozen-lockfile"], ["install"]] }
+    if (existsSync(join(dir, "yarn.lock"))) return { tool: "yarn", attempts: [["install", "--frozen-lockfile"], ["install"]] }
+    if (existsSync(join(dir, "package-lock.json"))) return { tool: "npm", attempts: [["ci"], ["install"]] }
+    return undefined
+}
+
+function installOne(dir: string, cmd: { tool: string; attempts: string[][] }, log: (l: string) => void): void {
+    for (let i = 0; i < cmd.attempts.length; i++) {
+        try {
+            execFileSync(cmd.tool, cmd.attempts[i]!, { cwd: dir, stdio: "ignore", timeout: 4 * 60_000, shell: process.platform === "win32" })
+            return
+        } catch (e) {
+            // Tool not installed → give up on this dir (no fallback can help).
+            if ((e as { code?: string }).code === "ENOENT") {
+                log(`${cmd.tool} not found — skipping ${dir}`)
+                return
+            }
+            // Frozen install failed → fall through to the loose attempt; only
+            // log once every attempt is exhausted.
+            if (i === cmd.attempts.length - 1) log(`dependency install failed in ${dir} (${cmd.tool}) — agents will retry`)
+        }
+    }
+}
+
+// A fresh clone has no node_modules, so every story agent would otherwise race to
+// `npm install` (one run burned 667k tokens on this) and worktree symlinks would
+// point at an empty dir. Pre-install once, up front — repo root plus common
+// one-level subdirs — best-effort: failures just log and let agents cope. Clone
+// path only; a local in-dir run already has its deps.
+function preinstallDeps(root: string, emit: (e: WireEvent) => void): void {
+    const log = (line: string) => emit({ type: "story_log", agentId: "_deps", data: { type: "story_log", id: "_deps", line } })
+    try {
+        const dirs = new Set<string>([root])
+        for (const sub of ["backend", "frontend"]) dirs.add(join(root, sub))
+        for (const group of ["packages", "apps"]) {
+            try {
+                for (const name of readdirSync(join(root, group))) dirs.add(join(root, group, name))
+            } catch {
+                /* group dir absent — skip */
+            }
+        }
+        const targets = [...dirs]
+            .filter((d) => existsSync(join(d, "package.json")))
+            .map((d) => ({ dir: d, cmd: depCommand(d) }))
+            .filter((t): t is { dir: string; cmd: NonNullable<ReturnType<typeof depCommand>> } => t.cmd !== undefined)
+        if (targets.length === 0) return
+        log("installing dependencies…")
+        for (const t of targets) installOne(t.dir, t.cmd, log)
+        log("dependencies ready")
+    } catch (e) {
+        log(`dependency pre-install skipped: ${(e as Error).message}`)
+    }
+}
+
 function captureDiff(cwd: string, base: string): string {
     try {
         execFileSync("git", ["add", "-A"], { cwd })
@@ -228,6 +286,9 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
             return { success: false, durationSecs: 1, error: `clone failed: ${(e as Error).message}` }
         }
         excludeDepDirs(cwd)
+        // Populate the shared node_modules before worktrees symlink to it and
+        // before agents run. Non-fatal — see preinstallDeps.
+        preinstallDeps(cwd, emit)
         if (d.diffOnly) {
             // Drop the origin remote so baro skips ALL push/PR steps cleanly ("no remote,
             // skipping push") instead of failing them noisily without a token — we return
