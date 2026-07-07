@@ -7,8 +7,10 @@ import {
     PLANNER_SYSTEM_PROMPT,
     renderModeContract,
 } from "../src/planning/planner-prompts.js"
-import { enforceModeContract } from "../src/planning/mode-enforcement.js"
-import type { PrdFile } from "../src/prd.js"
+import { enforceModeContract, resolveEffectiveParallel } from "../src/planning/mode-enforcement.js"
+import type { PrdExecutionMode, PrdFile } from "../src/prd.js"
+
+const mode = (m: Partial<PrdExecutionMode> & { mode: PrdExecutionMode["mode"] }): PrdExecutionMode => ({ reason: "r", ...m })
 
 describe("parseModeContract", () => {
     it("clamps confidence and floors caps", () => {
@@ -126,5 +128,31 @@ describe("enforceModeContract", () => {
             enforceModeContract(raw, { mode: "focused", confidence: 1, reason: "r" }, "g"),
             raw,
         )
+    })
+})
+
+describe("resolveEffectiveParallel", () => {
+    it("AUTO sequential (intake guess) defers to the DAG — does NOT serialize", () => {
+        // The vizion regression: a parallel DAG was force-serialized by an auto
+        // "sequential" guess. Auto (llm/heuristic) must keep the operator cap.
+        assert.equal(resolveEffectiveParallel(mode({ mode: "sequential", source: "llm" }), 10), 10)
+        assert.equal(resolveEffectiveParallel(mode({ mode: "sequential", source: "heuristic" }), 10), 10)
+        assert.equal(resolveEffectiveParallel(mode({ mode: "sequential" }), 10), 10)
+    })
+
+    it("USER-picked sequential serializes (deliberate caution the DAG can't see)", () => {
+        assert.equal(resolveEffectiveParallel(mode({ mode: "sequential", source: "user" }), 10), 1)
+    })
+
+    it("focused always serializes, regardless of source", () => {
+        assert.equal(resolveEffectiveParallel(mode({ mode: "focused", source: "user" }), 10), 1)
+        assert.equal(resolveEffectiveParallel(mode({ mode: "focused", source: "llm" }), 10), 1)
+    })
+
+    it("parallel and no-mode follow the operator cap (0 = unlimited)", () => {
+        assert.equal(resolveEffectiveParallel(mode({ mode: "parallel" }), 10), 10)
+        assert.equal(resolveEffectiveParallel(undefined, 10), 10)
+        assert.equal(resolveEffectiveParallel(undefined, 0), 0)
+        assert.equal(resolveEffectiveParallel(mode({ mode: "sequential", source: "llm" }), undefined), 0)
     })
 })

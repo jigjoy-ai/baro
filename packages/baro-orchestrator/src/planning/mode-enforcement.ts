@@ -7,8 +7,20 @@
  * what was decided.
  */
 
-import type { PrdFile, PrdStory } from "../prd.js"
+import type { PrdExecutionMode, PrdFile, PrdStory } from "../prd.js"
 import type { ModeContract } from "./planner-prompts.js"
+
+/**
+ * Concurrency follows the DAG — a level's stories are independent by
+ * construction, so they run in parallel up to `configParallel` (0 = unlimited,
+ * hosted sends ~10). Only a DELIBERATE choice serializes: `focused` (single-fix
+ * mode), or a USER-picked `sequential` (caution the DAG can't see). An AUTO
+ * `sequential` (intake's llm/heuristic guess) must NOT override the planner's DAG.
+ */
+export function resolveEffectiveParallel(mode: PrdExecutionMode | undefined, configParallel: number | undefined): number {
+    const forcedSerial = mode?.mode === "focused" || (mode?.mode === "sequential" && mode.source === "user")
+    return forcedSerial ? 1 : (configParallel ?? 0)
+}
 
 export function enforceModeContract(prdJson: string, contract: ModeContract, goal: string): string {
     let prd: Partial<PrdFile>

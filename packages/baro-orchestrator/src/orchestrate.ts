@@ -60,6 +60,7 @@ import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
 import { SurgeonOpenCode } from "./participants/surgeon-opencode.js"
 import { SurgeonPi } from "./participants/surgeon-pi.js"
 import { Supervisor } from "./participants/supervisor.js"
+import { resolveEffectiveParallel } from "./planning/mode-enforcement.js"
 import { PrdFile, loadPrd, savePrd } from "./prd.js"
 import { RunStartRequest } from "./semantic-events.js"
 import { emit } from "./tui-protocol.js"
@@ -580,17 +581,15 @@ export async function orchestrate(
         finalizer.join(env)
     }
 
-    // The intake contract's parallelism is a hard cap, enforced here — not
-    // just prompt advice to the planner. focused/sequential = 1 at a time.
+    // Parallelism follows the DAG. Stories the planner placed in the same level
+    // are independent by construction, so they run in parallel up to the operator
+    // cap (config.parallel; 0 = unlimited, hosted sends ~10). Only a DELIBERATE
+    // choice serializes: `focused` (a single-fix mode), or a USER-picked
+    // `sequential` (caution the DAG can't see). Intake's coarse AUTO "sequential"
+    // guess (source llm/heuristic) must NOT override the planner's DAG — that was
+    // the bug where a parallel DAG ran one story at a time.
     const executionMode = loadPrd(config.prdPath).executionMode
-    let effectiveParallel = config.parallel ?? 0
-    if (executionMode?.mode === "focused" || executionMode?.mode === "sequential") {
-        effectiveParallel = 1
-    } else if (executionMode?.parallelism) {
-        effectiveParallel = effectiveParallel === 0
-            ? executionMode.parallelism
-            : Math.min(effectiveParallel, executionMode.parallelism)
-    }
+    const effectiveParallel = resolveEffectiveParallel(executionMode, config.parallel)
     if (executionMode) {
         process.stderr.write(
             `[orchestrate] execution mode: ${executionMode.mode} (${executionMode.source ?? "contract"}) — parallel cap ${effectiveParallel === 0 ? "none" : effectiveParallel}\n`,
