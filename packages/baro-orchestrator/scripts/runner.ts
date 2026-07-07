@@ -196,57 +196,153 @@ function excludeDepDirs(cwd: string): void {
     }
 }
 
-// Package manager + ordered install attempts, chosen by lockfile. The frozen
-// variant runs first; a loose install is the fallback when it fails. undefined =
-// no lockfile, so nothing to install here.
-function depCommand(dir: string): { tool: string; attempts: string[][] } | undefined {
-    if (existsSync(join(dir, "pnpm-lock.yaml"))) return { tool: "pnpm", attempts: [["install", "--frozen-lockfile"], ["install"]] }
-    if (existsSync(join(dir, "yarn.lock"))) return { tool: "yarn", attempts: [["install", "--frozen-lockfile"], ["install"]] }
-    if (existsSync(join(dir, "package-lock.json"))) return { tool: "npm", attempts: [["ci"], ["install"]] }
+// One ecosystem's install for a dir: ordered attempts, frozen/lockfile variant
+// first, loose fallback second. `eco` names the ecosystem in progress logs.
+interface EcoCmd {
+    eco: string
+    tool: string
+    attempts: string[][]
+}
+
+// Shared dependency caches: download each ecosystem's packages once and reuse them
+// across every worktree AND the story agents' later builds. Set process-wide so the
+// child agents (which snapshot process.env) inherit them. node_modules is handled
+// separately by the worktree symlink mechanism — see worktree.ts.
+const depCacheRoot = join(tmpdir(), "baro-dep-cache")
+function setupSharedCaches(): void {
+    const goRoot = join(depCacheRoot, "go")
+    const pnpmStore = join(depCacheRoot, "pnpm")
+    const caches: Record<string, string> = {
+        CARGO_HOME: join(depCacheRoot, "cargo"),
+        GOPATH: goRoot,
+        GOMODCACHE: join(goRoot, "pkg", "mod"),
+        PIP_CACHE_DIR: join(depCacheRoot, "pip"),
+        PNPM_STORE_DIR: pnpmStore,
+        npm_config_store_dir: pnpmStore,
+        YARN_CACHE_FOLDER: join(depCacheRoot, "yarn"),
+    }
+    for (const [key, dir] of Object.entries(caches)) {
+        try {
+            mkdirSync(dir, { recursive: true })
+            process.env[key] = dir
+        } catch {
+            /* best-effort — a cache miss just re-downloads */
+        }
+    }
+}
+
+function pyprojectIsPoetry(dir: string): boolean {
+    try {
+        return /\[tool\.poetry\]/.test(readFileSync(join(dir, "pyproject.toml"), "utf8"))
+    } catch {
+        return false
+    }
+}
+
+// Every ecosystem whose manifest lives in `dir` (a dir may host several, e.g.
+// package.json + Cargo.toml). Detection prefers the lockfile-frozen command.
+function ecoCommands(dir: string): EcoCmd[] {
+    const out: EcoCmd[] = []
+    if (existsSync(join(dir, "package.json"))) {
+        if (existsSync(join(dir, "pnpm-lock.yaml"))) out.push({ eco: "pnpm", tool: "pnpm", attempts: [["install", "--frozen-lockfile"], ["install"]] })
+        else if (existsSync(join(dir, "yarn.lock"))) out.push({ eco: "yarn", tool: "yarn", attempts: [["install", "--frozen-lockfile"], ["install"]] })
+        else if (existsSync(join(dir, "package-lock.json"))) out.push({ eco: "npm", tool: "npm", attempts: [["ci"], ["install"]] })
+    }
+    if (existsSync(join(dir, "Cargo.toml"))) out.push({ eco: "cargo", tool: "cargo", attempts: [["fetch"]] })
+    if (existsSync(join(dir, "go.mod"))) out.push({ eco: "go", tool: "go", attempts: [["mod", "download"]] })
+    if (existsSync(join(dir, "uv.lock"))) out.push({ eco: "uv", tool: "uv", attempts: [["sync"]] })
+    else if (existsSync(join(dir, "poetry.lock")) || pyprojectIsPoetry(dir)) out.push({ eco: "poetry", tool: "poetry", attempts: [["install"]] })
+    else if (existsSync(join(dir, "requirements.txt")))
+        out.push({ eco: "pip", tool: "python3", attempts: [["-m", "pip", "install", "--user", "-r", "requirements.txt"], ["-m", "pip", "install", "-r", "requirements.txt"]] })
+    return out
+}
+
+// Workspace root markers: install ONCE at the root, not per-subpackage. A pnpm
+// workspace install run in a subdir fails outright, so this is load-bearing.
+function isJsWorkspaceRoot(root: string): boolean {
+    if (existsSync(join(root, "pnpm-workspace.yaml"))) return true
+    try {
+        return JSON.parse(readFileSync(join(root, "package.json"), "utf8")).workspaces !== undefined
+    } catch {
+        return false
+    }
+}
+function isCargoWorkspaceRoot(root: string): boolean {
+    try {
+        return /^\s*\[workspace\]/m.test(readFileSync(join(root, "Cargo.toml"), "utf8"))
+    } catch {
+        return false
+    }
+}
+
+// Fallback only when no known manifest matched: a Makefile with a conventional
+// bootstrap target.
+function makeSetupTarget(dir: string): string | undefined {
+    try {
+        const mk = readFileSync(join(dir, "Makefile"), "utf8")
+        for (const target of ["setup", "bootstrap", "install"]) if (new RegExp(`^${target}\\s*:`, "m").test(mk)) return target
+    } catch {
+        /* no Makefile */
+    }
     return undefined
 }
 
-function installOne(dir: string, cmd: { tool: string; attempts: string[][] }, log: (l: string) => void): void {
+function installOne(dir: string, cmd: EcoCmd, log: (l: string) => void): void {
+    log(`installing dependencies (${cmd.eco})…`)
     for (let i = 0; i < cmd.attempts.length; i++) {
         try {
             execFileSync(cmd.tool, cmd.attempts[i]!, { cwd: dir, stdio: "ignore", timeout: 4 * 60_000, shell: process.platform === "win32" })
             return
         } catch (e) {
-            // Tool not installed → give up on this dir (no fallback can help).
+            // Tool not installed → give up on this ecosystem (no fallback helps).
             if ((e as { code?: string }).code === "ENOENT") {
-                log(`${cmd.tool} not found — skipping ${dir}`)
+                log(`${cmd.tool} not available, skipping`)
                 return
             }
-            // Frozen install failed → fall through to the loose attempt; only
-            // log once every attempt is exhausted.
+            // Frozen install failed → fall through to the loose attempt; only log
+            // once every attempt is exhausted.
             if (i === cmd.attempts.length - 1) log(`dependency install failed in ${dir} (${cmd.tool}) — agents will retry`)
         }
     }
 }
 
-// A fresh clone has no node_modules, so every story agent would otherwise race to
-// `npm install` (one run burned 667k tokens on this) and worktree symlinks would
-// point at an empty dir. Pre-install once, up front — repo root plus common
-// one-level subdirs — best-effort: failures just log and let agents cope. Clone
-// path only; a local in-dir run already has its deps.
+// A fresh clone has no deps, so every story agent would otherwise race to install
+// them (one run burned 667k tokens on this) and worktree symlinks would point at an
+// empty dir. Pre-install once, up front — repo root plus common one-level subdirs,
+// across every detected ecosystem — best-effort: failures just log and let agents
+// cope. Clone path only; a local in-dir run already has its deps.
 function preinstallDeps(root: string, emit: (e: WireEvent) => void): void {
     const log = (line: string) => emit({ type: "story_log", agentId: "_deps", data: { type: "story_log", id: "_deps", line } })
     try {
+        setupSharedCaches()
         const dirs = new Set<string>([root])
         for (const sub of ["backend", "frontend"]) dirs.add(join(root, sub))
-        for (const group of ["packages", "apps"]) {
+        for (const group of ["packages", "apps", "services"]) {
             try {
                 for (const name of readdirSync(join(root, group))) dirs.add(join(root, group, name))
             } catch {
                 /* group dir absent — skip */
             }
         }
-        const targets = [...dirs]
-            .filter((d) => existsSync(join(d, "package.json")))
-            .map((d) => ({ dir: d, cmd: depCommand(d) }))
-            .filter((t): t is { dir: string; cmd: NonNullable<ReturnType<typeof depCommand>> } => t.cmd !== undefined)
+        // Workspace roots absorb their subpackages: install their ecosystem only at root.
+        const jsWorkspace = isJsWorkspaceRoot(root)
+        const cargoWorkspace = isCargoWorkspaceRoot(root)
+        const jsEcos = new Set(["npm", "pnpm", "yarn"])
+
+        const targets: { dir: string; cmd: EcoCmd }[] = []
+        for (const dir of dirs) {
+            if (dir !== root && !existsSync(dir)) continue
+            for (const cmd of ecoCommands(dir)) {
+                if (dir !== root && jsWorkspace && jsEcos.has(cmd.eco)) continue
+                if (dir !== root && cargoWorkspace && cmd.eco === "cargo") continue
+                targets.push({ dir, cmd })
+            }
+        }
+        if (targets.length === 0) {
+            const target = makeSetupTarget(root)
+            if (target) targets.push({ dir: root, cmd: { eco: "make", tool: "make", attempts: [[target]] } })
+        }
         if (targets.length === 0) return
-        log("installing dependencies…")
         for (const t of targets) installOne(t.dir, t.cmd, log)
         log("dependencies ready")
     } catch (e) {
@@ -267,6 +363,9 @@ function captureDiff(cwd: string, base: string): string {
 // Run one dispatched goal headless and forward its native event stream. With a
 // repo, clone it (token auth) and run there so baro pushes + opens a PR.
 async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: AbortSignal): Promise<RunOutcome> {
+    // Point the shared dep caches at process.env BEFORE the child snapshot below, so
+    // agents' later builds reuse whatever preinstallDeps downloads.
+    setupSharedCaches()
     // Use the subscription login, not API billing: a stray ANTHROPIC_API_KEY
     // makes the claude CLI use API auth. Strip it for the child.
     const env: Record<string, string | undefined> = { ...process.env }
