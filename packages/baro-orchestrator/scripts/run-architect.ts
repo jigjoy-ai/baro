@@ -1,10 +1,12 @@
 /**
  * Architect CLI — the Rust TUI invokes this as a subprocess instead of
- * shelling out to `claude` directly. Stdout = the markdown decision document
- * (empty on error); stderr = progress + errors; non-zero exit on failure.
+ * shelling out to `claude` directly. With `--result-file` the markdown
+ * decision document is written to that file and STDOUT becomes the live
+ * BaroEvent stream (the Rust runner forwards it to the feed); without it,
+ * STDOUT is the doc (legacy). Stderr = debug + errors; non-zero exit on failure.
  */
 
-import { readFileSync } from "fs"
+import { readFileSync, writeFileSync } from "fs"
 
 import { runArchitectClaude } from "../src/planning/architect-claude.js"
 import { runArchitectCodex } from "../src/planning/architect-codex.js"
@@ -24,6 +26,8 @@ interface Args {
     model?: string
     effort?: string
     contextFile?: string
+    /** When set, the doc is written here and stdout is freed for the event stream. */
+    resultFile?: string
 }
 
 function parseArgs(argv: string[]): Args {
@@ -33,6 +37,7 @@ function parseArgs(argv: string[]): Args {
     let model: string | undefined
     let effort: string | undefined
     let contextFile: string | undefined
+    let resultFile: string | undefined
 
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i]
@@ -60,6 +65,9 @@ function parseArgs(argv: string[]): Args {
             case "--context-file":
                 contextFile = required(argv, ++i, "--context-file")
                 break
+            case "--result-file":
+                resultFile = required(argv, ++i, "--result-file")
+                break
             default:
                 fatal(`unknown flag: ${a}`)
         }
@@ -67,7 +75,7 @@ function parseArgs(argv: string[]): Args {
     if (!goal) fatal("--goal is required")
     if (!cwd) fatal("--cwd is required")
     if (!llm) fatal("--llm is required")
-    return { goal: goal!, cwd: cwd!, llm: llm!, model, effort, contextFile }
+    return { goal: goal!, cwd: cwd!, llm: llm!, model, effort, contextFile, resultFile }
 }
 
 function required(argv: string[], i: number, flag: string): string {
@@ -83,6 +91,8 @@ function fatal(msg: string): never {
 
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2))
+    // With a result file, stdout is the event stream — let the architect emit.
+    if (args.resultFile) process.env.BARO_PLAN_EVENTS = "1"
 
     let projectContext: string | undefined
     if (args.contextFile) {
@@ -150,7 +160,12 @@ async function main(): Promise<void> {
     }
 
     process.stderr.write(`[run-architect] ok in ${Date.now() - t0}ms (${doc.length} chars)\n`)
-    process.stdout.write(doc)
+    // Result to the file (stdout is the event stream); legacy path keeps it on stdout.
+    if (args.resultFile) {
+        writeFileSync(args.resultFile, doc)
+    } else {
+        process.stdout.write(doc)
+    }
 }
 
 main().catch((e) => {

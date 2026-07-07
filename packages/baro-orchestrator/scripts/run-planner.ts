@@ -1,11 +1,12 @@
 /**
  * Planner CLI — the Rust TUI invokes this as a subprocess instead of
- * shelling out to `claude` directly. Stdout = bare PRD JSON, the shape
- * Rust's `PrdOutput` deserialises; stderr = progress + errors; non-zero
- * exit on failure.
+ * shelling out to `claude` directly. With `--result-file` the PRD JSON is
+ * written to that file and STDOUT becomes the live BaroEvent stream (the
+ * Rust runner forwards it to the feed); without it, STDOUT is the bare PRD
+ * JSON (legacy). Stderr = debug + errors either way; non-zero exit on failure.
  */
 
-import { readFileSync } from "fs"
+import { readFileSync, writeFileSync } from "fs"
 
 import { runPlannerClaude } from "../src/planning/planner-claude.js"
 import { runPlannerCodex } from "../src/planning/planner-codex.js"
@@ -29,6 +30,8 @@ interface Args {
     decisionFile?: string
     /** JSON ModeContract from the run-intake step (user-confirmed); skips planner intake. */
     modeFile?: string
+    /** When set, the PRD is written here and stdout is freed for the event stream. */
+    resultFile?: string
     quick: boolean
 }
 
@@ -41,6 +44,7 @@ function parseArgs(argv: string[]): Args {
     let contextFile: string | undefined
     let decisionFile: string | undefined
     let modeFile: string | undefined
+    let resultFile: string | undefined
     let quick = false
 
     for (let i = 0; i < argv.length; i++) {
@@ -75,6 +79,9 @@ function parseArgs(argv: string[]): Args {
             case "--mode-file":
                 modeFile = required(argv, ++i, "--mode-file")
                 break
+            case "--result-file":
+                resultFile = required(argv, ++i, "--result-file")
+                break
             case "--quick":
                 quick = true
                 break
@@ -94,6 +101,7 @@ function parseArgs(argv: string[]): Args {
         contextFile,
         decisionFile,
         modeFile,
+        resultFile,
         quick,
     }
 }
@@ -123,6 +131,8 @@ function tryRead(path: string | undefined): string | undefined {
 
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2))
+    // With a result file, stdout is the event stream — let the planner emit.
+    if (args.resultFile) process.env.BARO_PLAN_EVENTS = "1"
     const projectContext = tryRead(args.contextFile)
     const decisionDocument = tryRead(args.decisionFile)
     let modeContract: ModeContract | undefined
@@ -215,7 +225,12 @@ async function main(): Promise<void> {
     process.stderr.write(
         `[run-planner] ok in ${Date.now() - t0}ms (${prdJson.length} chars)\n`,
     )
-    process.stdout.write(prdJson)
+    // Result to the file (stdout is the event stream); legacy path keeps it on stdout.
+    if (args.resultFile) {
+        writeFileSync(args.resultFile, prdJson)
+    } else {
+        process.stdout.write(prdJson)
+    }
 }
 
 main().catch((e) => {

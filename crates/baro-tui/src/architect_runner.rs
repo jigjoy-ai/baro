@@ -27,6 +27,7 @@ pub async fn run_architect(
     openai_api_key: Option<&str>,
     openai_base_url: Option<&str>,
     effort: &str,
+    on_event: impl Fn(&str),
 ) -> Result<String, ProcessRunError> {
     let entry = discovery::locate_script(cwd, SCRIPT_REL_PATH, BUNDLE_NAME).map_err(|e| {
         ProcessRunError { message: e, log_path: None }
@@ -47,6 +48,13 @@ pub async fn run_architect(
         }
         _ => None,
     };
+
+    // The child writes the decision doc here so its stdout is free for the
+    // event stream; we read the file back after it exits.
+    let result_tempfile = tempfile::NamedTempFile::new().map_err(|e| ProcessRunError {
+        message: format!("could not create architect result tempfile: {}", e),
+        log_path: None,
+    })?;
 
     let mut cmd = match &entry {
         ScriptEntry::Tsx { tsx, script } => {
@@ -70,6 +78,7 @@ pub async fn run_architect(
     if let Some(ref f) = ctx_tempfile {
         cmd.arg("--context-file").arg(f.path());
     }
+    cmd.arg("--result-file").arg(result_tempfile.path());
     if matches!(llm, LlmProvider::OpenAI) {
         if let Some(key) = openai_api_key {
             cmd.env("OPENAI_API_KEY", key);
@@ -79,14 +88,21 @@ pub async fn run_architect(
         }
     }
 
-    let captured = subprocess::spawn_and_capture(cmd, "architect").await?;
+    // Stdout is now the architect's live BaroEvent stream; forward each line.
+    let log_path = subprocess::spawn_and_stream_events(cmd, "architect", on_event).await?;
     drop(ctx_tempfile); // explicit cleanup, paranoid about Drop ordering
 
-    let doc = captured.stdout.trim().to_string();
+    let doc = std::fs::read_to_string(result_tempfile.path())
+        .map_err(|e| ProcessRunError {
+            message: format!("could not read architect result file: {}", e),
+            log_path: log_path.clone(),
+        })?
+        .trim()
+        .to_string();
     if doc.is_empty() {
         return Err(ProcessRunError {
             message: "architect returned an empty document".into(),
-            log_path: captured.log_path,
+            log_path,
         });
     }
     Ok(doc)

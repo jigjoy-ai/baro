@@ -33,7 +33,7 @@ pub fn render(f: &mut Frame, app: &App) {
     // message + the troubleshooting links. Pre-existing layout used a
     // fixed 7-row central area which is the source of the truncated
     // error in issue #17 — bump it to 18 in the error path.
-    let central_height: u16 = if in_error { 18 } else { 7 };
+    let central_height: u16 = if in_error { 18 } else { 9 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -212,6 +212,21 @@ pub fn render(f: &mut Frame, app: &App) {
                     "quick mode — single story, no architect/critic/surgeon",
                     Style::default().fg(theme::ACCENT),
                 ),
+            ]));
+        }
+
+        // Live exploration line from the planner/architect subprocess.
+        if let Some(ref progress) = app.planning_progress {
+            let max_chars = box_width.saturating_sub(6) as usize;
+            let shown = if progress.chars().count() > max_chars {
+                let head: String = progress.chars().take(max_chars.saturating_sub(1)).collect();
+                format!("{}…", head)
+            } else {
+                progress.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(" \u{2502} ", Style::default().fg(theme::BORDER)),
+                Span::styled(shown, Style::default().fg(theme::ACCENT)),
             ]));
         }
 

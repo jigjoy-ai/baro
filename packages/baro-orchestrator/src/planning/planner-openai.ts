@@ -25,6 +25,7 @@ import {
 } from "./openai-runtime.js"
 
 import { createCodebaseTools } from "./codebase-tools.js"
+import { emitPlanLine, emitToolCall } from "./plan-events.js"
 import {
     PLANNER_SYSTEM_PROMPT,
     buildIntakePrompt,
@@ -103,6 +104,7 @@ export async function runPlannerOpenAI(
 
     const plannerModelName = resolvePlannerModelName(intake.mode, opts.model)
     process.stderr.write(`[planner-openai] planner model=${plannerModelName} (${intake.mode === "focused" ? "floor" : "ceiling"}, mode=${intake.mode})\n`)
+    emitPlanLine(`planning approach: ${intake.mode}`)
     const model = pickModel(plannerModelName)
 
     const tools = createCodebaseTools(opts.cwd)
@@ -175,6 +177,10 @@ export async function runPlannerOpenAI(
         }
 
         const calls = newItems.filter((i) => i.type === "function_call")
+        if (calls.length > 0) {
+            emitPlanLine(`exploring — round ${round}`)
+            for (const call of calls) emitToolCall(call.name ?? "tool", call.args)
+        }
         for (const call of calls) {
             const tool = tools.find((t) => t.name === call.name)
             const output = tool

@@ -351,6 +351,9 @@ pub struct App {
     /// Persisted log path for a failed planner/architect run, surfaced
     /// on the planning screen.
     pub planning_log_path: Option<std::path::PathBuf>,
+    /// Latest exploration/progress line streamed from the planner or
+    /// architect subprocess, shown live on the planning screen.
+    pub planning_progress: Option<String>,
 
     // Review screen
     pub branch_name: String,
@@ -547,6 +550,7 @@ impl App {
             planning_start: None,
             planning_error: None,
             planning_log_path: None,
+            planning_progress: None,
 
             branch_name: String::new(),
             description: String::new(),
@@ -648,6 +652,7 @@ impl App {
     pub fn start_planning(&mut self) {
         self.screen = Screen::Planning;
         self.planning_start = Some(Instant::now());
+        self.planning_progress = None;
     }
 
     pub fn show_review(&mut self, stories: Vec<ReviewStory>) {

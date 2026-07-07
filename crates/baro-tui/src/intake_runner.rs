@@ -26,6 +26,7 @@ pub async fn run_intake(
     decision_doc: Option<&str>,
     openai_api_key: Option<&str>,
     openai_base_url: Option<&str>,
+    on_progress: impl Fn(&str),
 ) -> String {
     match try_run(
         goal,
@@ -36,6 +37,7 @@ pub async fn run_intake(
         decision_doc,
         openai_api_key,
         openai_base_url,
+        on_progress,
     )
     .await
     {
@@ -53,6 +55,7 @@ async fn try_run(
     decision_doc: Option<&str>,
     openai_api_key: Option<&str>,
     openai_base_url: Option<&str>,
+    on_progress: impl Fn(&str),
 ) -> Result<String, String> {
     let entry = discovery::locate_script(cwd, SCRIPT_REL_PATH, BUNDLE_NAME)?;
 
@@ -93,9 +96,13 @@ async fn try_run(
         }
     }
 
-    let captured = subprocess::spawn_and_capture(cmd, "intake")
-        .await
-        .map_err(|e| e.message)?;
+    let captured = subprocess::spawn_and_capture_streaming(cmd, "intake", |line| {
+        if let Some(msg) = line.strip_prefix("@baro-progress ") {
+            on_progress(msg);
+        }
+    })
+    .await
+    .map_err(|e| e.message)?;
     drop(ctx_tempfile);
     drop(dec_tempfile);
 
