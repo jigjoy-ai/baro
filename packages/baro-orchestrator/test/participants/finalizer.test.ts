@@ -245,4 +245,112 @@ describe("Finalizer", () => {
             }
         })
     })
+
+    // Runs the finalizer end-to-end through a fake gh binary while varying only
+    // whether the merged branch's build/test verify passes, fails, or is absent.
+    // Asserts the observable effect of `checkpoint`: the PR title's "Checkpoint:"
+    // prefix and the verification block in the body.
+    async function runFinalizerWithVerify(
+        dir: string,
+        pkgJson: Record<string, unknown> | null,
+        runSuccess: boolean,
+    ): Promise<{ title: string; body: string }> {
+        const prdPath = join(dir, "prd.json")
+        writeFileSync(
+            prdPath,
+            JSON.stringify({
+                project: "Verify gate",
+                branchName: "baro/verify",
+                description: "Exercise the verify gate",
+                userStories: [],
+            }),
+        )
+        if (pkgJson) writeFileSync(join(dir, "package.json"), JSON.stringify(pkgJson))
+
+        const binDir = join(dir, "bin")
+        mkdirSync(binDir)
+        const argsPath = join(dir, "gh-args.jsonl")
+        const ghPath = join(binDir, "gh")
+        writeFileSync(
+            ghPath,
+            [
+                "#!/usr/bin/env node",
+                "const { appendFileSync } = require('node:fs')",
+                "const args = process.argv.slice(2)",
+                "appendFileSync(process.env.GH_ARGS_LOG, JSON.stringify(args) + '\\n')",
+                "if (args[0] === '--version') { console.log('gh version 2.0.0'); process.exit(0) }",
+                "if (args[0] === 'repo' && args[1] === 'view') { console.log('main'); process.exit(0) }",
+                "if (args[0] === 'pr' && args[1] === 'create') { console.log('https://github.com/acme/baro/pull/9'); process.exit(0) }",
+                "process.exit(1)",
+                "",
+            ].join("\n"),
+        )
+        chmodSync(ghPath, 0o755)
+
+        const originalPath = process.env.PATH
+        const originalArgsLog = process.env.GH_ARGS_LOG
+        process.env.PATH = `${binDir}:${originalPath ?? ""}`
+        process.env.GH_ARGS_LOG = argsPath
+        try {
+            const finalizer = new Finalizer({ cwd: dir, prdPath, baseSha: "base-sha" })
+            joinWithCapture(finalizer)
+            await finalizer.onExternalEvent(
+                source("conductor"),
+                RunStarted.create({ project: "Verify gate", storyCount: 0 }),
+            )
+            await finalizer.onExternalEvent(
+                source("conductor"),
+                RunCompleted.create({
+                    success: runSuccess,
+                    completedStories: [],
+                    failedStories: [],
+                    totalDurationSecs: 1,
+                    totalAttempts: 0,
+                    abortReason: runSuccess ? null : "boom",
+                }),
+            )
+            await finalizer.complete()
+
+            const calls = readFileSync(argsPath, "utf8")
+                .trim()
+                .split("\n")
+                .map((line) => JSON.parse(line) as string[])
+            const prCreate = calls.find((a) => a[0] === "pr" && a[1] === "create")
+            assert.ok(prCreate, "gh pr create was called")
+            return {
+                title: prCreate[prCreate.indexOf("--title") + 1],
+                body: prCreate[prCreate.indexOf("--body") + 1],
+            }
+        } finally {
+            if (originalPath === undefined) delete process.env.PATH
+            else process.env.PATH = originalPath
+            if (originalArgsLog === undefined) delete process.env.GH_ARGS_LOG
+            else process.env.GH_ARGS_LOG = originalArgsLog
+        }
+    }
+
+    it("forces a checkpoint when verify runs and fails, surfacing the failure in the body", async () => {
+        await withTempDir("baro-finalizer-", async (dir) => {
+            const { title, body } = await runFinalizerWithVerify(
+                dir,
+                { name: "v", scripts: { test: "exit 3" } },
+                true,
+            )
+            assert.match(title, /^Checkpoint:/)
+            assert.match(body, /Build\/test verification failed/)
+            assert.match(body, /npm run test/)
+        })
+    })
+
+    it("stays a clean PR when verify did not run (no build/test scripts)", async () => {
+        await withTempDir("baro-finalizer-", async (dir) => {
+            const { title, body } = await runFinalizerWithVerify(
+                dir,
+                { name: "v", scripts: { lint: "true" } },
+                true,
+            )
+            assert.doesNotMatch(title, /^Checkpoint:/)
+            assert.doesNotMatch(body, /Build\/test verification failed/)
+        })
+    })
 })

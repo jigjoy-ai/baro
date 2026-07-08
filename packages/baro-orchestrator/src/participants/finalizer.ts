@@ -45,6 +45,7 @@ import {
     StoryResult,
     type RunCompletedData,
 } from "../semantic-events.js"
+import { verifyBuild, type VerifyResult } from "../verify.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -290,12 +291,27 @@ export class Finalizer extends BaseObserver {
         const filesStats = await this.collectFileStats()
         const totalSecs = run.totalDurationSecs
 
-        const checkpoint = !run.success
+        // Objective gate: build + run tests on the fully-merged branch. A run
+        // the Critic judged "green" can still merge with tests actually failing;
+        // a failed verify demotes the PR to a checkpoint so it isn't reported as
+        // clean. "Couldn't verify" (verify.ran === false) is NOT a failure.
+        this.log("[finalizer] verifying build…")
+        const verify = await verifyBuild(this.opts.cwd)
+        if (!verify.ran) {
+            this.log("[finalizer] nothing to verify (no build/test)")
+        } else if (verify.ok) {
+            this.log("[finalizer] ✓ build-verified")
+        } else {
+            this.log(`[finalizer] ⚠ verification failed: ${verify.failures[0]?.cmd ?? "build/test"}`)
+        }
+
+        const checkpoint = !run.success || (verify.ran && !verify.ok)
         const title = this.buildPrTitle(prd, passed.length, orderedStories.length, checkpoint)
         const body = this.buildPrBody({
             prd,
             run,
             checkpoint,
+            verify,
             orderedStories,
             passed,
             failed,
@@ -538,6 +554,7 @@ export class Finalizer extends BaseObserver {
         prd: PrdFile | null
         run: RunCompletedData
         checkpoint: boolean
+        verify: VerifyResult
         orderedStories: StoryRecord[]
         passed: StoryRecord[]
         failed: StoryRecord[]
@@ -557,6 +574,23 @@ export class Finalizer extends BaseObserver {
         if (args.checkpoint) {
             lines.push("> **Checkpoint PR:** baro produced branch changes, but the run failed during verification/retry/replan. Review this as a candidate fix, not a fully verified completion.")
             lines.push("")
+        }
+
+        // Objective build/test gate results — only shown when something that
+        // actually ran returned non-zero (this is what forced the checkpoint).
+        if (args.verify.ran && !args.verify.ok) {
+            lines.push("## ⚠ Build/test verification failed")
+            lines.push("")
+            lines.push("The fully-merged branch did not pass an objective build/test check:")
+            lines.push("")
+            for (const f of args.verify.failures) {
+                lines.push(`**\`${f.cmd}\`**`)
+                lines.push("")
+                lines.push("```")
+                lines.push(f.tail.trim() || "(no output captured)")
+                lines.push("```")
+                lines.push("")
+            }
         }
 
         if (prd?.description) {
