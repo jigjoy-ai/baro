@@ -183,6 +183,11 @@ pub struct Cli {
     /// Execution mode: auto (intake proposes, you confirm) or force focused/sequential/parallel.
     #[arg(long, value_parser=["auto", "focused", "sequential", "parallel"], env = "BARO_MODE", default_value = "auto")]
     pub mode: String,
+
+    /// Ask-after-planning: in headless mode, emit the proposed execution mode
+    /// and wait (≤120s) for a confirm_mode command before planning continues.
+    #[arg(long, env = "BARO_CONFIRM_MODE")]
+    pub confirm_mode: bool,
 }
 
 pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {

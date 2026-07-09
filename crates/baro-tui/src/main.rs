@@ -24,6 +24,8 @@ use utils::extract_json;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -34,7 +36,7 @@ use crossterm::{
     },
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use app::{App, Planner, ReviewStory, Screen};
 use events::BaroEvent;
@@ -607,6 +609,7 @@ async fn run_app(
 
     app.effort = cli.effort.clone();
     app.mode = cli.mode.clone();
+    app.confirm_mode = cli.confirm_mode;
 
     // `cli.llm` defaults to "claude", so its value alone can't distinguish
     // an explicit `--llm claude` / `--llm hybrid` from the no-flag default;
@@ -901,7 +904,6 @@ async fn run_app(
     let mut last_draw = Instant::now()
         .checked_sub(Duration::from_millis(100))
         .unwrap_or_else(Instant::now);
-    let mut stdin_forwarder_started = false;
     loop {
         if let Some(t) = terminal.as_deref_mut() {
             if last_draw.elapsed() >= Duration::from_millis(33) {
@@ -1755,24 +1757,11 @@ async fn run_app(
                 }
             }
             Some(AppEvent::OrchestratorStdin(sender)) => {
-                // Headless: our own stdin is the cloud→run command lane.
-                // A plain std thread (like the keyboard reader) so a
-                // forever-blocked read can't stall runtime shutdown; send
-                // errors after child exit just end the thread.
-                if headless && !stdin_forwarder_started {
-                    stdin_forwarder_started = true;
-                    let cmd_tx = sender.clone();
-                    std::thread::spawn(move || {
-                        use std::io::BufRead;
-                        for line in std::io::stdin().lock().lines() {
-                            let Ok(line) = line else { break };
-                            if let Some(cmd) = stdin_command_line(&line) {
-                                if cmd_tx.blocking_send(cmd).is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    });
+                // Headless: our own stdin is the cloud→run command lane. A single
+                // StdinHub reader owns stdin (shared with the confirm-mode gate);
+                // hand it the execution-phase command sender.
+                if headless {
+                    StdinHub::global().set_orchestrator(sender.clone());
                 }
                 app.orchestrator_stdin = Some(sender);
             }
@@ -1844,6 +1833,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
     let context = app.claude_md_content.clone();
     let quick = app.quick;
     let mode = app.mode.clone();
+    let confirm_mode = app.confirm_mode;
     // Per-phase routing lets hybrid runs split Architect/Planner from
     // Story/Critic/Surgeon; unset overrides fall back to the global --llm.
     let architect_llm = app.architect_llm;
@@ -1919,7 +1909,14 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
                 plan_progress_sink(headless, tx.clone()),
             ).await;
             if headless {
-                Some(contract)
+                // Ask-after-planning (opt-in): emit the proposal and block for a
+                // confirm_mode command (≤120s). Without the flag, headless stays
+                // fire-and-forget — no emit, no wait, byte-for-byte as before.
+                if confirm_mode {
+                    Some(resolve_confirm_mode(contract).await)
+                } else {
+                    Some(contract)
+                }
             } else {
                 let _ = tx
                     .send(AppEvent::IntakeReady { decision_doc, contract_json: contract })
@@ -2362,6 +2359,136 @@ fn spawn_executor(
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx, stdin_rx);
 }
 
+/// Single reader over headless stdin, shared by two lanes: the intake
+/// `confirm_mode` gate and the execution `agent_message` command lane. One
+/// thread owns the Stdin mutex — two competing `stdin().lock()` readers would
+/// starve each other (a parked read holds the lock for the whole process).
+struct StdinHub {
+    confirm_gate: StdMutex<Option<oneshot::Sender<String>>>,
+    orch_tx: StdMutex<Option<mpsc::Sender<String>>>,
+    reader_started: AtomicBool,
+}
+
+impl StdinHub {
+    fn global() -> &'static StdinHub {
+        static HUB: OnceLock<StdinHub> = OnceLock::new();
+        HUB.get_or_init(|| StdinHub {
+            confirm_gate: StdMutex::new(None),
+            orch_tx: StdMutex::new(None),
+            reader_started: AtomicBool::new(false),
+        })
+    }
+
+    /// Spawn the single stdin reader thread (idempotent). A plain std thread —
+    /// like the keyboard reader — so a forever-blocked read never stalls the
+    /// runtime; each parsed line routes to whichever lane wants it.
+    fn ensure_reader(&'static self) {
+        if self.reader_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                // confirm_mode lines resolve the intake gate; if no gate is open
+                // (already confirmed / not waiting) they're dropped.
+                if let Some(mode) = parse_confirm_mode(trimmed) {
+                    if let Some(tx) = self.confirm_gate.lock().unwrap().take() {
+                        let _ = tx.send(mode);
+                    }
+                    continue;
+                }
+                // Everything else is an execution-phase command (agent_message);
+                // forward to the orchestrator lane once execution has set it.
+                if let Some(cmd) = stdin_command_line(trimmed) {
+                    let tx = self.orch_tx.lock().unwrap().clone();
+                    if let Some(tx) = tx {
+                        let _ = tx.blocking_send(cmd);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Register the execution-phase command sender and start the reader.
+    fn set_orchestrator(&'static self, tx: mpsc::Sender<String>) {
+        *self.orch_tx.lock().unwrap() = Some(tx);
+        self.ensure_reader();
+    }
+
+    /// Block for a `confirm_mode` line, up to `timeout`. `None` on timeout so
+    /// the caller can auto-proceed — a run must never hang on confirmation.
+    async fn await_confirm(&'static self, timeout: Duration) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        *self.confirm_gate.lock().unwrap() = Some(tx);
+        self.ensure_reader();
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(mode)) => Some(mode),
+            // Timed out (or the sender was dropped): close the gate so a late
+            // line is discarded rather than resolving a stale wait.
+            _ => {
+                *self.confirm_gate.lock().unwrap() = None;
+                None
+            }
+        }
+    }
+}
+
+/// Parse a `{"kind":"confirm_mode","mode":"…"}` command line into its mode
+/// string. `None` for anything else (agent_message, non-JSON, missing fields).
+fn parse_confirm_mode(line: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("kind")?.as_str()? != "confirm_mode" {
+        return None;
+    }
+    Some(v.get("mode")?.as_str()?.to_string())
+}
+
+/// Ask-after-planning (headless): emit the `mode_proposal` event, then block
+/// for a `confirm_mode` command (≤120s). On timeout, auto-proceed with baro's
+/// own proposed mode — the run must never hang waiting for a human. Returns the
+/// ModeContract JSON the planner runs with.
+async fn resolve_confirm_mode(contract: String) -> String {
+    let view = serde_json::from_str::<ModeContractView>(&contract).unwrap_or_else(|_| {
+        serde_json::from_str::<ModeContractView>(intake_runner::FALLBACK_CONTRACT)
+            .expect("fallback contract is valid")
+    });
+    if let Ok(line) = serde_json::to_string(&serde_json::json!({
+        "type": "mode_proposal",
+        "data": { "mode": view.mode, "confidence": view.confidence, "reason": view.reason },
+    })) {
+        println!("{}", line);
+    }
+    let proposed = view.mode.clone();
+    match StdinHub::global().await_confirm(Duration::from_secs(120)).await {
+        // "accept" or the proposed mode itself: keep the intake contract verbatim.
+        Some(m) if m == "accept" || m == proposed => {
+            eprintln!("[baro] confirm-mode: proceeding with proposed mode '{proposed}'");
+            contract
+        }
+        Some(m) if m == "focused" || m == "sequential" || m == "parallel" => {
+            eprintln!("[baro] confirm-mode: user chose '{m}' (proposed '{proposed}')");
+            user_mode_contract(&m, &format!("User selected {m} mode."))
+        }
+        Some(other) => {
+            eprintln!(
+                "[baro] confirm-mode: ignoring invalid mode '{other}', using proposed '{proposed}'"
+            );
+            contract
+        }
+        None => {
+            eprintln!(
+                "[baro] confirm-mode: no confirmation within 120s — auto-proceeding with proposed mode '{proposed}'"
+            );
+            contract
+        }
+    }
+}
+
 /// Headless command lane: keep a stdin line only if it's a JSON object
 /// with a "type" field — anything else is dropped silently.
 fn stdin_command_line(line: &str) -> Option<String> {
@@ -2390,7 +2517,7 @@ fn delete_prev_word(s: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{delete_prev_word, stdin_command_line};
+    use super::{delete_prev_word, parse_confirm_mode, stdin_command_line};
 
     fn deleted(input: &str) -> String {
         let mut s = input.to_string();
@@ -2417,5 +2544,23 @@ mod tests {
         assert_eq!(stdin_command_line("not json"), None);
         assert_eq!(stdin_command_line(r#"{"id":"S2"}"#), None); // no "type"
         assert_eq!(stdin_command_line(r#"["type"]"#), None); // not an object
+    }
+
+    #[test]
+    fn parse_confirm_mode_cases() {
+        assert_eq!(
+            parse_confirm_mode(r#"{"kind":"confirm_mode","mode":"parallel"}"#).as_deref(),
+            Some("parallel"),
+        );
+        // "accept" means "use the proposed mode" — passed through verbatim.
+        assert_eq!(
+            parse_confirm_mode(r#"  {"kind":"confirm_mode","mode":"accept"}  "#).as_deref(),
+            Some("accept"),
+        );
+        // An agent_message (the execution lane) is not a confirm_mode line.
+        assert_eq!(parse_confirm_mode(r#"{"type":"agent_message","id":"S2","text":"hi"}"#), None);
+        assert_eq!(parse_confirm_mode(r#"{"kind":"other","mode":"parallel"}"#), None);
+        assert_eq!(parse_confirm_mode(r#"{"kind":"confirm_mode"}"#), None); // no mode
+        assert_eq!(parse_confirm_mode("not json"), None);
     }
 }

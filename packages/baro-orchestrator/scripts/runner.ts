@@ -35,6 +35,10 @@ interface RunDispatchMsg {
     quick?: boolean
     // Execution mode for baro's intake (BARO_MODE env — older binaries just ignore it).
     mode?: "auto" | "focused" | "sequential" | "parallel"
+    // Ask-after-planning: pass --confirm-mode so baro pauses after intake for a
+    // confirm_mode command (older binaries lack the flag → they'd fail, so the
+    // control plane only sets this for capable runners).
+    confirmMode?: boolean
     // Follow-up: check out this PR's branch and run with --continue so it updates in place.
     followUp?: { prNumber: number }
 }
@@ -42,6 +46,7 @@ type ToRunner =
     | RunDispatchMsg
     | { t: "cancel"; storyId: string }
     | { t: "agent_message"; storyId: string; text: string }
+    | { t: "confirm_mode"; mode: string }
     | { t: "ping"; ts: number }
     | { t: "rejected"; reason: string }
     | { t: string }
@@ -455,7 +460,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         // the latest opus for the claude backend) — we don't override it.
         const child = spawn(
             baroBin,
-            ["--headless", d.goal, "--cwd", cwd, "--llm", d.route?.backend ?? "claude", "--parallel", String(d.parallel), "--timeout", String(d.timeoutSecs), ...(d.quick ? ["--quick"] : []), ...(d.followUp ? ["--continue"] : [])],
+            ["--headless", d.goal, "--cwd", cwd, "--llm", d.route?.backend ?? "claude", "--parallel", String(d.parallel), "--timeout", String(d.timeoutSecs), ...(d.quick ? ["--quick"] : []), ...(d.confirmMode ? ["--confirm-mode"] : []), ...(d.followUp ? ["--continue"] : [])],
             // stdin is piped: baro --headless forwards JSON command lines
             // (agent_message) into the orchestrator's stdin lane.
             { cwd, env, stdio: ["pipe", "pipe", "pipe"] },
@@ -634,6 +639,14 @@ function handleMessage(m: ToRunner): void {
         const stdin = activeChild?.stdin
         if (stdin && stdin.writable && !stdin.destroyed) {
             stdin.write(`${JSON.stringify({ type: "agent_message", id: storyId, text })}\n`)
+        }
+    } else if (m.t === "confirm_mode") {
+        // Ask-after-planning: the operator's mode choice → baro's stdin confirm
+        // gate. Dropped silently if no run is live or stdin already closed.
+        const { mode } = m as { mode: string }
+        const stdin = activeChild?.stdin
+        if (stdin && stdin.writable && !stdin.destroyed) {
+            stdin.write(`${JSON.stringify({ kind: "confirm_mode", mode })}\n`)
         }
     } else if (m.t === "dispatch_run") {
         const d = m as RunDispatchMsg
