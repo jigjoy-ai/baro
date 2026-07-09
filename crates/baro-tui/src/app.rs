@@ -455,6 +455,9 @@ pub struct App {
     /// `--mode` / `BARO_MODE`: "auto" runs intake (+ picker in the TUI);
     /// anything else forces that mode and skips both.
     pub mode: String,
+    /// `--confirm-mode`: headless emits the proposed mode and waits for a
+    /// confirm_mode command before planning (opt-in; default fire-and-forget).
+    pub confirm_mode: bool,
     pub mode_picker_index: usize,
     pub mode_proposal: Option<ModeProposal>,
     /// Planner-stamped `executionMode` contract, passed through opaquely
@@ -605,6 +608,7 @@ impl App {
             intra_level_delay_secs: None,
             quick: false,
             mode: "auto".to_string(),
+            confirm_mode: false,
             mode_picker_index: 0,
             mode_proposal: None,
             execution_mode: None,
