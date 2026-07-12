@@ -3,9 +3,12 @@ use std::time::Instant;
 
 use ratatui::widgets::ListState;
 
-use crate::events::{BaroEvent, DoneStats};
+use crate::events::{BaroEvent, DoneStats, RunVerificationEvidence};
 
 use crate::constants::MAX_LOG_LINES;
+use crate::dag_state::rebuild_dag_levels;
+
+pub const DIALOGUE_AGENT_ID: &str = "_dialogue";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Screen {
@@ -307,9 +310,13 @@ pub struct ModeProposal {
 #[derive(Debug, Clone)]
 pub struct ReviewStory {
     pub id: String,
+    pub priority: i32,
     pub title: String,
     pub description: String,
     pub depends_on: Vec<String>,
+    pub retries: u32,
+    pub acceptance: Vec<String>,
+    pub tests: Vec<String>,
     pub completed: bool,
     pub model: Option<String>,
 }
@@ -389,6 +396,10 @@ pub struct App {
     pub done: bool,
     pub final_stats: Option<DoneStats>,
     pub total_time_secs: u64,
+    /// Objective run verification: passed, failed, or skipped/unverified.
+    pub verification_status: Option<String>,
+    /// Correlated commands and timings behind the objective verdict.
+    pub verification: Option<RunVerificationEvidence>,
     /// Set when the orchestrator terminated without a normal `Done`
     /// event; the completion screen surfaces the unclean finish.
     pub exit_reason: Option<String>,
@@ -486,6 +497,8 @@ pub struct App {
     pub token_usage: HashMap<String, (u64, u64)>,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+    /// Latest non-authoritative live snapshot per running agent.
+    pub live_token_usage: HashMap<String, (u64, u64)>,
 
     // UI state
     pub main_view: MainView,
@@ -512,8 +525,10 @@ pub struct App {
     pub diff_scroll_pending: bool,
     pub decisions_scroll: u16,
     /// Mid-run chat input: (target story id, buffer). Rendered in the
-    /// bottom strip; Enter sends an `agent_message` command line.
+    /// bottom strip; Enter sends an agent or collective dialogue command.
     pub agent_msg_input: Option<(String, String)>,
+    /// The opt-in communication-only collective participant is available.
+    pub dialogue_enabled: bool,
     /// Live orchestrator stdin (JSON command lines); refreshed per spawn.
     pub orchestrator_stdin: Option<tokio::sync::mpsc::Sender<String>>,
 }
@@ -575,6 +590,8 @@ impl App {
             done: false,
             final_stats: None,
             total_time_secs: 0,
+            verification_status: None,
+            verification: None,
             exit_reason: None,
             push_results: Vec::new(),
             review_in_progress: false,
@@ -622,6 +639,7 @@ impl App {
             token_usage: HashMap::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
+            live_token_usage: HashMap::new(),
             runner: None,
             changed_files: Vec::new(),
             story_diffs: HashMap::new(),
@@ -643,6 +661,8 @@ impl App {
             diff_scroll_pending: false,
             decisions_scroll: 0,
             agent_msg_input: None,
+            dialogue_enabled: std::env::var("BARO_WITH_DIALOGUE")
+                .is_ok_and(|value| value == "1"),
             orchestrator_stdin: None,
         }
     }
@@ -677,6 +697,8 @@ impl App {
         self.percentage = 0;
         self.final_stats = None;
         self.done = false;
+        self.verification_status = None;
+        self.verification = None;
         self.exit_reason = None;
         self.finalize_in_progress = false;
         self.pr_url = None;
@@ -684,6 +706,7 @@ impl App {
         self.token_usage.clear();
         self.total_input_tokens = 0;
         self.total_output_tokens = 0;
+        self.live_token_usage.clear();
         self.changed_files.clear();
         self.story_diffs.clear();
         self.total_cost_usd = 0.0;
@@ -814,17 +837,44 @@ impl App {
         }
         .or_else(|| self.activity_filter.clone())
         .or_else(|| self.active_story_ids().get(self.selected_log_index).cloned());
-        candidate.filter(|id| self.active_stories.contains_key(id))
+        candidate.filter(|id| {
+            id != DIALOGUE_AGENT_ID && self.active_stories.contains_key(id)
+        })
+    }
+
+    /// Open the global collective conversation without making it part of the
+    /// control plane. The synthetic activity lane is UI-only.
+    pub fn open_dialogue(&mut self) {
+        if !self.dialogue_enabled {
+            return;
+        }
+        self.active_stories
+            .entry(DIALOGUE_AGENT_ID.to_string())
+            .or_insert_with(|| ActiveStory {
+                title: "Collective".to_string(),
+                logs: Vec::new(),
+                activity: Vec::new(),
+                start_time: Instant::now(),
+            });
+        self.activity_filter = Some(DIALOGUE_AGENT_ID.to_string());
+        self.main_view = MainView::Activity;
+        self.focus = WorkbenchFocus::Main;
+        self.agent_msg_input = Some((DIALOGUE_AGENT_ID.to_string(), String::new()));
     }
 
     /// Local echo of a user→agent message so it shows in the feed
     /// immediately, before (and regardless of) orchestrator round-trip.
     pub fn echo_user_message(&mut self, id: &str, text: &str) {
+        let target = if id == DIALOGUE_AGENT_ID {
+            "collective"
+        } else {
+            id
+        };
         self.push_story_activity(
             id,
             ActivityEntry {
                 kind: "user".to_string(),
-                text: format!("you → {}: {}", id, text),
+                text: format!("you → {}: {}", target, text),
                 tool: None,
                 op: None,
                 ok: None,
@@ -1295,10 +1345,37 @@ impl App {
                 stats,
                 success,
                 abort_reason,
+                verification_status,
+                verification,
             } => {
                 self.done = true;
                 self.total_time_secs = total_time_secs;
                 self.final_stats = Some(stats);
+                let embedded_status = verification
+                    .as_ref()
+                    .map(|evidence| evidence.status.clone());
+                let status_mismatch = embedded_status.is_some()
+                    && verification_status.is_some()
+                    && embedded_status != verification_status;
+                let candidate_status = embedded_status.or(verification_status);
+                self.verification_status = match candidate_status.as_deref() {
+                    Some("passed" | "failed" | "skipped") => candidate_status,
+                    Some(other) => {
+                        self.exit_reason = Some(format!(
+                            "Invalid objective verification status: {}",
+                            other,
+                        ));
+                        Some("failed".to_string())
+                    }
+                    None => None,
+                };
+                self.verification = verification;
+                if status_mismatch {
+                    self.verification_status = Some("failed".to_string());
+                    self.exit_reason = Some(
+                        "Inconsistent objective verification evidence received.".to_string(),
+                    );
+                }
                 if !success {
                     // Show the explicit failure reason instead of the
                     // green completion banner.
@@ -1323,6 +1400,23 @@ impl App {
                 }
             }
 
+            BaroEvent::ModelUsage { measurement: _ } => {
+                // Parsed deliberately so structured telemetry never becomes a
+                // noisy [parse-skip] line. TokenUsage remains the compatibility
+                // projection used for the current totals UI.
+            }
+
+            BaroEvent::TokenProgress {
+                id,
+                input_tokens,
+                output_tokens,
+            } => {
+                // Live snapshots are not deltas and therefore must not be
+                // added to the authoritative final totals.
+                self.live_token_usage
+                    .insert(id, (input_tokens, output_tokens));
+            }
+
             BaroEvent::StoryDiff { id, files, diff } => {
                 // Merge file stats into the run-wide changed-files list (dedup
                 // by path, accumulating counts), and keep the per-story diff.
@@ -1344,8 +1438,12 @@ impl App {
             BaroEvent::Replan { source, reason, added, removed, rewired } => {
                 for a in added {
                     if let Some(existing) = self.stories.iter_mut().find(|s| s.id == a.id) {
+                        existing.title = a.title;
                         existing.replan = Some(ReplanMark::Added);
                         existing.depends_on = a.depends_on;
+                        if existing.status == StoryStatus::Skipped {
+                            existing.status = StoryStatus::Pending;
+                        }
                     } else {
                         let mut s = StoryState::new(
                             a.id,
@@ -1360,9 +1458,7 @@ impl App {
                 for id in removed {
                     if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
                         story.replan = Some(ReplanMark::Removed(reason.clone()));
-                        if story.status == StoryStatus::Pending
-                            || story.status == StoryStatus::Running
-                        {
+                        if story.status != StoryStatus::Complete {
                             story.status = StoryStatus::Skipped;
                         }
                     }
@@ -1374,6 +1470,9 @@ impl App {
                     }
                 }
                 self.total = self.stories.len() as u32;
+                if let Some(levels) = rebuild_dag_levels(&self.stories) {
+                    self.dag_levels = levels;
+                }
                 self.push_run_activity(ActivityEntry::system(
                     "replan",
                     format!("replan ({}): {}", source, reason),
@@ -1591,6 +1690,11 @@ mod tests {
         let mut app = app_with_run();
         feed(
             &mut app,
+            r#"{"type":"story_error","id":"S2","error":"first attempt failed","attempt":1,"max_retries":1}"#,
+        );
+        assert_eq!(app.story("S2").status, StoryStatus::Failed);
+        feed(
+            &mut app,
             r#"{"type":"replan","source":"sentry","reason":"scope shift",
                 "added":[{"id":"S3","title":"Three","depends_on":["S1"]}],
                 "removed":["S2"],"rewired":[{"id":"S1","depends_on":[]}]}"#,
@@ -1603,9 +1707,24 @@ mod tests {
         );
         assert_eq!(app.story("S2").status, StoryStatus::Skipped);
         assert_eq!(app.total, 3);
+        assert_eq!(app.dag_levels, vec![vec!["S1"], vec!["S3"]]);
         // Run-level system entry is fanned out to active feeds.
         let feed_s1 = &app.active_stories.get("S1").unwrap().activity;
         assert!(feed_s1.last().unwrap().text.contains("scope shift"));
+
+        feed(
+            &mut app,
+            r#"{"type":"replan","source":"board","reason":"safe replacement",
+                "added":[{"id":"S2","title":"Two replacement","depends_on":["S3"]}],
+                "removed":[],"rewired":[]}"#,
+        );
+        assert_eq!(app.story("S2").status, StoryStatus::Pending);
+        assert_eq!(app.story("S2").title, "Two replacement");
+        assert_eq!(app.story("S2").depends_on, vec!["S3"]);
+        assert_eq!(
+            app.dag_levels,
+            vec![vec!["S1"], vec!["S3"], vec!["S2"]]
+        );
     }
 
     #[test]
@@ -1668,6 +1787,30 @@ mod tests {
     }
 
     #[test]
+    fn collective_dialogue_is_a_separate_non_story_message_lane() {
+        let mut app = app_with_run();
+        app.dialogue_enabled = true;
+        app.open_dialogue();
+
+        assert_eq!(
+            app.agent_msg_input.as_ref().map(|(id, _)| id.as_str()),
+            Some(DIALOGUE_AGENT_ID),
+        );
+        assert_eq!(app.activity_filter.as_deref(), Some(DIALOGUE_AGENT_ID));
+        assert_eq!(app.message_target(), None);
+
+        app.echo_user_message(DIALOGUE_AGENT_ID, "what is blocked?");
+        let entry = app
+            .active_stories
+            .get(DIALOGUE_AGENT_ID)
+            .unwrap()
+            .activity
+            .last()
+            .unwrap();
+        assert_eq!(entry.text, "you → collective: what is blocked?");
+    }
+
+    #[test]
     fn explorer_file_navigation_targets_diff() {
         let mut app = app_with_run();
         feed(
@@ -1699,5 +1842,41 @@ mod tests {
         assert_eq!(app.level_states.get(&0), Some(&LevelRunState::Done { failed: true }));
         feed(&mut app, r#"{"type":"recovery_started","attempt":1,"story_ids":["S1"]}"#);
         assert_eq!(app.recoveries, vec![(1, vec!["S1".to_string()])]);
+    }
+
+    #[test]
+    fn embedded_verification_is_canonical_and_mismatch_fails_closed() {
+        let mut app = app_with_run();
+        feed(
+            &mut app,
+            r#"{"type":"done","total_time_secs":1,"success":true,
+                "verification_status":"passed",
+                "verification":{"verification_id":"v1","status":"failed",
+                "duration_ms":1,"commands":[]},
+                "stats":{"stories_completed":1,"stories_skipped":0,
+                "total_commits":0,"files_created":0,"files_modified":0}}"#,
+        );
+
+        assert_eq!(app.verification_status.as_deref(), Some("failed"));
+        assert!(app
+            .exit_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Inconsistent objective verification"));
+    }
+
+    #[test]
+    fn unknown_verification_status_never_renders_as_green() {
+        let mut app = app_with_run();
+        feed(
+            &mut app,
+            r#"{"type":"done","total_time_secs":1,"success":true,
+                "verification_status":"mystery",
+                "stats":{"stories_completed":1,"stories_skipped":0,
+                "total_commits":0,"files_created":0,"files_modified":0}}"#,
+        );
+
+        assert_eq!(app.verification_status.as_deref(), Some("failed"));
+        assert!(app.exit_reason.is_some());
     }
 }

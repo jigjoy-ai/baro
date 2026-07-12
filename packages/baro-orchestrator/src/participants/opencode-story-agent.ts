@@ -19,12 +19,16 @@ import {
     OpenCodeCliParticipant,
     type OpenCodeRunSummary,
 } from "./opencode-cli-participant.js"
+import { correlationOf } from "./story-agent.js"
 
 export interface OpenCodeStorySpec {
     /** Story ID, used as agentId for observer attribution. */
     id: string
     prompt: string
     cwd: string
+    runId?: string
+    leaseId?: string
+    generation?: number
     /** Provider-qualified model, e.g. "anthropic/claude-sonnet-4-20250514". */
     model?: string
     opencodeBin?: string
@@ -65,6 +69,8 @@ export class OpenCodeStoryAgent extends BaseObserver {
         OpenCodeStorySpec
 
     private envRef: AgenticEnvironment | null = null
+    /** Optional explicit bus identity for the terminal outcome. */
+    private resultAuthority: Participant | null = null
     private currentOpenCode: OpenCodeCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -100,6 +106,13 @@ export class OpenCodeStoryAgent extends BaseObserver {
 
     getCurrentOpenCode(): OpenCodeCliParticipant | null {
         return this.currentOpenCode
+    }
+
+    setResultAuthority(source: Participant): void {
+        if (this.resultAuthority && this.resultAuthority !== source) {
+            throw new Error(`result authority already set for ${this.spec.id}`)
+        }
+        this.resultAuthority = source
     }
 
     /** Idempotent; returns the `done` promise. */
@@ -287,13 +300,14 @@ export class OpenCodeStoryAgent extends BaseObserver {
     ): void {
         if (!this.envRef) return
         this.envRef.deliverSemanticEvent(
-            this,
+            this.resultAuthority ?? this,
             StoryResult.create({
                 storyId: this.spec.id,
                 success,
                 attempts,
                 durationSecs,
                 error,
+                ...correlationOf(this.spec),
             }),
         )
     }

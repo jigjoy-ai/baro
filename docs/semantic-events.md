@@ -1,8 +1,9 @@
 # Semantic events: migration policy and wire-format notes
 
 `packages/baro-orchestrator/src/semantic-events.ts` defines every baro
-orchestrator bus event as a Mozaik 3.10 `SemanticEvent`. It replaced the old
-`BusEvent` class hierarchy (`types.ts`, plus `ConductorStateItem` in
+orchestrator bus event as a Mozaik `SemanticEvent`. The conversion began on
+Mozaik 3.10; the runtime now uses Mozaik 3.12. It replaced the old `BusEvent`
+class hierarchy (`types.ts`, plus `ConductorStateItem` in
 `participants/conductor.ts` and `StoryResultItem` in
 `participants/story-agent.ts`).
 
@@ -54,6 +55,29 @@ carry no compat constraint beyond "don't rename once shipped"):
   the machine-readable twin of the `[story-factory] S1 → backend:model`
   stderr line (which stays). See docs/tui-protocol-v2.md for the structured
   BaroEvents these feed.
+- `runtime_replan_proposed` — a collective worker proposes a closed,
+  correlated mutation of the not-yet-started DAG. Its run/story/lease/
+  generation identify the active authority and `baseGraphVersion` is the
+  optimistic-concurrency precondition.
+- `runtime_replan_applied` — the Board accepted the candidate only after the
+  graph, incremented version and applied-decision ledger were atomically
+  persisted. `graphVersion` is the immutable commit version;
+  `currentGraphVersion` is the latest version at delivery time and may be
+  newer on an idempotent replay.
+- `runtime_replan_rejected` — the correlated proposal did not mutate the DAG.
+  It carries a stable machine-readable rejection `code` and the Board's
+  current graph version so the worker does not continue from stale state.
+
+`proposalId` is the runtime-replan idempotency key. The same ID and identical
+content replays the remembered decision; the same ID with different content
+is rejected as `proposal_id_conflict`. Applied decisions are kept in the
+PRD's `runtimeGraph` metadata and can be restored by a host that resumes the
+same `runId`. The current public CLI starts a new identity after a process
+restart, so it keeps the graph/version baseline but does not yet expose
+end-to-end replay of an old decision. This runtime contract is distinct from
+the older `Replan` event, which remains the Surgeon/Conductor recovery
+proposal contract; in collective mode only the Board's persisted Applied
+decision reaches stateful projections.
 
 ## Why type discriminators, not `instanceof`
 

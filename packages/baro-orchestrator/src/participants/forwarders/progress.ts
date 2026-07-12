@@ -4,9 +4,13 @@ import {
     ConductorState,
     Critique,
     Replan,
+    RuntimeReplanApplied,
+    RuntimeReplanRejected,
     type ConductorStateData,
     type CritiqueData,
     type ReplanData,
+    type RuntimeReplanAppliedData,
+    type RuntimeReplanRejectedData,
 } from "../../semantic-events.js"
 import { emit } from "../../tui-protocol.js"
 
@@ -15,8 +19,23 @@ import { emit } from "../../tui-protocol.js"
  * doesn't understand `conductor_state` directly.
  */
 export class ProgressForwarder extends BaseObserver {
+    private runtimeReplanAuthority: Participant | null = null
+    private readonly seenRuntimeDecisions = new Set<string>()
+
+    setRuntimeReplanAuthority(authority: Participant): void {
+        if (
+            this.runtimeReplanAuthority &&
+            this.runtimeReplanAuthority !== authority
+        ) {
+            throw new Error(
+                "Progress forwarder runtime replan authority is already bound",
+            )
+        }
+        this.runtimeReplanAuthority = authority
+    }
+
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         if (ConductorState.is(event)) {
@@ -24,7 +43,31 @@ export class ProgressForwarder extends BaseObserver {
             return
         }
         if (Replan.is(event)) {
+            // A raw collective Replan is only a proposal. Wait for the
+            // Board's authoritative applied/rejected decision before telling
+            // the operator that the graph changed.
+            if (this.runtimeReplanAuthority) return
             this.handleReplan(event.data)
+            return
+        }
+        if (RuntimeReplanApplied.is(event)) {
+            if (
+                source !== this.runtimeReplanAuthority ||
+                this.seenRuntimeDecisions.has(event.data.proposalId) ||
+                (event.data.currentGraphVersion !== undefined &&
+                    event.data.graphVersion < event.data.currentGraphVersion)
+            ) return
+            this.seenRuntimeDecisions.add(event.data.proposalId)
+            this.handleRuntimeReplanApplied(event.data)
+            return
+        }
+        if (RuntimeReplanRejected.is(event)) {
+            if (
+                source !== this.runtimeReplanAuthority ||
+                this.seenRuntimeDecisions.has(event.data.proposalId)
+            ) return
+            this.seenRuntimeDecisions.add(event.data.proposalId)
+            this.handleRuntimeReplanRejected(event.data)
             return
         }
         if (Critique.is(event)) {
@@ -66,6 +109,26 @@ export class ProgressForwarder extends BaseObserver {
             id: "plan",
             kind: "warn",
             text: `Replanned (${item.source}): +${added}/-${removed} — ${item.reason}`,
+        })
+    }
+
+    private handleRuntimeReplanApplied(item: RuntimeReplanAppliedData): void {
+        const added = item.mutation.addedStories.length
+        const removed = item.mutation.removedStoryIds.length
+        emit({
+            type: "activity",
+            id: "plan",
+            kind: "warn",
+            text: `Replanned (agent:${item.sourceStoryId}@graph-v${item.graphVersion}): +${added}/-${removed} — ${item.reason}`,
+        })
+    }
+
+    private handleRuntimeReplanRejected(item: RuntimeReplanRejectedData): void {
+        emit({
+            type: "activity",
+            id: "plan",
+            kind: "warn",
+            text: `Replan rejected (agent:${item.sourceStoryId}, ${item.code}): ${item.reason}`,
         })
     }
 

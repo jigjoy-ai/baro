@@ -19,6 +19,7 @@ import {
     CodexCliParticipant,
     CodexRunSummary,
 } from "./codex-cli-participant.js"
+import { correlationOf } from "./story-agent.js"
 
 export interface CodexStorySpec {
     /** Story ID, used as agentId for observer attribution. */
@@ -26,6 +27,9 @@ export interface CodexStorySpec {
     prompt: string
     /** Must be a git repo (Codex enforces). */
     cwd: string
+    runId?: string
+    leaseId?: string
+    generation?: number
     model?: string
     codexBin?: string
     /** Number of *additional* attempts after the first. */
@@ -73,6 +77,8 @@ export class CodexStoryAgent extends BaseObserver {
         CodexStorySpec
 
     private envRef: AgenticEnvironment | null = null
+    /** Optional explicit bus identity for the terminal outcome. */
+    private resultAuthority: Participant | null = null
     private currentCodex: CodexCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -109,6 +115,13 @@ export class CodexStoryAgent extends BaseObserver {
 
     getCurrentCodex(): CodexCliParticipant | null {
         return this.currentCodex
+    }
+
+    setResultAuthority(source: Participant): void {
+        if (this.resultAuthority && this.resultAuthority !== source) {
+            throw new Error(`result authority already set for ${this.spec.id}`)
+        }
+        this.resultAuthority = source
     }
 
     /** Idempotent; returns the `done` promise. */
@@ -282,13 +295,14 @@ export class CodexStoryAgent extends BaseObserver {
     ): void {
         if (!this.envRef) return
         this.envRef.deliverSemanticEvent(
-            this,
+            this.resultAuthority ?? this,
             StoryResult.create({
                 storyId: this.spec.id,
                 success,
                 attempts,
                 durationSecs,
                 error,
+                ...correlationOf(this.spec),
             }),
         )
     }

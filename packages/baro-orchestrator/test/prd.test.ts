@@ -1,14 +1,20 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
+import { readFileSync, readdirSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 
 import {
     BARO_COAUTHOR_TRAILER,
     buildDefaultStoryPrompt,
     markStoryPassed,
     normalizePrd,
+    savePrdAtomic,
     type PrdFile,
     type PrdStory,
 } from "../src/prd.js"
+import { runtimeAppliedProposalFingerprint } from "../src/runtime/runtime-replan-fingerprint.js"
+import type { RuntimeReplanAppliedData } from "../src/semantic-events.js"
+import { withTempDir } from "./participants/helpers.js"
 
 function story(overrides: Partial<PrdStory> = {}): PrdStory {
     return {
@@ -24,6 +30,29 @@ function story(overrides: Partial<PrdStory> = {}): PrdStory {
         completedAt: null,
         durationSecs: null,
         model: undefined,
+        ...overrides,
+    }
+}
+
+function appliedDecision(
+    overrides: Partial<RuntimeReplanAppliedData> = {},
+): RuntimeReplanAppliedData {
+    return {
+        runId: "run-runtime",
+        proposalId: "proposal-1",
+        sourceStoryId: "S1",
+        leaseId: "lease-1",
+        generation: 1,
+        baseGraphVersion: 3,
+        previousGraphVersion: 3,
+        graphVersion: 4,
+        currentGraphVersion: 4,
+        reason: "discovered required work",
+        mutation: {
+            addedStories: [],
+            removedStoryIds: [],
+            modifiedDeps: { S2: ["S1"] },
+        },
         ...overrides,
     }
 }
@@ -118,6 +147,132 @@ describe("normalizePrd", () => {
 
         assert.equal(prd.decisionDocument, "Use the existing PRD schema.")
         assert.deepEqual(prd.executionMode, executionMode)
+    })
+
+    it("normalizes durable runtime graph metadata and drops malformed decisions", () => {
+        const validApplied = appliedDecision()
+        const runtimeGraph = {
+            runId: "run-runtime",
+            version: 4,
+            dynamicStories: 2,
+            appliedDecisions: [
+                { fingerprint: 7, applied: {} },
+                {
+                    fingerprint: "malformed-mutation",
+                    applied: {
+                        runId: "run-runtime",
+                        proposalId: "malformed",
+                        sourceStoryId: "S1",
+                        leaseId: "lease-1",
+                        generation: 1,
+                        baseGraphVersion: 2,
+                        previousGraphVersion: 2,
+                        graphVersion: 3,
+                        reason: "bad ledger entry",
+                        mutation: {},
+                    },
+                },
+                {
+                    fingerprint:
+                        runtimeAppliedProposalFingerprint(validApplied),
+                    applied: validApplied,
+                },
+            ],
+        }
+
+        const prd = normalizePrd(
+            { userStories: [], runtimeGraph } as unknown as Partial<PrdFile>,
+            "prd.json",
+        )
+
+        assert.equal(prd.runtimeGraph?.version, 4)
+        assert.equal(prd.runtimeGraph?.dynamicStories, 2)
+        assert.equal(prd.runtimeGraph?.appliedDecisions.length, 1)
+        assert.equal(
+            prd.runtimeGraph?.appliedDecisions[0]?.applied.proposalId,
+            "proposal-1",
+        )
+        runtimeGraph.appliedDecisions[2]!.applied.mutation.modifiedDeps.S2.push(
+            "later-mutation",
+        )
+        assert.deepEqual(
+            prd.runtimeGraph?.appliedDecisions[0]?.applied.mutation.modifiedDeps,
+            { S2: ["S1"] },
+        )
+    })
+
+    it("drops fingerprint mismatches and every ambiguous duplicate proposal id", () => {
+        const mismatched = appliedDecision({
+            proposalId: "mismatched",
+        })
+        const duplicate = appliedDecision({
+            proposalId: "duplicate",
+            baseGraphVersion: 1,
+            previousGraphVersion: 1,
+            graphVersion: 2,
+        })
+        const unique = appliedDecision({
+            proposalId: "unique",
+            baseGraphVersion: 2,
+            previousGraphVersion: 2,
+            graphVersion: 3,
+        })
+        const duplicateRecord = {
+            fingerprint: runtimeAppliedProposalFingerprint(duplicate),
+            applied: duplicate,
+        }
+
+        const prd = normalizePrd(
+            {
+                userStories: [],
+                runtimeGraph: {
+                    runId: "run-runtime",
+                    version: 4,
+                    dynamicStories: 2,
+                    appliedDecisions: [
+                        { fingerprint: "wrong", applied: mismatched },
+                        duplicateRecord,
+                        structuredClone(duplicateRecord),
+                        {
+                            fingerprint:
+                                runtimeAppliedProposalFingerprint(unique),
+                            applied: unique,
+                        },
+                    ],
+                },
+            },
+            "prd.json",
+        )
+
+        assert.deepEqual(
+            prd.runtimeGraph?.appliedDecisions.map(
+                (decision) => decision.applied.proposalId,
+            ),
+            ["unique"],
+        )
+    })
+})
+
+describe("savePrdAtomic", () => {
+    it("replaces the complete snapshot without retaining its temporary file", async () => {
+        await withTempDir("prd-atomic-", async (dir) => {
+            const path = join(dir, "prd.json")
+            writeFileSync(path, "old bytes\n")
+            const value: PrdFile = {
+                project: "atomic",
+                branchName: "baro/atomic",
+                description: "complete snapshot",
+                userStories: [story()],
+            }
+
+            savePrdAtomic(path, value)
+
+            assert.deepEqual(
+                JSON.parse(readFileSync(path, "utf8")),
+                JSON.parse(JSON.stringify(value)),
+            )
+            assert.deepEqual(readdirSync(dir), ["prd.json"])
+        })
     })
 })
 

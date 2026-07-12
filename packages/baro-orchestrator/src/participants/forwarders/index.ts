@@ -1,4 +1,4 @@
-import { AgenticEnvironment } from "@mozaik-ai/core"
+import { AgenticEnvironment, type Participant } from "@mozaik-ai/core"
 
 import { AgentStreamForwarder } from "./agent-stream.js"
 import { CoordinationForwarder } from "./coordination.js"
@@ -12,15 +12,33 @@ import { TokenUsageForwarder } from "./token-usage.js"
  * Wire every BaroEvent forwarder into the environment. Callers wanting a
  * subset can `new XxxForwarder().join(env)` directly instead.
  */
-export function joinBaroEventForwarders(env: AgenticEnvironment): void {
+export interface BaroEventForwarders {
+    readonly dag: DagForwarder
+    readonly progress: ProgressForwarder
+    setRuntimeReplanAuthority(authority: Participant): void
+}
+
+export function joinBaroEventForwarders(
+    env: AgenticEnvironment,
+): BaroEventForwarders {
+    const dag = new DagForwarder()
+    const progress = new ProgressForwarder()
     const forwarders = [
         new AgentStreamForwarder(),
         new StoryLifecycleForwarder(),
         new TokenUsageForwarder(),
-        new ProgressForwarder(),
+        progress,
         new CoordinationForwarder(),
-        new DagForwarder(),
+        dag,
         new FinalizationForwarder(),
     ]
     for (const f of forwarders) f.join(env)
+    return {
+        dag,
+        progress,
+        setRuntimeReplanAuthority(authority: Participant): void {
+            dag.setRuntimeReplanAuthority(authority)
+            progress.setRuntimeReplanAuthority(authority)
+        },
+    }
 }

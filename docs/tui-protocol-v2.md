@@ -3,15 +3,16 @@
 The BaroEvent stream (orchestrator stdout → Rust TUI / cloud control plane)
 historically compressed most bus activity into `story_log` lines. v2 adds
 STRUCTURED events so consumers can render run semantics first-class instead of
-parsing log strings. All additions are backward compatible: old consumers
-ignore unknown `type`s; every new event keeps emitting its old `story_log`
-line alongside for one release.
+parsing log strings. Old consumers ignore unknown `type`s. Where an older
+`story_log` mirror already existed it remains for compatibility; new runtime
+DAG projection uses the established structured `replan` shape directly and
+does not invent a duplicate log line.
 
 ## New BaroEvent variants (tui-protocol.ts)
 
 | type | fields | source semantic event | consumer rendering |
 |---|---|---|---|
-| `replan` | `source, reason, added: [{id,title,depends_on}], removed: [id], rewired: [{id, depends_on}]` | `Replan` | DAG updates; "replanned" badge on affected stories; activity entry |
+| `replan` | `source, reason, added: [{id,title,depends_on}], removed: [id], rewired: [{id, depends_on}]` | `Replan`, or an authoritative `RuntimeReplanApplied` projection | DAG updates; "replanned" badge on affected stories; activity entry |
 | `intervention` | `id, source, action, reason` | `StoryIntervention` | "stalled → aborted" pill on the agent row; activity warn |
 | `story_merged` | `id, mode: "worktree"\|"shared-tree"` | `StoryMerged` | ✓ merged pill on the agent row |
 | `merge_failed` | `id, error` | `StoryMergeFailed` | ✗ merge-failed pill (worktree preserved) |
@@ -31,14 +32,23 @@ line alongside for one release.
   type `story_routed`. Emitted by StoryFactory right after `resolveStoryRoute`
   (replaces the stderr-only `[story-factory] S1 → backend:model` as the
   machine-readable source of truth; the stderr line stays).
+- `RuntimeReplanProposed` / `RuntimeReplanApplied` /
+  `RuntimeReplanRejected` retain their distinct wire types in the Mozaik audit
+  stream. Only an authoritative, first-seen `Applied` decision is projected
+  to the existing stdout `replan` shape, after durable graph commit. The
+  projection's source is `agent:<storyId>@graph-v<commitVersion>`.
+
+There is deliberately no second runtime-specific TUI event. The Rust client
+applies the projected `replan` and rebuilds its DAG view immediately. Metrics
+must count the semantic audit event, not both it and this stdout projection.
 
 ## Forwarder mapping rules
 
 One forwarder concern per file (existing pattern in
 `participants/forwarders/`). The forwarders own ALL translation — no `emit()`
-calls for these events anywhere else. `story_log` mirror lines stay for one
-release so older TUIs/dashboards keep working; structured events are the
-source of truth for new consumers.
+calls for these events anywhere else. Existing `story_log` mirrors stay where
+they already formed part of the compatibility contract; structured events are
+the source of truth for new consumers.
 
 Existing `activity` events are unchanged; the TUI should now render them
 (kind-colored, story-grouped) instead of relying on the raw `story_log`

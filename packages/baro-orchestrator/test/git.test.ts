@@ -69,4 +69,21 @@ describe("createOrCheckoutBranch - branch name handling", () => {
         assert.equal(git(repo, "branch", "--show-current"), "baro/S4")
         assert.equal(git(repo, "branch", "--list", "baro/baro/S4"), "")
     })
+
+    it("creates a local branch without touching origin when push is disabled", async () => {
+        remote = mkdtempSync(join(tmpdir(), "baro-git-remote-"))
+        git(remote, "init", "--bare")
+        git(repo, "remote", "add", "origin", remote)
+
+        await createOrCheckoutBranch(
+            repo,
+            "baro/local-only",
+            (line) => logs.push(line),
+            false,
+        )
+
+        assert.equal(git(repo, "branch", "--show-current"), "baro/local-only")
+        assert.equal(git(remote, "for-each-ref", "--format=%(refname)"), "")
+        assert.ok(logs.includes("[git] local-only; not pushing baro/local-only"))
+    })
 })

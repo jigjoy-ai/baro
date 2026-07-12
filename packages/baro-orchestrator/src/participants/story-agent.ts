@@ -15,9 +15,16 @@ import {
     AgentResult,
     AgentState,
     AgentTargetedMessage,
+    ClaudeRateLimit,
     StoryResult,
     type AgentPhase,
+    type AgentResultData,
+    type StoryFailureData,
 } from "../semantic-events.js"
+import {
+    classifyProviderFailure,
+    compactProviderFailureDetail,
+} from "../provider-failure.js"
 import {
     ClaudeCliParticipant,
     ClaudeRunSummary,
@@ -28,6 +35,11 @@ export interface StorySpec {
     id: string
     prompt: string
     cwd: string
+    runId?: string
+    leaseId?: string
+    generation?: number
+    /** Runtime DAG version captured when this story lease was launched. */
+    graphVersion?: number
     model?: string
     /** Passed as `claude --effort` (low|medium|high|xhigh|max). */
     effort?: string
@@ -52,6 +64,7 @@ export interface StoryOutcome {
     durationSecs: number
     finalSummary: ClaudeRunSummary | null
     error: string | null
+    failure?: StoryFailureData
 }
 
 export class StoryAgent extends BaseObserver {
@@ -69,9 +82,13 @@ export class StoryAgent extends BaseObserver {
         StorySpec
 
     private envRef: AgenticEnvironment | null = null
+    /** Optional explicit bus identity for the terminal outcome. */
+    private resultAuthority: Participant | null = null
     private currentClaude: ClaudeCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
+    /** Rejected capacity frame for the currently executing CLI attempt. */
+    private currentProviderCapacitySignal: unknown | undefined
     private resolveDone!: (outcome: StoryOutcome) => void
     public readonly done: Promise<StoryOutcome>
 
@@ -115,6 +132,13 @@ export class StoryAgent extends BaseObserver {
         return this.currentClaude
     }
 
+    setResultAuthority(source: Participant): void {
+        if (this.resultAuthority && this.resultAuthority !== source) {
+            throw new Error(`result authority already set for ${this.spec.id}`)
+        }
+        this.resultAuthority = source
+    }
+
     /** Idempotent; returns the `done` promise. */
     run(environment: AgenticEnvironment): Promise<StoryOutcome> {
         if (this.startedAt != null) {
@@ -133,7 +157,7 @@ export class StoryAgent extends BaseObserver {
      * doing it here too would double-deliver.
      */
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         if (
@@ -146,6 +170,19 @@ export class StoryAgent extends BaseObserver {
         if (AgentResult.is(event) && event.data.agentId === this.spec.id) {
             this.notifyStoryResult?.()
         }
+
+        if (
+            ClaudeRateLimit.is(event) &&
+            event.data.agentId === this.spec.id &&
+            source === this.currentClaude &&
+            classifyProviderFailure(event.data.raw)
+        ) {
+            const eventSession = stringField(event.data.raw, "session_id")
+            const activeSession = this.currentClaude?.getSessionId()
+            if (!eventSession || !activeSession || eventSession === activeSession) {
+                this.currentProviderCapacitySignal = event.data.raw
+            }
+        }
     }
 
     abort(): void {
@@ -157,6 +194,8 @@ export class StoryAgent extends BaseObserver {
         const maxAttempts = this.spec.retries + 1
         let lastSummary: ClaudeRunSummary | null = null
         let lastError: string | null = null
+        let lastFailure: StoryFailureData | undefined
+        let attempts = 0
         let hardTimedOut = false
 
         const hardTimer =
@@ -186,9 +225,11 @@ export class StoryAgent extends BaseObserver {
                     }
                 }
 
+                attempts = attempt
                 const result = await this.runOneAttempt(attempt)
                 lastSummary = result.summary
                 lastError = result.error
+                lastFailure = result.failure
 
                 if (result.success) {
                     const durationSecs = Math.round(
@@ -207,6 +248,11 @@ export class StoryAgent extends BaseObserver {
                     return
                 }
 
+                // A second attempt on the same provider cannot recover quota,
+                // session-limit, or overload state. Return control to the
+                // broker so another route can bid instead.
+                if (result.failure?.kind === "provider_capacity") break
+
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
                     break
@@ -219,26 +265,46 @@ export class StoryAgent extends BaseObserver {
         const durationSecs = Math.round(
             (Date.now() - (this.startedAt ?? Date.now())) / 1000,
         )
-        this.transition("failed", `exhausted ${maxAttempts} attempts`)
-        this.emitStoryResult(false, maxAttempts, durationSecs, lastError)
+        this.transition(
+            "failed",
+            lastFailure?.kind === "provider_capacity"
+                ? `provider capacity unavailable after ${attempts} attempt(s)`
+                : `exhausted ${attempts}/${maxAttempts} attempts`,
+        )
+        this.emitStoryResult(
+            false,
+            attempts,
+            durationSecs,
+            lastError,
+            lastFailure,
+        )
         this.resolveDone({
             storyId: this.spec.id,
             success: false,
-            attempts: maxAttempts,
+            attempts,
             durationSecs,
             finalSummary: lastSummary,
             error: lastError,
+            ...(lastFailure ? { failure: lastFailure } : {}),
         })
     }
 
     private async runOneAttempt(
         attempt: number,
-    ): Promise<{ success: boolean; summary: ClaudeRunSummary | null; error: string | null }> {
+    ): Promise<{
+        success: boolean
+        summary: ClaudeRunSummary | null
+        error: string | null
+        failure?: StoryFailureData
+    }> {
         if (!this.envRef) {
             return { success: false, summary: null, error: "no environment" }
         }
 
         this.transition("running", `attempt ${attempt}`)
+        // Capacity evidence is scoped to one CLI process. Never let a late
+        // failure from an earlier retry taint a fresh attempt.
+        this.currentProviderCapacitySignal = undefined
 
         const claude = new ClaudeCliParticipant(this.spec.id, {
             cwd: this.spec.cwd,
@@ -299,12 +365,11 @@ export class StoryAgent extends BaseObserver {
             !summary.lastResult.isError
 
         if (!success) {
-            const reason = summary.error
-                ? summary.error.message
-                : summary.lastResult?.isError
-                  ? `claude reported isError on result:${summary.lastResult.subtype}`
-                  : `non-zero exit ${summary.exitCode}`
-            return { success: false, summary, error: reason }
+            const described = describeClaudeFailure(
+                summary,
+                this.currentProviderCapacitySignal,
+            )
+            return { success: false, summary, ...described }
         }
 
         return { success: true, summary, error: null }
@@ -363,16 +428,19 @@ export class StoryAgent extends BaseObserver {
         attempts: number,
         durationSecs: number,
         error: string | null,
+        failure?: StoryFailureData,
     ): void {
         if (!this.envRef) return
         this.envRef.deliverSemanticEvent(
-            this,
+            this.resultAuthority ?? this,
             StoryResult.create({
                 storyId: this.spec.id,
                 success,
                 attempts,
                 durationSecs,
                 error,
+                ...(failure ? { failure } : {}),
+                ...correlationOf(this.spec),
             }),
         )
     }
@@ -393,13 +461,69 @@ export class StoryAgent extends BaseObserver {
     }
 }
 
+function describeClaudeFailure(
+    summary: ClaudeRunSummary,
+    capacitySignal?: unknown,
+): {
+    error: string
+    failure?: StoryFailureData
+} {
+    const result = summary.lastResult
+    const failure = classifyProviderFailure(
+        capacitySignal,
+        summary.error,
+        result?.resultText,
+        result ? { code: result.subtype } : undefined,
+    )
+    if (failure) {
+        const detail = compactProviderFailureDetail(
+            result?.resultText ?? summary.error,
+        )
+        const resultLabel = result ? ` (result:${result.subtype})` : ""
+        return {
+            error: `claude provider capacity unavailable${resultLabel}${detail ? `: ${detail}` : ""}`,
+            failure,
+        }
+    }
+    if (summary.error) return { error: summary.error.message }
+    if (result?.isError) {
+        return { error: describeClaudeResultError(result) }
+    }
+    return { error: `non-zero exit ${summary.exitCode}` }
+}
+
+function stringField(value: unknown, key: string): string | undefined {
+    if (typeof value !== "object" || value === null) return undefined
+    const field = (value as Record<string, unknown>)[key]
+    return typeof field === "string" ? field : undefined
+}
+
+function describeClaudeResultError(result: AgentResultData): string {
+    return `claude reported isError on result:${result.subtype}`
+}
+
+export function correlationOf(
+    spec: Pick<StorySpec, "runId" | "leaseId" | "generation">,
+): { runId: string; leaseId: string; generation: number } | Record<string, never> {
+    return spec.runId && spec.leaseId && spec.generation != null
+        ? {
+              runId: spec.runId,
+              leaseId: spec.leaseId,
+              generation: spec.generation,
+          }
+        : {}
+}
+
 function raceWithTimeout<T>(
     p: Promise<T>,
     ms: number,
     label: string,
 ): Promise<T> {
-    return Promise.race([
-        p,
-        new Promise<T>((_, rej) => setTimeout(() => rej(new Error(label)), ms)),
-    ])
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(label)), ms)
+    })
+    return Promise.race([p, timeout]).finally(() => {
+        if (timer !== undefined) clearTimeout(timer)
+    })
 }

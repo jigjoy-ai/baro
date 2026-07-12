@@ -17,21 +17,11 @@ describe("OpenCodeStoryAgent", () => {
             mkdirSync(cwd)
             writeFileSync(
                 opencodeBin,
-                `#!/usr/bin/env node
-console.log(JSON.stringify({ type: "step_start", sessionID: "opencode-session", timestamp: 1 }))
-console.log(JSON.stringify({
-  type: "tool_use",
-  sessionID: "opencode-session",
-  timestamp: 2,
-  part: {
-    type: "tool",
-    tool: "write",
-    callID: "tool-1",
-    state: { status: "completed", input: { file: "done.txt" }, output: "ok" }
-  }
-}))
-console.log(JSON.stringify({ type: "step_finish", sessionID: "opencode-session", timestamp: 3 }))
-process.exit(0)
+                `#!/bin/sh
+printf '%s\n' \
+  '{"type":"step_start","sessionID":"opencode-session","timestamp":1}' \
+  '{"type":"tool_use","sessionID":"opencode-session","timestamp":2,"part":{"type":"tool","tool":"write","callID":"tool-1","state":{"status":"completed","input":{"file":"done.txt"},"output":"ok"}}}' \
+  '{"type":"step_finish","sessionID":"opencode-session","timestamp":3}'
 `,
             )
             chmodSync(opencodeBin, 0o755)
@@ -43,7 +33,9 @@ process.exit(0)
                 cwd,
                 opencodeBin,
                 retries: 0,
-                timeoutSecs: 15,
+                // Corporate endpoint scanners can delay first execution of a
+                // freshly-created temp binary; this is not the behavior under test.
+                timeoutSecs: 60,
             })
 
             const outcome = await agent.run(env)
@@ -72,10 +64,10 @@ process.exit(0)
             mkdirSync(cwd)
             writeFileSync(
                 opencodeBin,
-                `#!/usr/bin/env node
-console.log(JSON.stringify({ type: "step_start", sessionID: "opencode-session", timestamp: 1 }))
-console.log(JSON.stringify({ type: "step_finish", sessionID: "opencode-session", timestamp: 2 }))
-process.exit(0)
+                `#!/bin/sh
+printf '%s\n' \
+  '{"type":"step_start","sessionID":"opencode-session","timestamp":1}' \
+  '{"type":"step_finish","sessionID":"opencode-session","timestamp":2}'
 `,
             )
             chmodSync(opencodeBin, 0o755)
@@ -88,7 +80,7 @@ process.exit(0)
                 opencodeBin,
                 retries: 1,
                 retryDelayMs: 0,
-                timeoutSecs: 5,
+                timeoutSecs: 30,
             })
 
             const outcome = await agent.run(env)

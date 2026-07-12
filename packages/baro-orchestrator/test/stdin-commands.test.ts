@@ -2,13 +2,16 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
 import { Operator } from "../src/participants/operator.js"
-import { AgentTargetedMessage } from "../src/semantic-events.js"
+import {
+    AgentTargetedMessage,
+    ConversationRequested,
+} from "../src/semantic-events.js"
 import { handleStdinCommand } from "../src/stdin-commands.js"
 import type { BaroCommand, BaroEvent } from "../src/tui-protocol.js"
 import { joinWithCapture } from "./participants/helpers.js"
 
 function wired() {
-    const operator = new Operator()
+    const operator = new Operator({}, { runId: "run-stdin" })
     const env = joinWithCapture(operator)
     const emitted: BaroEvent[] = []
     const ctx = {
@@ -59,5 +62,34 @@ describe("stdin agent_message commands", () => {
 
         assert.equal(env.events.length, 0)
         assert.equal(emitted.length, 0)
+    })
+
+    it("routes dialogue messages through Operator without targeting a story", () => {
+        const { env, emitted, ctx } = wired()
+
+        handleStdinCommand(
+            {
+                type: "dialogue_message",
+                message_id: "user-message-1",
+                text: "What is the collective doing?",
+            },
+            ctx,
+        )
+
+        const requests = env.events.filter(ConversationRequested.is)
+        assert.equal(requests.length, 1)
+        assert.deepEqual(requests[0]?.data, {
+            runId: "run-stdin",
+            messageId: "user-message-1",
+            text: "What is the collective doing?",
+            source: "user",
+        })
+        assert.deepEqual(emitted, [
+            {
+                type: "story_log",
+                id: "_dialogue",
+                line: "[you → collective] What is the collective doing?",
+            },
+        ])
     })
 })

@@ -5,7 +5,12 @@ import { syncBuiltinESMExports } from "node:module"
 import { PassThrough } from "node:stream"
 import { describe, it } from "node:test"
 
-import { Replan, StoryResult, type ReplanStoryAdd } from "../../src/semantic-events.js"
+import {
+    ModelInvocationMeasured,
+    Replan,
+    StoryResult,
+    type ReplanStoryAdd,
+} from "../../src/semantic-events.js"
 import { SurgeonPi } from "../../src/participants/surgeon-pi.js"
 import type { PrdSnapshot } from "../../src/participants/surgeon.js"
 import { joinWithCapture, source } from "./helpers.js"
@@ -82,6 +87,7 @@ describe("SurgeonPi", () => {
             const surgeon = new SurgeonPi({
                 snapshot,
                 timeoutMs: 10_000,
+                runId: "run-pi-failure",
             })
             const env = joinWithCapture(surgeon)
 
@@ -95,6 +101,17 @@ describe("SurgeonPi", () => {
             assert.deepEqual(replans[0]!.data.modifiedDeps, {})
             assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
             assert.match(replans[0]!.data.reason, /pi fallback after error:/)
+
+            const measured = env.events.filter(ModelInvocationMeasured.is)
+            assert.equal(measured.length, 1)
+            assert.equal(measured[0]!.data.status, "failed")
+            assert.equal(measured[0]!.data.phase, "surgeon")
+            assert.equal(measured[0]!.data.backend, "pi")
+            assert.equal(measured[0]!.data.tokens.inputTotal.state, "unknown")
+            assert.ok(
+                env.events.findIndex(ModelInvocationMeasured.is) <
+                    env.events.findIndex(Replan.is),
+            )
         })
     })
 
@@ -132,10 +149,20 @@ describe("SurgeonPi", () => {
                 const surgeon = new SurgeonPi({
                     snapshot,
                     timeoutMs: 10_000,
+                    provider: "provider-test",
+                    model: "model-test",
                 })
                 const env = joinWithCapture(surgeon)
 
-                await surgeon.onExternalEvent(source("story-agent"), failure)
+                await surgeon.onExternalEvent(
+                    source("story-agent"),
+                    StoryResult.create({
+                        ...failure.data,
+                        runId: "run-pi-telemetry",
+                        leaseId: "lease-S1",
+                        generation: 5,
+                    }),
+                )
                 await surgeon.idle()
 
                 const replans = env.events.filter(Replan.is)
@@ -144,6 +171,57 @@ describe("SurgeonPi", () => {
                 assert.deepEqual(replans[0]!.data.addedStories, [added])
                 assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
                 assert.deepEqual(replans[0]!.data.modifiedDeps, { S2: ["S1a"] })
+
+                const measured = env.events.filter(ModelInvocationMeasured.is)
+                assert.equal(measured.length, 1)
+                assert.equal(
+                    measured[0]!.data.invocationId,
+                    "run-pi-telemetry:surgeon:S1:1:lease:lease-S1:generation:5:provider:1",
+                )
+                assert.equal(measured[0]!.data.runId, "run-pi-telemetry")
+                assert.equal(measured[0]!.data.storyId, "S1")
+                assert.equal(measured[0]!.data.turn, 1)
+                assert.equal(measured[0]!.data.provider, "provider-test")
+                assert.equal(measured[0]!.data.requestedModel, "model-test")
+                assert.equal(measured[0]!.data.status, "succeeded")
+                assert.ok(
+                    env.events.findIndex(ModelInvocationMeasured.is) <
+                        env.events.findIndex(Replan.is),
+                )
+            },
+        )
+    })
+
+    it("records a successful invocation before falling back from malformed JSON", async () => {
+        await withSpawnOutput(
+            [
+                JSON.stringify({
+                    type: "message_end",
+                    message: {
+                        role: "assistant",
+                        content: [{ type: "text", text: "no replan json available" }],
+                    },
+                }),
+            ],
+            0,
+            async () => {
+                const surgeon = new SurgeonPi({ snapshot, timeoutMs: 10_000 })
+                const env = joinWithCapture(surgeon)
+
+                await surgeon.onExternalEvent(source("story-agent"), failure)
+                await surgeon.idle()
+
+                const replan = env.events.find(Replan.is)
+                assert.ok(replan)
+                assert.match(replan.data.reason, /pi fallback after error: no JSON object found/)
+                const measured = env.events.filter(ModelInvocationMeasured.is)
+                assert.equal(measured.length, 1)
+                assert.equal(measured[0]!.data.status, "succeeded")
+                assert.equal(measured[0]!.data.tokens.inputTotal.state, "unknown")
+                assert.ok(
+                    env.events.findIndex(ModelInvocationMeasured.is) <
+                        env.events.findIndex(Replan.is),
+                )
             },
         )
     })
@@ -192,5 +270,16 @@ describe("SurgeonPi", () => {
                 assert.deepEqual(replans[0]!.data.modifiedDeps, { S2: ["S1a"] })
             },
         )
+    })
+
+    it("emits no model measurement when LLM evaluation is disabled", async () => {
+        const surgeon = new SurgeonPi({ snapshot, useLlm: false })
+        const env = joinWithCapture(surgeon)
+
+        await surgeon.onExternalEvent(source("story-agent"), failure)
+        await surgeon.idle()
+
+        assert.equal(env.events.filter(Replan.is).length, 1)
+        assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)
     })
 })

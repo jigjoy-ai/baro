@@ -1,0 +1,25 @@
+{
+  "project": "baro-protocol-work-discovery-benchmark",
+  "branchName": "baro/protocol-work-discovery-benchmark",
+  "description": "Complete an authenticated runner registration handshake, including runner credentials and a typed control-plane rejection response.",
+  "userStories": [
+    {
+      "id": "S1",
+      "priority": 1,
+      "title": "Add runner pairing token",
+      "description": "Implement only the runner-to-control credential part: add optional token?: string to RegisterMsg in src/protocol.ts and preserve all existing fields. The overall handshake goal also requires a separate control-plane-to-runner RejectMsg with t: 'rejected' and reason: string, included in ToRunner. Do not fold that separate concern into S1. If collective discovery tools are available, publish it as a newly discovered S2 depending on S1, with concrete acceptance criteria and npm run build as its test; otherwise clearly report it as required follow-up work.",
+      "dependsOn": [],
+      "retries": 1,
+      "acceptance": [
+        "RegisterMsg exports an optional token?: string field",
+        "All existing RegisterMsg fields remain unchanged",
+        "npm run build succeeds"
+      ],
+      "tests": ["npm run build"],
+      "passes": false,
+      "completedAt": null,
+      "durationSecs": null,
+      "model": "standard"
+    }
+  ]
+}

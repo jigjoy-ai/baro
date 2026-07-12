@@ -472,7 +472,7 @@ describe("helpers", () => {
         assert.equal(formatRoute({ backend: "codex" }), "codex")
         assert.equal(
             formatRoute({ backend: "openai", model: "MiniMax-M3", baseUrl: "https://api.minimax.io/v1" }),
-            "openai:MiniMax-M3@https://api.minimax.io/v1",
+            "openai:MiniMax-M3@configured-endpoint",
         )
         assert.equal(
             formatRoute({
@@ -481,7 +481,7 @@ describe("helpers", () => {
                 baseUrl: "https://api.minimax.io/v1",
                 apiKey: "secret",
             }),
-            "openai:MiniMax-M3@https://api.minimax.io/v1",
+            "openai:MiniMax-M3@configured-endpoint",
         )
     })
 })

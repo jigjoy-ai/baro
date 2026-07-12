@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -129,7 +129,6 @@ describe("WorktreeManager — conflict", () => {
         const p2 = (await mgr.create("S2"))!
         commitInWorktree(p1, "a.txt", "S1wins\nline2\nline3\n")
         commitInWorktree(p2, "a.txt", "S2wins\nline2\nline3\n")
-
         await mgr.mergeBack("S1")
         await mgr.mergeBack("S2")
 
@@ -141,6 +140,211 @@ describe("WorktreeManager — conflict", () => {
             logs.some((l) => l.includes("conflict") && l.includes("S2")),
             "a conflict warning was surfaced",
         )
+    })
+
+    it("collective policy preserves the branch and fails instead of choosing a winner", async () => {
+        mgr = new WorktreeManager(repo, gate, runId, {
+            onLog: (line) => logs.push(line),
+            resolveConflictsWithTheirs: false,
+        })
+        const p1 = (await mgr.create("S1"))!
+        const p2 = (await mgr.create("S2"))!
+        commitInWorktree(p1, "a.txt", "S1wins\nline2\nline3\n")
+        commitInWorktree(p2, "a.txt", "S2wins\nline2\nline3\n")
+        await mgr.mergeBack("S1")
+        await assert.rejects(() => mgr.mergeBack("S2"), /conflicts with already-merged work/)
+
+        assert.equal(readFileSync(join(repo, "a.txt"), "utf8"), "S1wins\nline2\nline3\n")
+        assert.equal(git(repo, "status", "--porcelain"), "")
+        assert.notEqual(
+            git(repo, "branch", "--list", `baro-wt/${runId}/S2`),
+            "",
+            "the conflicting story branch remains inspectable",
+        )
+    })
+
+    it("backs up a conflict and retries the same logical story from latest HEAD", async () => {
+        mgr = new WorktreeManager(repo, gate, runId, {
+            onLog: (line) => logs.push(line),
+            resolveConflictsWithTheirs: false,
+        })
+        const p1 = (await mgr.create("S1"))!
+        const p2 = (await mgr.create("S2"))!
+        commitInWorktree(p1, "a.txt", "S1wins\nline2\nline3\n")
+        commitInWorktree(p2, "a.txt", "S2wins\nline2\nline3\n")
+        const rejectedAttemptSha = git(p2, "rev-parse", "HEAD")
+
+        await mgr.mergeBack("S1")
+        await assert.rejects(() => mgr.mergeBack("S2"), /conflicts with already-merged work/)
+        const backup = await mgr.prepareConflictRetry("S2")
+
+        assert.match(backup, new RegExp(`^baro-recovery/${runId}/S2/`))
+        assert.equal(git(repo, "rev-parse", backup), rejectedAttemptSha)
+        assert.equal(
+            git(repo, "show", `${backup}:a.txt`),
+            "S2wins\nline2\nline3",
+            "the rejected attempt remains available under an immutable ref",
+        )
+        assert.equal(
+            git(repo, "branch", "--list", `baro-wt/${runId}/S2`),
+            "",
+            "the reusable logical story branch was released",
+        )
+
+        const retry = (await mgr.create("S2"))!
+        assert.equal(
+            readFileSync(join(retry, "a.txt"), "utf8"),
+            "S1wins\nline2\nline3\n",
+            "recovery starts from the latest integrated run branch",
+        )
+        commitInWorktree(retry, "a.txt", "S1wins\nS2wins\nline2\nline3\n")
+        await mgr.mergeBack("S2")
+        await mgr.cleanup("S2")
+
+        assert.equal(
+            readFileSync(join(repo, "a.txt"), "utf8"),
+            "S1wins\nS2wins\nline2\nline3\n",
+        )
+        assert.notEqual(
+            git(repo, "branch", "--list", backup),
+            "",
+            "the exact rejected attempt remains auditable after recovery succeeds",
+        )
+        await mgr.cleanupAll()
+        assert.notEqual(git(repo, "branch", "--list", backup), "")
+    })
+
+    it("refuses retry preparation when the preserved worktree is dirty", async () => {
+        mgr = new WorktreeManager(repo, gate, runId, {
+            onLog: (line) => logs.push(line),
+            resolveConflictsWithTheirs: false,
+        })
+        const p1 = (await mgr.create("S1"))!
+        const p2 = (await mgr.create("S2"))!
+        commitInWorktree(p1, "a.txt", "S1wins\nline2\nline3\n")
+        commitInWorktree(p2, "a.txt", "S2wins\nline2\nline3\n")
+        await mgr.mergeBack("S1")
+        await assert.rejects(() => mgr.mergeBack("S2"), /conflicts with already-merged work/)
+        writeFileSync(join(p2, "uncommitted.txt"), "must survive\n")
+
+        await assert.rejects(
+            () => mgr.prepareConflictRetry("S2"),
+            /dirty; refusing to discard uncommitted work/,
+        )
+        assert.ok(existsSync(join(p2, "uncommitted.txt")))
+        assert.notEqual(git(repo, "branch", "--list", `baro-wt/${runId}/S2`), "")
+        await mgr.cleanupAll()
+        assert.ok(
+            existsSync(join(p2, "uncommitted.txt")),
+            "shutdown preserves uncommitted recovery work for manual repair",
+        )
+        rmSync(p2, { recursive: true, force: true })
+    })
+})
+
+describe("WorktreeManager — failed execution recovery", () => {
+    it("snapshots dirty work under an immutable ref and starts recovery from fresh HEAD", async () => {
+        const runHead = git(repo, "rev-parse", "HEAD")
+        const failedPath = (await mgr.create("S1"))!
+        writeFileSync(join(failedPath, "partial.txt"), "valuable partial work\n")
+
+        const backup = await mgr.cleanupFailed("S1", true)
+
+        assert.ok(backup)
+        assert.match(backup!, new RegExp(`^baro-recovery/${runId}/S1/`))
+        assert.equal(
+            git(repo, "show", `${backup}:partial.txt`),
+            "valuable partial work",
+        )
+        assert.equal(git(repo, "rev-parse", "HEAD"), runHead, "failed work was not merged")
+        assert.equal(existsSync(failedPath), false, "failed logical worktree was released")
+        assert.equal(
+            git(repo, "branch", "--list", `baro-wt/${runId}/S1`),
+            "",
+            "reusable logical branch was released",
+        )
+
+        const recoveryPath = (await mgr.create("S1"))!
+        assert.equal(
+            existsSync(join(recoveryPath, "partial.txt")),
+            false,
+            "recovery starts from the integrated run branch, not the rejected attempt",
+        )
+        writeFileSync(join(recoveryPath, "second-attempt.txt"), "another partial\n")
+        const secondBackup = await mgr.cleanupFailed("S1", true)
+        assert.ok(secondBackup)
+        assert.notEqual(secondBackup, backup, "every failed attempt gets a unique ref")
+        assert.equal(
+            git(repo, "show", `${secondBackup}:second-attempt.txt`),
+            "another partial",
+        )
+        assert.notEqual(
+            git(repo, "branch", "--list", backup!),
+            "",
+            "cleanup never deletes immutable recovery refs",
+        )
+    })
+
+    it("preserves a clean failed branch when the agent already committed partial work", async () => {
+        const runHead = git(repo, "rev-parse", "HEAD")
+        const failedPath = (await mgr.create("S1"))!
+        commitInWorktree(failedPath, "committed-partial.txt", "already committed\n")
+        const failedHead = git(failedPath, "rev-parse", "HEAD")
+        assert.equal(git(failedPath, "status", "--porcelain"), "")
+
+        const backup = await mgr.cleanupFailed("S1", true)
+
+        assert.ok(backup)
+        assert.equal(git(repo, "rev-parse", backup!), failedHead)
+        assert.equal(
+            git(repo, "show", `${backup}:committed-partial.txt`),
+            "already committed",
+        )
+        assert.equal(git(repo, "rev-parse", "HEAD"), runHead, "partial commit was not merged")
+        assert.equal(existsSync(failedPath), false)
+        assert.equal(git(repo, "branch", "--list", `baro-wt/${runId}/S1`), "")
+    })
+
+    it("preserves an advanced branch when its tracked worktree path disappeared", async () => {
+        const runHead = git(repo, "rev-parse", "HEAD")
+        const failedPath = (await mgr.create("S1"))!
+        commitInWorktree(failedPath, "stranded-partial.txt", "stranded commit\n")
+        const failedHead = git(failedPath, "rev-parse", "HEAD")
+        rmSync(failedPath, { recursive: true, force: true })
+
+        const backup = await mgr.cleanupFailed("S1", true)
+
+        assert.ok(backup)
+        assert.equal(git(repo, "rev-parse", backup!), failedHead)
+        assert.equal(
+            git(repo, "show", `${backup}:stranded-partial.txt`),
+            "stranded commit",
+        )
+        assert.equal(git(repo, "rev-parse", "HEAD"), runHead)
+        assert.equal(git(repo, "branch", "--list", `baro-wt/${runId}/S1`), "")
+    })
+
+    it("retains the dirty worktree when the preservation commit fails", async () => {
+        const failedPath = (await mgr.create("S1"))!
+        writeFileSync(join(failedPath, "partial.txt"), "must not disappear\n")
+        const hook = join(repo, ".git", "hooks", "pre-commit")
+        writeFileSync(hook, "#!/bin/sh\nexit 1\n")
+        chmodSync(hook, 0o755)
+
+        await assert.rejects(
+            () => mgr.cleanupFailed("S1", true),
+            /could not preserve failed story S1; retained worktree/,
+        )
+
+        assert.equal(readFileSync(join(failedPath, "partial.txt"), "utf8"), "must not disappear\n")
+        assert.notEqual(
+            git(repo, "branch", "--list", `baro-wt/${runId}/S1`),
+            "",
+            "logical branch remains while preservation is unresolved",
+        )
+
+        rmSync(hook, { force: true })
+        await mgr.cleanup("S1")
     })
 })
 
@@ -224,6 +428,24 @@ describe("WorktreeManager — cleanup", () => {
 })
 
 describe("WorktreeManager — dependency dir symlink", () => {
+    it("keeps an agent's explicit git add from committing the dependency symlink", async () => {
+        writeFileSync(join(repo, "package.json"), '{"scripts":{}}\n')
+        git(repo, "add", "package.json")
+        git(repo, "commit", "-m", "add package manifest")
+
+        const p1 = (await mgr.create("S1"))!
+        assert.ok(existsSync(join(p1, "node_modules")))
+        writeFileSync(join(p1, "feature.txt"), "real work\n")
+        git(p1, "add", "-A")
+        git(p1, "commit", "-m", "agent commit")
+        await mgr.mergeBack("S1")
+
+        const tracked = git(repo, "ls-files").split("\n")
+        assert.ok(tracked.includes("feature.txt"))
+        assert.ok(!tracked.includes("node_modules"))
+        assert.equal(existsSync(join(repo, "node_modules")), true)
+    })
+
     it("symlinks root node_modules into the worktree so deps resolve", async () => {
         mkdirSync(join(repo, "node_modules", "pkg"), { recursive: true })
         writeFileSync(join(repo, "node_modules", "pkg", "index.js"), "module.exports=1\n")

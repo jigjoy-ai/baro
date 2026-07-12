@@ -1,0 +1,61 @@
+{
+  "project": "baro-protocol-run-dispatch-benchmark",
+  "branchName": "baro/protocol-run-dispatch-benchmark",
+  "description": "Extend the runner/control-plane wire contract with whole-run dispatch and result messages while preserving all existing story-level messages.",
+  "userStories": [
+    {
+      "id": "S1",
+      "priority": 1,
+      "title": "Add whole-run dispatch message",
+      "description": "In src/protocol.ts add and export RunDispatchMsg for control-plane-to-runner whole-run execution. It must have exactly: t: 'dispatch_run'; runId: string; goal: string; workspaceId: string; parallel: number; timeoutSecs: number; and optional route?: DispatchRoute. Include it in ToRunner without changing existing message shapes.",
+      "dependsOn": [],
+      "retries": 1,
+      "acceptance": [
+        "RunDispatchMsg is exported with the exact required and optional field types, including parallel: number",
+        "ToRunner accepts RunDispatchMsg and preserves all existing members",
+        "npm run build succeeds"
+      ],
+      "tests": ["npm run build"],
+      "passes": false,
+      "completedAt": null,
+      "durationSecs": null,
+      "model": "standard"
+    },
+    {
+      "id": "S2",
+      "priority": 1,
+      "title": "Add whole-run result message",
+      "description": "In src/protocol.ts add and export RunResultMsg for runner-to-control whole-run completion. It must have exactly: t: 'run_result'; runId: string; success: boolean; durationSecs: number; optional storiesPassed?: number and storiesTotal?: number; and error: string | null. Include it in ToControl without changing existing message shapes.",
+      "dependsOn": [],
+      "retries": 1,
+      "acceptance": [
+        "RunResultMsg is exported with the exact required and optional field types",
+        "ToControl accepts RunResultMsg and preserves all existing members",
+        "npm run build succeeds"
+      ],
+      "tests": ["npm run build"],
+      "passes": false,
+      "completedAt": null,
+      "durationSecs": null,
+      "model": "standard"
+    },
+    {
+      "id": "S3",
+      "priority": 2,
+      "title": "Document run-level protocol support",
+      "description": "Update README.md so it clearly states that the protocol supports both story-level and whole-run dispatch/results, naming dispatch_run and run_result. Keep the documentation concise and consistent with the actual exported types.",
+      "dependsOn": ["S1", "S2"],
+      "retries": 1,
+      "acceptance": [
+        "README mentions dispatch_run and run_result",
+        "Documentation does not claim behavior outside the wire contract",
+        "npm run build succeeds"
+      ],
+      "tests": ["npm run build"],
+      "passes": false,
+      "completedAt": null,
+      "durationSecs": null,
+      "model": "light"
+    }
+  ]
+}

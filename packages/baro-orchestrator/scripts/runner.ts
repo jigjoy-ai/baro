@@ -9,7 +9,7 @@ import { hostname, homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { createInterface } from "node:readline/promises"
 import { WebSocket } from "ws"
-import { buildInstallServiceArgs, buildReexec, semverLt } from "./runner-helpers.js"
+import { buildInstallServiceArgs, buildReexec, parseDoneSuccess, semverLt } from "./runner-helpers.js"
 
 interface WireEvent {
     type: string
@@ -495,7 +495,7 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
                 emit({ type: String(ev.type ?? "baro_event"), agentId: sid, data: ev })
                 if (ev.type === "story_complete") passed++
                 else if (ev.type === "story_error") failed++
-                else if (ev.type === "done") doneSuccess = !!ev.success
+                else if (ev.type === "done") doneSuccess = parseDoneSuccess(ev.success)
                 else if (ev.type === "finalize_complete") prUrl = ((ev.data as Record<string, unknown> | undefined)?.pr_url as string) ?? (ev.pr_url as string) ?? prUrl
                 // Capture the real failure reason from the stream (story/planner/architect
                 // errors, or a failed `done`), so we don't fall back to a noisy stderr banner.

@@ -97,4 +97,123 @@ describe("StoryFactory — StoryExecutor seam", () => {
             "wires the in-process executor by default",
         )
     })
+
+    it("LocalStoryExecutor registers the concrete agent before join/run", () => {
+        const executor = new LocalStoryExecutor()
+        const env = {} as AgenticEnvironment
+        let registered: Participant | null = null
+
+        assert.throws(
+            () => executor.start(
+                {
+                    storyId: "S-local",
+                    prompt: "do not run",
+                    model: "sonnet",
+                    retries: 0,
+                    timeoutSecs: 1,
+                    runId: "run-local",
+                    leaseId: "lease-local",
+                    generation: 1,
+                },
+                { backend: "claude", model: "sonnet" },
+                "/work",
+                env,
+                {
+                    registerResultAuthority: (sourceParticipant) => {
+                        registered = sourceParticipant
+                        assert.equal(sourceParticipant.agentId, "S-local")
+                        assert.equal(
+                            (sourceParticipant as unknown as {
+                                resultAuthority: Participant
+                            }).resultAuthority,
+                            sourceParticipant,
+                        )
+                        throw new Error("stop before join")
+                    },
+                },
+            ),
+            /stop before join/,
+        )
+        assert.ok(registered)
+    })
+
+    it("LocalStoryExecutor forwards correlated runtime replan context to OpenAI", () => {
+        const executor = new LocalStoryExecutor()
+        const env = {} as AgenticEnvironment
+        const board = source("collective-board")
+        let inspected = false
+
+        assert.throws(
+            () =>
+                executor.start(
+                    {
+                        storyId: "S-openai",
+                        prompt: "do not run",
+                        model: "fake-model",
+                        retries: 0,
+                        timeoutSecs: 1,
+                        runId: "run-openai",
+                        leaseId: "lease-openai",
+                        generation: 4,
+                        graphVersion: 9,
+                    },
+                    { backend: "openai", model: "fake-model" },
+                    "/work",
+                    env,
+                    {
+                        runtimeReplanDecisionAuthority: board,
+                        runtimeReplanDecisionTimeoutMs: 1_234,
+                        registerResultAuthority: (participant) => {
+                            const agent = participant as unknown as {
+                                spec: {
+                                    runId?: string
+                                    leaseId?: string
+                                    generation?: number
+                                    graphVersion?: number
+                                }
+                                opts: {
+                                    runtimeReplanDecisionAuthority: Participant
+                                    runtimeReplanDecisionTimeoutMs: number
+                                }
+                                tools: Array<{ name: string; strict?: boolean }>
+                            }
+                            assert.deepEqual(
+                                {
+                                    runId: agent.spec.runId,
+                                    leaseId: agent.spec.leaseId,
+                                    generation: agent.spec.generation,
+                                    graphVersion: agent.spec.graphVersion,
+                                },
+                                {
+                                    runId: "run-openai",
+                                    leaseId: "lease-openai",
+                                    generation: 4,
+                                    graphVersion: 9,
+                                },
+                            )
+                            assert.equal(
+                                agent.opts.runtimeReplanDecisionAuthority,
+                                board,
+                            )
+                            assert.equal(
+                                agent.opts.runtimeReplanDecisionTimeoutMs,
+                                1_234,
+                            )
+                            assert.equal(
+                                agent.tools.some(
+                                    (tool) =>
+                                        tool.name === "propose_replan" &&
+                                        tool.strict === true,
+                                ),
+                                true,
+                            )
+                            inspected = true
+                            throw new Error("stop before join")
+                        },
+                    },
+                ),
+            /stop before join/,
+        )
+        assert.equal(inspected, true)
+    })
 })

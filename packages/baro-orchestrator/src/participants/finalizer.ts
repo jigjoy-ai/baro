@@ -42,8 +42,12 @@ import {
     PrCreated,
     RunCompleted,
     RunStarted,
+    RunVerificationCompleted,
+    StoryMergeFailed,
+    StoryMerged,
     StoryResult,
     type RunCompletedData,
+    type RunVerificationEvidence,
 } from "../semantic-events.js"
 import { verifyBuild, type VerifyResult } from "../verify.js"
 
@@ -90,11 +94,19 @@ export class Finalizer extends BaseObserver {
     private readonly levels = new Map<number, string[]>()
     private readonly stories = new Map<string, StoryRecord>()
     /**
+     * Stories whose merge-back failed (storyId → preserved branch). Their
+     * commits never reached the integration branch, so finalize() tries to
+     * recover them into the PR instead of silently shipping nothing.
+     */
+    private readonly mergeFailed = new Map<string, string>()
+    /**
      * Resolves once finalize() has completed (or been short-circuited).
      * Lets orchestrate.ts gate its TUI `done` event so the PR URL lands
      * in the completion screen instead of after it.
      */
     private finalizePromise: Promise<void> | null = null
+    /** Reuse the collective pre-completion gate instead of running it twice. */
+    private objectiveVerification: { runId: string; result: VerifyResult } | null = null
 
     constructor(opts: FinalizerOptions) {
         super()
@@ -149,6 +161,20 @@ export class Finalizer extends BaseObserver {
             return
         }
 
+        if (StoryMergeFailed.is(event)) {
+            const d = event.data
+            if (d.branch) this.mergeFailed.set(d.storyId, d.branch)
+            return
+        }
+
+        if (StoryMerged.is(event)) {
+            // A bounded collective recovery can integrate a story after an
+            // earlier merge failure. Do not leave a successful run mislabeled
+            // as a checkpoint or advertise a stale recovery branch.
+            this.mergeFailed.delete(event.data.storyId)
+            return
+        }
+
         if (StoryResult.is(event)) {
             const d = event.data
             const existing = this.stories.get(d.storyId) ?? {
@@ -163,6 +189,14 @@ export class Finalizer extends BaseObserver {
             existing.durationSecs = d.durationSecs
             existing.attempts = d.attempts
             this.stories.set(d.storyId, existing)
+            return
+        }
+
+        if (RunVerificationCompleted.is(event)) {
+            this.objectiveVerification = {
+                runId: event.data.runId,
+                result: verificationResult(event.data),
+            }
             return
         }
 
@@ -245,14 +279,56 @@ export class Finalizer extends BaseObserver {
         // straight to the completion screen.
         this.emit(FinalizeStarted.create({ branch }))
 
-        const preAdrCommits = await this.collectCommitsSinceBase()
         const preAdrStats = await this.collectFileStats()
-        const hasRunChanges =
-            preAdrCommits.length > 0 || preAdrStats.created + preAdrStats.modified > 0
-        if (!run.success && !hasRunChanges) {
+        let hasRunChanges =
+            (await this.collectCommitsSinceBase()).length > 0 ||
+            preAdrStats.created + preAdrStats.modified > 0
+
+        // ── Recover stranded merge-back work ──────────────────────────
+        // A story can pass yet fail to merge onto the integration branch
+        // (unresolvable conflict), leaving its commits on a preserved branch
+        // that would otherwise never ship — a clean-looking run that delivers
+        // nothing. Pull that work into the PR: fast-forward the (empty)
+        // integration branch onto the story branch when history allows, else
+        // open the PR straight from the story branch. Any story we can't fold
+        // in is still pushed, so the work is recoverable rather than lost.
+        let prBranch = branch
+        const salvaged: string[] = []
+        if (this.mergeFailed.size > 0) {
+            if (!hasRunChanges) {
+                for (const [sid, b] of this.mergeFailed) {
+                    if (!(await this.branchHasCommits(b))) continue
+                    if (await this.fastForwardTo(b)) {
+                        this.log(`[finalizer] recovered story ${sid}: fast-forwarded ${branch} onto its un-merged branch`)
+                        hasRunChanges = true
+                    } else {
+                        await this.pushBranch(b)
+                        prBranch = b
+                        this.log(`[finalizer] recovered story ${sid}: opening PR from its un-merged branch ${b}`)
+                    }
+                    salvaged.push(sid)
+                    break
+                }
+            }
+            for (const [sid, b] of this.mergeFailed) {
+                if (!salvaged.includes(sid)) await this.pushBranch(b)
+            }
+        }
+        const deliverable = hasRunChanges || prBranch !== branch
+
+        if (!run.success && !deliverable) {
             this.log(
                 `[finalizer] run failed with no branch changes (${run.abortReason ?? "no reason"}); skipping PR`,
             )
+            this.emit(PrCreated.create({ url: null, branch, baseBranch }))
+            return
+        }
+        // A run whose stories all passed but whose work was entirely stranded by
+        // merge conflicts must not read as a clean, PR-less "done": point the
+        // user at the recovery branches instead.
+        if (run.success && !deliverable && this.mergeFailed.size > 0) {
+            const stranded = [...this.mergeFailed.values()].join(", ")
+            this.log(`[finalizer] all stories passed but none could merge onto ${branch}; work pushed to ${stranded} for manual recovery — no PR`)
             this.emit(PrCreated.create({ url: null, branch, baseBranch }))
             return
         }
@@ -296,7 +372,16 @@ export class Finalizer extends BaseObserver {
         // a failed verify demotes the PR to a checkpoint so it isn't reported as
         // clean. "Couldn't verify" (verify.ran === false) is NOT a failure.
         this.log("[finalizer] verifying build…")
-        const verify = await verifyBuild(this.opts.cwd)
+        const correlatedVerification =
+            // The evidence embedded by the Board in RunCompleted is the
+            // canonical verdict. A late same-run verifier event (for example
+            // after a timeout) must never overwrite it.
+            run.verification
+                ? verificationResult(run.verification)
+                : run.runId && this.objectiveVerification?.runId === run.runId
+                  ? this.objectiveVerification.result
+                  : null
+        const verify = correlatedVerification ?? await verifyBuild(this.opts.cwd)
         if (!verify.ran) {
             this.log("[finalizer] nothing to verify (no build/test)")
         } else if (verify.ok) {
@@ -305,7 +390,9 @@ export class Finalizer extends BaseObserver {
             this.log(`[finalizer] ⚠ verification failed: ${verify.failures[0]?.cmd ?? "build/test"}`)
         }
 
-        const checkpoint = !run.success || (verify.ran && !verify.ok)
+        // A merge-back failure means the branch is an incomplete/partial
+        // integration — never present that as a fully verified completion.
+        const checkpoint = !run.success || (verify.ran && !verify.ok) || this.mergeFailed.size > 0
         const title = this.buildPrTitle(prd, passed.length, orderedStories.length, checkpoint)
         const body = this.buildPrBody({
             prd,
@@ -319,21 +406,22 @@ export class Finalizer extends BaseObserver {
             filesStats,
             totalSecs,
             sequentialSecs: this.sequentialSeconds(),
+            mergeFailed: this.mergeFailed,
         })
 
         // The per-story merge-back push (gitPushWithRetry) is async and can still
         // be in flight when RunCompleted fires this finalizer — which races
         // `gh pr create` into "No commits between <base> and <branch>". Push the
         // head (awaited) here so the remote branch has the run's commits first.
-        await this.pushBranch(branch)
+        await this.pushBranch(prBranch)
 
-        this.log(`[finalizer] opening ${checkpoint ? "checkpoint " : ""}PR on ${baseBranch} ← ${branch}`)
-        const url = await this.openPr({ title, body, baseBranch, branch })
+        this.log(`[finalizer] opening ${checkpoint ? "checkpoint " : ""}PR on ${baseBranch} ← ${prBranch}`)
+        const url = await this.openPr({ title, body, baseBranch, branch: prBranch })
 
         if (url) {
             this.log(`[finalizer] PR opened: ${url}`)
         }
-        this.emit(PrCreated.create({ url, branch, baseBranch }))
+        this.emit(PrCreated.create({ url, branch: prBranch, baseBranch }))
     }
 
     // ─── Bus & env helpers ──────────────────────────────────────────
@@ -493,6 +581,36 @@ export class Finalizer extends BaseObserver {
         }
     }
 
+    // True when `ref` carries commits the base doesn't — i.e. there's real work
+    // to recover from a preserved (un-merged) story branch.
+    private async branchHasCommits(ref: string): Promise<boolean> {
+        if (!this.baseSha) return false
+        try {
+            const { stdout } = await execFileAsync(
+                "git",
+                ["rev-list", "--count", `${this.baseSha}..${ref}`],
+                { cwd: this.opts.cwd },
+            )
+            return parseInt(stdout.trim(), 10) > 0
+        } catch {
+            return false
+        }
+    }
+
+    // Fast-forward the checked-out integration branch onto `ref`. Succeeds only
+    // when HEAD is an ancestor of ref (the empty-integration recovery case), so
+    // it never rewrites or discards existing merged work; false otherwise.
+    private async fastForwardTo(ref: string): Promise<boolean> {
+        try {
+            await execFileAsync("git", ["merge", "--ff-only", ref], {
+                cwd: this.opts.cwd,
+            })
+            return true
+        } catch {
+            return false
+        }
+    }
+
     private async detectBranch(): Promise<string | null> {
         try {
             const { stdout } = await execFileAsync(
@@ -562,6 +680,7 @@ export class Finalizer extends BaseObserver {
         filesStats: { created: number; modified: number }
         totalSecs: number
         sequentialSecs: number
+        mergeFailed?: Map<string, string>
     }): string {
         const { prd, run, orderedStories, passed, failed, commits, filesStats } =
             args
@@ -573,6 +692,21 @@ export class Finalizer extends BaseObserver {
         lines.push("")
         if (args.checkpoint) {
             lines.push("> **Checkpoint PR:** baro produced branch changes, but the run failed during verification/retry/replan. Review this as a candidate fix, not a fully verified completion.")
+            lines.push("")
+        }
+
+        // Merge-back conflicts: name the stories whose work couldn't be folded
+        // cleanly into this branch, with the recovery branch that holds it.
+        if (args.mergeFailed && args.mergeFailed.size > 0) {
+            lines.push("## ⚠ Merge conflicts during integration")
+            lines.push("")
+            lines.push(
+                "Some stories passed but couldn't be auto-merged onto the branch. Their commits are preserved on the branches below — review carefully, changes may be partial:",
+            )
+            lines.push("")
+            for (const [storyId, b] of args.mergeFailed) {
+                lines.push(`- \`${storyId}\` → recovered on \`${b}\``)
+            }
             lines.push("")
         }
 
@@ -736,6 +870,20 @@ export class Finalizer extends BaseObserver {
             )
             return null
         }
+    }
+}
+
+function verificationResult(evidence: RunVerificationEvidence): VerifyResult {
+    return {
+        ran: evidence.status !== "skipped",
+        ok: evidence.status !== "failed",
+        failures: evidence.commands
+            .filter((command) => command.status === "failed")
+            .map((command) => ({
+                cmd: command.command,
+                tail: command.tail ?? "",
+            })),
+        commands: evidence.commands.map((command) => ({ ...command })),
     }
 }
 

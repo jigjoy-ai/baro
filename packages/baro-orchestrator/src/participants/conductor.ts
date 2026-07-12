@@ -46,6 +46,7 @@ import { buildDag } from "../dag.js"
 import {
     PrdFile,
     PrdStory,
+    applyReplan,
     buildDefaultStoryPrompt,
     loadPrd,
     markStoryPassed,
@@ -64,8 +65,11 @@ import {
     StoryResult,
     StorySpawnRequest,
     type ReplanData,
+    type RunVerificationEvidence,
     type StoryResultData,
 } from "../semantic-events.js"
+
+export { applyReplan } from "../prd.js"
 
 export interface ConductorOptions {
     prdPath: string
@@ -133,6 +137,10 @@ export interface ConductorRunSummary {
     droppedStories: string[]
     totalDurationSecs: number
     totalAttempts: number
+    /** Present when an objective run-level verification gate was requested. */
+    verificationStatus?: "passed" | "failed" | "skipped"
+    /** Full correlated evidence behind verificationStatus. */
+    verification?: RunVerificationEvidence
 }
 
 // ConductorStateItem (was a BusEvent subclass defined here) moves to
@@ -946,52 +954,6 @@ export class Conductor extends BaseObserver {
     private emit(event: SemanticEvent<unknown>): void {
         this.envRef?.deliverSemanticEvent(this, event)
     }
-}
-
-/**
- * Pure: apply a Replan payload to a PrdFile and return a new PrdFile.
- * Removes pending stories, rewires deps, adds new stories.
- * Stories that have already passed are never removed.
- */
-export function applyReplan(prd: PrdFile, replan: ReplanData): PrdFile {
-    let stories = prd.userStories.slice()
-
-    if (replan.removedStoryIds.length > 0) {
-        const removeSet = new Set(replan.removedStoryIds)
-        stories = stories.filter((s) => !removeSet.has(s.id) || s.passes)
-    }
-
-    const modifiedDepsKeys = Object.keys(replan.modifiedDeps)
-    if (modifiedDepsKeys.length > 0) {
-        stories = stories.map((s) => {
-            const newDeps = replan.modifiedDeps[s.id]
-            if (!newDeps) return s
-            return { ...s, dependsOn: [...newDeps] }
-        })
-    }
-
-    if (replan.addedStories.length > 0) {
-        const existing = new Set(stories.map((s) => s.id))
-        for (const a of replan.addedStories) {
-            if (existing.has(a.id)) continue
-            stories.push({
-                id: a.id,
-                priority: a.priority,
-                title: a.title,
-                description: a.description,
-                dependsOn: [...a.dependsOn],
-                retries: a.retries ?? 2,
-                acceptance: a.acceptance ? [...a.acceptance] : [],
-                tests: a.tests ? [...a.tests] : [],
-                passes: false,
-                completedAt: null,
-                durationSecs: null,
-                model: a.model,
-            })
-        }
-    }
-
-    return { ...prd, userStories: stories }
 }
 
 function envNonNegativeInt(name: string, fallback: number): number {

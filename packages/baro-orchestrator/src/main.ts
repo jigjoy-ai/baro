@@ -2,6 +2,13 @@
 
 export {
     AgentTargetedMessage,
+    ConversationRequested,
+    ConversationResponded,
+    ConversationFailed,
+    type ConversationRequestedData,
+    type ConversationRespondedData,
+    type ConversationFailedData,
+    type ConversationAction,
     AgentState,
     type AgentPhase,
     ClaudeSystem,
@@ -9,9 +16,83 @@ export {
     ClaudeStreamChunk,
     ClaudeRateLimit,
     ClaudeUnknownEvent,
+    AgentTurnCompleted,
+    type AgentTurnCompletedData,
+    ModelInvocationMeasured,
+    StoryQualityCompleted,
+    StoryQualityTimedOut,
+    type StoryQualityCompletedData,
+    type StoryQualityTimedOutData,
+    RunVerificationTimedOut,
 } from "./semantic-events.js"
 
+export {
+    DialogueAgent,
+    DIALOGUE_SYSTEM_PROMPT,
+    type DialogueAgentOptions,
+    type DialogueResponder,
+    type DialogueResponderInput,
+} from "./participants/dialogue-agent.js"
+
+export {
+    createDialogueResponder,
+    type DialogueBackend,
+    type CreateDialogueResponderOptions,
+} from "./participants/dialogue-responder.js"
+
+export { DialogueForwarder } from "./participants/forwarders/dialogue.js"
+
+export {
+    AgentTurnProjector,
+} from "./participants/agent-turn-projector.js"
+
+export {
+    AcceptanceGate,
+    type AcceptanceGateOptions,
+} from "./participants/acceptance-gate.js"
+
+export {
+    knownMetric,
+    unknownMetric,
+    notApplicableMetric,
+    mergeMetric,
+    reduceModelTelemetry,
+    type Metric,
+    type MetricSource,
+    type UnknownMetricReason,
+    type ModelInvocationPhase,
+    type ModelInvocationStatus,
+    type ModelInvocationGranularity,
+    type ModelTelemetryProducer,
+    type ModelTokenMetrics,
+    type ModelCostMetrics,
+    type ModelInvocationEvidence,
+    type ModelInvocationMeasuredData,
+    type ReducedModelInvocation,
+    type ModelTelemetryReduction,
+} from "./model-telemetry.js"
+
+export type {
+    RunnerInvocationObservation,
+    RunnerInvocationObserver,
+} from "./runner-invocation.js"
+export {
+    runnerMeasurement,
+    type RunnerMeasurementContext,
+} from "./runner-measurement.js"
+
 export { mapClaudeEvent, type MapResult } from "./stream-json-mapper.js"
+
+export {
+    createVerifyPlan,
+    recommendedVerifyTimeoutMs,
+    verifyBuild,
+    type VerifyBuildOptions,
+    type VerifyCommandResult,
+    type VerifyCommandSpec,
+    type VerifyPlan,
+    type VerifyResult,
+} from "./verify.js"
 
 export {
     mapCodexEvent,
@@ -36,6 +117,11 @@ export {
     type CodexStorySpec,
     type CodexStoryOutcome,
 } from "./participants/codex-story-agent.js"
+
+export {
+    ModelTelemetryCollector,
+    type ModelTelemetryCollectorOptions,
+} from "./participants/model-telemetry-collector.js"
 
 export {
     OpenCodeCliParticipant,
@@ -90,6 +176,10 @@ export {
     type StorySpec,
     type StoryOutcome,
 } from "./participants/story-agent.js"
+export {
+    OpenAIStoryAgent,
+    type OpenAIStoryAgentOptions,
+} from "./participants/openai-story-agent.js"
 export { StoryResult } from "./semantic-events.js"
 
 // The StoryExecutor seam: pass a custom implementation as
@@ -109,12 +199,73 @@ export {
     type ConductorRunSummary,
 } from "./participants/conductor.js"
 export { ConductorState } from "./semantic-events.js"
+export {
+    CoordinationModeSelected,
+    WorkerCapabilityAdvertised,
+    WorkOffered,
+    WorkBid,
+    WorkBidWindowClosed,
+    WorkClaimed,
+    WorkLeaseGranted,
+    WorkLeaseReleased,
+    WorkLeaseExpired,
+    WorkDiscovered,
+    RuntimeReplanProposed,
+    RuntimeReplanApplied,
+    RuntimeReplanRejected,
+    PeerHelpRequested,
+    CollaborationNote,
+    StoryIntegrationRequested,
+    type CoordinationMode,
+    type WorkBidData,
+    type WorkBidEstimateData,
+    type WorkRouteDescriptor,
+    type RuntimeReplanMutation,
+    type RuntimeReplanCorrelationData,
+    type RuntimeReplanProposedData,
+    type RuntimeReplanAppliedData,
+    type RuntimeReplanRejectedData,
+    type RuntimeReplanRejectionCode,
+} from "./semantic-events.js"
+export {
+    snapshotRuntimeReplanMutation,
+    validateRuntimeReplanMutation,
+    type RuntimeReplanValidationOptions,
+    type RuntimeReplanValidationResult,
+} from "./runtime-replan.js"
+export {
+    CollectiveBoard,
+    type CollectiveBoardOptions,
+} from "./participants/collective-board.js"
+export {
+    LeaseBroker,
+    type LeaseBrokerOptions,
+} from "./participants/lease-broker.js"
+export {
+    expectedVerifiedCostUsd,
+    isValidWorkBidEstimate,
+    selectWorkBid,
+    type WorkBidCandidate,
+    type WorkBidEstimate,
+    type WorkBidPolicy,
+} from "./work-market.js"
+export {
+    RunVerifier,
+    type RunVerifierOptions,
+} from "./participants/run-verifier.js"
+export {
+    RunVerificationRequested,
+    RunVerificationCompleted,
+    type RunVerificationStatus,
+    type VerificationCommandEvidence,
+} from "./semantic-events.js"
 
 export {
     type PrdFile,
     type PrdStory,
     loadPrd,
     savePrd,
+    savePrdAtomic,
     normalizePrd,
     markStoryPassed,
     buildDefaultStoryPrompt,
@@ -142,6 +293,8 @@ export {
 
 export {
     orchestrate,
+    validateCollectiveWorkers,
+    type CollectiveWorkerCandidateConfig,
     type OrchestrateConfig,
     type OrchestrateResult,
 } from "./orchestrate.js"

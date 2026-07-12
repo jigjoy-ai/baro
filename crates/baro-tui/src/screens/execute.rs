@@ -562,7 +562,12 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
     if let Some((id, buf)) = &app.agent_msg_input {
-        render_input_line(f, area, &format!("\u{2192} {}", id), buf);
+        let target = if id == crate::app::DIALOGUE_AGENT_ID {
+            "\u{2192} collective".to_string()
+        } else {
+            format!("\u{2192} {}", id)
+        };
+        render_input_line(f, area, &target, buf);
         return;
     }
 
@@ -586,8 +591,16 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(theme::MUTED),
         ))
     } else {
+        let dialogue_hint = if app.dialogue_enabled {
+            " \u{00B7} c collective"
+        } else {
+            ""
+        };
         Line::from(Span::styled(
-            " 1-5 views \u{00B7} Tab focus \u{00B7} \u{2191}\u{2193} scroll/select \u{00B7} m msg agent \u{00B7} e explorer \u{00B7} [ ] width \u{00B7} q quit",
+            format!(
+                " 1-5 views \u{00B7} Tab focus \u{00B7} \u{2191}\u{2193} scroll/select \u{00B7} m msg agent{} \u{00B7} e explorer \u{00B7} [ ] width \u{00B7} q quit",
+                dialogue_hint,
+            ),
             Style::default().fg(theme::MUTED),
         ))
     };
@@ -776,6 +789,16 @@ mod tests {
         assert!(content.contains("→ S1 ▸"));
         assert!(content.contains("focus on the tests"));
         assert!(content.contains("Enter send"));
+
+        let mut app = app_mid_run();
+        app.dialogue_enabled = true;
+        app.open_dialogue();
+        if let Some((_, buffer)) = app.agent_msg_input.as_mut() {
+            *buffer = "status please".to_string();
+        }
+        let content = draw(&mut app, 120, 40);
+        assert!(content.contains("→ collective ▸"));
+        assert!(content.contains("status please"));
 
         let mut app = app_mid_run();
         app.done = true;

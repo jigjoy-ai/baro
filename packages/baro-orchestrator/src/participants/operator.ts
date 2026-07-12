@@ -11,11 +11,20 @@
 
 import { AgenticEnvironment, BaseObserver, SemanticEvent } from "@mozaik-ai/core"
 
-import { AgentTargetedMessage } from "../semantic-events.js"
+import {
+    AgentTargetedMessage,
+    ConversationRequested,
+} from "../semantic-events.js"
 
 export type OperatorCommand =
     /** `source` tags who authored the message ("user" for TUI chat); defaults to "operator". */
     | { kind: "redirect"; storyId: string; message: string; source?: string }
+    | {
+          kind: "converse"
+          message: string
+          messageId?: string
+          source?: "user" | "operator"
+      }
     | { kind: "abort"; storyId: string }
     | { kind: "abort_all" }
     | { kind: "shutdown" }
@@ -29,10 +38,19 @@ export interface OperatorHooks {
     onShutdown?: () => void
 }
 
+export interface OperatorOptions {
+    /** Enables correlated conversation requests for this run. */
+    runId?: string
+}
+
 export class Operator extends BaseObserver {
     private envRef: AgenticEnvironment | null = null
+    private conversationSequence = 0
 
-    constructor(private readonly hooks: OperatorHooks = {}) {
+    constructor(
+        private readonly hooks: OperatorHooks = {},
+        private readonly opts: OperatorOptions = {},
+    ) {
         super()
     }
 
@@ -53,6 +71,23 @@ export class Operator extends BaseObserver {
                         recipientId: cmd.storyId,
                         text: cmd.message,
                         metadata: { source: cmd.source ?? "operator" },
+                    }),
+                )
+                return
+            }
+            case "converse": {
+                const runId = this.opts.runId
+                const text = cmd.message.trim()
+                if (!runId || !text) return
+                this.conversationSequence += 1
+                this.emit(
+                    ConversationRequested.create({
+                        runId,
+                        messageId:
+                            cmd.messageId ??
+                            `${runId}:conversation:${this.conversationSequence}`,
+                        text,
+                        source: cmd.source ?? "operator",
                     }),
                 )
                 return

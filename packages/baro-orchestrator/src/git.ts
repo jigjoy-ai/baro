@@ -82,6 +82,7 @@ export async function createOrCheckoutBranch(
     cwd: string,
     branchName: string,
     onLog?: (line: string) => void,
+    push = true,
 ): Promise<void> {
     // Strip accidental double-prefixes ("baro/baro/foo") — a caller already
     // on a baro-prefixed branch can prepend "baro/" again.
@@ -98,6 +99,11 @@ export async function createOrCheckoutBranch(
                 `Failed to checkout branch '${branchName}': ${(e as Error)?.message ?? String(e)}`,
             )
         }
+    }
+
+    if (!push) {
+        onLog?.(`[git] local-only; not pushing ${branchName}`)
+        return
     }
 
     try {

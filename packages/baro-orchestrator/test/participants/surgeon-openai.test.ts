@@ -3,9 +3,22 @@ import { createServer, type Server } from "node:http"
 import { once } from "node:events"
 import { after, before, describe, it } from "node:test"
 
-import { Replan, StoryResult, type ReplanStoryAdd } from "../../src/semantic-events.js"
+import {
+    InputTokenDetails,
+    ModelMessageItem,
+    OutputTokenDetails,
+    TokenUsage,
+} from "@mozaik-ai/core"
+
+import { knownMetric, unknownMetric } from "../../src/model-telemetry.js"
 import { SurgeonOpenAI } from "../../src/participants/surgeon-openai.js"
 import type { PrdSnapshot } from "../../src/participants/surgeon.js"
+import {
+    ModelInvocationMeasured,
+    Replan,
+    StoryResult,
+    type ReplanStoryAdd,
+} from "../../src/semantic-events.js"
 import { joinWithCapture, source } from "./helpers.js"
 
 const snapshot = (): PrdSnapshot => ({
@@ -101,6 +114,87 @@ describe("SurgeonOpenAI", () => {
         await once(server, "close")
     })
 
+    it("publishes one OpenAI TokenUsage measurement before its replan", async () => {
+        const surgeon = new SurgeonOpenAI({
+            snapshot,
+            model: "baro-test-model",
+            runId: "run-openai-surgeon",
+        })
+        stubRound(surgeon, {
+            text: JSON.stringify({
+                action: "skip",
+                reason: "infeasible dependency",
+                added: [],
+                removed: ["S1"],
+                modifiedDeps: [],
+            }),
+            usage: new TokenUsage(
+                21,
+                8,
+                29,
+                new InputTokenDetails(5),
+                new OutputTokenDetails(3),
+            ),
+        })
+        const env = joinWithCapture(surgeon)
+
+        await surgeon.onExternalEvent(source("story-agent"), failure)
+        await surgeon.idle()
+
+        const measured = env.events.filter(ModelInvocationMeasured.is)
+        const replans = env.events.filter(Replan.is)
+        assert.equal(measured.length, 1)
+        assert.equal(replans.length, 1)
+        assert.ok(env.events.indexOf(measured[0]!) < env.events.indexOf(replans[0]!))
+
+        const item = measured[0]!.data
+        assert.equal(
+            item.invocationId,
+            "run-openai-surgeon:surgeon:S1:evaluation-1",
+        )
+        assert.equal(
+            item.measurementId,
+            "run-openai-surgeon:surgeon:S1:evaluation-1:runner",
+        )
+        assert.equal(item.runId, "run-openai-surgeon")
+        assert.equal(item.phase, "surgeon")
+        assert.equal(item.storyId, "S1")
+        assert.equal(item.turn, 1)
+        assert.equal(item.round, 1)
+        assert.equal(item.backend, "openai")
+        assert.equal(item.provider, null)
+        assert.equal(item.evidence.providerRequestId, null)
+        assert.equal(item.status, "succeeded")
+        assert.deepEqual(
+            item.tokens.inputTotal,
+            knownMetric(21, "provider_response"),
+        )
+        assert.deepEqual(
+            item.tokens.cachedInput,
+            knownMetric(5, "provider_response"),
+        )
+        assert.deepEqual(
+            item.tokens.outputTotal,
+            knownMetric(8, "provider_response"),
+        )
+        assert.deepEqual(
+            item.tokens.reasoningOutput,
+            knownMetric(3, "provider_response"),
+        )
+        assert.deepEqual(
+            item.tokens.total,
+            knownMetric(29, "provider_response"),
+        )
+        assert.deepEqual(
+            item.cost.providerUsd,
+            unknownMetric("pending_gateway_meter"),
+        )
+        assert.deepEqual(
+            item.cost.customerUsd,
+            unknownMetric("pending_gateway_meter"),
+        )
+    })
+
     it("falls back to a deterministic Replan when OpenAI IO fails", async () => {
         responseMode = "error"
         const surgeon = new SurgeonOpenAI({
@@ -119,6 +213,15 @@ describe("SurgeonOpenAI", () => {
         assert.deepEqual(replans[0]!.data.modifiedDeps, {})
         assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
         assert.match(replans[0]!.data.reason, /openai-llm fallback after error:/)
+
+        const measured = env.events.filter(ModelInvocationMeasured.is)
+        assert.equal(measured.length, 1)
+        assert.equal(measured[0]!.data.status, "failed")
+        assert.deepEqual(
+            measured[0]!.data.tokens.inputTotal,
+            unknownMetric("not_reported"),
+        )
+        assert.ok(env.events.indexOf(measured[0]!) < env.events.indexOf(replans[0]!))
     })
 
     it("parses structured Replan JSON from OpenAI assistant text", async () => {
@@ -176,5 +279,58 @@ describe("SurgeonOpenAI", () => {
         assert.deepEqual(replans[0]!.data.modifiedDeps, {})
         assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
         assert.match(replans[0]!.data.reason, /openai-llm fallback after error: no JSON object found/)
+
+        const measured = env.events.filter(ModelInvocationMeasured.is)
+        assert.equal(measured.length, 1)
+        assert.equal(measured[0]!.data.status, "succeeded")
+        assert.deepEqual(
+            measured[0]!.data.tokens.total,
+            knownMetric(2, "provider_response"),
+        )
+    })
+
+    it("reports an OpenAI timeout once without invented zeros", async () => {
+        const surgeon = new SurgeonOpenAI({
+            snapshot,
+            model: "baro-test-model",
+        })
+        Object.defineProperty(surgeon, "runRound", {
+            value: async () => {
+                throw Object.assign(new Error("request timed out"), {
+                    code: "ETIMEDOUT",
+                })
+            },
+        })
+        const env = joinWithCapture(surgeon)
+
+        await surgeon.onExternalEvent(source("story-agent"), failure)
+        await surgeon.idle()
+
+        const measured = env.events.filter(ModelInvocationMeasured.is)
+        const replans = env.events.filter(Replan.is)
+        assert.equal(measured.length, 1)
+        assert.equal(measured[0]!.data.status, "timed_out")
+        assert.deepEqual(
+            measured[0]!.data.tokens.inputTotal,
+            unknownMetric("timed_out"),
+        )
+        assert.deepEqual(
+            measured[0]!.data.tokens.total,
+            unknownMetric("timed_out"),
+        )
+        assert.equal(replans.length, 1)
+        assert.ok(env.events.indexOf(measured[0]!) < env.events.indexOf(replans[0]!))
     })
 })
+
+function stubRound(
+    surgeon: SurgeonOpenAI,
+    response: { text: string; usage: TokenUsage | undefined },
+): void {
+    Object.defineProperty(surgeon, "runRound", {
+        value: async () => ({
+            items: [ModelMessageItem.rehydrate({ text: response.text })],
+            usage: response.usage,
+        }),
+    })
+}

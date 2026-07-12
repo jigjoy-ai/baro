@@ -11,6 +11,8 @@
 import { stdin } from "process"
 import { createInterface } from "readline"
 
+import type { ModelInvocationMeasuredData } from "./model-telemetry.js"
+
 export interface StoryInfo {
     id: string
     title: string
@@ -33,6 +35,18 @@ export interface DiffFileInfo {
     path: string
     added: number
     removed: number
+}
+
+export interface VerificationEvidenceInfo {
+    verification_id: string
+    status: "passed" | "failed" | "skipped"
+    duration_ms: number
+    commands: Array<{
+        command: string
+        status: "passed" | "failed" | "skipped"
+        duration_ms: number
+        tail?: string
+    }>
 }
 
 export type BaroEvent =
@@ -68,6 +82,8 @@ export type BaroEvent =
           stats: DoneStats
           success?: boolean
           abort_reason?: string
+          verification_status?: "passed" | "failed" | "skipped"
+          verification?: VerificationEvidenceInfo
       }
     | { type: "notification_ready" }
     // Per-story changes merged into the run branch, for the Changes view.
@@ -85,6 +101,10 @@ export type BaroEvent =
           // Absent for subscription paths (codex/openai) that have no
           // per-call dollar cost. Summed downstream.
           cost_usd?: number
+      }
+    | {
+          type: "model_usage"
+          measurement: ModelInvocationMeasuredData
       }
     // Live cumulative-per-agent token estimate streamed WHILE a story runs;
     // token_usage remains the authoritative total on finish. Consumers must
@@ -154,6 +174,8 @@ export type BaroCommand =
     | { type: "redirect"; story_id: string; message: string }
     /** Mid-run user chat with a running agent (TUI `m` key). */
     | { type: "agent_message"; id: string; text: string }
+    /** Mid-run chat with the optional, non-authoritative DialogueAgent. */
+    | { type: "dialogue_message"; message_id?: string; text: string }
     | { type: "shutdown" }
 
 export type CommandHandler = (cmd: BaroCommand) => Promise<void> | void

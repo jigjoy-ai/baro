@@ -12,6 +12,10 @@
 
 import { SemanticEvent } from "@mozaik-ai/core"
 
+import type { WorkBidEstimate } from "./work-market.js"
+
+import type { ModelInvocationMeasuredData } from "./model-telemetry.js"
+
 /**
  * One event "kind": wire type string + typed `create()` factory + `is()`
  * type guard — class-event ergonomics without a JS class identity.
@@ -61,8 +65,90 @@ export interface ReplanData {
     removedStoryIds: readonly string[]
     /** `Record<storyId, dependsOn>` — flat object, not `Map`, for JSON. */
     modifiedDeps: Readonly<Record<string, readonly string[]>>
+    /** Present for a Surgeon replan so a Board can reject stale/aborted
+     * recovery output without guessing from the proposed graph mutation. */
+    recovery?: {
+        runId?: string
+        storyId: string
+        leaseId?: string
+        generation?: number
+    }
 }
 export const Replan = defineSemanticEvent<ReplanData>("replan")
+
+/**
+ * A leased story's structured proposal to mutate the not-yet-started portion
+ * of the collective DAG. This is deliberately separate from `Replan`: that
+ * older event is the Surgeon/Conductor recovery contract, while runtime
+ * proposals require optimistic graph-version and lease correlation.
+ */
+export interface RuntimeReplanMutation {
+    addedStories: readonly ReplanStoryAdd[]
+    removedStoryIds: readonly string[]
+    /** `Record<storyId, dependsOn>` — flat and replay-safe on the event bus. */
+    modifiedDeps: Readonly<Record<string, readonly string[]>>
+}
+
+export interface RuntimeReplanCorrelationData {
+    runId: string
+    proposalId: string
+    sourceStoryId: string
+    leaseId: string
+    generation: number
+    /** Optimistic-concurrency version observed when the agent proposed. */
+    baseGraphVersion: number
+}
+
+export interface RuntimeReplanProposedData
+    extends RuntimeReplanCorrelationData {
+    reason: string
+    mutation: RuntimeReplanMutation
+}
+export const RuntimeReplanProposed =
+    defineSemanticEvent<RuntimeReplanProposedData>("runtime_replan_proposed")
+
+export interface RuntimeReplanAppliedData
+    extends RuntimeReplanCorrelationData {
+    previousGraphVersion: number
+    /** Decision version at which this mutation committed. */
+    graphVersion: number
+    /** Latest known version when this decision is delivered/replayed. */
+    currentGraphVersion?: number
+    reason: string
+    mutation: RuntimeReplanMutation
+}
+export const RuntimeReplanApplied =
+    defineSemanticEvent<RuntimeReplanAppliedData>("runtime_replan_applied")
+
+/** Stable machine-readable rejection reasons; human detail stays in `reason`. */
+export type RuntimeReplanRejectionCode =
+    | "invalid_proposal"
+    | "unauthorized"
+    | "inactive_source"
+    | "stale_graph_version"
+    | "proposal_id_conflict"
+    | "no_op"
+    | "dynamic_story_limit"
+    | "adaptation_budget_exhausted"
+    | "immutable_story"
+    | "unknown_story"
+    | "duplicate_story"
+    | "unknown_dependency"
+    | "duplicate_dependency"
+    | "self_dependency"
+    | "dependency_cycle"
+    | "destructive_removal"
+    | "persistence_failed"
+    | "run_not_active"
+
+export interface RuntimeReplanRejectedData
+    extends RuntimeReplanCorrelationData {
+    currentGraphVersion: number
+    code: RuntimeReplanRejectionCode
+    reason: string
+}
+export const RuntimeReplanRejected =
+    defineSemanticEvent<RuntimeReplanRejectedData>("runtime_replan_rejected")
 
 export interface CoordinationData {
     fromAgentId: string
@@ -80,6 +166,44 @@ export interface AgentTargetedMessageData {
 }
 export const AgentTargetedMessage =
     defineSemanticEvent<AgentTargetedMessageData>("agent_targeted_message")
+
+// Optional conversation participant. It may observe and communicate, but
+// these events deliberately carry no lease, integration, verification, or
+// completion authority.
+
+export interface ConversationRequestedData {
+    runId: string
+    messageId: string
+    text: string
+    source: "user" | "operator"
+}
+export const ConversationRequested =
+    defineSemanticEvent<ConversationRequestedData>("conversation_requested")
+
+export interface ConversationAction {
+    kind: "message"
+    recipientId: string
+    text: string
+}
+
+export interface ConversationRespondedData {
+    runId: string
+    messageId: string
+    agentId: string
+    text: string
+    actions: readonly ConversationAction[]
+}
+export const ConversationResponded =
+    defineSemanticEvent<ConversationRespondedData>("conversation_responded")
+
+export interface ConversationFailedData {
+    runId: string
+    messageId: string
+    agentId: string
+    error: string
+}
+export const ConversationFailed =
+    defineSemanticEvent<ConversationFailedData>("conversation_failed")
 
 // Agent lifecycle
 
@@ -132,6 +256,22 @@ export interface AgentResultData {
     durationMs: number | null
 }
 export const AgentResult = defineSemanticEvent<AgentResultData>("claude_result")
+
+/** Terminal assistant text from a backend-neutral story turn. */
+export interface AgentTurnCompletedData {
+    agentId: string
+    backend: string
+    isError: boolean
+    resultText: string | null
+    /** False for one-shot CLIs that cannot consume Critic feedback in-process. */
+    canContinue: boolean
+}
+export const AgentTurnCompleted =
+    defineSemanticEvent<AgentTurnCompletedData>("agent_turn_completed")
+
+/** Backend-neutral, replay-safe usage/cost observation for one model call. */
+export const ModelInvocationMeasured =
+    defineSemanticEvent<ModelInvocationMeasuredData>("model_invocation_measured")
 
 export interface ClaudeStreamChunkData {
     agentId: string
@@ -199,6 +339,42 @@ export interface CritiqueData {
 }
 export const Critique = defineSemanticEvent<CritiqueData>("critique")
 
+export interface StoryQualityCritiqueSnapshot {
+    verdict: "pass" | "fail"
+    reasoning: string
+    violatedCriteria: readonly string[]
+    turn: number
+    modelUsed: string
+}
+
+export interface StoryQualityCompletedData {
+    runId: string
+    evaluationId: string
+    storyId: string
+    leaseId: string
+    generation: number
+    status: "passed" | "failed"
+    /** Null only when no acceptance criteria exist or no terminal turn arrived. */
+    targetTurn: number | null
+    reason: string
+    critique?: StoryQualityCritiqueSnapshot
+}
+export const StoryQualityCompleted =
+    defineSemanticEvent<StoryQualityCompletedData>("story_quality_completed")
+
+/** Gate-owned semantic timer tick for a missing terminal turn or critique. */
+export interface StoryQualityTimedOutData {
+    runId: string
+    evaluationId: string
+    storyId: string
+    leaseId: string
+    generation: number
+    targetTurn: number | null
+    timeoutMs: number
+}
+export const StoryQualityTimedOut =
+    defineSemanticEvent<StoryQualityTimedOutData>("story_quality_timed_out")
+
 export interface ClaudeUnknownEventData {
     agentId: string
     claudeType: string
@@ -214,6 +390,304 @@ export interface RunStartRequestData {
 }
 export const RunStartRequest =
     defineSemanticEvent<RunStartRequestData>("run_start_request")
+
+export type CoordinationMode = "legacy" | "collective"
+
+export interface CoordinationModeSelectedData {
+    runId: string
+    mode: CoordinationMode
+}
+export const CoordinationModeSelected =
+    defineSemanticEvent<CoordinationModeSelectedData>("coordination_mode_selected")
+
+export interface WorkerCapabilities {
+    backends: readonly string[]
+    supportsAbort: boolean
+    supportsLiveFeedback: boolean
+    supportsPeerMessages: boolean
+    /** Concrete credential-free routes this worker may bid. */
+    routes?: readonly WorkRouteDescriptor[]
+    /** Optional per-worker execution capacity advertised to the broker. */
+    maxConcurrent?: number
+}
+
+export interface WorkerCapabilityAdvertisedData {
+    runId: string
+    workerId: string
+    capabilities: WorkerCapabilities
+}
+export const WorkerCapabilityAdvertised =
+    defineSemanticEvent<WorkerCapabilityAdvertisedData>("worker_capability_advertised")
+
+export interface WorkOfferedData {
+    runId: string
+    offerId: string
+    generation: number
+    priority: number
+    /** Credential-free routes that must not execute this attempt. The Board
+     * only adds routes proven unavailable by an authoritative prior lease. */
+    excludedRouteIds?: readonly string[]
+    request: StorySpawnRequestData
+}
+export const WorkOffered = defineSemanticEvent<WorkOfferedData>("work_offered")
+
+/** Safe-to-audit route identity. Provider credentials never enter the bus. */
+export interface WorkRouteDescriptor {
+    routeId: string
+    backend: string
+    model: string
+}
+
+export interface WorkBidEstimateData extends WorkBidEstimate {
+    estimateSource: "configured" | "historical"
+}
+
+export interface WorkBidData {
+    runId: string
+    offerId: string
+    storyId: string
+    generation: number
+    bidId: string
+    workerId: string
+    route: WorkRouteDescriptor
+    estimate: WorkBidEstimateData
+}
+export const WorkBid = defineSemanticEvent<WorkBidData>("work_bid")
+
+/** Broker-owned semantic timer tick that closes one bounded bid window. */
+export interface WorkBidWindowClosedData {
+    runId: string
+    offerId: string
+    storyId: string
+    generation: number
+}
+export const WorkBidWindowClosed =
+    defineSemanticEvent<WorkBidWindowClosedData>("work_bid_window_closed")
+
+export interface WorkClaimedData {
+    runId: string
+    offerId: string
+    storyId: string
+    workerId: string
+    backend: string
+    model: string
+    bidId?: string
+    route?: WorkRouteDescriptor
+}
+export const WorkClaimed = defineSemanticEvent<WorkClaimedData>("work_claimed")
+
+export interface WorkLeaseGrantedData {
+    runId: string
+    offerId: string
+    leaseId: string
+    workerId: string
+    generation: number
+    request: StorySpawnRequestData
+    bidId?: string
+    route?: WorkRouteDescriptor
+}
+export const WorkLeaseGranted =
+    defineSemanticEvent<WorkLeaseGrantedData>("work_lease_granted")
+
+export interface WorkLeaseReleasedData {
+    runId: string
+    offerId: string
+    leaseId: string
+    storyId: string
+    workerId: string
+    reason: "integrated" | "execution_failed" | "quality_failed" | "integration_failed" | "spawn_failed" | "aborted" | "expired"
+}
+export const WorkLeaseReleased =
+    defineSemanticEvent<WorkLeaseReleasedData>("work_lease_released")
+
+export interface WorkLeaseExpiredData {
+    runId: string
+    offerId: string
+    leaseId: string
+    storyId: string
+    workerId: string
+    reason: string
+}
+export const WorkLeaseExpired =
+    defineSemanticEvent<WorkLeaseExpiredData>("work_lease_expired")
+
+export interface WorkOfferExpiredData {
+    runId: string
+    offerId: string
+    storyId: string
+    reason: string
+}
+export const WorkOfferExpired =
+    defineSemanticEvent<WorkOfferExpiredData>("work_offer_expired")
+
+export interface WorkContextRequestedData {
+    runId: string
+    requestId: string
+    storyId: string
+    hints: readonly string[]
+}
+export const WorkContextRequested =
+    defineSemanticEvent<WorkContextRequestedData>("work_context_requested")
+
+export interface WorkContextProvidedData {
+    runId: string
+    requestId: string
+    storyId: string
+    context: string | null
+}
+export const WorkContextProvided =
+    defineSemanticEvent<WorkContextProvidedData>("work_context_provided")
+
+export interface RunPreparationRequestedData {
+    runId: string
+}
+export const RunPreparationRequested =
+    defineSemanticEvent<RunPreparationRequestedData>("run_preparation_requested")
+
+export interface RunPreparedData {
+    runId: string
+    baseSha: string | null
+}
+export const RunPrepared = defineSemanticEvent<RunPreparedData>("run_prepared")
+
+export interface RunPreparationFailedData {
+    runId: string
+    error: string
+}
+export const RunPreparationFailed =
+    defineSemanticEvent<RunPreparationFailedData>("run_preparation_failed")
+
+export interface StoryIntegrationRequestedData {
+    runId: string
+    leaseId: string
+    storyId: string
+    attempts: number
+    durationSecs: number
+}
+export const StoryIntegrationRequested =
+    defineSemanticEvent<StoryIntegrationRequestedData>("story_integration_requested")
+
+export interface WorkspaceCleanupRequestedData {
+    runId: string
+    cleanupId: string
+    storyId: string
+    leaseId?: string
+    generation?: number
+    /** Preserve meaningful dirty or committed partial work before releasing
+     * the failed story's worktree, for automatic or later manual recovery. */
+    preserveForRecovery?: boolean
+}
+export const WorkspaceCleanupRequested =
+    defineSemanticEvent<WorkspaceCleanupRequestedData>("workspace_cleanup_requested")
+
+export interface WorkspaceCleanupCompletedData {
+    runId: string
+    cleanupId: string
+    storyId: string
+    leaseId?: string
+    generation?: number
+    /** Unique immutable ref containing the meaningful failed attempt. */
+    preservedBranch?: string
+}
+export const WorkspaceCleanupCompleted =
+    defineSemanticEvent<WorkspaceCleanupCompletedData>("workspace_cleanup_completed")
+
+export interface WorkspaceCleanupFailedData {
+    runId: string
+    cleanupId: string
+    storyId: string
+    leaseId?: string
+    generation?: number
+    /** The logical branch/worktree was retained; it is not safe to start a
+     * fresh execution for the same story until a human resolves this error. */
+    retainedBranch?: string
+    error: string
+}
+export const WorkspaceCleanupFailed =
+    defineSemanticEvent<WorkspaceCleanupFailedData>("workspace_cleanup_failed")
+
+export interface RunPushRequestedData {
+    runId: string
+}
+export const RunPushRequested =
+    defineSemanticEvent<RunPushRequestedData>("run_push_requested")
+
+export interface RunPushedData {
+    runId: string
+    pushed: boolean
+}
+export const RunPushed = defineSemanticEvent<RunPushedData>("run_pushed")
+
+export interface RunPushFailedData {
+    runId: string
+    error: string
+}
+export const RunPushFailed = defineSemanticEvent<RunPushFailedData>("run_push_failed")
+
+export interface StorySpawnFailedData {
+    runId: string
+    offerId?: string
+    leaseId?: string
+    storyId: string
+    error: string
+}
+export const StorySpawnFailed =
+    defineSemanticEvent<StorySpawnFailedData>("story_spawn_failed")
+
+export interface PeerHelpRequestedData {
+    runId: string
+    sourceAgentId: string
+    text: string
+}
+export const PeerHelpRequested =
+    defineSemanticEvent<PeerHelpRequestedData>("peer_help_requested")
+
+export interface CollaborationNoteData {
+    runId: string
+    sourceAgentId: string
+    text: string
+}
+export const CollaborationNote =
+    defineSemanticEvent<CollaborationNoteData>("collaboration_note")
+
+export interface DiscoveredWork {
+    id: string
+    title: string
+    description: string
+    dependsOn: readonly string[]
+    acceptance: readonly string[]
+    tests: readonly string[]
+    model?: string
+    priority?: number
+    retries?: number
+}
+
+export interface WorkDiscoveredData {
+    runId: string
+    sourceAgentId: string
+    reason: string
+    story: DiscoveredWork
+}
+export const WorkDiscovered =
+    defineSemanticEvent<WorkDiscoveredData>("work_discovered")
+
+export interface RecoveryEvaluationStartedData {
+    runId: string
+    storyId: string
+    source: string
+}
+export const RecoveryEvaluationStarted =
+    defineSemanticEvent<RecoveryEvaluationStartedData>("recovery_evaluation_started")
+
+export interface RecoveryDecisionData {
+    runId: string
+    storyId: string
+    source: string
+    action: "replan" | "abort"
+    reason: string
+}
+export const RecoveryDecision =
+    defineSemanticEvent<RecoveryDecisionData>("recovery_decision")
 
 export interface RunStartedData {
     project: string
@@ -267,6 +741,21 @@ export interface StorySpawnRequestData {
     model: string
     retries: number
     timeoutSecs: number
+    /** A bounded retry launched after a previous execution or repository
+     * integration failure. Recovery starts from the latest run branch and can
+     * inspect an immutable backup whenever the failed attempt changed files. */
+    recovery?: {
+        kind: "execution" | "integration"
+        reason: string
+        branch?: string
+    }
+    offerId?: string
+    runId?: string
+    leaseId?: string
+    generation?: number
+    /** DAG version from which this concrete story launch was scheduled. */
+    graphVersion?: number
+    workerId?: string
 }
 export const StorySpawnRequest =
     defineSemanticEvent<StorySpawnRequestData>("story_spawn_request")
@@ -300,6 +789,48 @@ export interface PrCreatedData {
 }
 export const PrCreated = defineSemanticEvent<PrCreatedData>("pr_created")
 
+export type RunVerificationStatus = "passed" | "failed" | "skipped"
+export type VerificationCommandStatus = "passed" | "failed" | "skipped"
+
+export interface VerificationCommandEvidence {
+    command: string
+    status: VerificationCommandStatus
+    durationMs: number
+    /** Tail of stderr/stdout for failed commands, or a skip explanation. */
+    tail?: string
+}
+
+/** The coordinator has integrated all candidate work and requests an objective gate. */
+export interface RunVerificationRequestedData {
+    runId: string
+    verificationId: string
+}
+export const RunVerificationRequested =
+    defineSemanticEvent<RunVerificationRequestedData>("run_verification_requested")
+
+/** The coordinator's verification deadline elapsed; active work must cancel. */
+export interface RunVerificationTimedOutData {
+    runId: string
+    verificationId: string
+    timeoutMs: number
+}
+export const RunVerificationTimedOut =
+    defineSemanticEvent<RunVerificationTimedOutData>("run_verification_timed_out")
+
+export interface RunVerificationEvidence {
+    verificationId: string
+    status: RunVerificationStatus
+    commands: readonly VerificationCommandEvidence[]
+    durationMs: number
+}
+
+/** Objective build/test evidence for the fully integrated run branch. */
+export interface RunVerificationCompletedData extends RunVerificationEvidence {
+    runId: string
+}
+export const RunVerificationCompleted =
+    defineSemanticEvent<RunVerificationCompletedData>("run_verification_completed")
+
 export interface RunCompletedData {
     success: boolean
     completedStories: readonly string[]
@@ -307,6 +838,11 @@ export interface RunCompletedData {
     totalDurationSecs: number
     totalAttempts: number
     abortReason: string | null
+    /** Collective runs set this after their objective pre-completion gate. */
+    verificationStatus?: RunVerificationStatus
+    /** Correlated evidence used to decide the collective run outcome. */
+    verification?: RunVerificationEvidence
+    runId?: string
 }
 export const RunCompleted = defineSemanticEvent<RunCompletedData>("run_completed")
 
@@ -320,12 +856,34 @@ export interface ConductorStateData {
 export const ConductorState =
     defineSemanticEvent<ConductorStateData>("conductor_state")
 
+export type StoryFailureKind = "execution" | "provider_capacity"
+
+export type ProviderCapacityCode =
+    | "session_limit"
+    | "quota_exhausted"
+    | "rate_limited"
+    | "overloaded"
+    | "capacity_unavailable"
+
+/** Backend-neutral terminal failure classification. Human diagnostics remain
+ * in `error`; this bounded structure is what deterministic recovery policy
+ * consumes. Old audit logs omit it and retain the historical execution path. */
+export interface StoryFailureData {
+    kind: StoryFailureKind
+    code?: ProviderCapacityCode
+    retryAfterMs?: number
+}
+
 export interface StoryResultData {
     storyId: string
     success: boolean
     attempts: number
     durationSecs: number
     error: string | null
+    failure?: StoryFailureData
+    runId?: string
+    leaseId?: string
+    generation?: number
 }
 export const StoryResult = defineSemanticEvent<StoryResultData>("story_result")
 
@@ -347,13 +905,23 @@ export const StoryIntervention =
 export interface StoryMergedData {
     storyId: string
     mode: "worktree" | "shared-tree"
+    runId?: string
+    leaseId?: string
 }
 export const StoryMerged = defineSemanticEvent<StoryMergedData>("story_merged")
 
-/** Merge-back failed; the story's worktree + branch are preserved for recovery. */
+/** Merge-back failed; the story's work is preserved for inspection/recovery. */
 export interface StoryMergeFailedData {
     storyId: string
     error: string
+    /** The preserved branch holding the story's un-merged commits, so the
+     *  finalizer can recover the work into a PR instead of stranding it. */
+    branch?: string
+    /** True only when repository preparation produced a safe immutable backup
+     * and the same logical story may be re-offered from the latest run HEAD. */
+    retryable?: boolean
+    runId?: string
+    leaseId?: string
 }
 export const StoryMergeFailed =
     defineSemanticEvent<StoryMergeFailedData>("story_merge_failed")

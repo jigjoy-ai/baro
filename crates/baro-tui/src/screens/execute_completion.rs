@@ -121,7 +121,9 @@ pub fn render_completion(f: &mut Frame, app: &App) {
     // Box height: 16 base lines (14 content + 2 borders) + optional Time saved + optional PR URL
     let time_saved_extra: u16 = if saved_secs > 0 { 1 } else { 0 };
     let pr_extra: u16 = if app.pr_url.is_some() { 1 } else { 0 };
-    let box_height = (16u16 + time_saved_extra + pr_extra).min(area.height.saturating_sub(2));
+    let verification_extra: u16 = if app.verification_status.is_some() { 1 } else { 0 };
+    let box_height = (16u16 + time_saved_extra + pr_extra + verification_extra)
+        .min(area.height.saturating_sub(2));
     let x = (area.width.saturating_sub(box_width)) / 2;
     let y = (area.height.saturating_sub(box_height)) / 2;
     let popup_area = Rect::new(x, y, box_width, box_height);
@@ -129,6 +131,11 @@ pub fn render_completion(f: &mut Frame, app: &App) {
     f.render_widget(Clear, popup_area);
 
     let abnormal = app.exit_reason.is_some();
+    let unverified = app
+        .verification_status
+        .as_deref()
+        .map(|status| status != "passed")
+        .unwrap_or(false);
     let blocked = app
         .exit_reason
         .as_ref()
@@ -138,10 +145,16 @@ pub fn render_completion(f: &mut Frame, app: &App) {
         "RUN BLOCKED"
     } else if abnormal {
         "RUN ENDED EARLY"
+    } else if unverified {
+        "ALL STORIES COMPLETE — UNVERIFIED"
     } else {
         "ALL STORIES COMPLETE"
     };
-    let banner_color = if abnormal { theme::WARNING } else { theme::SUCCESS };
+    let banner_color = if abnormal || unverified {
+        theme::WARNING
+    } else {
+        theme::SUCCESS
+    };
 
     let mut lines = vec![
         Line::from(""),
@@ -205,6 +218,35 @@ pub fn render_completion(f: &mut Frame, app: &App) {
                 Style::default()
                     .fg(theme::SUCCESS)
                     .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    if let Some(status) = app.verification_status.as_deref() {
+        let (label, color) = match status {
+            "passed" => ("passed", theme::SUCCESS),
+            "failed" => ("failed", theme::WARNING),
+            _ => ("not run", theme::WARNING),
+        };
+        let evidence_detail = app.verification.as_ref().map(|evidence| {
+            let duration = if evidence.duration_ms >= 1_000 {
+                format!("{:.1}s", evidence.duration_ms as f64 / 1_000.0)
+            } else {
+                format!("{}ms", evidence.duration_ms)
+            };
+            let failed = evidence
+                .commands
+                .iter()
+                .find(|command| command.status == "failed")
+                .map(|command| format!(" · {}", command.command))
+                .unwrap_or_default();
+            format!(" · {} command(s) · {}{}", evidence.commands.len(), duration, failed)
+        });
+        lines.push(Line::from(vec![
+            Span::styled("  Verification:  ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                format!("{}{}", label, evidence_detail.unwrap_or_default()),
+                Style::default().fg(color),
             ),
         ]));
     }

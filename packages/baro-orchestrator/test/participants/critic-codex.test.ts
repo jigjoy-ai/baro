@@ -7,7 +7,9 @@ import { CriticCodex } from "../../src/participants/critic-codex.js"
 import {
     AgentResult,
     AgentTargetedMessage,
+    AgentTurnCompleted,
     Critique,
+    ModelInvocationMeasured,
 } from "../../src/semantic-events.js"
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
 
@@ -39,8 +41,14 @@ describe("CriticCodex", () => {
 
             const critiques = env.events.filter(Critique.is)
             const messages = env.events.filter(AgentTargetedMessage.is)
+            const measurements = env.events.filter(ModelInvocationMeasured.is)
 
             assert.equal(critiques.length, 3)
+            assert.equal(measurements.length, 3)
+            assert.ok(
+                env.events.findIndex(ModelInvocationMeasured.is) <
+                    env.events.findIndex(Critique.is),
+            )
             assert.deepEqual(
                 critiques.map((event) => event.data.turn),
                 [1, 2, 3],
@@ -103,6 +111,35 @@ describe("CriticCodex", () => {
             assert.equal(messages[0]!.data.metadata.criticTurn, 1)
         })
     })
+
+    it("critiques one-shot turns without sending unusable corrections", async () => {
+        const critic = new CriticCodex({
+            targets: new Map([["agent-a", ["must include tests"]]]),
+        })
+        Object.defineProperty(critic, "evaluate", {
+            value: async () => ({
+                verdict: "fail",
+                reasoning: "Missing tests",
+                violatedCriteria: ["must include tests"],
+            }),
+        })
+        const env = joinWithCapture(critic)
+
+        await critic.onExternalEvent(
+            source("projector"),
+            AgentTurnCompleted.create({
+                agentId: "agent-a",
+                backend: "codex",
+                isError: false,
+                resultText: "implemented feature without enough tests",
+                canContinue: false,
+            }),
+        )
+        await critic.idle()
+
+        assert.equal(env.events.filter(Critique.is).length, 1)
+        assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
+    })
 })
 
 async function emitResultTurns(
@@ -110,11 +147,11 @@ async function emitResultTurns(
     turns: number,
 ): Promise<void> {
     for (let turn = 0; turn < turns; turn += 1) {
-        await critic.onExternalEvent(source("runner"), resultEvent())
+        await critic.onExternalEvent(source("runner"), resultEvent(turn + 1))
     }
 }
 
-function resultEvent(): ReturnType<typeof AgentResult.create> {
+function resultEvent(numTurns: number | null = null): ReturnType<typeof AgentResult.create> {
     return AgentResult.create({
         agentId: "agent-a",
         subtype: "success",
@@ -123,7 +160,7 @@ function resultEvent(): ReturnType<typeof AgentResult.create> {
         resultText: "implemented feature without enough tests",
         usage: null,
         totalCostUsd: null,
-        numTurns: null,
+        numTurns,
         durationMs: null,
     })
 }

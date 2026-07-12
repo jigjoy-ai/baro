@@ -53,8 +53,9 @@ flowchart LR
 ## Why it's fast: a real fleet, not one chat agent
 
 Most tools give you a single agent in a chat box. baro plans your goal into a DAG and
-runs a whole fleet at once — every independent story executes in parallel, each as its
-own CLI subprocess in its own git worktree:
+runs a whole fleet at once — every independent story is scheduled in parallel in its
+own git worktree. CLI routes use subprocesses, while native OpenAI-compatible routes
+run in-process:
 
 ```bash
 cd your-repo
@@ -180,10 +181,47 @@ Most multi-agent setups have one orchestrator function in the middle that drives
 orchestrator becomes the bottleneck the moment you push past a handful of concurrent agents — and
 adding a new behaviour means editing its control flow.
 
-baro doesn't have that shape. Every part of the run is an independent **participant** on a shared
-event bus ([Mozaik](https://github.com/jigjoy-ai/mozaik)). N parallel story agents are N
-independent subprocesses, each emitting and consuming typed events. There is no central `run()` to
-bottleneck on, and adding a new behaviour is a new participant — not an orchestrator rewrite.
+The execution runtime uses one shared event bus
+([Mozaik](https://github.com/jigjoy-ai/mozaik)). Its Board/Conductor, factories, critics and
+other observers are participants; N parallel story agents are N independently scheduled
+executions whose activity is projected onto typed events. CLI routes use subprocesses and a
+local bridge, while native OpenAI-compatible routes run in-process. Architect and Planner run
+before this execution environment. The default `legacy` engine uses a
+deterministic Conductor participant for DAG policy. The experimental `collective` engine splits
+allocation, leases, integration and completion across participants and lets workers publish peer
+messages and propose versioned changes to the not-yet-started DAG. The Board validates and
+persists the complete candidate before it reports the change as applied; active stories remain
+fenced until a correlated revocation lifecycle exists.
+
+Try the collective engine with Baro-owned pushes and PR creation disabled:
+
+```bash
+baro --coordination collective --local-only "Your goal"
+```
+
+An experimental conversation participant can be added without turning it into
+the coordinator:
+
+```bash
+baro --coordination collective --local-only --with-dialogue "Your goal"
+```
+
+It is text-only, receives no repository tools, and cannot grant leases, mutate
+the DAG, integrate work, verify the run, or report success. Removing it does
+not stop the collective. While a run is active, press `c` for collective chat;
+`m` still sends a direct message to the selected worker. Direct/headless
+clients can use the `dialogue_message` stdin event.
+
+Omitting `--coordination` keeps the current Conductor coordination path as the default.
+For hard network isolation, point it at a disposable clone with its git remotes removed;
+story agents can execute shell commands, so `--local-only` is a coordinator policy, not an OS sandbox.
+
+Collective mode can also run an opt-in worker market. Candidate workers advertise safe route
+descriptors and submit bounded cost/latency/success estimates; the Broker applies policy and picks
+one winner deterministically. Credentials and endpoint URLs remain local to the worker. The
+estimates are configuration until they have been calibrated from externally verified runs — they
+are not presented as measured truth. See the [local collective experiment](docs/collective-experiment.md)
+and [candidate example](docs/collective-workers.example.json).
 
 ```mermaid
 flowchart LR
@@ -197,7 +235,7 @@ flowchart LR
     subgraph B["baro on Mozaik"]
         direction TB
         Bus[(shared event bus)]
-        P1[Conductor] -.-> Bus
+        P1[Conductor or Board + Broker] -.-> Bus
         P2[Story Agent 1] -.-> Bus
         P3[Story Agent N] -.-> Bus
         P4[Critic / Surgeon / ...] -.-> Bus
@@ -208,13 +246,24 @@ flowchart LR
 |---|---|
 | **Architect** | One Opus call before planning — emits a `DecisionDocument` that pins every cross-cutting design decision (file paths, schemas, API shapes, library choices) so parallel agents don't each invent their own |
 | **Planner** | Decomposes the goal into a story DAG, with the DecisionDocument already pinned |
-| **Conductor** | State machine that drives the run by reacting to bus events |
-| **StoryAgent** | One CLI subprocess per story (Claude Code / Codex / OpenCode / OpenAI), in its own git worktree; multi-turn loop until the story completes |
-| **Critic** | Per-turn evaluator. On a fail verdict, injects corrective feedback as the agent's next turn |
+| **Conductor** | Default/legacy state machine that drives DAG levels by reacting to bus events |
+| **Board + Broker** | Opt-in collective policy: projects run state, collects worker bids, grants correlated leases, atomically validates versioned future-DAG proposals and never treats process exit as proof of success |
+| **DialogueAgent** | Optional, disposable conversation participant that explains a sanitized run view and may message active workers, but has no control-plane authority |
+| **StoryAgent** | One isolated worker per story and git worktree. Native OpenAI runs in-process through Mozaik; Claude Code is a multi-turn CLI worker, while Codex, OpenCode and Pi story workers are currently one-shot CLI processes |
+| **Critic + AcceptanceGate** | Evaluates terminal output against acceptance criteria. Live backends can consume corrective turns; one-shot backends produce a blocking verdict that triggers recovery instead of a message to a dead process |
 | **Sentry** | Flags overlapping Edit/Write tool calls across concurrent stories |
 | **Librarian** | Indexes one agent's Read/Grep findings so siblings don't redo the exploration |
-| **Surgeon** | On terminal failure, asks Opus for a richer replan (split / prereq / rewire) |
-| **Finalizer** | Runs build verification, opens the GitHub PR with stories table + stats |
+| **Surgeon** | On execution, integration or acceptance failure, proposes a bounded replan (split / prerequisite / rewire / escalation) |
+| **RunVerifier / Finalizer** | Produces correlated build/test evidence for collective completion; optional publishing reuses that evidence when opening the PR |
+
+In collective mode, an active leased worker may propose an atomic change to
+the not-yet-started part of the story DAG. Native OpenAI receives a
+closed-schema `propose_replan` tool inside its Mozaik inference loop; CLI
+workers use the same correlated semantic events through the local
+`agent-collab.mjs` bridge. The Board remains the only mutation authority and
+emits `runtime_replan_applied` only after the new graph and version are
+durable. See [the local collective experiment guide](docs/collective-experiment.md#runtime-dag-adaptation)
+for the safety and replay contract.
 
 The bus is open. CI deployers, Slack notifiers, ticket triggers — all new participants, no
 orchestrator changes. Architecture deep-dive:
@@ -316,19 +365,23 @@ won't kill a run: the runner reconnects and resumes streaming where it left off.
 billed from prepaid credits. Pick **☁ baro's cloud** in the dashboard (no runner
 to pair) at [app.baro.jigjoy.ai](https://app.baro.jigjoy.ai).
 
-## How it compares
+## What Baro adds to a coding harness
 
-| | Single Claude Code session | DIY `Promise.all` of subprocesses | baro |
+Modern coding harnesses can already plan, use subagents and run work in
+parallel; those capabilities are not Baro's unique claim. The collective
+experiment focuses on an explicit control plane around heterogeneous workers:
+
+| Capability | Typical single-vendor harness | DIY parallel processes | Baro collective |
 |---|---|---|---|
-| **Plans the work** | you | you | Planner agent |
-| **Pins design decisions** | implicit, drifts | n/a | Architect agent (`DecisionDocument`) |
-| **Parallel agents** | no — one session | yes, you coordinate | yes, on Mozaik bus |
-| **Mid-flight peer awareness** | n/a | implement yourself | Librarian broadcasts |
-| **Replan on failure** | manual | manual | Surgeon agent |
-| **Opens the PR** | manual | manual | Finalizer |
-| **Adding a new behaviour** | new prompt | refactor orchestrator | new bus participant |
+| **Model/provider mix** | vendor-specific | wire it yourself | per-story routes and deterministic bids |
+| **Plan state** | session-internal | application-specific | explicit, versioned DAG |
+| **Work ownership** | harness-internal | wire it yourself | correlated offers, leases and authority fencing |
+| **Runtime adaptation** | harness-specific | wire it yourself | validated future-DAG transaction, persist-before-Applied |
+| **Auditability** | harness logs | build it yourself | typed semantic event and model-usage audit |
+| **Completion evidence** | model/harness result | build it yourself | Critic gate, repository integration and objective verifier |
+| **Cost/quality routing** | vendor model family | build it yourself | provider-neutral policy surface (estimates must be calibrated) |
 
-For a deeper side-by-side on a real refactor, see [baro vs Claude Code `/goal`](https://jigjoy.ai/blog/baro-vs-claude-code).
+For a historical side-by-side on one real refactor, see [baro vs Claude Code `/goal`](https://jigjoy.ai/blog/baro-vs-claude-code). Treat it as a case study, not a current capability matrix.
 
 ## Requirements
 

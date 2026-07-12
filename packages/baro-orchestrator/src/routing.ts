@@ -280,20 +280,16 @@ export function parseEndpoints(
         if (!spec) continue
         const eq = spec.indexOf("=")
         if (eq <= 0) {
-            throw new Error(
-                `bad --openai-endpoint "${spec}" (expected name=url)`,
-            )
+            throw new Error("bad --openai-endpoint value (expected name=url)")
         }
         const name = spec.slice(0, eq).trim().toLowerCase()
         const url = spec.slice(eq + 1).trim()
         if (!name || !url) {
-            throw new Error(
-                `bad --openai-endpoint "${spec}" (expected name=url)`,
-            )
+            throw new Error("bad --openai-endpoint value (expected name=url)")
         }
         if (!looksLikeUrl(url)) {
             throw new Error(
-                `--openai-endpoint "${name}" url "${url}" must start with http:// or https://`,
+                `--openai-endpoint "${name}" URL must start with http:// or https://`,
             )
         }
         map[name] = { baseUrl: url, apiKey: keyFor?.(name) }
@@ -304,5 +300,8 @@ export function parseEndpoints(
 /** Human-readable one-liner for banners / logs. */
 export function formatRoute(route: StoryRoute): string {
     const base = route.model ? `${route.backend}:${route.model}` : route.backend
-    return route.baseUrl ? `${base}@${route.baseUrl}` : base
+    // Endpoint URLs may contain userinfo or signed query strings. Keep them
+    // available to the runner, but never copy them into persisted stderr,
+    // prompts, or audit-facing route descriptions.
+    return route.baseUrl ? `${base}@configured-endpoint` : base
 }

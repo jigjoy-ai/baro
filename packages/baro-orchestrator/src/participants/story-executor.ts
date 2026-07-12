@@ -2,10 +2,11 @@
  * StoryExecutor — the seam between "decide a story should run" and "run its
  * agent loop somewhere" (in-process, mock, or remote). Every implementation
  * must deliver the agent's bus events — ending in the terminal `StoryResult` —
- * onto the local env, so other participants can't tell which executor ran.
+ * onto the local env. Collective executors must copy `runId`, `leaseId`, and
+ * `generation` from the request into that terminal result.
  */
 
-import { AgenticEnvironment } from "@mozaik-ai/core"
+import { AgenticEnvironment, type Participant } from "@mozaik-ai/core"
 
 import type { StorySpawnRequestData } from "../semantic-events.js"
 import type { StoryRoute } from "../routing.js"
@@ -20,6 +21,17 @@ export interface StoryExecOpts {
     openaiModel?: string
     /** Effort level for the Claude path (`claude --effort`). */
     effort?: string
+    /** Repository/Board participant authorized to decide native runtime DAG
+     * proposals. Omitted outside correlated collective execution. */
+    runtimeReplanDecisionAuthority?: Participant
+    /** Bound for a native story tool to receive its correlated decision. */
+    runtimeReplanDecisionTimeoutMs?: number
+    /**
+     * Collective executors must synchronously register the exact Participant
+     * that will source StoryResult before emitting a result or returning from
+     * start(). Legacy execution leaves this unset.
+     */
+    registerResultAuthority?: (source: Participant) => void
 }
 
 export interface StoryExecution {
@@ -59,6 +71,11 @@ export class LocalStoryExecutor implements StoryExecutor {
         env: AgenticEnvironment,
         opts: StoryExecOpts,
     ): StoryExecution {
+        const correlation = {
+            runId: req.runId,
+            leaseId: req.leaseId,
+            generation: req.generation,
+        }
         const agent: AnyStoryAgent =
             route.backend === "pi"
                 ? new PiStoryAgent({
@@ -68,6 +85,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                       model: route.model,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
+                      ...correlation,
                   })
                 : route.backend === "opencode"
                 ? new OpenCodeStoryAgent({
@@ -77,6 +95,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                       model: route.model,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
+                      ...correlation,
                   })
                 : route.backend === "codex"
                 ? new CodexStoryAgent({
@@ -87,6 +106,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                       model: route.model,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
+                      ...correlation,
                   })
                 : route.backend === "openai"
                 ? new OpenAIStoryAgent(
@@ -97,11 +117,17 @@ export class LocalStoryExecutor implements StoryExecutor {
                           model: route.model,
                           retries: req.retries,
                           timeoutSecs: req.timeoutSecs,
+                          graphVersion: req.graphVersion,
+                          ...correlation,
                       },
                       {
                           model: route.model ?? opts.openaiModel,
                           baseUrl: route.baseUrl,
                           apiKey: route.apiKey,
+                          runtimeReplanDecisionAuthority:
+                              opts.runtimeReplanDecisionAuthority,
+                          runtimeReplanDecisionTimeoutMs:
+                              opts.runtimeReplanDecisionTimeoutMs,
                       },
                   )
                 : new StoryAgent({
@@ -113,7 +139,13 @@ export class LocalStoryExecutor implements StoryExecutor {
                       effort: opts.effort,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
+                      ...correlation,
                   })
+
+        if (opts.registerResultAuthority) {
+            agent.setResultAuthority(agent)
+            opts.registerResultAuthority(agent)
+        }
 
         agent.join(env)
 

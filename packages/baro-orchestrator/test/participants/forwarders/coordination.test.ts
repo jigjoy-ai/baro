@@ -4,6 +4,8 @@ import { describe, it } from "node:test"
 import {
     Coordination,
     Critique,
+    RunVerificationCompleted,
+    RunVerificationRequested,
     StoryIntervention,
 } from "../../../src/semantic-events.js"
 import type { BaroEvent } from "../../../src/tui-protocol.js"
@@ -112,5 +114,42 @@ describe("CoordinationForwarder", () => {
                 line: "[sentry/merge] shared dependency complete",
             },
         ])
+    })
+
+    it("surfaces objective run verification without claiming a skipped pass", async () => {
+        const forwarder = new CoordinationForwarder()
+        const lines = await captureStdout(async () => {
+            await forwarder.onExternalEvent(
+                source("board"),
+                RunVerificationRequested.create({
+                    runId: "run-1",
+                    verificationId: "verify-1",
+                }),
+            )
+            await forwarder.onExternalEvent(
+                source("verifier"),
+                RunVerificationCompleted.create({
+                    runId: "run-1",
+                    verificationId: "verify-1",
+                    status: "skipped",
+                    commands: [],
+                    durationMs: 1,
+                }),
+            )
+        })
+
+        const events = lines.map((line) => JSON.parse(line) as BaroEvent)
+        assert.deepEqual(events.map((event) => event.type), [
+            "activity",
+            "story_log",
+            "activity",
+            "story_log",
+        ])
+        const completion = events[2]
+        assert.equal(completion.type, "activity")
+        if (completion.type === "activity") {
+            assert.equal(completion.ok, undefined)
+            assert.match(completion.text, /verification skipped/i)
+        }
     })
 })

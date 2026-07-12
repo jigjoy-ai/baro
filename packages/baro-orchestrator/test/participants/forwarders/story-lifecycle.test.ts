@@ -9,6 +9,7 @@ import {
     StoryMerged,
     StoryResult,
     StoryRouted,
+    WorkLeaseGranted,
 } from "../../../src/semantic-events.js"
 import type { BaroEvent } from "../../../src/tui-protocol.js"
 import { StoryLifecycleForwarder } from "../../../src/participants/forwarders/story-lifecycle.js"
@@ -102,6 +103,130 @@ describe("StoryLifecycleForwarder", () => {
                 attempt: 3,
                 max_retries: 3,
             },
+        ])
+    })
+
+    it("waits for repository integration before completing a collective story", async () => {
+        const forwarder = new StoryLifecycleForwarder()
+        const events = parseEvents(await captureStdout(async () => {
+            await forwarder.onExternalEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId: "run-1",
+                    offerId: "offer-1",
+                    leaseId: "lease-1",
+                    workerId: "worker",
+                    generation: 1,
+                    request: {
+                        storyId: "S1",
+                        prompt: "work",
+                        model: "standard",
+                        retries: 1,
+                        timeoutSecs: 60,
+                    },
+                }),
+            )
+            await forwarder.onExternalEvent(
+                source("S1"),
+                StoryResult.create({
+                    storyId: "S1",
+                    success: true,
+                    attempts: 1,
+                    durationSecs: 4,
+                    error: null,
+                    runId: "run-1",
+                    leaseId: "lease-1",
+                    generation: 1,
+                }),
+            )
+            await forwarder.onExternalEvent(
+                source("repo"),
+                StoryMerged.create({
+                    storyId: "S1",
+                    mode: "worktree",
+                    runId: "run-1",
+                    leaseId: "lease-1",
+                }),
+            )
+        }))
+
+        assert.deepEqual(events, [
+            {
+                type: "story_complete",
+                id: "S1",
+                duration_secs: 4,
+                files_created: 0,
+                files_modified: 0,
+            },
+            { type: "story_merged", id: "S1", mode: "worktree" },
+        ])
+    })
+
+    it("suppresses terminal events from a superseded lease", async () => {
+        const forwarder = new StoryLifecycleForwarder()
+        const lease = (
+            leaseId: string,
+            generation: number,
+        ) => WorkLeaseGranted.create({
+            runId: "run-stale",
+            offerId: `offer-${generation}`,
+            leaseId,
+            workerId: "worker",
+            generation,
+            request: {
+                storyId: "S1",
+                prompt: "work",
+                model: "standard",
+                retries: 1,
+                timeoutSecs: 60,
+            },
+        })
+        const result = (leaseId: string, generation: number) =>
+            StoryResult.create({
+                storyId: "S1",
+                success: true,
+                attempts: 1,
+                durationSecs: generation,
+                error: null,
+                runId: "run-stale",
+                leaseId,
+                generation,
+            })
+
+        const events = parseEvents(await captureStdout(async () => {
+            await forwarder.onExternalEvent(source("broker"), lease("old", 1))
+            await forwarder.onExternalEvent(source("old"), result("old", 1))
+            await forwarder.onExternalEvent(source("broker"), lease("new", 2))
+            await forwarder.onExternalEvent(source("new"), result("new", 2))
+            await forwarder.onExternalEvent(
+                source("repo"),
+                StoryMerged.create({
+                    storyId: "S1",
+                    mode: "worktree",
+                    runId: "run-stale",
+                    leaseId: "old",
+                }),
+            )
+            await forwarder.onExternalEvent(
+                source("repo"),
+                StoryMerged.create({
+                    storyId: "S1",
+                    mode: "worktree",
+                    runId: "run-stale",
+                    leaseId: "new",
+                }),
+            )
+        }))
+
+        assert.deepEqual(events, [
+            {
+                type: "story_complete",
+                id: "S1",
+                duration_secs: 2,
+                files_created: 0,
+                files_modified: 0,
+            },
+            { type: "story_merged", id: "S1", mode: "worktree" },
         ])
     })
 

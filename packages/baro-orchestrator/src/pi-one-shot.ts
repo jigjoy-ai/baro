@@ -7,6 +7,20 @@
 
 import { ChildProcess, spawn } from "child_process"
 
+import {
+    knownMetric,
+    notApplicableMetric,
+    unknownMetric,
+    type Metric,
+    type ModelInvocationStatus,
+    type ModelTokenMetrics,
+} from "./model-telemetry.js"
+import {
+    RunnerInvocationTracker,
+    type RunnerInvocationObserver,
+    type UnsequencedRunnerInvocationObservation,
+} from "./runner-invocation.js"
+
 export interface RunPiOneShotOptions {
     /** Combined system+user prompt. Passed as the final positional argv. */
     prompt: string
@@ -21,6 +35,8 @@ export interface RunPiOneShotOptions {
     timeoutMs?: number
     /** Per-phase prefix for the live stderr stream. Default: "pi". */
     label?: string
+    /** Optional invocation telemetry sink. It cannot alter runner success. */
+    onInvocation?: RunnerInvocationObserver
 }
 
 /**
@@ -39,6 +55,8 @@ export async function runPiOneShot(
     const timeoutMs = opts.timeoutMs ?? 600_000
 
     return await new Promise<string>((resolve, reject) => {
+        const startedAt = Date.now()
+        const invocations = new RunnerInvocationTracker(opts.onInvocation)
         let proc: ChildProcess
         try {
             proc = spawn(opts.piBin ?? "pi", args, {
@@ -46,6 +64,9 @@ export async function runPiOneShot(
                 stdio: ["ignore", "pipe", "pipe"],
             })
         } catch (e) {
+            invocations.finish(
+                unknownPiObservation("failed", Date.now() - startedAt, opts),
+            )
             reject(e instanceof Error ? e : new Error(String(e)))
             return
         }
@@ -64,7 +85,6 @@ export async function runPiOneShot(
             }
         }
 
-        const startedAt = Date.now()
         const timer = setTimeout(() => {
             timedOut = true
             try {
@@ -111,8 +131,11 @@ export async function runPiOneShot(
                         const usage = message.usage as { input?: number; output?: number } | undefined
                         if (usage) {
                             process.stderr.write(
-                                `[${label}] usage: in=${usage.input ?? 0} out=${usage.output ?? 0}\n`,
+                                `[${label}] usage: in=${numberForLog(usage.input)} out=${numberForLog(usage.output)}\n`,
                             )
+                        }
+                        if (!timedOut) {
+                            invocations.observe(piObservation(message, opts))
                         }
                         const content = message.content as Array<Record<string, unknown>> | undefined
                         if (Array.isArray(content)) {
@@ -199,6 +222,17 @@ export async function runPiOneShot(
 
         proc.on("error", (err) => {
             clearTimers()
+            if (
+                !invocations.finish(
+                    unknownPiObservation(
+                        timedOut ? "timed_out" : "failed",
+                        Date.now() - startedAt,
+                        opts,
+                    ),
+                )
+            ) {
+                return
+            }
             reject(err)
         })
 
@@ -224,6 +258,17 @@ export async function runPiOneShot(
             // partial text on timeout/crash would silently yield an
             // incomplete doc with no error surfaced.
             if (timedOut || signal != null || (code != null && code !== 0)) {
+                if (
+                    !invocations.finish(
+                        unknownPiObservation(
+                            timedOut ? "timed_out" : "failed",
+                            elapsedMs,
+                            opts,
+                        ),
+                    )
+                ) {
+                    return
+                }
                 reject(
                     new Error(
                         `runPiOneShot: pi terminated abnormally before completing (${ctx})`,
@@ -233,10 +278,24 @@ export async function runPiOneShot(
             }
 
             if (assistantText.trim()) {
+                if (
+                    !invocations.finish(
+                        unknownPiObservation("succeeded", elapsedMs, opts),
+                    )
+                ) {
+                    return
+                }
                 resolve(assistantText)
                 return
             }
 
+            if (
+                !invocations.finish(
+                    unknownPiObservation("failed", elapsedMs, opts),
+                )
+            ) {
+                return
+            }
             reject(
                 new Error(
                     `runPiOneShot: pi produced no text output (${ctx})`,
@@ -244,4 +303,160 @@ export async function runPiOneShot(
             )
         })
     })
+}
+
+function piObservation(
+    message: Record<string, unknown>,
+    opts: RunPiOneShotOptions,
+): UnsequencedRunnerInvocationObservation {
+    const usage = record(message.usage)
+    const cost = record(usage.cost)
+    return {
+        granularity: "turn",
+        status: "succeeded",
+        durationMs: unknownMetric("not_reported"),
+        tokens: piTokenMetrics(usage),
+        cost: {
+            providerUsd: notApplicableMetric(),
+            customerUsd: notApplicableMetric(),
+            equivalentUsd:
+                firstMetric([
+                    optionalMetric(usage, ["cost_usd", "costUsd"], "cli_result"),
+                    optionalMetric(cost, ["total"], "cli_result"),
+                ]) ?? unknownMetric("not_reported"),
+        },
+        provider: nonEmptyString(message.provider) ?? opts.provider ?? null,
+        resolvedModel: nonEmptyString(message.model) ?? opts.model ?? null,
+        providerRequestId:
+            nonEmptyString(message.responseId) ??
+            nonEmptyString(message.response_id),
+    }
+}
+
+function unknownPiObservation(
+    status: ModelInvocationStatus,
+    elapsedMs: number,
+    opts: RunPiOneShotOptions,
+): UnsequencedRunnerInvocationObservation {
+    const reason = status === "timed_out" ? "timed_out" : "not_reported"
+    const missing = unknownMetric(reason)
+    return {
+        granularity: "turn",
+        status,
+        durationMs: knownMetric(elapsedMs, "cli_result"),
+        tokens: {
+            inputTotal: missing,
+            cachedInput: missing,
+            cacheWriteInput: missing,
+            outputTotal: missing,
+            reasoningOutput: notApplicableMetric(),
+            total: missing,
+        },
+        cost: {
+            providerUsd: notApplicableMetric(),
+            customerUsd: notApplicableMetric(),
+            equivalentUsd: missing,
+        },
+        provider: opts.provider ?? null,
+        resolvedModel: opts.model ?? null,
+        providerRequestId: null,
+    }
+}
+
+function piTokenMetrics(usage: Record<string, unknown>): ModelTokenMetrics {
+    const cache = record(usage.cache)
+    const rawInput = metric(usage, ["input", "inputTokens", "input_tokens"])
+    const cached =
+        firstMetric([
+            optionalMetric(
+                usage,
+                ["cacheRead", "cached_input_tokens", "cache_read_input_tokens"],
+                "provider_response",
+            ),
+            optionalMetric(cache, ["read"], "provider_response"),
+        ]) ?? unknownMetric("not_reported")
+    const cacheWrite =
+        firstMetric([
+            optionalMetric(
+                usage,
+                ["cacheWrite", "cache_creation_input_tokens", "cache_write_input_tokens"],
+                "provider_response",
+            ),
+            optionalMetric(cache, ["write"], "provider_response"),
+        ]) ?? unknownMetric("not_reported")
+    const output = metric(usage, ["output", "outputTokens", "output_tokens"])
+    const inputTotal = sumKnown([rawInput, cached, cacheWrite])
+    return {
+        inputTotal,
+        cachedInput: cached,
+        cacheWriteInput: cacheWrite,
+        outputTotal: output,
+        // Pi exposes no separate reasoning token dimension.
+        reasoningOutput: notApplicableMetric(),
+        total:
+            optionalMetric(
+                usage,
+                ["totalTokens", "total_tokens", "total"],
+                "provider_response",
+            ) ?? sumKnown([inputTotal, output]),
+    }
+}
+
+function record(value: unknown): Record<string, unknown> {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : {}
+}
+
+function metric(
+    source: Record<string, unknown>,
+    keys: readonly string[],
+    metricSource: "provider_response" | "cli_result" = "provider_response",
+): Metric {
+    for (const key of keys) {
+        if (!(key in source) || source[key] == null) continue
+        const value = source[key]
+        return typeof value === "number" && Number.isFinite(value) && value >= 0
+            ? knownMetric(value, metricSource)
+            : unknownMetric("parse_error")
+    }
+    return unknownMetric("not_reported")
+}
+
+function optionalMetric(
+    source: Record<string, unknown>,
+    keys: readonly string[],
+    metricSource: "provider_response" | "cli_result",
+): Metric | null {
+    return keys.some((key) => key in source && source[key] != null)
+        ? metric(source, keys, metricSource)
+        : null
+}
+
+function firstMetric(metrics: readonly (Metric | null)[]): Metric | null {
+    return metrics.find((item): item is Metric => item !== null) ?? null
+}
+
+function sumKnown(metrics: readonly Metric[]): Metric {
+    if (metrics.every((item) => item.state === "known")) {
+        return knownMetric(
+            metrics.reduce(
+                (sum, item) => sum + (item.state === "known" ? item.value : 0),
+                0,
+            ),
+            "derived",
+        )
+    }
+    const missing = metrics.find((item) => item.state === "unknown")
+    return missing?.state === "unknown"
+        ? unknownMetric(missing.reason)
+        : unknownMetric("not_reported")
+}
+
+function numberForLog(value: unknown): number | "?" {
+    return typeof value === "number" && Number.isFinite(value) ? value : "?"
+}
+
+function nonEmptyString(value: unknown): string | null {
+    return typeof value === "string" && value.trim() ? value : null
 }

@@ -14,8 +14,11 @@ import {
     type StoryResultData,
     StoryRouted,
     StorySpawnRequest,
+    WorkLeaseGranted,
+    WorkLeaseReleased,
 } from "../../semantic-events.js"
 import { emit } from "../../tui-protocol.js"
+import { ActiveLeaseRegistry } from "../../runtime/active-lease-registry.js"
 
 // Write-ish tools across all backends. "create" = a whole-file write
 // (Claude `Write`, story-tools `write_file`); "edit" = an in-place edit
@@ -41,11 +44,26 @@ export class StoryLifecycleForwarder extends BaseObserver {
     // Reset on each retry so story_complete reflects only the winning
     // attempt's touches, not files a failed attempt wrote and abandoned.
     private filesByStory = new Map<string, Map<string, "created" | "modified">>()
+    private pendingIntegration = new Map<string, StoryResultData>()
+    private readonly leases = new ActiveLeaseRegistry()
 
     override async onExternalEvent(
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
+        if (WorkLeaseReleased.is(event)) {
+            const key = integrationKey(event.data.runId, event.data.leaseId)
+            if (key) this.pendingIntegration.delete(key)
+            if (event.data.reason !== "integrated") {
+                this.filesByStory.delete(event.data.storyId)
+            }
+            this.leases.observe(event, undefined)
+            return
+        }
+        if (WorkLeaseGranted.is(event)) {
+            this.leases.observe(event, undefined)
+            return
+        }
         if (AgentState.is(event)) {
             this.handleAgentState(event.data)
             return
@@ -55,6 +73,10 @@ export class StoryLifecycleForwarder extends BaseObserver {
             return
         }
         if (StoryResult.is(event)) {
+            if (
+                event.data.runId &&
+                !this.leases.matches(event.data, event.data.runId)
+            ) return
             this.handleStoryResult(event.data)
             return
         }
@@ -68,6 +90,20 @@ export class StoryLifecycleForwarder extends BaseObserver {
             return
         }
         if (StoryMerged.is(event)) {
+            if (
+                event.data.runId &&
+                !this.leases.matchesLease(
+                    event.data.storyId,
+                    event.data.runId,
+                    event.data.leaseId,
+                )
+            ) return
+            const key = integrationKey(event.data.runId, event.data.leaseId)
+            const pending = key ? this.pendingIntegration.get(key) : undefined
+            if (pending) {
+                this.pendingIntegration.delete(key!)
+                this.emitStoryComplete(pending)
+            }
             emit({
                 type: "story_merged",
                 id: event.data.storyId,
@@ -76,6 +112,27 @@ export class StoryLifecycleForwarder extends BaseObserver {
             return
         }
         if (StoryMergeFailed.is(event)) {
+            if (
+                event.data.runId &&
+                !this.leases.matchesLease(
+                    event.data.storyId,
+                    event.data.runId,
+                    event.data.leaseId,
+                )
+            ) return
+            const key = integrationKey(event.data.runId, event.data.leaseId)
+            const pending = key ? this.pendingIntegration.get(key) : undefined
+            if (pending) {
+                this.pendingIntegration.delete(key!)
+                this.filesByStory.delete(event.data.storyId)
+                emit({
+                    type: "story_error",
+                    id: event.data.storyId,
+                    error: event.data.error,
+                    attempt: pending.attempts,
+                    max_retries: this.retryBudget.get(event.data.storyId) ?? pending.attempts,
+                })
+            }
             emit({
                 type: "merge_failed",
                 id: event.data.storyId,
@@ -130,23 +187,14 @@ export class StoryLifecycleForwarder extends BaseObserver {
 
     private handleStoryResult(item: StoryResultData): void {
         if (item.success) {
-            const paths = this.filesByStory.get(item.storyId)
-            let created = 0
-            let modified = 0
-            if (paths) {
-                for (const kind of paths.values()) {
-                    if (kind === "created") created++
-                    else modified++
-                }
+            if (item.runId && item.leaseId && item.generation != null) {
+                this.pendingIntegration.set(
+                    integrationKey(item.runId, item.leaseId)!,
+                    item,
+                )
+                return
             }
-            this.filesByStory.delete(item.storyId)
-            emit({
-                type: "story_complete",
-                id: item.storyId,
-                duration_secs: item.durationSecs,
-                files_created: created,
-                files_modified: modified,
-            })
+            this.emitStoryComplete(item)
         } else {
             this.filesByStory.delete(item.storyId)
             emit({
@@ -158,6 +206,33 @@ export class StoryLifecycleForwarder extends BaseObserver {
             })
         }
     }
+
+    private emitStoryComplete(item: StoryResultData): void {
+        const paths = this.filesByStory.get(item.storyId)
+        let created = 0
+        let modified = 0
+        if (paths) {
+            for (const kind of paths.values()) {
+                if (kind === "created") created++
+                else modified++
+            }
+        }
+        this.filesByStory.delete(item.storyId)
+        emit({
+            type: "story_complete",
+            id: item.storyId,
+            duration_secs: item.durationSecs,
+            files_created: created,
+            files_modified: modified,
+        })
+    }
+}
+
+function integrationKey(
+    runId: string | undefined,
+    leaseId: string | undefined,
+): string | null {
+    return runId && leaseId ? `${runId}:${leaseId}` : null
 }
 
 /** Pull the file path out of a write/edit tool call's JSON args. */

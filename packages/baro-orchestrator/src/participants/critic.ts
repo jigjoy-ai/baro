@@ -27,10 +27,23 @@ import { promisify } from "util"
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
 import {
-    AgentResult,
     AgentTargetedMessage,
     Critique,
+    ModelInvocationMeasured,
 } from "../semantic-events.js"
+import {
+    knownMetric,
+    notApplicableMetric,
+    unknownMetric,
+    type Metric,
+    type MetricSource,
+    type ModelCostMetrics,
+    type ModelInvocationMeasuredData,
+    type ModelInvocationStatus,
+    type ModelTokenMetrics,
+    type UnknownMetricReason,
+} from "../model-telemetry.js"
+import { criticInput } from "./critic-input.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -63,14 +76,34 @@ export interface CriticOptions {
     claudeBin?: string
     /** Per-evaluation timeout in milliseconds. Default: 60_000. */
     timeoutMs?: number
+    /** Run correlation used by model-invocation telemetry. */
+    runId?: string
+}
+
+interface CriticEvaluation {
+    verdict: "pass" | "fail"
+    reasoning: string
+    violatedCriteria: string[]
+    /** Optional only so existing test/subclass overrides remain compatible. */
+    telemetry?: CriticEvaluationTelemetry
+}
+
+interface CriticEvaluationTelemetry {
+    status: ModelInvocationStatus
+    durationMs: Metric
+    tokens: ModelTokenMetrics
+    cost: ModelCostMetrics
 }
 
 export class Critic extends BaseObserver {
-    private readonly opts: Required<CriticOptions>
+    private readonly opts: Required<Omit<CriticOptions, "runId">> & {
+        runId?: string
+    }
     /** agentId → number of AgentTargetedMessageItem-s emitted so far. */
     private readonly emissions = new Map<string, number>()
     /** agentId → number of result turns seen (for CritiqueItem.turn). */
     private readonly turnCount = new Map<string, number>()
+    private readonly seenTerminalIds = new Set<string>()
     /**
      * Critic's evaluate() spawns an async `claude --print` subprocess.
      * Mozaik's deliverContextItem fan-out doesn't await onContextItem's
@@ -87,6 +120,7 @@ export class Critic extends BaseObserver {
             claudeBin: opts.claudeBin ?? "claude",
             timeoutMs: opts.timeoutMs ?? 60_000,
             targets: opts.targets,
+            runId: opts.runId,
         }
     }
 
@@ -99,20 +133,34 @@ export class Critic extends BaseObserver {
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        if (!AgentResult.is(event)) return
-        const { agentId, isError, resultText } = event.data
+        const input = criticInput(event)
+        if (!input) return
+        const { agentId, isError, resultText, canContinue, terminalId } = input
         if (isError || !resultText) return
 
         const criteria = this.opts.targets.get(agentId)
         if (!criteria || criteria.length === 0) return
+        if (terminalId) {
+            if (this.seenTerminalIds.has(terminalId)) return
+            this.seenTerminalIds.add(terminalId)
+        }
 
         const turn = (this.turnCount.get(agentId) ?? 0) + 1
         this.turnCount.set(agentId, turn)
 
         const work = (async () => {
-            const { verdict, reasoning, violatedCriteria } = await this.evaluate(
+            const evaluation = await this.evaluate(
                 resultText,
                 criteria,
+            )
+            const { verdict, reasoning, violatedCriteria } = evaluation
+
+            // Telemetry is authoritative audit context for the verdict and
+            // must be visible on the bus before the Critique it describes.
+            this.publishMeasurement(
+                agentId,
+                turn,
+                evaluation.telemetry ?? unknownClaudeTelemetry("succeeded", "not_reported"),
             )
 
             // Always emit audit trail.
@@ -129,7 +177,7 @@ export class Critic extends BaseObserver {
             }
 
             // Emit corrective message only on fail and under the per-agent cap.
-            if (verdict === "fail") {
+            if (verdict === "fail" && canContinue) {
                 const emitted = this.emissions.get(agentId) ?? 0
                 if (emitted < this.opts.maxEmissionsPerAgent) {
                     this.emissions.set(agentId, emitted + 1)
@@ -157,18 +205,56 @@ export class Critic extends BaseObserver {
         await work
     }
 
+    private publishMeasurement(
+        agentId: string,
+        turn: number,
+        telemetry: CriticEvaluationTelemetry,
+    ): void {
+        const invocationId = `${this.opts.runId ?? "local"}:critic:${agentId}:${turn}`
+        const data: ModelInvocationMeasuredData = {
+            schemaVersion: 1,
+            measurementId: `${invocationId}:runner`,
+            invocationId,
+            runId: this.opts.runId ?? null,
+            phase: "critic",
+            storyId: agentId,
+            attempt: null,
+            turn,
+            round: null,
+            backend: "claude",
+            // Claude CLI may be configured for Anthropic, Bedrock, or Vertex;
+            // the wrapper does not independently identify the upstream.
+            provider: null,
+            requestedModel: this.opts.model,
+            resolvedModel: this.opts.model,
+            status: telemetry.status,
+            durationMs: telemetry.durationMs,
+            tokens: telemetry.tokens,
+            cost: telemetry.cost,
+            evidence: {
+                producer: "runner",
+                // A Claude session ID resumes a conversation; it is not a
+                // provider request/charge identifier and must not be reused.
+                providerRequestId: null,
+                rateCardVersion: null,
+                granularity: "process",
+            },
+        }
+        const event = ModelInvocationMeasured.create(data)
+        for (const env of this.getEnvironments()) {
+            env.deliverSemanticEvent(this, event)
+        }
+    }
+
     private async evaluate(
         resultText: string,
         criteria: readonly string[],
-    ): Promise<{
-        verdict: "pass" | "fail"
-        reasoning: string
-        violatedCriteria: string[]
-    }> {
+    ): Promise<CriticEvaluation> {
         const prompt = buildEvalPrompt(criteria, resultText)
 
+        let stdout: string
         try {
-            const { stdout } = await execFileAsync(
+            const response = await execFileAsync(
                 this.opts.claudeBin,
                 [
                     "--print",
@@ -188,11 +274,47 @@ export class Critic extends BaseObserver {
                     maxBuffer: 4 * 1024 * 1024,
                 },
             )
+            stdout = response.stdout
+        } catch (err) {
+            const timedOut = isExecTimeout(err)
+            return criticFailure(
+                err,
+                unknownClaudeTelemetry(
+                    timedOut ? "timed_out" : "failed",
+                    timedOut ? "timed_out" : "not_reported",
+                ),
+            )
+        }
 
+        let wrapper: Record<string, unknown>
+        try {
             // `claude --output-format json` returns one JSON object on stdout
             // with a `result` field containing the assistant's text answer
             // (per packages/baro-app/scripts/SPIKE-FINDINGS.md).
-            const wrapper = JSON.parse(stdout) as { result?: string }
+            const parsedWrapper: unknown = JSON.parse(stdout)
+            if (!isRecord(parsedWrapper)) {
+                throw new Error("claude returned a non-object JSON wrapper")
+            }
+            wrapper = parsedWrapper
+        } catch (err) {
+            return criticFailure(
+                err,
+                unknownClaudeTelemetry("failed", "parse_error"),
+            )
+        }
+
+        if (wrapper.is_error === true || isErrorSubtype(wrapper.subtype)) {
+            return criticFailure(
+                new Error("claude returned an error result"),
+                unknownClaudeTelemetry("failed", "not_reported"),
+            )
+        }
+
+        // Once a well-formed, non-error wrapper exists the provider call
+        // succeeded. Verdict parsing is deliberately separate: malformed
+        // model output must fail closed without rewriting successful usage.
+        const telemetry = claudeTelemetry(wrapper)
+        try {
             const verdictText =
                 typeof wrapper.result === "string" ? wrapper.result.trim() : ""
             if (!verdictText) {
@@ -212,15 +334,194 @@ export class Critic extends BaseObserver {
                 violatedCriteria: Array.isArray(parsed.violated_criteria)
                     ? parsed.violated_criteria
                     : [],
+                telemetry,
             }
         } catch (err) {
-            return {
-                verdict: "fail",
-                reasoning: `Critic LLM call failed: ${String((err as Error)?.message ?? err)}`,
-                violatedCriteria: ["[critic error — could not evaluate]"],
-            }
+            return criticFailure(err, telemetry)
         }
     }
+}
+
+function criticFailure(
+    err: unknown,
+    telemetry: CriticEvaluationTelemetry,
+): CriticEvaluation {
+    return {
+        verdict: "fail",
+        reasoning: `Critic LLM call failed: ${String((err as Error)?.message ?? err)}`,
+        violatedCriteria: ["[critic error — could not evaluate]"],
+        telemetry,
+    }
+}
+
+function claudeTelemetry(
+    wrapper: Record<string, unknown>,
+): CriticEvaluationTelemetry {
+    const usage = isRecord(wrapper.usage) ? wrapper.usage : null
+    const tokens = usage
+        ? claudeTokenMetrics(usage)
+        : unknownClaudeTokens(
+              wrapper.usage == null ? "not_reported" : "parse_error",
+          )
+
+    return {
+        status: "succeeded",
+        durationMs: metricFromKeys(
+            wrapper,
+            ["duration_ms"],
+            "cli_result",
+        ),
+        tokens,
+        cost: {
+            providerUsd: notApplicableMetric(),
+            customerUsd: notApplicableMetric(),
+            equivalentUsd: metricFromKeys(
+                wrapper,
+                ["total_cost_usd"],
+                "cli_result",
+            ),
+        },
+    }
+}
+
+function claudeTokenMetrics(
+    usage: Record<string, unknown>,
+): ModelTokenMetrics {
+    const cache = isRecord(usage.cache) ? usage.cache : null
+    const rawInput = metricFromKeys(
+        usage,
+        ["input_tokens", "inputTokens"],
+        "provider_response",
+    )
+    const cachedInput = firstReportedMetric([
+        metricFromKeysOptional(
+            usage,
+            ["cache_read_input_tokens", "cached_input_tokens"],
+            "provider_response",
+        ),
+        cache
+            ? metricFromKeysOptional(cache, ["read"], "provider_response")
+            : null,
+    ])
+    const cacheWriteInput = firstReportedMetric([
+        metricFromKeysOptional(
+            usage,
+            ["cache_creation_input_tokens", "cache_write_input_tokens"],
+            "provider_response",
+        ),
+        cache
+            ? metricFromKeysOptional(cache, ["write"], "provider_response")
+            : null,
+    ])
+    const outputTotal = metricFromKeys(
+        usage,
+        ["output_tokens", "outputTokens"],
+        "provider_response",
+    )
+    const inputTotal = sumMetrics([rawInput, cachedInput, cacheWriteInput])
+    const reportedTotal = metricFromKeysOptional(
+        usage,
+        ["total_tokens", "totalTokens"],
+        "provider_response",
+    )
+
+    return {
+        inputTotal,
+        cachedInput,
+        cacheWriteInput,
+        outputTotal,
+        reasoningOutput: notApplicableMetric(),
+        total: reportedTotal ?? sumMetrics([inputTotal, outputTotal]),
+    }
+}
+
+function unknownClaudeTelemetry(
+    status: ModelInvocationStatus,
+    reason: UnknownMetricReason,
+): CriticEvaluationTelemetry {
+    return {
+        status,
+        durationMs: unknownMetric(reason),
+        tokens: unknownClaudeTokens(reason),
+        cost: {
+            providerUsd: notApplicableMetric(),
+            customerUsd: notApplicableMetric(),
+            equivalentUsd: unknownMetric(reason),
+        },
+    }
+}
+
+function unknownClaudeTokens(reason: UnknownMetricReason): ModelTokenMetrics {
+    return {
+        inputTotal: unknownMetric(reason),
+        cachedInput: unknownMetric(reason),
+        cacheWriteInput: unknownMetric(reason),
+        outputTotal: unknownMetric(reason),
+        reasoningOutput: notApplicableMetric(),
+        total: unknownMetric(reason),
+    }
+}
+
+function metricFromKeys(
+    source: Record<string, unknown>,
+    keys: readonly string[],
+    metricSource: MetricSource,
+): Metric {
+    return (
+        metricFromKeysOptional(source, keys, metricSource) ??
+        unknownMetric("not_reported")
+    )
+}
+
+function metricFromKeysOptional(
+    source: Record<string, unknown>,
+    keys: readonly string[],
+    metricSource: MetricSource,
+): Metric | null {
+    for (const key of keys) {
+        if (!(key in source) || source[key] == null) continue
+        const value = source[key]
+        return typeof value === "number" && Number.isFinite(value) && value >= 0
+            ? knownMetric(value, metricSource)
+            : unknownMetric("parse_error")
+    }
+    return null
+}
+
+function firstReportedMetric(metrics: readonly (Metric | null)[]): Metric {
+    return (
+        metrics.find((metric): metric is Metric => metric !== null) ??
+        unknownMetric("not_reported")
+    )
+}
+
+function sumMetrics(metrics: readonly Metric[]): Metric {
+    if (metrics.every((metric) => metric.state === "known")) {
+        return knownMetric(
+            metrics.reduce(
+                (sum, metric) =>
+                    sum + (metric.state === "known" ? metric.value : 0),
+                0,
+            ),
+            "derived",
+        )
+    }
+    const unknown = metrics.find((metric) => metric.state === "unknown")
+    return unknown?.state === "unknown"
+        ? unknownMetric(unknown.reason)
+        : unknownMetric("not_reported")
+}
+
+function isExecTimeout(error: unknown): boolean {
+    return isRecord(error) && error.killed === true
+}
+
+function isErrorSubtype(value: unknown): boolean {
+    return typeof value === "string" && value.toLowerCase().startsWith("error")
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 export function buildEvalPrompt(

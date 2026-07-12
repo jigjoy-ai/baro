@@ -5,7 +5,12 @@ import { syncBuiltinESMExports } from "node:module"
 import { PassThrough } from "node:stream"
 import { describe, it } from "node:test"
 
-import { Replan, StoryResult, type ReplanStoryAdd } from "../../src/semantic-events.js"
+import {
+    ModelInvocationMeasured,
+    Replan,
+    StoryResult,
+    type ReplanStoryAdd,
+} from "../../src/semantic-events.js"
 import { SurgeonOpenCode } from "../../src/participants/surgeon-opencode.js"
 import type { PrdSnapshot } from "../../src/participants/surgeon.js"
 import { joinWithCapture, source } from "./helpers.js"
@@ -82,6 +87,7 @@ describe("SurgeonOpenCode", () => {
             const surgeon = new SurgeonOpenCode({
                 snapshot,
                 timeoutMs: 10_000,
+                runId: "run-opencode-failure",
             })
             const env = joinWithCapture(surgeon)
 
@@ -95,6 +101,17 @@ describe("SurgeonOpenCode", () => {
             assert.deepEqual(replans[0]!.data.modifiedDeps, {})
             assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
             assert.match(replans[0]!.data.reason, /opencode fallback after error:/)
+
+            const measured = env.events.filter(ModelInvocationMeasured.is)
+            assert.equal(measured.length, 1)
+            assert.equal(measured[0]!.data.status, "failed")
+            assert.equal(measured[0]!.data.phase, "surgeon")
+            assert.equal(measured[0]!.data.backend, "opencode")
+            assert.equal(measured[0]!.data.tokens.inputTotal.state, "unknown")
+            assert.ok(
+                env.events.findIndex(ModelInvocationMeasured.is) <
+                    env.events.findIndex(Replan.is),
+            )
         })
     })
 
@@ -129,10 +146,19 @@ describe("SurgeonOpenCode", () => {
                 const surgeon = new SurgeonOpenCode({
                     snapshot,
                     timeoutMs: 10_000,
+                    model: "provider/model-test",
                 })
                 const env = joinWithCapture(surgeon)
 
-                await surgeon.onExternalEvent(source("story-agent"), failure)
+                await surgeon.onExternalEvent(
+                    source("story-agent"),
+                    StoryResult.create({
+                        ...failure.data,
+                        runId: "run-opencode-telemetry",
+                        leaseId: "lease-S1",
+                        generation: 4,
+                    }),
+                )
                 await surgeon.idle()
 
                 const replans = env.events.filter(Replan.is)
@@ -141,6 +167,22 @@ describe("SurgeonOpenCode", () => {
                 assert.deepEqual(replans[0]!.data.addedStories, [added])
                 assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
                 assert.deepEqual(replans[0]!.data.modifiedDeps, { S2: ["S1a"] })
+
+                const measured = env.events.filter(ModelInvocationMeasured.is)
+                assert.equal(measured.length, 1)
+                assert.equal(
+                    measured[0]!.data.invocationId,
+                    "run-opencode-telemetry:surgeon:S1:1:lease:lease-S1:generation:4:provider:1",
+                )
+                assert.equal(measured[0]!.data.runId, "run-opencode-telemetry")
+                assert.equal(measured[0]!.data.storyId, "S1")
+                assert.equal(measured[0]!.data.turn, 1)
+                assert.equal(measured[0]!.data.requestedModel, "provider/model-test")
+                assert.equal(measured[0]!.data.status, "succeeded")
+                assert.ok(
+                    env.events.findIndex(ModelInvocationMeasured.is) <
+                        env.events.findIndex(Replan.is),
+                )
             },
         )
     })
@@ -166,7 +208,27 @@ describe("SurgeonOpenCode", () => {
                 assert.deepEqual(replans[0]!.data.modifiedDeps, {})
                 assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
                 assert.match(replans[0]!.data.reason, /opencode fallback after error: no JSON object found/)
+
+                const measured = env.events.filter(ModelInvocationMeasured.is)
+                assert.equal(measured.length, 1)
+                assert.equal(measured[0]!.data.status, "succeeded")
+                assert.equal(measured[0]!.data.tokens.inputTotal.state, "unknown")
+                assert.ok(
+                    env.events.findIndex(ModelInvocationMeasured.is) <
+                        env.events.findIndex(Replan.is),
+                )
             },
         )
+    })
+
+    it("emits no model measurement when LLM evaluation is disabled", async () => {
+        const surgeon = new SurgeonOpenCode({ snapshot, useLlm: false })
+        const env = joinWithCapture(surgeon)
+
+        await surgeon.onExternalEvent(source("story-agent"), failure)
+        await surgeon.idle()
+
+        assert.equal(env.events.filter(Replan.is).length, 1)
+        assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)
     })
 })

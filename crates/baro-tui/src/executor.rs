@@ -111,16 +111,15 @@ pub fn prd_from_review(
         description: description.to_string(),
         user_stories: stories
             .iter()
-            .enumerate()
-            .map(|(i, s)| PrdStory {
+            .map(|s| PrdStory {
                 id: s.id.clone(),
-                priority: (i + 1) as i32,
+                priority: s.priority,
                 title: s.title.clone(),
                 description: s.description.clone(),
                 depends_on: s.depends_on.clone(),
-                retries: 2,
-                acceptance: Vec::new(),
-                tests: Vec::new(),
+                retries: s.retries,
+                acceptance: s.acceptance.clone(),
+                tests: s.tests.clone(),
                 passes: false,
                 completed_at: None,
                 duration_secs: None,
@@ -141,7 +140,8 @@ pub fn write_prd(prd: &PrdFile, cwd: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::PrdFile;
+    use super::{prd_from_review, PrdFile};
+    use crate::app::ReviewStory;
 
     #[test]
     fn execution_mode_round_trips() {
@@ -149,5 +149,48 @@ mod tests {
         let prd: PrdFile = serde_json::from_str(raw).unwrap();
         let out = serde_json::to_string(&prd).unwrap();
         assert!(out.contains(r#""executionMode":{"maxStories":1,"mode":"focused","source":"user"}"#));
+    }
+
+    #[test]
+    fn review_story_metadata_is_preserved_in_prd() {
+        let stories = vec![ReviewStory {
+            id: "S7".to_string(),
+            priority: 42,
+            title: "Preserve the planner contract".to_string(),
+            description: "Carry every execution field through review.".to_string(),
+            depends_on: vec!["S3".to_string()],
+            retries: 5,
+            acceptance: vec![
+                "Acceptance criteria reach the story agent".to_string(),
+                "Priority remains unchanged".to_string(),
+            ],
+            tests: vec!["cargo test -p baro-tui".to_string()],
+            completed: false,
+            model: Some("heavy".to_string()),
+        }];
+
+        let prd = prd_from_review(
+            "baro",
+            "baro/metadata-roundtrip",
+            "metadata regression",
+            &stories,
+            None,
+            None,
+        );
+
+        let story = &prd.user_stories[0];
+        assert_eq!(story.id, "S7");
+        assert_eq!(story.priority, 42);
+        assert_eq!(story.depends_on, ["S3"]);
+        assert_eq!(story.retries, 5);
+        assert_eq!(
+            story.acceptance,
+            [
+                "Acceptance criteria reach the story agent",
+                "Priority remains unchanged",
+            ]
+        );
+        assert_eq!(story.tests, ["cargo test -p baro-tui"]);
+        assert_eq!(story.model.as_deref(), Some("heavy"));
     }
 }

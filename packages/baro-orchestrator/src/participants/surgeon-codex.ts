@@ -16,13 +16,21 @@
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
 import { runCodexOneShot } from "../codex-one-shot.js"
+import { runnerMeasurement } from "../runner-measurement.js"
+import type { RunnerInvocationObserver } from "../runner-invocation.js"
 import {
+    ModelInvocationMeasured,
+    RecoveryDecision,
+    RecoveryEvaluationStarted,
     Replan,
     type ReplanData,
     type ReplanStoryAdd,
-    StoryResult,
     type StoryResultData,
 } from "../semantic-events.js"
+import { ActiveLeaseRegistry } from "../runtime/active-lease-registry.js"
+import { RecoverySourceAuthority } from "../runtime/recovery-source-authority.js"
+import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
+import { correlateRecoveryReplan, recoveryInput } from "./recovery-input.js"
 import {
     PrdSnapshot,
     type RouteDescriber,
@@ -50,11 +58,15 @@ export interface SurgeonCodexOptions {
     codexBin?: string
     /** Per-evaluation timeout in milliseconds. Default: 300_000 (5 min). */
     timeoutMs?: number
+    runId?: string
+    emitRecoveryDecisions?: boolean
+    /** Collective-only dynamic authority for terminal execution results. */
+    outcomeAuthority?: StoryOutcomeAuthority
 }
 
 export class SurgeonCodex extends BaseObserver {
     private readonly opts: Required<
-        Omit<SurgeonCodexOptions, "snapshot" | "model" | "codexBin" | "resolveRoute" | "escalationRoute">
+        Omit<SurgeonCodexOptions, "snapshot" | "model" | "codexBin" | "resolveRoute" | "escalationRoute" | "runId" | "emitRecoveryDecisions" | "outcomeAuthority">
     > & {
         snapshot: () => PrdSnapshot
         model: string | undefined
@@ -62,14 +74,20 @@ export class SurgeonCodex extends BaseObserver {
         resolveRoute?: RouteDescriber
         /** Explicit `backend:model` the Surgeon may set to escalate a stuck, right-sized story. */
         escalationRoute?: string
+        runId?: string
+        emitRecoveryDecisions?: boolean
     }
 
     private replansEmitted = 0
     private readonly critiques = new CritiqueLog()
+    private readonly leases = new ActiveLeaseRegistry()
+    private readonly sources: RecoverySourceAuthority
     private readonly pending = new Set<Promise<void>>()
+    private evaluationSequence = 0
 
     constructor(opts: SurgeonCodexOptions) {
         super()
+        this.sources = new RecoverySourceAuthority(opts.outcomeAuthority)
         this.opts = {
             useLlm: opts.useLlm ?? true,
             model: opts.model,
@@ -79,6 +97,8 @@ export class SurgeonCodex extends BaseObserver {
             snapshot: opts.snapshot,
             resolveRoute: opts.resolveRoute,
             escalationRoute: opts.escalationRoute,
+            runId: opts.runId,
+            emitRecoveryDecisions: opts.emitRecoveryDecisions,
         }
     }
 
@@ -86,23 +106,60 @@ export class SurgeonCodex extends BaseObserver {
         await Promise.allSettled([...this.pending])
     }
 
+    setLeaseAuthority(authority: Participant): void {
+        this.sources.setLeaseAuthority(authority)
+    }
+
+    setQualityAuthority(authority: Participant): void {
+        this.sources.setQualityAuthority(authority)
+    }
+
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         this.critiques.record(event)
-        if (!StoryResult.is(event)) return
-        if (event.data.success) return
-        if (this.replansEmitted >= this.opts.maxReplans) return
+        if (this.sources.observeLease(source, event, this.leases, this.opts.runId)) return
+        if (!this.sources.accepts(source, event)) return
+        const failure = recoveryInput(event)
+        if (!failure) return
+        if (
+            this.opts.emitRecoveryDecisions &&
+            !this.leases.consumeResult(failure, this.opts.runId)
+        ) return
+        if (this.replansEmitted >= this.opts.maxReplans) {
+            this.emitRecoveryDecision(failure, "abort", "replan budget exhausted")
+            return
+        }
+
+        this.emitRecoveryStarted(failure)
+        const evaluation = this.opts.useLlm
+            ? ++this.evaluationSequence
+            : null
 
         const work = (async () => {
-            const replan = this.opts.useLlm
-                ? await this.evaluateWithLlm(event.data)
-                : surgeonDeterministicReplan(event.data)
-            if (!replan) return
-            this.replansEmitted += 1
-            for (const env of this.getEnvironments()) {
-                env.deliverSemanticEvent(this, Replan.create(replan))
+            try {
+                const replan = this.opts.useLlm
+                    ? await this.evaluateWithLlm(failure, evaluation!)
+                    : surgeonDeterministicReplan(failure)
+                if (!replan) {
+                    this.emitRecoveryDecision(failure, "abort", "surgeon chose abort")
+                    return
+                }
+                this.replansEmitted += 1
+                for (const env of this.getEnvironments()) {
+                    env.deliverSemanticEvent(
+                        this,
+                        Replan.create(correlateRecoveryReplan(replan, failure)),
+                    )
+                }
+                this.emitRecoveryDecision(failure, "replan", replan.reason)
+            } catch (error) {
+                this.emitRecoveryDecision(
+                    failure,
+                    "abort",
+                    `surgeon failed: ${(error as Error)?.message ?? String(error)}`,
+                )
             }
         })()
 
@@ -111,8 +168,37 @@ export class SurgeonCodex extends BaseObserver {
         await work
     }
 
+    private emitRecoveryStarted(failure: StoryResultData): void {
+        if (!this.opts.emitRecoveryDecisions || !this.opts.runId) return
+        for (const env of this.getEnvironments()) {
+            env.deliverSemanticEvent(this, RecoveryEvaluationStarted.create({
+                runId: this.opts.runId,
+                storyId: failure.storyId,
+                source: "surgeon:codex",
+            }))
+        }
+    }
+
+    private emitRecoveryDecision(
+        failure: StoryResultData,
+        action: "replan" | "abort",
+        reason: string,
+    ): void {
+        if (!this.opts.emitRecoveryDecisions || !this.opts.runId) return
+        for (const env of this.getEnvironments()) {
+            env.deliverSemanticEvent(this, RecoveryDecision.create({
+                runId: this.opts.runId,
+                storyId: failure.storyId,
+                source: "surgeon:codex",
+                action,
+                reason,
+            }))
+        }
+    }
+
     private async evaluateWithLlm(
         failure: StoryResultData,
+        evaluation: number,
     ): Promise<ReplanData | null> {
         const snap = this.opts.snapshot()
         const userPrompt = buildSurgeonPrompt(
@@ -134,6 +220,7 @@ export class SurgeonCodex extends BaseObserver {
                 codexBin: this.opts.codexBin,
                 timeoutMs: this.opts.timeoutMs,
                 label: "codex-surgeon",
+                onInvocation: this.invocationObserver(failure, evaluation),
             })
             const verdictText = text.trim()
             if (!verdictText) throw new Error("empty result")
@@ -169,6 +256,38 @@ export class SurgeonCodex extends BaseObserver {
             return {
                 ...fallback,
                 reason: `${fallback.reason} (codex fallback after error: ${(err as Error)?.message ?? String(err)})`,
+            }
+        }
+    }
+
+    private invocationObserver(
+        failure: StoryResultData,
+        evaluation: number,
+    ): RunnerInvocationObserver {
+        const runId = failure.runId ?? this.opts.runId ?? null
+        const leaseSuffix = failure.leaseId
+            ? `:lease:${failure.leaseId}`
+            : ""
+        const generationSuffix = failure.generation !== undefined
+            ? `:generation:${failure.generation}`
+            : ""
+        return (observation) => {
+            const event = ModelInvocationMeasured.create(
+                runnerMeasurement(
+                    {
+                        invocationBaseId: `${runId ?? "local"}:surgeon:${failure.storyId}:${evaluation}${leaseSuffix}${generationSuffix}`,
+                        runId,
+                        phase: "surgeon",
+                        storyId: failure.storyId,
+                        turn: evaluation,
+                        backend: "codex",
+                        requestedModel: this.opts.model ?? null,
+                    },
+                    observation,
+                ),
+            )
+            for (const env of this.getEnvironments()) {
+                env.deliverSemanticEvent(this, event)
             }
         }
     }

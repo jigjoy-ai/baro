@@ -19,12 +19,16 @@ import {
     PiCliParticipant,
     type PiRunSummary,
 } from "./pi-cli-participant.js"
+import { correlationOf } from "./story-agent.js"
 
 export interface PiStorySpec {
     /** Story ID, used as agentId for observer attribution. */
     id: string
     prompt: string
     cwd: string
+    runId?: string
+    leaseId?: string
+    generation?: number
     /** Provider override; omit to use Pi's configured default ("google"). */
     provider?: string
     /** Model override, passed through as an opaque string. */
@@ -61,6 +65,8 @@ export class PiStoryAgent extends BaseObserver {
         PiStorySpec
 
     private envRef: AgenticEnvironment | null = null
+    /** Optional explicit bus identity for the terminal outcome. */
+    private resultAuthority: Participant | null = null
     private currentPi: PiCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -95,6 +101,13 @@ export class PiStoryAgent extends BaseObserver {
 
     getCurrentPi(): PiCliParticipant | null {
         return this.currentPi
+    }
+
+    setResultAuthority(source: Participant): void {
+        if (this.resultAuthority && this.resultAuthority !== source) {
+            throw new Error(`result authority already set for ${this.spec.id}`)
+        }
+        this.resultAuthority = source
     }
 
     /** Idempotent; returns the `done` promise. */
@@ -289,13 +302,14 @@ export class PiStoryAgent extends BaseObserver {
     ): void {
         if (!this.envRef) return
         this.envRef.deliverSemanticEvent(
-            this,
+            this.resultAuthority ?? this,
             StoryResult.create({
                 storyId: this.spec.id,
                 success,
                 attempts,
                 durationSecs,
                 error,
+                ...correlationOf(this.spec),
             }),
         )
     }

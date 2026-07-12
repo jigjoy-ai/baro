@@ -15,6 +15,26 @@ export interface StdinCommandContext {
 }
 
 export function handleStdinCommand(cmd: BaroCommand, ctx: StdinCommandContext): void {
+    if (cmd.type === "dialogue_message") {
+        if (typeof cmd.text !== "string" || !cmd.text.trim()) return
+        const operator = ctx.getOperator()
+        if (!operator) return
+        operator.dispatch({
+            kind: "converse",
+            message: cmd.text,
+            messageId:
+                typeof cmd.message_id === "string" && cmd.message_id.trim()
+                    ? cmd.message_id.trim()
+                    : undefined,
+            source: "user",
+        })
+        ;(ctx.emitEvent ?? emit)({
+            type: "story_log",
+            id: "_dialogue",
+            line: `[you → collective] ${cmd.text}`,
+        })
+        return
+    }
     if (cmd.type !== "agent_message") return
     const { id, text } = cmd
     if (typeof id !== "string" || !id || typeof text !== "string" || !text.trim()) return

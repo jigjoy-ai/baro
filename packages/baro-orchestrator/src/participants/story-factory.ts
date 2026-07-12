@@ -2,9 +2,8 @@
  * StoryFactory — Mozaik-native participant that spawns StoryAgent
  * instances in response to StorySpawnRequest events on the bus.
  *
- * Why a factory? It removes the direct coupling between Conductor and
- * StoryAgent. The Conductor only emits "I'd like a story to run with
- * these specs"; the factory is responsible for the lifecycle.
+ * It removes direct coupling between either coordinator and StoryAgent:
+ * coordinators request work, while the factory owns agent lifecycle.
  *
  * Replacing this factory (e.g. with a mock for tests, or with a
  * remote-execution variant) requires no changes to Conductor.
@@ -18,12 +17,25 @@ import {
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
+    RunCompleted,
+    RunStartRequest,
     StoryIntervention,
     StoryResult,
     StoryRouted,
+    StorySpawnFailed,
     StorySpawnRequest,
     StorySpawned,
+    WorkClaimed,
+    WorkBid,
+    WorkLeaseGranted,
+    WorkLeaseReleased,
+    WorkOffered,
+    WorkerCapabilityAdvertised,
     type StorySpawnRequestData,
+    type WorkOfferedData,
+    type WorkLeaseGrantedData,
+    type WorkBidEstimateData,
+    type WorkRouteDescriptor,
 } from "../semantic-events.js"
 import {
     LocalStoryExecutor,
@@ -32,19 +44,41 @@ import {
 } from "./story-executor.js"
 import {
     formatRoute,
+    canonicalTier,
     resolveStoryRoute,
     type EndpointMap,
     type TierMap,
+    type StoryRoute,
 } from "../routing.js"
+import { isValidWorkBidEstimate } from "../work-market.js"
 import type { WorktreeManager } from "../worktree.js"
+import {
+    StoryOutcomeAuthority,
+    type StoryResultAuthorityCorrelation,
+} from "../runtime/story-outcome-authority.js"
 
 export interface StoryFactoryOptions {
     cwd: string
+    coordinationMode?: "legacy" | "collective"
+    runId?: string
+    workerId?: string
+    /** Object-identity authority allowed to grant/release collective leases. */
+    leaseAuthority?: Participant
+    /** Shared run-scoped authority for dynamic factory/agent outcomes. */
+    outcomeAuthority?: StoryOutcomeAuthority
+    /** Collective Board allowed to answer native `propose_replan` tool calls. */
+    runtimeReplanDecisionAuthority?: Participant
+    collaboration?: {
+        commandPath: string
+        sessionDir: string
+    }
     /**
      * When set, each story runs in its own isolated git worktree instead of
-     * the shared `cwd` (issue #50). create() falls back to `cwd` on failure.
+     * the shared `cwd` (issue #50). Collective mode requires this isolation.
      */
     worktrees?: WorktreeManager
+    /** Fail the lease when an isolated worktree cannot be created. */
+    requireWorktree?: boolean
     /**
      * Which LLM provider every story uses.
      *   "claude"  — StoryAgent wrapping a `claude` CLI subprocess
@@ -103,6 +137,18 @@ export interface StoryFactoryOptions {
      * participant.
      */
     executor?: StoryExecutor
+    /** Opt-in market candidate. Credentials remain in the resolved route here. */
+    bid?: StoryFactoryBidOptions
+}
+
+export interface StoryFactoryBidOptions {
+    routeId: string
+    /** Existing backend:model@endpoint route syntax. */
+    route: string
+    estimate: WorkBidEstimateData
+    /** Bare PRD tiers this candidate accepts; absent means every offer. */
+    tiers?: readonly string[]
+    maxConcurrent?: number
 }
 
 export class StoryFactory extends BaseObserver {
@@ -111,23 +157,199 @@ export class StoryFactory extends BaseObserver {
     private readonly active: Map<string, StoryExecution> = new Map()
     /** Story ids whose spawn is in progress (closes the await-create window). */
     private readonly spawning = new Set<string>()
+    /** Terminal results delivered synchronously from inside executor.start(). */
+    private readonly settledWhileSpawning = new Set<string>()
+    private readonly leases = new Map<string, WorkLeaseGrantedData>()
+    private readonly bidRoutes = new Map<
+        string,
+        { offerId: string; route: StoryRoute; descriptor: WorkRouteDescriptor }
+    >()
+    private readonly leasedRoutes = new Map<string, StoryRoute>()
     private readonly executor: StoryExecutor
+    private readonly bidOptions: StoryFactoryBidOptions | null
+    private readonly configuredBidRoute: {
+        route: StoryRoute
+        descriptor: WorkRouteDescriptor
+    } | null
 
     constructor(private readonly opts: StoryFactoryOptions) {
         super()
+        if (opts.coordinationMode === "collective" && !opts.leaseAuthority) {
+            throw new Error("collective StoryFactory requires a leaseAuthority")
+        }
+        if (opts.coordinationMode === "collective" && !opts.outcomeAuthority) {
+            throw new Error("collective StoryFactory requires an outcomeAuthority")
+        }
+        if (
+            opts.coordinationMode === "collective" &&
+            opts.outcomeAuthority?.runId !== this.runId()
+        ) {
+            throw new Error("collective StoryFactory outcomeAuthority runId mismatch")
+        }
         this.executor = opts.executor ?? new LocalStoryExecutor()
+        this.bidOptions = opts.bid
+            ? {
+                  ...opts.bid,
+                  estimate: { ...opts.bid.estimate },
+                  ...(opts.bid.tiers ? { tiers: [...opts.bid.tiers] } : {}),
+              }
+            : null
+        this.configuredBidRoute = this.bidOptions
+            ? this.resolveBidRoute(this.bidOptions)
+            : null
     }
 
     setEnvironment(env: AgenticEnvironment): void {
         this.envRef = env
+        if (this.opts.coordinationMode === "collective") {
+            // Advertise as soon as the worker joins. Board preparation can
+            // synchronously emit offers before the outer RunStart event reaches
+            // later participants, so waiting only for RunStart loses early bids.
+            this.advertiseCapabilities()
+        }
     }
 
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
+        await this.handleEvent(event, source, false)
+    }
+
+    override async onInternalEvent(event: SemanticEvent<unknown>): Promise<void> {
+        await this.handleEvent(event, null, true)
+    }
+
+    private async handleEvent(
+        event: SemanticEvent<unknown>,
+        source: Participant | null,
+        internal: boolean,
+    ): Promise<void> {
+        if (
+            this.opts.coordinationMode === "collective" &&
+            RunStartRequest.is(event)
+        ) {
+            this.advertiseCapabilities()
+            return
+        }
+
+        if (
+            this.opts.coordinationMode === "collective" &&
+            WorkOffered.is(event) &&
+            event.data.runId === this.runId()
+        ) {
+            if (this.bidOptions) this.bid(event.data)
+            else this.claim(event.data)
+            return
+        }
+
+        if (
+            this.opts.coordinationMode === "collective" &&
+            WorkLeaseGranted.is(event) &&
+            event.data.runId === this.runId() &&
+            source === this.opts.leaseAuthority
+        ) {
+            if (event.data.workerId !== this.workerId()) return
+            this.opts.outcomeAuthority!.registerSpawnAuthority(
+                {
+                    runId: event.data.runId,
+                    storyId: event.data.request.storyId,
+                    leaseId: event.data.leaseId,
+                },
+                this,
+            )
+            if (this.bidOptions) {
+                for (const [bidId, stored] of this.bidRoutes) {
+                    if (
+                        stored.offerId === event.data.offerId &&
+                        bidId !== event.data.bidId
+                    ) this.bidRoutes.delete(bidId)
+                }
+            }
+            if (this.bidOptions) {
+                const stored = event.data.bidId
+                    ? this.bidRoutes.get(event.data.bidId)
+                    : undefined
+                if (
+                    !stored ||
+                    stored.offerId !== event.data.offerId ||
+                    !event.data.route ||
+                    !sameRouteDescriptor(stored.descriptor, event.data.route)
+                ) {
+                    this.emitBus(
+                        StorySpawnFailed.create({
+                            runId: event.data.runId,
+                            offerId: event.data.offerId,
+                            leaseId: event.data.leaseId,
+                            storyId: event.data.request.storyId,
+                            error: "market lease did not match the worker's stored bid",
+                        }),
+                    )
+                    return
+                }
+                this.leasedRoutes.set(event.data.request.storyId, stored.route)
+            }
+            this.leases.set(event.data.request.storyId, event.data)
+            this.emitBus(
+                StorySpawnRequest.create({
+                    ...event.data.request,
+                    offerId: event.data.offerId,
+                    runId: event.data.runId,
+                    leaseId: event.data.leaseId,
+                    generation: event.data.generation,
+                    workerId: event.data.workerId,
+                }),
+            )
+            return
+        }
+
         if (StorySpawnRequest.is(event)) {
+            if (this.opts.coordinationMode === "collective") {
+                // Collective spawn requests are projected by this worker only
+                // after an authorized lease. Never trust an external replay.
+                if (!internal) return
+                const lease = this.leases.get(event.data.storyId)
+                if (
+                    !lease ||
+                    event.data.runId !== this.runId() ||
+                    event.data.workerId !== this.workerId() ||
+                    event.data.leaseId !== lease.leaseId ||
+                    event.data.generation !== lease.generation
+                ) return
+            }
             await this.spawn(event.data)
+            return
+        }
+
+        if (
+            this.opts.coordinationMode === "collective" &&
+            WorkLeaseReleased.is(event) &&
+            event.data.runId === this.runId() &&
+            source === this.opts.leaseAuthority
+        ) {
+            const lease = this.leases.get(event.data.storyId)
+            if (lease?.leaseId === event.data.leaseId) {
+                const exec = this.active.get(event.data.storyId)
+                if (exec && this.envRef) {
+                    exec.abort?.()
+                    exec.dispose(this.envRef)
+                    this.active.delete(event.data.storyId)
+                }
+                this.leases.delete(event.data.storyId)
+                this.leasedRoutes.delete(event.data.storyId)
+                if (lease.bidId) this.bidRoutes.delete(lease.bidId)
+            }
+            return
+        }
+
+        if (
+            RunCompleted.is(event) &&
+            (this.opts.coordinationMode !== "collective" ||
+                (event.data.runId === this.runId() &&
+                    source === this.opts.runtimeReplanDecisionAuthority))
+        ) {
+            this.bidRoutes.clear()
+            this.leasedRoutes.clear()
             return
         }
 
@@ -144,12 +366,72 @@ export class StoryFactory extends BaseObserver {
         // When a story finishes (passes or fails), dispose its execution so we
         // can clean up its bus membership / executor resources.
         if (StoryResult.is(event)) {
+            if (this.opts.coordinationMode === "collective") {
+                if (
+                    !source ||
+                    !this.opts.outcomeAuthority!.matchesResult(source, event.data)
+                ) return
+                const lease = this.leases.get(event.data.storyId)
+                if (
+                    !lease ||
+                    event.data.runId !== this.runId() ||
+                    event.data.leaseId !== lease.leaseId ||
+                    event.data.generation !== lease.generation
+                ) return
+            }
             const exec = this.active.get(event.data.storyId)
             if (exec && this.envRef) {
                 exec.dispose(this.envRef)
                 this.active.delete(event.data.storyId)
+            } else if (this.spawning.has(event.data.storyId)) {
+                this.settledWhileSpawning.add(event.data.storyId)
             }
         }
+    }
+
+    private claim(offer: WorkOfferedData): void {
+        try {
+            const route = this.resolveRoute(offer.request.model)
+            this.emitBus(
+                WorkClaimed.create({
+                    runId: offer.runId,
+                    offerId: offer.offerId,
+                    storyId: offer.request.storyId,
+                    workerId: this.workerId(),
+                    backend: route.backend,
+                    model: route.model ?? "default",
+                }),
+            )
+        } catch (error) {
+            process.stderr.write(
+                `[story-factory] cannot claim ${offer.request.storyId}: ${(error as Error)?.message ?? String(error)}\n`,
+            )
+        }
+    }
+
+    private bid(offer: WorkOfferedData): void {
+        const configured = this.configuredBidRoute
+        const bid = this.bidOptions
+        if (!configured || !bid || !this.acceptsTier(offer.request.model)) return
+        if (offer.excludedRouteIds?.includes(configured.descriptor.routeId)) return
+        const bidId = `${offer.offerId}:${this.workerId()}:${bid.routeId}`
+        this.bidRoutes.set(bidId, {
+            offerId: offer.offerId,
+            route: configured.route,
+            descriptor: configured.descriptor,
+        })
+        this.emitBus(
+            WorkBid.create({
+                runId: offer.runId,
+                offerId: offer.offerId,
+                storyId: offer.request.storyId,
+                generation: offer.generation,
+                bidId,
+                workerId: this.workerId(),
+                route: configured.descriptor,
+                estimate: { ...bid.estimate },
+            }),
+        )
     }
 
     /**
@@ -176,8 +458,39 @@ export class StoryFactory extends BaseObserver {
         this.spawning.add(req.storyId)
         try {
             await this.buildAndLaunch(req)
+        } catch (error) {
+            const message = (error as Error)?.message ?? String(error)
+            process.stderr.write(`[story-factory] ${req.storyId} spawn failed: ${message}\n`)
+            this.emitBus(
+                StorySpawnFailed.create({
+                    runId: this.runId(),
+                    offerId: req.offerId,
+                    leaseId: req.leaseId,
+                    storyId: req.storyId,
+                    error: message,
+                }),
+            )
+            if (this.opts.coordinationMode !== "collective") {
+                this.emitBus(
+                    StoryResult.create({
+                        storyId: req.storyId,
+                        success: false,
+                        attempts: 0,
+                        durationSecs: 0,
+                        error: `spawn failed: ${message}`,
+                        ...(req.runId && req.leaseId && req.generation != null
+                            ? {
+                                  runId: req.runId,
+                                  leaseId: req.leaseId,
+                                  generation: req.generation,
+                              }
+                            : {}),
+                    }),
+                )
+            }
         } finally {
             this.spawning.delete(req.storyId)
+            this.settledWhileSpawning.delete(req.storyId)
         }
     }
 
@@ -190,14 +503,19 @@ export class StoryFactory extends BaseObserver {
         // `--story-model` override. `llm` is only the fallback backend
         // when the route names none — so one DAG can mix all three
         // backends story-by-story.
-        const route = resolveStoryRoute(req.model, {
-            tierMap: this.opts.tierMap,
-            fallbackBackend: this.opts.llm ?? "claude",
-            openaiDefaultModel: this.opts.openaiModel ?? "gpt-5.5",
-            override: this.opts.storyModelOverride,
-            endpoints: this.opts.endpoints,
-            defaultApiKey: this.opts.defaultApiKey,
-        })
+        const route = this.leasedRoutes.get(req.storyId) ?? this.resolveRoute(req.model)
+        const executionRequest =
+            this.opts.collaboration && req.leaseId
+                ? {
+                      ...req,
+                      prompt: `${req.prompt}\n\n${this.collaborationInstructions(
+                          req.storyId,
+                          req.leaseId,
+                          req.graphVersion,
+                          route.backend !== "openai",
+                      )}`,
+                  }
+                : req
 
         process.stderr.write(
             `[story-factory] ${req.storyId} → ${formatRoute(route)}` +
@@ -213,19 +531,69 @@ export class StoryFactory extends BaseObserver {
             }),
         )
 
-        // Per-story worktree isolation (#50); falls back to the shared cwd.
-        const storyCwd = this.opts.worktrees
-            ? (await this.opts.worktrees.create(req.storyId)) ?? this.opts.cwd
-            : this.opts.cwd
+        // Legacy may fall back to cwd; collective treats missing isolation as failure.
+        const createdWorktree = this.opts.worktrees
+            ? await this.opts.worktrees.create(req.storyId)
+            : null
+        if (this.opts.worktrees && !createdWorktree && this.opts.requireWorktree) {
+            throw new Error(`isolated worktree unavailable for ${req.storyId}`)
+        }
+        const storyCwd = createdWorktree ?? this.opts.cwd
 
         // Run the story — in-process by default, or via an injected executor
         // that runs it elsewhere. Either way the StoryResult lands on the bus
         // when it settles, and Conductor reacts.
-        const exec = this.executor.start(req, route, storyCwd, this.envRef, {
+        let resultAuthorityRegistered = false
+        const collectiveCorrelation = this.opts.coordinationMode === "collective"
+            ? this.resultCorrelation(req)
+            : null
+        const exec = this.executor.start(executionRequest, route, storyCwd, this.envRef, {
             openaiModel: this.opts.openaiModel,
             effort: this.opts.effort,
+            ...(route.backend === "openai" &&
+            this.opts.runtimeReplanDecisionAuthority
+                ? {
+                      runtimeReplanDecisionAuthority:
+                          this.opts.runtimeReplanDecisionAuthority,
+                  }
+                : {}),
+            ...(collectiveCorrelation
+                ? {
+                      registerResultAuthority: (source: Participant) => {
+                          this.opts.outcomeAuthority!.registerResultAuthority(
+                              collectiveCorrelation,
+                              source,
+                          )
+                          resultAuthorityRegistered = true
+                      },
+                  }
+                : {}),
         })
-        this.active.set(req.storyId, exec)
+        if (collectiveCorrelation && !resultAuthorityRegistered) {
+            try {
+                exec.abort?.()
+            } catch (error) {
+                process.stderr.write(
+                    `[story-factory] ${req.storyId} unregistered executor abort failed: ${String(error)}\n`,
+                )
+            }
+            try {
+                exec.dispose(this.envRef)
+            } catch (error) {
+                process.stderr.write(
+                    `[story-factory] ${req.storyId} unregistered executor dispose failed: ${String(error)}\n`,
+                )
+            }
+            throw new Error(
+                "collective executor returned without registering its StoryResult authority",
+            )
+        }
+
+        if (this.settledWhileSpawning.delete(req.storyId)) {
+            exec.dispose(this.envRef)
+        } else {
+            this.active.set(req.storyId, exec)
+        }
 
         // Emit the "yes, agent spawned" notification so observers can
         // see the lifecycle. Conductor doesn't actually need this, but
@@ -235,4 +603,172 @@ export class StoryFactory extends BaseObserver {
             StorySpawned.create({ storyId: req.storyId }),
         )
     }
+
+    private resolveRoute(model: string) {
+        return resolveStoryRoute(model, {
+            tierMap: this.opts.tierMap,
+            fallbackBackend: this.opts.llm ?? "claude",
+            openaiDefaultModel: this.opts.openaiModel ?? "gpt-5.5",
+            override: this.opts.storyModelOverride,
+            endpoints: this.opts.endpoints,
+            defaultApiKey: this.opts.defaultApiKey,
+        })
+    }
+
+    private resultCorrelation(
+        req: StorySpawnRequestData,
+    ): StoryResultAuthorityCorrelation {
+        if (
+            req.runId !== this.runId() ||
+            !req.leaseId ||
+            req.generation == null
+        ) {
+            throw new Error(
+                `collective story ${req.storyId} is missing lease correlation`,
+            )
+        }
+        return {
+            runId: req.runId,
+            storyId: req.storyId,
+            leaseId: req.leaseId,
+            generation: req.generation,
+        }
+    }
+
+    private resolveBidRoute(bid: StoryFactoryBidOptions): {
+        route: StoryRoute
+        descriptor: WorkRouteDescriptor
+    } {
+        if (!bid.routeId.trim()) throw new Error("market routeId must not be empty")
+        if (!isValidWorkBidEstimate(bid.estimate)) {
+            throw new Error(`invalid market estimate for route ${bid.routeId}`)
+        }
+        if (
+            bid.estimate.estimateSource !== "configured" &&
+            bid.estimate.estimateSource !== "historical"
+        ) {
+            throw new Error(`invalid estimate source for route ${bid.routeId}`)
+        }
+        if (
+            bid.maxConcurrent !== undefined &&
+            (!Number.isInteger(bid.maxConcurrent) || bid.maxConcurrent <= 0)
+        ) {
+            throw new Error(`maxConcurrent must be a positive integer for route ${bid.routeId}`)
+        }
+        const route = resolveStoryRoute(bid.route, {
+            fallbackBackend: this.opts.llm ?? "claude",
+            openaiDefaultModel: this.opts.openaiModel ?? "gpt-5.5",
+            endpoints: this.opts.endpoints,
+            defaultApiKey: this.opts.defaultApiKey,
+        })
+        return {
+            route,
+            descriptor: {
+                routeId: bid.routeId,
+                backend: route.backend,
+                model: route.model ?? "default",
+            },
+        }
+    }
+
+    private acceptsTier(model: string): boolean {
+        const tiers = this.bidOptions?.tiers
+        if (!tiers || tiers.length === 0) return true
+        const wanted = canonicalTier(model || "default").toLowerCase()
+        return tiers.some(
+            (tier) => canonicalTier(tier || "default").toLowerCase() === wanted,
+        )
+    }
+
+    private emitBus(event: SemanticEvent<unknown>): void {
+        this.envRef?.deliverSemanticEvent(this, event)
+    }
+
+    private advertiseCapabilities(): void {
+        this.emitBus(
+            workerCapabilityEvent(
+                this.runId(),
+                this.workerId(),
+                this.configuredBidRoute?.descriptor ?? {
+                    routeId: `default:${this.opts.llm ?? "claude"}`,
+                    backend: this.opts.llm ?? "claude",
+                    model: "default",
+                },
+                this.bidOptions?.maxConcurrent,
+            ),
+        )
+    }
+
+    private workerId(): string {
+        return this.opts.workerId ?? `story-worker:${this.opts.llm ?? "claude"}`
+    }
+
+    private runId(): string {
+        return this.opts.runId ?? "legacy"
+    }
+
+    private collaborationInstructions(
+        storyId: string,
+        leaseId: string,
+        graphVersion?: number,
+        includeCliDagMutationCommands = true,
+    ): string {
+        const collaboration = this.opts.collaboration!
+        const command = `node ${JSON.stringify(collaboration.commandPath)}`
+        const session = JSON.stringify(collaboration.sessionDir)
+        const lease = JSON.stringify(leaseId)
+        return [
+            "## Collective coordination",
+            "",
+            "You are an autonomous peer on the shared Baro event bus. Use these commands only when they help the goal:",
+            `- Ask peers: ${command} emit --session ${session} --lease ${lease} --kind help --text ${JSON.stringify("YOUR QUESTION")}`,
+            `- Message a peer: ${command} emit --session ${session} --lease ${lease} --kind message --to S2 --text ${JSON.stringify("YOUR MESSAGE")} (queued if that peer starts in a later wave)`,
+            `- Share a finding: ${command} emit --session ${session} --lease ${lease} --kind note --text ${JSON.stringify("YOUR FINDING")} (retained in later agents' launch context)`,
+            `- Read peer messages: ${command} inbox --session ${session} --agent ${JSON.stringify(storyId)}`,
+            ...(includeCliDagMutationCommands
+                ? [
+                      ...(graphVersion !== undefined
+                          ? [
+                                `- The launch DAG version is ${graphVersion}. To atomically add, replace, or rewire future work and receive the Board's decision immediately: ${command} emit --session ${session} --lease ${lease} --kind replan --base-version ${graphVersion} --replan-json ${JSON.stringify('{"addedStories":[],"removedStoryIds":[],"modifiedDeps":{}}')} --reason ${JSON.stringify("WHY THE PLAN MUST CHANGE")}`,
+                                "  Use the newest `graphVersion` returned by a prior decision. Active/already-started stories are immutable; express additional work as future stories.",
+                                `  If replan exits 3 or returns \`outcome_unknown\`, do not assume whether it applied. Resolve that same proposal before continuing: ${command} decision --session ${session} --proposal ${JSON.stringify("PROPOSAL_ID")} --wait-ms 30000`,
+                            ]
+                          : []),
+                  ]
+                : []),
+            "Check the inbox after initial exploration and before finishing. Do not create coordination noise for routine work.",
+        ].join("\n")
+    }
+}
+
+function workerCapabilityEvent(
+    runId: string,
+    workerId: string,
+    route: WorkRouteDescriptor,
+    maxConcurrent?: number,
+) {
+    const live = route.backend === "claude" || route.backend === "openai"
+    return WorkerCapabilityAdvertised.create({
+        runId,
+        workerId,
+        capabilities: {
+            backends: [route.backend],
+            supportsAbort: true,
+            supportsLiveFeedback: live,
+            supportsPeerMessages: live,
+            routes: [route],
+            ...(maxConcurrent !== undefined ? { maxConcurrent } : {}),
+        },
+    })
+}
+
+function sameRouteDescriptor(
+    left: WorkRouteDescriptor,
+    right: WorkRouteDescriptor,
+): boolean {
+    return (
+        left.routeId === right.routeId &&
+        left.backend === right.backend &&
+        left.model === right.model
+    )
 }

@@ -31,6 +31,46 @@ pub struct Cli {
     #[arg(long, default_value = "0")]
     pub parallel: u32,
 
+    /// Coordination engine: legacy (current Conductor) or collective (experimental event-bus agents).
+    #[arg(long, value_parser=["legacy", "collective"], env = "BARO_COORDINATION", default_value = "legacy")]
+    pub coordination: String,
+
+    /// Disable Baro-owned pushes and pull requests; use a remote-free clone for hard isolation.
+    #[arg(long)]
+    pub local_only: bool,
+
+    /// JSON file containing opt-in collective worker candidates and their bids.
+    #[arg(long, env = "BARO_COLLECTIVE_WORKERS_FILE")]
+    pub collective_workers: Option<String>,
+
+    /// Milliseconds to collect collective worker bids before deterministic selection.
+    #[arg(long, env = "BARO_COLLECTIVE_BID_WINDOW_MS")]
+    pub collective_bid_window_ms: Option<u64>,
+
+    /// Reject collective bids below this estimated success probability.
+    #[arg(long, value_parser = parse_probability, env = "BARO_COLLECTIVE_MIN_SUCCESS")]
+    pub collective_min_success: Option<f64>,
+
+    /// Reject collective bids above this expected one-attempt cost in USD.
+    #[arg(long, value_parser = parse_non_negative_f64, env = "BARO_COLLECTIVE_MAX_COST_USD")]
+    pub collective_max_cost_usd: Option<f64>,
+
+    /// Reject collective bids above this estimated latency in milliseconds.
+    #[arg(long, env = "BARO_COLLECTIVE_MAX_LATENCY_MS")]
+    pub collective_max_latency_ms: Option<u64>,
+
+    /// Enable the optional communication-only conversation participant (collective mode only).
+    #[arg(long)]
+    pub with_dialogue: bool,
+
+    /// Text-only backend for the conversation participant.
+    #[arg(long, value_parser=["claude", "openai"], env = "BARO_DIALOGUE_LLM")]
+    pub dialogue_llm: Option<String>,
+
+    /// Model id for the optional conversation participant.
+    #[arg(long, env = "BARO_DIALOGUE_MODEL")]
+    pub dialogue_model: Option<String>,
+
     /// Per-story timeout in seconds. Default scales with --effort
     /// (max ≈ 25 min, xhigh ≈ 20, high ≈ 15, else 10).
     #[arg(long)]
@@ -188,6 +228,28 @@ pub struct Cli {
     /// and wait (≤120s) for a confirm_mode command before planning continues.
     #[arg(long, env = "BARO_CONFIRM_MODE")]
     pub confirm_mode: bool,
+}
+
+fn parse_probability(raw: &str) -> Result<f64, String> {
+    let value = raw
+        .parse::<f64>()
+        .map_err(|_| "must be a number between 0 and 1".to_string())?;
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("must be a finite number between 0 and 1".to_string())
+    }
+}
+
+fn parse_non_negative_f64(raw: &str) -> Result<f64, String> {
+    let value = raw
+        .parse::<f64>()
+        .map_err(|_| "must be a non-negative number".to_string())?;
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err("must be a finite non-negative number".to_string())
+    }
 }
 
 pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {

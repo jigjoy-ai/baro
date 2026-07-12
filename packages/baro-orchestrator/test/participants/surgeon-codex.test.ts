@@ -5,7 +5,16 @@ import { syncBuiltinESMExports } from "node:module"
 import { PassThrough } from "node:stream"
 import { describe, it } from "node:test"
 
-import { Replan, StoryResult, type ReplanStoryAdd } from "../../src/semantic-events.js"
+import {
+    ModelInvocationMeasured,
+    RecoveryDecision,
+    RecoveryEvaluationStarted,
+    Replan,
+    StoryQualityCompleted,
+    StoryResult,
+    WorkLeaseGranted,
+    type ReplanStoryAdd,
+} from "../../src/semantic-events.js"
 import { SurgeonCodex } from "../../src/participants/surgeon-codex.js"
 import type { PrdSnapshot } from "../../src/participants/surgeon.js"
 import { joinWithCapture, source } from "./helpers.js"
@@ -82,6 +91,7 @@ describe("SurgeonCodex", () => {
             const surgeon = new SurgeonCodex({
                 snapshot,
                 timeoutMs: 10_000,
+                runId: "run-codex-failure",
             })
             const env = joinWithCapture(surgeon)
 
@@ -95,6 +105,17 @@ describe("SurgeonCodex", () => {
             assert.deepEqual(replans[0]!.data.modifiedDeps, {})
             assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
             assert.match(replans[0]!.data.reason, /codex fallback after error:/)
+
+            const measured = env.events.filter(ModelInvocationMeasured.is)
+            assert.equal(measured.length, 1)
+            assert.equal(measured[0]!.data.status, "failed")
+            assert.equal(measured[0]!.data.phase, "surgeon")
+            assert.equal(measured[0]!.data.backend, "codex")
+            assert.equal(measured[0]!.data.tokens.inputTotal.state, "unknown")
+            assert.ok(
+                env.events.findIndex(ModelInvocationMeasured.is) <
+                    env.events.findIndex(Replan.is),
+            )
         })
     })
 
@@ -132,10 +153,19 @@ describe("SurgeonCodex", () => {
                 const surgeon = new SurgeonCodex({
                     snapshot,
                     timeoutMs: 10_000,
+                    model: "gpt-test",
                 })
                 const env = joinWithCapture(surgeon)
 
-                await surgeon.onExternalEvent(source("story-agent"), failure)
+                await surgeon.onExternalEvent(
+                    source("story-agent"),
+                    StoryResult.create({
+                        ...failure.data,
+                        runId: "run-codex-telemetry",
+                        leaseId: "lease-S1",
+                        generation: 3,
+                    }),
+                )
                 await surgeon.idle()
 
                 const replans = env.events.filter(Replan.is)
@@ -144,6 +174,22 @@ describe("SurgeonCodex", () => {
                 assert.deepEqual(replans[0]!.data.addedStories, [added])
                 assert.deepEqual(replans[0]!.data.removedStoryIds, ["S1"])
                 assert.deepEqual(replans[0]!.data.modifiedDeps, { S2: ["S1a"] })
+
+                const measured = env.events.filter(ModelInvocationMeasured.is)
+                assert.equal(measured.length, 1)
+                assert.equal(
+                    measured[0]!.data.invocationId,
+                    "run-codex-telemetry:surgeon:S1:1:lease:lease-S1:generation:3:provider:1",
+                )
+                assert.equal(measured[0]!.data.runId, "run-codex-telemetry")
+                assert.equal(measured[0]!.data.storyId, "S1")
+                assert.equal(measured[0]!.data.turn, 1)
+                assert.equal(measured[0]!.data.requestedModel, "gpt-test")
+                assert.equal(measured[0]!.data.status, "succeeded")
+                assert.ok(
+                    env.events.findIndex(ModelInvocationMeasured.is) <
+                        env.events.findIndex(Replan.is),
+                )
             },
         )
     })
@@ -177,7 +223,86 @@ describe("SurgeonCodex", () => {
                 assert.deepEqual(replans[0]!.data.modifiedDeps, {})
                 assert.match(replans[0]!.data.reason, /deterministic skip: S1 exhausted 3 attempts/)
                 assert.match(replans[0]!.data.reason, /codex fallback after error: no JSON object found/)
+
+                const measured = env.events.filter(ModelInvocationMeasured.is)
+                assert.equal(measured.length, 1)
+                assert.equal(measured[0]!.data.status, "succeeded")
+                assert.equal(measured[0]!.data.tokens.inputTotal.state, "unknown")
+                assert.ok(
+                    env.events.findIndex(ModelInvocationMeasured.is) <
+                        env.events.findIndex(Replan.is),
+                )
             },
         )
+    })
+
+    it("bridges a correlated quality failure into one-shot recovery", async () => {
+        const surgeon = new SurgeonCodex({
+            snapshot,
+            useLlm: false,
+            runId: "run-codex-quality",
+            emitRecoveryDecisions: true,
+        })
+        const env = joinWithCapture(surgeon)
+        await surgeon.onExternalEvent(
+            source("broker"),
+            WorkLeaseGranted.create({
+                runId: "run-codex-quality",
+                offerId: "offer-S1",
+                leaseId: "lease-S1",
+                workerId: "worker",
+                generation: 1,
+                request: {
+                    storyId: "S1",
+                    prompt: "implement",
+                    model: "standard",
+                    retries: 1,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+        await surgeon.onExternalEvent(
+            source("S1"),
+            StoryResult.create({
+                storyId: "S1",
+                success: true,
+                attempts: 1,
+                durationSecs: 3,
+                error: null,
+                runId: "run-codex-quality",
+                leaseId: "lease-S1",
+                generation: 1,
+            }),
+        )
+        await surgeon.onExternalEvent(
+            source("quality-gate"),
+            StoryQualityCompleted.create({
+                runId: "run-codex-quality",
+                evaluationId: "quality-S1",
+                storyId: "S1",
+                leaseId: "lease-S1",
+                generation: 1,
+                status: "failed",
+                targetTurn: 1,
+                reason: "acceptance mismatch",
+            }),
+        )
+        await surgeon.idle()
+
+        assert.deepEqual(
+            env.events
+                .filter((event) =>
+                    RecoveryEvaluationStarted.is(event) ||
+                    Replan.is(event) ||
+                    RecoveryDecision.is(event),
+                )
+                .map((event) => event.type),
+            ["recovery_evaluation_started", "replan", "recovery_decision"],
+        )
+        assert.match(
+            env.events.find(Replan.is)!.data.reason,
+            /acceptance quality gate failed: acceptance mismatch/,
+        )
+        assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)
     })
 })

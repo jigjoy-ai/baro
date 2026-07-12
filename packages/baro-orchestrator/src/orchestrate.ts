@@ -7,9 +7,10 @@
  *   - direct TS callers (tests, demos)
  */
 
-import { mkdirSync } from "fs"
+import { existsSync, mkdirSync } from "fs"
 import { hostname } from "os"
 import { dirname, join } from "path"
+import { fileURLToPath } from "url"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
 
@@ -25,6 +26,7 @@ import {
     isInsideGitRepo,
 } from "./git.js"
 import { WorktreeManager } from "./worktree.js"
+import { StoryOutcomeAuthority } from "./runtime/story-outcome-authority.js"
 import { buildDag } from "./dag.js"
 import {
     formatRoute,
@@ -32,23 +34,42 @@ import {
     type ResolveOpts,
 } from "./routing.js"
 import { Auditor } from "./participants/auditor.js"
+import { AcceptanceGate } from "./participants/acceptance-gate.js"
+import { AgentTurnProjector } from "./participants/agent-turn-projector.js"
+import { CollaborationBridge } from "./participants/collaboration-bridge.js"
+import { CollectiveBoard } from "./participants/collective-board.js"
 import {
     Conductor,
     ConductorRunSummary,
 } from "./participants/conductor.js"
 import { Critic } from "./participants/critic.js"
+import { CriticTargetRegistry } from "./participants/critic-target-registry.js"
 import { CriticCodex } from "./participants/critic-codex.js"
 import { CriticOpenAI } from "./participants/critic-openai.js"
 import { CriticOpenCode } from "./participants/critic-opencode.js"
 import { CriticPi } from "./participants/critic-pi.js"
+import {
+    DialogueAgent,
+    type DialogueResponder,
+} from "./participants/dialogue-agent.js"
+import {
+    createDialogueResponder,
+    type DialogueBackend,
+} from "./participants/dialogue-responder.js"
 import { Finalizer } from "./participants/finalizer.js"
 import { GitCoordinator } from "./participants/git-coordinator.js"
+import { DialogueForwarder } from "./participants/forwarders/dialogue.js"
 import { joinBaroEventForwarders } from "./participants/forwarders/index.js"
 import { Librarian } from "./participants/librarian.js"
+import { LeaseBroker } from "./participants/lease-broker.js"
+import { LocalRepositoryAgent } from "./participants/local-repository-agent.js"
 import { MemoryLibrarian } from "./participants/memory-librarian.js"
+import { ModelTelemetryCollector } from "./participants/model-telemetry-collector.js"
 import { Operator } from "./participants/operator.js"
+import { RunVerifier } from "./participants/run-verifier.js"
 import { Sentry } from "./participants/sentry.js"
 import { StoryFactory } from "./participants/story-factory.js"
+import { WorkContextProvider } from "./participants/work-context-provider.js"
 import { type StoryAgent } from "./participants/story-agent.js"
 import {
     Surgeon,
@@ -62,14 +83,62 @@ import { SurgeonPi } from "./participants/surgeon-pi.js"
 import { Supervisor } from "./participants/supervisor.js"
 import { resolveEffectiveParallel } from "./planning/mode-enforcement.js"
 import { PrdFile, loadPrd, savePrd } from "./prd.js"
-import { RunStartRequest } from "./semantic-events.js"
+import {
+    RunStartRequest,
+    type CoordinationMode,
+    type WorkBidEstimateData,
+} from "./semantic-events.js"
 import { emit } from "./tui-protocol.js"
+import { createVerifyPlan, recommendedVerifyTimeoutMs } from "./verify.js"
+import {
+    isValidWorkBidEstimate,
+    selectWorkBid,
+    type WorkBidPolicy,
+} from "./work-market.js"
+
+export interface CollectiveWorkerCandidateConfig {
+    workerId: string
+    routeId: string
+    /** Existing backend:model@endpoint route syntax. */
+    route: string
+    tiers?: readonly string[]
+    maxConcurrent?: number
+    estimate: WorkBidEstimateData
+}
 
 export interface OrchestrateConfig {
     prdPath: string
     cwd: string
     parallel?: number
     timeoutSecs?: number
+    /** Coordination engine. `legacy` remains the default. */
+    coordinationMode?: CoordinationMode
+    /** Allow push and PR creation. False keeps the complete git lifecycle local. */
+    publishRemote?: boolean
+    /** Optional collective execution-lease watchdog; disabled by default. */
+    collectiveLeaseTimeoutMs?: number
+    /** Optional collective repository-integration watchdog. */
+    collectiveIntegrationTimeoutMs?: number
+    /** Optional whole-run objective verification watchdog. */
+    collectiveVerificationTimeoutMs?: number
+    /** Optional per-story Critic evidence watchdog. Default: 240 seconds. */
+    collectiveAcceptanceTimeoutMs?: number
+    /** Optional communication-only conversational participant. Collective only. */
+    withDialogue?: boolean
+    /** Text-only backing model for DialogueAgent. Default: Claude. */
+    dialogueLlm?: DialogueBackend
+    /** Provider model for DialogueAgent. Defaults by backend. */
+    dialogueModel?: string
+    /** Per-user-message response timeout. Default: 60 seconds. */
+    dialogueTimeoutMs?: number
+    /** Test/embedding seam; overrides the built-in text-only model adapter. */
+    dialogueResponder?: DialogueResponder
+    /** Opt-in autonomous worker candidates; absent preserves first-claim collective. */
+    collectiveWorkers?: readonly CollectiveWorkerCandidateConfig[]
+    /** Bounded local auction window. Default: 50ms when candidates are configured. */
+    collectiveBidWindowMs?: number
+    /** Safety/cost constraints applied before deterministic bid ranking. */
+    collectiveBidPolicy?: WorkBidPolicy
     overrideModel?: string | null
     defaultModel?: string
     /** Path for the audit JSONL log. If omitted, no Auditor joins. */
@@ -200,6 +269,8 @@ export interface OrchestrateConfig {
      * waiting for the OrchestrateResult.
      */
     onOperatorReady?: (operator: Operator) => void
+    /** Called after the optional DialogueAgent has joined the same bus. */
+    onDialogueReady?: (dialogue: DialogueAgent) => void
     /** Extra participants to attach to the bus before the run starts. */
     extraParticipants?: import("@mozaik-ai/core").Participant[]
 }
@@ -230,7 +301,10 @@ export function storyTimeoutSecs(
 export interface OrchestrateResult {
     summary: ConductorRunSummary
     operator: Operator
-    /** Active StoryAgents indexed by id, exposed for outside abort/inspection. */
+    /**
+     * @deprecated A completed orchestration has no active workers. Retained for
+     * source compatibility and returned empty; use Operator/events mid-run.
+     */
     storyAgents: Map<string, StoryAgent>
 }
 
@@ -257,26 +331,43 @@ export async function orchestrate(
     }
     const env = new AgenticEnvironment()
     const emitTui = config.emitTuiEvents ?? true
+    const coordinationMode = config.coordinationMode ?? "legacy"
+    const publishRemote = config.publishRemote ?? true
     const llm: "claude" | "openai" | "codex" | "opencode" | "pi" = config.llm ?? "claude"
     // Downstream factories branch on these per-phase values, never on the
     // global `llm`.
     const storyLlm = config.storyLlm ?? llm
     const criticLlm = config.criticLlm ?? llm
     const surgeonLlm = config.surgeonLlm ?? llm
-
-    // The Critic fires on AgentResult, which the pi/opencode STORY backends
-    // never emit — so it stays silent regardless of which backend the Critic
-    // itself runs on. Warn loudly rather than failing quietly.
-    if (config.withCritic) {
-        const noAgentResult = new Set(["pi", "opencode"])
-        if (noAgentResult.has(storyLlm)) {
-            process.stderr.write(
-                `[orchestrate] WARNING: --with-critic with story backend '${storyLlm}' — ` +
-                    `the ${storyLlm} backend emits no AgentResult, so the Critic will never fire. ` +
-                    `Use a Claude/OpenAI story backend, or set --story-llm to a different backend.\n`,
-            )
-        }
+    const collectiveWorkers = [...(config.collectiveWorkers ?? [])]
+    validateCollectiveWorkers(
+        collectiveWorkers,
+        coordinationMode,
+        config.storyModel,
+    )
+    validateCollectiveMarketOptions(
+        collectiveWorkers.length,
+        coordinationMode,
+        config.collectiveBidWindowMs,
+        config.collectiveBidPolicy,
+    )
+    if (config.withDialogue && coordinationMode !== "collective") {
+        throw new Error("DialogueAgent requires coordinationMode='collective'")
     }
+
+    // Shared by event correlation, memory sessions, and worktree names.
+    // It is created before Operator so user conversation events carry the
+    // same identity as the collective control plane from their first hop.
+    const runId = `run-${Date.now()}-${process.pid}`
+    const outcomeAuthority = coordinationMode === "collective"
+        ? new StoryOutcomeAuthority(runId)
+        : undefined
+
+    process.stderr.write(
+        `[orchestrate] coordination=${coordinationMode}` +
+            (publishRemote ? "" : " (local-only; push/PR disabled)") +
+            "\n",
+    )
 
     // Routing banner for stderr / audit log. Architect + Planner run as
     // separate Rust-TUI subprocesses and log their own banners.
@@ -292,7 +383,7 @@ export async function orchestrate(
     }
     if (config.openaiEndpoints && Object.keys(config.openaiEndpoints).length > 0) {
         const eps = Object.entries(config.openaiEndpoints)
-            .map(([name, ep]) => `${name}→${ep.baseUrl}${ep.apiKey ? "" : " (no key!)"}`)
+            .map(([name, ep]) => `${name}→configured${ep.apiKey ? "" : " (no key!)"}`)
             .join(" ")
         process.stderr.write(`[orchestrate] openai endpoints: ${eps}\n`)
     }
@@ -336,14 +427,14 @@ export async function orchestrate(
         for (const p of config.extraParticipants) p.join(env)
     }
 
-    if (emitTui) {
-        joinBaroEventForwarders(env)
-    }
+    const dagForwarder = emitTui ? joinBaroEventForwarders(env) : null
 
-    const operator = new Operator(config.operatorHooks ?? {})
+    const operator = new Operator(
+        config.operatorHooks ?? {},
+        { runId },
+    )
     operator.setEnvironment(env)
     operator.join(env)
-    config.onOperatorReady?.(operator)
 
     const useGit = config.withGit ?? (await isInsideGitRepo(config.cwd))
     const gitGate = new GitGate()
@@ -364,18 +455,32 @@ export async function orchestrate(
         }
     }
 
-    // Shared by the memory session path and worktree branch/dir names so
-    // concurrent runs and resumes never collide.
-    const runId = `run-${Date.now()}-${process.pid}`
+    // Always-on semantic telemetry; unlike stdout/TUI forwarders this remains
+    // present in headless tests and local programmatic orchestration.
+    const modelTelemetryCollector = new ModelTelemetryCollector({ runId })
+    modelTelemetryCollector.join(env)
+    // Codex/OpenCode/Pi expose terminal turns through different native events.
+    // Project them onto one neutral contract so policy participants such as the
+    // Critic depend on semantics rather than a provider-specific stream shape.
+    new AgentTurnProjector().join(env)
+    const hasOrigin = useGit ? await hasRemoteOrigin(config.cwd) : false
+    const pushRemote = publishRemote && hasOrigin
 
     // BARO_NO_WORKTREES is NO_COLOR-style: ANY value, including empty,
     // disables worktrees (no Rust CLI flag plumbing needed).
     const worktreesEnabled =
         config.withWorktrees ?? !("BARO_NO_WORKTREES" in process.env)
+    if (coordinationMode === "collective" && useGit && !worktreesEnabled) {
+        throw new Error(
+            "collective coordination requires isolated git worktrees; unset BARO_NO_WORKTREES or use legacy coordination",
+        )
+    }
     const worktrees =
         useGit && worktreesEnabled
             ? new WorktreeManager(config.cwd, gitGate, runId, {
                   linkDepDirs: config.worktreeLinkDepDirs ?? true,
+                  allowSharedFallback: coordinationMode === "legacy",
+                  resolveConflictsWithTheirs: coordinationMode === "legacy",
                   onLog: (line) =>
                       emitTui && emit({ type: "story_log", id: "_git", line }),
               })
@@ -391,9 +496,19 @@ export async function orchestrate(
               gitGate,
               worktrees,
               emitTui,
+              eventDriven: coordinationMode === "collective",
+              runId,
+              prdPath: config.prdPath,
+              push: pushRemote,
           })
         : null
     if (gitCoordinator) gitCoordinator.join(env)
+    const localRepositoryAgent =
+        !gitCoordinator && coordinationMode === "collective"
+            ? new LocalRepositoryAgent(runId)
+            : null
+    localRepositoryAgent?.join(env)
+    const repositoryAuthority = gitCoordinator ?? localRepositoryAgent
 
     const useLibrarian = config.withLibrarian ?? true
     const useSentry = config.withSentry ?? true
@@ -424,6 +539,36 @@ export async function orchestrate(
     const sentry = useSentry ? new Sentry() : null
     if (librarian) librarian.join(env)
     if (sentry) sentry.join(env)
+
+    const workContextProvider = coordinationMode === "collective"
+        ? new WorkContextProvider(runId, librarian)
+        : null
+    workContextProvider?.join(env)
+
+    const bundledCollaborationCommand = fileURLToPath(
+        new URL("./agent-collab.mjs", import.meta.url),
+    )
+    const developmentCollaborationCommand = fileURLToPath(
+        new URL("../scripts/agent-collab.mjs", import.meta.url),
+    )
+    const collaborationConfig = coordinationMode === "collective"
+        ? {
+              commandPath: existsSync(bundledCollaborationCommand)
+                  ? bundledCollaborationCommand
+                  : developmentCollaborationCommand,
+              sessionDir: join(sessionsDir, runId, "collective"),
+          }
+        : undefined
+    const collaborationBridge = collaborationConfig
+        ? new CollaborationBridge({
+              runId,
+              sessionDir: collaborationConfig.sessionDir,
+          })
+        : null
+    if (collaborationBridge) {
+        workContextProvider?.setCollaborationAuthority(collaborationBridge)
+    }
+    collaborationBridge?.join(env)
 
     // Surgeon joins early so it sees StoryResultItems from the moment the
     // Conductor starts running.
@@ -485,6 +630,9 @@ export async function orchestrate(
                 resolveRoute,
                 escalationRoute,
                 model: config.surgeonModel ?? "gpt-5.5",
+                runId,
+                emitRecoveryDecisions: coordinationMode === "collective",
+                outcomeAuthority,
             })
         } else if (surgeonLlm === "codex") {
             surgeon = new SurgeonCodex({
@@ -493,6 +641,9 @@ export async function orchestrate(
                 escalationRoute,
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
+                runId,
+                emitRecoveryDecisions: coordinationMode === "collective",
+                outcomeAuthority,
             })
         } else if (surgeonLlm === "opencode") {
             surgeon = new SurgeonOpenCode({
@@ -501,6 +652,9 @@ export async function orchestrate(
                 escalationRoute,
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
+                runId,
+                emitRecoveryDecisions: coordinationMode === "collective",
+                outcomeAuthority,
             })
         } else if (surgeonLlm === "pi") {
             surgeon = new SurgeonPi({
@@ -509,6 +663,9 @@ export async function orchestrate(
                 escalationRoute,
                 useLlm: config.surgeonUseLlm ?? true,
                 model: config.surgeonModel,
+                runId,
+                emitRecoveryDecisions: coordinationMode === "collective",
+                outcomeAuthority,
             })
         } else {
             surgeon = new Surgeon({
@@ -517,45 +674,57 @@ export async function orchestrate(
                 escalationRoute,
                 useLlm: config.surgeonUseLlm ?? false,
                 model: config.surgeonModel ?? "opus",
+                runId,
+                emitRecoveryDecisions: coordinationMode === "collective",
+                outcomeAuthority,
             })
         }
         surgeon.join(env)
     }
 
     let critic: Critic | CriticOpenAI | CriticCodex | CriticOpenCode | CriticPi | null = null
+    let criticTargetRegistry: CriticTargetRegistry | null = null
+    let criticTargets = new Map<string, readonly string[]>()
     if (config.withCritic) {
         const prd = loadPrd(config.prdPath)
-        const targets = new Map<string, readonly string[]>(
+        criticTargets = new Map<string, readonly string[]>(
             prd.userStories
                 .filter((s) => s.acceptance && s.acceptance.length > 0)
                 .map((s) => [s.id, s.acceptance] as [string, readonly string[]]),
         )
+        criticTargetRegistry = new CriticTargetRegistry(criticTargets)
+        criticTargetRegistry.join(env)
         // Bus contract is identical across providers, so observers never
         // notice the swap.
         if (criticLlm === "openai") {
             critic = new CriticOpenAI({
-                targets,
+                targets: criticTargets,
                 model: config.criticModel ?? "gpt-5.4-mini",
+                runId,
             })
         } else if (criticLlm === "codex") {
             critic = new CriticCodex({
-                targets,
+                targets: criticTargets,
                 model: config.criticModel,
+                runId,
             })
         } else if (criticLlm === "opencode") {
             critic = new CriticOpenCode({
-                targets,
+                targets: criticTargets,
                 model: config.criticModel,
+                runId,
             })
         } else if (criticLlm === "pi") {
             critic = new CriticPi({
-                targets,
+                targets: criticTargets,
                 model: config.criticModel,
+                runId,
             })
         } else {
             critic = new Critic({
-                targets,
+                targets: criticTargets,
                 model: config.criticModel ?? "haiku",
+                runId,
             })
         }
         critic.join(env)
@@ -564,11 +733,13 @@ export async function orchestrate(
     // Finalizer only joins on git runs WITH an origin remote — a preview
     // (diffOnly) or local-only run has none, and running `gh pr create`/push
     // there just produces noisy failures. `gh` availability is checked inside.
-    const hasOrigin = useGit ? await hasRemoteOrigin(config.cwd) : false
     if (useGit && !hasOrigin) {
         process.stderr.write("[orchestrate] no origin remote — skipping push/PR (preview/local run)\n")
     }
-    const finalizer = useGit && hasOrigin
+    if (useGit && hasOrigin && !publishRemote) {
+        process.stderr.write("[orchestrate] local-only mode — skipping push/PR\n")
+    }
+    const finalizer = useGit && hasOrigin && publishRemote
         ? new Finalizer({
               cwd: config.cwd,
               prdPath: config.prdPath,
@@ -596,52 +767,157 @@ export async function orchestrate(
         )
     }
 
-    const conductor = new Conductor({
-        prdPath: config.prdPath,
-        cwd: config.cwd,
-        parallel: effectiveParallel,
-        timeoutSecs: storyTimeoutSecs(config.timeoutSecs, config.effort),
-        overrideModel: config.overrideModel ?? undefined,
-        defaultModel: config.defaultModel ?? "opus",
-        intraLevelDelaySecs: config.intraLevelDelaySecs,
-        onRunStart: useGit
-            ? async (prd) => {
-                  baseSha = await getHeadSha(config.cwd)
-                  await excludeBaroArtifacts(config.cwd)
-                  if (prd.branchName) {
-                      await createOrCheckoutBranch(
-                          config.cwd,
-                          prd.branchName,
-                          (line) => emitTui && emit({ type: "story_log", id: "_git", line }),
-                      )
+    let coordinationDone: Promise<ConductorRunSummary>
+    let runVerifier: RunVerifier | null = null
+    let leaseBroker: LeaseBroker | null = null
+    let acceptanceGate: AcceptanceGate | null = null
+    let dialogueAgent: DialogueAgent | null = null
+    let collectiveBoard: CollectiveBoard | null = null
+    if (coordinationMode === "legacy") {
+        const conductor = new Conductor({
+            prdPath: config.prdPath,
+            cwd: config.cwd,
+            parallel: effectiveParallel,
+            timeoutSecs: storyTimeoutSecs(config.timeoutSecs, config.effort),
+            overrideModel: config.overrideModel ?? undefined,
+            defaultModel: config.defaultModel ?? "opus",
+            intraLevelDelaySecs: config.intraLevelDelaySecs,
+            onRunStart: useGit
+                ? async (prd) => {
+                      baseSha = await getHeadSha(config.cwd)
+                      await excludeBaroArtifacts(config.cwd)
+                      if (prd.branchName) {
+                          await createOrCheckoutBranch(
+                              config.cwd,
+                              prd.branchName,
+                              (line) => emitTui && emit({ type: "story_log", id: "_git", line }),
+                              pushRemote,
+                          )
+                      }
+                      await worktrees?.cleanupStaleOnStart()
                   }
-                  await worktrees?.cleanupStaleOnStart()
-              }
-            : undefined,
-        onBeforeStoryLaunch: librarian
-            ? (storyId, story) => {
-                  const hints: string[] = [
-                      ...tokenizeForHints(story.title),
-                      ...tokenizeForHints(story.description).slice(0, 8),
-                  ]
-                  return librarian.gatherContext(storyId, hints)
-              }
-            : undefined,
-        onStoryPassed: gitCoordinator
-            ? (storyId) => gitCoordinator.onStoryPassed(storyId)
-            : undefined,
-        onStoryFailed: worktrees && gitCoordinator
-            ? (storyId) => gitCoordinator.onStoryFailed(storyId)
-            : undefined,
-    })
-    conductor.setEnvironment(env)
-    conductor.join(env)
+                : undefined,
+            onBeforeStoryLaunch: librarian
+                ? (storyId, story) => {
+                      const hints: string[] = [
+                          ...tokenizeForHints(story.title),
+                          ...tokenizeForHints(story.description).slice(0, 8),
+                      ]
+                      return librarian.gatherContext(storyId, hints)
+                  }
+                : undefined,
+            onStoryPassed: gitCoordinator
+                ? (storyId) => gitCoordinator.onStoryPassed(storyId)
+                : undefined,
+            onStoryFailed: worktrees && gitCoordinator
+                ? (storyId) => gitCoordinator.onStoryFailed(storyId)
+                : undefined,
+        })
+        conductor.setEnvironment(env)
+        conductor.join(env)
+        coordinationDone = conductor.done
+    } else {
+        const collectiveParallel = useGit ? effectiveParallel : 1
+        if (!repositoryAuthority) {
+            throw new Error("collective coordination requires a repository authority")
+        }
+        if (!useGit && effectiveParallel !== 1) {
+            process.stderr.write(
+                "[orchestrate] collective non-git run is serialized because isolated worktrees are unavailable\n",
+            )
+        }
+        const verifyPlan = createVerifyPlan(config.cwd)
+        runVerifier = new RunVerifier({
+            runId,
+            cwd: config.cwd,
+            plan: verifyPlan,
+        })
+        runVerifier.join(env)
+        leaseBroker = new LeaseBroker({
+            runId,
+            parallel: collectiveParallel,
+            intraLevelDelaySecs: config.intraLevelDelaySecs ?? 10,
+            leaseTimeoutMs: config.collectiveLeaseTimeoutMs,
+            integrationTimeoutMs: config.collectiveIntegrationTimeoutMs,
+            outcomeAuthority,
+            ...(collectiveWorkers.length > 0
+                ? {
+                      market: {
+                          bidWindowMs: config.collectiveBidWindowMs ?? 50,
+                          policy: config.collectiveBidPolicy,
+                      },
+                  }
+                : {}),
+        })
+        leaseBroker.setIntegrationAuthority(repositoryAuthority)
+        acceptanceGate = config.withCritic && critic
+            ? new AcceptanceGate({
+                  runId,
+                  targets: criticTargets,
+                  timeoutMs: config.collectiveAcceptanceTimeoutMs,
+                  leaseAuthority: leaseBroker,
+                  critiqueAuthority: critic,
+                  outcomeAuthority,
+              })
+            : null
+        if (acceptanceGate) leaseBroker.setQualityAuthority(acceptanceGate)
+        const board = collectiveBoard = new CollectiveBoard({
+            runId,
+            prdPath: config.prdPath,
+            cwd: config.cwd,
+            timeoutSecs: storyTimeoutSecs(config.timeoutSecs, config.effort),
+            overrideModel: config.overrideModel ?? undefined,
+            defaultModel: config.defaultModel ?? "opus",
+            expectRecoveryDecisions: config.withSurgeon ?? false,
+            marketRouteIds: collectiveWorkers.map((worker) => worker.routeId),
+            expectQualityDecisions: acceptanceGate !== null,
+            leaseAuthority: leaseBroker,
+            startAuthority: operator,
+            qualityAuthority: acceptanceGate ?? undefined,
+            integrationAuthority: repositoryAuthority,
+            verifierAuthority: runVerifier,
+            recoveryAuthority: surgeon ?? undefined,
+            discoveryAuthority: collaborationBridge ?? undefined,
+            runtimeReplanAuthority: collaborationBridge ?? undefined,
+            contextAuthority: workContextProvider ?? undefined,
+            outcomeAuthority,
+            verifyBeforePush: true,
+            verificationTimeoutMs:
+                config.collectiveVerificationTimeoutMs ??
+                Math.max(
+                    recommendedVerifyTimeoutMs(verifyPlan),
+                    // The final integrated snapshot may introduce its first
+                    // build/test scripts after this baseline was captured.
+                    21 * 60_000,
+                ),
+        })
+        leaseBroker.setOfferAuthority(board)
+        gitCoordinator?.setEventAuthority(board)
+        gitCoordinator?.setLeaseAuthority(leaseBroker)
+        localRepositoryAgent?.setRequestAuthority(board)
+        workContextProvider?.setRequestAuthority(board)
+        collaborationBridge?.setLeaseAuthority(leaseBroker)
+        collaborationBridge?.setDecisionAuthority(board)
+        criticTargetRegistry?.setRuntimeReplanAuthority(board)
+        dagForwarder?.setRuntimeReplanAuthority(board)
+        surgeon?.setLeaseAuthority(leaseBroker)
+        if (acceptanceGate) surgeon?.setQualityAuthority(acceptanceGate)
+        leaseBroker.join(env)
+        board.join(env)
+        acceptanceGate?.join(env)
+        coordinationDone = board.done
+    }
 
-    // Spawns StoryAgents in response to StorySpawnRequests from Conductor,
-    // dispatching per-spawn on the resolved backend.
-    const storyFactory = new StoryFactory({
+    // Join workers after the coordinator/projector so nested executor events
+    // are ordered behind the lease that authorized them.
+    const factoryBase = {
         cwd: config.cwd,
+        coordinationMode,
+        runId,
         worktrees: worktrees ?? undefined,
+        requireWorktree: coordinationMode === "collective" && worktrees !== null,
+        collaboration: collaborationConfig,
+        leaseAuthority: leaseBroker ?? undefined,
         llm: storyLlm,
         openaiModel: config.storyModel ?? "gpt-5.5",
         storyModelOverride: config.storyModel,
@@ -650,9 +926,29 @@ export async function orchestrate(
         endpoints: config.openaiEndpoints,
         defaultApiKey: process.env.OPENAI_API_KEY,
         executor: config.executor,
-    })
-    storyFactory.setEnvironment(env)
-    storyFactory.join(env)
+        outcomeAuthority,
+        runtimeReplanDecisionAuthority: collectiveBoard ?? undefined,
+    } as const
+    const storyFactories = collectiveWorkers.length > 0
+        ? collectiveWorkers.map(
+              (candidate) =>
+                  new StoryFactory({
+                      ...factoryBase,
+                      workerId: candidate.workerId,
+                      bid: {
+                          routeId: candidate.routeId,
+                          route: candidate.route,
+                          tiers: candidate.tiers,
+                          maxConcurrent: candidate.maxConcurrent,
+                          estimate: candidate.estimate,
+                      },
+                  }),
+          )
+        : [new StoryFactory(factoryBase)]
+    for (const storyFactory of storyFactories) {
+        storyFactory.setEnvironment(env)
+        storyFactory.join(env)
+    }
 
     // Emits StoryIntervention(abort) for a spinning story so it settles as a
     // failed StoryResult the Surgeon can split/escalate, instead of burning
@@ -660,6 +956,37 @@ export async function orchestrate(
     if (config.withSupervisor) {
         new Supervisor().join(env)
     }
+
+    // Dialogue is an optional communication participant, never a root
+    // coordinator. It can explain observed state and send bounded messages to
+    // active workers; Board/Broker/repository/verifier authorities do not
+    // depend on it and the run never awaits its model calls.
+    if (config.withDialogue) {
+        if (!leaseBroker) {
+            throw new Error("DialogueAgent requires the collective LeaseBroker")
+        }
+        const dialogueBackend: DialogueBackend = config.dialogueLlm ??
+            (llm === "openai" ? "openai" : "claude")
+        const responder = config.dialogueResponder ?? createDialogueResponder({
+            backend: dialogueBackend,
+            cwd: config.cwd,
+            model: config.dialogueModel,
+            timeoutMs: config.dialogueTimeoutMs,
+        })
+        dialogueAgent = new DialogueAgent({
+            runId,
+            responder,
+            operatorAuthority: operator,
+            leaseAuthority: leaseBroker,
+            timeoutMs: config.dialogueTimeoutMs,
+        })
+        dialogueAgent.join(env)
+        if (emitTui) new DialogueForwarder(dialogueAgent).join(env)
+        config.onDialogueReady?.(dialogueAgent)
+    }
+    // Do not expose the Operator until every consumer of its commands has
+    // joined; startup-window commands are intentionally dropped by the CLI.
+    config.onOperatorReady?.(operator)
 
     // Emit `init` + `dag` before any agent spawns — without `dag` the TUI's
     // DAG tab sits on "Waiting for DAG data…" forever.
@@ -687,17 +1014,29 @@ export async function orchestrate(
         }
     }
 
-    // There is no `conductor.run()` call — the bus runtime is the loop.
+    if (coordinationMode === "collective" && useGit) {
+        baseSha = await getHeadSha(config.cwd)
+    }
     env.deliverSemanticEvent(
         operator,
         RunStartRequest.create({ reason: "orchestrate" }),
     )
-    const summary = await conductor.done
+    const summary = await coordinationDone
+    // A conversation request must never become a liveness dependency. Leaving
+    // aborts an in-flight responder without delaying verification/finalization.
+    if (dialogueAgent?.getEnvironments().includes(env)) {
+        dialogueAgent.leave(env)
+    }
+    // A verifier timeout cancels its child process through a semantic event.
+    // Do not return while that cancellation/cleanup task is still settling.
+    if (runVerifier) await runVerifier.idle()
 
     // Drain detached pushes + the single worktree merge-back push: after
     // conductor.done so the network can't stall the run, before the
     // Finalizer so its PR sees every commit.
-    if (gitCoordinator) await gitCoordinator.finish()
+    if (coordinationMode === "legacy" && gitCoordinator) {
+        await gitCoordinator.finish()
+    }
 
     // Backstop sweep for straggler worktrees + temp dir + dangling branches.
     await worktrees?.cleanupAll()
@@ -705,7 +1044,11 @@ export async function orchestrate(
     // Drain in-flight async observers so their side effects land in the
     // audit log before this function returns.
     if (critic) await critic.idle()
+    if (acceptanceGate) await acceptanceGate.idle()
     if (surgeon) await surgeon.idle()
+    if (collaborationBridge) await collaborationBridge.idle()
+    if (workContextProvider) await workContextProvider.idle()
+    await modelTelemetryCollector.idle()
     // Await the PR before the TUI `done` event so the completion screen has
     // the PR URL the moment it renders instead of after a race.
     if (finalizer) await finalizer.complete()
@@ -739,6 +1082,20 @@ export async function orchestrate(
             total_time_secs: summary.totalDurationSecs,
             success: summary.success,
             abort_reason: summary.abortReason ?? undefined,
+            verification_status: summary.verificationStatus,
+            verification: summary.verification
+                ? {
+                      verification_id: summary.verification.verificationId,
+                      status: summary.verification.status,
+                      duration_ms: summary.verification.durationMs,
+                      commands: summary.verification.commands.map((command) => ({
+                          command: command.command,
+                          status: command.status,
+                          duration_ms: command.durationMs,
+                          ...(command.tail ? { tail: command.tail } : {}),
+                      })),
+                  }
+                : undefined,
             stats: {
                 stories_completed: summary.completedStories.length,
                 stories_skipped:
@@ -755,6 +1112,99 @@ export async function orchestrate(
         operator,
         storyAgents: new Map(),
     }
+}
+
+export function validateCollectiveWorkers(
+    workers: readonly CollectiveWorkerCandidateConfig[],
+    mode: CoordinationMode,
+    storyModel: string | undefined,
+): void {
+    if (workers.length === 0) return
+    if (mode !== "collective") {
+        throw new Error("collectiveWorkers requires coordinationMode='collective'")
+    }
+    if (storyModel) {
+        throw new Error(
+            "collectiveWorkers cannot be combined with storyModel; candidates bid concrete routes",
+        )
+    }
+    const workerIds = new Set<string>()
+    const routeIds = new Set<string>()
+    for (const [index, worker] of workers.entries()) {
+        const label = `collective worker[${index}]`
+        if (!worker || typeof worker !== "object") {
+            throw new Error(`${label} must be an object`)
+        }
+        if (
+            typeof worker.workerId !== "string" ||
+            !worker.workerId.trim() ||
+            worker.workerId !== worker.workerId.trim() ||
+            workerIds.has(worker.workerId)
+        ) {
+            throw new Error(
+                `${label}.workerId must be a trimmed, non-empty, unique string: ${String(worker.workerId)}`,
+            )
+        }
+        if (
+            typeof worker.routeId !== "string" ||
+            !worker.routeId.trim() ||
+            worker.routeId !== worker.routeId.trim() ||
+            routeIds.has(worker.routeId)
+        ) {
+            throw new Error(
+                `${label}.routeId must be a trimmed, non-empty, unique string: ${String(worker.routeId)}`,
+            )
+        }
+        if (typeof worker.route !== "string" || !worker.route.trim()) {
+            throw new Error(`${label}.route must be a non-empty string`)
+        }
+        if (
+            !worker.estimate ||
+            !isValidWorkBidEstimate(worker.estimate) ||
+            (worker.estimate.estimateSource !== "configured" &&
+                worker.estimate.estimateSource !== "historical")
+        ) {
+            throw new Error(`${label}.estimate is invalid`)
+        }
+        if (
+            worker.maxConcurrent !== undefined &&
+            (!Number.isInteger(worker.maxConcurrent) || worker.maxConcurrent <= 0)
+        ) {
+            throw new Error(
+                `${label}.maxConcurrent must be a positive integer`,
+            )
+        }
+        if (
+            worker.tiers !== undefined &&
+            (!Array.isArray(worker.tiers) ||
+                worker.tiers.some((tier) => typeof tier !== "string" || !tier.trim()))
+        ) {
+            throw new Error(`${label}.tiers must contain non-empty strings`)
+        }
+        workerIds.add(worker.workerId)
+        routeIds.add(worker.routeId)
+    }
+}
+
+function validateCollectiveMarketOptions(
+    workerCount: number,
+    mode: CoordinationMode,
+    bidWindowMs: number | undefined,
+    policy: WorkBidPolicy | undefined,
+): void {
+    if (workerCount === 0 && (bidWindowMs !== undefined || policy !== undefined)) {
+        throw new Error("collective bid window/policy requires at least one worker candidate")
+    }
+    if (workerCount > 0 && mode !== "collective") {
+        throw new Error("collective market requires coordinationMode='collective'")
+    }
+    if (
+        bidWindowMs !== undefined &&
+        (!Number.isFinite(bidWindowMs) || bidWindowMs < 0)
+    ) {
+        throw new Error("collectiveBidWindowMs must be finite and non-negative")
+    }
+    if (policy) selectWorkBid([], policy)
 }
 
 /** Keyword-shaped tokens for Librarian relevance hints. */

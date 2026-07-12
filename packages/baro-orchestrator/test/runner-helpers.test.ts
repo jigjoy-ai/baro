@@ -1,6 +1,6 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { buildInstallServiceArgs, buildReexec, semverLt } from "../scripts/runner-helpers.js"
+import { buildInstallServiceArgs, buildReexec, parseDoneSuccess, semverLt } from "../scripts/runner-helpers.js"
 
 describe("semverLt", () => {
     it("orders plain semvers", () => {
@@ -35,5 +35,15 @@ describe("buildInstallServiceArgs", () => {
     it("passes the control-plane override through when set", () => {
         const args = buildInstallServiceArgs({ token: "rt_abc", workspace: "/w", controlUrl: "wss://staging" })
         assert.deepEqual(args.slice(-2), ["--control-url", "wss://staging"])
+    })
+})
+
+describe("parseDoneSuccess", () => {
+    it("preserves explicit outcomes and treats a legacy missing field as success", () => {
+        assert.equal(parseDoneSuccess(true), true)
+        assert.equal(parseDoneSuccess(false), false)
+        assert.equal(parseDoneSuccess(undefined), true)
+        assert.equal(parseDoneSuccess("false"), null)
+        assert.equal(parseDoneSuccess(null), null)
     })
 })

@@ -8,9 +8,17 @@
  */
 
 import { execFile } from "child_process"
-import { existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from "fs"
+import {
+    appendFileSync,
+    existsSync,
+    mkdirSync,
+    readFileSync,
+    readdirSync,
+    rmSync,
+    symlinkSync,
+} from "fs"
 import { tmpdir } from "os"
-import { join } from "path"
+import { join, resolve } from "path"
 import { promisify } from "util"
 
 import { GitGate } from "./git.js"
@@ -42,6 +50,10 @@ export interface WorktreeManagerOptions {
     linkDepDirs?: boolean
     /** Diagnostic logger (defaults to stderr). */
     onLog?: (line: string) => void
+    /** Return null on create failure so callers may use the shared tree. Default true. */
+    allowSharedFallback?: boolean
+    /** Resolve merge conflicts by retrying with `-X theirs`. Default true. */
+    resolveConflictsWithTheirs?: boolean
 }
 
 /**
@@ -52,11 +64,17 @@ export interface WorktreeManagerOptions {
  */
 export class WorktreeManager {
     private readonly paths = new Map<string, string>()
+    /** Exact run-branch commit each logical story worktree was created from. */
+    private readonly baseShas = new Map<string, string>()
     /** Stories whose merge-back failed: their branch is kept for recovery. */
     private readonly preserved = new Set<string>()
+    private recoverySequence = 0
     private readonly baseDir: string
     private readonly linkDepDirs: boolean
+    private readonly allowSharedFallback: boolean
+    private readonly resolveConflictsWithTheirs: boolean
     private readonly log: (line: string) => void
+    private depExcludesReady = false
 
     constructor(
         private readonly repoRoot: string,
@@ -66,12 +84,20 @@ export class WorktreeManager {
     ) {
         this.baseDir = join(tmpdir(), "baro-worktrees", runId)
         this.linkDepDirs = opts.linkDepDirs ?? true
+        this.allowSharedFallback = opts.allowSharedFallback ?? true
+        this.resolveConflictsWithTheirs = opts.resolveConflictsWithTheirs ?? true
         this.log =
             opts.onLog ?? ((line) => process.stderr.write(`[worktree] ${line}\n`))
     }
 
     private branchOf(storyId: string): string {
         return `baro-wt/${this.runId}/${sanitize(storyId)}`
+    }
+
+    /** The git branch a story's work lives on — needed to recover it when
+     *  merge-back fails and the branch is preserved instead of merged. */
+    branchName(storyId: string): string {
+        return this.branchOf(storyId)
     }
 
     private pathOf(storyId: string): string {
@@ -88,10 +114,15 @@ export class WorktreeManager {
         try {
             const branch = this.branchOf(storyId)
             const path = this.pathOf(storyId)
+            this.baseShas.delete(storyId)
             // A leftover dir/branch from a crash would make `worktree add`
             // fail; best-effort clear first.
             await this.removeWorktreeQuiet(path)
             await this.deleteBranchQuiet(branch)
+
+            const { stdout: baseSha } = await exec("git", ["rev-parse", "HEAD"], {
+                cwd: this.repoRoot,
+            })
 
             await exec(
                 "git",
@@ -99,15 +130,199 @@ export class WorktreeManager {
                 { cwd: this.repoRoot },
             )
             this.paths.set(storyId, path)
-            if (this.linkDepDirs) this.symlinkDepDirs(path)
+            this.baseShas.set(storyId, baseSha.trim())
+            if (this.linkDepDirs) {
+                await this.ensureDepDirsExcluded()
+                this.symlinkDepDirs(path)
+            }
             this.log(`created ${branch} at ${path}`)
             return path
         } catch (e) {
-            this.log(
-                `could not create worktree for ${storyId} (${errMsg(e)}); ` +
-                    `falling back to shared tree`,
-            )
+            const suffix = this.allowSharedFallback
+                ? "; falling back to shared tree"
+                : "; collective mode requires isolation"
+            this.log(`could not create worktree for ${storyId} (${errMsg(e)})${suffix}`)
+            if (!this.allowSharedFallback) throw e
             return null
+        } finally {
+            release()
+        }
+    }
+
+    /**
+     * Turn a merge-failed worktree into an immutable recovery ref, then free
+     * the logical story id so a bounded retry can start from the latest run
+     * branch. The original commit remains inspectable even if retry execution
+     * fails; generic story cleanup never deletes these backup refs.
+     */
+    async prepareConflictRetry(storyId: string): Promise<string> {
+        const release = await this.gate.acquire()
+        try {
+            const path = this.paths.get(storyId)
+            const branch = this.branchOf(storyId)
+            if (!path || !existsSync(path) || !this.preserved.has(storyId)) {
+                throw new Error(`story ${storyId} has no preserved worktree to recover`)
+            }
+
+            const { stdout: status } = await exec("git", ["status", "--porcelain"], {
+                cwd: path,
+            })
+            if (meaningfulStatusLines(status).length > 0) {
+                throw new Error(
+                    `story ${storyId} recovery worktree is dirty; refusing to discard ` +
+                        "uncommitted work",
+                )
+            }
+
+            // mergeBack already ran the leftover safety-net before detecting
+            // the conflict, so this ref is a complete immutable attempt.
+            const backup = await this.createRecoveryBranch(storyId, branch)
+
+            // The backup now owns durability. Release the reusable story ref;
+            // create(storyId) can safely start a fresh worktree at current HEAD.
+            await this.removeWorktreeQuiet(path)
+            if (existsSync(path)) {
+                throw new Error(`could not release preserved worktree for story ${storyId}`)
+            }
+            this.paths.delete(storyId)
+            this.baseShas.delete(storyId)
+            await this.deleteBranchQuiet(branch)
+            const { stdout: remaining } = await exec(
+                "git",
+                ["branch", "--list", branch, "--format=%(refname:short)"],
+                { cwd: this.repoRoot },
+            )
+            if (remaining.trim()) {
+                throw new Error(`could not release preserved branch for story ${storyId}`)
+            }
+            this.preserved.delete(storyId)
+            this.log(
+                `preserved rejected attempt for story ${storyId} at ${backup}; ` +
+                    "fresh recovery will start from the latest run branch",
+            )
+            return backup
+        } finally {
+            release()
+        }
+    }
+
+    /**
+     * Release an execution-failed story without losing meaningful work. When
+     * preservation is requested, uncommitted user changes are first committed
+     * on the isolated story branch; an already-committed partial attempt is
+     * detected against the worktree's recorded creation SHA. Either form is
+     * copied to a unique recovery ref before the reusable worktree and logical
+     * branch are removed, so a next attempt can start at run-branch HEAD.
+     *
+     * An unchanged attempt needs no recovery ref and is cleaned up normally.
+     * If the directory disappeared, the logical branch is compared with its
+     * recorded creation SHA before cleanup. Any inspection/snapshot failure is
+     * fail-closed: the remaining worktree or branch stays in place and this
+     * method rejects.
+     */
+    async cleanupFailed(
+        storyId: string,
+        preserveForRecovery: boolean,
+    ): Promise<string | null> {
+        const release = await this.gate.acquire()
+        try {
+            const path = this.paths.get(storyId)
+            const branch = this.branchOf(storyId)
+            if (!path || !existsSync(path)) {
+                if (preserveForRecovery) {
+                    let branchHead: string | null
+                    try {
+                        branchHead = await this.logicalBranchHead(branch)
+                    } catch (error) {
+                        this.preserved.add(storyId)
+                        throw new Error(
+                            `could not inspect missing worktree branch for story ${storyId}; ` +
+                                `retained ${branch}: ${errMsg(error)}`,
+                        )
+                    }
+                    const baseSha = this.baseShas.get(storyId)
+                    if (branchHead && (!baseSha || branchHead !== baseSha)) {
+                        this.preserved.add(storyId)
+                        const backup = await this.createRecoveryBranch(storyId, branch)
+                        await this.releaseLogicalStory(
+                            storyId,
+                            path ?? this.pathOf(storyId),
+                            branch,
+                        )
+                        this.log(
+                            `preserved failed execution for story ${storyId} at ${backup} ` +
+                                "after its worktree path disappeared",
+                        )
+                        return backup
+                    }
+                }
+                await this.releaseLogicalStory(
+                    storyId,
+                    path ?? this.pathOf(storyId),
+                    branch,
+                )
+                return null
+            }
+
+            if (!preserveForRecovery) {
+                await this.removeWorktreeQuiet(path)
+                this.paths.delete(storyId)
+                this.baseShas.delete(storyId)
+                await this.deleteBranchQuiet(branch)
+                this.preserved.delete(storyId)
+                return null
+            }
+
+            let status: string
+            try {
+                ;({ stdout: status } = await exec(
+                    "git",
+                    ["status", "--porcelain"],
+                    { cwd: path },
+                ))
+            } catch (error) {
+                this.preserved.add(storyId)
+                throw new Error(
+                    `could not inspect failed story ${storyId}; retained dirty worktree ` +
+                        `at ${path}: ${errMsg(error)}`,
+                )
+            }
+            const meaningfulDirty = meaningfulStatusLines(status).length > 0
+            let headSha: string
+            try {
+                ;({ stdout: headSha } = await exec("git", ["rev-parse", "HEAD"], {
+                    cwd: path,
+                }))
+            } catch (error) {
+                this.preserved.add(storyId)
+                throw new Error(
+                    `could not inspect failed story ${storyId} HEAD; retained worktree ` +
+                        `at ${path}: ${errMsg(error)}`,
+                )
+            }
+            const baseSha = this.baseShas.get(storyId)
+            // Missing provenance is unsafe to call clean: preserve the branch
+            // rather than guessing that its commits came from the run branch.
+            const hasStoryCommits = !baseSha || headSha.trim() !== baseSha
+            if (!meaningfulDirty && !hasStoryCommits) {
+                await this.releaseLogicalStory(storyId, path, branch)
+                return null
+            }
+
+            // Mark it before touching the index. cleanupAll() must retain the
+            // worktree if staging, committing, or ref creation fails midway.
+            this.preserved.add(storyId)
+            if (meaningfulDirty) await this.commitFailedWork(storyId, path)
+            const backup = await this.createRecoveryBranch(storyId, branch)
+
+            // The immutable backup now owns durability. It is safe to release
+            // the reusable logical id and let a recovery start from fresh HEAD.
+            await this.releaseLogicalStory(storyId, path, branch)
+            this.log(
+                `preserved failed execution for story ${storyId} at ${backup}; ` +
+                    "fresh recovery will start from the latest run branch",
+            )
+            return backup
         } finally {
             release()
         }
@@ -136,6 +351,13 @@ export class WorktreeManager {
             } catch {
                 const conflicts = await this.conflictedPaths()
                 await this.abortMerge(storyId)
+                if (!this.resolveConflictsWithTheirs) {
+                    this.preserved.add(storyId)
+                    throw new Error(
+                        `story ${storyId} conflicts with already-merged work` +
+                            (conflicts.length ? ` on [${conflicts.join(", ")}]` : ""),
+                    )
+                }
                 this.log(
                     `WARNING: story ${storyId} conflicts with already-merged work` +
                         (conflicts.length ? ` on [${conflicts.join(", ")}]` : "") +
@@ -188,7 +410,9 @@ export class WorktreeManager {
                 await this.removeWorktreeQuiet(path)
                 this.paths.delete(storyId)
             }
+            this.baseShas.delete(storyId)
             await this.deleteBranchQuiet(branch)
+            this.preserved.delete(storyId)
         } finally {
             release()
         }
@@ -201,9 +425,33 @@ export class WorktreeManager {
      */
     async cleanupAll(): Promise<void> {
         const release = await this.gate.acquire()
+        let keptDirtyRecovery = false
         try {
             for (const [storyId, path] of this.paths) {
+                if (this.preserved.has(storyId) && existsSync(path)) {
+                    let status = ""
+                    try {
+                        ;({ stdout: status } = await exec(
+                            "git",
+                            ["status", "--porcelain"],
+                            { cwd: path },
+                        ))
+                    } catch {
+                        // If cleanliness cannot be proven, preserve the path.
+                        status = "?? <status-unavailable>"
+                    }
+                    if (meaningfulStatusLines(status).length > 0) {
+                        keptDirtyRecovery = true
+                        this.log(
+                            `kept dirty recovery worktree for story ${storyId} at ${path}; ` +
+                                `branch ${this.branchOf(storyId)} remains inspectable`,
+                        )
+                        continue
+                    }
+                }
                 await this.removeWorktreeQuiet(path)
+                this.paths.delete(storyId)
+                this.baseShas.delete(storyId)
                 if (this.preserved.has(storyId)) {
                     this.log(
                         `kept branch ${this.branchOf(storyId)} for recovery ` +
@@ -213,9 +461,12 @@ export class WorktreeManager {
                     await this.deleteBranchQuiet(this.branchOf(storyId))
                 }
             }
-            this.paths.clear()
+            if (!keptDirtyRecovery) {
+                this.paths.clear()
+                this.baseShas.clear()
+            }
             await execQuiet("git", ["worktree", "prune"], this.repoRoot)
-            rmSyncQuiet(this.baseDir)
+            if (!keptDirtyRecovery) rmSyncQuiet(this.baseDir)
         } finally {
             release()
         }
@@ -289,6 +540,45 @@ export class WorktreeManager {
         scan("", SCAN_DEPTH)
         this.depLocs = out
         return out
+    }
+
+    /**
+     * A pattern such as `node_modules/` does not ignore a symlink named
+     * `node_modules`, so an agent's explicit `git add -A` could commit our
+     * shared dependency link and turn the run root into a self-referential
+     * symlink after merge-back. Add exact manager-owned paths to the common
+     * repo-local exclude file (linked worktrees share it). Tracked paths are
+     * unaffected by info/exclude.
+     */
+    private async ensureDepDirsExcluded(): Promise<void> {
+        if (this.depExcludesReady) return
+        const { stdout } = await exec(
+            "git",
+            ["rev-parse", "--git-path", "info/exclude"],
+            { cwd: this.repoRoot },
+        )
+        const rawPath = stdout.trim()
+        const excludePath = rawPath.startsWith("/")
+            ? rawPath
+            : resolve(this.repoRoot, rawPath)
+        let existing = ""
+        try {
+            existing = readFileSync(excludePath, "utf8")
+        } catch {
+            /* git normally creates it; appendFileSync will create if needed */
+        }
+        const present = new Set(existing.split("\n").map((line) => line.trim()))
+        const patterns = this.depLocations().map(({ rel, dir }) =>
+            `/${rel ? `${rel}/` : ""}${dir}`,
+        )
+        const missing = patterns.filter((pattern) => !present.has(pattern))
+        if (missing.length > 0) {
+            appendFileSync(
+                excludePath,
+                `\n# baro: shared dependency symlinks\n${missing.join("\n")}\n`,
+            )
+        }
+        this.depExcludesReady = true
     }
 
     private symlinkDepDirs(worktreePath: string): void {
@@ -400,6 +690,131 @@ export class WorktreeManager {
         }
     }
 
+    /** Strict counterpart to the passing-story safety net. Failure here must
+     * retain the worktree instead of allowing cleanup to drop user changes. */
+    private async commitFailedWork(
+        storyId: string,
+        worktreePath: string,
+    ): Promise<void> {
+        try {
+            await exec("git", ["add", "-A"], { cwd: worktreePath })
+
+            const resetSpecs = this.depLocations().map(({ rel, dir }) => join(rel, dir))
+            if (resetSpecs.length > 0) {
+                await execQuiet(
+                    "git",
+                    ["reset", "-q", "--", ...resetSpecs],
+                    worktreePath,
+                )
+            }
+
+            const { stdout } = await exec(
+                "git",
+                ["diff", "--cached", "--name-only", "-z"],
+                { cwd: worktreePath },
+            )
+            const staged = stdout.split("\0").filter(Boolean)
+            const depStaged = staged.filter((path) =>
+                path.split("/").some((segment) => DEP_DIR_NAMES.has(segment)),
+            )
+            if (depStaged.length > 0) {
+                await execQuiet("git", ["reset", "-q"], worktreePath)
+                throw new Error(
+                    `dependency artifacts remained staged: ${depStaged.join(", ")}`,
+                )
+            }
+            if (staged.length === 0) {
+                throw new Error("meaningful dirty paths could not be staged")
+            }
+
+            await exec(
+                "git",
+                [
+                    "commit",
+                    "-m",
+                    `baro: preserve failed work for story ${storyId}`,
+                ],
+                { cwd: worktreePath },
+            )
+            const { stdout: remaining } = await exec(
+                "git",
+                ["status", "--porcelain"],
+                { cwd: worktreePath },
+            )
+            if (meaningfulStatusLines(remaining).length > 0) {
+                throw new Error("meaningful changes remain after the preservation commit")
+            }
+        } catch (error) {
+            throw new Error(
+                `could not preserve failed story ${storyId}; retained worktree at ` +
+                    `${worktreePath}: ${errMsg(error)}`,
+            )
+        }
+    }
+
+    private async createRecoveryBranch(
+        storyId: string,
+        sourceBranch: string,
+    ): Promise<string> {
+        for (;;) {
+            const backup =
+                `baro-recovery/${this.runId}/${sanitize(storyId)}/` +
+                `${++this.recoverySequence}`
+            try {
+                await exec("git", ["branch", backup, sourceBranch], {
+                    cwd: this.repoRoot,
+                })
+                return backup
+            } catch (error) {
+                const { stdout: existing } = await exec(
+                    "git",
+                    ["branch", "--list", backup, "--format=%(refname:short)"],
+                    { cwd: this.repoRoot },
+                )
+                if (existing.trim()) continue
+                throw error
+            }
+        }
+    }
+
+    private async logicalBranchHead(branch: string): Promise<string | null> {
+        const { stdout: listed } = await exec(
+            "git",
+            ["branch", "--list", branch, "--format=%(refname:short)"],
+            { cwd: this.repoRoot },
+        )
+        if (!listed.trim()) return null
+        const { stdout: head } = await exec(
+            "git",
+            ["rev-parse", `refs/heads/${branch}`],
+            { cwd: this.repoRoot },
+        )
+        return head.trim()
+    }
+
+    private async releaseLogicalStory(
+        storyId: string,
+        path: string,
+        branch: string,
+    ): Promise<void> {
+        await this.removeWorktreeQuiet(path)
+        if (existsSync(path)) {
+            throw new Error(`could not release worktree for story ${storyId}`)
+        }
+        this.paths.delete(storyId)
+        this.baseShas.delete(storyId)
+        await this.deleteBranchQuiet(branch)
+        const { stdout: remaining } = await exec(
+            "git",
+            ["branch", "--list", branch, "--format=%(refname:short)"],
+            { cwd: this.repoRoot },
+        )
+        if (remaining.trim()) {
+            throw new Error(`could not release logical branch for story ${storyId}`)
+        }
+        this.preserved.delete(storyId)
+    }
+
     private async conflictedPaths(): Promise<string[]> {
         try {
             const { stdout } = await exec(
@@ -419,8 +834,10 @@ export class WorktreeManager {
         // dir and prune the now-dangling administrative entry.
         if (existsSync(path)) {
             rmSyncQuiet(path)
-            await execQuiet("git", ["worktree", "prune"], this.repoRoot)
         }
+        // Also prune when the directory disappeared outside this process;
+        // otherwise Git still considers its logical branch checked out.
+        await execQuiet("git", ["worktree", "prune"], this.repoRoot)
     }
 
     private async deleteBranchQuiet(branch: string): Promise<void> {
@@ -432,6 +849,20 @@ function sanitize(storyId: string): string {
     // Story ids are short slugs (S1, S2, …) but guard against anything that
     // would break a ref name or a path segment.
     return storyId.replace(/[^A-Za-z0-9._-]/g, "_")
+}
+
+function meaningfulStatusLines(status: string): string[] {
+    return status
+        .split("\n")
+        .map((line) => line.trimEnd())
+        .filter(Boolean)
+        .filter((line) => {
+            // Porcelain v1 prefixes every entry with XY + space. Ignore only
+            // manager-owned dependency symlinks; user files remain blocking.
+            const rawPath = line.length > 3 ? line.slice(3) : line
+            const path = rawPath.replace(/^"|"$/g, "")
+            return !path.split("/").some((segment) => DEP_DIR_NAMES.has(segment))
+        })
 }
 
 async function execQuiet(

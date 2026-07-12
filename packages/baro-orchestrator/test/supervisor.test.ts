@@ -2,7 +2,12 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 
 import { Supervisor, type SupervisorOptions } from "../src/participants/supervisor.js"
-import { StoryIntervention, type StoryInterventionData } from "../src/semantic-events.js"
+import {
+    AgentState,
+    StoryIntervention,
+    StorySpawned,
+    type StoryInterventionData,
+} from "../src/semantic-events.js"
 import { joinWithCapture, type CapturedEnvironment } from "./participants/helpers.js"
 
 // Minimal fakes: the Supervisor only reads source.agentId, item.name, item.args.
@@ -40,6 +45,32 @@ test("a file change resets the no-progress counter", async () => {
     assert.equal(interventions(env).length, 0)
 })
 
+test("real Claude write-tool casing counts as progress", async () => {
+    for (const name of ["Write", "Edit", "MultiEdit", "NotebookEdit"]) {
+        const { sup, env } = supervised({ noProgressToolCalls: 3 })
+        await feed(sup, "S1", "Read", `{"before":"${name}"}`)
+        await feed(sup, "S1", "Grep", `{"before":"${name}"}`)
+        await feed(sup, "S1", name, `{"file_path":"a.ts"}`)
+        await feed(sup, "S1", "Read", `{"after":"${name}"}`)
+        await feed(sup, "S1", "Grep", `{"after":"${name}"}`)
+        assert.equal(
+            interventions(env).length,
+            0,
+            `${name} must reset the no-progress counter`,
+        )
+    }
+})
+
+test("lowercase OpenAI and Codex write tools count as progress case-insensitively", async () => {
+    for (const name of ["write_file", "EDIT_FILE", "edit", "apply_patch"]) {
+        const { sup, env } = supervised({ noProgressToolCalls: 2 })
+        await feed(sup, "S1", "read_file", `{"before":"${name}"}`)
+        await feed(sup, "S1", name, `{"path":"a.ts"}`)
+        await feed(sup, "S1", "read_file", `{"after":"${name}"}`)
+        assert.equal(interventions(env).length, 0, `${name} must count as progress`)
+    }
+})
+
 test("aborts on a repeated identical tool call with no progress", async () => {
     // repeatsNeedNoProgress defaults to floor(noProgressToolCalls/2) = 3, and the
     // 3 read-only greps push sinceLastChange to 3 — so the loop guard is satisfied.
@@ -74,6 +105,27 @@ test("wall-clock with zero file changes trips", async () => {
     assert.equal(interventions(env).length, 1)
 })
 
+test("wall-clock cap is measured from the most recent recognized progress", async () => {
+    let now = 0
+    const { sup, env } = supervised({
+        softCapMs: 1000,
+        noProgressToolCalls: 999,
+        repeatThreshold: 999,
+        now: () => now,
+    })
+    await feed(sup, "S1", "read_file", `{"n":1}`)
+    now = 900
+    await feed(sup, "S1", "Write", `{"file_path":"a.ts"}`)
+    now = 1500
+    await feed(sup, "S1", "read_file", `{"n":2}`)
+    assert.equal(interventions(env).length, 0, "recent write restarts the wall-clock window")
+    now = 2000
+    await feed(sup, "S1", "read_file", `{"n":3}`)
+    const got = interventions(env)
+    assert.equal(got.length, 1)
+    assert.match(got[0]!.reason, /since last recognized file change/)
+})
+
 test("does not false-positive on steady progress", async () => {
     let now = 0
     const { sup, env } = supervised({
@@ -83,7 +135,7 @@ test("does not false-positive on steady progress", async () => {
         now: () => now,
     })
     for (let i = 0; i < 30; i++) {
-        now += 10_000
+        now += 100
         await feed(sup, "S1", i % 2 ? "edit_file" : "read_file", `{"i":${i}}`) // writes every other call
     }
     assert.equal(interventions(env).length, 0, "steady file changes → no stall")
@@ -93,6 +145,46 @@ test("intervenes only once per story", async () => {
     const { sup, env } = supervised({ noProgressToolCalls: 3, repeatThreshold: 999 })
     for (let i = 0; i < 10; i++) await feed(sup, "S1", "read_file", `{"n":${i}}`)
     assert.equal(interventions(env).length, 1, "one intervention despite continued spinning")
+})
+
+test("supervises a retry as a fresh attempt after intervening", async () => {
+    const { sup, env } = supervised({ noProgressToolCalls: 2, repeatThreshold: 999 })
+    await feed(sup, "S1", "Read", `{"attempt":1,"n":1}`)
+    await feed(sup, "S1", "Grep", `{"attempt":1,"n":2}`)
+    assert.equal(interventions(env).length, 1, "attempt 1 intervened")
+
+    await sup.onExternalEvent(
+        { agentId: "S2" } as never,
+        AgentState.create({ agentId: "S1", phase: "waiting" }),
+    )
+    await feed(sup, "S1", "Read", `{"unrelated":"must not reset S1"}`)
+    assert.equal(interventions(env).length, 1, "an uncorrelated lifecycle source cannot reset S1")
+
+    await sup.onExternalEvent(
+        { agentId: "S1" } as never,
+        AgentState.create({
+            agentId: "S1",
+            phase: "waiting",
+            detail: "retrying (attempt 2/3)",
+        }),
+    )
+    await feed(sup, "S1", "Read", `{"attempt":2,"n":1}`)
+    assert.equal(interventions(env).length, 1, "fresh attempt does not inherit counters")
+    await feed(sup, "S1", "Grep", `{"attempt":2,"n":2}`)
+    assert.equal(interventions(env).length, 2, "attempt 2 is independently supervised")
+})
+
+test("a real respawn clears prior intervention state", async () => {
+    const { sup, env } = supervised({ noProgressToolCalls: 1, repeatThreshold: 999 })
+    await feed(sup, "S1", "Read", `{"execution":1}`)
+    assert.equal(interventions(env).length, 1)
+
+    await sup.onExternalEvent(
+        { agentId: "story-factory" } as never,
+        StorySpawned.create({ storyId: "S1" }),
+    )
+    await feed(sup, "S1", "Read", `{"execution":2}`)
+    assert.equal(interventions(env).length, 2, "recovery spawn is supervised independently")
 })
 
 test("tracks stories independently", async () => {

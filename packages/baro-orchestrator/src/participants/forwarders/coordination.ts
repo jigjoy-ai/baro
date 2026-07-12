@@ -2,8 +2,19 @@ import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
 import {
     Coordination,
+    CoordinationModeSelected,
+    CollaborationNote,
     Critique,
+    PeerHelpRequested,
+    RunVerificationCompleted,
+    RunVerificationRequested,
+    RunVerificationTimedOut,
     StoryIntervention,
+    WorkClaimed,
+    WorkDiscovered,
+    WorkLeaseGranted,
+    WorkLeaseExpired,
+    WorkOffered,
     type CoordinationData,
     type CritiqueData,
     type StoryInterventionData,
@@ -30,6 +41,114 @@ export class CoordinationForwarder extends BaseObserver {
         }
         if (StoryIntervention.is(event)) {
             this.handleIntervention(event.data)
+            return
+        }
+        if (CoordinationModeSelected.is(event)) {
+            emit({
+                type: "story_log",
+                id: "_run",
+                line: `[coordination] ${event.data.mode}`,
+            })
+            return
+        }
+        if (RunVerificationRequested.is(event)) {
+            emit({
+                type: "activity",
+                id: "_verify",
+                kind: "test",
+                text: "Verifying the fully integrated run",
+            })
+            emit({
+                type: "story_log",
+                id: "_verify",
+                line: `[verify] started (${event.data.verificationId})`,
+            })
+            return
+        }
+        if (RunVerificationCompleted.is(event)) {
+            const commands = event.data.commands
+                .map((command) => `${command.command}: ${command.status}`)
+                .join(", ")
+            emit({
+                type: "activity",
+                id: "_verify",
+                kind: "test",
+                text: `Run verification ${event.data.status}${commands ? ` — ${commands}` : ""}`,
+                ...(event.data.status === "skipped"
+                    ? {}
+                    : { ok: event.data.status === "passed" }),
+            })
+            emit({
+                type: "story_log",
+                id: "_verify",
+                line: `[verify/${event.data.status}] ${commands || "no build/test command detected"}`,
+            })
+            return
+        }
+        if (RunVerificationTimedOut.is(event)) {
+            emit({
+                type: "activity",
+                id: "_verify",
+                kind: "test",
+                text: `Run verification timed out after ${Math.ceil(event.data.timeoutMs / 1_000)}s`,
+                ok: false,
+            })
+            return
+        }
+        if (WorkOffered.is(event)) {
+            emit({
+                type: "story_log",
+                id: event.data.request.storyId,
+                line: `[collective] work offered (${event.data.offerId})`,
+            })
+            return
+        }
+        if (WorkClaimed.is(event)) {
+            emit({
+                type: "story_log",
+                id: event.data.storyId,
+                line: `[collective] claimed by ${event.data.workerId} → ${event.data.backend}:${event.data.model}`,
+            })
+            return
+        }
+        if (WorkLeaseGranted.is(event)) {
+            emit({
+                type: "story_log",
+                id: event.data.request.storyId,
+                line: `[collective] lease granted to ${event.data.workerId}`,
+            })
+            return
+        }
+        if (WorkLeaseExpired.is(event)) {
+            emit({
+                type: "story_log",
+                id: event.data.storyId,
+                line: `[collective] lease expired: ${event.data.reason}`,
+            })
+            return
+        }
+        if (PeerHelpRequested.is(event)) {
+            emit({
+                type: "story_log",
+                id: event.data.sourceAgentId,
+                line: `[peer/help] ${event.data.text}`,
+            })
+            return
+        }
+        if (CollaborationNote.is(event)) {
+            emit({
+                type: "story_log",
+                id: event.data.sourceAgentId,
+                line: `[peer/note] ${event.data.text}`,
+            })
+            return
+        }
+        if (WorkDiscovered.is(event)) {
+            emit({
+                type: "story_log",
+                id: event.data.sourceAgentId,
+                line: `[peer/discovered] ${event.data.story.id}: ${event.data.reason}`,
+            })
             return
         }
     }

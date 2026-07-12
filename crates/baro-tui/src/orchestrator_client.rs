@@ -22,9 +22,9 @@ pub struct OrchestratorConfig {
     pub skip_git: bool,
     /// Path for the audit JSONL log.
     pub audit_log: Option<PathBuf>,
-    // NOTE: the with_* fields map to mixed-polarity orchestrator flags —
-    // true forwards `--with-critic`/`--with-surgeon`, false forwards
-    // `--no-librarian`/`--no-memory`/`--no-sentry`.
+    // NOTE: the with_* fields map to mixed-polarity orchestrator flags.
+    // Surgeon and its LLM mode are always forwarded explicitly because the
+    // TS CLI defaults both on; omitting a Rust-side false would re-enable it.
     pub with_critic: bool,
     /// Default "haiku" inside the orchestrator.
     pub critic_model: Option<String>,
@@ -285,12 +285,16 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     if !cfg.with_sentry {
         cmd.arg("--no-sentry");
     }
-    if cfg.with_surgeon {
-        cmd.arg("--with-surgeon");
-    }
-    if cfg.surgeon_use_llm {
-        cmd.arg("--surgeon-use-llm");
-    }
+    cmd.arg(if cfg.with_surgeon {
+        "--with-surgeon"
+    } else {
+        "--no-surgeon"
+    });
+    cmd.arg(if cfg.surgeon_use_llm {
+        "--surgeon-use-llm"
+    } else {
+        "--no-surgeon-llm"
+    });
     if let Some(m) = &cfg.surgeon_model {
         cmd.arg("--surgeon-model").arg(m);
     }
@@ -321,7 +325,11 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
         || cfg.critic_llm == "openai"
         || cfg.surgeon_llm == "openai"
         || tier_map_uses_openai
-        || !cfg.openai_endpoints.is_empty();
+        || !cfg.openai_endpoints.is_empty()
+        // Candidate routes live in JSON and are intentionally not duplicated
+        // in Rust. Conservatively expose an explicitly-entered TUI key to the
+        // trusted orchestrator whenever that market is enabled.
+        || std::env::var_os("BARO_COLLECTIVE_WORKERS_FILE").is_some();
     if uses_openai {
         if let Some(key) = &cfg.openai_api_key {
             cmd.env("OPENAI_API_KEY", key);
@@ -341,4 +349,90 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     }
     cmd.arg("--effort").arg(&cfg.effort);
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::{build_command, OrchestratorConfig};
+    use crate::discovery::ScriptEntry;
+
+    fn config(with_surgeon: bool, surgeon_use_llm: bool) -> OrchestratorConfig {
+        OrchestratorConfig {
+            prd_path: "prd.json".into(),
+            cwd: ".".into(),
+            parallel: 1,
+            timeout_secs: 60,
+            override_model: None,
+            default_model: Some("sonnet".to_string()),
+            skip_git: true,
+            audit_log: None,
+            with_critic: false,
+            critic_model: None,
+            with_librarian: true,
+            with_memory: true,
+            with_sentry: true,
+            with_surgeon,
+            surgeon_use_llm,
+            surgeon_model: None,
+            intra_level_delay_secs: None,
+            llm: "claude".to_string(),
+            story_llm: "claude".to_string(),
+            critic_llm: "claude".to_string(),
+            surgeon_llm: "claude".to_string(),
+            openai_api_key: None,
+            openai_base_url: None,
+            effort: "high".to_string(),
+            story_model: None,
+            tier_map: None,
+            openai_endpoints: vec![],
+            echo_raw: false,
+        }
+    }
+
+    fn command_args(cfg: &OrchestratorConfig) -> Vec<String> {
+        let command = build_command(&ScriptEntry::NodeJs("/tmp/cli.mjs".into()), cfg);
+        command
+            .as_std()
+            .get_args()
+            .map(OsStr::to_string_lossy)
+            .map(|arg| arg.into_owned())
+            .collect()
+    }
+
+    fn count(args: &[String], flag: &str) -> usize {
+        args.iter().filter(|arg| arg.as_str() == flag).count()
+    }
+
+    #[test]
+    fn forwards_exactly_one_flag_for_each_surgeon_polarity() {
+        for (with_surgeon, surgeon_use_llm) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let args = command_args(&config(with_surgeon, surgeon_use_llm));
+            assert_eq!(count(&args, "--with-surgeon"), usize::from(with_surgeon));
+            assert_eq!(count(&args, "--no-surgeon"), usize::from(!with_surgeon));
+            assert_eq!(
+                count(&args, "--surgeon-use-llm"),
+                usize::from(surgeon_use_llm),
+            );
+            assert_eq!(
+                count(&args, "--no-surgeon-llm"),
+                usize::from(!surgeon_use_llm),
+            );
+        }
+    }
+
+    #[test]
+    fn quick_equivalent_config_explicitly_disables_surgeon() {
+        // `--quick` sets `with_surgeon=false` while leaving the configured LLM
+        // preference intact. The explicit negative flag is what keeps the TS
+        // default-on Surgeon disabled for that single-story run.
+        let args = command_args(&config(false, true));
+        assert_eq!(count(&args, "--no-surgeon"), 1);
+        assert_eq!(count(&args, "--with-surgeon"), 0);
+        assert_eq!(count(&args, "--surgeon-use-llm"), 1);
+        assert_eq!(count(&args, "--no-surgeon-llm"), 0);
+    }
 }

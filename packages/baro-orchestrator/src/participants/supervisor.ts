@@ -2,31 +2,29 @@
  * Supervisor — live non-convergence detector (mid-run adaptation).
  *
  * Watches each story's tool-call stream and, on a clear stall (long
- * read-only stretch, the same call on repeat, or wall-clock with zero file
- * changes), emits a StoryIntervention(abort) on the bus. StoryFactory aborts
+ * read-only stretch, the same call on repeat, or wall-clock without recent
+ * file changes), emits a StoryIntervention(abort) on the bus. StoryFactory aborts
  * the story so it settles as a failed StoryResult EARLY — the Surgeon then
  * splits/escalates it instead of the run burning its budget on non-terminal
  * retries. Detection here, remediation there; both over the bus.
  */
 
-import { BaseObserver, FunctionCallItem, Participant } from "@mozaik-ai/core"
+import {
+    BaseObserver,
+    FunctionCallItem,
+    Participant,
+    SemanticEvent,
+} from "@mozaik-ai/core"
 
-import { StoryIntervention } from "../semantic-events.js"
-
-/** Tool names that mean the agent is CHANGING the codebase (progress), not just exploring. */
-const WRITE_TOOLS = new Set([
-    "write_file",
-    "edit_file",
-    "edit",
-    "create_file",
-    "apply_patch",
-    "str_replace",
-    "str_replace_editor",
-    "str_replace_based_edit_tool",
-    "multi_edit",
-    "write",
-    "patch",
-])
+import {
+    AgentState,
+    StoryIntervention,
+    StorySpawned,
+} from "../semantic-events.js"
+import {
+    isFileMutationTool,
+    normalizeToolName,
+} from "../tool-classification.js"
 
 export interface SupervisorOptions {
     /** Consecutive tool calls with NO file change before we call it a non-converging loop. Default 80. */
@@ -40,7 +38,7 @@ export interface SupervisorOptions {
      * Defaults to half of noProgressToolCalls.
      */
     repeatsNeedNoProgress?: number
-    /** Wall-clock (ms) with zero file changes before intervening regardless. Default 12 min. */
+    /** Wall-clock (ms) without a recognized file change before intervening. Default 12 min. */
     softCapMs?: number
     /** Safety cap on total interventions per run. Default 25. */
     maxInterventions?: number
@@ -49,8 +47,7 @@ export interface SupervisorOptions {
 }
 
 interface StoryProgress {
-    startedAt: number
-    toolCalls: number
+    lastProgressAt: number
     fileChanges: number
     sinceLastChange: number
     sigCounts: Map<string, number>
@@ -75,6 +72,31 @@ export class Supervisor extends BaseObserver {
         }
     }
 
+    override async onExternalEvent(
+        source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
+        if (StorySpawned.is(event)) {
+            // A recovery can spawn the same logical story id again. The
+            // successful spawn event is the authoritative boundary between
+            // executions, so no intervention/progress state crosses it.
+            this.resetAttempt(event.data.storyId)
+            return
+        }
+
+        if (!AgentState.is(event)) return
+        const { agentId, phase } = event.data
+        const sourceId = (source as unknown as { agentId?: string }).agentId
+        if (sourceId !== agentId) return
+
+        // Story agents emit `waiting` only when they have scheduled another
+        // execution attempt. Reset at that semantic retry boundary so a
+        // Supervisor abort on attempt 1 cannot disable supervision of 2.
+        if (phase === "waiting") {
+            this.resetAttempt(agentId)
+        }
+    }
+
     override async onExternalFunctionCall(
         source: Participant,
         item: FunctionCallItem,
@@ -84,15 +106,18 @@ export class Supervisor extends BaseObserver {
         const st = this.ensure(id)
         if (st.intervened) return
 
-        st.toolCalls += 1
-        if (WRITE_TOOLS.has(item.name)) {
+        if (isFileMutationTool(item.name)) {
             st.fileChanges += 1
             st.sinceLastChange = 0
+            st.lastProgressAt = this.opts.now()
+            // Repeats before an actual file mutation are not evidence that
+            // the post-progress sequence is looping.
+            st.sigCounts.clear()
         } else {
             st.sinceLastChange += 1
         }
 
-        const sig = `${item.name}:${String(item.args ?? "").slice(0, 160)}`
+        const sig = `${normalizeToolName(item.name)}:${String(item.args ?? "").slice(0, 160)}`
         const repeats = (st.sigCounts.get(sig) ?? 0) + 1
         st.sigCounts.set(sig, repeats)
 
@@ -124,9 +149,12 @@ export class Supervisor extends BaseObserver {
         if (repeats >= this.opts.repeatThreshold && st.sinceLastChange >= this.opts.repeatsNeedNoProgress) {
             return `same tool call repeated ${repeats}× with no file change — stuck in a loop`
         }
-        const elapsed = this.opts.now() - st.startedAt
-        if (elapsed >= this.opts.softCapMs && st.fileChanges === 0) {
-            return `${Math.round(elapsed / 60_000)} min elapsed with zero file changes`
+        const sinceProgress = this.opts.now() - st.lastProgressAt
+        if (sinceProgress >= this.opts.softCapMs) {
+            const minutes = Math.round(sinceProgress / 60_000)
+            return st.fileChanges === 0
+                ? `${minutes} min elapsed with zero recognized file changes`
+                : `${minutes} min since last recognized file change`
         }
         return null
     }
@@ -134,9 +162,9 @@ export class Supervisor extends BaseObserver {
     private ensure(id: string): StoryProgress {
         let st = this.stories.get(id)
         if (!st) {
+            const now = this.opts.now()
             st = {
-                startedAt: this.opts.now(),
-                toolCalls: 0,
+                lastProgressAt: now,
                 fileChanges: 0,
                 sinceLastChange: 0,
                 sigCounts: new Map(),
@@ -145,5 +173,10 @@ export class Supervisor extends BaseObserver {
             this.stories.set(id, st)
         }
         return st
+    }
+
+    private resetAttempt(id: string): void {
+        this.stories.delete(id)
+        this.ensure(id)
     }
 }

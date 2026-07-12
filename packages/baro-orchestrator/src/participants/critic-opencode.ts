@@ -17,10 +17,12 @@
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
 import { runOpenCodeOneShot } from "../opencode-one-shot.js"
+import { runnerMeasurement } from "../runner-measurement.js"
+import type { RunnerInvocationObserver } from "../runner-invocation.js"
 import {
-    AgentResult,
     AgentTargetedMessage,
     Critique,
+    ModelInvocationMeasured,
 } from "../semantic-events.js"
 import {
     VERDICT_SYSTEM_PROMPT,
@@ -28,6 +30,7 @@ import {
     buildCorrectiveMessage,
     extractVerdictJson,
 } from "./critic.js"
+import { criticInput } from "./critic-input.js"
 
 export interface CriticOpenCodeOptions {
     /** Map from agentId to its acceptance-criteria strings. */
@@ -44,18 +47,21 @@ export interface CriticOpenCodeOptions {
     opencodeBin?: string
     /** Per-evaluation timeout in milliseconds. Default: 180_000 (3 min). */
     timeoutMs?: number
+    runId?: string
 }
 
 export class CriticOpenCode extends BaseObserver {
     private readonly opts: Required<
-        Omit<CriticOpenCodeOptions, "targets" | "model" | "opencodeBin">
+        Omit<CriticOpenCodeOptions, "targets" | "model" | "opencodeBin" | "runId">
     > & {
         targets: ReadonlyMap<string, readonly string[]>
         model: string | undefined
         opencodeBin: string
+        runId: string | undefined
     }
     private readonly emissions = new Map<string, number>()
     private readonly turnCount = new Map<string, number>()
+    private readonly seenTerminalIds = new Set<string>()
     private readonly pending = new Set<Promise<void>>()
 
     constructor(opts: CriticOpenCodeOptions) {
@@ -66,6 +72,7 @@ export class CriticOpenCode extends BaseObserver {
             opencodeBin: opts.opencodeBin ?? "opencode",
             timeoutMs: opts.timeoutMs ?? 180_000,
             targets: opts.targets,
+            runId: opts.runId,
         }
     }
 
@@ -78,12 +85,17 @@ export class CriticOpenCode extends BaseObserver {
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        if (!AgentResult.is(event)) return
-        const { agentId, isError, resultText } = event.data
+        const input = criticInput(event)
+        if (!input) return
+        const { agentId, isError, resultText, canContinue, terminalId } = input
         if (isError || !resultText) return
 
         const criteria = this.opts.targets.get(agentId)
         if (!criteria || criteria.length === 0) return
+        if (terminalId) {
+            if (this.seenTerminalIds.has(terminalId)) return
+            this.seenTerminalIds.add(terminalId)
+        }
 
         const turn = (this.turnCount.get(agentId) ?? 0) + 1
         this.turnCount.set(agentId, turn)
@@ -92,6 +104,8 @@ export class CriticOpenCode extends BaseObserver {
             const { verdict, reasoning, violatedCriteria } = await this.evaluate(
                 resultText,
                 criteria,
+                agentId,
+                turn,
             )
 
             const critiqueEvent = Critique.create({
@@ -106,7 +120,7 @@ export class CriticOpenCode extends BaseObserver {
                 env.deliverSemanticEvent(this, critiqueEvent)
             }
 
-            if (verdict === "fail") {
+            if (verdict === "fail" && canContinue) {
                 const emitted = this.emissions.get(agentId) ?? 0
                 if (emitted < this.opts.maxEmissionsPerAgent) {
                     this.emissions.set(agentId, emitted + 1)
@@ -137,6 +151,8 @@ export class CriticOpenCode extends BaseObserver {
     private async evaluate(
         resultText: string,
         criteria: readonly string[],
+        agentId: string,
+        turn: number,
     ): Promise<{
         verdict: "pass" | "fail"
         reasoning: string
@@ -153,6 +169,7 @@ export class CriticOpenCode extends BaseObserver {
                 opencodeBin: this.opts.opencodeBin,
                 timeoutMs: this.opts.timeoutMs,
                 label: "opencode-critic",
+                onInvocation: this.invocationObserver(agentId, turn),
             })
 
             const verdictJson = extractVerdictJson(text.trim())
@@ -174,6 +191,28 @@ export class CriticOpenCode extends BaseObserver {
                 verdict: "fail",
                 reasoning: `CriticOpenCode LLM call failed: ${String((err as Error)?.message ?? err)}`,
                 violatedCriteria: ["[critic error — could not evaluate]"],
+            }
+        }
+    }
+
+    private invocationObserver(agentId: string, turn: number): RunnerInvocationObserver {
+        return (observation) => {
+            const event = ModelInvocationMeasured.create(
+                runnerMeasurement(
+                    {
+                        invocationBaseId: `${this.opts.runId ?? "local"}:critic:${agentId}:${turn}`,
+                        runId: this.opts.runId ?? null,
+                        phase: "critic",
+                        storyId: agentId,
+                        turn,
+                        backend: "opencode",
+                        requestedModel: this.opts.model ?? null,
+                    },
+                    observation,
+                ),
+            )
+            for (const env of this.getEnvironments()) {
+                env.deliverSemanticEvent(this, event)
             }
         }
     }

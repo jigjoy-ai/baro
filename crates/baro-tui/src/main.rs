@@ -5,6 +5,7 @@ mod config;
 mod constants;
 mod context;
 mod discovery;
+mod dag_state;
 mod doctor;
 mod events;
 mod executor;
@@ -46,9 +47,13 @@ fn review_stories_from_prd(prd: &executor::PrdFile) -> Vec<ReviewStory> {
         .iter()
         .map(|s| ReviewStory {
             id: s.id.clone(),
+            priority: s.priority,
             title: s.title.clone(),
             description: s.description.clone(),
             depends_on: s.depends_on.clone(),
+            retries: s.retries,
+            acceptance: s.acceptance.clone(),
+            tests: s.tests.clone(),
             completed: s.passes,
             model: s.model.clone(),
         })
@@ -173,16 +178,44 @@ struct ModeContractView {
 #[derive(serde::Deserialize)]
 struct PrdStoryOutput {
     id: String,
+    #[serde(default)]
+    priority: i32,
     title: String,
     #[serde(default)]
     description: String,
     #[serde(default)]
     #[serde(rename = "dependsOn")]
     depends_on: Vec<String>,
+    #[serde(default = "default_story_retries")]
+    retries: u32,
+    #[serde(default)]
+    acceptance: Vec<String>,
+    #[serde(default)]
+    tests: Vec<String>,
     #[serde(default)]
     model: Option<String>,
 }
 
+fn default_story_retries() -> u32 {
+    2
+}
+
+impl From<PrdStoryOutput> for ReviewStory {
+    fn from(story: PrdStoryOutput) -> Self {
+        Self {
+            id: story.id,
+            priority: story.priority,
+            title: story.title,
+            description: story.description,
+            depends_on: story.depends_on,
+            retries: story.retries,
+            acceptance: story.acceptance,
+            tests: story.tests,
+            completed: false,
+            model: story.model,
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -203,7 +236,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // terminal (below) — the alternate screen purges it.
     let update_notice = notify_update();
 
-     let (cli, _lock) = cli::cli::parse()?;
+    let (cli, _lock) = cli::cli::parse()?;
+    std::env::set_var("BARO_COORDINATION", &cli.coordination);
+    if cli.local_only {
+        std::env::set_var("BARO_LOCAL_ONLY", "1");
+    }
+    if let Some(value) = &cli.collective_workers {
+        std::env::set_var("BARO_COLLECTIVE_WORKERS_FILE", value);
+    }
+    if let Some(value) = cli.collective_bid_window_ms {
+        std::env::set_var("BARO_COLLECTIVE_BID_WINDOW_MS", value.to_string());
+    }
+    if let Some(value) = cli.collective_min_success {
+        std::env::set_var("BARO_COLLECTIVE_MIN_SUCCESS", value.to_string());
+    }
+    if let Some(value) = cli.collective_max_cost_usd {
+        std::env::set_var("BARO_COLLECTIVE_MAX_COST_USD", value.to_string());
+    }
+    if let Some(value) = cli.collective_max_latency_ms {
+        std::env::set_var("BARO_COLLECTIVE_MAX_LATENCY_MS", value.to_string());
+    }
+    if cli.with_dialogue {
+        std::env::set_var("BARO_WITH_DIALOGUE", "1");
+    }
+    if let Some(value) = &cli.dialogue_llm {
+        std::env::set_var("BARO_DIALOGUE_LLM", value);
+    }
+    if let Some(value) = &cli.dialogue_model {
+        std::env::set_var("BARO_DIALOGUE_MODEL", value);
+    }
 
     // --doctor short-circuits before any TUI setup — it must work even
     // when the things a real run depends on (e.g. claude auth) are broken.
@@ -1556,12 +1617,7 @@ async fn run_app(
                                 let text = text.trim().to_string();
                                 if !text.is_empty() {
                                     if let Some(sender) = &app.orchestrator_stdin {
-                                        let line = serde_json::json!({
-                                            "type": "agent_message",
-                                            "id": id,
-                                            "text": text,
-                                        })
-                                        .to_string();
+                                        let line = message_command_line(&id, &text);
                                         let _ = sender.try_send(line);
                                     }
                                     app.echo_user_message(&id, &text);
@@ -1578,6 +1634,9 @@ async fn run_app(
                             if let Some(id) = app.message_target() {
                                 app.agent_msg_input = Some((id, String::new()));
                             }
+                        }
+                        KeyCode::Char('c') if !app.done && app.followup_input.is_none() => {
+                            app.open_dialogue();
                         }
                         KeyCode::Char('r') if app.done && app.exit_reason.is_some() => {
                             let prd_path = cwd.join("prd.json");
@@ -1771,7 +1830,20 @@ async fn run_app(
             None => break,
         }
     }
+    // The JSON `done` event is the authoritative outcome. The orchestrator
+    // process can exit cleanly after emitting `success:false`; automation must
+    // still receive a non-zero baro exit code instead of mistaking that for a
+    // successful run.
+    if headless {
+        if let Some(reason) = headless_failure_reason(&app) {
+            return Err(reason.into());
+        }
+    }
     Ok(())
+}
+
+fn headless_failure_reason(app: &App) -> Option<String> {
+    app.exit_reason.clone()
 }
 
 /// Stage A of planning: Architect, then execution-mode contract
@@ -2040,14 +2112,7 @@ async fn run_planner_and_report(
         })?;
         let stories: Vec<ReviewStory> = prd.user_stories
             .into_iter()
-            .map(|s| ReviewStory {
-                id: s.id,
-                title: s.title,
-                description: s.description,
-                depends_on: s.depends_on,
-                completed: false,
-                model: s.model,
-            })
+            .map(ReviewStory::from)
             .collect();
         Ok((stories, prd.project, prd.branch_name, prd.description, prd.execution_mode))
     }) {
@@ -2167,14 +2232,7 @@ fn spawn_refiner(app: &App, feedback: &str, cwd: &Path, tx: mpsc::Sender<AppEven
 
             let stories: Vec<ReviewStory> = prd.user_stories
                 .into_iter()
-                .map(|s| ReviewStory {
-                    id: s.id,
-                    title: s.title,
-                    description: s.description,
-                    depends_on: s.depends_on,
-                    completed: false,
-                    model: s.model,
-                })
+                .map(ReviewStory::from)
                 .collect();
 
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>((stories, prd.project, prd.branch_name, prd.description))
@@ -2266,8 +2324,13 @@ fn spawn_executor(
         }
     });
 
-    let default_model = if config.model_routing {
-        Some("opus".to_string())
+    // Preserve PRD light/standard/heavy classes only for the opt-in collective
+    // market so workers can bid by tier. Legacy intentionally keeps its
+    // historical global Opus default unchanged.
+    let collective = std::env::var("BARO_COORDINATION")
+        .is_ok_and(|mode| mode == "collective");
+    let default_model = if config.model_routing && collective {
+        None
     } else {
         Some("opus".to_string())
     };
@@ -2515,9 +2578,29 @@ fn delete_prev_word(s: &mut String) {
     }
 }
 
+fn message_command_line(id: &str, text: &str) -> String {
+    if id == app::DIALOGUE_AGENT_ID {
+        serde_json::json!({
+            "type": "dialogue_message",
+            "text": text,
+        })
+        .to_string()
+    } else {
+        serde_json::json!({
+            "type": "agent_message",
+            "id": id,
+            "text": text,
+        })
+        .to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{delete_prev_word, parse_confirm_mode, stdin_command_line};
+    use super::{
+        delete_prev_word, headless_failure_reason, message_command_line, parse_confirm_mode,
+        stdin_command_line, App, PrdStoryOutput, ReviewStory,
+    };
 
     fn deleted(input: &str) -> String {
         let mut s = input.to_string();
@@ -2547,6 +2630,18 @@ mod tests {
     }
 
     #[test]
+    fn message_command_distinguishes_collective_from_story_chat() {
+        assert_eq!(
+            message_command_line(crate::app::DIALOGUE_AGENT_ID, "status"),
+            r#"{"text":"status","type":"dialogue_message"}"#,
+        );
+        assert_eq!(
+            message_command_line("S2", "run tests"),
+            r#"{"id":"S2","text":"run tests","type":"agent_message"}"#,
+        );
+    }
+
+    #[test]
     fn parse_confirm_mode_cases() {
         assert_eq!(
             parse_confirm_mode(r#"{"kind":"confirm_mode","mode":"parallel"}"#).as_deref(),
@@ -2562,5 +2657,47 @@ mod tests {
         assert_eq!(parse_confirm_mode(r#"{"kind":"other","mode":"parallel"}"#), None);
         assert_eq!(parse_confirm_mode(r#"{"kind":"confirm_mode"}"#), None); // no mode
         assert_eq!(parse_confirm_mode("not json"), None);
+    }
+
+    #[test]
+    fn failed_done_is_a_headless_process_failure() {
+        let mut app = App::new();
+        app.handle_event(
+            serde_json::from_str(
+                r#"{"type":"done","total_time_secs":7,"success":false,
+                    "abort_reason":"verification failed: npm run test",
+                    "verification":{"verification_id":"verify-1","status":"failed",
+                    "duration_ms":12,"commands":[{"command":"npm run test",
+                    "status":"failed","duration_ms":12,"tail":"tests failed"}]},
+                    "stats":{"stories_completed":1,"stories_skipped":0,
+                    "total_commits":1,"files_created":1,"files_modified":0}}"#,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            headless_failure_reason(&app).as_deref(),
+            Some("verification failed: npm run test"),
+        );
+        assert_eq!(app.verification_status.as_deref(), Some("failed"));
+        let evidence = app.verification.as_ref().unwrap();
+        assert_eq!(evidence.verification_id, "verify-1");
+        assert_eq!(evidence.commands[0].tail.as_deref(), Some("tests failed"));
+    }
+
+    #[test]
+    fn planner_story_metadata_reaches_review_story() {
+        let output: PrdStoryOutput = serde_json::from_str(
+            r#"{"id":"S4","priority":17,"title":"Keep metadata","description":"Round trip","dependsOn":["S1"],"retries":4,"acceptance":["criterion"],"tests":["cargo test"],"model":"heavy"}"#,
+        )
+        .unwrap();
+
+        let story = ReviewStory::from(output);
+        assert_eq!(story.priority, 17);
+        assert_eq!(story.depends_on, ["S1"]);
+        assert_eq!(story.retries, 4);
+        assert_eq!(story.acceptance, ["criterion"]);
+        assert_eq!(story.tests, ["cargo test"]);
+        assert_eq!(story.model.as_deref(), Some("heavy"));
     }
 }

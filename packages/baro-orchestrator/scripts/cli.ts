@@ -4,10 +4,15 @@
  * line) plus a compact human summary on stderr. See --help for flags.
  */
 
-import { existsSync } from "fs"
+import { existsSync, readFileSync } from "fs"
 import { resolve } from "path"
 
-import { orchestrate, type OrchestrateConfig } from "../src/orchestrate.js"
+import {
+    orchestrate,
+    validateCollectiveWorkers,
+    type CollectiveWorkerCandidateConfig,
+    type OrchestrateConfig,
+} from "../src/orchestrate.js"
 import { ClaudeCliParticipant } from "../src/participants/claude-cli-participant.js"
 import { CodexCliParticipant } from "../src/participants/codex-cli-participant.js"
 import { OpenCodeCliParticipant } from "../src/participants/opencode-cli-participant.js"
@@ -15,6 +20,7 @@ import { PiCliParticipant } from "../src/participants/pi-cli-participant.js"
 import type { Operator } from "../src/participants/operator.js"
 import { handleStdinCommand } from "../src/stdin-commands.js"
 import { subscribeCommands } from "../src/tui-protocol.js"
+import type { CoordinationMode } from "../src/semantic-events.js"
 import {
     parseEndpoints,
     parseTierMap,
@@ -28,6 +34,13 @@ interface CliArgs {
     cwd: string
     parallel: number
     timeout: number
+    coordinationMode?: CoordinationMode
+    collectiveWorkersFile?: string
+    collectiveBidWindowMs?: number
+    collectiveMinSuccessProbability?: number
+    collectiveMaxCostUsd?: number
+    collectiveMaxLatencyMs?: number
+    localOnly: boolean
     model?: string
     noGit: boolean
     continueRun: boolean
@@ -41,6 +54,9 @@ interface CliArgs {
     withSurgeon: boolean
     surgeonUseLlm: boolean
     withSupervisor: boolean
+    withDialogue: boolean
+    dialogueLlm?: "claude" | "openai"
+    dialogueModel?: string
     surgeonModel?: string
     storyModel?: string
     effort?: string
@@ -62,6 +78,7 @@ function parseArgs(argv: string[]): CliArgs {
         cwd: ".",
         parallel: 0,
         timeout: 0, // 0 = auto (effort-scaled in storyTimeoutSecs); --timeout N overrides absolutely
+        localOnly: false,
         noGit: false,
         continueRun: false,
         noTuiEvents: false,
@@ -75,6 +92,7 @@ function parseArgs(argv: string[]): CliArgs {
         withSurgeon: true,
         surgeonUseLlm: true,
         withSupervisor: true,
+        withDialogue: false,
         endpointSpecs: [],
         llm: "claude",
         help: false,
@@ -97,6 +115,47 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--timeout":
                 args.timeout = parseInt(required(argv, ++i, "--timeout"), 10)
+                break
+            case "--coordination": {
+                const value = required(argv, ++i, "--coordination")
+                if (value !== "legacy" && value !== "collective") {
+                    process.stderr.write(
+                        `[cli] --coordination must be 'legacy' or 'collective', got '${value}'\n`,
+                    )
+                    process.exit(2)
+                }
+                args.coordinationMode = value
+                break
+            }
+            case "--local-only":
+                args.localOnly = true
+                break
+            case "--collective-workers":
+                args.collectiveWorkersFile = required(argv, ++i, "--collective-workers")
+                break
+            case "--collective-bid-window-ms":
+                args.collectiveBidWindowMs = nonNegativeNumber(
+                    required(argv, ++i, "--collective-bid-window-ms"),
+                    "--collective-bid-window-ms",
+                )
+                break
+            case "--collective-min-success":
+                args.collectiveMinSuccessProbability = probability(
+                    required(argv, ++i, "--collective-min-success"),
+                    "--collective-min-success",
+                )
+                break
+            case "--collective-max-cost-usd":
+                args.collectiveMaxCostUsd = nonNegativeNumber(
+                    required(argv, ++i, "--collective-max-cost-usd"),
+                    "--collective-max-cost-usd",
+                )
+                break
+            case "--collective-max-latency-ms":
+                args.collectiveMaxLatencyMs = nonNegativeNumber(
+                    required(argv, ++i, "--collective-max-latency-ms"),
+                    "--collective-max-latency-ms",
+                )
                 break
             case "--model":
                 args.model = required(argv, ++i, "--model")
@@ -134,6 +193,9 @@ function parseArgs(argv: string[]): CliArgs {
             case "--surgeon-use-llm":
                 args.surgeonUseLlm = true
                 break
+            case "--no-surgeon-llm":
+                args.surgeonUseLlm = false
+                break
             case "--no-surgeon":
                 args.withSurgeon = false
                 break
@@ -142,6 +204,23 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--with-supervisor":
                 args.withSupervisor = true
+                break
+            case "--with-dialogue":
+                args.withDialogue = true
+                break
+            case "--dialogue-llm": {
+                const value = required(argv, ++i, "--dialogue-llm")
+                if (value !== "claude" && value !== "openai") {
+                    process.stderr.write(
+                        `[cli] --dialogue-llm must be 'claude' or 'openai', got '${value}'\n`,
+                    )
+                    process.exit(2)
+                }
+                args.dialogueLlm = value
+                break
+            }
+            case "--dialogue-model":
+                args.dialogueModel = required(argv, ++i, "--dialogue-model")
                 break
             case "--surgeon-model":
                 args.surgeonModel = required(argv, ++i, "--surgeon-model")
@@ -212,6 +291,32 @@ function required(argv: string[], i: number, flag: string): string {
     return v
 }
 
+function nonNegativeNumber(raw: string, flag: string): number {
+    const value = Number(raw)
+    if (!Number.isFinite(value) || value < 0) {
+        process.stderr.write(`[cli] ${flag} must be a finite non-negative number\n`)
+        process.exit(2)
+    }
+    return value
+}
+
+function probability(raw: string, flag: string): number {
+    const value = Number(raw)
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+        process.stderr.write(`[cli] ${flag} must be between 0 and 1\n`)
+        process.exit(2)
+    }
+    return value
+}
+
+function optionalEnvNumber(
+    name: string,
+    parse: (raw: string, label: string) => number,
+): number | undefined {
+    const raw = process.env[name]
+    return raw === undefined ? undefined : parse(raw, name)
+}
+
 function printHelp(): void {
     process.stdout.write(
         [
@@ -225,17 +330,29 @@ function printHelp(): void {
             "  --cwd <path>          Working directory (default: .)",
             "  --parallel <N>        Max parallel stories per level (0 = unlimited)",
             "  --timeout <secs>      Per-story timeout (default: auto — effort-scaled; any value overrides)",
+            "  --coordination <mode> Coordination engine: legacy|collective (default: legacy)",
+            "  --local-only          Disable Baro-owned pushes/PRs (use a remote-free clone for hard isolation)",
+            "  --collective-workers <json>  Candidate array file for opt-in worker bidding",
+            "  --collective-bid-window-ms <N>  Local bid collection window (default: 50)",
+            "  --collective-min-success <0..1>  Reject lower-confidence bids",
+            "  --collective-max-cost-usd <N>    Reject bids above expected attempt cost",
+            "  --collective-max-latency-ms <N>  Reject bids above estimated latency",
             "  --model <name>        Override model (opus, sonnet, haiku)",
             "  --no-git              Skip git lifecycle (branch / push)",
             "  --no-tui-events       Skip BaroEvent JSON emission",
             "  --audit-log <path>    Persist all bus events to JSONL",
             "  --with-critic         Enable Critic (live acceptance evaluator)",
             "  --critic-model <name> Model for Critic (default: haiku)",
+            "  --with-dialogue       Enable collective conversation participant (no control authority)",
+            "  --dialogue-llm <name> Text-only dialogue backend: claude|openai (default: claude)",
+            "  --dialogue-model <id> Model for the optional DialogueAgent",
             "  --no-librarian        Disable Librarian (cross-agent memory)",
             "  --no-memory           Disable semantic memory (uses tag-based Librarian instead)",
             "  --no-sentry           Disable Sentry (file conflict detector)",
-            "  --with-surgeon        Enable Surgeon (adaptive DAG mutation)",
-            "  --surgeon-use-llm     Use LLM evaluation in Surgeon (default: deterministic)",
+            "  --with-surgeon        Enable Surgeon (adaptive DAG mutation; default: on)",
+            "  --no-surgeon          Disable Surgeon",
+            "  --surgeon-use-llm     Use LLM evaluation in Surgeon (default: on)",
+            "  --no-surgeon-llm      Use deterministic Surgeon evaluation",
             "  --surgeon-model <name> Model for Surgeon LLM (default: opus)",
             "  --intra-level-delay <secs>  Stagger story spawns within a level (default: 10, 0 disables)",
             "  --tier-map <spec>     Bind per-story tiers to backends, e.g.",
@@ -259,6 +376,51 @@ async function main(): Promise<void> {
         printHelp()
         return
     }
+
+    const envCoordination = process.env.BARO_COORDINATION
+    if (
+        !args.coordinationMode &&
+        envCoordination &&
+        envCoordination !== "legacy" &&
+        envCoordination !== "collective"
+    ) {
+        process.stderr.write(
+            `[cli] BARO_COORDINATION must be 'legacy' or 'collective', got '${envCoordination}'\n`,
+        )
+        process.exit(2)
+    }
+    const coordinationMode =
+        args.coordinationMode ??
+        (envCoordination as CoordinationMode | undefined) ??
+        "legacy"
+    const localOnly = args.localOnly || process.env.BARO_LOCAL_ONLY === "1"
+    const withDialogue = args.withDialogue || process.env.BARO_WITH_DIALOGUE === "1"
+    const dialogueLlm = args.dialogueLlm ?? parseDialogueBackend(
+        process.env.BARO_DIALOGUE_LLM,
+        "BARO_DIALOGUE_LLM",
+    )
+    const dialogueModel = args.dialogueModel ?? process.env.BARO_DIALOGUE_MODEL
+    if (withDialogue && coordinationMode !== "collective") {
+        process.stderr.write("[cli] --with-dialogue requires --coordination collective\n")
+        process.exit(2)
+    }
+    const collectiveBidWindowMs = args.collectiveBidWindowMs ?? optionalEnvNumber(
+        "BARO_COLLECTIVE_BID_WINDOW_MS",
+        nonNegativeNumber,
+    )
+    const collectiveMinSuccessProbability =
+        args.collectiveMinSuccessProbability ?? optionalEnvNumber(
+            "BARO_COLLECTIVE_MIN_SUCCESS",
+            probability,
+        )
+    const collectiveMaxCostUsd = args.collectiveMaxCostUsd ?? optionalEnvNumber(
+        "BARO_COLLECTIVE_MAX_COST_USD",
+        nonNegativeNumber,
+    )
+    const collectiveMaxLatencyMs = args.collectiveMaxLatencyMs ?? optionalEnvNumber(
+        "BARO_COLLECTIVE_MAX_LATENCY_MS",
+        nonNegativeNumber,
+    )
 
     // `--tier-map` wins; otherwise fall back to BARO_TIER_MAP env (how
     // the Rust TUI forwards the operator's choice to this subprocess).
@@ -317,6 +479,58 @@ async function main(): Promise<void> {
         process.stderr.write(`[cli] PRD not found: ${prdPath}\n`)
         process.exit(2)
     }
+    const workersFile =
+        args.collectiveWorkersFile ?? process.env.BARO_COLLECTIVE_WORKERS_FILE
+    let collectiveWorkers: CollectiveWorkerCandidateConfig[] | undefined
+    if (workersFile) {
+        const path = resolve(cwd, workersFile)
+        try {
+            const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
+            if (!Array.isArray(parsed)) {
+                throw new Error("top-level JSON value must be an array")
+            }
+            collectiveWorkers = parsed as CollectiveWorkerCandidateConfig[]
+            validateCollectiveWorkers(
+                collectiveWorkers,
+                coordinationMode,
+                args.storyModel,
+            )
+            for (const [index, worker] of collectiveWorkers.entries()) {
+                if (worker?.estimate?.estimateSource !== "configured") {
+                    throw new Error(
+                        `worker[${index}].estimate.estimateSource must be 'configured' in a static candidate file`,
+                    )
+                }
+            }
+        } catch (error) {
+            process.stderr.write(
+                `[cli] invalid collective workers file ${path}: ${(error as Error).message}\n`,
+            )
+            process.exit(2)
+        }
+    }
+    const hasMarketPolicy =
+        collectiveMinSuccessProbability !== undefined ||
+        collectiveMaxCostUsd !== undefined ||
+        collectiveMaxLatencyMs !== undefined
+    if (workersFile && collectiveWorkers?.length === 0) {
+        process.stderr.write("[cli] collective workers file must contain at least one candidate\n")
+        process.exit(2)
+    }
+    if (
+        (workersFile || collectiveBidWindowMs !== undefined || hasMarketPolicy) &&
+        coordinationMode !== "collective"
+    ) {
+        process.stderr.write("[cli] collective market options require --coordination collective\n")
+        process.exit(2)
+    }
+    if (
+        !collectiveWorkers?.length &&
+        (collectiveBidWindowMs !== undefined || hasMarketPolicy)
+    ) {
+        process.stderr.write("[cli] collective bid window/policy requires --collective-workers\n")
+        process.exit(2)
+    }
 
     // TUI→orchestrator command lane on stdin (agent chat). The Operator
     // joins the bus a beat after startup; commands arriving before that
@@ -334,6 +548,18 @@ async function main(): Promise<void> {
         },
         parallel: args.parallel,
         timeoutSecs: args.timeout,
+        coordinationMode,
+        publishRemote: !localOnly,
+        collectiveWorkers,
+        collectiveBidWindowMs,
+        collectiveBidPolicy:
+            hasMarketPolicy
+                ? {
+                      minSuccessProbability: collectiveMinSuccessProbability,
+                      maxCostUsd: collectiveMaxCostUsd,
+                      maxLatencyMs: collectiveMaxLatencyMs,
+                  }
+                : undefined,
         overrideModel: args.model ?? null,
         defaultModel: args.model ?? "sonnet",
         emitTuiEvents: !args.noTuiEvents,
@@ -342,6 +568,9 @@ async function main(): Promise<void> {
         auditLogPath: args.auditLog,
         withCritic: args.withCritic,
         criticModel: args.criticModel,
+        withDialogue,
+        dialogueLlm,
+        dialogueModel,
         withLibrarian: args.noLibrarian ? false : undefined,
         withMemory: args.noMemory ? false : undefined,
         withSentry: args.noSentry ? false : undefined,
@@ -360,16 +589,20 @@ async function main(): Promise<void> {
         openaiEndpoints,
     }
 
-    if (args.llm === "openai" && !process.env.OPENAI_API_KEY) {
+    if (
+        ([args.llm, args.storyLlm, args.criticLlm, args.surgeonLlm].includes("openai") ||
+            (withDialogue && dialogueLlm === "openai") ||
+            collectiveWorkers?.some((worker) => worker.route.startsWith("openai:"))) &&
+        !process.env.OPENAI_API_KEY
+    ) {
         process.stderr.write(
-            "[cli] WARNING: --llm openai requested but OPENAI_API_KEY is not set.\n" +
-            "[cli]          The current build falls through to Claude behaviour;\n" +
-            "[cli]          set OPENAI_API_KEY before phase 3+ OpenAI siblings ship.\n",
+            "[cli] WARNING: an OpenAI phase was requested but OPENAI_API_KEY is not set.\n" +
+            "[cli]          Configure OPENAI_API_KEY or a keyed named endpoint before running.\n",
         )
     }
 
     process.stderr.write(
-        `[cli] starting orchestrator: prd=${prdPath} cwd=${cwd} parallel=${args.parallel} timeout=${args.timeout}s llm=${args.llm}\n`,
+        `[cli] starting orchestrator: prd=${prdPath} cwd=${cwd} parallel=${args.parallel} timeout=${args.timeout}s llm=${args.llm} coordination=${coordinationMode}${localOnly ? " local-only" : ""}\n`,
     )
 
     const startedAt = Date.now()
@@ -378,13 +611,24 @@ async function main(): Promise<void> {
         const elapsed = Math.round((Date.now() - startedAt) / 1000)
         const passed = result.summary.completedStories.length
         const failed = result.summary.failedStories.length
+        const dropped = result.summary.droppedStories.length
         process.stderr.write(
-            `[cli] complete in ${elapsed}s — ${passed} passed, ${failed} failed (${result.summary.totalAttempts} attempts)\n`,
+            `[cli] complete in ${elapsed}s — ${passed} passed, ${failed} failed, ${dropped} dropped (${result.summary.totalAttempts} attempts)\n`,
         )
-        if (failed > 0) {
-            process.stderr.write(
-                `[cli] failed stories: ${result.summary.failedStories.join(", ")}\n`,
-            )
+        if (!result.summary.success) {
+            if (failed > 0) {
+                process.stderr.write(
+                    `[cli] failed stories: ${result.summary.failedStories.join(", ")}\n`,
+                )
+            }
+            if (dropped > 0) {
+                process.stderr.write(
+                    `[cli] dropped stories: ${result.summary.droppedStories.join(", ")}\n`,
+                )
+            }
+            if (result.summary.abortReason) {
+                process.stderr.write(`[cli] stopped: ${result.summary.abortReason}\n`)
+            }
             process.exit(1)
         }
         // Explicit exit — open handles (ONNX model, Mozaik timers) prevent
@@ -396,6 +640,16 @@ async function main(): Promise<void> {
         )
         process.exit(1)
     }
+}
+
+function parseDialogueBackend(
+    value: string | undefined,
+    label: string,
+): "claude" | "openai" | undefined {
+    if (value === undefined || value === "") return undefined
+    if (value === "claude" || value === "openai") return value
+    process.stderr.write(`[cli] ${label} must be 'claude' or 'openai', got '${value}'\n`)
+    process.exit(2)
 }
 
 // Without these guards, an unhandled rejection in a Participant's

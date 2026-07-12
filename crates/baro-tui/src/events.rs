@@ -33,6 +33,27 @@ pub struct DiffFile {
     pub removed: u32,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct VerificationCommandEvidence {
+    pub command: String,
+    pub status: String,
+    #[allow(dead_code)]
+    pub duration_ms: u64,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub tail: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RunVerificationEvidence {
+    #[allow(dead_code)]
+    pub verification_id: String,
+    pub status: String,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub commands: Vec<VerificationCommandEvidence>,
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ReplanStory {
     #[serde(default)]
@@ -175,6 +196,13 @@ pub enum BaroEvent {
         /// Reason for an abort/early-termination if `success` is false.
         #[serde(default)]
         abort_reason: Option<String>,
+        /// Objective run-level gate. `skipped` means no build/test command
+        /// could be detected, so the run is complete but not verified.
+        #[serde(default)]
+        verification_status: Option<String>,
+        /// Full correlated command evidence behind `verification_status`.
+        #[serde(default)]
+        verification: Option<RunVerificationEvidence>,
     },
 
     #[serde(rename = "notification_ready")]
@@ -189,6 +217,22 @@ pub enum BaroEvent {
         /// for subscription paths. Summed into a per-run cost.
         #[serde(default)]
         cost_usd: Option<f64>,
+    },
+
+    /// Full backend-neutral measurement. The current UI keeps using the
+    /// compatibility TokenUsage projection while Cloud/audit consume this.
+    #[serde(rename = "model_usage")]
+    ModelUsage {
+        #[allow(dead_code)]
+        measurement: serde_json::Value,
+    },
+
+    /// Latest cumulative live estimate; unlike TokenUsage this is not a delta.
+    #[serde(rename = "token_progress")]
+    TokenProgress {
+        id: String,
+        input_tokens: u64,
+        output_tokens: u64,
     },
 
     /// Per-story changes merged into the run branch: file list + capped diff.

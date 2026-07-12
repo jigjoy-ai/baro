@@ -1,0 +1,28 @@
+[
+  {
+    "workerId": "deepseek-flash-worker",
+    "routeId": "baro-cloud-deepseek-flash",
+    "route": "openai:deepseek-v4-flash",
+    "tiers": ["light", "standard", "heavy"],
+    "maxConcurrent": 4,
+    "estimate": {
+      "expectedCostUsd": 0.03,
+      "estimatedSuccessProbability": 0.68,
+      "estimatedLatencyMs": 45000,
+      "estimateSource": "configured"
+    }
+  },
+  {
+    "workerId": "glm-worker",
+    "routeId": "baro-cloud-glm",
+    "route": "openai:glm-5.2",
+    "tiers": ["light", "standard", "heavy"],
+    "maxConcurrent": 2,
+    "estimate": {
+      "expectedCostUsd": 0.12,
+      "estimatedSuccessProbability": 0.84,
+      "estimatedLatencyMs": 55000,
+      "estimateSource": "configured"
+    }
+  }
+]

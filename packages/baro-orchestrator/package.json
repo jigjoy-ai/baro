@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
     "cli": "tsx scripts/cli.ts",
+    "experiment:ab": "tsx scripts/ab-run.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "test:participants": "node --import tsx --test \"test/participants/**/*.test.ts\""

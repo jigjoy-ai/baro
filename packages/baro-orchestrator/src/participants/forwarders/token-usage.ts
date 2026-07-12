@@ -1,13 +1,14 @@
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
 import {
-    AgentResult,
-    type AgentResultData,
     ClaudeStreamChunk,
     type ClaudeStreamChunkData,
-    CodexTurnEvent,
-    type CodexTurnEventData,
+    ModelInvocationMeasured,
 } from "../../semantic-events.js"
+import type {
+    Metric,
+    ModelInvocationMeasuredData,
+} from "../../model-telemetry.js"
 import { emit } from "../../tui-protocol.js"
 
 // Don't flood the event stream with sub-turn progress: at most one
@@ -17,9 +18,8 @@ const PROGRESS_THROTTLE_MS = 1500
 /**
  * Mirrors agent usage accounting as `token_usage` BaroEvents for the Rust TUI.
  *
- * Subscribes to: AgentResult, CodexTurnEvent (authoritative per-turn totals),
- * and ClaudeStreamChunk (live, sub-turn estimates so the UI can show tokens
- * climbing while a Claude story runs — codex/openai already update per-turn).
+ * Subscribes to backend-neutral ModelInvocationMeasured totals and
+ * ClaudeStreamChunk (live sub-turn estimates).
  *
  * Emits: token_usage (authoritative, summed downstream) and token_progress
  * (latest cumulative snapshot per agent; consumers take the max, not a sum).
@@ -40,12 +40,8 @@ export class TokenUsageForwarder extends BaseObserver {
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        if (AgentResult.is(event)) {
-            this.handleClaudeResult(event.data)
-            return
-        }
-        if (CodexTurnEvent.is(event)) {
-            this.handleCodexTurnEvent(event.data)
+        if (ModelInvocationMeasured.is(event)) {
+            this.handleMeasurement(event.data)
             return
         }
         if (ClaudeStreamChunk.is(event)) {
@@ -86,54 +82,33 @@ export class TokenUsageForwarder extends BaseObserver {
         })
     }
 
-    private handleClaudeResult(item: AgentResultData): void {
-        const usage = item.usage as
-            | { input_tokens?: number; output_tokens?: number }
-            | null
-        const inputTokens =
-            typeof usage?.input_tokens === "number" ? usage.input_tokens : 0
-        const outputTokens =
-            typeof usage?.output_tokens === "number"
-                ? usage.output_tokens
-                : 0
+    private handleMeasurement(item: ModelInvocationMeasuredData): void {
+        emit({
+            type: "model_usage",
+            measurement: item,
+        })
+        // Gateway/cloud records are alternate observations of the same
+        // invocation, not token deltas. Keep them in model_usage for the
+        // reducer, but project only the runner record into legacy additive
+        // token_usage or Rust would double-count one call.
+        if (item.evidence.producer !== "runner") return
+        const inputTokens = knownValue(item.tokens.inputTotal)
+        const outputTokens = knownValue(item.tokens.outputTotal)
+        // The legacy projection cannot represent unknown. Emit it only when
+        // both token totals are truly known; never manufacture a numeric zero.
+        if (inputTokens === null || outputTokens === null) return
+        const equivalentCost = knownValue(item.cost.equivalentUsd)
+        const providerCost = knownValue(item.cost.providerUsd)
         emit({
             type: "token_usage",
-            id: item.agentId,
+            id: item.storyId ?? item.phase,
             input_tokens: inputTokens,
             output_tokens: outputTokens,
-            // Claude CLI reports a per-result dollar cost; carry it so the TUI
-            // can sum a per-run cost. Null for non-Claude backends.
-            cost_usd:
-                typeof item.totalCostUsd === "number" ? item.totalCostUsd : undefined,
+            cost_usd: equivalentCost ?? providerCost ?? undefined,
         })
     }
+}
 
-    private handleCodexTurnEvent(item: CodexTurnEventData): void {
-        if (item.phase !== "completed") return
-        const raw = item.raw as Record<string, unknown>
-        const usage = raw.usage as
-            | {
-                  input_tokens?: number
-                  cached_input_tokens?: number
-                  output_tokens?: number
-                  reasoning_output_tokens?: number
-              }
-            | undefined
-        if (!usage) return
-        const inputTokens =
-            typeof usage.input_tokens === "number" ? usage.input_tokens : 0
-        const outputBase =
-            typeof usage.output_tokens === "number" ? usage.output_tokens : 0
-        const reasoning =
-            typeof usage.reasoning_output_tokens === "number"
-                ? usage.reasoning_output_tokens
-                : 0
-        const outputTokens = outputBase + reasoning
-        emit({
-            type: "token_usage",
-            id: item.agentId,
-            input_tokens: inputTokens,
-            output_tokens: outputTokens,
-        })
-    }
+function knownValue(metric: Metric): number | null {
+    return metric.state === "known" ? metric.value : null
 }

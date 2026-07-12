@@ -71,6 +71,10 @@ export default defineConfig([
         ...sharedBundleConfig,
     },
     {
+        entry: { "agent-collab": "../baro-orchestrator/scripts/agent-collab.mjs" },
+        ...sharedBundleConfig,
+    },
+    {
         // `baro connect` runner — pairs with baro-cloud, runs dispatched goals.
         entry: { runner: "../baro-orchestrator/scripts/runner.ts" },
         ...sharedBundleConfig,

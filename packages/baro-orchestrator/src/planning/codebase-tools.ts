@@ -6,7 +6,7 @@
  * Claude side — `claude --print` ships its own Read/Grep/Glob/Bash.
  */
 
-import { execSync } from "child_process"
+import { exec, execSync } from "child_process"
 import * as fs from "fs"
 import * as path from "path"
 
@@ -30,6 +30,10 @@ const IGNORE = new Set([
 const MAX_FILE_BYTES = 15_000
 const MAX_GREP_LINES = 80
 const MAX_BASH_OUTPUT_BYTES = 8_000
+
+type SignalAwareTool = Tool & {
+    invokeWithSignal: (args: any, signal: AbortSignal) => Promise<unknown>
+}
 
 export function createCodebaseTools(cwd: string): Tool[] {
     return [
@@ -271,7 +275,7 @@ function globTool(cwd: string): Tool {
     }
 }
 
-function bashTool(cwd: string): Tool {
+function bashTool(cwd: string): SignalAwareTool {
     return {
         type: "function",
         name: "bash",
@@ -292,30 +296,71 @@ function bashTool(cwd: string): Tool {
             additionalProperties: false,
         },
         async invoke(args: { command: string }) {
-            try {
-                const output = execSync(args.command, {
+            return runBash(cwd, args.command)
+        },
+        async invokeWithSignal(
+            args: { command: string },
+            signal: AbortSignal,
+        ) {
+            return runBash(cwd, args.command, signal)
+        },
+    }
+}
+
+function runBash(
+    cwd: string,
+    command: string,
+    signal?: AbortSignal,
+): Promise<string> {
+    return new Promise((resolve) => {
+        try {
+            const child = exec(
+                command,
+                {
                     cwd,
                     encoding: "utf-8",
                     maxBuffer: 4 * 1024 * 1024,
                     // Real builds/test suites take minutes; 30s was far too short.
-                    timeout: Number(process.env.BARO_BASH_TIMEOUT_MS) || 300_000,
-                    stdio: ["ignore", "pipe", "pipe"],
-                })
-                if (output.length > MAX_BASH_OUTPUT_BYTES) {
-                    return (
-                        output.slice(0, MAX_BASH_OUTPUT_BYTES) +
-                        `\n... (truncated, ${output.length - MAX_BASH_OUTPUT_BYTES} bytes elided)`
-                    )
-                }
-                return output || "(empty output)"
-            } catch (e) {
-                const err = e as { stderr?: Buffer | string; status?: number; message?: string }
-                const stderr =
-                    err.stderr instanceof Buffer ? err.stderr.toString() : err.stderr ?? ""
-                return `bash exited with status ${err.status ?? "?"}: ${stderr || err.message || "unknown error"}`
-            }
-        },
-    }
+                    timeout:
+                        Number(process.env.BARO_BASH_TIMEOUT_MS) || 300_000,
+                    ...(signal ? { signal } : {}),
+                },
+                (error, stdout, stderr) => {
+                    if (error) {
+                        const status =
+                            typeof error.code === "number" ? error.code : "?"
+                        const detail = limitBashOutput(
+                            stderr || error.message || "unknown error",
+                            true,
+                        )
+                        resolve(
+                            `bash exited with status ${status}: ` +
+                                detail,
+                        )
+                        return
+                    }
+                    resolve(limitBashOutput(stdout, false) || "(empty output)")
+                },
+            )
+            // Match the old execSync({ stdio: ["ignore", ...] }) behavior:
+            // commands that read stdin must see EOF instead of hanging.
+            child.stdin?.end()
+        } catch (error) {
+            resolve(
+                `bash exited with status ?: ` +
+                    ((error as Error)?.message ?? String(error)),
+            )
+        }
+    })
+}
+
+function limitBashOutput(output: string, keepTail: boolean): string {
+    if (output.length <= MAX_BASH_OUTPUT_BYTES) return output
+    const elided = output.length - MAX_BASH_OUTPUT_BYTES
+    return keepTail
+        ? `... (${elided} bytes elided)\n` + output.slice(-MAX_BASH_OUTPUT_BYTES)
+        : output.slice(0, MAX_BASH_OUTPUT_BYTES) +
+              `\n... (truncated, ${elided} bytes elided)`
 }
 
 function safePath(cwd: string, filePath: string): string | null {
