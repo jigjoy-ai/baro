@@ -17,13 +17,15 @@ const BUNDLE_NAME: &str = "run-architect.mjs";
 
 /// Spawn the TS Architect, return the markdown decision document.
 /// `context` (the project's CLAUDE.md or equivalent) travels via a
-/// tempfile so large files don't blow past `ARG_MAX`.
+/// tempfile so large files don't blow past `ARG_MAX`. An operator-fixed
+/// execution-mode contract uses the same tempfile boundary.
 pub async fn run_architect(
     goal: &str,
     cwd: &Path,
     llm: LlmProvider,
     model: Option<&str>,
     context: Option<&str>,
+    mode_json: Option<&str>,
     openai_api_key: Option<&str>,
     openai_base_url: Option<&str>,
     effort: &str,
@@ -42,6 +44,21 @@ pub async fn run_architect(
             })?;
             f.write_all(c.as_bytes()).map_err(|e| ProcessRunError {
                 message: format!("could not write architect context tempfile: {}", e),
+                log_path: None,
+            })?;
+            Some(f)
+        }
+        _ => None,
+    };
+
+    let mode_tempfile = match mode_json {
+        Some(mode) if !mode.is_empty() => {
+            let mut f = tempfile::NamedTempFile::new().map_err(|e| ProcessRunError {
+                message: format!("could not create tempfile for architect mode: {}", e),
+                log_path: None,
+            })?;
+            f.write_all(mode.as_bytes()).map_err(|e| ProcessRunError {
+                message: format!("could not write architect mode tempfile: {}", e),
                 log_path: None,
             })?;
             Some(f)
@@ -78,6 +95,9 @@ pub async fn run_architect(
     if let Some(ref f) = ctx_tempfile {
         cmd.arg("--context-file").arg(f.path());
     }
+    if let Some(ref f) = mode_tempfile {
+        cmd.arg("--mode-file").arg(f.path());
+    }
     cmd.arg("--result-file").arg(result_tempfile.path());
     if matches!(llm, LlmProvider::OpenAI) {
         if let Some(key) = openai_api_key {
@@ -91,6 +111,7 @@ pub async fn run_architect(
     // Stdout is now the architect's live BaroEvent stream; forward each line.
     let log_path = subprocess::spawn_and_stream_events(cmd, "architect", on_event).await?;
     drop(ctx_tempfile); // explicit cleanup, paranoid about Drop ordering
+    drop(mode_tempfile);
 
     let doc = std::fs::read_to_string(result_tempfile.path())
         .map_err(|e| ProcessRunError {

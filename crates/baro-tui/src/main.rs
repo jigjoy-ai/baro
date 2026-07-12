@@ -1092,6 +1092,15 @@ async fn run_app(
                 app.decision_document = Some(doc);
             }
             Some(AppEvent::ArchitectSkipped(reason)) => {
+                if headless {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "type": "architect_skipped",
+                            "reason": &reason,
+                        })
+                    );
+                }
                 app.architect_status = app::ArchitectStatus::Skipped(reason);
                 app.decision_document = None;
             }
@@ -1915,6 +1924,12 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
     let effort = app.effort.clone();
 
     tokio::spawn(async move {
+        // Resolve operator-fixed contracts before the Architect so the
+        // mode-aware OpenAI planning phases see the same execution shape. Auto
+        // remains undecided here: the Architect may run its own intake, and
+        // the shared intake below can still incorporate its decision document.
+        let fixed_mode_json = fixed_mode_contract(quick, &mode);
+
         // Quick mode skips the Architect — its job is aligning parallel
         // agents, and quick runs are single-agent. Still emit
         // ArchitectSkipped so the TUI shows why there's no design doc.
@@ -1936,6 +1951,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
                 architect_llm,
                 architect_model.as_deref(),
                 context.as_deref(),
+                fixed_mode_json.as_deref(),
                 openai_api_key.as_deref(),
                 openai_base_url.as_deref(),
                 &effort,
@@ -1964,10 +1980,8 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
         // Contract resolution: --quick and an explicit --mode never
         // consult the intake; auto runs it, and interactive auto pauses
         // for the picker instead of continuing.
-        let mode_json = if quick {
-            Some(user_mode_contract("focused", "Quick mode"))
-        } else if mode != "auto" {
-            Some(user_mode_contract(&mode, &format!("User selected {} mode.", mode)))
+        let mode_json = if let Some(contract) = fixed_mode_json {
+            Some(contract)
         } else {
             let contract = intake_runner::run_intake(
                 &goal,
@@ -2014,6 +2028,22 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
         )
         .await;
     });
+}
+
+/// Return the immutable mode contract selected directly by the operator.
+/// Auto mode deliberately returns `None`: its contract depends on intake and,
+/// unlike explicit `--mode`, may use the Architect's decision document.
+fn fixed_mode_contract(quick: bool, mode: &str) -> Option<String> {
+    if quick {
+        Some(user_mode_contract("focused", "Quick mode"))
+    } else if mode != "auto" {
+        Some(user_mode_contract(
+            mode,
+            &format!("User selected {} mode.", mode),
+        ))
+    } else {
+        None
+    }
 }
 
 /// Stage B: the planner proper, then PlanReady/PlanError.
@@ -2598,8 +2628,8 @@ fn message_command_line(id: &str, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        delete_prev_word, headless_failure_reason, message_command_line, parse_confirm_mode,
-        stdin_command_line, App, PrdStoryOutput, ReviewStory,
+        delete_prev_word, fixed_mode_contract, headless_failure_reason, message_command_line,
+        parse_confirm_mode, stdin_command_line, App, PrdStoryOutput, ReviewStory,
     };
 
     fn deleted(input: &str) -> String {
@@ -2657,6 +2687,25 @@ mod tests {
         assert_eq!(parse_confirm_mode(r#"{"kind":"other","mode":"parallel"}"#), None);
         assert_eq!(parse_confirm_mode(r#"{"kind":"confirm_mode"}"#), None); // no mode
         assert_eq!(parse_confirm_mode("not json"), None);
+    }
+
+    #[test]
+    fn fixed_mode_contract_is_available_before_architect() {
+        assert!(fixed_mode_contract(false, "auto").is_none());
+
+        let parallel: serde_json::Value =
+            serde_json::from_str(&fixed_mode_contract(false, "parallel").unwrap()).unwrap();
+        assert_eq!(parallel["mode"], "parallel");
+        assert_eq!(parallel["source"], "user");
+        assert_eq!(parallel["parallelism"], 4);
+
+        // Quick is the stronger operator override even if another mode value
+        // is present on the App.
+        let quick: serde_json::Value =
+            serde_json::from_str(&fixed_mode_contract(true, "parallel").unwrap()).unwrap();
+        assert_eq!(quick["mode"], "focused");
+        assert_eq!(quick["source"], "user");
+        assert_eq!(quick["maxStories"], 1);
     }
 
     #[test]

@@ -97,6 +97,11 @@ export interface OpenAIStoryAgentOptions {
     model?: string
     /** Cap on inference rounds within one TURN (round = one runner.run() + tool exec). */
     maxRoundsPerTurn?: number
+    /**
+     * Rounds reserved at the end of a turn for a no-tool final summary.
+     * At least one exploration round is retained when maxRoundsPerTurn > 0.
+     */
+    finalizationRoundsPerTurn?: number
     perRoundTimeoutSecs?: number
     /**
      * Per-story OpenAI-compatible endpoint. Overrides the process-global
@@ -117,6 +122,7 @@ export interface OpenAIStoryAgentOptions {
 interface ResolvedOpenAIStoryAgentOptions {
     model: string
     maxRoundsPerTurn: number
+    finalizationRoundsPerTurn: number
     perRoundTimeoutSecs: number
     baseUrl: string
     apiKey: string
@@ -171,9 +177,16 @@ export class OpenAIStoryAgent extends BaseObserver {
             hardTimeoutSecs: 0,
             ...spec,
         }
+        const maxRoundsPerTurn = boundedRoundCount(
+            opts.maxRoundsPerTurn ?? 30,
+        )
         this.opts = {
             model: opts.model ?? "gpt-5.5",
-            maxRoundsPerTurn: opts.maxRoundsPerTurn ?? 30,
+            maxRoundsPerTurn,
+            finalizationRoundsPerTurn: boundedFinalizationRounds(
+                maxRoundsPerTurn,
+                opts.finalizationRoundsPerTurn ?? 3,
+            ),
             perRoundTimeoutSecs: opts.perRoundTimeoutSecs ?? 180,
             baseUrl: opts.baseUrl ?? "",
             apiKey: opts.apiKey ?? "",
@@ -506,6 +519,9 @@ export class OpenAIStoryAgent extends BaseObserver {
         let context = initialContext
         let assistantText: string | null = null
         const perRoundMs = this.opts.perRoundTimeoutSecs * 1000
+        const maxExplorationRounds =
+            this.opts.maxRoundsPerTurn - this.opts.finalizationRoundsPerTurn
+        let finalizationRequested = false
         // Accumulates across all rounds in the turn; the AgentResult ships the sum.
         const usage = new UsageAccumulator()
 
@@ -521,6 +537,7 @@ export class OpenAIStoryAgent extends BaseObserver {
                 }
             }
             const calls: FunctionCallItem[] = []
+            const toolsAllowed = !finalizationRequested
             let sawMessage = false
             let lastMessageText: string | null = null
 
@@ -547,7 +564,12 @@ export class OpenAIStoryAgent extends BaseObserver {
 
                 for (const item of result.items) {
                     if (item.type === "function_call") {
-                        await this.envRef?.deliverFunctionCall(this, item as FunctionCallItem)
+                        if (toolsAllowed) {
+                            await this.envRef?.deliverFunctionCall(
+                                this,
+                                item as FunctionCallItem,
+                            )
+                        }
                         context = context.addContextItem(item)
                         calls.push(item as FunctionCallItem)
                     } else if (item.type === "message") {
@@ -614,8 +636,11 @@ export class OpenAIStoryAgent extends BaseObserver {
             // and appended to the model context in the provider's original call
             // order. Some OpenAI-compatible servers require that ordering.
             for (const call of interceptedReplans) {
-                const output = await this.proposeRuntimeReplan(call)
+                const output = toolsAllowed
+                    ? await this.proposeRuntimeReplan(call)
+                    : finalizationToolOutput(call.name)
                 outputs.set(call.callId, output)
+                if (!toolsAllowed) continue
                 const status = runtimeToolStatus(output)
                 ordinaryToolsAllowed =
                     ordinaryToolsAllowed && status === "applied"
@@ -626,7 +651,9 @@ export class OpenAIStoryAgent extends BaseObserver {
             }
             for (const call of ordinaryCalls) {
                 let output: string
-                if (!ordinaryToolsAllowed) {
+                if (!toolsAllowed) {
+                    output = finalizationToolOutput(call.name)
+                } else if (!ordinaryToolsAllowed) {
                     output = runtimeReplanToolOutput("skipped", {
                         code: "replan_not_applied",
                         reason:
@@ -649,7 +676,9 @@ export class OpenAIStoryAgent extends BaseObserver {
                     )
                 }
                 const outItem = FunctionCallOutputItem.create(call.callId, output)
-                await this.envRef?.deliverFunctionCallOutput(this, outItem)
+                if (toolsAllowed) {
+                    await this.envRef?.deliverFunctionCallOutput(this, outItem)
+                }
                 context = context.addContextItem(outItem)
             }
 
@@ -688,6 +717,26 @@ export class OpenAIStoryAgent extends BaseObserver {
                     usage,
                     error: `round ${round} returned no items`,
                 }
+            }
+
+            if (
+                !finalizationRequested &&
+                round >= maxExplorationRounds
+            ) {
+                finalizationRequested = true
+                context = context.addContextItem(
+                    UserMessageItem.create(
+                        finalStoryInstruction(
+                            round,
+                            maxExplorationRounds,
+                            this.opts.maxRoundsPerTurn,
+                        ),
+                    ),
+                )
+            } else if (finalizationRequested) {
+                context = context.addContextItem(
+                    UserMessageItem.create(finalStoryRepairInstruction()),
+                )
             }
 
             assistantText = lastMessageText ?? assistantText
@@ -920,6 +969,52 @@ function setModelTools(model: GenerativeModel, tools: Tool[]): void {
         )
     }
     m.setTools(tools)
+}
+
+function boundedRoundCount(value: number): number {
+    return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
+}
+
+function boundedFinalizationRounds(
+    maxRounds: number,
+    requestedRounds: number,
+): number {
+    const requested = boundedRoundCount(requestedRounds)
+    // A non-empty turn always gets one executable exploration round. With a
+    // one-round turn there is no room to request a separate final response.
+    return Math.min(requested, Math.max(0, maxRounds - 1))
+}
+
+function finalizationToolOutput(tool: string): string {
+    return JSON.stringify({
+        ok: false,
+        status: "refused",
+        code: "tool_budget_closed",
+        tool,
+        reason:
+            "Tool execution is closed for this turn. Return the final story summary without calling tools.",
+    })
+}
+
+function finalStoryInstruction(
+    round: number,
+    maxExplorationRounds: number,
+    maxRounds: number,
+): string {
+    return [
+        "The tool-execution budget for this turn is now closed.",
+        `Exploration round ${round}/${maxExplorationRounds}; ${maxRounds - round} finalization round(s) remain.`,
+        "Tool schemas remain visible only for protocol compatibility. Any further tool call, including propose_replan, will be refused without execution.",
+        "Do not call tools. Return a brief final summary of the work completed, tests run, and any remaining issue.",
+    ].join("\n")
+}
+
+function finalStoryRepairInstruction(): string {
+    return [
+        "The previous tool call was refused because the tool-execution budget is closed.",
+        "Do not call tools again, including propose_replan.",
+        "Return only a brief final summary of the work completed, tests run, and any remaining issue.",
+    ].join("\n")
 }
 
 async function runToolSafely(

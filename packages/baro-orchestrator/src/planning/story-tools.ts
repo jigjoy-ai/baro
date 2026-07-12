@@ -1,9 +1,8 @@
 /**
  * Tool layer for the OpenAI-backed StoryAgent: the read tools from
- * `codebase-tools.ts` plus write_file / edit_file. Writes are deliberately
- * not sandboxed to specific paths (real refactors touch arbitrary parts of
- * the tree) — the per-story branch makes anything recoverable via git.
- * write_file / edit_file still refuse paths that resolve outside cwd.
+ * `codebase-tools.ts` plus write_file / edit_file. Writes may touch arbitrary
+ * paths inside the story worktree (real refactors need that flexibility), but
+ * path-prefix and symlink escapes outside the worktree are refused.
  */
 
 import * as fs from "fs"
@@ -11,13 +10,15 @@ import * as path from "path"
 
 import { type Tool } from "@mozaik-ai/core"
 
-import { createCodebaseTools } from "./codebase-tools.js"
+import { createCodebaseTools, safePath } from "./codebase-tools.js"
 
 const MAX_WRITE_BYTES = 500_000
 
 /**
- * NOTE: the shared `bash` tool describes itself as read-only — a soft
- * convention, not enforced; the StoryAgent system prompt overrides it.
+ * NOTE: the shared `bash` tool describes itself as read-only, while the
+ * StoryAgent prompt permits in-worktree builds, edits, installs, and commits.
+ * On macOS its shell writes are additionally confined by Seatbelt; other
+ * platforms currently rely on the conservative command guard fallback.
  */
 export function createStoryTools(cwd: string): Tool[] {
     return [...createCodebaseTools(cwd), writeFileTool(cwd), editFileTool(cwd)]
@@ -136,10 +137,4 @@ function editFileTool(cwd: string): Tool {
             }
         },
     }
-}
-
-function safePath(cwd: string, filePath: string): string | null {
-    const resolved = path.resolve(cwd, filePath)
-    if (!resolved.startsWith(path.resolve(cwd))) return null
-    return resolved
 }

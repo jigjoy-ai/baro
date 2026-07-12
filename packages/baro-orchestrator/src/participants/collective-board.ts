@@ -1,4 +1,5 @@
 import type { Participant, SemanticEvent } from "@mozaik-ai/core"
+import { randomUUID } from "node:crypto"
 
 import { buildDag } from "../dag.js"
 import {
@@ -133,7 +134,6 @@ export class CollectiveBoard extends SerializedObserver {
     private cleanupSequence = 0
     private verificationSequence = 0
     private discoverySequence = 0
-    private policyReplanSequence = 0
     private totalAttempts = 0
     private readonly completed: string[] = []
     private readonly failed = new Set<string>()
@@ -876,7 +876,7 @@ export class CollectiveBoard extends SerializedObserver {
                 runId: this.opts.runId,
                 proposalId:
                     `${this.opts.runId}:policy-replan:` +
-                    `${++this.policyReplanSequence}`,
+                    randomUUID(),
                 sourceStoryId:
                     recovery?.storyId ??
                     replan.removedStoryIds[0] ??
@@ -903,9 +903,8 @@ export class CollectiveBoard extends SerializedObserver {
                 activeLease: undefined,
                 healingActionsSinceProgress: this.healingActionsSinceProgress,
                 requireActiveLease: false,
-                countAddedStories: false,
+                storyAccounting: "policy",
                 maxAddedStories: Number.MAX_SAFE_INTEGER,
-                rememberAppliedDecision: false,
             })
             if (!outcome.applied || !RuntimeReplanApplied.is(outcome.event)) {
                 const detail = RuntimeReplanRejected.is(outcome.event)

@@ -1,5 +1,5 @@
 /**
- * Objective build/test VERIFY gate for the fully-merged branch.
+ * Objective build/test/typecheck/lint VERIFY gate for the fully-merged branch.
  *
  * baro's Critic is an LLM that JUDGES pass/fail against acceptance criteria —
  * it never runs the tests. A per-story gate is unsafe in a shared worktree
@@ -157,9 +157,10 @@ function supportedWorkspacePattern(pattern: string): boolean {
     )
 }
 
-// Build/test commands for whatever the repo root declares. Only scripts that
-// actually exist are included — a missing build/test is a skip, never an
-// invented command. Build runs before test so a broken build is reported first.
+// Conventional final-gate commands for whatever the repo root declares. Only
+// scripts that actually exist are included — a missing gate is a skip, never an
+// invented command. The deterministic RunVerifier owns these after all story
+// commits are integrated; they must not become separate LLM stories.
 function detectCommands(cwd: string): VerifyCommandSpec[] {
     const cmds: VerifyCommandSpec[] = []
 
@@ -217,7 +218,7 @@ function detectCommands(cwd: string): VerifyCommandSpec[] {
                 preflightFailure: `${displayCwd}/package.json is not valid JSON`,
             })
         }
-        for (const script of ["build", "test"] as const) {
+        for (const script of ["build", "typecheck", "test", "lint"] as const) {
             if (typeof scripts[script] === "string") {
                 cmds.push({
                     label: `${pm} run ${script}`,
@@ -263,7 +264,7 @@ export function createVerifyPlan(cwd: string): VerifyPlan {
 
 /**
  * Preserve every trusted pre-run command while also admitting conventional
- * build/test commands that only exist after the stories are integrated.
+ * final-gate commands that only exist after the stories are integrated.
  *
  * Keeping the baseline first means an agent cannot turn a required check into
  * a skip by deleting it. Adding the final snapshot closes the opposite gap:
@@ -374,7 +375,7 @@ function throwIfAborted(signal?: AbortSignal): void {
 }
 
 /**
- * Run the detected build/test commands at `cwd` (the merged branch), best-effort.
+ * Run the detected final-gate commands at `cwd` (the merged branch), best-effort.
  * Runs every detectable command even if an earlier one fails, so the PR body can
  * surface all the problems at once.
  */

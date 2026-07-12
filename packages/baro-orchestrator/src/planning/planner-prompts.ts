@@ -36,6 +36,16 @@ single story's acceptance.
 
 If the goal is NON-TRIVIAL: decompose normally per the rules below.
 
+For every run, do NOT create a final verification-only story whose job is to
+run tests, typecheck, build, or lint after the
+implementation stories. Baro's deterministic RunVerifier executes those gates
+after all story commits are integrated. Put commands in each implementation
+story's \`tests\` field; do not spend an LLM worker on speculative final checks.
+Creating or materially changing test code is real implementation work and may
+be its own story — merely running existing test/build/lint commands is not.
+Repository-specific invariants that those commands do not cover (for example,
+an exact public-export or dependency policy) remain substantive acceptance work.
+
 When in doubt, prefer FEWER stories over more. A single 2-file story is better
 than two artificially-split 1-file stories.
 
@@ -252,6 +262,24 @@ export function buildIntakePrompt(args: {
 
 export function parseModeContract(text: string): ModeContract {
     const json = JSON.parse(extractJsonObject(text)) as Partial<ModeContract>
+    return normalizeModeContract(json)
+}
+
+/**
+ * Parse a contract that has already crossed the intake/operator boundary.
+ * Unlike provider-facing parsing, a persisted contract may not silently turn
+ * an unknown or missing mode into `focused`: that would override an explicit
+ * operator selection without telling the caller.
+ */
+export function parseRequiredModeContract(text: string): ModeContract {
+    const json = JSON.parse(extractJsonObject(text)) as Partial<ModeContract>
+    if (json.mode !== "parallel" && json.mode !== "sequential" && json.mode !== "focused") {
+        throw new Error("mode contract must contain mode 'focused', 'sequential', or 'parallel'")
+    }
+    return normalizeModeContract(json)
+}
+
+function normalizeModeContract(json: Partial<ModeContract>): ModeContract {
     const mode = json.mode === "parallel" || json.mode === "sequential" || json.mode === "focused"
         ? json.mode
         : "focused"
@@ -271,22 +299,61 @@ export function parseModeContract(text: string): ModeContract {
 }
 
 export function extractJsonObject(text: string): string {
+    const objects = extractJsonObjects(text)
+    if (objects.length > 0) return objects[0]!
     const trimmed = text.trim()
-    if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed
-    const fence = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/)
-    if (fence) return fence[1]!
-    const start = trimmed.indexOf("{")
-    if (start < 0) throw new Error(`no JSON object in response: ${trimmed.slice(0, 200)}`)
-    let depth = 0
-    for (let i = start; i < trimmed.length; i++) {
-        const ch = trimmed[i]
-        if (ch === "{") depth++
-        else if (ch === "}") {
-            depth--
-            if (depth === 0) return trimmed.slice(start, i + 1)
+    throw new Error(`no valid JSON object in response: ${trimmed.slice(0, 200)}`)
+}
+
+/** Return each top-level JSON object embedded in provider prose, in order. */
+export function extractJsonObjects(text: string): string[] {
+    const trimmed = text.trim()
+    const objects: string[] = []
+    let searchFrom = 0
+    while (searchFrom < trimmed.length) {
+        const start = trimmed.indexOf("{", searchFrom)
+        if (start < 0) break
+        let depth = 0
+        let inString = false
+        let escaped = false
+        let closedAt = -1
+        let parsedObject = false
+        for (let i = start; i < trimmed.length; i++) {
+            const ch = trimmed[i]!
+            if (inString) {
+                if (escaped) escaped = false
+                else if (ch === "\\") escaped = true
+                else if (ch === '"') inString = false
+                continue
+            }
+            if (ch === '"') {
+                inString = true
+            } else if (ch === "{") {
+                depth += 1
+            } else if (ch === "}") {
+                depth -= 1
+                if (depth === 0) {
+                    closedAt = i
+                    const candidate = trimmed.slice(start, i + 1)
+                    try {
+                        const parsed = JSON.parse(candidate) as unknown
+                        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                            objects.push(candidate)
+                            parsedObject = true
+                        }
+                    } catch {
+                        // Provider prose can contain examples such as `{ signal }`
+                        // before the real object. Continue scanning later braces.
+                    }
+                    break
+                }
+            }
         }
+        // A malformed/unbalanced earlier brace may enclose a later valid JSON
+        // object. Advance by one in that case so the nested start is examined.
+        searchFrom = closedAt >= 0 && parsedObject ? closedAt + 1 : start + 1
     }
-    throw new Error(`unbalanced JSON in response: ${trimmed.slice(0, 200)}`)
+    return objects
 }
 
 export function buildPlannerUserMessage(args: {

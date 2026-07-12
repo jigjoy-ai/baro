@@ -6,8 +6,9 @@
  * Claude side — `claude --print` ships its own Read/Grep/Glob/Bash.
  */
 
-import { exec, execSync } from "child_process"
+import { execFile, execFileSync, execSync } from "child_process"
 import * as fs from "fs"
+import * as os from "os"
 import * as path from "path"
 
 import { type Tool } from "@mozaik-ai/core"
@@ -312,14 +313,29 @@ function runBash(
     command: string,
     signal?: AbortSignal,
 ): Promise<string> {
+    const rejection = bashContainmentRejection(cwd, command)
+    if (rejection) {
+        return Promise.resolve(
+            `Error: bash command rejected by project containment guard: ${rejection}`,
+        )
+    }
+
+    const sandbox = prepareShellSandbox(cwd, command)
+
     return new Promise((resolve) => {
+        const finish = (value: string): void => {
+            sandbox.cleanup()
+            resolve(value)
+        }
         try {
-            const child = exec(
-                command,
+            const child = execFile(
+                sandbox.executable,
+                sandbox.args,
                 {
                     cwd,
                     encoding: "utf-8",
                     maxBuffer: 4 * 1024 * 1024,
+                    env: sandbox.env,
                     // Real builds/test suites take minutes; 30s was far too short.
                     timeout:
                         Number(process.env.BARO_BASH_TIMEOUT_MS) || 300_000,
@@ -333,25 +349,201 @@ function runBash(
                             stderr || error.message || "unknown error",
                             true,
                         )
-                        resolve(
+                        finish(
                             `bash exited with status ${status}: ` +
                                 detail,
                         )
                         return
                     }
-                    resolve(limitBashOutput(stdout, false) || "(empty output)")
+                    finish(limitBashOutput(stdout, false) || "(empty output)")
                 },
             )
             // Match the old execSync({ stdio: ["ignore", ...] }) behavior:
             // commands that read stdin must see EOF instead of hanging.
             child.stdin?.end()
         } catch (error) {
-            resolve(
+            finish(
                 `bash exited with status ?: ` +
                     ((error as Error)?.message ?? String(error)),
             )
         }
     })
+}
+
+interface PreparedShellSandbox {
+    executable: string
+    args: string[]
+    env: NodeJS.ProcessEnv
+    cleanup: () => void
+}
+
+/**
+ * On macOS, run the shell under Seatbelt with writes confined to the current
+ * worktree, a per-command scratch directory, narrowly required Git metadata,
+ * Cargo's shared download cache, and manager-owned dependency symlink targets.
+ * Other platforms retain the portable command guard above until they gain an
+ * equivalent process sandbox.
+ */
+function prepareShellSandbox(cwd: string, command: string): PreparedShellSandbox {
+    if (process.platform !== "darwin" || !fs.existsSync("/usr/bin/sandbox-exec")) {
+        return {
+            executable: "/bin/sh",
+            args: ["-c", command],
+            env: process.env,
+            cleanup: () => undefined,
+        }
+    }
+
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "baro-story-shell-"))
+    const scratchReal = fs.realpathSync.native(scratch)
+    const writablePaths = sandboxWritablePaths(cwd, scratchReal)
+    const profile = macosWriteSandboxProfile(writablePaths)
+    const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        TMPDIR: scratchReal,
+        TMP: scratchReal,
+        TEMP: scratchReal,
+        XDG_CACHE_HOME: path.join(scratchReal, "cache"),
+        npm_config_cache: path.join(scratchReal, "npm-cache"),
+        YARN_CACHE_FOLDER: path.join(scratchReal, "yarn-cache"),
+        pnpm_config_store_dir: path.join(scratchReal, "pnpm-store"),
+        PIP_CACHE_DIR: path.join(scratchReal, "pip-cache"),
+        COMPOSER_CACHE_DIR: path.join(scratchReal, "composer-cache"),
+    }
+
+    return {
+        executable: "/usr/bin/sandbox-exec",
+        args: ["-p", profile, "/bin/sh", "-c", command],
+        env,
+        cleanup: () => {
+            try {
+                fs.rmSync(scratch, { recursive: true, force: true })
+            } catch {
+                // A killed child may briefly retain a scratch entry. It is
+                // under the OS temp directory and will be reclaimed normally.
+            }
+        },
+    }
+}
+
+function macosWriteSandboxProfile(writablePaths: string[]): string {
+    const filters = writablePaths
+        .map((entry) => `        (subpath ${JSON.stringify(entry)})`)
+        .join("\n")
+    return [
+        "(version 1)",
+        "(allow default)",
+        "(deny file-write*",
+        "    (require-not",
+        "      (require-any",
+        filters,
+        "      )",
+        "    )",
+        ")",
+    ].join("\n")
+}
+
+function sandboxWritablePaths(cwd: string, scratchReal: string): string[] {
+    const rootReal = fs.realpathSync.native(path.resolve(cwd))
+    const writable = new Set<string>([rootReal, scratchReal, "/dev/null"])
+    const git = gitSandboxPaths(cwd)
+    for (const entry of git.paths) writable.add(entry)
+    for (const entry of dependencySymlinkTargets(cwd, git.commonWorktreeRoot)) {
+        writable.add(entry)
+    }
+    for (const entry of cargoCachePaths()) writable.add(entry)
+    return [...writable]
+}
+
+function gitSandboxPaths(cwd: string): {
+    paths: string[]
+    commonWorktreeRoot: string | null
+} {
+    try {
+        const gitDir = fs.realpathSync.native(
+            execFileSync("git", ["rev-parse", "--absolute-git-dir"], {
+                cwd,
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "ignore"],
+            }).trim(),
+        )
+        const commonRaw = execFileSync(
+            "git",
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            {
+                cwd,
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "ignore"],
+            },
+        ).trim()
+        const commonDir = fs.realpathSync.native(path.resolve(cwd, commonRaw))
+        const paths = [gitDir, path.join(commonDir, "objects")]
+
+        let branch = ""
+        try {
+            branch = execFileSync("git", ["symbolic-ref", "--quiet", "HEAD"], {
+                cwd,
+                encoding: "utf8",
+                stdio: ["ignore", "pipe", "ignore"],
+            }).trim()
+        } catch {
+            // Detached worktrees update HEAD inside gitDir, already allowed.
+        }
+        if (branch) {
+            const ref = path.join(commonDir, branch)
+            const log = path.join(commonDir, "logs", branch)
+            paths.push(ref, `${ref}.lock`, log, `${log}.lock`)
+        }
+
+        const commonWorktreeRoot =
+            path.basename(commonDir) === ".git" ? path.dirname(commonDir) : null
+        return { paths, commonWorktreeRoot }
+    } catch {
+        return { paths: [], commonWorktreeRoot: null }
+    }
+}
+
+function dependencySymlinkTargets(cwd: string, commonRoot: string | null): string[] {
+    if (!commonRoot) return []
+    const allowedNames = new Set(["node_modules", ".venv", "vendor"])
+    const skipped = new Set([".git", "target", "dist", "build", ".next", "coverage"])
+    const targets = new Set<string>()
+
+    const walk = (directory: string, depth: number): void => {
+        if (depth < 0) return
+        let entries: fs.Dirent[]
+        try {
+            entries = fs.readdirSync(directory, { withFileTypes: true })
+        } catch {
+            return
+        }
+        for (const entry of entries) {
+            const candidate = path.join(directory, entry.name)
+            if (entry.isSymbolicLink() && allowedNames.has(entry.name)) {
+                try {
+                    const real = fs.realpathSync.native(candidate)
+                    if (pathIsWithin(commonRoot, real)) targets.add(real)
+                } catch {
+                    // Dangling/untrusted dependency links stay denied.
+                }
+            } else if (entry.isDirectory() && !skipped.has(entry.name)) {
+                walk(candidate, depth - 1)
+            }
+        }
+    }
+    walk(path.resolve(cwd), 4)
+    return [...targets]
+}
+
+function cargoCachePaths(): string[] {
+    const home = os.homedir()
+    if (!home) return []
+    return [
+        path.join(home, ".cargo", "registry"),
+        path.join(home, ".cargo", "git"),
+        path.join(home, ".cargo", ".package-cache"),
+        path.join(home, ".cargo", ".global-cache"),
+    ]
 }
 
 function limitBashOutput(output: string, keepTail: boolean): string {
@@ -363,10 +555,304 @@ function limitBashOutput(output: string, keepTail: boolean): string {
               `\n... (truncated, ${elided} bytes elided)`
 }
 
-function safePath(cwd: string, filePath: string): string | null {
-    const resolved = path.resolve(cwd, filePath)
-    if (!resolved.startsWith(path.resolve(cwd))) return null
+/**
+ * Resolve a tool path while keeping both its lexical path and its real on-disk
+ * ancestor inside the project root. Checking the nearest existing ancestor is
+ * important for writes: the final file may not exist yet, but one of its parent
+ * directories can still be a symlink that points outside the worktree.
+ *
+ * This closes path-prefix and symlink escapes for the native file tools. Shell
+ * writes additionally have macOS Seatbelt containment; on other platforms the
+ * conservative `bashContainmentRejection` fallback covers known escape shapes.
+ */
+export function safePath(cwd: string, filePath: string): string | null {
+    const root = path.resolve(cwd)
+    const resolved = path.resolve(root, filePath)
+    if (!pathIsWithin(root, resolved)) return null
+
+    let rootReal: string
+    try {
+        rootReal = fs.realpathSync.native(root)
+    } catch {
+        return null
+    }
+
+    let existing = resolved
+    while (true) {
+        try {
+            // lstat also sees dangling symlinks. realpath will reject those,
+            // rather than treating them as a safe, not-yet-created path.
+            fs.lstatSync(existing)
+            break
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code
+            if (code !== "ENOENT" && code !== "ENOTDIR") return null
+            const parent = path.dirname(existing)
+            if (parent === existing || !pathIsWithin(root, parent)) return null
+            existing = parent
+        }
+    }
+
+    let existingReal: string
+    try {
+        existingReal = fs.realpathSync.native(existing)
+    } catch {
+        return null
+    }
+    if (!pathIsWithin(rootReal, existingReal)) return null
+
     return resolved
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+    const relative = path.relative(root, candidate)
+    return (
+        relative === "" ||
+        (relative !== ".." &&
+            !relative.startsWith(`..${path.sep}`) &&
+            !path.isAbsolute(relative))
+    )
+}
+
+type ShellToken =
+    | { kind: "word"; value: string }
+    | { kind: "operator"; value: string }
+
+/**
+ * Reject command shapes that can plainly leave the worktree. This validator is
+ * deliberately conservative and covers the incident class (`cd` to another
+ * repo followed by an install), absolute external operands, parent/home
+ * traversal, nested shell evaluation, and redirection through escaping
+ * symlinks. It is defense in depth under macOS Seatbelt and the portable
+ * fail-closed fallback elsewhere, not arbitrary-shell security by itself.
+ */
+function bashContainmentRejection(cwd: string, command: string): string | null {
+    const parsed = tokenizeShell(command)
+    if (typeof parsed === "string") return parsed
+    if (parsed.length === 0) return "empty commands are not allowed"
+
+    let commandStart = true
+    let commandName = ""
+    let currentDir = path.resolve(cwd)
+    let expectRedirectTarget = false
+    let cdAwaitingPath = false
+    let shellMayTakeCommandString = false
+
+    for (const token of parsed) {
+        if (token.kind === "operator") {
+            if (token.value === "<" || token.value === ">" || token.value === ">>") {
+                expectRedirectTarget = true
+                continue
+            }
+            if (token.value === "<<" || token.value === "<<<") {
+                return "here-documents and here-strings are not allowed"
+            }
+            commandStart = true
+            commandName = ""
+            cdAwaitingPath = false
+            shellMayTakeCommandString = false
+            continue
+        }
+
+        const word = token.value
+        if (!word) continue
+
+        if (expectRedirectTarget) {
+            expectRedirectTarget = false
+            const rejected = rejectPathOperand(cwd, currentDir, word, false)
+            if (rejected) return `redirection target ${rejected}`
+            continue
+        }
+
+        if (commandStart && isEnvironmentAssignment(word)) continue
+
+        if (commandStart) {
+            commandStart = false
+            commandName = path.basename(word)
+
+            // An absolute executable is different from an absolute data path.
+            // Existing StoryAgent cancellation tests invoke process.execPath
+            // directly. Permit project-local executables and that exact runtime;
+            // do not treat an arbitrary executable in another repo as trusted.
+            if (path.isAbsolute(word)) {
+                if (!safePath(cwd, word) && !isCurrentRuntimeExecutable(word)) {
+                    return `absolute command '${word}' is outside the project root`
+                }
+            } else {
+                const rejected = rejectTraversalSpelling(word)
+                if (rejected) return rejected
+            }
+
+            if (["eval", "source", ".", "exec", "env"].includes(commandName)) {
+                return `indirect shell command '${commandName}' is not allowed`
+            }
+            shellMayTakeCommandString = ["bash", "sh", "zsh", "dash", "ksh"].includes(
+                commandName,
+            )
+            cdAwaitingPath = commandName === "cd"
+            continue
+        }
+
+        if (shellMayTakeCommandString && (word === "-c" || word.includes("c"))) {
+            return `nested '${commandName} -c' commands are not allowed`
+        }
+
+        if (cdAwaitingPath) {
+            if (word.startsWith("-")) {
+                return "cd options and 'cd -' are not allowed"
+            }
+            const rejected = rejectPathOperand(cwd, currentDir, word, true)
+            if (rejected) return `cd target ${rejected}`
+            const nextDir = safePath(cwd, path.resolve(currentDir, word))
+            if (!nextDir) return `cd target '${word}' escapes the project root`
+            try {
+                if (!fs.statSync(nextDir).isDirectory()) {
+                    return `cd target '${word}' is not a directory`
+                }
+            } catch {
+                return `cd target '${word}' does not exist`
+            }
+            currentDir = nextDir
+            cdAwaitingPath = false
+            continue
+        }
+
+        const rejected = rejectPathOperand(cwd, currentDir, word, false)
+        if (rejected) return rejected
+    }
+
+    if (expectRedirectTarget) return "redirection is missing its target"
+    if (cdAwaitingPath) return "cd without an explicit project-relative target is not allowed"
+    return null
+}
+
+function rejectPathOperand(
+    root: string,
+    currentDir: string,
+    word: string,
+    requirePath: boolean,
+): string | null {
+    const candidates = [word]
+    const equals = word.indexOf("=")
+    if (equals >= 0 && equals + 1 < word.length) candidates.push(word.slice(equals + 1))
+
+    for (const candidate of candidates) {
+        const spelling = rejectTraversalSpelling(candidate)
+        if (spelling) return spelling
+
+        if (path.isAbsolute(candidate)) {
+            if (!safePath(root, candidate)) {
+                return `absolute path '${candidate}' escapes the project root`
+            }
+            continue
+        }
+
+        const possiblePath = path.resolve(currentDir, candidate)
+        const looksLikePath =
+            requirePath ||
+            candidate.includes("/") ||
+            candidate.startsWith(".") ||
+            pathEntryExists(possiblePath)
+        if (looksLikePath && !safePath(root, possiblePath)) {
+            return `path '${candidate}' escapes the project root (possibly through a symlink)`
+        }
+    }
+    return null
+}
+
+function rejectTraversalSpelling(word: string): string | null {
+    if (word.startsWith("~") || /(^|=)~/.test(word)) {
+        return `home-relative path '${word}' is not allowed`
+    }
+    if (/(^|[=/])\.\.($|\/)/.test(word)) {
+        return `parent traversal '${word}' is not allowed`
+    }
+    return null
+}
+
+function pathEntryExists(candidate: string): boolean {
+    try {
+        fs.lstatSync(candidate)
+        return true
+    } catch {
+        return false
+    }
+}
+
+function isCurrentRuntimeExecutable(candidate: string): boolean {
+    try {
+        fs.accessSync(candidate, fs.constants.X_OK)
+        return fs.realpathSync.native(candidate) === fs.realpathSync.native(process.execPath)
+    } catch {
+        return false
+    }
+}
+
+function isEnvironmentAssignment(word: string): boolean {
+    return /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)
+}
+
+function tokenizeShell(command: string): ShellToken[] | string {
+    const tokens: ShellToken[] = []
+    let word = ""
+    let quote: "'" | '"' | null = null
+
+    const pushWord = () => {
+        if (word) tokens.push({ kind: "word", value: word })
+        word = ""
+    }
+
+    for (let i = 0; i < command.length; i++) {
+        const ch = command[i]!
+        if (quote) {
+            if (ch === quote) {
+                quote = null
+                continue
+            }
+            if (quote === '"' && ch === "\\" && i + 1 < command.length) {
+                word += command[++i]!
+                continue
+            }
+            if (quote === '"' && (ch === "`" || ch === "$")) {
+                return "shell expansion inside double quotes is not allowed"
+            }
+            word += ch
+            continue
+        }
+
+        if (ch === "'" || ch === '"') {
+            quote = ch
+            continue
+        }
+        if (ch === "\\" && i + 1 < command.length) {
+            word += command[++i]!
+            continue
+        }
+        if (/\s/.test(ch)) {
+            pushWord()
+            continue
+        }
+        if (ch === "`" || ch === "$") {
+            return "shell expansion and command substitution are not allowed"
+        }
+        if ((ch === "<" || ch === ">") && command[i + 1] === "(") {
+            return "process substitution is not allowed"
+        }
+        if (";&|<>".includes(ch)) {
+            pushWord()
+            let operator = ch
+            if (command[i + 1] === ch && (ch === "&" || ch === "|" || ch === ">" || ch === "<")) {
+                operator += command[++i]!
+                if (operator === "<<" && command[i + 1] === "<") operator += command[++i]!
+            }
+            tokens.push({ kind: "operator", value: operator })
+            continue
+        }
+        word += ch
+    }
+    if (quote) return "unterminated shell quote"
+    pushWord()
+    return tokens
 }
 
 /** Tiny glob → regex translator: covers `*`, `**`, `?` — enough for the common cases. */

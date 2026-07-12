@@ -9,6 +9,7 @@ import {
     ARCHITECT_SYSTEM_PROMPT,
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
+import type { ModeContract } from "./planner-prompts.js"
 
 export interface RunArchitectOpenCodeOptions {
     goal: string
@@ -16,6 +17,7 @@ export interface RunArchitectOpenCodeOptions {
     /** OpenCode model in `provider/model` format. */
     model?: string
     projectContext?: string
+    modeContract?: ModeContract
     opencodeBin?: string
     /** Default 10 min — tool-call exploration blew past the old
      *  3-minute timeout mid-exploration. */
@@ -25,7 +27,7 @@ export interface RunArchitectOpenCodeOptions {
 export async function runArchitectOpenCode(
     opts: RunArchitectOpenCodeOptions,
 ): Promise<string> {
-    const userMessage = buildArchitectUserMessage(opts.goal, opts.projectContext)
+    const userMessage = buildArchitectUserMessage(opts.goal, opts.projectContext, opts.modeContract)
     const prompt = `${ARCHITECT_SYSTEM_PROMPT}\n\n${userMessage}`
 
     const text = await runOpenCodeOneShot({

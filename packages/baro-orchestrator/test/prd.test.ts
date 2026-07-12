@@ -187,6 +187,7 @@ describe("normalizePrd", () => {
 
         assert.equal(prd.runtimeGraph?.version, 4)
         assert.equal(prd.runtimeGraph?.dynamicStories, 2)
+        assert.equal(prd.runtimeGraph?.policyStories, 0)
         assert.equal(prd.runtimeGraph?.appliedDecisions.length, 1)
         assert.equal(
             prd.runtimeGraph?.appliedDecisions[0]?.applied.proposalId,

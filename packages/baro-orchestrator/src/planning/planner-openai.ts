@@ -30,7 +30,7 @@ import {
     PLANNER_SYSTEM_PROMPT,
     buildIntakePrompt,
     buildPlannerUserMessage,
-    extractJsonObject,
+    extractJsonObjects,
     heuristicModeContract,
     parseModeContract,
     renderModeContract,
@@ -52,11 +52,21 @@ export interface RunPlannerOpenAIOptions {
     maxRounds?: number
     /** How many tool-using rounds the Planner may spend exploring before it must finalize. */
     maxExplorationRounds?: number
-    /** Token budget for planning. After this, tools are disabled and the Planner must finalize. */
+    /** Token budget for planning. After this, tool execution closes and the Planner must finalize. */
     maxTokens?: number
+    /** Invalid final responses that may be repaired before the deterministic fallback. */
+    maxFinalizationRetries?: number
     /** Default 600 s — reasoning models routinely need minutes per round;
      *  the old 120 s killed planning mid-round. */
     perRoundTimeoutSecs?: number
+    /** Deterministic no-network seam used by the planner state-machine tests. */
+    testRuntime?: PlannerOpenAITestRuntime
+}
+
+export interface PlannerOpenAITestRuntime {
+    model: GenerativeModel
+    tools: Tool[]
+    inferRound: typeof runInferenceRound
 }
 
 function pickModel(name: string): GenerativeModel {
@@ -105,9 +115,10 @@ export async function runPlannerOpenAI(
     const plannerModelName = resolvePlannerModelName(intake.mode, opts.model)
     process.stderr.write(`[planner-openai] planner model=${plannerModelName} (${intake.mode === "focused" ? "floor" : "ceiling"}, mode=${intake.mode})\n`)
     emitPlanLine(`planning approach: ${intake.mode}`)
-    const model = pickModel(plannerModelName)
+    const model = opts.testRuntime?.model ?? pickModel(plannerModelName)
 
-    const tools = createCodebaseTools(opts.cwd)
+    const tools = opts.testRuntime?.tools ?? createCodebaseTools(opts.cwd)
+    const inferRound = opts.testRuntime?.inferRound ?? runInferenceRound
     setModelTools(model, tools)
 
     let context = ModelContext.create("planner")
@@ -125,12 +136,17 @@ export async function runPlannerOpenAI(
         )
 
     const maxRounds = opts.maxRounds ?? 8
-    const defaultExploration = opts.decisionDocument?.trim() ? 1 : 2
+    // Cheap OpenAI-compatible planners usually inspect fewer files per round
+    // than frontier OpenAI models. Two rounds was too short for cross-cutting
+    // work and forced GLM into finalization while it was still reading code.
+    const defaultExploration = opts.decisionDocument?.trim() ? 2 : 4
     const maxExplorationRounds = Math.max(1, Math.min(opts.maxExplorationRounds ?? numberEnv("BARO_PLANNER_MAX_EXPLORATION_ROUNDS", defaultExploration), maxRounds - 1))
     const maxTokens = Math.max(50_000, opts.maxTokens ?? numberEnv("BARO_PLANNER_MAX_TOKENS", 150_000))
+    const maxFinalizationRetries = Math.max(0, Math.floor(opts.maxFinalizationRetries ?? 2))
     const perRoundTimeoutMs = (opts.perRoundTimeoutSecs ?? 600) * 1000
     const usage = new UsageAccumulator()
     let finalRequested = false
+    let invalidFinalResponses = 0
 
     for (let round = 1; round <= maxRounds; round++) {
         const newItems: Array<{
@@ -141,8 +157,11 @@ export async function runPlannerOpenAI(
             text?: string
         }> = []
 
-        if (finalRequested) setModelTools(model, [])
-        const roundPromise = runInferenceRound(context, model)
+        // Keep tool schemas installed even after the execution budget closes.
+        // GLM/OpenRouter emits attempted calls as literal <tool_call> text when
+        // schemas disappear mid-conversation; keeping them makes those calls
+        // protocol-visible so we can answer them without executing anything.
+        const roundPromise = inferRound(context, model)
         // Clear the timer once the round settles — a pending setTimeout keeps the
         // process alive for the full 600s after the work is done (see architect-openai).
         let timer: ReturnType<typeof setTimeout> | undefined
@@ -183,9 +202,11 @@ export async function runPlannerOpenAI(
         }
         for (const call of calls) {
             const tool = tools.find((t) => t.name === call.name)
-            const output = tool
-                ? await runToolSafely(tool, call.args ?? "{}")
-                : `Error: tool '${call.name}' not registered`
+            const output = finalRequested
+                ? closedToolOutput()
+                : tool
+                  ? await runToolSafely(tool, call.args ?? "{}")
+                  : `Error: tool '${call.name}' not registered`
             context = context.addContextItem(
                 FunctionCallOutputItem.create(call.callId ?? "", output),
             )
@@ -194,8 +215,13 @@ export async function runPlannerOpenAI(
         if (calls.length > 0) {
             if (!finalRequested && (round >= maxExplorationRounds || usage.totalTokens >= maxTokens)) {
                 finalRequested = true
-                setModelTools(model, [])
                 context = context.addContextItem(UserMessageItem.create(finalPlanInstruction(usage.summary(), round, maxExplorationRounds, maxTokens)))
+                emitPlanLine("exploration budget reached — finalizing the PRD")
+            } else if (finalRequested) {
+                context = context.addContextItem(UserMessageItem.create(finalRepairInstruction(
+                    "The previous response requested another tool after the exploration budget closed.",
+                )))
+                emitPlanLine("tool request refused after exploration budget — retrying final PRD")
             }
         } else {
             const messages = newItems.filter((i) => i.type === "message")
@@ -208,16 +234,102 @@ export async function runPlannerOpenAI(
             if (!raw) throw new Error("PlannerOpenAI: empty final response")
             process.stderr.write(`[planner-openai] ${usage.summary()}\n`)
             try {
-                return extractJsonObject(raw)
+                return extractRunnablePlannerPrd(raw)
             } catch (e) {
-                process.stderr.write(`[planner-openai] invalid final JSON (${(e as Error)?.message ?? String(e)}) — using fallback PRD\n`)
-                return fallbackPrdJson(opts.goal, "Planner returned invalid JSON after exploration.")
+                invalidFinalResponses += 1
+                const reason = (e as Error)?.message ?? String(e)
+                if (round < maxRounds && invalidFinalResponses <= maxFinalizationRetries) {
+                    finalRequested = true
+                    context = context.addContextItem(UserMessageItem.create(finalRepairInstruction(reason)))
+                    process.stderr.write(`[planner-openai] invalid final JSON (${reason}) — repair ${invalidFinalResponses}/${maxFinalizationRetries}\n`)
+                    emitPlanLine(`invalid final PRD — repair ${invalidFinalResponses}/${maxFinalizationRetries}`)
+                    continue
+                }
+                process.stderr.write(`[planner-openai] invalid final JSON (${reason}) — repair budget exhausted, using fallback PRD\n`)
+                emitPlanLine("planner could not produce valid PRD JSON — using one-story fallback")
+                return fallbackPrdJson(opts.goal, "Planner returned invalid JSON after bounded repair attempts.")
             }
         }
     }
 
     process.stderr.write(`[planner-openai] ${usage.summary()} — exceeded maxRounds=${maxRounds}, using fallback PRD\n`)
     return fallbackPrdJson(opts.goal, `Planner exceeded maxRounds=${maxRounds} without producing a final plan.`)
+}
+
+function extractRunnablePlannerPrd(raw: string): string {
+    const candidates = extractJsonObjects(raw)
+    if (candidates.length === 0) {
+        throw new Error(`no valid JSON object in response: ${raw.trim().slice(0, 200)}`)
+    }
+    let lastError: unknown
+    for (const candidate of candidates) {
+        try {
+            validatePlannerPrd(candidate)
+            return candidate
+        } catch (error) {
+            lastError = error
+        }
+    }
+    throw lastError ?? new Error("response contained no runnable PRD object")
+}
+
+/** Reject syntactically-valid JSON that cannot be a runnable PRD while repair rounds remain. */
+function validatePlannerPrd(json: string): void {
+    const parsed = JSON.parse(json) as unknown
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("final PRD must be a JSON object")
+    }
+    const prd = parsed as Record<string, unknown>
+    if (typeof prd.project !== "string" || !prd.project.trim()) {
+        throw new Error("final PRD is missing a non-empty project")
+    }
+    if (typeof prd.branchName !== "string" || !prd.branchName.trim()) {
+        throw new Error("final PRD is missing a non-empty branchName")
+    }
+    if (typeof prd.description !== "string") {
+        throw new Error("final PRD is missing a string description")
+    }
+    if (!Array.isArray(prd.userStories) || prd.userStories.length === 0) {
+        throw new Error("final PRD must contain at least one user story")
+    }
+    for (const [index, value] of prd.userStories.entries()) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+            throw new Error(`final PRD story ${index + 1} is not an object`)
+        }
+        const story = value as Record<string, unknown>
+        if (typeof story.id !== "string" || !story.id.trim()) {
+            throw new Error(`final PRD story ${index + 1} is missing an id`)
+        }
+        if (typeof story.title !== "string" || !story.title.trim()) {
+            throw new Error(`final PRD story ${story.id} is missing a title`)
+        }
+        if (story.description !== undefined && typeof story.description !== "string") {
+            throw new Error(`final PRD story ${story.id} has a non-string description`)
+        }
+        if (
+            story.priority !== undefined &&
+            (!Number.isInteger(story.priority) || Number(story.priority) < -2_147_483_648 || Number(story.priority) > 2_147_483_647)
+        ) {
+            throw new Error(`final PRD story ${story.id} has an invalid i32 priority`)
+        }
+        if (
+            story.retries !== undefined &&
+            (!Number.isInteger(story.retries) || Number(story.retries) < 0 || Number(story.retries) > 4_294_967_295)
+        ) {
+            throw new Error(`final PRD story ${story.id} has an invalid u32 retries value`)
+        }
+        if (story.model !== undefined && typeof story.model !== "string") {
+            throw new Error(`final PRD story ${story.id} has a non-string model`)
+        }
+        for (const field of ["dependsOn", "acceptance", "tests"] as const) {
+            if (!Array.isArray(story[field])) {
+                throw new Error(`final PRD story ${story.id} is missing ${field}`)
+            }
+            if (!(story[field] as unknown[]).every((item) => typeof item === "string")) {
+                throw new Error(`final PRD story ${story.id} has non-string values in ${field}`)
+            }
+        }
+    }
 }
 
 /** Standalone intake for scripts/run-intake.ts — no planner run required. */
@@ -266,9 +378,22 @@ function finalPlanInstruction(summary: string, round: number, maxExplorationRoun
     return [
         "You have explored enough. Stop calling tools.",
         `Exploration round ${round}/${maxExplorationRounds}; planning budget ${maxTokens} tokens; usage so far: ${summary}.`,
+        "Tool schemas remain visible only for protocol compatibility. Any further tool request will be refused.",
         "Now output ONLY the final PRD JSON matching the required schema. No markdown, no prose, no more inspection.",
         "If some details remain uncertain, encode them as acceptance criteria/tests inside the relevant story instead of continuing exploration.",
     ].join("\n")
+}
+
+function finalRepairInstruction(reason: string): string {
+    return [
+        `Your previous response was not an acceptable final PRD: ${oneLine(reason).slice(0, 300)}`,
+        "Do not call tools and do not emit <tool_call> tags; tool execution is closed.",
+        "Output ONLY one valid JSON object matching the PRD schema from the system prompt. No markdown or prose.",
+    ].join("\n")
+}
+
+function closedToolOutput(): string {
+    return "Tool exploration budget is closed. This call was not executed. Output the final PRD JSON now."
 }
 
 export function fallbackPrdJson(goal: string, reason: string): string {

@@ -12,6 +12,7 @@ import {
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
 import { effortTimeoutMs } from "./planner-claude.js"
+import type { ModeContract } from "./planner-prompts.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -21,6 +22,7 @@ export interface RunArchitectClaudeOptions {
     model?: string
     effort?: string
     projectContext?: string
+    modeContract?: ModeContract
     claudeBin?: string
     /** Defaults scale with `effort` ({@link effortTimeoutMs}) — a flat
      *  3-minute timeout SIGTERM'd `--effort max` turns mid-thought. */
@@ -30,7 +32,7 @@ export interface RunArchitectClaudeOptions {
 export async function runArchitectClaude(
     opts: RunArchitectClaudeOptions,
 ): Promise<string> {
-    const userMessage = buildArchitectUserMessage(opts.goal, opts.projectContext)
+    const userMessage = buildArchitectUserMessage(opts.goal, opts.projectContext, opts.modeContract)
     const { stdout } = await execFileAsync(
         opts.claudeBin ?? "claude",
         [

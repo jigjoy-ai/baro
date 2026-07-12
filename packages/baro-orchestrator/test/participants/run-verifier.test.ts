@@ -86,7 +86,7 @@ describe("RunVerifier", () => {
             const pkgPath = join(dir, "package.json")
             writeFileSync(
                 pkgPath,
-                JSON.stringify({ name: "v", scripts: { lint: "exit 0" } }),
+                JSON.stringify({ name: "v", scripts: {} }),
             )
             const verifier = new RunVerifier({
                 runId: "run-final-plan",

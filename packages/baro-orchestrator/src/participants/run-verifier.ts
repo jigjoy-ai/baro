@@ -28,7 +28,7 @@ export interface RunVerifierOptions {
 }
 
 /**
- * Objective run-level quality gate.
+ * Objective run-level build/test/typecheck/lint quality gate.
  *
  * The coordinator requests verification only after every candidate change is
  * integrated. Results are correlated by runId + verificationId so replayed or

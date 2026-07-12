@@ -31,17 +31,20 @@ describe("verifyBuild", () => {
         })
     })
 
-    it("returns {ran:false} when there is no build/test script to run", async () => {
+    it("runs a declared lint gate even when build/test are absent", async () => {
         await withTempDir("baro-verify-", async (dir) => {
             writeFileSync(
                 join(dir, "package.json"),
                 JSON.stringify({ name: "v", scripts: { lint: "true" } }),
             )
             const r = await verifyBuild(dir)
-            assert.equal(r.ran, false)
+            assert.equal(r.ran, true)
             assert.equal(r.ok, true)
             assert.equal(r.failures.length, 0)
-            assert.deepEqual(r.commands, [])
+            assert.deepEqual(
+                r.commands.map(({ command, status }) => ({ command, status })),
+                [{ command: "npm run lint", status: "passed" }],
+            )
         })
     })
 
@@ -67,6 +70,33 @@ describe("verifyBuild", () => {
             assert.deepEqual(
                 r.commands.map((command) => command.status),
                 ["passed", "passed"],
+            )
+        })
+    })
+
+    it("runs typecheck and lint as deterministic final gates", async () => {
+        await withTempDir("baro-verify-static-gates-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "v",
+                    scripts: {
+                        typecheck: "exit 0",
+                        lint: "exit 1",
+                    },
+                }),
+            )
+
+            const r = await verifyBuild(dir)
+
+            assert.equal(r.ran, true)
+            assert.equal(r.ok, false)
+            assert.deepEqual(
+                r.commands.map(({ command, status }) => ({ command, status })),
+                [
+                    { command: "npm run typecheck", status: "passed" },
+                    { command: "npm run lint", status: "failed" },
+                ],
             )
         })
     })
@@ -131,12 +161,12 @@ describe("verifyBuild", () => {
         })
     })
 
-    it("merges newly introduced final build/test commands with the pre-run plan", async () => {
+    it("merges newly introduced final-gate commands with the pre-run plan", async () => {
         await withTempDir("baro-verify-final-plan-", async (dir) => {
             const pkgPath = join(dir, "package.json")
             writeFileSync(
                 pkgPath,
-                JSON.stringify({ name: "v", scripts: { lint: "exit 0" } }),
+                JSON.stringify({ name: "v", scripts: {} }),
             )
             const baseline = createVerifyPlan(dir)
             writeFileSync(

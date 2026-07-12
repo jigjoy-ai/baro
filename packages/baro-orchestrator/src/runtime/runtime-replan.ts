@@ -1,5 +1,6 @@
 import { buildDag } from "../dag.js"
 import type { PrdFile, PrdStory } from "../prd.js"
+import { isVerificationOnlyStory } from "../planning/verification-stories.js"
 import type {
     ReplanStoryAdd,
     RuntimeReplanMutation,
@@ -269,6 +270,12 @@ function validateInputs(
     for (const added of mutation.addedStories) {
         const issue = validateAddedStoryShape(added)
         if (issue) return reject("invalid_proposal", issue)
+        if (isVerificationOnlyStory(added)) {
+            return reject(
+                "invalid_proposal",
+                `added story '${added.id}' is verification-only; final test/build/lint gates belong to RunVerifier`,
+            )
+        }
     }
     for (const storyId of mutation.removedStoryIds) {
         if (!validId(storyId)) {

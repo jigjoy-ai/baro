@@ -13,7 +13,7 @@ import { runPlannerCodex } from "../src/planning/planner-codex.js"
 import { runPlannerOpenAI } from "../src/planning/planner-openai.js"
 import { runPlannerOpenCode } from "../src/planning/planner-opencode.js"
 import { runPlannerPi } from "../src/planning/planner-pi.js"
-import { parseModeContract, type ModeContract } from "../src/planning/planner-prompts.js"
+import { parseRequiredModeContract, type ModeContract } from "../src/planning/planner-prompts.js"
 import { enforceModeContract } from "../src/planning/mode-enforcement.js"
 
 interface Args {
@@ -136,14 +136,11 @@ async function main(): Promise<void> {
     const projectContext = tryRead(args.contextFile)
     const decisionDocument = tryRead(args.decisionFile)
     let modeContract: ModeContract | undefined
-    const modeJson = tryRead(args.modeFile)
-    if (modeJson) {
+    if (args.modeFile) {
         try {
-            modeContract = parseModeContract(modeJson)
+            modeContract = parseRequiredModeContract(readFileSync(args.modeFile, "utf-8"))
         } catch (e) {
-            process.stderr.write(
-                `[run-planner] warning: invalid --mode-file (${(e as Error).message}) — planner will run its own intake\n`,
-            )
+            fatal(`invalid --mode-file: ${(e as Error).message}`)
         }
     }
 
@@ -218,8 +215,15 @@ async function main(): Promise<void> {
         process.exit(1)
     }
 
-    if (modeContract) {
-        prdJson = enforceModeContract(prdJson, modeContract, args.goal)
+    try {
+        if (modeContract) {
+            prdJson = enforceModeContract(prdJson, modeContract, args.goal)
+        }
+    } catch (e) {
+        process.stderr.write(
+            `[run-planner] FAILED after ${Date.now() - t0}ms: ${(e as Error)?.message ?? String(e)}\n`,
+        )
+        process.exit(1)
     }
 
     process.stderr.write(

@@ -23,6 +23,11 @@ pub struct PrdFile {
     /// prd.json for the orchestrator.
     #[serde(rename = "executionMode", default, skip_serializing_if = "Option::is_none")]
     pub execution_mode: Option<serde_json::Value>,
+    /// Collective runtime DAG version, accounting and decision ledger. Rust
+    /// does not interpret it, but must preserve it if a resumed PRD is ever
+    /// serialized again.
+    #[serde(rename = "runtimeGraph", default, skip_serializing_if = "Option::is_none")]
+    pub runtime_graph: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -128,6 +133,7 @@ pub fn prd_from_review(
             .collect(),
         decision_document,
         execution_mode,
+        runtime_graph: None,
     }
 }
 
@@ -149,6 +155,23 @@ mod tests {
         let prd: PrdFile = serde_json::from_str(raw).unwrap();
         let out = serde_json::to_string(&prd).unwrap();
         assert!(out.contains(r#""executionMode":{"maxStories":1,"mode":"focused","source":"user"}"#));
+    }
+
+    #[test]
+    fn runtime_graph_round_trips_opaquely() {
+        let raw = r#"{"project":"p","branchName":"b","userStories":[],"runtimeGraph":{"runId":"run-1","version":3,"dynamicStories":1,"policyStories":2,"appliedDecisions":[{"opaque":true}]}}"#;
+        let prd: PrdFile = serde_json::from_str(raw).unwrap();
+        let out = serde_json::to_value(&prd).unwrap();
+        assert_eq!(
+            out["runtimeGraph"],
+            serde_json::json!({
+                "runId": "run-1",
+                "version": 3,
+                "dynamicStories": 1,
+                "policyStories": 2,
+                "appliedDecisions": [{"opaque": true}],
+            }),
+        );
     }
 
     #[test]

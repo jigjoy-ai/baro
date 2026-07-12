@@ -38,11 +38,9 @@ export interface RuntimeReplanDecisionState {
     /** Recovery policy commits are Board-authorized after the wave settles. */
     requireActiveLease?: boolean
     /** Recovery has its own bounded retry budget, separate from discovery. */
-    countAddedStories?: boolean
+    storyAccounting?: "worker" | "policy"
     /** Override the remaining dynamic-add allowance for policy commits. */
     maxAddedStories?: number
-    /** Internal wave-boundary policy commits do not need worker replay. */
-    rememberAppliedDecision?: boolean
 }
 
 export type RuntimeReplanDecisionEvent =
@@ -77,6 +75,7 @@ interface RememberedDecision {
 export class RuntimeReplanCoordinator {
     private graphVersionValue = 0
     private dynamicStories = 0
+    private policyStories = 0
     private readonly decisions = new Map<string, RememberedDecision>()
     private readonly persist: (path: string, prd: PrdFile) => void
 
@@ -94,6 +93,10 @@ export class RuntimeReplanCoordinator {
         this.dynamicStories =
             durable?.runId === this.opts.runId
                 ? durable.dynamicStories
+                : 0
+        this.policyStories =
+            durable?.runId === this.opts.runId
+                ? durable.policyStories ?? 0
                 : 0
         this.decisions.clear()
         if (durable?.runId !== this.opts.runId) return
@@ -216,9 +219,14 @@ export class RuntimeReplanCoordinator {
         const graphVersion = previousGraphVersion + 1
         const dynamicStories =
             this.dynamicStories +
-            (state.countAddedStories === false
+            (state.storyAccounting === "policy"
                 ? 0
                 : validation.addedStoryIds.length)
+        const policyStories =
+            this.policyStories +
+            (state.storyAccounting === "policy"
+                ? validation.addedStoryIds.length
+                : 0)
         const event = RuntimeReplanApplied.create({
             runId: proposal.runId,
             proposalId: proposal.proposalId,
@@ -237,9 +245,9 @@ export class RuntimeReplanCoordinator {
             runtimeGraph: this.nextDurableState(
                 graphVersion,
                 dynamicStories,
+                policyStories,
                 fingerprint,
                 event.data,
-                state.rememberAppliedDecision !== false,
             ),
         }
         try {
@@ -257,9 +265,8 @@ export class RuntimeReplanCoordinator {
 
         this.graphVersionValue = graphVersion
         this.dynamicStories = dynamicStories
-        if (state.rememberAppliedDecision !== false) {
-            this.decisions.set(proposal.proposalId, { fingerprint, event })
-        }
+        this.policyStories = policyStories
+        this.decisions.set(proposal.proposalId, { fingerprint, event })
         return {
             event,
             applied: {
@@ -290,9 +297,9 @@ export class RuntimeReplanCoordinator {
     private nextDurableState(
         version: number,
         dynamicStories: number,
+        policyStories: number,
         fingerprint: string,
         applied: RuntimeReplanAppliedData,
-        includeAppliedDecision: boolean,
     ): PrdRuntimeGraphState {
         const appliedDecisions: PrdRuntimeGraphState["appliedDecisions"] = []
         for (const decision of this.decisions.values()) {
@@ -302,16 +309,15 @@ export class RuntimeReplanCoordinator {
                 applied: structuredClone(decision.event.data),
             })
         }
-        if (includeAppliedDecision) {
-            appliedDecisions.push({
-                fingerprint,
-                applied: structuredClone(applied),
-            })
-        }
+        appliedDecisions.push({
+            fingerprint,
+            applied: structuredClone(applied),
+        })
         return {
             runId: this.opts.runId,
             version,
             dynamicStories,
+            policyStories,
             appliedDecisions: appliedDecisions.slice(-32),
         }
     }

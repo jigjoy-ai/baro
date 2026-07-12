@@ -266,6 +266,38 @@ describe("validateRuntimeReplanMutation", () => {
         expectCode(validate(prd(), mutation()), "no_op")
     })
 
+    it("rejects runtime verification-only stories handled by RunVerifier", () => {
+        const result = validate(
+            prd(),
+            mutation({
+                addedStories: [{
+                    ...add("S11", ["S2"]),
+                    title: "Run npm test and npm run typecheck, fix failures",
+                    description:
+                        "Run the existing final gates. Fix any test or typecheck failures caused by integration issues; do not introduce new features.",
+                }],
+            }),
+        )
+
+        expectCode(result, "invalid_proposal")
+        if (!result.ok) assert.match(result.reason, /RunVerifier/)
+    })
+
+    it("accepts runtime stories that implement new tests", () => {
+        const result = validate(
+            prd(),
+            mutation({
+                addedStories: [{
+                    ...add("S4", ["S2"]),
+                    title: "Verify cancellation by adding regression tests",
+                    description: "Implement new abort-race test cases.",
+                }],
+            }),
+        )
+
+        assert.equal(result.ok, true)
+    })
+
     it("rejects dependency rewires that are semantic no-ops", () => {
         expectCode(
             validate(prd(), mutation({ modifiedDeps: { S2: ["S1"] } })),

@@ -1,7 +1,47 @@
 import { afterEach, describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import { fallbackPrdJson, resolvePlannerModelName } from "../src/planning/planner-openai.js"
+import {
+    FunctionCallItem,
+    ModelMessageItem,
+    type ContextItem,
+    type ModelContext,
+    type Tool,
+} from "@mozaik-ai/core"
+
+import { GenericOpenAIModel } from "../src/planning/openai-runtime.js"
+import {
+    fallbackPrdJson,
+    resolvePlannerModelName,
+    runPlannerOpenAI,
+    type PlannerOpenAITestRuntime,
+} from "../src/planning/planner-openai.js"
+
+const PARALLEL_MODE = {
+    mode: "parallel" as const,
+    confidence: 1,
+    reason: "test",
+    source: "user",
+}
+
+const VALID_PRD = JSON.stringify({
+    project: "mozaik",
+    branchName: "cooperative-cancellation",
+    description: "Implement cooperative cancellation",
+    userStories: [
+        {
+            id: "S1",
+            priority: 1,
+            title: "Propagate cancellation",
+            description: "Thread the signal through the provider boundary.",
+            dependsOn: [],
+            retries: 2,
+            acceptance: ["The exact signal reaches providers."],
+            tests: ["npm test"],
+            model: "heavy",
+        },
+    ],
+})
 
 describe("PlannerOpenAI fallback PRD", () => {
     it("returns a valid one-story PRD when planning cannot finalize", () => {
@@ -44,3 +84,225 @@ describe("PlannerOpenAI complexity routing", () => {
         assert.equal(resolvePlannerModelName("focused", "gpt-5.5"), "gpt-5.5")
     })
 })
+
+describe("PlannerOpenAI GLM-compatible finalization", () => {
+    it("repairs the recorded literal GLM tool markup instead of collapsing to fallback", async () => {
+        let invokes = 0
+        const tool = fakeTool(async () => {
+            invokes += 1
+            return "file contents"
+        })
+        const sequence = fakeSequence([
+            [call("c1")],
+            [call("c2")],
+            [message(
+                "<tool_call>read_file<arg_key>path</arg_key>" +
+                "<arg_value>src/domain/agentic-environment/inference/params.ts</arg_value></tool_call>",
+            )],
+            [message(`\`\`\`json\n${VALID_PRD}\n\`\`\``)],
+        ], tool)
+
+        const result = await runPlannerOpenAI({
+            goal: "Implement cooperative cancellation",
+            cwd: "/unused",
+            model: "glm-5.2",
+            modeContract: PARALLEL_MODE,
+            maxRounds: 6,
+            maxExplorationRounds: 2,
+            maxFinalizationRetries: 2,
+            testRuntime: sequence.runtime,
+        })
+
+        assert.deepEqual(JSON.parse(result), JSON.parse(VALID_PRD))
+        assert.equal(invokes, 2)
+        assert.equal(sequence.rounds(), 4)
+        assert.deepEqual(sequence.toolCounts, [1, 1, 1, 1])
+        assert.match(
+            JSON.stringify(sequence.contexts[3]!.toJSON()),
+            /do not emit <tool_call> tags/i,
+        )
+    })
+
+    it("keeps schemas visible but refuses structured tool calls after the budget", async () => {
+        let invokes = 0
+        const tool = fakeTool(async () => {
+            invokes += 1
+            return "file contents"
+        })
+        const sequence = fakeSequence([
+            [call("allowed")],
+            [call("refused")],
+            [message(VALID_PRD)],
+        ], tool)
+
+        const result = await runPlannerOpenAI({
+            goal: "Implement cooperative cancellation",
+            cwd: "/unused",
+            model: "glm-5.2",
+            modeContract: PARALLEL_MODE,
+            maxRounds: 5,
+            maxExplorationRounds: 1,
+            testRuntime: sequence.runtime,
+        })
+
+        assert.deepEqual(JSON.parse(result), JSON.parse(VALID_PRD))
+        assert.equal(invokes, 1)
+        assert.deepEqual(sequence.toolCounts, [1, 1, 1])
+        assert.match(
+            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            /this call was not executed/i,
+        )
+    })
+
+    it("falls back only after the bounded JSON repair budget is exhausted", async () => {
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence([
+            [call("c1")],
+            [message("<tool_call>read_file</tool_call>")],
+            [message("still not JSON")],
+        ], tool)
+
+        const result = await runPlannerOpenAI({
+            goal: "Implement cooperative cancellation",
+            cwd: "/unused",
+            model: "glm-5.2",
+            modeContract: PARALLEL_MODE,
+            maxRounds: 6,
+            maxExplorationRounds: 1,
+            maxFinalizationRetries: 1,
+            testRuntime: sequence.runtime,
+        })
+
+        const prd = JSON.parse(result)
+        assert.equal(prd.project, "baro-run")
+        assert.match(prd.userStories[0].description, /bounded repair attempts/)
+        assert.equal(sequence.rounds(), 3)
+    })
+
+    it("repairs syntactically valid JSON that is not a runnable PRD", async () => {
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence([
+            [call("c1")],
+            [message("{}")],
+            [message(VALID_PRD)],
+        ], tool)
+
+        const result = await runPlannerOpenAI({
+            goal: "Implement cooperative cancellation",
+            cwd: "/unused",
+            model: "glm-5.2",
+            modeContract: PARALLEL_MODE,
+            maxRounds: 5,
+            maxExplorationRounds: 1,
+            maxFinalizationRetries: 1,
+            testRuntime: sequence.runtime,
+        })
+
+        assert.deepEqual(JSON.parse(result), JSON.parse(VALID_PRD))
+        assert.match(
+            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            /missing a non-empty project/i,
+        )
+    })
+
+    it("repairs PRD array values that Rust cannot deserialize", async () => {
+        const invalid = JSON.parse(VALID_PRD) as Record<string, unknown>
+        const stories = invalid.userStories as Array<Record<string, unknown>>
+        stories[0]!.tests = [42]
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence([
+            [call("c1")],
+            [message(JSON.stringify(invalid))],
+            [message(VALID_PRD)],
+        ], tool)
+
+        const result = await runPlannerOpenAI({
+            goal: "Implement cooperative cancellation",
+            cwd: "/unused",
+            model: "glm-5.2",
+            modeContract: PARALLEL_MODE,
+            maxRounds: 5,
+            maxExplorationRounds: 1,
+            maxFinalizationRetries: 1,
+            testRuntime: sequence.runtime,
+        })
+
+        assert.deepEqual(JSON.parse(result), JSON.parse(VALID_PRD))
+        assert.match(
+            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            /non-string values in tests/i,
+        )
+    })
+
+    it("skips an earlier tool-args object when the same response contains a valid PRD", async () => {
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence([
+            [message(`Attempted args: {"path":"src/index.ts"}\n${VALID_PRD}`)],
+        ], tool)
+
+        const result = await runPlannerOpenAI({
+            goal: "Implement cooperative cancellation",
+            cwd: "/unused",
+            model: "glm-5.2",
+            modeContract: PARALLEL_MODE,
+            maxRounds: 3,
+            maxFinalizationRetries: 0,
+            testRuntime: sequence.runtime,
+        })
+
+        assert.deepEqual(JSON.parse(result), JSON.parse(VALID_PRD))
+        assert.equal(sequence.rounds(), 1)
+    })
+})
+
+function call(callId: string): ContextItem {
+    return FunctionCallItem.rehydrate({
+        callId,
+        name: "read_file",
+        args: JSON.stringify({ path: "src/index.ts" }),
+    })
+}
+
+function message(text: string): ContextItem {
+    return ModelMessageItem.rehydrate({ text })
+}
+
+function fakeTool(invoke: Tool["invoke"]): Tool {
+    return {
+        type: "function",
+        name: "read_file",
+        description: "Read one file",
+        parameters: { type: "object" },
+        strict: true,
+        invoke,
+    }
+}
+
+function fakeSequence(roundItems: ContextItem[][], tool: Tool): {
+    runtime: PlannerOpenAITestRuntime
+    contexts: ModelContext[]
+    toolCounts: number[]
+    rounds: () => number
+} {
+    const model = new GenericOpenAIModel("glm-5.2")
+    const contexts: ModelContext[] = []
+    const toolCounts: number[] = []
+    let round = 0
+    return {
+        runtime: {
+            model,
+            tools: [tool],
+            inferRound: async (context, activeModel) => {
+                contexts.push(context)
+                toolCounts.push(activeModel.getTools().length)
+                const items = roundItems[round]
+                assert.ok(items, `unexpected inference round ${round + 1}`)
+                round += 1
+                return { items, usage: undefined }
+            },
+        },
+        contexts,
+        toolCounts,
+        rounds: () => round,
+    }
+}

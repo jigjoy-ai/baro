@@ -46,6 +46,32 @@ describe("script entrypoints run their main()", () => {
         assert.match(r.stderr, /--mode-file requires a value/)
     })
 
+    it("run-architect knows --mode-file", async () => {
+        const r = await runScript("run-architect.ts", ["--mode-file"])
+        assert.equal(r.code, 2)
+        assert.match(r.stderr, /--mode-file requires a value/)
+    })
+
+    it("planner and architect fail closed on an invalid persisted mode contract", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "baro-invalid-mode-"))
+        try {
+            const modeFile = join(dir, "mode.json")
+            writeFileSync(modeFile, "{}")
+            for (const script of ["run-planner.ts", "run-architect.ts"]) {
+                const r = await runScript(script, [
+                    "--goal", "test",
+                    "--cwd", dir,
+                    "--llm", "openai",
+                    "--mode-file", modeFile,
+                ])
+                assert.equal(r.code, 2, `${script}: ${r.stderr}`)
+                assert.match(r.stderr, /invalid --mode-file.*must contain mode/)
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+
     it("run-intake rejects missing args (proves main executes)", async () => {
         const r = await runScript("run-intake.ts", [])
         assert.equal(r.code, 2)

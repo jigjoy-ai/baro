@@ -5,6 +5,8 @@
  * spec. The triage block is load-bearing: trivial goals emit ONE short
  * ADR instead of a full design spec (baro 0.26+ relies on this).
  */
+import type { ModeContract } from "./planner-prompts.js"
+
 export const ARCHITECT_SYSTEM_PROMPT = `You are the architect for this engineering run. ONE focused turn, before anyone writes code.
 
 TRIAGE FIRST — DO NOT SKIP THIS STEP:
@@ -76,12 +78,38 @@ Rules:
 - Reference exact existing files when leveraging current conventions.
 - Output ONLY the markdown document. No preamble, no "Here are the ADRs:". Start with the \`## Existing context\` heading.`
 
-export function buildArchitectUserMessage(goal: string, projectContext?: string): string {
+export function buildArchitectUserMessage(
+    goal: string,
+    projectContext?: string,
+    modeContract?: ModeContract,
+): string {
     const parts: string[] = []
     if (projectContext && projectContext.trim().length > 0) {
         parts.push("## Project context (CLAUDE.md / equivalent)")
         parts.push("")
         parts.push(projectContext.trim())
+        parts.push("")
+        parts.push("---")
+        parts.push("")
+    }
+    if (modeContract) {
+        parts.push("## Execution mode contract (already decided — do not reclassify)")
+        parts.push("")
+        parts.push(`mode: ${modeContract.mode}`)
+        parts.push(`reason: ${modeContract.reason}`)
+        if (modeContract.mode === "parallel") {
+            parts.push(
+                "This run will use multiple agents on independent DAG siblings. Resolve every cross-cutting choice they must share.",
+            )
+        } else if (modeContract.mode === "sequential") {
+            parts.push(
+                "This run will use an ordered multi-story DAG. Pin down contracts that later stories must inherit from earlier ones.",
+            )
+        } else {
+            parts.push(
+                "This run will use one focused worker. Do not infer that the goal is trivial solely from the mode; emit full ADRs if the goal still has cross-cutting decisions.",
+            )
+        }
         parts.push("")
         parts.push("---")
         parts.push("")

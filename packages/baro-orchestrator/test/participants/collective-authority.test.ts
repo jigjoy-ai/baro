@@ -600,7 +600,13 @@ describe("collective authority and replay invariants", () => {
             )
             const persisted = JSON.parse(readFileSync(prdPath, "utf8"))
             assert.equal(persisted.runtimeGraph.version, 2)
-            assert.deepEqual(persisted.runtimeGraph.appliedDecisions, [])
+            assert.equal(persisted.runtimeGraph.dynamicStories, 0)
+            assert.equal(persisted.runtimeGraph.policyStories, 1)
+            assert.equal(persisted.runtimeGraph.appliedDecisions.length, 1)
+            assert.match(
+                persisted.runtimeGraph.appliedDecisions[0].applied.proposalId,
+                new RegExp(`^${runId}:policy-replan:[0-9a-f-]{36}$`),
+            )
         })
     })
 

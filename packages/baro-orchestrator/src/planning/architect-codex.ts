@@ -9,12 +9,14 @@ import {
     ARCHITECT_SYSTEM_PROMPT,
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
+import type { ModeContract } from "./planner-prompts.js"
 
 export interface RunArchitectCodexOptions {
     goal: string
     cwd: string
     model?: string
     projectContext?: string
+    modeContract?: ModeContract
     codexBin?: string
     /** Default 10 min — codex with reasoning + tool exploration blew
      *  past the old 3-minute timeout mid-exploration. */
@@ -24,7 +26,7 @@ export interface RunArchitectCodexOptions {
 export async function runArchitectCodex(
     opts: RunArchitectCodexOptions,
 ): Promise<string> {
-    const userMessage = buildArchitectUserMessage(opts.goal, opts.projectContext)
+    const userMessage = buildArchitectUserMessage(opts.goal, opts.projectContext, opts.modeContract)
     const prompt = `${ARCHITECT_SYSTEM_PROMPT}\n\n${userMessage}`
 
     const text = await runCodexOneShot({

@@ -13,6 +13,10 @@ import { runArchitectCodex } from "../src/planning/architect-codex.js"
 import { runArchitectOpenAI } from "../src/planning/architect-openai.js"
 import { runArchitectOpenCode } from "../src/planning/architect-opencode.js"
 import { runArchitectPi } from "../src/planning/architect-pi.js"
+import {
+    parseRequiredModeContract,
+    type ModeContract,
+} from "../src/planning/planner-prompts.js"
 
 interface Args {
     goal: string
@@ -26,6 +30,8 @@ interface Args {
     model?: string
     effort?: string
     contextFile?: string
+    /** Operator-fixed ModeContract. OpenAI uses it instead of running intake again. */
+    modeFile?: string
     /** When set, the doc is written here and stdout is freed for the event stream. */
     resultFile?: string
 }
@@ -37,6 +43,7 @@ function parseArgs(argv: string[]): Args {
     let model: string | undefined
     let effort: string | undefined
     let contextFile: string | undefined
+    let modeFile: string | undefined
     let resultFile: string | undefined
 
     for (let i = 0; i < argv.length; i++) {
@@ -65,6 +72,9 @@ function parseArgs(argv: string[]): Args {
             case "--context-file":
                 contextFile = required(argv, ++i, "--context-file")
                 break
+            case "--mode-file":
+                modeFile = required(argv, ++i, "--mode-file")
+                break
             case "--result-file":
                 resultFile = required(argv, ++i, "--result-file")
                 break
@@ -75,7 +85,16 @@ function parseArgs(argv: string[]): Args {
     if (!goal) fatal("--goal is required")
     if (!cwd) fatal("--cwd is required")
     if (!llm) fatal("--llm is required")
-    return { goal: goal!, cwd: cwd!, llm: llm!, model, effort, contextFile, resultFile }
+    return {
+        goal: goal!,
+        cwd: cwd!,
+        llm: llm!,
+        model,
+        effort,
+        contextFile,
+        modeFile,
+        resultFile,
+    }
 }
 
 function required(argv: string[], i: number, flag: string): string {
@@ -105,8 +124,19 @@ async function main(): Promise<void> {
         }
     }
 
+    let modeContract: ModeContract | undefined
+    if (args.modeFile) {
+        try {
+            modeContract = parseRequiredModeContract(readFileSync(args.modeFile, "utf-8"))
+        } catch (e) {
+            fatal(`invalid --mode-file: ${(e as Error).message}`)
+        }
+    }
+
     process.stderr.write(
-        `[run-architect] llm=${args.llm} model=${args.model ?? "(default)"}\n`,
+        `[run-architect] llm=${args.llm} model=${args.model ?? "(default)"}` +
+            (modeContract ? ` mode=${modeContract.mode} (pre-decided)` : "") +
+            "\n",
     )
 
     let doc: string
@@ -121,6 +151,7 @@ async function main(): Promise<void> {
                 cwd: args.cwd,
                 model: args.model,
                 projectContext,
+                modeContract,
             })
         } else if (args.llm === "codex") {
             doc = await runArchitectCodex({
@@ -128,6 +159,7 @@ async function main(): Promise<void> {
                 cwd: args.cwd,
                 model: args.model,
                 projectContext,
+                modeContract,
             })
         } else if (args.llm === "opencode") {
             doc = await runArchitectOpenCode({
@@ -135,6 +167,7 @@ async function main(): Promise<void> {
                 cwd: args.cwd,
                 model: args.model,
                 projectContext,
+                modeContract,
             })
         } else if (args.llm === "pi") {
             doc = await runArchitectPi({
@@ -142,6 +175,7 @@ async function main(): Promise<void> {
                 cwd: args.cwd,
                 model: args.model,
                 projectContext,
+                modeContract,
             })
         } else {
             doc = await runArchitectClaude({
@@ -150,6 +184,7 @@ async function main(): Promise<void> {
                 model: args.model,
                 effort: args.effort,
                 projectContext,
+                modeContract,
             })
         }
     } catch (e) {

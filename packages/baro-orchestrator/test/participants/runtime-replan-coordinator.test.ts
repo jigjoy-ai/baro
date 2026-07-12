@@ -71,6 +71,7 @@ describe("RuntimeReplanCoordinator", () => {
             runId: "run-1",
             version: 3,
             dynamicStories: 2,
+            policyStories: 0,
             appliedDecisions: [
                 {
                     fingerprint:
@@ -133,6 +134,82 @@ describe("RuntimeReplanCoordinator", () => {
         )
         assert.ok(RuntimeReplanApplied.is(nextRunOutcome.event))
         assert.equal(nextRun.graphVersion, 3)
+        assert.equal(writes, 2)
+    })
+
+    it("persists policy replans and accounts for them outside the worker discovery budget", () => {
+        let durable = initialPrd()
+        let writes = 0
+        const createCoordinator = () =>
+            new RuntimeReplanCoordinator({
+                runId: "run-1",
+                prdPath: "/unused/prd.json",
+                maxDynamicStories: 1,
+                adaptationBudget: 3,
+                persist: (_path, value) => {
+                    writes += 1
+                    durable = structuredClone(value)
+                },
+            })
+
+        const first = createCoordinator()
+        first.start(durable)
+        const proposal = addProposal()
+        const outcome = first.decide(proposal, {
+            ...decisionState(durable),
+            requireActiveLease: false,
+            activeLease: undefined,
+            storyAccounting: "policy",
+            maxAddedStories: 1,
+        })
+        assert.ok(RuntimeReplanApplied.is(outcome.event))
+        assert.equal(durable.runtimeGraph?.dynamicStories, 0)
+        assert.equal(durable.runtimeGraph?.policyStories, 1)
+        assert.equal(durable.runtimeGraph?.appliedDecisions.length, 1)
+        assert.equal(writes, 1)
+
+        const restarted = createCoordinator()
+        restarted.start(durable)
+        const replay = restarted.decide(proposal, {
+            ...decisionState(durable),
+            requireActiveLease: false,
+            activeLease: undefined,
+            storyAccounting: "policy",
+            maxAddedStories: 1,
+        })
+        assert.ok(RuntimeReplanApplied.is(replay.event))
+        assert.equal(replay.applied, undefined)
+        assert.equal(writes, 1)
+
+        const worker = restarted.decide(
+            addSecondProposal(),
+            decisionState(durable),
+        )
+        assert.ok(RuntimeReplanApplied.is(worker.event))
+        assert.equal(durable.runtimeGraph?.dynamicStories, 1)
+        assert.equal(durable.runtimeGraph?.policyStories, 1)
+        assert.equal(writes, 2)
+
+        const overBudget = restarted.decide(
+            {
+                ...addSecondProposal(),
+                proposalId: "proposal-over-worker-budget",
+                baseGraphVersion: 3,
+                mutation: {
+                    addedStories: [{
+                        id: "S4",
+                        priority: 4,
+                        title: "Over budget",
+                        description: "This worker story must be rejected.",
+                        dependsOn: ["S3"],
+                    }],
+                    removedStoryIds: [],
+                    modifiedDeps: {},
+                },
+            },
+            decisionState(durable),
+        )
+        assert.ok(RuntimeReplanRejected.is(overBudget.event))
         assert.equal(writes, 2)
     })
 

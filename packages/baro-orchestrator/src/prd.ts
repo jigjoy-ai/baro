@@ -62,7 +62,10 @@ export interface PrdRuntimeReplanDecision {
 export interface PrdRuntimeGraphState {
     runId: string
     version: number
+    /** Worker-proposed stories charged against maxDynamicStories. */
     dynamicStories: number
+    /** Board/Surgeon recovery stories committed at safe wave boundaries. */
+    policyStories: number
     appliedDecisions: PrdRuntimeReplanDecision[]
 }
 
@@ -140,6 +143,9 @@ function normalizeRuntimeGraph(value: unknown): PrdRuntimeGraphState | undefined
         Number(graph.version) < 1 ||
         !Number.isSafeInteger(graph.dynamicStories) ||
         Number(graph.dynamicStories) < 0 ||
+        (graph.policyStories !== undefined &&
+            (!Number.isSafeInteger(graph.policyStories) ||
+                Number(graph.policyStories) < 0)) ||
         !Array.isArray(graph.appliedDecisions)
     ) return undefined
     const validDecisions = graph.appliedDecisions
@@ -166,6 +172,9 @@ function normalizeRuntimeGraph(value: unknown): PrdRuntimeGraphState | undefined
         runId: graph.runId,
         version: Number(graph.version),
         dynamicStories: Number(graph.dynamicStories),
+        // Backwards compatible with durable state written before recovery
+        // adaptations had their own accounting lane.
+        policyStories: Number(graph.policyStories ?? 0),
         appliedDecisions,
     }
 }

@@ -411,6 +411,184 @@ describe("OpenAIStoryAgent", () => {
         })
     })
 
+    it("executes the last exploration call, refuses later writes, and accepts a final summary", async () => {
+        await withTempDir("openai-story-finalization-", async (dir) => {
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "story-finalization",
+                    prompt: "finish, test, and summarize",
+                    cwd: dir,
+                    retries: 0,
+                    quietTimeoutMs: 1,
+                    maxTurns: 1,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 5,
+                    perRoundTimeoutSecs: 1,
+                },
+            )
+            const contexts = stubInferenceRounds(agent, [
+                [writeCall("call-explore-1", "explore-1.txt")],
+                [writeCall("call-last-explore", "last-explore.txt")],
+                [writeCall("call-refused-write", "must-not-exist.txt")],
+                [ModelMessageItem.rehydrate({ text: "Implemented and tested." })],
+            ])
+
+            const outcome = await agent.run(captureEnv())
+
+            assert.equal(outcome.success, true)
+            assert.equal(existsSync(join(dir, "explore-1.txt")), true)
+            assert.equal(existsSync(join(dir, "last-explore.txt")), true)
+            assert.equal(existsSync(join(dir, "must-not-exist.txt")), false)
+            assert.match(
+                JSON.stringify(contexts[2]!.toJSON()),
+                /tool-execution budget.*closed/i,
+            )
+            assert.deepEqual(
+                JSON.parse(
+                    functionOutput(contexts[3]!, "call-refused-write"),
+                ),
+                {
+                    ok: false,
+                    status: "refused",
+                    code: "tool_budget_closed",
+                    tool: "write_file",
+                    reason:
+                        "Tool execution is closed for this turn. Return the final story summary without calling tools.",
+                },
+            )
+            assert.match(
+                JSON.stringify(contexts[3]!.toJSON()),
+                /previous tool call was refused/i,
+            )
+        })
+    })
+
+    it("refuses propose_replan during finalization without emitting or waiting for a Board decision", async () => {
+        await withTempDir("openai-replan-finalization-", async (dir) => {
+            const board = source("collective-board")
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "S1",
+                    prompt: "finish S1",
+                    cwd: dir,
+                    runId: "run-finalization",
+                    leaseId: "lease-S1",
+                    generation: 1,
+                    graphVersion: 3,
+                    retries: 0,
+                    quietTimeoutMs: 1,
+                    maxTurns: 1,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 3,
+                    perRoundTimeoutSecs: 1,
+                    runtimeReplanDecisionAuthority: board,
+                    runtimeReplanDecisionTimeoutMs: 60_000,
+                },
+            )
+            const contexts = stubInferenceRounds(agent, [
+                [writeCall("call-last-explore", "completed.txt")],
+                [
+                    FunctionCallItem.rehydrate({
+                        callId: "call-refused-replan",
+                        name: "propose_replan",
+                        args: JSON.stringify({
+                            baseGraphVersion: 3,
+                            reason: "Try to add more work after the budget closed",
+                            ...runtimeMutation(),
+                        }),
+                    }),
+                ],
+                [ModelMessageItem.rehydrate({ text: "S1 is complete." })],
+            ])
+            const env = captureEnv()
+            const deliveredCalls: string[] = []
+            const deliveredOutputs: string[] = []
+            const deliverFunctionCall = env.deliverFunctionCall.bind(env)
+            const deliverFunctionCallOutput =
+                env.deliverFunctionCallOutput.bind(env)
+            env.deliverFunctionCall = (sourceParticipant, item) => {
+                deliveredCalls.push(item.callId)
+                deliverFunctionCall(sourceParticipant, item)
+            }
+            env.deliverFunctionCallOutput = (sourceParticipant, item) => {
+                deliveredOutputs.push(item.callId)
+                deliverFunctionCallOutput(sourceParticipant, item)
+            }
+            agent.join(env)
+
+            const outcome = await Promise.race([
+                agent.run(env),
+                new Promise<never>((_resolve, reject) =>
+                    setTimeout(
+                        () => reject(new Error("finalization replan waited for Board")),
+                        500,
+                    ),
+                ),
+            ])
+
+            assert.equal(outcome.success, true)
+            assert.equal(env.events.some(RuntimeReplanProposed.is), false)
+            assert.deepEqual(deliveredCalls, ["call-last-explore"])
+            assert.deepEqual(deliveredOutputs, ["call-last-explore"])
+            assert.deepEqual(
+                JSON.parse(
+                    functionOutput(contexts[2]!, "call-refused-replan"),
+                ),
+                {
+                    ok: false,
+                    status: "refused",
+                    code: "tool_budget_closed",
+                    tool: "propose_replan",
+                    reason:
+                        "Tool execution is closed for this turn. Return the final story summary without calling tools.",
+                },
+            )
+            agent.leave(env)
+        })
+    })
+
+    it("bounds persistent finalization tool calls without executing them", async () => {
+        await withTempDir("openai-story-finalization-bounded-", async (dir) => {
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "story-finalization-bounded",
+                    prompt: "keep trying tools",
+                    cwd: dir,
+                    retries: 0,
+                    quietTimeoutMs: 1,
+                    maxTurns: 1,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 5,
+                    perRoundTimeoutSecs: 1,
+                },
+            )
+            const contexts = stubInferenceRounds(agent, [
+                [writeCall("call-1", "round-1.txt")],
+                [writeCall("call-2", "round-2.txt")],
+                [writeCall("call-3", "round-3.txt")],
+                [writeCall("call-4", "round-4.txt")],
+                [writeCall("call-5", "round-5.txt")],
+            ])
+
+            const outcome = await agent.run(captureEnv())
+
+            assert.equal(outcome.success, false)
+            assert.equal(outcome.error, "exceeded maxRoundsPerTurn=5")
+            assert.equal(contexts.length, 5)
+            assert.equal(existsSync(join(dir, "round-1.txt")), true)
+            assert.equal(existsSync(join(dir, "round-2.txt")), true)
+            assert.equal(existsSync(join(dir, "round-3.txt")), false)
+            assert.equal(existsSync(join(dir, "round-4.txt")), false)
+            assert.equal(existsSync(join(dir, "round-5.txt")), false)
+        })
+    })
+
     it("offers a closed-schema correlated propose_replan tool and waits for the exact applied decision", async () => {
         await withTempDir("openai-runtime-replan-", async (dir) => {
             const board = source("collective-board")
@@ -797,6 +975,14 @@ function runtimeMutation(): RuntimeReplanMutation {
         removedStoryIds: [],
         modifiedDeps: {},
     }
+}
+
+function writeCall(callId: string, path: string): FunctionCallItem {
+    return FunctionCallItem.rehydrate({
+        callId,
+        name: "write_file",
+        args: JSON.stringify({ path, content: `${callId}\n` }),
+    })
 }
 
 function runtimeReplanAgent(
