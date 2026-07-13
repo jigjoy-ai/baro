@@ -117,7 +117,8 @@ export interface SurgeonOptions {
     snapshot: () => PrdSnapshot
     /** Describes the model a story actually ran on (see RouteDescriber). */
     resolveRoute?: RouteDescriber
-    /** Explicit `backend:model` the Surgeon may set to escalate a stuck, right-sized story. */
+    /** Exact routing selector for escalating a right-sized story (`heavy`
+     * under tier routing, otherwise an explicit backend:model). */
     escalationRoute?: string
     /** Use Claude CLI to evaluate replans. Default: false (deterministic). */
     useLlm?: boolean
@@ -189,21 +190,23 @@ exactly this shape:
 {"action":"split"|"prereq"|"rewire"|"skip"|"abort",
  "reason":"…",
  "added":[ { "id":"S?","priority":N,"title":"…","description":"…",
-             "dependsOn":["…"], "acceptance":["…"] } ],
+             "dependsOn":["…"], "acceptance":["…"], "tests":["…"],
+             "model":"…" } ],
  "removed":["S?"],
  "modifiedDeps":[{"id":"S?","newDependsOn":["…"]}]}
 
 Rules:
 - Story ids you ADD must not collide with existing ids.
 - Story ids you REMOVE must currently exist and not yet have passes=true.
+- Every added story must have at least one concrete, observable acceptance
+  criterion and at least one executable test command; neither may be blank.
 - "modifiedDeps" rewires a story's dependsOn — use to repoint dependents
   of a removed story to a replacement.
 - "abort" → empty added/removed/modifiedDeps arrays.
-- MODEL: LEAVE "model" UNSET on the stories you add — they run on the
-  default (cheaper) model, which is exactly what split children want.
-  Do NOT use planner tier names ("light"/"standard"/"heavy") — the story
-  model is not chosen by tier here; it is either the default or an
-  explicit escalation route (below).
+- MODEL: LEAVE "model" UNSET on stories you add unless you deliberately use
+  the EXACT escalation selector printed below. Do not invent a tier or route:
+  depending on runtime routing, the selector may be the semantic tier "heavy"
+  or an explicit backend:model.
 - ESCALATION vs SPLIT — the failing story already burned its retries on
   the model shown ("Model that just failed"). Two ways to recover:
     * SPLIT (preferred): if it was TOO BROAD — too many files/concerns
@@ -212,7 +215,7 @@ Rules:
       smaller, sharper story is usually what a stuck run actually needs.
     * ESCALATE (sparingly): if the story was already RIGHT-SIZED but
       genuinely needs a more capable model, set that ONE story's "model"
-      to the exact ESCALATION ROUTE printed in the failure context
+      to the exact ESCALATION SELECTOR printed in the failure context
       below. That runs it on the stronger model. Only escalate when the
       scope is already tight — never as a reflex.
 - Output ONLY the JSON object, nothing else.`
@@ -770,7 +773,7 @@ export function buildSurgeonPrompt(
         ...(escalationRoute
             ? [
                   "",
-                  `# Escalation route`,
+                  `# Escalation selector`,
                   `To ESCALATE a right-sized story onto the stronger model, set that ` +
                       `story's "model" to EXACTLY: ${escalationRoute}`,
                   `Otherwise leave "model" unset — added stories run on the default ` +

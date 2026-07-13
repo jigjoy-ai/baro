@@ -13,6 +13,7 @@ import {
 
 import { OpenAIStoryAgent } from "../../src/participants/openai-story-agent.js"
 import {
+    AgentResult,
     RuntimeReplanApplied,
     RuntimeReplanProposed,
     RuntimeReplanRejected,
@@ -54,6 +55,7 @@ describe("OpenAIStoryAgent", () => {
 
                 const outcome = await agent.run(env)
                 const event = env.events.find(StoryResult.is)
+                const terminal = env.events.find(AgentResult.is)
 
                 assert.equal(outcome.success, true)
                 assert.equal(outcome.storyId, "story-openai")
@@ -63,6 +65,11 @@ describe("OpenAIStoryAgent", () => {
                 assert.equal(event.data.success, true)
                 assert.equal(event.data.attempts, 1)
                 assert.equal(event.data.error, null)
+                assert.ok(terminal?.data.terminalId)
+                assert.match(
+                    terminal.data.terminalId,
+                    /^openai:local:unleased:legacy:story-openai:/,
+                )
             } finally {
                 await closeServer(server)
             }
@@ -969,7 +976,7 @@ function runtimeMutation(): RuntimeReplanMutation {
                 description: "Create the migration required by S1.",
                 dependsOn: [],
                 acceptance: ["migration exists"],
-                tests: [],
+                tests: ["npm test"],
             },
         ],
         removedStoryIds: [],

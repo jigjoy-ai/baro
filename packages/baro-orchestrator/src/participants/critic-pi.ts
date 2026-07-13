@@ -26,13 +26,22 @@ import {
 } from "../semantic-events.js"
 import {
     VERDICT_SYSTEM_PROMPT,
-    buildEvalPrompt,
     buildCorrectiveMessage,
     extractVerdictJson,
 } from "./critic.js"
-import { criticInput } from "./critic-input.js"
+import {
+    prepareCriticEvalPrompt,
+    type CriticEvidenceSource,
+} from "./critic-evidence.js"
+import { withIsolatedCriticCwd } from "./critic-cli-isolation.js"
+import { criticInput, criticReplayKey } from "./critic-input.js"
+import { drainCriticPending } from "./critic-pending.js"
+import {
+    isAuthorizedTerminalTurn,
+    type TerminalTurnAuthorityOptions,
+} from "./terminal-turn-authority.js"
 
-export interface CriticPiOptions {
+export interface CriticPiOptions extends TerminalTurnAuthorityOptions {
     /** Map from agentId to its acceptance-criteria strings. */
     targets: ReadonlyMap<string, readonly string[]>
     /** Max corrective AgentTargetedMessageItem-s per agent. Default: 2. */
@@ -51,18 +60,32 @@ export interface CriticPiOptions {
     /** Per-evaluation timeout in milliseconds. Default: 180_000 (3 min). */
     timeoutMs?: number
     runId?: string
+    /** Bounded repository + command evidence captured independently of the summary. */
+    evidence?: CriticEvidenceSource
 }
 
 export class CriticPi extends BaseObserver {
     private readonly opts: Required<
-        Omit<CriticPiOptions, "targets" | "provider" | "model" | "piBin" | "runId">
+        Omit<
+            CriticPiOptions,
+            | "targets"
+            | "provider"
+            | "model"
+            | "piBin"
+            | "runId"
+            | "evidence"
+            | "outcomeAuthority"
+            | "terminalProjectorAuthority"
+        >
     > & {
         targets: ReadonlyMap<string, readonly string[]>
         provider: string | undefined
         model: string | undefined
         piBin: string
         runId: string | undefined
+        evidence: CriticEvidenceSource | undefined
     }
+    private readonly terminalAuthorities: TerminalTurnAuthorityOptions
     private readonly emissions = new Map<string, number>()
     private readonly turnCount = new Map<string, number>()
     private readonly seenTerminalIds = new Set<string>()
@@ -78,37 +101,49 @@ export class CriticPi extends BaseObserver {
             timeoutMs: opts.timeoutMs ?? 180_000,
             targets: opts.targets,
             runId: opts.runId,
+            evidence: opts.evidence,
+        }
+        this.terminalAuthorities = {
+            outcomeAuthority: opts.outcomeAuthority,
+            terminalProjectorAuthority: opts.terminalProjectorAuthority,
         }
     }
 
     /** Resolves once every in-flight evaluation has emitted its CritiqueItem. */
     async idle(): Promise<void> {
-        await Promise.allSettled([...this.pending])
+        await drainCriticPending(this.pending)
     }
 
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         const input = criticInput(event)
         if (!input) return
+        if (!isAuthorizedTerminalTurn(source, event, input, this.terminalAuthorities)) return
         const { agentId, isError, resultText, canContinue, terminalId } = input
         if (isError || !resultText) return
 
         const criteria = this.opts.targets.get(agentId)
         if (!criteria || criteria.length === 0) return
-        if (terminalId) {
-            if (this.seenTerminalIds.has(terminalId)) return
-            this.seenTerminalIds.add(terminalId)
+        const replayKey = criticReplayKey(agentId, terminalId)
+        if (replayKey) {
+            if (this.seenTerminalIds.has(replayKey)) return
+            this.seenTerminalIds.add(replayKey)
         }
 
         const turn = (this.turnCount.get(agentId) ?? 0) + 1
         this.turnCount.set(agentId, turn)
 
         const work = (async () => {
-            const { verdict, reasoning, violatedCriteria } = await this.evaluate(
-                resultText,
+            const prompt = await prepareCriticEvalPrompt(
                 criteria,
+                resultText,
+                agentId,
+                this.opts.evidence,
+            )
+            const { verdict, reasoning, violatedCriteria } = await this.evaluate(
+                prompt,
                 agentId,
                 turn,
             )
@@ -154,8 +189,7 @@ export class CriticPi extends BaseObserver {
     }
 
     private async evaluate(
-        resultText: string,
-        criteria: readonly string[],
+        userPrompt: string,
         agentId: string,
         turn: number,
     ): Promise<{
@@ -163,20 +197,20 @@ export class CriticPi extends BaseObserver {
         reasoning: string
         violatedCriteria: string[]
     }> {
-        const userPrompt = buildEvalPrompt(criteria, resultText)
-        const prompt = `${VERDICT_SYSTEM_PROMPT}\n\n${userPrompt}`
-
         try {
-            const text = await runPiOneShot({
-                prompt,
-                cwd: process.cwd(),
-                provider: this.opts.provider,
-                model: this.opts.model,
-                piBin: this.opts.piBin,
-                timeoutMs: this.opts.timeoutMs,
-                label: "pi-critic",
-                onInvocation: this.invocationObserver(agentId, turn),
-            })
+            const text = await withIsolatedCriticCwd((cwd) =>
+                runPiOneShot({
+                    prompt: userPrompt,
+                    cwd,
+                    provider: this.opts.provider,
+                    model: this.opts.model,
+                    piBin: this.opts.piBin,
+                    timeoutMs: this.opts.timeoutMs,
+                    label: "pi-critic",
+                    onInvocation: this.invocationObserver(agentId, turn),
+                    safeEvaluatorSystemPrompt: VERDICT_SYSTEM_PROMPT,
+                }),
+            )
 
             const verdictJson = extractVerdictJson(text.trim())
             const parsed = JSON.parse(verdictJson) as {

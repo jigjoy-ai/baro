@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { chmodSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
@@ -14,80 +14,56 @@ import {
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
 
 describe("CriticCodex", () => {
-    it("emits critiques while bounding corrective messages", async () => {
-        await withTempDir("baro-critic-codex-", async (dir) => {
-            const codexBin = join(dir, "codex")
-            writeFileSync(
-                codexBin,
-                [
-                    "#!/bin/sh",
-                    "cat <<'JSON'",
-                    "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"verdict\\\":\\\"fail\\\",\\\"reasoning\\\":\\\"Missing tests\\\",\\\"violated_criteria\\\":[\\\"must include tests\\\"]}\"}}",
-                    "JSON",
-                ].join("\n") + "\n",
-            )
-            chmodSync(codexBin, 0o755)
-
-            const critic = new CriticCodex({
-                targets: new Map([["agent-a", ["must include tests"]]]),
-                maxEmissionsPerAgent: 2,
-                codexBin,
-                timeoutMs: 5_000,
-            })
-            const env = joinWithCapture(critic)
-
-            await emitResultTurns(critic, 3)
-            await critic.idle()
-
-            const critiques = env.events.filter(Critique.is)
-            const messages = env.events.filter(AgentTargetedMessage.is)
-            const measurements = env.events.filter(ModelInvocationMeasured.is)
-
-            assert.equal(critiques.length, 3)
-            assert.equal(measurements.length, 3)
-            assert.ok(
-                env.events.findIndex(ModelInvocationMeasured.is) <
-                    env.events.findIndex(Critique.is),
-            )
-            assert.deepEqual(
-                critiques.map((event) => event.data.turn),
-                [1, 2, 3],
-            )
-            assert.equal(critiques[0]!.data.verdict, "fail")
-            assert.equal(critiques[0]!.data.modelUsed, "codex-default")
-            assert.deepEqual(critiques[0]!.data.violatedCriteria, [
-                "must include tests",
-            ])
-
-            assert.equal(messages.length, 2)
-            assert.deepEqual(
-                messages.map((event) => event.data.metadata.emissionIndex),
-                [1, 2],
-            )
-            assert.ok(
-                messages.every((event) => event.data.recipientId === "agent-a"),
-            )
+    it("fails closed while bounding corrective messages", async () => {
+        const critic = new CriticCodex({
+            targets: new Map([["agent-a", ["must include tests"]]]),
+            maxEmissionsPerAgent: 2,
         })
+        const env = joinWithCapture(critic)
+
+        await emitResultTurns(critic, 3)
+        await critic.idle()
+
+        const critiques = env.events.filter(Critique.is)
+        const messages = env.events.filter(AgentTargetedMessage.is)
+        const measurements = env.events.filter(ModelInvocationMeasured.is)
+
+        assert.equal(critiques.length, 3)
+        assert.equal(measurements.length, 0, "no model process was invoked")
+        assert.deepEqual(
+            critiques.map((event) => event.data.turn),
+            [1, 2, 3],
+        )
+        assert.equal(critiques[0]!.data.verdict, "fail")
+        assert.equal(critiques[0]!.data.modelUsed, "codex-default")
+        assert.match(critiques[0]!.data.reasoning, /no tool-less inference mode/)
+        assert.deepEqual(critiques[0]!.data.violatedCriteria, [
+            "[critic backend unavailable — tool-less evaluation required]",
+        ])
+
+        assert.equal(messages.length, 2)
+        assert.deepEqual(
+            messages.map((event) => event.data.metadata.emissionIndex),
+            [1, 2],
+        )
+        assert.ok(
+            messages.every((event) => event.data.recipientId === "agent-a"),
+        )
     })
 
-    it("emits a deterministic fail critique for malformed backend output", async () => {
+    it("never launches the configured Codex binary", async () => {
         await withTempDir("baro-critic-codex-", async (dir) => {
             const codexBin = join(dir, "codex")
+            const sentinel = join(dir, "codex-was-launched")
             writeFileSync(
                 codexBin,
-                [
-                    "#!/bin/sh",
-                    "cat <<'JSON'",
-                    "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"not json\"}}",
-                    "JSON",
-                ].join("\n") + "\n",
+                `#!/bin/sh\nprintf unsafe > ${JSON.stringify(sentinel)}\n`,
             )
             chmodSync(codexBin, 0o755)
 
             const critic = new CriticCodex({
                 targets: new Map([["agent-a", ["must include tests"]]]),
                 codexBin,
-                timeoutMs: 5_000,
             })
             const env = joinWithCapture(critic)
 
@@ -97,14 +73,15 @@ describe("CriticCodex", () => {
             const critiques = env.events.filter(Critique.is)
             const messages = env.events.filter(AgentTargetedMessage.is)
 
+            assert.equal(existsSync(sentinel), false)
             assert.equal(critiques.length, 1)
             assert.equal(critiques[0]!.data.verdict, "fail")
             assert.match(
                 critiques[0]!.data.reasoning,
-                /CriticCodex LLM call failed: no JSON object found/,
+                /no tool-less inference mode/,
             )
             assert.deepEqual(critiques[0]!.data.violatedCriteria, [
-                "[critic error — could not evaluate]",
+                "[critic backend unavailable — tool-less evaluation required]",
             ])
             assert.equal(messages.length, 1)
             assert.equal(messages[0]!.data.recipientId, "agent-a")

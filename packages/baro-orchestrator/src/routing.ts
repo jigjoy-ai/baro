@@ -175,7 +175,9 @@ export function resolveStoryRoute(
     // spelling — canonicalize each side before the lookup. Recurse with
     // the map removed so the mapped value can never re-expand into a loop.
     if (direct.backend === undefined && opts.tierMap) {
-        const mapped = canonicalTierMap(opts.tierMap)[canonicalTier(raw).toLowerCase()]
+        const map = canonicalTierMap(opts.tierMap)
+        const tier = canonicalTier(raw).toLowerCase()
+        const mapped = map[tier] ?? (tier === "default" ? map["*"] : undefined)
         if (mapped) {
             return resolveStoryRoute(mapped, {
                 ...opts,

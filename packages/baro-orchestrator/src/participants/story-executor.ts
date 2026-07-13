@@ -26,12 +26,22 @@ export interface StoryExecOpts {
     runtimeReplanDecisionAuthority?: Participant
     /** Bound for a native story tool to receive its correlated decision. */
     runtimeReplanDecisionTimeoutMs?: number
+    /** Exact run-scoped collaboration transport for native StoryAgent tools. */
+    collaboration?: Readonly<{
+        commandPath: string
+        sessionDir: string
+    }>
     /**
      * Collective executors must synchronously register the exact Participant
      * that will source StoryResult before emitting a result or returning from
      * start(). Legacy execution leaves this unset.
      */
     registerResultAuthority?: (source: Participant) => void
+    /**
+     * Register an exact nested producer of terminal-turn evidence before it
+     * joins the bus. Collective policy consumers reject unregistered sources.
+     */
+    registerTerminalAuthority?: (source: Participant) => void
 }
 
 export interface StoryExecution {
@@ -61,6 +71,12 @@ type AnyStoryAgent =
     | CodexStoryAgent
     | OpenCodeStoryAgent
     | PiStoryAgent
+
+interface TerminalSourceRegistrant {
+    setTerminalSourceRegistrar(
+        register: (source: Participant) => void,
+    ): void
+}
 
 /** In-process executor: builds the backend agent for the resolved route. */
 export class LocalStoryExecutor implements StoryExecutor {
@@ -128,6 +144,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                               opts.runtimeReplanDecisionAuthority,
                           runtimeReplanDecisionTimeoutMs:
                               opts.runtimeReplanDecisionTimeoutMs,
+                          collaboration: opts.collaboration,
                       },
                   )
                 : new StoryAgent({
@@ -142,6 +159,13 @@ export class LocalStoryExecutor implements StoryExecutor {
                       ...correlation,
                   })
 
+        if (
+            opts.registerTerminalAuthority &&
+            "setTerminalSourceRegistrar" in agent
+        ) {
+            const registrant = agent as AnyStoryAgent & TerminalSourceRegistrant
+            registrant.setTerminalSourceRegistrar(opts.registerTerminalAuthority)
+        }
         if (opts.registerResultAuthority) {
             agent.setResultAuthority(agent)
             opts.registerResultAuthority(agent)

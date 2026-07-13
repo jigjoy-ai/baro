@@ -15,6 +15,7 @@ import { runPlannerOpenCode } from "../src/planning/planner-opencode.js"
 import { runPlannerPi } from "../src/planning/planner-pi.js"
 import { parseRequiredModeContract, type ModeContract } from "../src/planning/planner-prompts.js"
 import { enforceModeContract } from "../src/planning/mode-enforcement.js"
+import { assertRunnablePlannerPrdJson } from "../src/planning/planner-validation.js"
 
 interface Args {
     goal: string
@@ -216,9 +217,11 @@ async function main(): Promise<void> {
     }
 
     try {
+        prdJson = assertRunnablePlannerPrdJson(prdJson)
         if (modeContract) {
             prdJson = enforceModeContract(prdJson, modeContract, args.goal)
         }
+        prdJson = assertRunnablePlannerPrdJson(prdJson)
     } catch (e) {
         process.stderr.write(
             `[run-planner] FAILED after ${Date.now() - t0}ms: ${(e as Error)?.message ?? String(e)}\n`,

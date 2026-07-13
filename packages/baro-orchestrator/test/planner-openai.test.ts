@@ -234,6 +234,36 @@ describe("PlannerOpenAI GLM-compatible finalization", () => {
         )
     })
 
+    it("repairs stories with empty semantic acceptance or test evidence", async () => {
+        const invalid = JSON.parse(VALID_PRD) as Record<string, unknown>
+        const stories = invalid.userStories as Array<Record<string, unknown>>
+        stories[0]!.acceptance = []
+        stories[0]!.tests = ["   "]
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence([
+            [call("c1")],
+            [message(JSON.stringify(invalid))],
+            [message(VALID_PRD)],
+        ], tool)
+
+        const result = await runPlannerOpenAI({
+            goal: "Implement cooperative cancellation",
+            cwd: "/unused",
+            model: "glm-5.2",
+            modeContract: PARALLEL_MODE,
+            maxRounds: 5,
+            maxExplorationRounds: 1,
+            maxFinalizationRetries: 1,
+            testRuntime: sequence.runtime,
+        })
+
+        assert.deepEqual(JSON.parse(result), JSON.parse(VALID_PRD))
+        assert.match(
+            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            /must contain non-empty acceptance/i,
+        )
+    })
+
     it("skips an earlier tool-args object when the same response contains a valid PRD", async () => {
         const tool = fakeTool(async () => "file contents")
         const sequence = fakeSequence([

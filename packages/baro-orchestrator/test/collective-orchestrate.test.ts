@@ -20,7 +20,7 @@ import type {
 } from "../src/participants/story-executor.js"
 import type { StoryRoute } from "../src/routing.js"
 import {
-    AgentTurnCompleted,
+    AgentResult,
     StoryResult,
     StorySpawnFailed,
     StorySpawned,
@@ -66,7 +66,7 @@ class PassingExecutor implements StoryExecutor {
 class CritiquedPassingExecutor extends PassingExecutor {
     override start(
         request: StorySpawnRequestData,
-        route: StoryRoute,
+        _route: StoryRoute,
         _cwd: string,
         environment: AgenticEnvironment,
         options: StoryExecOpts,
@@ -77,12 +77,17 @@ class CritiquedPassingExecutor extends PassingExecutor {
         setImmediate(() => {
             environment.deliverSemanticEvent(
                 resultSource,
-                AgentTurnCompleted.create({
+                AgentResult.create({
                     agentId: request.storyId,
-                    backend: route.backend,
+                    terminalId: `custom:${request.storyId}:1`,
+                    subtype: "success",
+                    sessionId: null,
                     isError: false,
                     resultText: `${request.storyId} implementation and tests completed`,
-                    canContinue: false,
+                    usage: null,
+                    totalCostUsd: null,
+                    numTurns: 1,
+                    durationMs: 1,
                 }),
             )
             environment.deliverSemanticEvent(
@@ -433,6 +438,87 @@ describe("orchestrate collective mode", () => {
         })
     })
 
+    it("keeps the legacy fallback when a programmatic tier map has no default lane", async () => {
+        await withTempDir("collective-tier-fallback-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            const input = testPrd()
+            input.userStories = [input.userStories[0]!]
+            delete input.userStories[0]!.model
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            const executor = new RouteCapturingExecutor()
+
+            const result = await orchestrate({
+                prdPath,
+                cwd: dir,
+                coordinationMode: "collective",
+                llm: "claude",
+                tierMap: { standard: "openai:deepseek-v4-flash" },
+                publishRemote: false,
+                withGit: false,
+                emitTuiEvents: false,
+                withLibrarian: false,
+                withMemory: false,
+                withSentry: false,
+                withCritic: false,
+                withSurgeon: false,
+                withSupervisor: false,
+                intraLevelDelaySecs: 0,
+                executor,
+            })
+
+            assert.equal(result.summary.success, true)
+            assert.deepEqual(executor.routes, [
+                { backend: "claude", model: "opus" },
+            ])
+        })
+    })
+
+    for (const defaultKey of ["default", "*"] as const) {
+        it(`uses an explicit ${defaultKey} lane from a programmatic tier map`, async () => {
+            await withTempDir(
+                `collective-tier-${defaultKey === "*" ? "star" : defaultKey}-`,
+                async (dir) => {
+                    const prdPath = join(dir, "prd.json")
+                    const input = testPrd()
+                    input.userStories = [input.userStories[0]!]
+                    delete input.userStories[0]!.model
+                    writeFileSync(
+                        prdPath,
+                        JSON.stringify(input, null, 2) + "\n",
+                    )
+                    const executor = new RouteCapturingExecutor()
+
+                    const result = await orchestrate({
+                        prdPath,
+                        cwd: dir,
+                        coordinationMode: "collective",
+                        llm: "claude",
+                        tierMap: {
+                            [defaultKey]: "openai:deepseek-v4-flash",
+                            heavy: "openai:deepseek-v4-pro",
+                        },
+                        publishRemote: false,
+                        withGit: false,
+                        emitTuiEvents: false,
+                        withLibrarian: false,
+                        withMemory: false,
+                        withSentry: false,
+                        withCritic: false,
+                        withSurgeon: false,
+                        withSupervisor: false,
+                        intraLevelDelaySecs: 0,
+                        executor,
+                    })
+
+                    assert.equal(result.summary.success, true)
+                    assert.deepEqual(executor.routes, [
+                        { backend: "openai", model: "deepseek-v4-flash" },
+                    ])
+                },
+            )
+        })
+    }
+
     it("rejects forged terminal events even when every lease field is correct", async () => {
         await withTempDir("collective-outcome-authority-", async (dir) => {
             const prdPath = join(dir, "prd.json")
@@ -693,6 +779,74 @@ describe("orchestrate collective mode", () => {
             assert.equal((audit.match(/"type":"work_claimed"/g) ?? []).length, 1)
             assert.match(audit, /"workerId":"cheap-second"/)
             assert.match(audit, /"routeId":"deepseek"/)
+        })
+    })
+
+    it("routes an unset story model to the market default lane instead of heavy", async () => {
+        await withTempDir("collective-market-default-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            const input = testPrd()
+            input.userStories = [input.userStories[0]!]
+            delete input.userStories[0]!.model
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            const auditPath = join(dir, "audit.jsonl")
+            const executor = new RouteCapturingExecutor()
+
+            const result = await orchestrate({
+                prdPath,
+                cwd: dir,
+                coordinationMode: "collective",
+                collectiveBidWindowMs: 5,
+                collectiveWorkers: [
+                    {
+                        workerId: "flash-worker",
+                        routeId: "flash",
+                        route: "openai:deepseek-v4-flash",
+                        tiers: ["default", "light", "standard"],
+                        estimate: {
+                            expectedCostUsd: 0.1,
+                            estimatedSuccessProbability: 0.8,
+                            estimatedLatencyMs: 20,
+                            estimateSource: "configured",
+                        },
+                    },
+                    {
+                        workerId: "pro-worker",
+                        routeId: "pro",
+                        route: "openai:deepseek-v4-pro",
+                        tiers: ["heavy"],
+                        estimate: {
+                            expectedCostUsd: 0.01,
+                            estimatedSuccessProbability: 0.99,
+                            estimatedLatencyMs: 10,
+                            estimateSource: "configured",
+                        },
+                    },
+                ],
+                publishRemote: false,
+                withGit: false,
+                emitTuiEvents: false,
+                withLibrarian: false,
+                withMemory: false,
+                withSentry: false,
+                withCritic: false,
+                withSurgeon: false,
+                withSupervisor: false,
+                intraLevelDelaySecs: 0,
+                executor,
+                auditLogPath: auditPath,
+            })
+
+            assert.equal(result.summary.success, true)
+            assert.deepEqual(executor.routes, [
+                { backend: "openai", model: "deepseek-v4-flash" },
+            ])
+            const audit = readFileSync(auditPath, "utf8")
+            const bids = audit
+                .split("\n")
+                .filter((line) => line.includes('"type":"work_bid"'))
+            assert.equal(bids.length, 1)
+            assert.match(bids[0]!, /"workerId":"flash-worker"/)
         })
     })
 

@@ -127,6 +127,7 @@ describe("SurgeonCodex", () => {
             description: "Add the prerequisite before retrying S1.",
             dependsOn: [],
             acceptance: ["The retry has setup in place."],
+            tests: ["npm test"],
             model: "haiku",
         }
         const verdict = {

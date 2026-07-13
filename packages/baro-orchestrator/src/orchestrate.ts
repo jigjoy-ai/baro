@@ -18,6 +18,7 @@ import {
     GitGate,
     createOrCheckoutBranch,
     excludeBaroArtifacts,
+    getCommitCount,
     getCurrentBranch,
     getDiff,
     getGitFileStats,
@@ -29,9 +30,11 @@ import { WorktreeManager } from "./worktree.js"
 import { StoryOutcomeAuthority } from "./runtime/story-outcome-authority.js"
 import { buildDag } from "./dag.js"
 import {
+    canonicalTier,
     formatRoute,
     resolveStoryRoute,
     type ResolveOpts,
+    type TierMap,
 } from "./routing.js"
 import { Auditor } from "./participants/auditor.js"
 import { AcceptanceGate } from "./participants/acceptance-gate.js"
@@ -43,6 +46,11 @@ import {
     ConductorRunSummary,
 } from "./participants/conductor.js"
 import { Critic } from "./participants/critic.js"
+import {
+    CriticCommandEvidenceCollector,
+    type CriticRepositoryTarget,
+    type CriticEvidenceSource,
+} from "./participants/critic-evidence.js"
 import { CriticTargetRegistry } from "./participants/critic-target-registry.js"
 import { CriticCodex } from "./participants/critic-codex.js"
 import { CriticOpenAI } from "./participants/critic-openai.js"
@@ -104,6 +112,35 @@ export interface CollectiveWorkerCandidateConfig {
     tiers?: readonly string[]
     maxConcurrent?: number
     estimate: WorkBidEstimateData
+}
+
+type CriticLifecycle = { idle(): Promise<void> }
+type StoryWorktreeTarget = Pick<WorktreeManager, "activePath" | "creationSha">
+
+/**
+ * Story evidence is attributable only while its isolated worktree remains
+ * active. The shared run tree can contain sibling/run-wide changes and must
+ * never be credited to one story.
+ */
+export function resolveCriticRepositoryTarget(
+    worktrees: StoryWorktreeTarget | null,
+    storyId: string,
+): CriticRepositoryTarget | null {
+    const cwd = worktrees?.activePath(storyId) ?? null
+    if (!cwd) return null
+    return {
+        cwd,
+        baseSha: worktrees?.creationSha(storyId) ?? null,
+    }
+}
+
+/** Do not mutate/release story repositories while Critic reads evidence. */
+export async function withCriticEvidenceBarrier<T>(
+    critic: CriticLifecycle | null,
+    mutateRepository: () => Promise<T>,
+): Promise<T> {
+    if (critic) await critic.idle()
+    return mutateRepository()
 }
 
 export interface OrchestrateConfig {
@@ -224,7 +261,7 @@ export interface OrchestrateConfig {
     llm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     /**
      * Per-phase overrides; win over `llm`. Used by the `--llm hybrid` preset
-     * (Story+Critic on the cheap backend, Surgeon on the strong one).
+     * (Story on the alternate backend; Critic/Surgeon may stay tool-less).
      */
     storyLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     criticLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
@@ -339,6 +376,7 @@ export async function orchestrate(
     const storyLlm = config.storyLlm ?? llm
     const criticLlm = config.criticLlm ?? llm
     const surgeonLlm = config.surgeonLlm ?? llm
+    assertSupportedCriticBackend(Boolean(config.withCritic), criticLlm)
     const collectiveWorkers = [...(config.collectiveWorkers ?? [])]
     validateCollectiveWorkers(
         collectiveWorkers,
@@ -351,6 +389,11 @@ export async function orchestrate(
         config.collectiveBidWindowMs,
         config.collectiveBidPolicy,
     )
+    const defaultStorySelector = resolveDefaultStorySelector({
+        configured: config.defaultModel,
+        tierMap: config.tierMap,
+        collectiveWorkerCount: collectiveWorkers.length,
+    })
     if (config.withDialogue && coordinationMode !== "collective") {
         throw new Error("DialogueAgent requires coordinationMode='collective'")
     }
@@ -462,7 +505,8 @@ export async function orchestrate(
     // Codex/OpenCode/Pi expose terminal turns through different native events.
     // Project them onto one neutral contract so policy participants such as the
     // Critic depend on semantics rather than a provider-specific stream shape.
-    new AgentTurnProjector().join(env)
+    const agentTurnProjector = new AgentTurnProjector({ outcomeAuthority })
+    agentTurnProjector.join(env)
     const hasOrigin = useGit ? await hasRemoteOrigin(config.cwd) : false
     const pushRemote = publishRemote && hasOrigin
 
@@ -509,6 +553,9 @@ export async function orchestrate(
             : null
     localRepositoryAgent?.join(env)
     const repositoryAuthority = gitCoordinator ?? localRepositoryAgent
+    if (repositoryAuthority) {
+        dagForwarder?.setRepositoryAuthority(repositoryAuthority)
+    }
 
     const useLibrarian = config.withLibrarian ?? true
     const useSentry = config.withSentry ?? true
@@ -611,17 +658,18 @@ export async function orchestrate(
                   }
               }
             : undefined
-        // Stories default to the cheap model; the strong model is reached only
-        // through this deliberate on-failure escalation, never the planner's
-        // up-front tier. A global `--story-model` override wins over per-story
-        // routes and would silently defeat it — so don't offer one then.
-        const surgeonEscalationModel =
-            config.surgeonModel ??
-            (surgeonLlm === "openai" ? "gpt-5.5" : surgeonLlm === "claude" ? "opus" : undefined)
-        const escalationRoute =
-            surgeonEscalationModel && !config.storyModel
-                ? `${surgeonLlm}:${surgeonEscalationModel}`
-                : undefined
+        // The model reasoning ABOUT recovery is not necessarily the model
+        // executing replacement work. With a tier map/worker market, keep the
+        // replacement semantic (`heavy`) so normal routing and bidding select
+        // the configured strong executor. Without tier routing, preserve the
+        // historical explicit Surgeon-backend escalation.
+        const escalationRoute = resolveSurgeonEscalationRoute({
+            surgeonLlm,
+            surgeonModel: config.surgeonModel,
+            storyModel: config.storyModel,
+            tierMap: config.tierMap,
+            collectiveWorkers,
+        })
         // Bus contract is identical across providers, so observers never
         // notice the swap.
         if (surgeonLlm === "openai") {
@@ -686,6 +734,17 @@ export async function orchestrate(
     let criticTargetRegistry: CriticTargetRegistry | null = null
     let criticTargets = new Map<string, readonly string[]>()
     if (config.withCritic) {
+        const resolveCriticTarget = (storyId: string) =>
+            resolveCriticRepositoryTarget(worktrees, storyId)
+        const commandEvidence = new CriticCommandEvidenceCollector({
+            outcomeAuthority,
+            resolveRepositoryTarget: resolveCriticTarget,
+        })
+        commandEvidence.join(env)
+        const criticEvidence: CriticEvidenceSource = {
+            resolveRepositoryTarget: resolveCriticTarget,
+            commandEvidence: (storyId) => commandEvidence.snapshot(storyId),
+        }
         const prd = loadPrd(config.prdPath)
         criticTargets = new Map<string, readonly string[]>(
             prd.userStories
@@ -701,30 +760,45 @@ export async function orchestrate(
                 targets: criticTargets,
                 model: config.criticModel ?? "gpt-5.4-mini",
                 runId,
+                evidence: criticEvidence,
+                outcomeAuthority,
+                terminalProjectorAuthority: agentTurnProjector,
             })
         } else if (criticLlm === "codex") {
             critic = new CriticCodex({
                 targets: criticTargets,
                 model: config.criticModel,
                 runId,
+                evidence: criticEvidence,
+                outcomeAuthority,
+                terminalProjectorAuthority: agentTurnProjector,
             })
         } else if (criticLlm === "opencode") {
             critic = new CriticOpenCode({
                 targets: criticTargets,
                 model: config.criticModel,
                 runId,
+                evidence: criticEvidence,
+                outcomeAuthority,
+                terminalProjectorAuthority: agentTurnProjector,
             })
         } else if (criticLlm === "pi") {
             critic = new CriticPi({
                 targets: criticTargets,
                 model: config.criticModel,
                 runId,
+                evidence: criticEvidence,
+                outcomeAuthority,
+                terminalProjectorAuthority: agentTurnProjector,
             })
         } else {
             critic = new Critic({
                 targets: criticTargets,
                 model: config.criticModel ?? "haiku",
                 runId,
+                evidence: criticEvidence,
+                outcomeAuthority,
+                terminalProjectorAuthority: agentTurnProjector,
             })
         }
         critic.join(env)
@@ -743,11 +817,16 @@ export async function orchestrate(
         ? new Finalizer({
               cwd: config.cwd,
               prdPath: config.prdPath,
+              runId,
+              outcomeAuthority,
               onLog: (line) =>
                   emitTui && emit({ type: "story_log", id: "_finalizer", line }),
           })
         : null
     if (finalizer) {
+        if (repositoryAuthority) {
+            finalizer.setRepositoryAuthority(repositoryAuthority)
+        }
         finalizer.setEnvironment(env)
         finalizer.join(env)
     }
@@ -780,11 +859,10 @@ export async function orchestrate(
             parallel: effectiveParallel,
             timeoutSecs: storyTimeoutSecs(config.timeoutSecs, config.effort),
             overrideModel: config.overrideModel ?? undefined,
-            defaultModel: config.defaultModel ?? "opus",
+            defaultModel: defaultStorySelector,
             intraLevelDelaySecs: config.intraLevelDelaySecs,
             onRunStart: useGit
                 ? async (prd) => {
-                      baseSha = await getHeadSha(config.cwd)
                       await excludeBaroArtifacts(config.cwd)
                       if (prd.branchName) {
                           await createOrCheckoutBranch(
@@ -794,6 +872,7 @@ export async function orchestrate(
                               pushRemote,
                           )
                       }
+                      baseSha = await getHeadSha(config.cwd)
                       await worktrees?.cleanupStaleOnStart()
                   }
                 : undefined,
@@ -807,14 +886,25 @@ export async function orchestrate(
                   }
                 : undefined,
             onStoryPassed: gitCoordinator
-                ? (storyId) => gitCoordinator.onStoryPassed(storyId)
+                ? (storyId) =>
+                      withCriticEvidenceBarrier(critic, () =>
+                          gitCoordinator.onStoryPassed(storyId),
+                      )
                 : undefined,
             onStoryFailed: worktrees && gitCoordinator
-                ? (storyId) => gitCoordinator.onStoryFailed(storyId)
+                ? (storyId) =>
+                      withCriticEvidenceBarrier(critic, () =>
+                          gitCoordinator.onStoryFailed(storyId),
+                      )
                 : undefined,
         })
         conductor.setEnvironment(env)
         conductor.join(env)
+        // ReplanApplied is committed graph state, not an ambient bus claim.
+        // Only this concrete Conductor may update legacy TUI/critic projections.
+        criticTargetRegistry?.setLegacyReplanAuthority(conductor)
+        dagForwarder?.setLegacyReplanAuthority(conductor)
+        finalizer?.setCoordinationAuthority(conductor)
         coordinationDone = conductor.done
     } else {
         const collectiveParallel = useGit ? effectiveParallel : 1
@@ -832,6 +922,7 @@ export async function orchestrate(
             cwd: config.cwd,
             plan: verifyPlan,
         })
+        finalizer?.setVerifierAuthority(runVerifier)
         runVerifier.join(env)
         leaseBroker = new LeaseBroker({
             runId,
@@ -858,6 +949,7 @@ export async function orchestrate(
                   leaseAuthority: leaseBroker,
                   critiqueAuthority: critic,
                   outcomeAuthority,
+                  terminalProjectorAuthority: agentTurnProjector,
               })
             : null
         if (acceptanceGate) leaseBroker.setQualityAuthority(acceptanceGate)
@@ -867,7 +959,7 @@ export async function orchestrate(
             cwd: config.cwd,
             timeoutSecs: storyTimeoutSecs(config.timeoutSecs, config.effort),
             overrideModel: config.overrideModel ?? undefined,
-            defaultModel: config.defaultModel ?? "opus",
+            defaultModel: defaultStorySelector,
             expectRecoveryDecisions: config.withSurgeon ?? false,
             marketRouteIds: collectiveWorkers.map((worker) => worker.routeId),
             expectQualityDecisions: acceptanceGate !== null,
@@ -891,6 +983,9 @@ export async function orchestrate(
                     21 * 60_000,
                 ),
         })
+        runVerifier.setRequestAuthority(board)
+        acceptanceGate?.setCompletionAuthority(board)
+        finalizer?.setCoordinationAuthority(board)
         leaseBroker.setOfferAuthority(board)
         gitCoordinator?.setEventAuthority(board)
         gitCoordinator?.setLeaseAuthority(leaseBroker)
@@ -1014,14 +1109,14 @@ export async function orchestrate(
         }
     }
 
-    if (coordinationMode === "collective" && useGit) {
-        baseSha = await getHeadSha(config.cwd)
-    }
     env.deliverSemanticEvent(
         operator,
         RunStartRequest.create({ reason: "orchestrate" }),
     )
     const summary = await coordinationDone
+    if (coordinationMode === "collective" && useGit) {
+        baseSha = gitCoordinator?.runBaseSha() ?? null
+    }
     // A conversation request must never become a liveness dependency. Leaving
     // aborts an in-flight responder without delaying verification/finalization.
     if (dialogueAgent?.getEnvironments().includes(env)) {
@@ -1038,12 +1133,15 @@ export async function orchestrate(
         await gitCoordinator.finish()
     }
 
-    // Backstop sweep for straggler worktrees + temp dir + dangling branches.
-    await worktrees?.cleanupAll()
+    // Critic may still be reading a story worktree after its terminal result.
+    // Drain it before the backstop sweep releases any remaining repository
+    // targets, then continue draining the other asynchronous observers.
+    await withCriticEvidenceBarrier(critic, async () => {
+        await worktrees?.cleanupAll()
+    })
 
     // Drain in-flight async observers so their side effects land in the
     // audit log before this function returns.
-    if (critic) await critic.idle()
     if (acceptanceGate) await acceptanceGate.idle()
     if (surgeon) await surgeon.idle()
     if (collaborationBridge) await collaborationBridge.idle()
@@ -1055,10 +1153,15 @@ export async function orchestrate(
 
     let filesCreated = 0
     let filesModified = 0
+    let totalCommits = 0
     if (useGit && baseSha) {
-        const stats = await getGitFileStats(config.cwd, baseSha)
+        const [stats, commitCount] = await Promise.all([
+            getGitFileStats(config.cwd, baseSha),
+            getCommitCount(config.cwd, baseSha),
+        ])
         filesCreated = stats.created
         filesModified = stats.modified
+        totalCommits = commitCount
 
         // Full run diff as a safety net for the Changes view (per-story diffs
         // can be missed on the shared-tree fallback). The TUI dedupes files
@@ -1100,7 +1203,7 @@ export async function orchestrate(
                 stories_completed: summary.completedStories.length,
                 stories_skipped:
                     summary.failedStories.length + summary.droppedStories.length,
-                total_commits: 0,
+                total_commits: totalCommits,
                 files_created: filesCreated,
                 files_modified: filesModified,
             },
@@ -1112,6 +1215,55 @@ export async function orchestrate(
         operator,
         storyAgents: new Map(),
     }
+}
+
+export function assertSupportedCriticBackend(
+    enabled: boolean,
+    backend: NonNullable<OrchestrateConfig["criticLlm"]>,
+): void {
+    if (!enabled || backend !== "codex") return
+    throw new Error(
+        "Critic cannot use the Codex CLI safely because it has no tool-less " +
+            "inference mode. Select --critic-llm claude|openai|opencode|pi " +
+            "or disable the Critic with --no-critic.",
+    )
+}
+
+export function resolveDefaultStorySelector(args: {
+    configured?: string
+    tierMap?: TierMap
+    collectiveWorkerCount: number
+}): string {
+    if (args.configured !== undefined) return args.configured
+    if (args.collectiveWorkerCount > 0) return "default"
+    if (args.tierMap && tierMapHasDefaultRoute(args.tierMap)) return "default"
+    return "opus"
+}
+
+export function resolveSurgeonEscalationRoute(args: {
+    surgeonLlm: NonNullable<OrchestrateConfig["surgeonLlm"]>
+    surgeonModel?: string
+    storyModel?: string
+    tierMap?: TierMap
+    collectiveWorkers?: readonly Pick<CollectiveWorkerCandidateConfig, "tiers">[]
+}): string | undefined {
+    if (args.storyModel) return undefined
+    if (args.collectiveWorkers?.length) {
+        return marketAcceptsTier(args.collectiveWorkers, "heavy")
+            ? "heavy"
+            : undefined
+    }
+    if (args.tierMap && tierMapHasExplicitTier(args.tierMap, "heavy")) {
+        return "heavy"
+    }
+    const model =
+        args.surgeonModel ??
+        (args.surgeonLlm === "openai"
+            ? "gpt-5.5"
+            : args.surgeonLlm === "claude"
+              ? "opus"
+              : undefined)
+    return model ? `${args.surgeonLlm}:${model}` : undefined
 }
 
 export function validateCollectiveWorkers(
@@ -1184,6 +1336,42 @@ export function validateCollectiveWorkers(
         workerIds.add(worker.workerId)
         routeIds.add(worker.routeId)
     }
+    for (const tier of ["default", "light", "standard", "heavy"] as const) {
+        if (!marketAcceptsTier(workers, tier)) {
+            throw new Error(
+                `collective workers do not cover required story tier '${tier}'`,
+            )
+        }
+    }
+}
+
+function marketAcceptsTier(
+    workers: readonly Pick<CollectiveWorkerCandidateConfig, "tiers">[],
+    tier: string,
+): boolean {
+    const wanted = canonicalTier(tier).toLowerCase()
+    return workers.some((worker) => {
+        const tiers = worker.tiers
+        if (!tiers || tiers.length === 0) return true
+        return tiers.some(
+            (candidate) =>
+                canonicalTier(candidate || "default").toLowerCase() === wanted,
+        )
+    })
+}
+
+function tierMapHasExplicitTier(map: TierMap, tier: string): boolean {
+    const wanted = canonicalTier(tier).toLowerCase()
+    return Object.keys(map).some(
+        (candidate) => canonicalTier(candidate).toLowerCase() === wanted,
+    )
+}
+
+function tierMapHasDefaultRoute(map: TierMap): boolean {
+    return Object.keys(map).some((candidate) => {
+        const key = canonicalTier(candidate).toLowerCase()
+        return key === "default" || key === "*"
+    })
 }
 
 function validateCollectiveMarketOptions(

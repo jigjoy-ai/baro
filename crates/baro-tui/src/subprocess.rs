@@ -1,4 +1,4 @@
-//! Spawn an external command, capture stdout + stderr, persist a
+//! Spawn external commands, capture stdout + stderr, persist a
 //! timestamped log to `~/.baro/runs/<tag>-<unix_secs>.log`, and turn
 //! a non-zero exit into a structured error carrying the log path.
 //! Deliberately generic: the caller passes a fully-built `Command`
@@ -34,56 +34,11 @@ impl std::fmt::Display for ProcessRunError {
 
 impl std::error::Error for ProcessRunError {}
 
-/// Spawn `cmd`, wait for completion, capture both streams, persist a
-/// log. `log_tag` becomes the log-filename prefix — pick a short
-/// kebab string ("claude", "architect", …).
-pub async fn spawn_and_capture(
-    mut cmd: Command,
-    log_tag: &str,
-) -> Result<CapturedOutput, ProcessRunError> {
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let output = cmd
-        .spawn()
-        .map_err(|e| ProcessRunError {
-            message: format!("failed to spawn {}: {}", log_tag, e),
-            log_path: None,
-        })?
-        .wait_with_output()
-        .await
-        .map_err(|e| ProcessRunError {
-            message: format!("{} process error: {}", log_tag, e),
-            log_path: None,
-        })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let log_path = persist_log(log_tag, &stdout, &stderr);
-
-    if !output.status.success() {
-        let code = output.status.code();
-        return Err(ProcessRunError {
-            message: format!(
-                "{} exited with code {}{}",
-                log_tag,
-                code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
-                detail_tail(&stdout, &stderr),
-            ),
-            log_path,
-        });
-    }
-
-    let _ = stderr; // captured in the log file on disk
-    Ok(CapturedOutput { stdout })
-}
-
-/// Like `spawn_and_capture`, but streams stderr line-by-line to `on_line`
+/// Captures stdout while streaming stderr line-by-line to `on_line`
 /// while the run is still in flight — the planner/architect phases use this
 /// to surface `@baro-progress` lines during the otherwise-silent wait.
 /// stdout is drained on a concurrent task and returned byte-identical to
-/// `spawn_and_capture` (it's the PRD/decision-doc result); a chatty stderr
+/// the PRD/decision-doc result; a chatty stderr
 /// can't deadlock the pipe.
 pub async fn spawn_and_capture_streaming(
     mut cmd: Command,

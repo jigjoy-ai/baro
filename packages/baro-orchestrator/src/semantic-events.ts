@@ -77,6 +77,14 @@ export interface ReplanData {
 export const Replan = defineSemanticEvent<ReplanData>("replan")
 
 /**
+ * Legacy Conductor acknowledgement emitted only after a buffered Replan has
+ * passed policy checks and been persisted. Raw Replan remains a proposal;
+ * observers that project operator-visible state must consume this event.
+ */
+export const ReplanApplied =
+    defineSemanticEvent<ReplanData>("replan_applied")
+
+/**
  * A leased story's structured proposal to mutate the not-yet-started portion
  * of the collective DAG. This is deliberately separate from `Replan`: that
  * older event is the Surgeon/Conductor recovery contract, while runtime
@@ -246,6 +254,8 @@ export const ClaudeSystem = defineSemanticEvent<ClaudeSystemData>("claude_system
  */
 export interface AgentResultData {
     agentId: string
+    /** Producer-issued replay identity for this exact terminal turn. */
+    terminalId?: string
     subtype: string
     sessionId: string | null
     isError: boolean
@@ -260,6 +270,8 @@ export const AgentResult = defineSemanticEvent<AgentResultData>("claude_result")
 /** Terminal assistant text from a backend-neutral story turn. */
 export interface AgentTurnCompletedData {
     agentId: string
+    /** Producer-issued replay identity for this exact projected terminal turn. */
+    terminalId?: string
     backend: string
     isError: boolean
     resultText: string | null
@@ -692,6 +704,12 @@ export const RecoveryDecision =
 export interface RunStartedData {
     project: string
     storyCount: number
+    /** Full logical run set; optional for replay compatibility. */
+    storyIds?: readonly string[]
+    /** Stories already passed before this resume/continue run began. */
+    completedStoryIds?: readonly string[]
+    /** Determines whether progress requires authoritative repository merge. */
+    coordinationMode?: CoordinationMode
     /** Execution mode from the intake contract ("focused" | "sequential" | "parallel"), when one was decided. */
     mode?: string
 }

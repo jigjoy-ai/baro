@@ -79,6 +79,7 @@ export class CodexStoryAgent extends BaseObserver {
     private envRef: AgenticEnvironment | null = null
     /** Optional explicit bus identity for the terminal outcome. */
     private resultAuthority: Participant | null = null
+    private terminalSourceRegistrar: ((source: Participant) => void) | null = null
     private currentCodex: CodexCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -122,6 +123,15 @@ export class CodexStoryAgent extends BaseObserver {
             throw new Error(`result authority already set for ${this.spec.id}`)
         }
         this.resultAuthority = source
+    }
+
+    setTerminalSourceRegistrar(
+        register: (source: Participant) => void,
+    ): void {
+        if (this.terminalSourceRegistrar && this.terminalSourceRegistrar !== register) {
+            throw new Error(`terminal source registrar already set for ${this.spec.id}`)
+        }
+        this.terminalSourceRegistrar = register
     }
 
     /** Idempotent; returns the `done` promise. */
@@ -248,6 +258,7 @@ export class CodexStoryAgent extends BaseObserver {
             skipGitRepoCheck: this.spec.skipGitRepoCheck,
         })
         this.currentCodex = codex
+        this.terminalSourceRegistrar?.(codex)
         codex.join(this.envRef)
         codex.start(this.envRef)
 

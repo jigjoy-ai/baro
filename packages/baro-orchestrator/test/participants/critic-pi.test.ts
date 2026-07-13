@@ -32,7 +32,10 @@ describe("CriticPi", () => {
                 targets: new Map([["agent-a", ["must include tests"]]]),
                 maxEmissionsPerAgent: 2,
                 piBin,
-                timeoutMs: 5_000,
+                // Fresh temp executables can incur a one-time macOS scan;
+                // leave enough headroom when the full test suite is spawning
+                // many fixture processes concurrently.
+                timeoutMs: 60_000,
             })
             const env = joinWithCapture(critic)
 

@@ -1,14 +1,31 @@
 import { BaseObserver, type Participant, type SemanticEvent } from "@mozaik-ai/core"
 
-import { Replan, RuntimeReplanApplied } from "../semantic-events.js"
+import {
+    Replan,
+    ReplanApplied,
+    RuntimeReplanApplied,
+} from "../semantic-events.js"
 
 export class CriticTargetRegistry extends BaseObserver {
+    private legacyReplanAuthority: Participant | null = null
     private runtimeReplanAuthority: Participant | null = null
     private readonly seenRuntimeProposals = new Set<string>()
     private latestRuntimeGraphVersion = 0
 
     constructor(private readonly targets: Map<string, readonly string[]>) {
         super()
+    }
+
+    setLegacyReplanAuthority(authority: Participant): void {
+        if (
+            this.legacyReplanAuthority &&
+            this.legacyReplanAuthority !== authority
+        ) {
+            throw new Error(
+                "critic target legacy replan authority is already bound",
+            )
+        }
+        this.legacyReplanAuthority = authority
     }
 
     setRuntimeReplanAuthority(authority: Participant): void {
@@ -22,25 +39,28 @@ export class CriticTargetRegistry extends BaseObserver {
     }
 
     override onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): void {
         if (Replan.is(event)) {
-            // Legacy Conductor keeps its existing raw-Replan projection. In
-            // collective mode the Board's persisted Applied is authoritative.
-            if (this.runtimeReplanAuthority) return
+            return
+        }
+        if (ReplanApplied.is(event)) {
+            if (source !== this.legacyReplanAuthority) return
+            for (const storyId of event.data.removedStoryIds) {
+                this.targets.delete(storyId)
+            }
             for (const story of event.data.addedStories) {
                 if (story.acceptance?.length) {
                     this.targets.set(story.id, [...story.acceptance])
+                } else {
+                    this.targets.delete(story.id)
                 }
             }
             return
         }
         if (RuntimeReplanApplied.is(event)) {
-            if (
-                this.runtimeReplanAuthority &&
-                _source !== this.runtimeReplanAuthority
-            ) return
+            if (source !== this.runtimeReplanAuthority) return
             if (
                 this.seenRuntimeProposals.has(event.data.proposalId) ||
                 (event.data.currentGraphVersion !== undefined &&

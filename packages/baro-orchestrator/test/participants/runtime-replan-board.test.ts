@@ -397,7 +397,7 @@ function dynamicStory(id: string, dependsOn: string[]) {
         dependsOn,
         retries: 1,
         acceptance: [`${id} works`],
-        tests: [],
+        tests: ["npm test"],
         model: "standard",
     }
 }

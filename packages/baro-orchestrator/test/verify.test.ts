@@ -186,6 +186,96 @@ describe("verifyBuild", () => {
         })
     })
 
+    it("drops a repaired baseline package-manager preflight failure", async () => {
+        await withTempDir("baro-verify-repaired-pm-", async (dir) => {
+            const pkgPath = join(dir, "package.json")
+            writeFileSync(
+                pkgPath,
+                JSON.stringify({
+                    name: "v",
+                    packageManager: "bun@1.2.20",
+                    scripts: { test: "exit 0" },
+                }),
+            )
+            const baseline = createVerifyPlan(dir)
+            assert.match(
+                baseline.commands[0]?.preflightFailure ?? "",
+                /unsupported packageManager 'bun@1\.2\.20'/,
+            )
+
+            writeFileSync(
+                pkgPath,
+                JSON.stringify({
+                    name: "v",
+                    packageManager: "npm@11.4.2",
+                    scripts: { test: "exit 0" },
+                }),
+            )
+            const merged = mergeVerifyPlans(baseline, createVerifyPlan(dir))
+
+            assert.deepEqual(
+                merged.commands.map(({ label, preflightFailure }) => ({
+                    label,
+                    preflightFailure,
+                })),
+                [{ label: "npm run test", preflightFailure: undefined }],
+            )
+            assert.deepEqual(merged.javascriptPackageManagers, [
+                { manager: "npm", declaredVersion: "11.4.2" },
+            ])
+
+            const result = await verifyBuild(dir, { plan: merged })
+            assert.equal(result.ran, true)
+            assert.equal(result.ok, true)
+        })
+    })
+
+    it("retains a final package-manager regression while freezing baseline gates", async () => {
+        await withTempDir("baro-verify-final-pm-regression-", async (dir) => {
+            const pkgPath = join(dir, "package.json")
+            writeFileSync(
+                pkgPath,
+                JSON.stringify({
+                    name: "v",
+                    packageManager: "npm@11.4.2",
+                    scripts: { test: "exit 0" },
+                }),
+            )
+            const baseline = createVerifyPlan(dir)
+
+            writeFileSync(
+                pkgPath,
+                JSON.stringify({
+                    name: "v",
+                    packageManager: "bun@1.2.20",
+                    scripts: {},
+                }),
+            )
+            const merged = mergeVerifyPlans(baseline, createVerifyPlan(dir))
+
+            assert.equal(merged.commands[0]?.label, "npm run test")
+            assert.equal(merged.commands[1]?.label, "resolve package manager bun")
+            assert.match(
+                merged.commands[1]?.preflightFailure ?? "",
+                /unsupported packageManager 'bun@1\.2\.20'/,
+            )
+
+            const result = await verifyBuild(dir, { plan: merged })
+            assert.equal(result.ran, true)
+            assert.equal(result.ok, false)
+            assert.equal(
+                result.failures.some(({ tail }) =>
+                    /unsupported packageManager 'bun@1\.2\.20'/.test(tail)),
+                true,
+            )
+            assert.equal(
+                result.commands.some(({ command }) =>
+                    command === "resolve package manager bun"),
+                true,
+            )
+        })
+    })
+
     it("deduplicates commands present in both verify-plan snapshots", async () => {
         await withTempDir("baro-verify-dedupe-plan-", async (dir) => {
             writeFileSync(
@@ -198,6 +288,121 @@ describe("verifyBuild", () => {
 
             assert.equal(merged.commands.length, 1)
             assert.equal(merged.commands[0]?.label, "npm run test")
+        })
+    })
+
+    it("keeps the baseline package manager authoritative when lockfiles drift", async () => {
+        await withTempDir("baro-verify-pm-drift-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({ name: "v", scripts: { test: "exit 0" } }),
+            )
+            writeFileSync(join(dir, "yarn.lock"), "")
+            const baseline = createVerifyPlan(dir)
+
+            writeFileSync(join(dir, "package-lock.json"), "{}")
+            const final = createVerifyPlan(dir)
+            const merged = mergeVerifyPlans(baseline, final)
+
+            assert.equal(baseline.commands[0]?.label, "yarn run test")
+            assert.equal(final.commands[0]?.label, "npm run test")
+            assert.equal(merged.commands.length, 1)
+            assert.equal(merged.commands[0]?.label, "yarn run test")
+            assert.equal(merged.commands[0]?.tool, "yarn")
+        })
+    })
+
+    it("uses the baseline manager for a final-added gate after package-manager drift", async () => {
+        await withTempDir("baro-verify-new-gate-pm-drift-", async (dir) => {
+            const pkgPath = join(dir, "package.json")
+            writeFileSync(
+                pkgPath,
+                JSON.stringify({
+                    name: "v",
+                    scripts: { build: "exit 0" },
+                }),
+            )
+            writeFileSync(join(dir, "package-lock.json"), "{}")
+            const baseline = createVerifyPlan(dir)
+
+            writeFileSync(
+                pkgPath,
+                JSON.stringify({
+                    name: "v",
+                    packageManager: "yarn@4.9.2",
+                    scripts: { build: "exit 0", test: "exit 0" },
+                }),
+            )
+            writeFileSync(join(dir, "yarn.lock"), "")
+            const final = createVerifyPlan(dir)
+            const merged = mergeVerifyPlans(baseline, final)
+
+            assert.deepEqual(
+                final.commands.map(({ label, tool }) => ({ label, tool })),
+                [
+                    { label: "yarn run build", tool: "corepack" },
+                    { label: "yarn run test", tool: "corepack" },
+                ],
+            )
+            assert.deepEqual(
+                merged.commands.map(({ label, tool, args }) => ({ label, tool, args })),
+                [
+                    {
+                        label: "npm run build",
+                        tool: "npm",
+                        args: ["run", "build"],
+                    },
+                    {
+                        label: "npm run test",
+                        tool: "npm",
+                        args: ["run", "test"],
+                    },
+                ],
+            )
+
+            const result = await verifyBuild(dir, { plan: merged })
+            assert.equal(result.ok, true)
+            assert.deepEqual(
+                result.commands.map(({ command, status }) => ({ command, status })),
+                [
+                    { command: "npm run build", status: "passed" },
+                    { command: "npm run test", status: "passed" },
+                ],
+            )
+        })
+    })
+
+    it("preserves baseline Corepack Yarn for a final-added gate", async () => {
+        await withTempDir("baro-verify-corepack-new-gate-", async (dir) => {
+            const pkgPath = join(dir, "package.json")
+            writeFileSync(
+                pkgPath,
+                JSON.stringify({
+                    name: "v",
+                    packageManager: "yarn@4.9.2",
+                    scripts: { build: "exit 0" },
+                }),
+            )
+            const baseline = createVerifyPlan(dir)
+
+            writeFileSync(
+                pkgPath,
+                JSON.stringify({
+                    name: "v",
+                    packageManager: "npm@11.4.2",
+                    scripts: { build: "exit 0", test: "exit 0" },
+                }),
+            )
+            writeFileSync(join(dir, "package-lock.json"), "{}")
+            const merged = mergeVerifyPlans(baseline, createVerifyPlan(dir))
+
+            assert.equal(merged.commands.length, 2)
+            assert.equal(merged.commands[0]?.label, "yarn run build")
+            assert.equal(merged.commands[0]?.tool, "corepack")
+            assert.deepEqual(merged.commands[0]?.args, ["yarn", "run", "build"])
+            assert.equal(merged.commands[1]?.label, "yarn run test")
+            assert.equal(merged.commands[1]?.tool, "corepack")
+            assert.deepEqual(merged.commands[1]?.args, ["yarn", "run", "test"])
         })
     })
 
@@ -241,6 +446,102 @@ describe("verifyBuild", () => {
 
             assert.equal(plan.commands.length, 1)
             assert.equal(plan.commands[0]?.label, "pnpm run test (packages/app)")
+        })
+    })
+
+    it("prefers npm deterministically when package-lock.json and yarn.lock coexist", async () => {
+        await withTempDir("baro-verify-lock-conflict-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({ name: "v", scripts: { test: "exit 0" } }),
+            )
+            writeFileSync(join(dir, "package-lock.json"), "{}")
+            writeFileSync(join(dir, "yarn.lock"), "")
+
+            const plan = createVerifyPlan(dir)
+
+            assert.equal(plan.commands[0]?.label, "npm run test")
+            assert.equal(plan.commands[0]?.tool, "npm")
+        })
+    })
+
+    it("honours a valid packageManager field ahead of conflicting lockfiles", async () => {
+        await withTempDir("baro-verify-declared-pm-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "v",
+                    packageManager: "yarn@4.9.2",
+                    scripts: { test: "exit 0" },
+                }),
+            )
+            writeFileSync(join(dir, "package-lock.json"), "{}")
+            writeFileSync(join(dir, "pnpm-lock.yaml"), "")
+            writeFileSync(join(dir, "yarn.lock"), "")
+
+            const plan = createVerifyPlan(dir)
+
+            assert.equal(plan.commands[0]?.label, "yarn run test")
+            assert.equal(plan.commands[0]?.tool, "corepack")
+            assert.deepEqual(plan.commands[0]?.args, ["yarn", "run", "test"])
+        })
+    })
+
+    it("fails closed for a well-formed unsupported packageManager", async () => {
+        await withTempDir("baro-verify-unsupported-pm-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "v",
+                    packageManager: "bun@1.2.20",
+                    scripts: { test: "exit 0" },
+                }),
+            )
+
+            const plan = createVerifyPlan(dir)
+            assert.equal(plan.commands.length, 1)
+            assert.equal(plan.commands[0]?.label, "resolve package manager bun")
+            assert.equal(plan.commands[0]?.preflightFailure?.includes("bun@1.2.20"), true)
+
+            const result = await verifyBuild(dir, { plan })
+            assert.equal(result.ran, true)
+            assert.equal(result.ok, false)
+            assert.match(result.failures[0]?.tail ?? "", /unsupported packageManager 'bun@1\.2\.20'/)
+            assert.equal(result.commands.some(({ command }) => command === "npm run test"), false)
+        })
+    })
+
+    it("fails closed for a present malformed packageManager declaration", async () => {
+        await withTempDir("baro-verify-invalid-pm-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "v",
+                    packageManager: "yarn",
+                    scripts: { test: "exit 0" },
+                }),
+            )
+            writeFileSync(join(dir, "package-lock.json"), "{}")
+            writeFileSync(join(dir, "pnpm-lock.yaml"), "")
+            writeFileSync(join(dir, "yarn.lock"), "")
+
+            const plan = createVerifyPlan(dir)
+
+            assert.equal(plan.commands.length, 1)
+            assert.equal(plan.commands[0]?.label, "resolve package manager declaration")
+            assert.match(
+                plan.commands[0]?.preflightFailure ?? "",
+                /malformed packageManager "yarn"/,
+            )
+            assert.equal(plan.javascriptPackageManagers?.length, 0)
+
+            const result = await verifyBuild(dir, { plan })
+            assert.equal(result.ran, true)
+            assert.equal(result.ok, false)
+            assert.equal(
+                result.commands.some(({ command }) => command === "pnpm run test"),
+                false,
+            )
         })
     })
 

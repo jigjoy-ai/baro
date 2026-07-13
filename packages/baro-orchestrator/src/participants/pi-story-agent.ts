@@ -67,6 +67,7 @@ export class PiStoryAgent extends BaseObserver {
     private envRef: AgenticEnvironment | null = null
     /** Optional explicit bus identity for the terminal outcome. */
     private resultAuthority: Participant | null = null
+    private terminalSourceRegistrar: ((source: Participant) => void) | null = null
     private currentPi: PiCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -108,6 +109,15 @@ export class PiStoryAgent extends BaseObserver {
             throw new Error(`result authority already set for ${this.spec.id}`)
         }
         this.resultAuthority = source
+    }
+
+    setTerminalSourceRegistrar(
+        register: (source: Participant) => void,
+    ): void {
+        if (this.terminalSourceRegistrar && this.terminalSourceRegistrar !== register) {
+            throw new Error(`terminal source registrar already set for ${this.spec.id}`)
+        }
+        this.terminalSourceRegistrar = register
     }
 
     /** Idempotent; returns the `done` promise. */
@@ -238,6 +248,7 @@ export class PiStoryAgent extends BaseObserver {
             piBin: this.spec.piBin,
         })
         this.currentPi = pi
+        this.terminalSourceRegistrar?.(pi)
         pi.join(this.envRef)
         pi.start(this.envRef)
 

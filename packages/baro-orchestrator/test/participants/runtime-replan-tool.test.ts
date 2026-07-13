@@ -28,6 +28,18 @@ describe("runtime replan function tool", () => {
             false,
         )
         assert.deepEqual(
+            tool.parameters.properties.addedStories.items.required,
+            [
+                "id",
+                "priority",
+                "title",
+                "description",
+                "dependsOn",
+                "acceptance",
+                "tests",
+            ],
+        )
+        assert.deepEqual(
             JSON.parse(String(await tool.invoke({}))),
             {
                 ok: false,
@@ -95,6 +107,15 @@ describe("runtime replan function tool", () => {
             removedStoryIds: [],
             modifiedDeps: {},
         }
+        const validStory = {
+            id: "S2",
+            priority: 1,
+            title: "T",
+            description: "D",
+            dependsOn: [],
+            acceptance: ["T works"],
+            tests: ["npm test"],
+        }
         const cases: Array<[unknown, RegExp]> = [
             ["not-json", /not valid JSON/],
             [{ ...valid, unexpected: true }, /unknown argument 'unexpected'/],
@@ -131,7 +152,37 @@ describe("runtime replan function tool", () => {
                         },
                     ],
                 },
-                /retries must be a non-negative integer/,
+                /retries must be an integer between 0 and 5/,
+            ],
+            [
+                {
+                    ...valid,
+                    addedStories: [{ ...validStory, acceptance: undefined }],
+                },
+                /acceptance must be a non-empty array of non-blank strings/,
+            ],
+            [
+                { ...valid, addedStories: [{ ...validStory, acceptance: [] }] },
+                /acceptance must be a non-empty array of non-blank strings/,
+            ],
+            [
+                { ...valid, addedStories: [{ ...validStory, acceptance: [" "] }] },
+                /acceptance must be a non-empty array of non-blank strings/,
+            ],
+            [
+                {
+                    ...valid,
+                    addedStories: [{ ...validStory, tests: undefined }],
+                },
+                /tests must be a non-empty array of non-blank strings/,
+            ],
+            [
+                { ...valid, addedStories: [{ ...validStory, tests: [] }] },
+                /tests must be a non-empty array of non-blank strings/,
+            ],
+            [
+                { ...valid, addedStories: [{ ...validStory, tests: ["\t"] }] },
+                /tests must be a non-empty array of non-blank strings/,
             ],
             [{ ...valid, removedStoryIds: [1] }, /array of strings/],
             [{ ...valid, modifiedDeps: { S1: [1] } }, /array of strings/],

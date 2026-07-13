@@ -87,11 +87,13 @@ export {
     createVerifyPlan,
     recommendedVerifyTimeoutMs,
     verifyBuild,
+    type JavaScriptPackageManager,
     type VerifyBuildOptions,
     type VerifyCommandResult,
     type VerifyCommandSpec,
     type VerifyPlan,
     type VerifyResult,
+    type VerifyJavaScriptPackageManager,
 } from "./verify.js"
 
 export {
@@ -213,6 +215,7 @@ export {
     RuntimeReplanProposed,
     RuntimeReplanApplied,
     RuntimeReplanRejected,
+    ReplanApplied,
     PeerHelpRequested,
     CollaborationNote,
     StoryIntegrationRequested,
@@ -226,6 +229,7 @@ export {
     type RuntimeReplanAppliedData,
     type RuntimeReplanRejectedData,
     type RuntimeReplanRejectionCode,
+    type ReplanData,
 } from "./semantic-events.js"
 export {
     snapshotRuntimeReplanMutation,

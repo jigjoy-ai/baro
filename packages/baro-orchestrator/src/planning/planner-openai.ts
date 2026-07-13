@@ -37,6 +37,7 @@ import {
     type ExecutionMode,
     type ModeContract,
 } from "./planner-prompts.js"
+import { assertRunnablePlannerPrdJson } from "./planner-validation.js"
 
 export interface RunPlannerOpenAIOptions {
     goal: string
@@ -264,72 +265,13 @@ function extractRunnablePlannerPrd(raw: string): string {
     let lastError: unknown
     for (const candidate of candidates) {
         try {
-            validatePlannerPrd(candidate)
+            assertRunnablePlannerPrdJson(candidate)
             return candidate
         } catch (error) {
             lastError = error
         }
     }
     throw lastError ?? new Error("response contained no runnable PRD object")
-}
-
-/** Reject syntactically-valid JSON that cannot be a runnable PRD while repair rounds remain. */
-function validatePlannerPrd(json: string): void {
-    const parsed = JSON.parse(json) as unknown
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("final PRD must be a JSON object")
-    }
-    const prd = parsed as Record<string, unknown>
-    if (typeof prd.project !== "string" || !prd.project.trim()) {
-        throw new Error("final PRD is missing a non-empty project")
-    }
-    if (typeof prd.branchName !== "string" || !prd.branchName.trim()) {
-        throw new Error("final PRD is missing a non-empty branchName")
-    }
-    if (typeof prd.description !== "string") {
-        throw new Error("final PRD is missing a string description")
-    }
-    if (!Array.isArray(prd.userStories) || prd.userStories.length === 0) {
-        throw new Error("final PRD must contain at least one user story")
-    }
-    for (const [index, value] of prd.userStories.entries()) {
-        if (!value || typeof value !== "object" || Array.isArray(value)) {
-            throw new Error(`final PRD story ${index + 1} is not an object`)
-        }
-        const story = value as Record<string, unknown>
-        if (typeof story.id !== "string" || !story.id.trim()) {
-            throw new Error(`final PRD story ${index + 1} is missing an id`)
-        }
-        if (typeof story.title !== "string" || !story.title.trim()) {
-            throw new Error(`final PRD story ${story.id} is missing a title`)
-        }
-        if (story.description !== undefined && typeof story.description !== "string") {
-            throw new Error(`final PRD story ${story.id} has a non-string description`)
-        }
-        if (
-            story.priority !== undefined &&
-            (!Number.isInteger(story.priority) || Number(story.priority) < -2_147_483_648 || Number(story.priority) > 2_147_483_647)
-        ) {
-            throw new Error(`final PRD story ${story.id} has an invalid i32 priority`)
-        }
-        if (
-            story.retries !== undefined &&
-            (!Number.isInteger(story.retries) || Number(story.retries) < 0 || Number(story.retries) > 4_294_967_295)
-        ) {
-            throw new Error(`final PRD story ${story.id} has an invalid u32 retries value`)
-        }
-        if (story.model !== undefined && typeof story.model !== "string") {
-            throw new Error(`final PRD story ${story.id} has a non-string model`)
-        }
-        for (const field of ["dependsOn", "acceptance", "tests"] as const) {
-            if (!Array.isArray(story[field])) {
-                throw new Error(`final PRD story ${story.id} is missing ${field}`)
-            }
-            if (!(story[field] as unknown[]).every((item) => typeof item === "string")) {
-                throw new Error(`final PRD story ${story.id} has non-string values in ${field}`)
-            }
-        }
-    }
 }
 
 /** Standalone intake for scripts/run-intake.ts — no planner run required. */
@@ -380,6 +322,7 @@ function finalPlanInstruction(summary: string, round: number, maxExplorationRoun
         `Exploration round ${round}/${maxExplorationRounds}; planning budget ${maxTokens} tokens; usage so far: ${summary}.`,
         "Tool schemas remain visible only for protocol compatibility. Any further tool request will be refused.",
         "Now output ONLY the final PRD JSON matching the required schema. No markdown, no prose, no more inspection.",
+        "Before emitting it, silently confirm every explicit user and ADR requirement maps to a story description and observable acceptance criterion, with no contradictions.",
         "If some details remain uncertain, encode them as acceptance criteria/tests inside the relevant story instead of continuing exploration.",
     ].join("\n")
 }

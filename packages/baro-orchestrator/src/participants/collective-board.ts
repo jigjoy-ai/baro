@@ -588,6 +588,11 @@ export class CollectiveBoard extends SerializedObserver {
             RunStarted.create({
                 project: this.prd.project,
                 storyCount: this.prd.userStories.length,
+                storyIds: this.prd.userStories.map((story) => story.id),
+                completedStoryIds: this.prd.userStories
+                    .filter((story) => story.passes)
+                    .map((story) => story.id),
+                coordinationMode: "collective",
                 ...(this.prd.executionMode ? { mode: this.prd.executionMode.mode } : {}),
             }),
         )

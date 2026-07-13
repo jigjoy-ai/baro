@@ -36,6 +36,22 @@ single story's acceptance.
 
 If the goal is NON-TRIVIAL: decompose normally per the rules below.
 
+REQUIREMENT COVERAGE — MANDATORY BEFORE YOU OUTPUT JSON:
+Build an internal checklist of every explicit behavior, compatibility promise,
+edge case, provider/adapter, lifecycle boundary, and test constraint in the user
+goal and Architect decision document. Map every checklist item to at least one
+story description and one observable acceptance criterion. Do not output the
+checklist separately, but do not omit an item just because another story touches
+nearby code. If the goal changes a shared abstraction, inspect and name every
+built-in implementation/caller that must preserve the contract.
+
+Acceptance criteria are semantic contracts, not slogans. "Tests pass" is never
+the only acceptance criterion. State what happens before, during, and after the
+changed operation, including no-op/backward-compatible behavior where the goal
+requires it. Before finalizing, compare criteria across stories and remove any
+contradiction (for example one story preserving an old call shape while another
+requires it to change unconditionally).
+
 For every run, do NOT create a final verification-only story whose job is to
 run tests, typecheck, build, or lint after the
 implementation stories. Baro's deterministic RunVerifier executes those gates
@@ -127,6 +143,10 @@ Rules:
   even if it looks small.
 - Use dependsOn for dependencies; same-priority stories with no deps run IN PARALLEL
 - Include testable acceptance criteria and test commands
+- Every explicit user/ADR requirement is covered by a story description AND an
+  observable acceptance criterion; shared abstractions cover all built-in callers
+- Acceptance arrays and tests arrays must be non-empty and contain no blank entries
+- Acceptance criteria across stories must not contradict each other
 - No circular dependencies
 - Start with foundational stories, build up
 - IDs: S1, S2, S3...

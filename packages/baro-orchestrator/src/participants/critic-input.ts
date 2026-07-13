@@ -13,21 +13,43 @@ export interface CriticInput {
     terminalId: string | null
 }
 
+/** Scope producer IDs to their logical agent before storing them in a Critic. */
+export function criticReplayKey(
+    agentId: string,
+    terminalId: string | null,
+): string | null {
+    return terminalId ? JSON.stringify([agentId, terminalId]) : null
+}
+
 /** Compatibility bridge: Claude/OpenAI retain AgentResult; one-shot CLIs use the neutral event. */
 export function criticInput(event: SemanticEvent<unknown>): CriticInput | null {
     if (AgentTurnCompleted.is(event)) {
-        return { ...event.data, terminalId: null }
+        return {
+            ...event.data,
+            terminalId: explicitTerminalId(event.data.terminalId),
+        }
     }
     if (AgentResult.is(event)) {
+        const explicit = explicitTerminalId(event.data.terminalId)
+        const hasLegacyIdentity =
+            Boolean(event.data.sessionId) || event.data.numTurns !== null
         return {
             agentId: event.data.agentId,
             isError: event.data.isError,
             resultText: event.data.resultText,
             canContinue: true,
-            terminalId: createHash("sha256")
-                .update(JSON.stringify(event.data))
-                .digest("hex"),
+            terminalId:
+                explicit ??
+                (hasLegacyIdentity
+                    ? createHash("sha256")
+                          .update(JSON.stringify(event.data))
+                          .digest("hex")
+                    : null),
         }
     }
     return null
+}
+
+function explicitTerminalId(value: unknown): string | null {
+    return typeof value === "string" && value.trim() ? value.trim() : null
 }

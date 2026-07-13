@@ -83,6 +83,51 @@ describe("StoryOutcomeAuthority", () => {
         )
     })
 
+    it("source-binds terminal turns to the active concrete execution", () => {
+        const registry = new StoryOutcomeAuthority("run-1")
+        const firstWorker = source("S1")
+        const firstCli = source("S1")
+        const impersonator = source("S1")
+        const first = {
+            runId: "run-1",
+            storyId: "S1",
+            leaseId: "lease-1",
+            generation: 1,
+        }
+
+        assert.throws(
+            () => registry.registerTerminalAuthority(first, firstCli),
+            /requires registered story result/,
+        )
+        registry.registerResultAuthority(first, firstWorker)
+        registry.registerTerminalAuthority(first, firstCli)
+
+        assert.equal(registry.matchesTerminalTurnSource(firstWorker, "S1"), true)
+        assert.equal(registry.matchesTerminalTurnSource(firstCli, "S1"), true)
+        assert.equal(registry.matchesTerminalTurnSource(impersonator, "S1"), false)
+        assert.equal(registry.matchesTerminalTurnSource(firstCli, "S2"), false)
+
+        const retryCli = source("S1")
+        registry.registerTerminalAuthority(first, retryCli)
+        assert.equal(registry.matchesTerminalTurnSource(firstCli, "S1"), false)
+        assert.equal(registry.matchesTerminalTurnSource(retryCli, "S1"), true)
+
+        const secondWorker = source("S1")
+        const second = {
+            ...first,
+            leaseId: "lease-2",
+            generation: 2,
+        }
+        registry.registerResultAuthority(second, secondWorker)
+        assert.equal(registry.matchesTerminalTurnSource(retryCli, "S1"), false)
+        assert.equal(registry.matchesTerminalTurnSource(secondWorker, "S1"), true)
+
+        // A delayed replay of the old registration cannot roll authority back.
+        registry.registerResultAuthority(first, firstWorker)
+        assert.equal(registry.matchesTerminalTurnSource(retryCli, "S1"), false)
+        assert.equal(registry.matchesTerminalTurnSource(secondWorker, "S1"), true)
+    })
+
     it("throws on conflicting identity registration and invalid correlation", () => {
         const registry = new StoryOutcomeAuthority("run-1")
         const first = source("worker")

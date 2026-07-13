@@ -5,6 +5,7 @@ import { join } from "node:path"
 
 import {
     BARO_COAUTHOR_TRAILER,
+    applyReplanWithEffectiveDelta,
     buildDefaultStoryPrompt,
     markStoryPassed,
     normalizePrd,
@@ -68,7 +69,7 @@ describe("normalizePrd", () => {
                         title: "Story one",
                         description: "Has mixed array values.",
                         dependsOn: ["S0", 1, "S00"],
-                        retries: 3.9,
+                        retries: 30.9,
                         acceptance: ["works", false, "ships"],
                         tests: ["npm test", null, "cargo test"],
                         passes: "yes",
@@ -91,7 +92,7 @@ describe("normalizePrd", () => {
             title: "Story one",
             description: "Has mixed array values.",
             dependsOn: ["S0", "S00"],
-            retries: 3,
+            retries: 5,
             acceptance: ["works", "ships"],
             tests: ["npm test", "cargo test"],
             passes: false,
@@ -306,6 +307,66 @@ describe("markStoryPassed", () => {
         const completedAt = Date.parse(updated.userStories[1].completedAt!)
         assert.ok(completedAt >= before)
         assert.ok(completedAt <= after)
+    })
+})
+
+describe("applyReplanWithEffectiveDelta", () => {
+    it("reports only persisted removals, additions, and dependency changes", () => {
+        const passed = story({ id: "S1", passes: true })
+        const existing = story({ id: "S2", dependsOn: ["S1"] })
+        const prd: PrdFile = {
+            project: "baro",
+            branchName: "baro/effective-replan",
+            description: "Test effective legacy replan deltas.",
+            userStories: [passed, existing],
+        }
+        const duplicate = {
+            id: "S2",
+            priority: 1,
+            title: "Duplicate",
+            description: "Must be ignored.",
+            dependsOn: [],
+        }
+        const addition = {
+            id: "S3",
+            priority: 2,
+            title: "Actual addition",
+            description: "Must be persisted.",
+            dependsOn: ["S2"],
+            acceptance: ["S3 exists"],
+        }
+
+        const result = applyReplanWithEffectiveDelta(prd, {
+            source: "surgeon",
+            reason: "mixed fresh and stale operations",
+            removedStoryIds: ["S1", "S-missing"],
+            addedStories: [duplicate, addition],
+            modifiedDeps: {
+                S2: [],
+                "S-missing": ["S1"],
+            },
+        })
+
+        assert.deepEqual(result.applied, {
+            source: "surgeon",
+            reason: "mixed fresh and stale operations",
+            removedStoryIds: [],
+            addedStories: [addition],
+            modifiedDeps: { S2: [] },
+        })
+        assert.deepEqual(
+            result.prd.userStories.map(({ id, dependsOn, passes }) => ({
+                id,
+                dependsOn,
+                passes,
+            })),
+            [
+                { id: "S1", dependsOn: [], passes: true },
+                { id: "S2", dependsOn: [], passes: false },
+                { id: "S3", dependsOn: ["S2"], passes: false },
+            ],
+        )
+        assert.deepEqual(prd.userStories, [passed, existing])
     })
 })
 

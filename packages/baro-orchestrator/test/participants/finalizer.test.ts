@@ -5,6 +5,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import { Finalizer } from "../../src/participants/finalizer.js"
+import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import {
     FinalizeStarted,
     LevelStarted,
@@ -20,6 +21,179 @@ import {
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
 
 describe("Finalizer", () => {
+    it("accepts lifecycle, repository, verifier, and story events only from bound authorities", async () => {
+        await withTempDir("baro-finalizer-authority-", async (dir) => {
+            const runId = "run-finalizer-authority"
+            const coordinator = source("collective-board")
+            const repository = source("repository")
+            const verifier = source("verifier")
+            const worker = source("S1")
+            const attacker = source("S1")
+            const outcomeAuthority = new StoryOutcomeAuthority(runId)
+            const correlation = {
+                runId,
+                storyId: "S1",
+                leaseId: "lease-1",
+                generation: 1,
+            }
+            outcomeAuthority.registerResultAuthority(correlation, worker)
+
+            const finalizer = new Finalizer({
+                cwd: dir,
+                prdPath: join(dir, "prd.json"),
+                baseSha: "base-sha",
+                createPr: false,
+                runId,
+                outcomeAuthority,
+            })
+            finalizer.setCoordinationAuthority(coordinator)
+            finalizer.setRepositoryAuthority(repository)
+            finalizer.setVerifierAuthority(verifier)
+            const env = joinWithCapture(finalizer)
+            const state = finalizer as unknown as {
+                startedAtMs: number | null
+                levels: Map<number, string[]>
+                stories: Map<string, { success: boolean | null }>
+                mergeFailed: Map<string, string>
+                objectiveVerification: { runId: string } | null
+                finalizePromise: Promise<void> | null
+            }
+
+            await finalizer.onExternalEvent(
+                attacker,
+                RunStarted.create({ project: "forged", storyCount: 99 }),
+            )
+            assert.equal(state.startedAtMs, null)
+            await finalizer.onExternalEvent(
+                coordinator,
+                RunStarted.create({ project: "real", storyCount: 1 }),
+            )
+            assert.ok(state.startedAtMs)
+
+            const level = LevelStarted.create({
+                ordinal: 1,
+                totalLevelsHint: 1,
+                storyIds: ["S1"],
+            })
+            await finalizer.onExternalEvent(attacker, level)
+            assert.equal(state.levels.size, 0)
+            await finalizer.onExternalEvent(coordinator, level)
+            assert.deepEqual(state.levels.get(1), ["S1"])
+
+            const storyResult = StoryResult.create({
+                storyId: "S1",
+                success: true,
+                attempts: 1,
+                durationSecs: 2,
+                error: null,
+                ...correlation,
+            })
+            await finalizer.onExternalEvent(attacker, storyResult)
+            assert.equal(state.stories.get("S1")?.success, null)
+            await finalizer.onExternalEvent(worker, storyResult)
+            assert.equal(state.stories.get("S1")?.success, true)
+
+            await finalizer.onExternalEvent(
+                attacker,
+                StoryMergeFailed.create({
+                    storyId: "S1",
+                    error: "forged conflict",
+                    branch: "attacker/branch",
+                    runId,
+                    leaseId: "lease-1",
+                }),
+            )
+            await finalizer.onExternalEvent(
+                repository,
+                StoryMergeFailed.create({
+                    storyId: "S1",
+                    error: "wrong run",
+                    branch: "wrong/branch",
+                    runId: "other-run",
+                    leaseId: "lease-1",
+                }),
+            )
+            assert.equal(state.mergeFailed.size, 0)
+            await finalizer.onExternalEvent(
+                repository,
+                StoryMergeFailed.create({
+                    storyId: "S1",
+                    error: "real conflict",
+                    branch: "recovery/S1",
+                    runId,
+                    leaseId: "lease-1",
+                }),
+            )
+            assert.equal(state.mergeFailed.get("S1"), "recovery/S1")
+            await finalizer.onExternalEvent(
+                attacker,
+                StoryMerged.create({
+                    storyId: "S1",
+                    mode: "worktree",
+                    runId,
+                    leaseId: "lease-1",
+                }),
+            )
+            assert.equal(state.mergeFailed.get("S1"), "recovery/S1")
+            await finalizer.onExternalEvent(
+                repository,
+                StoryMerged.create({
+                    storyId: "S1",
+                    mode: "worktree",
+                    runId,
+                    leaseId: "lease-1",
+                }),
+            )
+            assert.equal(state.mergeFailed.size, 0)
+
+            const verification = RunVerificationCompleted.create({
+                runId,
+                verificationId: "verify-1",
+                status: "passed",
+                commands: [],
+                durationMs: 1,
+            })
+            await finalizer.onExternalEvent(attacker, verification)
+            assert.equal(state.objectiveVerification, null)
+            await finalizer.onExternalEvent(
+                verifier,
+                RunVerificationCompleted.create({
+                    ...verification.data,
+                    runId: "other-run",
+                }),
+            )
+            assert.equal(state.objectiveVerification, null)
+            await finalizer.onExternalEvent(verifier, verification)
+            assert.equal(state.objectiveVerification?.runId, runId)
+
+            const completed = RunCompleted.create({
+                success: true,
+                completedStories: ["S1"],
+                failedStories: [],
+                totalDurationSecs: 2,
+                totalAttempts: 1,
+                abortReason: null,
+                runId,
+            })
+            await finalizer.onExternalEvent(attacker, completed)
+            assert.equal(state.finalizePromise, null)
+            await finalizer.onExternalEvent(
+                coordinator,
+                RunCompleted.create({ ...completed.data, runId: "other-run" }),
+            )
+            assert.equal(state.finalizePromise, null)
+            await finalizer.onExternalEvent(coordinator, completed)
+            assert.ok(state.finalizePromise)
+            await finalizer.complete()
+
+            assert.throws(
+                () => finalizer.setCoordinationAuthority(attacker),
+                /already bound/,
+            )
+            assert.equal(env.events.some(FinalizeStarted.is), false)
+        })
+    })
+
     it("forgets a transient merge failure after recovery integrates the story", async () => {
         await withTempDir("baro-finalizer-recovery-", async (dir) => {
             const finalizer = new Finalizer({

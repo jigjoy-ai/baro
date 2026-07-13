@@ -10,7 +10,11 @@ import * as path from "path"
 
 import { type Tool } from "@mozaik-ai/core"
 
-import { createCodebaseTools, safePath } from "./codebase-tools.js"
+import {
+    createCodebaseTools,
+    safePath,
+    type CodebaseToolOptions,
+} from "./codebase-tools.js"
 
 const MAX_WRITE_BYTES = 500_000
 
@@ -20,8 +24,15 @@ const MAX_WRITE_BYTES = 500_000
  * On macOS its shell writes are additionally confined by Seatbelt; other
  * platforms currently rely on the conservative command guard fallback.
  */
-export function createStoryTools(cwd: string): Tool[] {
-    return [...createCodebaseTools(cwd), writeFileTool(cwd), editFileTool(cwd)]
+export function createStoryTools(
+    cwd: string,
+    options: CodebaseToolOptions = {},
+): Tool[] {
+    return [
+        ...createCodebaseTools(cwd, options),
+        writeFileTool(cwd),
+        editFileTool(cwd),
+    ]
 }
 
 function writeFileTool(cwd: string): Tool {

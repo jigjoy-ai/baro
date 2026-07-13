@@ -77,7 +77,7 @@ describe("CollaborationBridge", () => {
                         description: "Create the required schema migration.",
                         dependsOn: ["S1"],
                         acceptance: ["migration exists"],
-                        tests: [],
+                        tests: ["npm test"],
                     },
                 }),
             )
@@ -287,7 +287,7 @@ describe("CollaborationBridge", () => {
                         description: "Create the migration discovered at runtime.",
                         dependsOn: ["S1"],
                         acceptance: ["migration exists"],
-                        tests: [],
+                        tests: ["npm test"],
                     },
                 ],
                 removedStoryIds: [],

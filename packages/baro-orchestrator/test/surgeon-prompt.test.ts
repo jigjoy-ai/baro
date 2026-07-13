@@ -4,9 +4,14 @@ import assert from "node:assert/strict"
 import {
     buildSurgeonPrompt,
     CritiqueLog,
+    SURGEON_SYSTEM_PROMPT,
     type PrdSnapshot,
 } from "../src/participants/surgeon.js"
 import { formatRoute, resolveStoryRoute } from "../src/routing.js"
+import {
+    resolveSurgeonEscalationRoute,
+    validateCollectiveWorkers,
+} from "../src/orchestrate.js"
 import { Critique, type StoryResultData } from "../src/semantic-events.js"
 
 const snap: PrdSnapshot = {
@@ -93,5 +98,127 @@ describe("buildSurgeonPrompt — Critic verdicts feed the replan decision", () =
     it("omits the section when there are no critiques", () => {
         const p = buildSurgeonPrompt(snap, failure, undefined, undefined, [])
         assert.doesNotMatch(p, /Critic verdicts/)
+    })
+})
+
+describe("Surgeon execution escalation routing", () => {
+    it("keeps recovery on the semantic heavy lane when Surgeon reasoning uses GLM", () => {
+        assert.equal(
+            resolveSurgeonEscalationRoute({
+                surgeonLlm: "openai",
+                surgeonModel: "glm-5.2",
+                tierMap: {
+                    default: "openai:deepseek-v4-flash",
+                    heavy: "openai:deepseek-v4-pro",
+                },
+            }),
+            "heavy",
+        )
+    })
+
+    it("preserves explicit backend escalation when no tier router exists", () => {
+        assert.equal(
+            resolveSurgeonEscalationRoute({
+                surgeonLlm: "openai",
+                surgeonModel: "glm-5.2",
+            }),
+            "openai:glm-5.2",
+        )
+    })
+
+    it("uses the heavy selector only when the worker market has a heavy lane", () => {
+        assert.equal(
+            resolveSurgeonEscalationRoute({
+                surgeonLlm: "openai",
+                surgeonModel: "glm-5.2",
+                collectiveWorkers: [
+                    { tiers: ["default", "light", "standard"] },
+                    { tiers: ["heavy"] },
+                ],
+            }),
+            "heavy",
+        )
+        assert.equal(
+            resolveSurgeonEscalationRoute({
+                surgeonLlm: "openai",
+                surgeonModel: "glm-5.2",
+                collectiveWorkers: [
+                    { tiers: ["default", "light", "standard"] },
+                ],
+            }),
+            undefined,
+        )
+    })
+
+    it("does not call a partial tier map an available heavy route", () => {
+        assert.equal(
+            resolveSurgeonEscalationRoute({
+                surgeonLlm: "openai",
+                surgeonModel: "glm-5.2",
+                tierMap: { default: "openai:deepseek-v4-flash" },
+            }),
+            "openai:glm-5.2",
+        )
+    })
+
+    it("fails fast when a restricted worker market leaves a story tier uncovered", () => {
+        const estimate = {
+            expectedCostUsd: 0.01,
+            estimatedSuccessProbability: 0.8,
+            estimatedLatencyMs: 1_000,
+            estimateSource: "configured" as const,
+        }
+        assert.throws(
+            () =>
+                validateCollectiveWorkers(
+                    [
+                        {
+                            workerId: "flash",
+                            routeId: "flash-route",
+                            route: "openai:deepseek-v4-flash",
+                            tiers: ["default", "light", "standard"],
+                            estimate,
+                        },
+                    ],
+                    "collective",
+                    undefined,
+                ),
+            /required story tier 'heavy'/,
+        )
+        assert.doesNotThrow(() =>
+            validateCollectiveWorkers(
+                [
+                    {
+                        workerId: "flash",
+                        routeId: "flash-route",
+                        route: "openai:deepseek-v4-flash",
+                        tiers: ["default", "light", "standard"],
+                        estimate,
+                    },
+                    {
+                        workerId: "pro",
+                        routeId: "pro-route",
+                        route: "openai:deepseek-v4-pro",
+                        tiers: ["heavy"],
+                        estimate,
+                    },
+                ],
+                "collective",
+                undefined,
+            ),
+        )
+    })
+
+    it("gives the model one consistent exact-selector instruction", () => {
+        const prompt = buildSurgeonPrompt(
+            snap,
+            failure,
+            undefined,
+            "heavy",
+        )
+        assert.match(prompt, /Escalation selector/)
+        assert.match(prompt, /model" to EXACTLY: heavy/)
+        assert.match(SURGEON_SYSTEM_PROMPT, /semantic tier "heavy"/)
+        assert.doesNotMatch(SURGEON_SYSTEM_PROMPT, /Do NOT use planner tier names/)
     })
 })

@@ -5,6 +5,7 @@ import {
     LevelStarted,
     RecoveryStarted,
     Replan,
+    ReplanApplied,
     RuntimeReplanApplied,
     type LevelCompletedData,
     type LevelStartedData,
@@ -20,9 +21,22 @@ import { emit } from "../../tui-protocol.js"
  * (Their `activity`/`progress` mirrors live in ProgressForwarder.)
  */
 export class DagForwarder extends BaseObserver {
+    private legacyReplanAuthority: Participant | null = null
     private runtimeReplanAuthority: Participant | null = null
+    private coordinationAuthority: Participant | null = null
     private readonly seenRuntimeProposals = new Set<string>()
     private latestRuntimeGraphVersion = 0
+
+    setLegacyReplanAuthority(authority: Participant): void {
+        if (
+            this.legacyReplanAuthority &&
+            this.legacyReplanAuthority !== authority
+        ) {
+            throw new Error("DAG forwarder legacy replan authority is already bound")
+        }
+        this.legacyReplanAuthority = authority
+        this.bindCoordinationAuthority(authority)
+    }
 
     setRuntimeReplanAuthority(authority: Participant): void {
         if (
@@ -32,6 +46,7 @@ export class DagForwarder extends BaseObserver {
             throw new Error("DAG forwarder runtime replan authority is already bound")
         }
         this.runtimeReplanAuthority = authority
+        this.bindCoordinationAuthority(authority)
     }
 
     override async onExternalEvent(
@@ -39,9 +54,11 @@ export class DagForwarder extends BaseObserver {
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         if (Replan.is(event)) {
-            // In collective mode a raw Surgeon Replan is only a proposal; the
-            // Board later emits its persisted RuntimeReplanApplied decision.
-            if (this.runtimeReplanAuthority) return
+            // Raw legacy and collective replans are proposals, not graph state.
+            return
+        }
+        if (ReplanApplied.is(event)) {
+            if (source !== this.legacyReplanAuthority) return
             this.handleReplan(event.data)
             return
         }
@@ -60,17 +77,30 @@ export class DagForwarder extends BaseObserver {
             return
         }
         if (LevelStarted.is(event)) {
+            if (source !== this.coordinationAuthority) return
             this.handleLevelStarted(event.data)
             return
         }
         if (LevelCompleted.is(event)) {
+            if (source !== this.coordinationAuthority) return
             this.handleLevelCompleted(event.data)
             return
         }
         if (RecoveryStarted.is(event)) {
+            if (source !== this.coordinationAuthority) return
             this.handleRecoveryStarted(event.data)
             return
         }
+    }
+
+    private bindCoordinationAuthority(authority: Participant): void {
+        if (
+            this.coordinationAuthority &&
+            this.coordinationAuthority !== authority
+        ) {
+            throw new Error("DAG forwarder coordination authority is already bound")
+        }
+        this.coordinationAuthority = authority
     }
 
     private handleReplan(item: ReplanData): void {

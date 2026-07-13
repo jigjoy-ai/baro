@@ -67,6 +67,8 @@ describe("WorktreeManager — lifecycle", () => {
         const path = await mgr.create("S1")
         assert.ok(path, "create returned a path")
         assert.ok(existsSync(path!), "worktree dir exists")
+        assert.equal(mgr.activePath("S1"), path)
+        assert.equal(mgr.creationSha("S1"), head)
         assert.equal(git(path!, "rev-parse", "HEAD"), head, "worktree HEAD == repo HEAD")
         assert.ok(
             git(repo, "worktree", "list").includes(path!),
@@ -83,6 +85,8 @@ describe("WorktreeManager — lifecycle", () => {
         )
 
         await mgr.cleanup("S1")
+        assert.equal(mgr.activePath("S1"), null)
+        assert.equal(mgr.creationSha("S1"), null)
         assert.ok(!existsSync(path!), "worktree dir removed")
         assert.ok(!git(repo, "worktree", "list").includes(path!), "worktree pruned")
         const branches = git(repo, "branch", "--list", `baro-wt/${runId}/S1`)
@@ -91,6 +95,20 @@ describe("WorktreeManager — lifecycle", () => {
 })
 
 describe("WorktreeManager — isolation (#50)", () => {
+    it("keeps distinct unsafe story ids on injective branch and path identities", async () => {
+        const [first, second] = await Promise.all([
+            mgr.create("S/1"),
+            mgr.create("S?1"),
+        ])
+
+        assert.ok(first)
+        assert.ok(second)
+        assert.notEqual(first, second)
+        assert.notEqual(mgr.branchName("S/1"), mgr.branchName("S?1"))
+        assert.equal(existsSync(first), true)
+        assert.equal(existsSync(second), true)
+    })
+
     it("parallel stories don't see each other's files until merge-back", async () => {
         const p1 = (await mgr.create("S1"))!
         const p2 = (await mgr.create("S2"))!
@@ -393,6 +411,35 @@ describe("WorktreeManager — fallback", () => {
     it("mergeBack returns false for a story that never got a worktree", async () => {
         const merged = await mgr.mergeBack("never-created")
         assert.equal(merged, false, "no worktree → no merge, signals shared-tree path")
+    })
+
+    it("rolls back a partially-created worktree before shared fallback", async () => {
+        writeFileSync(join(repo, "package.json"), '{"name":"setup-failure"}\n')
+        git(repo, "add", "package.json")
+        git(repo, "commit", "-m", "add package manifest")
+
+        // Force ensureDepDirsExcluded() to fail after `git worktree add` has
+        // succeeded, exercising the transactional rollback path.
+        const rawExcludePath = git(repo, "rev-parse", "--git-path", "info/exclude")
+        const excludePath = rawExcludePath.startsWith("/")
+            ? rawExcludePath
+            : join(repo, rawExcludePath)
+        rmSync(excludePath, { force: true })
+        mkdirSync(excludePath)
+
+        const path = await mgr.create("S1")
+        const partialPath = join(tmpdir(), "baro-worktrees", runId, "S1")
+
+        assert.equal(path, null)
+        assert.equal(mgr.activePath("S1"), null)
+        assert.equal(mgr.creationSha("S1"), null)
+        assert.equal(existsSync(partialPath), false)
+        assert.equal(git(repo, "worktree", "list").includes(partialPath), false)
+        assert.equal(
+            git(repo, "branch", "--list", `baro-wt/${runId}/S1`),
+            "",
+            "partial story branch was removed before fallback",
+        )
     })
 })
 

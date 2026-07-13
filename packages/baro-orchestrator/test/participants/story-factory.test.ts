@@ -415,6 +415,10 @@ describe("StoryFactory", () => {
                 executor.calls[0].opts.runtimeReplanDecisionAuthority,
                 runtimeBoard,
             )
+            assert.deepEqual(executor.calls[0].opts.collaboration, {
+                commandPath: "/tmp/agent-collab.mjs",
+                sessionDir: "/tmp/baro-session",
+            })
 
             await factory.onExternalEvent(
                 source("forged-broker"),
@@ -499,6 +503,10 @@ describe("StoryFactory", () => {
                 nativeExecutor.calls[0].opts.runtimeReplanDecisionAuthority,
                 runtimeBoard,
             )
+            assert.deepEqual(nativeExecutor.calls[0].opts.collaboration, {
+                commandPath: "/tmp/agent-collab.mjs",
+                sessionDir: "/tmp/baro-session-native",
+            })
 
             const cliExecutor = new CapturingExecutor()
             const cliFactory = new StoryFactory({
@@ -550,6 +558,7 @@ describe("StoryFactory", () => {
                 cliExecutor.calls[0].opts.runtimeReplanDecisionAuthority,
                 undefined,
             )
+            assert.equal(cliExecutor.calls[0].opts.collaboration, undefined)
         })
     })
 

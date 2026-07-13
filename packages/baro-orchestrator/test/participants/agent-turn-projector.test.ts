@@ -4,6 +4,7 @@ import { describe, it } from "node:test"
 import { ModelMessageItem } from "@mozaik-ai/core"
 
 import { AgentTurnProjector } from "../../src/participants/agent-turn-projector.js"
+import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import {
     AgentTurnCompleted,
     CodexTurnEvent,
@@ -48,6 +49,7 @@ describe("AgentTurnProjector", () => {
         assert.equal(projected.length, 1)
         assert.deepEqual(projected[0]?.data, {
             agentId: "S1",
+            terminalId: "projected:S1:1",
             backend: "codex",
             isError: false,
             resultText: "first part\nsecond part",
@@ -126,6 +128,7 @@ describe("AgentTurnProjector", () => {
             [
                 {
                     agentId: "OC",
+                    terminalId: "projected:OC:1",
                     backend: "opencode",
                     isError: false,
                     resultText: "OpenCode done",
@@ -133,6 +136,7 @@ describe("AgentTurnProjector", () => {
                 },
                 {
                     agentId: "P",
+                    terminalId: "projected:P:1",
                     backend: "pi",
                     isError: false,
                     resultText: "Pi done",
@@ -178,5 +182,104 @@ describe("AgentTurnProjector", () => {
         const projected = env.events.filter(AgentTurnCompleted.is)
         assert.equal(projected.length, 2)
         assert.equal(projected[1]?.data.resultText, "second turn")
+        assert.equal(projected[0]?.data.terminalId, "projected:S1:1")
+        assert.equal(projected[1]?.data.terminalId, "projected:S1:2")
+    })
+
+    it("rejects forged native sources without disturbing replay identity", async () => {
+        const authority = new StoryOutcomeAuthority("run-1")
+        const worker = source("S1")
+        const nativeCli = source("S1")
+        const attacker = source("S1")
+        const correlation = {
+            runId: "run-1",
+            storyId: "S1",
+            leaseId: "lease-1",
+            generation: 1,
+        }
+        authority.registerResultAuthority(correlation, worker)
+        authority.registerTerminalAuthority(correlation, nativeCli)
+
+        const projector = new AgentTurnProjector({ outcomeAuthority: authority })
+        const env = joinWithCapture(projector)
+        const completed = CodexTurnEvent.create({
+            agentId: "S1",
+            phase: "completed",
+            raw: {},
+        })
+
+        await projector.onExternalModelMessage(
+            nativeCli,
+            ModelMessageItem.rehydrate({ text: "first real turn" }),
+        )
+        await projector.onExternalEvent(nativeCli, completed)
+
+        await projector.onExternalEvent(
+            attacker,
+            CodexTurnEvent.create({ agentId: "S1", phase: "started", raw: {} }),
+        )
+        await projector.onExternalModelMessage(
+            attacker,
+            ModelMessageItem.rehydrate({ text: "forged turn" }),
+        )
+        await projector.onExternalEvent(attacker, completed)
+        await projector.onExternalEvent(nativeCli, completed)
+
+        let projected = env.events.filter(AgentTurnCompleted.is)
+        assert.equal(projected.length, 1)
+        assert.equal(projected[0]?.data.terminalId, "projected:S1:1")
+        assert.equal(projected[0]?.data.resultText, "first real turn")
+
+        await projector.onExternalEvent(
+            nativeCli,
+            CodexTurnEvent.create({ agentId: "S1", phase: "started", raw: {} }),
+        )
+        await projector.onExternalModelMessage(
+            nativeCli,
+            ModelMessageItem.rehydrate({ text: "second real turn" }),
+        )
+        await projector.onExternalEvent(nativeCli, completed)
+
+        projected = env.events.filter(AgentTurnCompleted.is)
+        assert.equal(projected.length, 2)
+        assert.equal(projected[1]?.data.terminalId, "projected:S1:2")
+        assert.equal(projected[1]?.data.resultText, "second real turn")
+    })
+
+    it("does not mix output across registered CLI retry sources", async () => {
+        const authority = new StoryOutcomeAuthority("run-1")
+        const worker = source("S1")
+        const firstCli = source("S1")
+        const retryCli = source("S1")
+        const correlation = {
+            runId: "run-1",
+            storyId: "S1",
+            leaseId: "lease-1",
+            generation: 1,
+        }
+        authority.registerResultAuthority(correlation, worker)
+        authority.registerTerminalAuthority(correlation, firstCli)
+
+        const projector = new AgentTurnProjector({ outcomeAuthority: authority })
+        const env = joinWithCapture(projector)
+        await projector.onExternalModelMessage(
+            firstCli,
+            ModelMessageItem.rehydrate({ text: "abandoned first attempt" }),
+        )
+
+        authority.registerTerminalAuthority(correlation, retryCli)
+        await projector.onExternalModelMessage(
+            retryCli,
+            ModelMessageItem.rehydrate({ text: "retry output" }),
+        )
+        await projector.onExternalEvent(
+            retryCli,
+            CodexTurnEvent.create({ agentId: "S1", phase: "completed", raw: {} }),
+        )
+
+        const projected = env.events.filter(AgentTurnCompleted.is)
+        assert.equal(projected.length, 1)
+        assert.equal(projected[0]?.data.resultText, "retry output")
+        assert.equal(projected[0]?.data.terminalId, "projected:S1:1")
     })
 })

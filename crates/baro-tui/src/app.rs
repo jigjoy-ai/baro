@@ -307,7 +307,7 @@ pub struct ModeProposal {
     pub contract_json: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewStory {
     pub id: String,
     pub priority: i32,
@@ -479,7 +479,7 @@ pub struct App {
     /// override is set.
     pub llm: LlmProvider,
     /// Per-phase overrides; each defaults to `llm`. `--llm hybrid`
-    /// flips Story + Critic to Codex.
+    /// flips Story to Codex while keeping Critic on tool-less Claude.
     pub architect_llm: LlmProvider,
     pub planner_llm: LlmProvider,
     pub story_llm: LlmProvider,
@@ -1469,7 +1469,15 @@ impl App {
                         story.depends_on = r.depends_on;
                     }
                 }
-                self.total = self.stories.len() as u32;
+                // Removed stories remain visible as struck/skipped history but
+                // are no longer part of the live work denominator. Progress
+                // events and this projection therefore agree regardless of
+                // which observer's stdout event arrives first.
+                self.total = self
+                    .stories
+                    .iter()
+                    .filter(|story| story.status != StoryStatus::Skipped)
+                    .count() as u32;
                 if let Some(levels) = rebuild_dag_levels(&self.stories) {
                     self.dag_levels = levels;
                 }
@@ -1613,11 +1621,18 @@ impl App {
         if let Some(m) = per_phase {
             return Some(m.clone());
         }
+        let provider = match phase {
+            "architect" => self.architect_llm,
+            "planning" => self.planner_llm,
+            "execution" | "story" => self.story_llm,
+            "review" => self.critic_llm,
+            _ => self.llm,
+        };
         // Routed defaults must match the provider — returning a Claude
         // name on the OpenAI path once made the TS planner throw
         // "unknown model 'opus'" before any inference.
         if self.model_routing {
-            return match (self.llm, phase) {
+            return match (provider, phase) {
                 (LlmProvider::Claude, "architect" | "planning" | "execution" | "story") => {
                     Some("opus".to_string())
                 }
@@ -1656,6 +1671,19 @@ mod tests {
         );
         feed(&mut app, r#"{"type":"story_start","id":"S1","title":"One"}"#);
         app
+    }
+
+    #[test]
+    fn routed_model_defaults_follow_each_phase_backend() {
+        let mut app = App::new();
+        app.llm = LlmProvider::OpenAI;
+        app.architect_llm = LlmProvider::Claude;
+        app.planner_llm = LlmProvider::OpenAI;
+        app.story_llm = LlmProvider::Codex;
+
+        assert_eq!(app.model_for_phase("architect").as_deref(), Some("opus"));
+        assert_eq!(app.model_for_phase("planning").as_deref(), Some("gpt-5.5"));
+        assert_eq!(app.model_for_phase("story"), None);
     }
 
     #[test]
@@ -1706,7 +1734,7 @@ mod tests {
             Some(ReplanMark::Removed("scope shift".into()))
         );
         assert_eq!(app.story("S2").status, StoryStatus::Skipped);
-        assert_eq!(app.total, 3);
+        assert_eq!(app.total, 2);
         assert_eq!(app.dag_levels, vec![vec!["S1"], vec!["S3"]]);
         // Run-level system entry is fanned out to active feeds.
         let feed_s1 = &app.active_stories.get("S1").unwrap().activity;
@@ -1719,6 +1747,7 @@ mod tests {
                 "removed":[],"rewired":[]}"#,
         );
         assert_eq!(app.story("S2").status, StoryStatus::Pending);
+        assert_eq!(app.total, 3);
         assert_eq!(app.story("S2").title, "Two replacement");
         assert_eq!(app.story("S2").depends_on, vec!["S3"]);
         assert_eq!(

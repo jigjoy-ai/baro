@@ -2,10 +2,71 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import { CriticTargetRegistry } from "../../src/participants/critic-target-registry.js"
-import { Replan, RuntimeReplanApplied } from "../../src/semantic-events.js"
+import {
+    Replan,
+    ReplanApplied,
+    RuntimeReplanApplied,
+} from "../../src/semantic-events.js"
 import { source } from "./helpers.js"
 
 describe("CriticTargetRegistry runtime replans", () => {
+    it("projects only the Conductor's effective persisted legacy delta", async () => {
+        const targets = new Map<string, readonly string[]>([["S-old", ["old"]]])
+        const registry = new CriticTargetRegistry(targets)
+        const conductor = source("conductor")
+        registry.setLegacyReplanAuthority(conductor)
+        const mutation = {
+            source: "surgeon",
+            reason: "replacement",
+            addedStories: [
+                {
+                    id: "S-new",
+                    priority: 1,
+                    title: "new",
+                    description: "new",
+                    dependsOn: [],
+                    acceptance: ["new criterion"],
+                    tests: ["npm test"],
+                },
+                {
+                    id: "S-old",
+                    priority: 1,
+                    title: "duplicate persisted pass",
+                    description: "ignored by persistence",
+                    dependsOn: [],
+                    acceptance: ["must not replace old criterion"],
+                    tests: ["npm test"],
+                },
+            ],
+            removedStoryIds: ["S-old", "S-missing"],
+            modifiedDeps: { "S-missing": [] },
+        }
+        const effective = {
+            ...mutation,
+            addedStories: [mutation.addedStories[0]!],
+            removedStoryIds: [],
+            modifiedDeps: {},
+        }
+
+        await registry.onExternalEvent(source("surgeon"), Replan.create(mutation))
+        assert.deepEqual(targets.get("S-old"), ["old"])
+        assert.equal(targets.has("S-new"), false)
+
+        await registry.onExternalEvent(
+            source("forged-conductor"),
+            ReplanApplied.create(mutation),
+        )
+        assert.deepEqual(targets.get("S-old"), ["old"])
+        assert.equal(targets.has("S-new"), false)
+
+        await registry.onExternalEvent(
+            conductor,
+            ReplanApplied.create(effective),
+        )
+        assert.deepEqual(targets.get("S-old"), ["old"])
+        assert.deepEqual(targets.get("S-new"), ["new criterion"])
+    })
+
     it("updates acceptance targets only after an authoritative Applied event", async () => {
         const targets = new Map<string, readonly string[]>([
             ["S-old", ["old criterion"]],
@@ -27,6 +88,7 @@ describe("CriticTargetRegistry runtime replans", () => {
                         description: "Must not affect collective targets.",
                         dependsOn: [],
                         acceptance: ["phantom criterion"],
+                        tests: ["npm test"],
                     },
                 ],
                 removedStoryIds: [],
@@ -54,6 +116,7 @@ describe("CriticTargetRegistry runtime replans", () => {
                         description: "New work.",
                         dependsOn: ["S1"],
                         acceptance: ["new criterion"],
+                        tests: ["npm test"],
                     },
                 ],
                 removedStoryIds: ["S-old"],

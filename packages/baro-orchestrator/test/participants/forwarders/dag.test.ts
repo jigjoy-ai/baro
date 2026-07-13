@@ -6,6 +6,7 @@ import {
     LevelStarted,
     RecoveryStarted,
     Replan,
+    ReplanApplied,
     RuntimeReplanApplied,
 } from "../../../src/semantic-events.js"
 import type { BaroEvent } from "../../../src/tui-protocol.js"
@@ -17,26 +18,54 @@ function parseEvents(lines: string[]): BaroEvent[] {
 }
 
 describe("DagForwarder", () => {
-    it("emits a structured replan BaroEvent with added/removed/rewired", async () => {
+    it("emits a structured replan only after the legacy Conductor applies it", async () => {
         const forwarder = new DagForwarder()
+        const conductor = source("conductor")
+        forwarder.setLegacyReplanAuthority(conductor)
+        const proposal = {
+            source: "surgeon",
+            reason: "S2 too large",
+            addedStories: [
+                {
+                    id: "S2a",
+                    priority: 2,
+                    title: "First half of S2",
+                    description: "Split from S2.",
+                    dependsOn: ["S1"],
+                    acceptance: ["The first half of S2 works."],
+                    tests: ["npm test"],
+                },
+                {
+                    id: "S-existing",
+                    priority: 2,
+                    title: "Duplicate",
+                    description: "Ignored by persistence.",
+                    dependsOn: [],
+                    acceptance: ["The duplicate work works."],
+                    tests: ["npm test"],
+                },
+            ],
+            removedStoryIds: ["S2", "S-passed"],
+            modifiedDeps: { S3: ["S2a"], "S-missing": [] },
+        }
+        const effective = {
+            ...proposal,
+            addedStories: [proposal.addedStories[0]!],
+            removedStoryIds: ["S2"],
+            modifiedDeps: { S3: ["S2a"] },
+        }
         const events = parseEvents(await captureStdout(async () => {
             await forwarder.onExternalEvent(
                 source("surgeon"),
-                Replan.create({
-                    source: "surgeon",
-                    reason: "S2 too large",
-                    addedStories: [
-                        {
-                            id: "S2a",
-                            priority: 2,
-                            title: "First half of S2",
-                            description: "Split from S2.",
-                            dependsOn: ["S1"],
-                        },
-                    ],
-                    removedStoryIds: ["S2"],
-                    modifiedDeps: { S3: ["S2a"] },
-                }),
+                Replan.create(proposal),
+            )
+            await forwarder.onExternalEvent(
+                source("forged-conductor"),
+                ReplanApplied.create(proposal),
+            )
+            await forwarder.onExternalEvent(
+                conductor,
+                ReplanApplied.create(effective),
             )
         }))
 
@@ -54,9 +83,19 @@ describe("DagForwarder", () => {
 
     it("emits level_started, level_completed, and recovery_started", async () => {
         const forwarder = new DagForwarder()
+        const conductor = source("conductor")
+        forwarder.setLegacyReplanAuthority(conductor)
         const events = parseEvents(await captureStdout(async () => {
             await forwarder.onExternalEvent(
-                source("conductor"),
+                source("forged-conductor"),
+                LevelStarted.create({
+                    ordinal: 99,
+                    totalLevelsHint: 99,
+                    storyIds: ["forged"],
+                }),
+            )
+            await forwarder.onExternalEvent(
+                conductor,
                 LevelStarted.create({
                     ordinal: 1,
                     totalLevelsHint: 3,
@@ -64,7 +103,7 @@ describe("DagForwarder", () => {
                 }),
             )
             await forwarder.onExternalEvent(
-                source("conductor"),
+                conductor,
                 LevelCompleted.create({
                     ordinal: 1,
                     passed: ["S1"],
@@ -72,7 +111,7 @@ describe("DagForwarder", () => {
                 }),
             )
             await forwarder.onExternalEvent(
-                source("conductor"),
+                conductor,
                 RecoveryStarted.create({ attempt: 1, storyIds: ["S2"] }),
             )
         }))
@@ -107,6 +146,8 @@ describe("DagForwarder", () => {
                         title: "Follow-up",
                         description: "Implement it.",
                         dependsOn: ["S1"],
+                        acceptance: ["The follow-up works."],
+                        tests: ["npm test"],
                     },
                 ],
                 removedStoryIds: [],

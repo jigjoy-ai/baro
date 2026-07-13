@@ -81,21 +81,21 @@ key plumbing for the subscription backends.
 
 ```bash
 baro --llm claude    "Your goal"   # default — Claude Code on Anthropic Max subscription
-baro --llm codex     "Your goal"   # OpenAI Codex CLI on ChatGPT Pro/Plus subscription
+baro --llm codex --critic-llm claude "Your goal" # Codex execution + tool-less Claude review
 baro --llm openai    "Your goal"   # Mozaik-native OpenAI (per-call API billing)
 baro --llm opencode  "Your goal"   # OpenCode CLI — multi-provider agent shell (any model)
-baro --llm hybrid    "Your goal"   # Claude on Architect/Planner/Surgeon, Codex on Story/Critic
+baro --llm hybrid    "Your goal"   # Claude on Architect/Planner/Critic/Surgeon, Codex on Story
 ```
 
-`--llm hybrid` is the recommendation for serious runs — Claude where the upstream plan
-matters, Codex for the parallel story+critic work that dominates the budget. Each phase
+`--llm hybrid` is the recommendation for serious runs — Claude for planning, safe
+tool-less review, and recovery; Codex for parallel story work. Each phase
 also has its own override flag if you want to mix it yourself:
 
 ```bash
 baro --architect-llm claude   \
      --planner-llm  claude   \
      --story-llm    opencode \
-     --critic-llm   codex    \
+     --critic-llm   claude   \
      --surgeon-llm  claude   \
      "Your goal"
 ```

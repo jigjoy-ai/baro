@@ -8,6 +8,7 @@
  */
 
 import { execFile } from "child_process"
+import { createHash } from "crypto"
 import {
     appendFileSync,
     existsSync,
@@ -100,6 +101,19 @@ export class WorktreeManager {
         return this.branchOf(storyId)
     }
 
+    /**
+     * Read-only lookup for policy observers that must inspect a story before
+     * acceptance/integration. Returns null once the manager has released it.
+     */
+    activePath(storyId: string): string | null {
+        return this.paths.get(storyId) ?? null
+    }
+
+    /** Exact immutable commit from which the active story worktree was made. */
+    creationSha(storyId: string): string | null {
+        return this.baseShas.get(storyId) ?? null
+    }
+
     private pathOf(storyId: string): string {
         return join(this.baseDir, sanitize(storyId))
     }
@@ -111,10 +125,15 @@ export class WorktreeManager {
      */
     async create(storyId: string): Promise<string | null> {
         const release = await this.gate.acquire()
+        const branch = this.branchOf(storyId)
+        const path = this.pathOf(storyId)
         try {
-            const branch = this.branchOf(storyId)
-            const path = this.pathOf(storyId)
+            // Registration is transactional: observers must not be able to
+            // resolve a story target until every setup step has completed.
+            // Clear any prior logical state before removing stale git state.
+            this.paths.delete(storyId)
             this.baseShas.delete(storyId)
+            this.preserved.delete(storyId)
             // A leftover dir/branch from a crash would make `worktree add`
             // fail; best-effort clear first.
             await this.removeWorktreeQuiet(path)
@@ -129,19 +148,39 @@ export class WorktreeManager {
                 ["worktree", "add", "-b", branch, path, "HEAD"],
                 { cwd: this.repoRoot },
             )
-            this.paths.set(storyId, path)
-            this.baseShas.set(storyId, baseSha.trim())
             if (this.linkDepDirs) {
                 await this.ensureDepDirsExcluded()
                 this.symlinkDepDirs(path)
             }
+            this.paths.set(storyId, path)
+            this.baseShas.set(storyId, baseSha.trim())
             this.log(`created ${branch} at ${path}`)
             return path
         } catch (e) {
+            let rollbackError: unknown = null
+            try {
+                await this.rollbackPartialCreate(storyId, path, branch)
+            } catch (cleanupError) {
+                rollbackError = cleanupError
+            }
             const suffix = this.allowSharedFallback
                 ? "; falling back to shared tree"
                 : "; collective mode requires isolation"
-            this.log(`could not create worktree for ${storyId} (${errMsg(e)})${suffix}`)
+            const rollbackSuffix = rollbackError
+                ? `; partial setup cleanup failed (${errMsg(rollbackError)})`
+                : ""
+            this.log(
+                `could not create worktree for ${storyId} (${errMsg(e)})` +
+                    `${rollbackSuffix}${suffix}`,
+            )
+            // A residual worktree/branch is not a safe shared-tree fallback:
+            // fail closed rather than leave ambiguous story state behind.
+            if (rollbackError) {
+                throw new Error(
+                    `worktree setup failed for ${storyId}: ${errMsg(e)}; ` +
+                        `rollback failed: ${errMsg(rollbackError)}`,
+                )
+            }
             if (!this.allowSharedFallback) throw e
             return null
         } finally {
@@ -843,12 +882,47 @@ export class WorktreeManager {
     private async deleteBranchQuiet(branch: string): Promise<void> {
         await execQuiet("git", ["branch", "-D", branch], this.repoRoot)
     }
+
+    /**
+     * Roll back every externally visible part of a failed create(). Maps are
+     * cleared first so policy observers fail closed even while git cleanup is
+     * still running. Residual state is treated as an error, never as a valid
+     * shared-tree fallback.
+     */
+    private async rollbackPartialCreate(
+        storyId: string,
+        path: string,
+        branch: string,
+    ): Promise<void> {
+        this.paths.delete(storyId)
+        this.baseShas.delete(storyId)
+        this.preserved.delete(storyId)
+        await this.removeWorktreeQuiet(path)
+        await this.deleteBranchQuiet(branch)
+
+        const { stdout: remainingBranch } = await exec(
+            "git",
+            ["branch", "--list", branch, "--format=%(refname:short)"],
+            { cwd: this.repoRoot },
+        )
+        if (existsSync(path) || remainingBranch.trim()) {
+            throw new Error(
+                `residual setup state remains` +
+                    (existsSync(path) ? ` at ${path}` : "") +
+                    (remainingBranch.trim() ? ` on branch ${branch}` : ""),
+            )
+        }
+    }
 }
 
 function sanitize(storyId: string): string {
     // Story ids are short slugs (S1, S2, …) but guard against anything that
-    // would break a ref name or a path segment.
-    return storyId.replace(/[^A-Za-z0-9._-]/g, "_")
+    // would break a ref name or a path segment. Unsafe spellings receive an
+    // identity hash so distinct ids can never collapse onto one worktree.
+    const safe = storyId.replace(/[^A-Za-z0-9._-]/g, "_") || "story"
+    if (safe === storyId) return safe
+    const identity = createHash("sha256").update(storyId).digest("hex").slice(0, 12)
+    return `${safe.slice(0, 80)}-${identity}`
 }
 
 function meaningfulStatusLines(status: string): string[] {

@@ -102,6 +102,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
         const executor = new LocalStoryExecutor()
         const env = {} as AgenticEnvironment
         let registered: Participant | null = null
+        const registerTerminalAuthority = (_sourceParticipant: Participant) => undefined
 
         assert.throws(
             () => executor.start(
@@ -119,6 +120,7 @@ describe("StoryFactory — StoryExecutor seam", () => {
                 "/work",
                 env,
                 {
+                    registerTerminalAuthority,
                     registerResultAuthority: (sourceParticipant) => {
                         registered = sourceParticipant
                         assert.equal(sourceParticipant.agentId, "S-local")
@@ -127,6 +129,12 @@ describe("StoryFactory — StoryExecutor seam", () => {
                                 resultAuthority: Participant
                             }).resultAuthority,
                             sourceParticipant,
+                        )
+                        assert.equal(
+                            (sourceParticipant as unknown as {
+                                terminalSourceRegistrar: unknown
+                            }).terminalSourceRegistrar,
+                            registerTerminalAuthority,
                         )
                         throw new Error("stop before join")
                     },

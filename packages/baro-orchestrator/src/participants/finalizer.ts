@@ -36,6 +36,7 @@ import { AgenticEnvironment } from "@mozaik-ai/core"
 import { buildDag } from "../dag.js"
 import { getHeadSha } from "../git.js"
 import { BARO_COAUTHOR_TRAILER, loadPrd, type PrdFile, type PrdStory } from "../prd.js"
+import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import {
     FinalizeStarted,
     LevelStarted,
@@ -65,6 +66,10 @@ export interface FinalizerOptions {
     createPr?: boolean
     /** Optional logger; receives single-line strings without a trailing newline. */
     onLog?: (line: string) => void
+    /** Run identity used to reject cross-run collective events. */
+    runId?: string
+    /** Collective exact-source registry for dynamic StoryResult producers. */
+    outcomeAuthority?: StoryOutcomeAuthority
 }
 
 interface StoryRecord {
@@ -77,9 +82,17 @@ interface StoryRecord {
 }
 
 export class Finalizer extends BaseObserver {
-    private readonly opts: Required<Omit<FinalizerOptions, "baseSha" | "onLog">> &
+    private readonly opts: Required<Omit<
+        FinalizerOptions,
+        "baseSha" | "onLog" | "runId" | "outcomeAuthority"
+    >> &
         Pick<FinalizerOptions, "onLog">
     private envRef: AgenticEnvironment | null = null
+    private readonly runId: string | null
+    private readonly outcomeAuthority: StoryOutcomeAuthority | null
+    private coordinationAuthority: Participant | null = null
+    private repositoryAuthority: Participant | null = null
+    private verifierAuthority: Participant | null = null
 
     private startedAtMs: number | null = null
     private baseSha: string | null
@@ -117,17 +130,50 @@ export class Finalizer extends BaseObserver {
             onLog: opts.onLog,
         }
         this.baseSha = opts.baseSha ?? null
+        this.runId = opts.runId?.trim() || null
+        this.outcomeAuthority = opts.outcomeAuthority ?? null
+        if (
+            this.outcomeAuthority &&
+            this.runId !== this.outcomeAuthority.runId
+        ) {
+            throw new Error("Finalizer outcomeAuthority runId mismatch")
+        }
     }
 
     setEnvironment(env: AgenticEnvironment): void {
         this.envRef = env
     }
 
+    setCoordinationAuthority(authority: Participant): void {
+        this.coordinationAuthority = bindAuthority(
+            this.coordinationAuthority,
+            authority,
+            "coordination",
+        )
+    }
+
+    setRepositoryAuthority(authority: Participant): void {
+        this.repositoryAuthority = bindAuthority(
+            this.repositoryAuthority,
+            authority,
+            "repository",
+        )
+    }
+
+    setVerifierAuthority(authority: Participant): void {
+        this.verifierAuthority = bindAuthority(
+            this.verifierAuthority,
+            authority,
+            "verifier",
+        )
+    }
+
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         if (RunStarted.is(event)) {
+            if (!this.matchesAuthority(source, this.coordinationAuthority)) return
             this.startedAtMs = Date.now()
             // Capture base SHA at run start so we can later list commits
             // produced by the run regardless of how many branches Conductor
@@ -141,6 +187,7 @@ export class Finalizer extends BaseObserver {
         }
 
         if (LevelStarted.is(event)) {
+            if (!this.matchesAuthority(source, this.coordinationAuthority)) return
             const { ordinal, storyIds } = event.data
             this.levels.set(ordinal, [...storyIds])
             for (const id of storyIds) {
@@ -162,12 +209,20 @@ export class Finalizer extends BaseObserver {
         }
 
         if (StoryMergeFailed.is(event)) {
+            if (
+                !this.matchesAuthority(source, this.repositoryAuthority) ||
+                !this.matchesRun(event.data.runId)
+            ) return
             const d = event.data
             if (d.branch) this.mergeFailed.set(d.storyId, d.branch)
             return
         }
 
         if (StoryMerged.is(event)) {
+            if (
+                !this.matchesAuthority(source, this.repositoryAuthority) ||
+                !this.matchesRun(event.data.runId)
+            ) return
             // A bounded collective recovery can integrate a story after an
             // earlier merge failure. Do not leave a successful run mislabeled
             // as a checkpoint or advertise a stale recovery branch.
@@ -176,6 +231,10 @@ export class Finalizer extends BaseObserver {
         }
 
         if (StoryResult.is(event)) {
+            if (
+                this.outcomeAuthority &&
+                !this.outcomeAuthority.matchesResult(source, event.data)
+            ) return
             const d = event.data
             const existing = this.stories.get(d.storyId) ?? {
                 id: d.storyId,
@@ -193,6 +252,11 @@ export class Finalizer extends BaseObserver {
         }
 
         if (RunVerificationCompleted.is(event)) {
+            if (
+                (this.verifierAuthority === null && this.runId !== null) ||
+                !this.matchesAuthority(source, this.verifierAuthority) ||
+                !this.matchesRun(event.data.runId, true)
+            ) return
             this.objectiveVerification = {
                 runId: event.data.runId,
                 result: verificationResult(event.data),
@@ -201,6 +265,11 @@ export class Finalizer extends BaseObserver {
         }
 
         if (RunCompleted.is(event)) {
+            if (
+                !this.matchesAuthority(source, this.coordinationAuthority) ||
+                !this.matchesRun(event.data.runId)
+            ) return
+            if (this.finalizePromise) return
             // Wrap finalize() so a bug inside this participant never
             // takes down the orchestrator. The whole run has already
             // succeeded by the time we get here — losing the PR is a
@@ -210,6 +279,26 @@ export class Finalizer extends BaseObserver {
             await this.finalizePromise
             return
         }
+    }
+
+    private matchesAuthority(
+        source: Participant,
+        authority: Participant | null,
+    ): boolean {
+        // Standalone Finalizer users without a run identity historically had
+        // no explicit authority registry. Orchestrate always supplies runId
+        // and binds its capabilities before RunStartRequest is published.
+        return authority === null ? this.runId === null : source === authority
+    }
+
+    private matchesRun(eventRunId: string | undefined, required = false): boolean {
+        if (this.runId === null) return true
+        if (eventRunId === undefined) {
+            // Collective events are fully correlated; legacy lifecycle/merge
+            // events intentionally omit runId and remain source-bound.
+            return !required && this.outcomeAuthority === null
+        }
+        return eventRunId === this.runId
     }
 
     private async safeFinalize(run: RunCompletedData): Promise<void> {
@@ -871,6 +960,17 @@ export class Finalizer extends BaseObserver {
             return null
         }
     }
+}
+
+function bindAuthority(
+    current: Participant | null,
+    authority: Participant,
+    label: string,
+): Participant {
+    if (current && current !== authority) {
+        throw new Error(`Finalizer ${label} authority is already bound`)
+    }
+    return authority
 }
 
 function verificationResult(evidence: RunVerificationEvidence): VerifyResult {

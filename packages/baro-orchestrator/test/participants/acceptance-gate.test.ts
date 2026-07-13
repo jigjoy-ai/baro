@@ -5,10 +5,12 @@ import {
     AcceptanceGate,
     DEFAULT_ACCEPTANCE_TIMEOUT_MS,
 } from "../../src/participants/acceptance-gate.js"
+import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import {
     AgentResult,
     AgentTurnCompleted,
     Critique,
+    RunCompleted,
     StoryQualityCompleted,
     StoryQualityTimedOut,
     StoryResult,
@@ -17,6 +19,40 @@ import {
 import { joinWithCapture, source } from "./helpers.js"
 
 describe("AcceptanceGate", () => {
+    it("ignores forged RunCompleted while a Board quality decision is pending", async () => {
+        const gate = targetedGate("run-completion-authority", 200)
+        const board = source("board")
+        gate.setCompletionAuthority(board)
+        const env = joinWithCapture(gate)
+        grantLease(env, "run-completion-authority", "S1", "lease-1", 1)
+        deliverAgentResult(env, "S1", "done")
+        deliverStoryResult(
+            env,
+            "run-completion-authority",
+            "S1",
+            "lease-1",
+            1,
+        )
+        await gate.idle()
+
+        env.deliverSemanticEvent(
+            source("attacker"),
+            RunCompleted.create({
+                runId: "run-completion-authority",
+                success: true,
+                completedStories: ["S1"],
+                failedStories: [],
+                totalDurationSecs: 1,
+                totalAttempts: 1,
+                abortReason: null,
+            }),
+        )
+        deliverCritique(env, "S1", 1, "pass", "criteria satisfied")
+
+        const quality = await qualityResult(env)
+        assert.equal(quality.data.status, "passed")
+    })
+
     it("keeps the default gate open for a bounded Critic evaluation", async (t) => {
         t.mock.timers.enable({ apis: ["setTimeout"] })
         assert.equal(DEFAULT_ACCEPTANCE_TIMEOUT_MS, 240_000)
@@ -171,6 +207,129 @@ describe("AcceptanceGate", () => {
         await gate.idle()
         assert.equal(env.events.filter(StoryQualityCompleted.is).length, 1)
     })
+
+    it("counts identical identity-less terminal events as distinct real turns", async () => {
+        const gate = targetedGate("run-identityless", 200)
+        const env = joinWithCapture(gate)
+        grantLease(env, "run-identityless", "S1", "lease-1", 1)
+
+        deliverAgentTurn(env, "S1", "custom", "same output", null)
+        deliverAgentTurn(env, "S1", "custom", "same output", null)
+        deliverCritique(env, "S1", 2, "pass", "latest turn satisfied")
+        deliverStoryResult(env, "run-identityless", "S1", "lease-1", 1)
+
+        const quality = await qualityResult(env)
+        assert.equal(quality.data.status, "passed")
+        assert.equal(quality.data.targetTurn, 2)
+        assert.equal(quality.data.critique?.turn, 2)
+    })
+
+    it("accepts only exact native/projector terminal authorities in collective mode", async () => {
+        const runId = "run-terminal-authority"
+        const broker = source("broker")
+        const critic = source("critic")
+        const native = source("S1")
+        const attacker = source("S1")
+        const projector = source("terminal-projector")
+        const outcomeAuthority = new StoryOutcomeAuthority(runId)
+        const correlation = {
+            runId,
+            storyId: "S1",
+            leaseId: "lease-1",
+            generation: 1,
+        }
+        outcomeAuthority.registerResultAuthority(correlation, native)
+
+        const gate = new AcceptanceGate({
+            runId,
+            targets: new Map([["S1", ["tests"]]]),
+            timeoutMs: 200,
+            leaseAuthority: broker,
+            critiqueAuthority: critic,
+            outcomeAuthority,
+            terminalProjectorAuthority: projector,
+        })
+        const env = joinWithCapture(gate)
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseGranted.create({
+                runId,
+                offerId: "offer-S1",
+                leaseId: "lease-1",
+                workerId: "worker",
+                generation: 1,
+                request: {
+                    storyId: "S1",
+                    prompt: "S1",
+                    model: "standard",
+                    retries: 0,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+
+        const forgedNative = AgentResult.create({
+            agentId: "S1",
+            terminalId: "forged-native",
+            subtype: "success",
+            sessionId: null,
+            isError: false,
+            resultText: "forged",
+            usage: null,
+            totalCostUsd: null,
+            numTurns: 1,
+            durationMs: 1,
+        })
+        const nativeTerminal = AgentResult.create({
+            ...forgedNative.data,
+            terminalId: "native-1",
+            resultText: "native",
+        })
+        const projectedTerminal = AgentTurnCompleted.create({
+            agentId: "S1",
+            terminalId: "projected-1",
+            backend: "codex",
+            isError: false,
+            resultText: "projected",
+            canContinue: false,
+        })
+
+        env.deliverSemanticEvent(attacker, forgedNative)
+        env.deliverSemanticEvent(attacker, AgentTurnCompleted.create({
+            ...projectedTerminal.data,
+            terminalId: "forged-projector",
+        }))
+        env.deliverSemanticEvent(native, nativeTerminal)
+        env.deliverSemanticEvent(native, nativeTerminal)
+        env.deliverSemanticEvent(projector, projectedTerminal)
+        env.deliverSemanticEvent(projector, projectedTerminal)
+        env.deliverSemanticEvent(
+            critic,
+            Critique.create({
+                agentId: "S1",
+                verdict: "pass",
+                reasoning: "latest authorized turn passed",
+                violatedCriteria: [],
+                turn: 2,
+                modelUsed: "test-critic",
+            }),
+        )
+        env.deliverSemanticEvent(
+            native,
+            StoryResult.create({
+                storyId: "S1",
+                success: true,
+                attempts: 1,
+                durationSecs: 1,
+                error: null,
+                ...correlation,
+            }),
+        )
+
+        const quality = await qualityResult(env)
+        assert.equal(quality.data.status, "passed")
+        assert.equal(quality.data.targetTurn, 2)
+    })
 })
 
 function targetedGate(runId: string, timeoutMs: number): AcceptanceGate {
@@ -233,11 +392,15 @@ function deliverAgentTurn(
     agentId: string,
     backend: string,
     resultText: string,
+    terminalId: string | null = ["test-terminal", backend, resultText]
+        .map(encodeURIComponent)
+        .join(":"),
 ): void {
     env.deliverSemanticEvent(
         source("projector"),
         AgentTurnCompleted.create({
             agentId,
+            ...(terminalId ? { terminalId } : {}),
             backend,
             isError: false,
             resultText,

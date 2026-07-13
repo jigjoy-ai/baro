@@ -266,6 +266,38 @@ describe("validateRuntimeReplanMutation", () => {
         expectCode(validate(prd(), mutation()), "no_op")
     })
 
+    it("requires non-empty, non-blank acceptance criteria and test commands", () => {
+        const without = (
+            field: "acceptance" | "tests",
+        ): RuntimeReplanMutation["addedStories"][number] => {
+            const candidate = {
+                ...add("S4"),
+            } as unknown as Record<string, unknown>
+            delete candidate[field]
+            return candidate as unknown as RuntimeReplanMutation["addedStories"][number]
+        }
+        const cases: Array<[
+            RuntimeReplanMutation["addedStories"][number],
+            RegExp,
+        ]> = [
+            [without("acceptance"), /non-empty acceptance criteria/],
+            [{ ...add("S4"), acceptance: [] }, /non-empty acceptance criteria/],
+            [{ ...add("S4"), acceptance: ["  "] }, /non-empty acceptance criteria/],
+            [without("tests"), /non-empty tests/],
+            [{ ...add("S4"), tests: [] }, /non-empty tests/],
+            [{ ...add("S4"), tests: ["\t"] }, /non-empty tests/],
+        ]
+
+        for (const [addedStory, expectedReason] of cases) {
+            const result = validate(
+                prd(),
+                mutation({ addedStories: [addedStory] }),
+            )
+            expectCode(result, "invalid_proposal")
+            if (!result.ok) assert.match(result.reason, expectedReason)
+        }
+    })
+
     it("rejects runtime verification-only stories handled by RunVerifier", () => {
         const result = validate(
             prd(),

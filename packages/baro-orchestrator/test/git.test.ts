@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { createOrCheckoutBranch } from "../src/git.js"
+import { createOrCheckoutBranch, getCommitCount } from "../src/git.js"
 
 function git(cwd: string, ...args: string[]): string {
     return execFileSync("git", args, { cwd, encoding: "utf8" }).trim()
@@ -85,5 +85,23 @@ describe("createOrCheckoutBranch - branch name handling", () => {
         assert.equal(git(repo, "branch", "--show-current"), "baro/local-only")
         assert.equal(git(remote, "for-each-ref", "--format=%(refname)"), "")
         assert.ok(logs.includes("[git] local-only; not pushing baro/local-only"))
+    })
+})
+
+describe("getCommitCount", () => {
+    it("counts every story and merge commit after the run base", async () => {
+        const baseSha = git(repo, "rev-parse", "HEAD")
+        git(repo, "checkout", "-b", "story/S1")
+        writeFileSync(join(repo, "b.txt"), "second\n")
+        git(repo, "add", "b.txt")
+        git(repo, "commit", "-m", "story change")
+        git(repo, "checkout", "main")
+        git(repo, "merge", "--no-ff", "story/S1", "-m", "merge story S1")
+
+        assert.equal(await getCommitCount(repo, baseSha), 2)
+    })
+
+    it("returns zero when the range cannot be read", async () => {
+        assert.equal(await getCommitCount(repo, "missing-base"), 0)
     })
 })

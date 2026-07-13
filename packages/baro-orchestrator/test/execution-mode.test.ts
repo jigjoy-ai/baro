@@ -98,6 +98,13 @@ describe("planner prompt tiers", () => {
         assert.match(PLANNER_SYSTEM_PROMPT, /do NOT create a final verification-only story/)
         assert.match(PLANNER_SYSTEM_PROMPT, /RunVerifier/)
     })
+
+    it("requires semantic traceability and rejects summary-only acceptance", () => {
+        assert.match(PLANNER_SYSTEM_PROMPT, /REQUIREMENT COVERAGE/)
+        assert.match(PLANNER_SYSTEM_PROMPT, /built-in implementation\/caller/)
+        assert.match(PLANNER_SYSTEM_PROMPT, /"Tests pass" is never/)
+        assert.match(PLANNER_SYSTEM_PROMPT, /must not contradict/)
+    })
 })
 
 describe("heuristicModeContract", () => {

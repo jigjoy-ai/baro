@@ -1,5 +1,10 @@
 import type { Tool } from "@mozaik-ai/core"
 
+import {
+    MAX_STORY_PRIORITY,
+    MAX_STORY_RETRIES,
+    MIN_STORY_PRIORITY,
+} from "../prd.js"
 import type {
     RuntimeReplanAppliedData,
     RuntimeReplanMutation,
@@ -65,14 +70,22 @@ export function createRuntimeReplanTool(graphVersion: number): Tool {
                         type: "object",
                         properties: {
                             id: { type: "string", minLength: 1 },
-                            priority: { type: "number" },
+                            priority: {
+                                type: "integer",
+                                minimum: MIN_STORY_PRIORITY,
+                                maximum: MAX_STORY_PRIORITY,
+                            },
                             title: { type: "string", minLength: 1 },
                             description: { type: "string", minLength: 1 },
                             dependsOn: {
                                 type: "array",
                                 items: { type: "string" },
                             },
-                            retries: { type: "integer", minimum: 0 },
+                            retries: {
+                                type: "integer",
+                                minimum: 0,
+                                maximum: MAX_STORY_RETRIES,
+                            },
                             acceptance: {
                                 type: "array",
                                 items: { type: "string" },
@@ -89,6 +102,8 @@ export function createRuntimeReplanTool(graphVersion: number): Tool {
                             "title",
                             "description",
                             "dependsOn",
+                            "acceptance",
+                            "tests",
                         ],
                         additionalProperties: false,
                     },
@@ -225,8 +240,9 @@ function parseAddedStories(
         }
         if (
             typeof story.id !== "string" ||
-            typeof story.priority !== "number" ||
-            !Number.isFinite(story.priority) ||
+            !Number.isInteger(story.priority) ||
+            (story.priority as number) < MIN_STORY_PRIORITY ||
+            (story.priority as number) > MAX_STORY_PRIORITY ||
             typeof story.title !== "string" ||
             typeof story.description !== "string"
         ) {
@@ -234,7 +250,7 @@ function parseAddedStories(
                 ok: false,
                 error:
                     `addedStories[${index}] requires string ` +
-                    "id/title/description and finite priority",
+                    "id/title/description and an i32 priority",
             }
         }
         const dependsOn = stringArray(
@@ -244,21 +260,23 @@ function parseAddedStories(
         if (!dependsOn.ok) return dependsOn
         if (
             story.retries !== undefined &&
-            (!Number.isInteger(story.retries) || (story.retries as number) < 0)
+            (!Number.isInteger(story.retries) ||
+                (story.retries as number) < 0 ||
+                (story.retries as number) > MAX_STORY_RETRIES)
         ) {
             return {
                 ok: false,
                 error:
-                    `addedStories[${index}].retries must be a ` +
-                    "non-negative integer",
+                    `addedStories[${index}].retries must be an ` +
+                    `integer between 0 and ${MAX_STORY_RETRIES}`,
             }
         }
-        const acceptance = optionalStringArray(
+        const acceptance = requiredNonBlankStringArray(
             story.acceptance,
             `addedStories[${index}].acceptance`,
         )
         if (!acceptance.ok) return acceptance
-        const tests = optionalStringArray(
+        const tests = requiredNonBlankStringArray(
             story.tests,
             `addedStories[${index}].tests`,
         )
@@ -271,17 +289,15 @@ function parseAddedStories(
         }
         stories.push({
             id: story.id,
-            priority: story.priority,
+            priority: story.priority as number,
             title: story.title,
             description: story.description,
             dependsOn: dependsOn.value,
             ...(story.retries !== undefined
                 ? { retries: story.retries as number }
                 : {}),
-            ...(acceptance.value !== undefined
-                ? { acceptance: acceptance.value }
-                : {}),
-            ...(tests.value !== undefined ? { tests: tests.value } : {}),
+            acceptance: acceptance.value,
+            tests: tests.value,
             ...(story.model !== undefined ? { model: story.model } : {}),
         })
     }
@@ -315,15 +331,21 @@ function stringArray(
         : { ok: false, error: `${field} must be an array of strings` }
 }
 
-function optionalStringArray(
+function requiredNonBlankStringArray(
     value: unknown,
     field: string,
-):
-    | { ok: true; value: string[] | undefined }
-    | { ok: false; error: string } {
-    return value === undefined
-        ? { ok: true, value: undefined }
-        : stringArray(value, field)
+): { ok: true; value: string[] } | { ok: false; error: string } {
+    if (
+        !Array.isArray(value) ||
+        value.length === 0 ||
+        !value.every((item) => typeof item === "string" && item.trim().length > 0)
+    ) {
+        return {
+            ok: false,
+            error: `${field} must be a non-empty array of non-blank strings`,
+        }
+    }
+    return { ok: true, value: [...value] }
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

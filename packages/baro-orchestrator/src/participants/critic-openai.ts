@@ -57,12 +57,20 @@ import {
 import {
     VERDICT_SYSTEM_PROMPT,
     buildCorrectiveMessage,
-    buildEvalPrompt,
     extractVerdictJson,
 } from "./critic.js"
-import { criticInput } from "./critic-input.js"
+import {
+    prepareCriticEvalPrompt,
+    type CriticEvidenceSource,
+} from "./critic-evidence.js"
+import { criticInput, criticReplayKey } from "./critic-input.js"
+import { drainCriticPending } from "./critic-pending.js"
+import {
+    isAuthorizedTerminalTurn,
+    type TerminalTurnAuthorityOptions,
+} from "./terminal-turn-authority.js"
 
-export interface CriticOpenAIOptions {
+export interface CriticOpenAIOptions extends TerminalTurnAuthorityOptions {
     /** Map from agentId to its acceptance-criteria strings. */
     targets: ReadonlyMap<string, readonly string[]>
     /** Max corrective AgentTargetedMessageItem-s per agent. Default: 2. */
@@ -75,6 +83,8 @@ export interface CriticOpenAIOptions {
     model?: string
     /** Run correlation used by model-invocation telemetry. */
     runId?: string
+    /** Bounded repository + command evidence captured independently of the summary. */
+    evidence?: CriticEvidenceSource
 }
 
 interface CriticOpenAIEvaluation {
@@ -112,9 +122,19 @@ function pickModel(name: string): GenerativeModel {
 }
 
 export class CriticOpenAI extends BaseObserver {
-    private readonly opts: Required<Omit<CriticOpenAIOptions, "runId">> & {
+    private readonly opts: Required<
+        Omit<
+            CriticOpenAIOptions,
+            | "runId"
+            | "evidence"
+            | "outcomeAuthority"
+            | "terminalProjectorAuthority"
+        >
+    > & {
         runId?: string
+        evidence?: CriticEvidenceSource
     }
+    private readonly terminalAuthorities: TerminalTurnAuthorityOptions
     private readonly model: GenerativeModel
 
     private readonly emissions = new Map<string, number>()
@@ -129,38 +149,50 @@ export class CriticOpenAI extends BaseObserver {
             model: opts.model ?? "gpt-5.4-mini",
             targets: opts.targets,
             runId: opts.runId,
+            evidence: opts.evidence,
+        }
+        this.terminalAuthorities = {
+            outcomeAuthority: opts.outcomeAuthority,
+            terminalProjectorAuthority: opts.terminalProjectorAuthority,
         }
         this.model = pickModel(this.opts.model)
     }
 
     /** Resolves once every in-flight evaluation has emitted its CritiqueItem. */
     async idle(): Promise<void> {
-        await Promise.allSettled([...this.pending])
+        await drainCriticPending(this.pending)
     }
 
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         const input = criticInput(event)
         if (!input) return
+        if (!isAuthorizedTerminalTurn(source, event, input, this.terminalAuthorities)) return
         const { agentId, isError, resultText, canContinue, terminalId } = input
         if (isError || !resultText) return
 
         const criteria = this.opts.targets.get(agentId)
         if (!criteria || criteria.length === 0) return
-        if (terminalId) {
-            if (this.seenTerminalIds.has(terminalId)) return
-            this.seenTerminalIds.add(terminalId)
+        const replayKey = criticReplayKey(agentId, terminalId)
+        if (replayKey) {
+            if (this.seenTerminalIds.has(replayKey)) return
+            this.seenTerminalIds.add(replayKey)
         }
 
         const turn = (this.turnCount.get(agentId) ?? 0) + 1
         this.turnCount.set(agentId, turn)
 
         const work = (async () => {
-            const evaluation = await this.evaluate(
-                resultText,
+            const prompt = await prepareCriticEvalPrompt(
                 criteria,
+                resultText,
+                agentId,
+                this.opts.evidence,
+            )
+            const evaluation = await this.evaluate(
+                prompt,
             )
             const { verdict, reasoning, violatedCriteria } = evaluation
 
@@ -255,10 +287,8 @@ export class CriticOpenAI extends BaseObserver {
      * for benchmarking.
      */
     private async evaluate(
-        resultText: string,
-        criteria: readonly string[],
+        userPrompt: string,
     ): Promise<CriticOpenAIEvaluation> {
-        const userPrompt = buildEvalPrompt(criteria, resultText)
         const context = ModelContext.create("critic")
             .addContextItem(SystemMessageItem.create(VERDICT_SYSTEM_PROMPT))
             .addContextItem(UserMessageItem.create(userPrompt))

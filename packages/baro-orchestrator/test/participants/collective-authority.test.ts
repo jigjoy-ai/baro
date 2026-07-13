@@ -389,6 +389,7 @@ describe("collective authority and replay invariants", () => {
 
             const terminal = AgentTurnCompleted.create({
                 agentId: "S1",
+                terminalId: "projected:S1:1",
                 backend: "codex",
                 isError: false,
                 resultText: "implementation and tests completed",
@@ -756,7 +757,7 @@ function replacementReplan(): Parameters<typeof Replan.create>[0] {
                 dependsOn: [],
                 retries: 1,
                 acceptance: ["tests pass"],
-                tests: [],
+                tests: ["npm test"],
             },
         ],
     }
@@ -776,7 +777,7 @@ function discovery(
             description: `Complete follow-up ${storyId}.`,
             dependsOn: ["S1"],
             acceptance: ["tests pass"],
-            tests: [],
+            tests: ["npm test"],
         },
     })
 }

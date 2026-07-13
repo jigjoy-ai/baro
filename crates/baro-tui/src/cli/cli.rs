@@ -185,8 +185,8 @@ pub struct Cli {
     ///                      (needs OPENAI_API_KEY or the picker screen).
     ///   codex            — all phases via the OpenAI Codex CLI
     ///                      (ChatGPT Plus/Pro billing).
-    ///   hybrid           — Architect/Planner/Surgeon on Claude,
-    ///                      Story/Critic on Codex; phase overrides win.
+    ///   hybrid           — Architect/Planner/Critic/Surgeon on Claude,
+    ///                      Story on Codex; phase overrides win.
     ///   jigjoy           — hosted baro gateway holding the upstream keys
     ///                      (JIGJOY_API_KEY; URL via BARO_JIGJOY_URL).
     #[arg(long, default_value="claude", value_parser=["claude", "openai", "codex", "opencode", "pi", "hybrid", "jigjoy"])]
@@ -194,7 +194,7 @@ pub struct Cli {
 
     /// Base URL for all OpenAI-routed calls instead of api.openai.com,
     /// for OpenAI-compatible providers (OpenRouter, vLLM, Ollama, ...).
-    #[arg(long, env = "OPENAI_BASE_URL")]
+    #[arg(long)]
     pub openai_base_url: Option<String>,
 
     /// Per-phase backend overrides; each wins over `--llm` (including

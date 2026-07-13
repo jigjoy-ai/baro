@@ -557,6 +557,9 @@ export class StoryFactory extends BaseObserver {
                           this.opts.runtimeReplanDecisionAuthority,
                   }
                 : {}),
+            ...(route.backend === "openai" && this.opts.collaboration
+                ? { collaboration: this.opts.collaboration }
+                : {}),
             ...(collectiveCorrelation
                 ? {
                       registerResultAuthority: (source: Participant) => {
@@ -565,6 +568,12 @@ export class StoryFactory extends BaseObserver {
                               source,
                           )
                           resultAuthorityRegistered = true
+                      },
+                      registerTerminalAuthority: (source: Participant) => {
+                          this.opts.outcomeAuthority!.registerTerminalAuthority(
+                              collectiveCorrelation,
+                              source,
+                          )
                       },
                   }
                 : {}),

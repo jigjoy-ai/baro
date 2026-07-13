@@ -22,7 +22,7 @@ import {
 } from "./runner-invocation.js"
 
 export interface RunPiOneShotOptions {
-    /** Combined system+user prompt. Passed as the final positional argv. */
+    /** Combined system+user prompt. Safe evaluators pipe it over stdin. */
     prompt: string
     cwd: string
     /** Provider override (e.g. "google"); omit for Pi's configured default. */
@@ -37,6 +37,12 @@ export interface RunPiOneShotOptions {
     label?: string
     /** Optional invocation telemetry sink. It cannot alter runner success. */
     onInvocation?: RunnerInvocationObserver
+    /**
+     * Critic-only hardening: pass this as Pi's real system prompt while
+     * disabling every tool, extension, skill, template, theme, and context
+     * file. Other callers retain the existing tool-capable invocation.
+     */
+    safeEvaluatorSystemPrompt?: string
 }
 
 /**
@@ -47,10 +53,23 @@ export async function runPiOneShot(
     opts: RunPiOneShotOptions,
 ): Promise<string> {
     const label = opts.label ?? "pi"
+    const safeEvaluator = opts.safeEvaluatorSystemPrompt !== undefined
     const args = ["--mode", "json", "-p", "--no-session"]
+    if (safeEvaluator) {
+        args.push(
+            "--no-tools",
+            "--no-extensions",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-themes",
+            "--no-context-files",
+            "--system-prompt",
+            opts.safeEvaluatorSystemPrompt!,
+        )
+    }
     if (opts.provider) args.push("--provider", opts.provider)
     if (opts.model) args.push("--model", opts.model)
-    args.push(opts.prompt)
+    if (!safeEvaluator) args.push(opts.prompt)
 
     const timeoutMs = opts.timeoutMs ?? 600_000
 
@@ -61,7 +80,7 @@ export async function runPiOneShot(
         try {
             proc = spawn(opts.piBin ?? "pi", args, {
                 cwd: opts.cwd,
-                stdio: ["ignore", "pipe", "pipe"],
+                stdio: [safeEvaluator ? "pipe" : "ignore", "pipe", "pipe"],
             })
         } catch (e) {
             invocations.finish(
@@ -70,10 +89,10 @@ export async function runPiOneShot(
             reject(e instanceof Error ? e : new Error(String(e)))
             return
         }
-
         let assistantText = ""
         let stdoutBuffer = ""
         const eventTypesSeen: string[] = []
+        let evaluatorToolUseSeen = false
         let timedOut = false
         let killTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -154,6 +173,9 @@ export async function runPiOneShot(
                 // Real Pi field is `toolName`; `tool`/`name` are defensive
                 // fallbacks against shape drift.
                 if (type === "tool_execution_start") {
+                    if (opts.safeEvaluatorSystemPrompt !== undefined) {
+                        evaluatorToolUseSeen = true
+                    }
                     const toolName =
                         typeof event.toolName === "string"
                             ? event.toolName.slice(0, 120)
@@ -170,6 +192,9 @@ export async function runPiOneShot(
                 if (type === "message_update") {
                     const ame = event.assistantMessageEvent as Record<string, unknown> | undefined
                     if (ame?.type === "toolcall_start") {
+                        if (opts.safeEvaluatorSystemPrompt !== undefined) {
+                            evaluatorToolUseSeen = true
+                        }
                         const block = ame.toolCall as Record<string, unknown> | undefined
                         const toolName =
                             typeof block?.name === "string"
@@ -277,6 +302,25 @@ export async function runPiOneShot(
                 return
             }
 
+            if (
+                opts.safeEvaluatorSystemPrompt !== undefined &&
+                evaluatorToolUseSeen
+            ) {
+                if (
+                    !invocations.finish(
+                        unknownPiObservation("failed", elapsedMs, opts),
+                    )
+                ) {
+                    return
+                }
+                reject(
+                    new Error(
+                        "runPiOneShot: safe evaluator attempted a tool call",
+                    ),
+                )
+                return
+            }
+
             if (assistantText.trim()) {
                 if (
                     !invocations.finish(
@@ -302,6 +346,36 @@ export async function runPiOneShot(
                 ),
             )
         })
+
+        if (safeEvaluator) {
+            if (!proc.stdin) {
+                proc.kill()
+                invocations.finish(
+                    unknownPiObservation(
+                        "failed",
+                        Date.now() - startedAt,
+                        opts,
+                    ),
+                )
+                reject(new Error("pi subprocess stdin is unavailable"))
+                return
+            }
+            proc.stdin.on("error", (error) => {
+                proc.kill()
+                if (
+                    invocations.finish(
+                        unknownPiObservation(
+                            "failed",
+                            Date.now() - startedAt,
+                            opts,
+                        ),
+                    )
+                ) {
+                    reject(error)
+                }
+            })
+            proc.stdin.end(opts.prompt)
+        }
     })
 }
 

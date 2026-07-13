@@ -143,6 +143,60 @@ describe("Critic", () => {
         assert.equal(env.events.filter(Critique.is).length, 1)
     })
 
+    it("does not collapse two real identity-less terminal turns with identical payloads", async () => {
+        const critic = new Critic({
+            targets: new Map([["agent-a", ["must include tests"]]]),
+        })
+        let evaluations = 0
+        Object.defineProperty(critic, "evaluate", {
+            value: async () => {
+                evaluations += 1
+                return {
+                    verdict: "pass",
+                    reasoning: "done",
+                    violatedCriteria: [],
+                }
+            },
+        })
+        const env = joinWithCapture(critic)
+
+        await critic.onExternalEvent(source("turn-1"), resultEvent())
+        await critic.onExternalEvent(source("turn-2"), resultEvent())
+        await critic.idle()
+
+        assert.equal(evaluations, 2)
+        assert.deepEqual(
+            env.events.filter(Critique.is).map((event) => event.data.turn),
+            [1, 2],
+        )
+    })
+
+    it("deduplicates a replay carrying an explicit producer terminal id", async () => {
+        const critic = new Critic({
+            targets: new Map([["agent-a", ["must include tests"]]]),
+        })
+        let evaluations = 0
+        Object.defineProperty(critic, "evaluate", {
+            value: async () => {
+                evaluations += 1
+                return {
+                    verdict: "pass",
+                    reasoning: "done",
+                    violatedCriteria: [],
+                }
+            },
+        })
+        const env = joinWithCapture(critic)
+        const terminal = resultEvent(null, { terminalId: "openai-terminal-1" })
+
+        await critic.onExternalEvent(source("native-openai"), terminal)
+        await critic.onExternalEvent(source("audit-replay"), terminal)
+        await critic.idle()
+
+        assert.equal(evaluations, 1)
+        assert.equal(env.events.filter(Critique.is).length, 1)
+    })
+
     it("publishes exactly one trustworthy Claude measurement before its critique", async () => {
         await withTempDir("baro-critic-telemetry-", async (dir) => {
             const wrapper = {
@@ -321,7 +375,10 @@ async function emitResultTurns(critic: Critic, turns: number): Promise<void> {
     }
 }
 
-function resultEvent(numTurns: number | null = null): ReturnType<typeof AgentResult.create> {
+function resultEvent(
+    numTurns: number | null = null,
+    overrides: Partial<Parameters<typeof AgentResult.create>[0]> = {},
+): ReturnType<typeof AgentResult.create> {
     return AgentResult.create({
         agentId: "agent-a",
         subtype: "success",
@@ -332,6 +389,7 @@ function resultEvent(numTurns: number | null = null): ReturnType<typeof AgentRes
         totalCostUsd: null,
         numTurns,
         durationMs: null,
+        ...overrides,
     })
 }
 

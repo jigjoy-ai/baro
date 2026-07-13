@@ -84,6 +84,7 @@ export class StoryAgent extends BaseObserver {
     private envRef: AgenticEnvironment | null = null
     /** Optional explicit bus identity for the terminal outcome. */
     private resultAuthority: Participant | null = null
+    private terminalSourceRegistrar: ((source: Participant) => void) | null = null
     private currentClaude: ClaudeCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -137,6 +138,15 @@ export class StoryAgent extends BaseObserver {
             throw new Error(`result authority already set for ${this.spec.id}`)
         }
         this.resultAuthority = source
+    }
+
+    setTerminalSourceRegistrar(
+        register: (source: Participant) => void,
+    ): void {
+        if (this.terminalSourceRegistrar && this.terminalSourceRegistrar !== register) {
+            throw new Error(`terminal source registrar already set for ${this.spec.id}`)
+        }
+        this.terminalSourceRegistrar = register
     }
 
     /** Idempotent; returns the `done` promise. */
@@ -313,6 +323,7 @@ export class StoryAgent extends BaseObserver {
             claudeBin: this.spec.claudeBin,
         })
         this.currentClaude = claude
+        this.terminalSourceRegistrar?.(claude)
         claude.join(this.envRef)
         claude.start(this.envRef)
 

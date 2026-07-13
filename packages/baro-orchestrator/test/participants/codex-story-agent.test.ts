@@ -3,6 +3,8 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
+import type { Participant } from "@mozaik-ai/core"
+
 import { CodexStoryAgent } from "../../src/participants/codex-story-agent.js"
 import { StoryResult } from "../../src/semantic-events.js"
 import { captureEnv, withTempDir } from "./helpers.js"
@@ -35,6 +37,8 @@ process.exit(0)
                 timeoutSecs: 5,
                 skipGitRepoCheck: true,
             })
+            const terminalSources: Participant[] = []
+            agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
 
             const outcome = await agent.run(env)
             const event = env.events.find(StoryResult.is)
@@ -48,6 +52,8 @@ process.exit(0)
             assert.equal(event.data.success, true)
             assert.equal(event.data.attempts, 1)
             assert.equal(event.data.error, null)
+            assert.equal(terminalSources.length, 1)
+            assert.equal(terminalSources[0]?.agentId, "story-codex")
         })
     })
 

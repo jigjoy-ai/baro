@@ -8,6 +8,7 @@ import { readFileSync, renameSync, unlinkSync, writeFileSync } from "fs"
 
 import type {
     ReplanData,
+    ReplanStoryAdd,
     RuntimeReplanAppliedData,
 } from "./semantic-events.js"
 import { runtimeDecisionFingerprintMatches } from "./runtime/runtime-replan-fingerprint.js"
@@ -70,6 +71,10 @@ export interface PrdRuntimeGraphState {
 }
 
 const STORY_DEFAULTS: Pick<PrdStory, "retries"> = { retries: 2 }
+/** Hard cost/liveness ceiling at every PRD and runtime-replan boundary. */
+export const MAX_STORY_RETRIES = 5
+export const MIN_STORY_PRIORITY = -2_147_483_648
+export const MAX_STORY_PRIORITY = 2_147_483_647
 
 export function loadPrd(path: string): PrdFile {
     const raw = readFileSync(path, "utf8")
@@ -248,7 +253,9 @@ function validStoredRuntimeStory(value: unknown): boolean {
         nonBlank(value.title) &&
         nonBlank(value.description) &&
         stringArrayValue(value.dependsOn) &&
-        (value.retries === undefined || safeIntegerAtLeast(value.retries, 0)) &&
+        (value.retries === undefined ||
+            (safeIntegerAtLeast(value.retries, 0) &&
+                Number(value.retries) <= MAX_STORY_RETRIES)) &&
         (value.acceptance === undefined || stringArrayValue(value.acceptance)) &&
         (value.tests === undefined || stringArrayValue(value.tests)) &&
         (value.model === undefined || nonBlank(value.model))
@@ -288,7 +295,13 @@ function normalizeStory(
         throw new Error(`PRD story ${index} in ${source} is not an object`)
     }
     const id = typeof input.id === "string" ? input.id : `S${index + 1}`
-    const priority = typeof input.priority === "number" ? input.priority : 0
+    const priority =
+        typeof input.priority === "number" && Number.isFinite(input.priority)
+            ? Math.min(
+                  MAX_STORY_PRIORITY,
+                  Math.max(MIN_STORY_PRIORITY, Math.trunc(input.priority)),
+              )
+            : 0
     const title = typeof input.title === "string" ? input.title : ""
     const description =
         typeof input.description === "string" ? input.description : ""
@@ -297,7 +310,10 @@ function normalizeStory(
         : []
     const retries =
         typeof input.retries === "number" && Number.isFinite(input.retries)
-            ? Math.max(0, Math.floor(input.retries))
+            ? Math.min(
+                  MAX_STORY_RETRIES,
+                  Math.max(0, Math.floor(input.retries)),
+              )
             : STORY_DEFAULTS.retries
     const acceptance = Array.isArray(input.acceptance)
         ? input.acceptance.filter((a): a is string => typeof a === "string")
@@ -348,45 +364,120 @@ export function markStoryPassed(
     }
 }
 
-/** Apply a replan without mutating the current PRD snapshot. */
-export function applyReplan(prd: PrdFile, replan: ReplanData): PrdFile {
+export interface AppliedReplanResult {
+    prd: PrdFile
+    /** The exact mutation that changed `prd`; ignored proposal entries are absent. */
+    applied: ReplanData
+}
+
+/**
+ * Apply a legacy replan without mutating the current PRD snapshot and return
+ * the exact effective mutation. Legacy replans intentionally tolerate stale
+ * entries, so observers must never project the proposal itself as committed
+ * state: passed removals, unknown rewires, and duplicate additions are no-ops.
+ */
+export function applyReplanWithEffectiveDelta(
+    prd: PrdFile,
+    replan: ReplanData,
+): AppliedReplanResult {
     let stories = prd.userStories.slice()
+    const removedStoryIds: string[] = []
 
     if (replan.removedStoryIds.length > 0) {
-        const removeSet = new Set(replan.removedStoryIds)
-        stories = stories.filter((story) => !removeSet.has(story.id) || story.passes)
+        const requested = new Set(replan.removedStoryIds)
+        const removable = new Set(
+            stories
+                .filter((story) => requested.has(story.id) && !story.passes)
+                .map((story) => story.id),
+        )
+        const recorded = new Set<string>()
+        for (const storyId of replan.removedStoryIds) {
+            if (removable.has(storyId) && !recorded.has(storyId)) {
+                recorded.add(storyId)
+                removedStoryIds.push(storyId)
+            }
+        }
+        stories = stories.filter((story) => !removable.has(story.id))
     }
 
+    const modifiedDeps: Record<string, readonly string[]> = {}
     if (Object.keys(replan.modifiedDeps).length > 0) {
+        const existing = new Map(stories.map((story) => [story.id, story]))
+        for (const [storyId, proposedDeps] of Object.entries(
+            replan.modifiedDeps,
+        )) {
+            const story = existing.get(storyId)
+            if (!story || sameStringArray(story.dependsOn, proposedDeps)) continue
+            modifiedDeps[storyId] = [...proposedDeps]
+        }
         stories = stories.map((story) => {
-            const dependsOn = replan.modifiedDeps[story.id]
+            const dependsOn = modifiedDeps[story.id]
             return dependsOn ? { ...story, dependsOn: [...dependsOn] } : story
         })
     }
 
+    const addedStories: ReplanStoryAdd[] = []
     if (replan.addedStories.length > 0) {
         const existing = new Set(stories.map((story) => story.id))
         for (const added of replan.addedStories) {
             if (existing.has(added.id)) continue
             existing.add(added.id)
+            const applied = cloneReplanStoryAdd(added)
+            addedStories.push(applied)
             stories.push({
-                id: added.id,
-                priority: added.priority,
-                title: added.title,
-                description: added.description,
-                dependsOn: [...added.dependsOn],
-                retries: added.retries ?? 2,
-                acceptance: added.acceptance ? [...added.acceptance] : [],
-                tests: added.tests ? [...added.tests] : [],
+                id: applied.id,
+                priority: applied.priority,
+                title: applied.title,
+                description: applied.description,
+                dependsOn: [...applied.dependsOn],
+                retries: Math.min(MAX_STORY_RETRIES, applied.retries ?? 2),
+                acceptance: applied.acceptance ? [...applied.acceptance] : [],
+                tests: applied.tests ? [...applied.tests] : [],
                 passes: false,
                 completedAt: null,
                 durationSecs: null,
-                model: added.model,
+                model: applied.model,
             })
         }
     }
 
-    return { ...prd, userStories: stories }
+    return {
+        prd: { ...prd, userStories: stories },
+        applied: {
+            source: replan.source,
+            reason: replan.reason,
+            addedStories,
+            removedStoryIds,
+            modifiedDeps,
+            ...(replan.recovery
+                ? { recovery: { ...replan.recovery } }
+                : {}),
+        },
+    }
+}
+
+/** Apply a replan without mutating the current PRD snapshot. */
+export function applyReplan(prd: PrdFile, replan: ReplanData): PrdFile {
+    return applyReplanWithEffectiveDelta(prd, replan).prd
+}
+
+function sameStringArray(
+    left: readonly string[],
+    right: readonly string[],
+): boolean {
+    return (
+        left.length === right.length &&
+        left.every((value, index) => value === right[index])
+    )
+}
+
+function cloneReplanStoryAdd(story: ReplanStoryAdd): ReplanStoryAdd {
+    return {
+        ...story,
+        dependsOn: [...story.dependsOn],
+        ...(story.acceptance ? { acceptance: [...story.acceptance] } : {}),
+        ...(story.tests ? { tests: [...story.tests] } : {}),
+    }
 }
 
 /**

@@ -1,5 +1,11 @@
 import { buildDag } from "../dag.js"
-import type { PrdFile, PrdStory } from "../prd.js"
+import {
+    MAX_STORY_RETRIES,
+    MAX_STORY_PRIORITY,
+    MIN_STORY_PRIORITY,
+    type PrdFile,
+    type PrdStory,
+} from "../prd.js"
 import { isVerificationOnlyStory } from "../planning/verification-stories.js"
 import type {
     ReplanStoryAdd,
@@ -352,7 +358,11 @@ function validateAddedStoryShape(story: ReplanStoryAdd): string | null {
         ])
     ) return `added story '${story.id || "(missing)"}' has unknown fields`
     if (!validId(story.id)) return "added story id must be a non-empty, trimmed string"
-    if (!Number.isFinite(story.priority)) return `added story '${story.id}' has invalid priority`
+    if (
+        !Number.isInteger(story.priority) ||
+        story.priority < MIN_STORY_PRIORITY ||
+        story.priority > MAX_STORY_PRIORITY
+    ) return `added story '${story.id}' has invalid i32 priority`
     if (!validNonBlankString(story.title)) return `added story '${story.id}' has invalid title`
     if (!validNonBlankString(story.description)) {
         return `added story '${story.id}' has invalid description`
@@ -360,14 +370,19 @@ function validateAddedStoryShape(story: ReplanStoryAdd): string | null {
     if (!validStringArray(story.dependsOn, true)) {
         return `added story '${story.id}' has malformed dependencies`
     }
-    if (story.retries !== undefined && (!Number.isInteger(story.retries) || story.retries < 0)) {
+    if (
+        story.retries !== undefined &&
+        (!Number.isInteger(story.retries) ||
+            story.retries < 0 ||
+            story.retries > MAX_STORY_RETRIES)
+    ) {
         return `added story '${story.id}' has invalid retries`
     }
-    if (story.acceptance !== undefined && !validStringArray(story.acceptance, false)) {
-        return `added story '${story.id}' has malformed acceptance criteria`
+    if (!validNonBlankStringArray(story.acceptance)) {
+        return `added story '${story.id}' requires non-empty acceptance criteria`
     }
-    if (story.tests !== undefined && !validStringArray(story.tests, false)) {
-        return `added story '${story.id}' has malformed tests`
+    if (!validNonBlankStringArray(story.tests)) {
+        return `added story '${story.id}' requires non-empty tests`
     }
     if (story.model !== undefined && !validNonBlankString(story.model)) {
         return `added story '${story.id}' has invalid model`
@@ -380,12 +395,15 @@ function validPrdStoryShape(story: PrdStory): boolean {
         !!story &&
         typeof story === "object" &&
         validId(story.id) &&
-        Number.isFinite(story.priority) &&
+        Number.isInteger(story.priority) &&
+        story.priority >= MIN_STORY_PRIORITY &&
+        story.priority <= MAX_STORY_PRIORITY &&
         typeof story.title === "string" &&
         typeof story.description === "string" &&
         validStringArray(story.dependsOn, true) &&
         Number.isInteger(story.retries) &&
         story.retries >= 0 &&
+        story.retries <= MAX_STORY_RETRIES &&
         validStringArray(story.acceptance, false) &&
         validStringArray(story.tests, false) &&
         typeof story.passes === "boolean" &&
@@ -418,8 +436,8 @@ function toPrdStory(story: ReplanStoryAdd): PrdStory {
         description: story.description,
         dependsOn: [...story.dependsOn],
         retries: story.retries ?? 2,
-        acceptance: story.acceptance ? [...story.acceptance] : [],
-        tests: story.tests ? [...story.tests] : [],
+        acceptance: [...story.acceptance!],
+        tests: [...story.tests!],
         passes: false,
         completedAt: null,
         durationSecs: null,
@@ -483,6 +501,14 @@ function validStringArray(value: unknown, ids: boolean): value is string[] {
         value.every((item) =>
             ids ? validId(item) : typeof item === "string",
         )
+    )
+}
+
+function validNonBlankStringArray(value: unknown): value is string[] {
+    return (
+        Array.isArray(value) &&
+        value.length > 0 &&
+        value.every(validNonBlankString)
     )
 }
 

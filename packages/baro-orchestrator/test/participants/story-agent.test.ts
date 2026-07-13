@@ -3,6 +3,8 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
+import type { Participant } from "@mozaik-ai/core"
+
 import { StoryResult } from "../../src/semantic-events.js"
 import { StoryAgent } from "../../src/participants/story-agent.js"
 import { captureEnv, withTempDir } from "./helpers.js"
@@ -44,6 +46,8 @@ process.stdin.resume()
                 timeoutSecs: 5,
                 quietTimeoutMs: 5,
             })
+            const terminalSources: Participant[] = []
+            agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
 
             const outcome = await agent.run(env)
             const event = env.events.find(StoryResult.is)
@@ -57,6 +61,8 @@ process.stdin.resume()
             assert.equal(event.data.success, true)
             assert.equal(event.data.attempts, 1)
             assert.equal(event.data.error, null)
+            assert.equal(terminalSources.length, 1)
+            assert.equal(terminalSources[0]?.agentId, "story-claude")
         })
     })
 

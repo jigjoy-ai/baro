@@ -1,6 +1,5 @@
 mod app;
 mod architect_runner;
-mod claude_runner;
 mod config;
 mod constants;
 mod context;
@@ -14,6 +13,8 @@ mod intake_runner;
 mod notification;
 mod orchestrator_client;
 mod planner_runner;
+mod review_refiner;
+mod resume;
 mod screens;
 mod service;
 mod subprocess;
@@ -21,7 +22,6 @@ mod theme;
 mod ui;
 mod utils;
 mod cli;
-use utils::extract_json;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -41,6 +41,66 @@ use tokio::sync::{mpsc, oneshot};
 
 use app::{App, Planner, ReviewStory, Screen};
 use events::BaroEvent;
+
+const JIGJOY_STRONG_MODEL: &str = "glm-5.2";
+const JIGJOY_CHEAP_STORY_MODEL: &str = "deepseek-v4-flash";
+const JIGJOY_HEAVY_STORY_MODEL: &str = "deepseek-v4-pro";
+const JIGJOY_GATEWAY_URL: &str = "https://gw.baro.jigjoy.ai/v1";
+
+fn preferred_jigjoy_gateway_key(
+    jigjoy_key: Option<String>,
+    openai_key: Option<String>,
+) -> Option<String> {
+    jigjoy_key
+        .filter(|value| !value.is_empty())
+        // Compatibility fallback for operators who historically placed a
+        // JigJoy gateway token in OPENAI_API_KEY directly.
+        .or_else(|| openai_key.filter(|value| !value.is_empty()))
+}
+
+fn preferred_jigjoy_gateway_url(
+    explicit_openai_base_url: Option<String>,
+    jigjoy_url: Option<String>,
+) -> String {
+    explicit_openai_base_url
+        .filter(|value| !value.is_empty())
+        .or_else(|| jigjoy_url.filter(|value| !value.is_empty()))
+        .unwrap_or_else(|| JIGJOY_GATEWAY_URL.to_string())
+}
+
+fn reconcile_jigjoy_phase_overrides(
+    app: &mut App,
+    architect_model_explicit: bool,
+    planner_model_explicit: bool,
+    critic_model_explicit: bool,
+    surgeon_model_explicit: bool,
+    tier_map_explicit: bool,
+) {
+    if app.architect_llm != app::LlmProvider::OpenAI && !architect_model_explicit {
+        app.architect_model = None;
+    }
+    if app.planner_llm != app::LlmProvider::OpenAI && !planner_model_explicit {
+        app.planner_model = None;
+    }
+    if app.critic_llm != app::LlmProvider::OpenAI && !critic_model_explicit {
+        app.critic_model = None;
+    }
+    if app.surgeon_llm != app::LlmProvider::OpenAI && !surgeon_model_explicit {
+        app.surgeon_model = None;
+    }
+    if app.story_llm != app::LlmProvider::OpenAI && !tier_map_explicit {
+        app.tier_map = None;
+    }
+}
+
+fn unsupported_critic_backend(
+    enabled: bool,
+    provider: app::LlmProvider,
+) -> Option<&'static str> {
+    (enabled && provider == app::LlmProvider::Codex).then_some(
+        "Critic cannot use the Codex CLI safely because it has no tool-less inference mode. Use --critic-llm claude|openai|opencode|pi or --no-critic.",
+    )
+}
 
 fn review_stories_from_prd(prd: &executor::PrdFile) -> Vec<ReviewStory> {
     prd.user_stories
@@ -101,8 +161,15 @@ enum AppEvent {
     PlanError(String, Option<std::path::PathBuf>),
     /// Intake finished (`--mode auto`, interactive): show the ModePicker.
     IntakeReady { decision_doc: Option<String>, contract_json: String },
-    RefineReady(Vec<ReviewStory>, String, String, String),
-    RefineError(String),
+    RefineReady(
+        u64,
+        Vec<ReviewStory>,
+        String,
+        String,
+        String,
+        Option<serde_json::Value>,
+    ),
+    RefineError(u64, String),
     BranchError(String),
     /// Payload is the suffixed branch name the async git task settled
     /// on; the handler updates `app.branch_name` so the TUI shows the
@@ -685,15 +752,18 @@ async fn run_app(
             app.architect_llm = app::LlmProvider::Claude;
             app.planner_llm = app::LlmProvider::Claude;
             app.story_llm = app::LlmProvider::Codex;
-            app.critic_llm = app::LlmProvider::Codex;
+            // Codex CLI has no tool-less inference mode, so it cannot safely
+            // inspect untrusted repository evidence as a Critic. Keep review
+            // on Claude while Codex executes stories.
+            app.critic_llm = app::LlmProvider::Claude;
             app.surgeon_llm = app::LlmProvider::Claude;
         }
         "jigjoy" => {
             // Hosted preset: every phase talks to the baro gateway, an
             // OpenAI-compatible proxy that holds the upstream keys and
-            // maps model names to tiers. Strong defaults to DeepSeek V4 Pro
-            // while we validate cost/quality; set BARO_JIGJOY_STRONG_MODEL to
-            // gpt-5.5 to opt back into OpenAI for planning/replanning.
+            // maps model names to tiers. Planning/replanning defaults to GLM,
+            // while high-blast-radius execution and review use DeepSeek Pro.
+            // Every lane remains independently env-overridable.
             app.llm = app::LlmProvider::OpenAI;
             app.architect_llm = app::LlmProvider::OpenAI;
             app.planner_llm = app::LlmProvider::OpenAI;
@@ -705,28 +775,24 @@ async fn run_app(
             // These are the gateway's tier tokens; env-overridable so a
             // self-hosted gateway can point them at its own models.
             //
-            // Two lanes, deliberately separate:
-            //  - Planner lane (planner + architect) = `strong` frontier model.
+            // Three lanes, deliberately separate:
+            //  - Planner lane (planner + architect + surgeon) = `strong` model.
             //    Planning quality is what scales with the subscription tier, so
-            //    this is where a frontier model (e.g. glm) earns its cost.
-            //  - Executor lane (ALL story tiers) = `cheap` Flash. Execution is a
-            //    commodity: cheap and robust to the planner's (unreliable) tiering.
-            //    A story Flash can't do is a decomposition smell, not a reason to
-            //    pay more per story.
-            //  - Surgeon lane (fixing a failed story) = `surgeon`, a stronger
-            //    model. The ESCALATION path — a smarter fixer only when execution
-            //    fails, instead of pricing every "heavy"-tiered story up front.
-            // Critic + light/standard/default stay on the cheap Flash model.
-            let strong =
-                std::env::var("BARO_JIGJOY_STRONG_MODEL").unwrap_or_else(|_| "deepseek-v4-pro".to_string());
-            let cheap =
-                std::env::var("BARO_JIGJOY_STORY_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
+            //    this is where GLM earns its cost.
+            //  - Executor lane = Flash for light/standard work, DeepSeek Pro for
+            //    `heavy` stories whose failure can break shared contracts.
+            //  - Review lane = DeepSeek Pro. A cheap Critic that misses semantic
+            //    defects makes the entire collective look green incorrectly.
+            let strong = std::env::var("BARO_JIGJOY_STRONG_MODEL")
+                .unwrap_or_else(|_| JIGJOY_STRONG_MODEL.to_string());
+            let cheap = std::env::var("BARO_JIGJOY_STORY_MODEL")
+                .unwrap_or_else(|_| JIGJOY_CHEAP_STORY_MODEL.to_string());
+            let story_heavy = std::env::var("BARO_JIGJOY_STORY_HEAVY_MODEL")
+                .unwrap_or_else(|_| JIGJOY_HEAVY_STORY_MODEL.to_string());
             let surgeon =
-                std::env::var("BARO_JIGJOY_SURGEON_MODEL").unwrap_or_else(|_| "deepseek-v4-pro".to_string());
-            // `heavy` stories default to the cheap Flash lane too (executor is
-            // always cheap); the knob remains for a self-hosted override.
-            let story_heavy =
-                std::env::var("BARO_JIGJOY_STORY_HEAVY_MODEL").unwrap_or_else(|_| cheap.clone());
+                std::env::var("BARO_JIGJOY_SURGEON_MODEL").unwrap_or_else(|_| strong.clone());
+            let critic =
+                std::env::var("BARO_JIGJOY_CRITIC_MODEL").unwrap_or_else(|_| story_heavy.clone());
             if app.planner_model.is_none() {
                 app.planner_model = Some(strong.clone());
             }
@@ -737,7 +803,7 @@ async fn run_app(
                 app.surgeon_model = Some(surgeon.clone());
             }
             if app.critic_model.is_none() {
-                app.critic_model = Some(cheap.clone());
+                app.critic_model = Some(critic);
             }
             // Most story tiers map to the cheap model; `heavy` maps to the
             // executor lane (story_heavy) for focused/high-blast-radius work
@@ -750,30 +816,24 @@ async fn run_app(
                 ));
             }
 
-            // Default gateway URL unless --openai-base-url / OPENAI_BASE_URL
-            // is set; the env var feeds the resolution below. Override
-            // per-deploy with BARO_JIGJOY_URL.
-            let base_url_set = cli.openai_base_url.is_some()
-                || std::env::var("OPENAI_BASE_URL")
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false);
-            if !base_url_set {
-                let url = std::env::var("BARO_JIGJOY_URL")
-                    .unwrap_or_else(|_| "https://baro.jigjoy.ai/v1".to_string());
-                std::env::set_var("OPENAI_BASE_URL", url);
-            }
+            // A JigJoy run must not inherit an unrelated ambient
+            // OPENAI_BASE_URL. Only an explicit CLI flag may override the
+            // preset; otherwise use BARO_JIGJOY_URL or the hosted default.
+            let url = preferred_jigjoy_gateway_url(
+                cli.openai_base_url.clone(),
+                std::env::var("BARO_JIGJOY_URL").ok(),
+            );
+            std::env::set_var("OPENAI_BASE_URL", url);
 
-            // The hosted key arrives as JIGJOY_API_KEY; the OpenAI path reads
-            // OPENAI_API_KEY, so bridge it without clobbering an explicit one.
-            let openai_key_set = std::env::var("OPENAI_API_KEY")
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
-            if !openai_key_set {
-                if let Ok(k) = std::env::var("JIGJOY_API_KEY") {
-                    if !k.is_empty() {
-                        std::env::set_var("OPENAI_API_KEY", k);
-                    }
-                }
+            // This preset talks to the JigJoy gateway, so its credential must
+            // win over an unrelated OpenAI key already present in the shell.
+            // OPENAI_API_KEY remains a compatibility fallback for operators
+            // who historically stored the gateway token there directly.
+            if let Some(key) = preferred_jigjoy_gateway_key(
+                std::env::var("JIGJOY_API_KEY").ok(),
+                std::env::var("OPENAI_API_KEY").ok(),
+            ) {
+                std::env::set_var("OPENAI_API_KEY", key);
             }
         }
         other => {
@@ -815,6 +875,22 @@ async fn run_app(
         }
     }
 
+    if cli.llm == "jigjoy" {
+        reconcile_jigjoy_phase_overrides(
+            &mut app,
+            cli.architect_model.is_some(),
+            cli.planner_model.is_some(),
+            cli.critic_model.is_some(),
+            cli.surgeon_model.is_some(),
+            cli.tier_map.is_some(),
+        );
+    }
+
+    if let Some(message) = unsupported_critic_backend(app.with_critic, app.critic_llm) {
+        eprintln!("[baro] error: {}", message);
+        std::process::exit(2);
+    }
+
     // A global `--model` hits EVERY phase, but the Claude CLI only
     // accepts opus/sonnet/haiku — reject early if any phase still
     // routes through Claude. The check lives here, after per-phase
@@ -852,24 +928,44 @@ async fn run_app(
     }
 
     let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
+    let mut next_refine_generation = 0_u64;
+    let mut active_refine_generation: Option<u64> = None;
 
-    // Resume detection: check for existing prd.json with incomplete stories
+    // Resume detection: the PRD in the initial checkout supplies only the
+    // branch hint. Establish that branch and reload its own PRD before showing
+    // Review, otherwise refinement could inspect one branch while executing
+    // and overwriting another.
     let prd_path = cwd.join("prd.json");
     let mut entered_resume = false;
     if prd_path.exists() {
-        if let Ok(prd_contents) = std::fs::read_to_string(&prd_path) {
-            if let Ok(prd) = serde_json::from_str::<executor::PrdFile>(&prd_contents) {
-                let has_incomplete = prd.user_stories.iter().any(|s| !s.passes);
+        let initial = std::fs::read_to_string(&prd_path)
+            .map_err(|error| error.to_string())
+            .and_then(|contents| {
+                serde_json::from_str::<executor::PrdFile>(&contents)
+                    .map_err(|error| error.to_string())
+            });
+        match initial {
+            Ok(branch_hint) => {
+                let has_incomplete = branch_hint.user_stories.iter().any(|story| !story.passes);
                 if cli.resume || (has_incomplete && cli.goal.is_none()) {
+                    let prd = resume::checkout_and_load_prd(&cwd, &branch_hint.branch_name)
+                        .await
+                        .map_err(|error| format!("cannot establish resume branch: {error}"))?;
                     app.is_resume = true;
                     app.project = prd.project.clone();
                     app.branch_name = prd.branch_name.clone();
                     app.description = prd.description.clone();
+                    app.decision_document = prd.decision_document.clone();
+                    app.execution_mode = prd.execution_mode.clone();
                     let stories = review_stories_from_prd(&prd);
                     app.show_review(stories);
                     entered_resume = true;
                 }
             }
+            Err(error) if cli.resume => {
+                return Err(format!("cannot resume from prd.json: {error}").into());
+            }
+            Err(_) => {}
         }
     }
 
@@ -1062,14 +1158,48 @@ async fn run_app(
                 app.planning_error = Some(err);
                 app.planning_log_path = log_path;
             }
-            Some(AppEvent::RefineReady(stories, project, branch, description)) => {
+            Some(AppEvent::RefineReady(
+                generation,
+                mut stories,
+                project,
+                branch,
+                description,
+                execution_mode,
+            )) => {
+                if !resume::should_accept_refine_result(
+                    app.screen,
+                    app.refining,
+                    active_refine_generation,
+                    generation,
+                ) {
+                    continue;
+                }
+                active_refine_generation = None;
                 app.refining = false;
+                if app.is_resume {
+                    stories = review_refiner::preserve_completed_review_stories(
+                        &app.review_stories,
+                        stories,
+                    );
+                }
                 app.project = project;
-                app.branch_name = branch;
+                if !app.is_resume {
+                    app.branch_name = branch;
+                    app.execution_mode = execution_mode;
+                }
                 app.description = description;
                 app.show_review(stories);
             }
-            Some(AppEvent::RefineError(err)) => {
+            Some(AppEvent::RefineError(generation, err)) => {
+                if !resume::should_accept_refine_result(
+                    app.screen,
+                    app.refining,
+                    active_refine_generation,
+                    generation,
+                ) {
+                    continue;
+                }
+                active_refine_generation = None;
                 app.refining = false;
                 app.planning_error = Some(err);
             }
@@ -1160,7 +1290,14 @@ async fn run_app(
                             app.architect_llm = chosen;
                             app.planner_llm = chosen;
                             app.story_llm = chosen;
-                            app.critic_llm = chosen;
+                            app.critic_llm = if chosen == app::LlmProvider::Codex {
+                                // Codex remains the primary provider, but its
+                                // agentic CLI is not safe for untrusted Critic
+                                // evidence because it has no tool-less mode.
+                                app::LlmProvider::Claude
+                            } else {
+                                chosen
+                            };
                             app.surgeon_llm = chosen;
                             // Set the legacy planner enum to match
                             app.planner = match chosen {
@@ -1359,9 +1496,19 @@ async fn run_app(
                             KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
                                 let feedback = app.refine_input.as_ref().unwrap().clone();
                                 if !feedback.is_empty() {
+                                    next_refine_generation = next_refine_generation
+                                        .checked_add(1)
+                                        .unwrap_or(1);
+                                    active_refine_generation = Some(next_refine_generation);
                                     app.refining = true;
                                     app.refine_input = None;
-                                    spawn_refiner(&app, &feedback, &cwd, tx.clone());
+                                    review_refiner::spawn_refiner(
+                                        &app,
+                                        next_refine_generation,
+                                        &feedback,
+                                        &cwd,
+                                        tx.clone(),
+                                    );
                                 }
                             }
                             KeyCode::Char(c) => { app.refine_input.as_mut().unwrap().push(c); }
@@ -1389,84 +1536,61 @@ async fn run_app(
                             }
                         }
                         KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                        KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
+                        KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') if !app.refining => {
                             if app.is_resume {
-                                // Resume mode: read existing prd.json (has full acceptance/tests data)
-                                let prd_path = cwd.join("prd.json");
-                                match std::fs::read_to_string(&prd_path)
-                                    .map_err(|e| e.to_string())
-                                    .and_then(|c| serde_json::from_str::<executor::PrdFile>(&c).map_err(|e| e.to_string()))
-                                {
-                                    Ok(prd) => {
-                                        // prd.json holds either the full "baro/<slug>-<suffix>"
-                                        // name or (legacy) the bare slug — prefix only when missing.
-                                        let full_branch = if prd.branch_name.starts_with("baro/") {
-                                            prd.branch_name.clone()
-                                        } else {
-                                            format!("baro/{}", prd.branch_name)
-                                        };
-                                        let branch_cwd = cwd.clone();
-                                        let branch_name_clone = full_branch.clone();
-                                        app.branch_name = full_branch;
-                                        app.start_execution();
-                                        let exec_cwd = cwd.clone();
-                                        let branch_tx = tx.clone();
-                                        let mr = app.model_routing;
-                                        let om = app.override_model.clone();
-                                        let pl = app.parallel_limit;
-                                        let ts = app.timeout_secs;
-                                        let wc = app.with_critic;
-                                        let cm = app.critic_model.clone();
-                                        let wl = app.with_librarian;
-                                        let wmem = app.with_memory;
-                                        let ws = app.with_sentry;
-                                        let wsg = app.with_surgeon;
-                                        let sul = app.surgeon_use_llm;
-                                        let sm = app.surgeon_model.clone();
-                                        let ild = app.intra_level_delay_secs;
-                                        let llm = app.llm;
-                                        let sllm = app.story_llm;
-                                        let cllm = app.critic_llm;
-                                        let surllm = app.surgeon_llm;
-                                        let oak = app.openai_api_key.clone();
-                                        let obu = app.openai_base_url.clone();
-                                        let eff = app.effort.clone();
-                                        let stm = app.story_model.clone();
-                                        let ttm = app.tier_map.clone();
-                                        let oep = app.openai_endpoints.clone();
-                                        let err_tx = tx.clone();
-                                        tokio::spawn(async move {
-                                            // Resume: check out the suffixed branch prd.json
-                                            // holds — never create a new one (that would
-                                            // silently drift off the prior work).
-                                            if let Err(e) = git::checkout_existing_branch(&branch_cwd, &branch_name_clone).await {
-                                                let _ = err_tx.send(AppEvent::BranchError(
-                                                    format!("Branch checkout failed: {}. Cannot resume run on this branch.", e)
-                                                )).await;
-                                                return;
-                                            }
-                                            match git::get_current_branch(&exec_cwd).await {
-                                                Ok(ref actual) if actual == &branch_name_clone => {}
-                                                Ok(actual) => {
-                                                    let _ = err_tx.send(AppEvent::BranchError(
-                                                        format!("Branch verification failed: expected '{}', got '{}'. Cannot proceed on main branch.", branch_name_clone, actual)
-                                                    )).await;
-                                                    return;
-                                                }
-                                                Err(e) => {
-                                                    let _ = err_tx.send(AppEvent::BranchError(
-                                                        format!("Branch verification failed: {}. Cannot proceed on main branch.", e)
-                                                    )).await;
-                                                    return;
-                                                }
-                                            }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() }, false);
-                                        });
+                                let resume_branch = app.branch_name.clone();
+                                let project = app.project.clone();
+                                let description = app.description.clone();
+                                let reviewed_stories = app.review_stories.clone();
+                                let exec_cwd = cwd.clone();
+                                let branch_tx = tx.clone();
+                                let err_tx = tx.clone();
+                                let cfg = executor_config_from_app(&app);
+                                app.start_execution();
+                                tokio::spawn(async move {
+                                    let original_prd = match resume::checkout_and_load_prd(
+                                        &exec_cwd,
+                                        &resume_branch,
+                                    )
+                                    .await
+                                    {
+                                        Ok(prd) => prd,
+                                        Err(error) => {
+                                            let _ = err_tx
+                                                .send(AppEvent::BranchError(format!(
+                                                    "Cannot reload resume branch: {error}"
+                                                )))
+                                                .await;
+                                            return;
+                                        }
+                                    };
+                                    let prd = match executor::prd_from_resume_review(
+                                        &original_prd,
+                                        &project,
+                                        &description,
+                                        &reviewed_stories,
+                                        None,
+                                    ) {
+                                        Ok(prd) => prd,
+                                        Err(error) => {
+                                            let _ = err_tx
+                                                .send(AppEvent::BranchError(format!(
+                                                    "Refined resume plan is invalid: {error}"
+                                                )))
+                                                .await;
+                                            return;
+                                        }
+                                    };
+                                    if let Err(error) = executor::write_prd(&prd, &exec_cwd) {
+                                        let _ = err_tx
+                                            .send(AppEvent::BranchError(format!(
+                                                "Failed to persist refined resume plan: {error}"
+                                            )))
+                                            .await;
+                                        return;
                                     }
-                                    Err(e) => {
-                                        app.planning_error = Some(format!("Failed to read prd.json: {}", e));
-                                    }
-                                }
+                                    spawn_executor(prd, exec_cwd, branch_tx, cfg, false);
+                                });
                             } else {
                                 let prd = executor::prd_from_review(
                                     &app.project,
@@ -2202,83 +2326,6 @@ fn spawn_context_builder(cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     });
 }
 
-fn spawn_refiner(app: &App, feedback: &str, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
-    let feedback = feedback.to_string();
-    let cwd = cwd.to_path_buf();
-    let model = app.model_for_phase("planning");
-    let effort = app.effort.clone();
-    let context = app.claude_md_content.clone();
-
-    // Build current plan JSON from app state
-    let stories_json: Vec<serde_json::Value> = app.review_stories.iter().map(|s| {
-        serde_json::json!({
-            "id": s.id,
-            "title": s.title,
-            "description": s.description,
-            "dependsOn": s.depends_on,
-        })
-    }).collect();
-    let plan_json = serde_json::json!({
-        "project": app.project,
-        "branchName": app.branch_name,
-        "description": app.description,
-        "userStories": stories_json,
-    });
-    let plan_str = serde_json::to_string_pretty(&plan_json).unwrap_or_default();
-
-    tokio::spawn(async move {
-        let base_prompt = format!(
-            "Here is the current plan:\n{}\nThe user wants these changes: {}\nGenerate an updated plan with the same JSON schema. Keep stories the user did not mention unchanged. Output ONLY valid JSON, no markdown, no explanation.",
-            plan_str, feedback
-        );
-        let prompt = match context {
-            Some(ctx) => format!("Here is the project context:\n{}\n\n{}", ctx, base_prompt),
-            None => base_prompt,
-        };
-
-        let result = async {
-            let config = claude_runner::ClaudeRunConfig {
-                prompt: prompt.clone(),
-                cwd: cwd.clone(),
-                model: model.clone(),
-                effort: effort.clone(),
-                log_tag: Some("refine"),
-            };
-
-            let output = claude_runner::spawn_claude_json(&config).await?;
-
-            let claude_output: serde_json::Value = serde_json::from_str(&output.stdout)
-                .map_err(|e| format!("Failed to parse Claude JSON wrapper: {}", e))?;
-
-            let plan_text = claude_output
-                .get("result")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&output.stdout);
-
-            let json_str = extract_json(plan_text);
-
-            let prd: PrdOutput = serde_json::from_str(&json_str)
-                .map_err(|e| format!("Failed to parse refined PRD JSON: {}\nRaw: {}", e, &json_str[..json_str.len().min(500)]))?;
-
-            let stories: Vec<ReviewStory> = prd.user_stories
-                .into_iter()
-                .map(ReviewStory::from)
-                .collect();
-
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((stories, prd.project, prd.branch_name, prd.description))
-        }.await;
-
-        match result {
-            Ok((stories, project, branch, description)) => {
-                let _ = tx.send(AppEvent::RefineReady(stories, project, branch, description)).await;
-            }
-            Err(e) => {
-                let _ = tx.send(AppEvent::RefineError(e.to_string())).await;
-            }
-        }
-    });
-}
-
 /// Headless plan confirmation: write the PRD, create the run branch, and spawn
 /// the orchestrator (streaming its events to stdout via echo_raw). Mirrors the
 /// TUI Review→Enter fresh path, minus the interactive review.
@@ -2629,7 +2676,11 @@ fn message_command_line(id: &str, text: &str) -> String {
 mod tests {
     use super::{
         delete_prev_word, fixed_mode_contract, headless_failure_reason, message_command_line,
-        parse_confirm_mode, stdin_command_line, App, PrdStoryOutput, ReviewStory,
+        parse_confirm_mode, preferred_jigjoy_gateway_key,
+        preferred_jigjoy_gateway_url, reconcile_jigjoy_phase_overrides,
+        stdin_command_line, unsupported_critic_backend, App, PrdStoryOutput, ReviewStory,
+        JIGJOY_CHEAP_STORY_MODEL, JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL,
+        JIGJOY_STRONG_MODEL,
     };
 
     fn deleted(input: &str) -> String {
@@ -2672,6 +2723,78 @@ mod tests {
     }
 
     #[test]
+    fn jigjoy_defaults_keep_planning_and_heavy_review_off_flash() {
+        assert_eq!(JIGJOY_STRONG_MODEL, "glm-5.2");
+        assert_eq!(JIGJOY_CHEAP_STORY_MODEL, "deepseek-v4-flash");
+        assert_eq!(JIGJOY_HEAVY_STORY_MODEL, "deepseek-v4-pro");
+        assert_eq!(JIGJOY_GATEWAY_URL, "https://gw.baro.jigjoy.ai/v1");
+        assert_ne!(JIGJOY_STRONG_MODEL, JIGJOY_CHEAP_STORY_MODEL);
+        assert_ne!(JIGJOY_HEAVY_STORY_MODEL, JIGJOY_CHEAP_STORY_MODEL);
+    }
+
+    #[test]
+    fn jigjoy_key_wins_over_an_unrelated_openai_key() {
+        assert_eq!(
+            preferred_jigjoy_gateway_key(
+                Some("jigjoy-token".into()),
+                Some("openai-token".into()),
+            )
+            .as_deref(),
+            Some("jigjoy-token"),
+        );
+        assert_eq!(
+            preferred_jigjoy_gateway_key(None, Some("legacy-gateway-token".into()))
+                .as_deref(),
+            Some("legacy-gateway-token"),
+        );
+    }
+
+    #[test]
+    fn jigjoy_url_ignores_ambient_openai_routing() {
+        assert_eq!(
+            preferred_jigjoy_gateway_url(
+                None,
+                Some("https://tenant-gateway.example/v1".into()),
+            ),
+            "https://tenant-gateway.example/v1",
+        );
+        assert_eq!(
+            preferred_jigjoy_gateway_url(
+                Some("https://explicit.example/v1".into()),
+                Some("https://tenant-gateway.example/v1".into()),
+            ),
+            "https://explicit.example/v1",
+        );
+        assert_eq!(preferred_jigjoy_gateway_url(None, None), JIGJOY_GATEWAY_URL);
+    }
+
+    #[test]
+    fn jigjoy_phase_backend_overrides_drop_incompatible_preset_models() {
+        let mut app = App::new();
+        app.llm = crate::app::LlmProvider::OpenAI;
+        app.architect_llm = crate::app::LlmProvider::Claude;
+        app.planner_llm = crate::app::LlmProvider::Codex;
+        app.story_llm = crate::app::LlmProvider::Claude;
+        app.critic_llm = crate::app::LlmProvider::Claude;
+        app.surgeon_llm = crate::app::LlmProvider::Claude;
+        app.architect_model = Some(JIGJOY_STRONG_MODEL.into());
+        app.planner_model = Some(JIGJOY_STRONG_MODEL.into());
+        app.critic_model = Some(JIGJOY_HEAVY_STORY_MODEL.into());
+        app.surgeon_model = Some(JIGJOY_STRONG_MODEL.into());
+        app.tier_map = Some("default=openai:deepseek-v4-flash".into());
+
+        reconcile_jigjoy_phase_overrides(
+            &mut app, false, false, false, false, false,
+        );
+
+        assert_eq!(app.model_for_phase("architect").as_deref(), Some("opus"));
+        assert_eq!(app.model_for_phase("planning"), None);
+        assert_eq!(app.critic_model, None);
+        assert_eq!(app.surgeon_model, None);
+        assert_eq!(app.tier_map, None);
+    }
+
+    #[test]
     fn parse_confirm_mode_cases() {
         assert_eq!(
             parse_confirm_mode(r#"{"kind":"confirm_mode","mode":"parallel"}"#).as_deref(),
@@ -2706,6 +2829,26 @@ mod tests {
         assert_eq!(quick["mode"], "focused");
         assert_eq!(quick["source"], "user");
         assert_eq!(quick["maxStories"], 1);
+    }
+
+    #[test]
+    fn enabled_codex_critic_is_rejected_before_planning() {
+        assert!(unsupported_critic_backend(
+            true,
+            crate::app::LlmProvider::Codex,
+        )
+        .unwrap()
+        .contains("--critic-llm"));
+        assert!(unsupported_critic_backend(
+            false,
+            crate::app::LlmProvider::Codex,
+        )
+        .is_none());
+        assert!(unsupported_critic_backend(
+            true,
+            crate::app::LlmProvider::OpenAI,
+        )
+        .is_none());
     }
 
     #[test]
@@ -2749,4 +2892,5 @@ mod tests {
         assert_eq!(story.tests, ["cargo test"]);
         assert_eq!(story.model.as_deref(), Some("heavy"));
     }
+
 }

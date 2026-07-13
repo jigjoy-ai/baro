@@ -71,6 +71,7 @@ export class OpenCodeStoryAgent extends BaseObserver {
     private envRef: AgenticEnvironment | null = null
     /** Optional explicit bus identity for the terminal outcome. */
     private resultAuthority: Participant | null = null
+    private terminalSourceRegistrar: ((source: Participant) => void) | null = null
     private currentOpenCode: OpenCodeCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
@@ -113,6 +114,15 @@ export class OpenCodeStoryAgent extends BaseObserver {
             throw new Error(`result authority already set for ${this.spec.id}`)
         }
         this.resultAuthority = source
+    }
+
+    setTerminalSourceRegistrar(
+        register: (source: Participant) => void,
+    ): void {
+        if (this.terminalSourceRegistrar && this.terminalSourceRegistrar !== register) {
+            throw new Error(`terminal source registrar already set for ${this.spec.id}`)
+        }
+        this.terminalSourceRegistrar = register
     }
 
     /** Idempotent; returns the `done` promise. */
@@ -238,6 +248,7 @@ export class OpenCodeStoryAgent extends BaseObserver {
             skipPermissions: this.spec.skipPermissions,
         })
         this.currentOpenCode = opencode
+        this.terminalSourceRegistrar?.(opencode)
         opencode.join(this.envRef)
         opencode.start(this.envRef)
 

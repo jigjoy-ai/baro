@@ -28,6 +28,14 @@ export interface StoryResultAuthorityCorrelation
 export class StoryOutcomeAuthority {
     private readonly spawnAuthorities = new Map<string, Participant>()
     private readonly resultAuthorities = new Map<string, Participant>()
+    private readonly terminalAuthorities = new Map<
+        string,
+        { result: Participant; nested: Participant | null }
+    >()
+    private readonly activeTerminalKeys = new Map<
+        string,
+        { key: string; generation: number; leaseId: string }
+    >()
 
     constructor(public readonly runId: string) {
         if (!runId.trim()) {
@@ -53,12 +61,76 @@ export class StoryOutcomeAuthority {
         source: Participant,
     ): void {
         this.assertResultCorrelation(correlation)
+        const key = resultKey(correlation)
+        const active = this.activeTerminalKeys.get(correlation.storyId)
+        if (
+            active &&
+            correlation.generation === active.generation &&
+            active.leaseId !== correlation.leaseId
+        ) {
+            throw new Error(
+                `conflicting active terminal correlation for ${correlation.storyId}/${correlation.generation}`,
+            )
+        }
         registerIdentity(
             this.resultAuthorities,
-            resultKey(correlation),
+            key,
             source,
             `story result for ${describeResult(correlation)}`,
         )
+        if (
+            !active ||
+            correlation.generation > active.generation ||
+            (correlation.generation === active.generation && active.key === key)
+        ) {
+            this.activeTerminalKeys.set(correlation.storyId, {
+                key,
+                generation: correlation.generation,
+                leaseId: correlation.leaseId,
+            })
+        }
+        const terminal = this.terminalAuthorities.get(key)
+        if (!terminal) {
+            this.terminalAuthorities.set(key, { result: source, nested: null })
+        } else if (terminal.result !== source) {
+            throw new Error(
+                `conflicting terminal result authority: ${describeResult(correlation)}`,
+            )
+        }
+    }
+
+    /**
+     * Register an exact nested participant (for example a one-shot CLI
+     * process) that may source terminal-turn evidence for one already
+     * registered execution correlation. Multiple attempts may register
+     * distinct participants, but only the currently active correlation for a
+     * story is accepted.
+     */
+    registerTerminalAuthority(
+        correlation: StoryResultAuthorityCorrelation,
+        source: Participant,
+    ): void {
+        this.assertResultCorrelation(correlation)
+        const key = resultKey(correlation)
+        if (!this.resultAuthorities.has(key)) {
+            throw new Error(
+                `terminal authority requires registered story result: ${describeResult(correlation)}`,
+            )
+        }
+        this.terminalAuthorities.get(key)!.nested = source
+    }
+
+    /** Authenticate a native terminal event without trusting its agentId. */
+    matchesTerminalTurnSource(
+        source: Participant,
+        storyId: string,
+    ): boolean {
+        if (!storyId) return false
+        const active = this.activeTerminalKeys.get(storyId)
+        if (!active) return false
+        const authorities = this.terminalAuthorities.get(active.key)
+        return authorities !== undefined &&
+            (authorities.result === source || authorities.nested === source)
     }
 
     matchesSpawnFailure(
@@ -135,6 +207,7 @@ export class StoryOutcomeAuthority {
             )
         }
     }
+
 }
 
 function registerIdentity(

@@ -36,14 +36,29 @@ type SignalAwareTool = Tool & {
     invokeWithSignal: (args: any, signal: AbortSignal) => Promise<unknown>
 }
 
-export function createCodebaseTools(cwd: string): Tool[] {
+export interface CodebaseToolOptions {
+    /**
+     * Exact manager-owned transport used by collective StoryAgents. The shell
+     * guard recognizes it only as `node <commandPath> ... --session
+     * <sessionDir>`; these paths do not become generally trusted operands.
+     */
+    collaboration?: Readonly<{
+        commandPath: string
+        sessionDir: string
+    }>
+}
+
+export function createCodebaseTools(
+    cwd: string,
+    options: CodebaseToolOptions = {},
+): Tool[] {
     return [
         readFileTool(cwd),
         listFilesTool(cwd),
         fileTreeTool(cwd),
         grepTool(cwd),
         globTool(cwd),
-        bashTool(cwd),
+        bashTool(cwd, options),
     ]
 }
 
@@ -276,7 +291,7 @@ function globTool(cwd: string): Tool {
     }
 }
 
-function bashTool(cwd: string): SignalAwareTool {
+function bashTool(cwd: string, options: CodebaseToolOptions): SignalAwareTool {
     return {
         type: "function",
         name: "bash",
@@ -297,13 +312,13 @@ function bashTool(cwd: string): SignalAwareTool {
             additionalProperties: false,
         },
         async invoke(args: { command: string }) {
-            return runBash(cwd, args.command)
+            return runBash(cwd, args.command, options)
         },
         async invokeWithSignal(
             args: { command: string },
             signal: AbortSignal,
         ) {
-            return runBash(cwd, args.command, signal)
+            return runBash(cwd, args.command, options, signal)
         },
     }
 }
@@ -311,16 +326,18 @@ function bashTool(cwd: string): SignalAwareTool {
 function runBash(
     cwd: string,
     command: string,
+    options: CodebaseToolOptions,
     signal?: AbortSignal,
 ): Promise<string> {
-    const rejection = bashContainmentRejection(cwd, command)
+    const access = shellAccessContext(cwd, options)
+    const rejection = bashContainmentRejection(cwd, command, access)
     if (rejection) {
         return Promise.resolve(
             `Error: bash command rejected by project containment guard: ${rejection}`,
         )
     }
 
-    const sandbox = prepareShellSandbox(cwd, command)
+    const sandbox = prepareShellSandbox(cwd, command, access)
 
     return new Promise((resolve) => {
         const finish = (value: string): void => {
@@ -377,29 +394,90 @@ interface PreparedShellSandbox {
     cleanup: () => void
 }
 
+interface CollaborationShellAccess {
+    commandPath: string
+    commandReal: string
+    sessionDir: string
+    sessionReal: string
+    outboxReal: string
+}
+
+interface ShellAccessContext {
+    git: ReturnType<typeof gitSandboxPaths>
+    dependencyTargets: string[]
+    collaboration: CollaborationShellAccess | null
+}
+
+function shellAccessContext(
+    cwd: string,
+    options: CodebaseToolOptions,
+): ShellAccessContext {
+    const git = gitSandboxPaths(cwd)
+    return {
+        git,
+        dependencyTargets: dependencySymlinkTargets(
+            cwd,
+            git.commonWorktreeRoot,
+        ),
+        collaboration: resolveCollaborationShellAccess(options.collaboration),
+    }
+}
+
+function resolveCollaborationShellAccess(
+    collaboration: CodebaseToolOptions["collaboration"],
+): CollaborationShellAccess | null {
+    if (!collaboration) return null
+    try {
+        const commandPath = path.resolve(collaboration.commandPath)
+        const sessionDir = path.resolve(collaboration.sessionDir)
+        const commandStat = fs.statSync(commandPath)
+        const sessionStat = fs.statSync(sessionDir)
+        if (!commandStat.isFile() || !sessionStat.isDirectory()) return null
+
+        const outbox = path.join(sessionDir, "outbox")
+        if (!fs.statSync(outbox).isDirectory()) return null
+        return {
+            commandPath,
+            commandReal: fs.realpathSync.native(commandPath),
+            sessionDir,
+            sessionReal: fs.realpathSync.native(sessionDir),
+            outboxReal: fs.realpathSync.native(outbox),
+        }
+    } catch {
+        // A missing/replaced helper or inactive session fails closed.
+        return null
+    }
+}
+
 /**
  * On macOS, run the shell under Seatbelt with writes confined to the current
  * worktree, a per-command scratch directory, narrowly required Git metadata,
- * Cargo's shared download cache, and manager-owned dependency symlink targets.
- * Other platforms retain the portable command guard above until they gain an
- * equivalent process sandbox.
+ * Cargo's shared download cache, and the collective collaboration outbox.
+ * Manager-owned dependency symlink targets remain readable but are deliberately
+ * omitted from the write allow-list. Other platforms retain the portable
+ * command guard above until they gain an equivalent process sandbox.
  */
-function prepareShellSandbox(cwd: string, command: string): PreparedShellSandbox {
-    if (process.platform !== "darwin" || !fs.existsSync("/usr/bin/sandbox-exec")) {
+function prepareShellSandbox(
+    cwd: string,
+    command: string,
+    access: ShellAccessContext,
+): PreparedShellSandbox {
+    const inheritedEnv = containedShellEnvironment(process.env)
+    if (!hasMacosWriteSandbox()) {
         return {
             executable: "/bin/sh",
             args: ["-c", command],
-            env: process.env,
+            env: inheritedEnv,
             cleanup: () => undefined,
         }
     }
 
     const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "baro-story-shell-"))
     const scratchReal = fs.realpathSync.native(scratch)
-    const writablePaths = sandboxWritablePaths(cwd, scratchReal)
+    const writablePaths = sandboxWritablePaths(cwd, scratchReal, access)
     const profile = macosWriteSandboxProfile(writablePaths)
     const env: NodeJS.ProcessEnv = {
-        ...process.env,
+        ...inheritedEnv,
         TMPDIR: scratchReal,
         TMP: scratchReal,
         TEMP: scratchReal,
@@ -426,6 +504,28 @@ function prepareShellSandbox(cwd: string, command: string): PreparedShellSandbox
     }
 }
 
+/** Provider/control-plane credentials never belong in model-authored shells. */
+function containedShellEnvironment(
+    source: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {}
+    for (const [name, value] of Object.entries(source)) {
+        if (isSensitiveEnvironmentName(name)) continue
+        env[name] = value
+    }
+    return env
+}
+
+function isSensitiveEnvironmentName(name: string): boolean {
+    return (
+        /^(?:ANTHROPIC|JIGJOY|OPENAI)_API_KEY$/i.test(name) ||
+        /^BARO_OPENAI_KEY_/i.test(name) ||
+        /(?:^|_)(?:ACCESS_?KEY|API_?KEY|AUTH_?TOKEN|CREDENTIALS?|PASSWORD|PRIVATE_?KEY|SECRET(?:_?KEY)?|SESSION_?TOKEN|TOKEN)$/i.test(
+            name,
+        )
+    )
+}
+
 function macosWriteSandboxProfile(writablePaths: string[]): string {
     const filters = writablePaths
         .map((entry) => `        (subpath ${JSON.stringify(entry)})`)
@@ -443,14 +543,18 @@ function macosWriteSandboxProfile(writablePaths: string[]): string {
     ].join("\n")
 }
 
-function sandboxWritablePaths(cwd: string, scratchReal: string): string[] {
+function sandboxWritablePaths(
+    cwd: string,
+    scratchReal: string,
+    access: ShellAccessContext,
+): string[] {
     const rootReal = fs.realpathSync.native(path.resolve(cwd))
     const writable = new Set<string>([rootReal, scratchReal, "/dev/null"])
-    const git = gitSandboxPaths(cwd)
-    for (const entry of git.paths) writable.add(entry)
-    for (const entry of dependencySymlinkTargets(cwd, git.commonWorktreeRoot)) {
-        writable.add(entry)
-    }
+    for (const entry of access.git.paths) writable.add(entry)
+    // WorktreeManager-owned dependency links are read-only from StoryAgents.
+    // Seatbelt resolves a write through the lexical in-worktree symlink to its
+    // external real target, which is intentionally absent from this allow-list.
+    if (access.collaboration) writable.add(access.collaboration.outboxReal)
     for (const entry of cargoCachePaths()) writable.add(entry)
     return [...writable]
 }
@@ -522,9 +626,17 @@ function dependencySymlinkTargets(cwd: string, commonRoot: string | null): strin
             if (entry.isSymbolicLink() && allowedNames.has(entry.name)) {
                 try {
                     const real = fs.realpathSync.native(candidate)
-                    if (pathIsWithin(commonRoot, real)) targets.add(real)
+                    const relative = path.relative(path.resolve(cwd), candidate)
+                    const managerTarget = fs.realpathSync.native(
+                        path.join(commonRoot, relative),
+                    )
+                    if (
+                        pathIsWithin(commonRoot, real) &&
+                        real === managerTarget
+                    ) targets.add(real)
                 } catch {
-                    // Dangling/untrusted dependency links stay denied.
+                    // Dangling links and same-named links that do not point to
+                    // WorktreeManager's corresponding common-root path stay denied.
                 }
             } else if (entry.isDirectory() && !skipped.has(entry.name)) {
                 walk(candidate, depth - 1)
@@ -626,7 +738,11 @@ type ShellToken =
  * symlinks. It is defense in depth under macOS Seatbelt and the portable
  * fail-closed fallback elsewhere, not arbitrary-shell security by itself.
  */
-function bashContainmentRejection(cwd: string, command: string): string | null {
+function bashContainmentRejection(
+    cwd: string,
+    command: string,
+    access: ShellAccessContext,
+): string | null {
     const parsed = tokenizeShell(command)
     if (typeof parsed === "string") return parsed
     if (parsed.length === 0) return "empty commands are not allowed"
@@ -637,10 +753,20 @@ function bashContainmentRejection(cwd: string, command: string): string | null {
     let expectRedirectTarget = false
     let cdAwaitingPath = false
     let shellMayTakeCommandString = false
+    let opaqueArgumentPending = false
+    let nodeCommand = false
+    let collaborationInvocation = false
+    const canSandboxOpaqueCode = hasMacosWriteSandbox()
 
     for (const token of parsed) {
         if (token.kind === "operator") {
-            if (token.value === "<" || token.value === ">" || token.value === ">>") {
+            if (
+                token.value === "<" ||
+                token.value === ">" ||
+                token.value === ">>" ||
+                token.value === "<&" ||
+                token.value === ">&"
+            ) {
                 expectRedirectTarget = true
                 continue
             }
@@ -651,6 +777,9 @@ function bashContainmentRejection(cwd: string, command: string): string | null {
             commandName = ""
             cdAwaitingPath = false
             shellMayTakeCommandString = false
+            opaqueArgumentPending = false
+            nodeCommand = false
+            collaborationInvocation = false
             continue
         }
 
@@ -659,7 +788,16 @@ function bashContainmentRejection(cwd: string, command: string): string | null {
 
         if (expectRedirectTarget) {
             expectRedirectTarget = false
-            const rejected = rejectPathOperand(cwd, currentDir, word, false)
+            const rejected = rejectPathOperand(
+                cwd,
+                currentDir,
+                word,
+                false,
+                access,
+                false,
+                true,
+                false,
+            )
             if (rejected) return `redirection target ${rejected}`
             continue
         }
@@ -683,13 +821,60 @@ function bashContainmentRejection(cwd: string, command: string): string | null {
                 if (rejected) return rejected
             }
 
-            if (["eval", "source", ".", "exec", "env"].includes(commandName)) {
+            if (
+                [
+                    "declare",
+                    "env",
+                    "eval",
+                    "exec",
+                    "export",
+                    "printenv",
+                    "set",
+                    "source",
+                    "typeset",
+                    ".",
+                ].includes(commandName)
+            ) {
                 return `indirect shell command '${commandName}' is not allowed`
             }
             shellMayTakeCommandString = ["bash", "sh", "zsh", "dash", "ksh"].includes(
                 commandName,
             )
+            nodeCommand = isNodeCommandName(commandName)
             cdAwaitingPath = commandName === "cd"
+            continue
+        }
+
+        if (opaqueArgumentPending) {
+            opaqueArgumentPending = false
+            continue
+        }
+
+        const nodeInlineCode = nodeCommand
+            ? classifyNodeInlineCodeFlag(word)
+            : null
+        if (nodeInlineCode) {
+            if (!canSandboxOpaqueCode) {
+                return (
+                    "node inline code flags (-e/--eval/-p/--print) require " +
+                    "the macOS write sandbox"
+                )
+            }
+            opaqueArgumentPending = nodeInlineCode === "next-argument"
+            continue
+        }
+
+        if (commandName === "git" && isGitMessageFlag(word)) {
+            opaqueArgumentPending = word === "-m" || word === "--message"
+            continue
+        }
+
+        if (
+            nodeCommand &&
+            !collaborationInvocation &&
+            matchesTrustedFile(word, access.collaboration)
+        ) {
+            collaborationInvocation = true
             continue
         }
 
@@ -701,7 +886,16 @@ function bashContainmentRejection(cwd: string, command: string): string | null {
             if (word.startsWith("-")) {
                 return "cd options and 'cd -' are not allowed"
             }
-            const rejected = rejectPathOperand(cwd, currentDir, word, true)
+            const rejected = rejectPathOperand(
+                cwd,
+                currentDir,
+                word,
+                true,
+                access,
+                false,
+                false,
+                false,
+            )
             if (rejected) return `cd target ${rejected}`
             const nextDir = safePath(cwd, path.resolve(currentDir, word))
             if (!nextDir) return `cd target '${word}' escapes the project root`
@@ -717,7 +911,16 @@ function bashContainmentRejection(cwd: string, command: string): string | null {
             continue
         }
 
-        const rejected = rejectPathOperand(cwd, currentDir, word, false)
+        const rejected = rejectPathOperand(
+            cwd,
+            currentDir,
+            word,
+            false,
+            access,
+            collaborationInvocation,
+            false,
+            canSandboxOpaqueCode,
+        )
         if (rejected) return rejected
     }
 
@@ -731,6 +934,10 @@ function rejectPathOperand(
     currentDir: string,
     word: string,
     requirePath: boolean,
+    access: ShellAccessContext,
+    allowCollaborationSession: boolean,
+    allowDevNull: boolean,
+    allowManagerDependency: boolean,
 ): string | null {
     const candidates = [word]
     const equals = word.indexOf("=")
@@ -741,7 +948,22 @@ function rejectPathOperand(
         if (spelling) return spelling
 
         if (path.isAbsolute(candidate)) {
-            if (!safePath(root, candidate)) {
+            if (allowDevNull && candidate === "/dev/null") continue
+            if (
+                allowCollaborationSession &&
+                matchesTrustedSession(candidate, access.collaboration)
+            ) continue
+            if (
+                !safePath(root, candidate) &&
+                !(
+                    allowManagerDependency &&
+                    isManagerDependencyPath(
+                        root,
+                        candidate,
+                        access.dependencyTargets,
+                    )
+                )
+            ) {
                 return `absolute path '${candidate}' escapes the project root`
             }
             continue
@@ -753,11 +975,130 @@ function rejectPathOperand(
             candidate.includes("/") ||
             candidate.startsWith(".") ||
             pathEntryExists(possiblePath)
-        if (looksLikePath && !safePath(root, possiblePath)) {
+        if (
+            looksLikePath &&
+            !safePath(root, possiblePath) &&
+            !(
+                allowManagerDependency &&
+                isManagerDependencyPath(
+                    root,
+                    possiblePath,
+                    access.dependencyTargets,
+                )
+            )
+        ) {
             return `path '${candidate}' escapes the project root (possibly through a symlink)`
         }
     }
     return null
+}
+
+function isNodeCommandName(commandName: string): boolean {
+    return commandName === "node" || commandName === path.basename(process.execPath)
+}
+
+function classifyNodeInlineCodeFlag(
+    word: string,
+): "next-argument" | "attached-code" | null {
+    if (
+        word === "-e" ||
+        word === "-p" ||
+        word === "-ep" ||
+        word === "-pe" ||
+        word === "--eval" ||
+        word === "--print"
+    ) {
+        return "next-argument"
+    }
+    if (word.startsWith("--eval=") || word.startsWith("--print=")) {
+        return "attached-code"
+    }
+
+    // Fail closed for compact short-option spellings accepted by some Node
+    // versions/wrappers: `-eCODE`, `-pCODE`, `-peCODE`, and `-epCODE`.
+    // The exact `-pe`/`-ep` cases above consume the following code argument.
+    if (/^-(?:e|p|ep|pe).+/.test(word)) return "attached-code"
+    return null
+}
+
+function hasMacosWriteSandbox(): boolean {
+    return process.platform === "darwin" && fs.existsSync("/usr/bin/sandbox-exec")
+}
+
+function isGitMessageFlag(word: string): boolean {
+    return (
+        word === "-m" ||
+        word.startsWith("-m") ||
+        word === "--message" ||
+        word.startsWith("--message=")
+    )
+}
+
+function matchesTrustedFile(
+    candidate: string,
+    collaboration: CollaborationShellAccess | null,
+): boolean {
+    if (!collaboration || !path.isAbsolute(candidate)) return false
+    const resolved = path.resolve(candidate)
+    if (resolved === collaboration.commandPath) return true
+    try {
+        return fs.realpathSync.native(resolved) === collaboration.commandReal
+    } catch {
+        return false
+    }
+}
+
+function matchesTrustedSession(
+    candidate: string,
+    collaboration: CollaborationShellAccess | null,
+): boolean {
+    if (!collaboration || !path.isAbsolute(candidate)) return false
+    const resolved = path.resolve(candidate)
+    if (resolved === collaboration.sessionDir) return true
+    try {
+        return fs.realpathSync.native(resolved) === collaboration.sessionReal
+    } catch {
+        return false
+    }
+}
+
+/**
+ * Dependency links are created by WorktreeManager and point back into the
+ * common Git worktree. Permit paths only through that lexical link in the
+ * isolated story root; passing the real external target directly stays denied.
+ */
+function isManagerDependencyPath(
+    root: string,
+    candidate: string,
+    dependencyTargets: readonly string[],
+): boolean {
+    if (dependencyTargets.length === 0) return false
+    const rootResolved = path.resolve(root)
+    const candidateResolved = path.resolve(candidate)
+    if (!pathIsWithin(rootResolved, candidateResolved)) return false
+
+    let existing = candidateResolved
+    while (true) {
+        try {
+            fs.lstatSync(existing)
+            break
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code
+            if (code !== "ENOENT" && code !== "ENOTDIR") return false
+            const parent = path.dirname(existing)
+            if (parent === existing || !pathIsWithin(rootResolved, parent)) {
+                return false
+            }
+            existing = parent
+        }
+    }
+
+    try {
+        const real = fs.realpathSync.native(existing)
+        return dependencyTargets.some((target) => pathIsWithin(target, real))
+    } catch {
+        return false
+    }
 }
 
 function rejectTraversalSpelling(word: string): string | null {
@@ -813,6 +1154,13 @@ function tokenizeShell(command: string): ShellToken[] | string {
                 word += command[++i]!
                 continue
             }
+            if (quote === '"' && ch === "$" && command[i + 1] === "?") {
+                // Expanding the immediately preceding exit status cannot
+                // disclose a path or redirect a filesystem operation.
+                word += "$?"
+                i++
+                continue
+            }
             if (quote === '"' && (ch === "`" || ch === "$")) {
                 return "shell expansion inside double quotes is not allowed"
             }
@@ -832,6 +1180,11 @@ function tokenizeShell(command: string): ShellToken[] | string {
             pushWord()
             continue
         }
+        if (ch === "$" && command[i + 1] === "?") {
+            word += "$?"
+            i++
+            continue
+        }
         if (ch === "`" || ch === "$") {
             return "shell expansion and command substitution are not allowed"
         }
@@ -841,7 +1194,12 @@ function tokenizeShell(command: string): ShellToken[] | string {
         if (";&|<>".includes(ch)) {
             pushWord()
             let operator = ch
-            if (command[i + 1] === ch && (ch === "&" || ch === "|" || ch === ">" || ch === "<")) {
+            if (
+                (ch === ">" || ch === "<") &&
+                command[i + 1] === "&"
+            ) {
+                operator += command[++i]!
+            } else if (command[i + 1] === ch && (ch === "&" || ch === "|" || ch === ">" || ch === "<")) {
                 operator += command[++i]!
                 if (operator === "<<" && command[i + 1] === "<") operator += command[++i]!
             }

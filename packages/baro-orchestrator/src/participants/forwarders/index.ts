@@ -15,7 +15,9 @@ import { TokenUsageForwarder } from "./token-usage.js"
 export interface BaroEventForwarders {
     readonly dag: DagForwarder
     readonly progress: ProgressForwarder
+    setLegacyReplanAuthority(authority: Participant): void
     setRuntimeReplanAuthority(authority: Participant): void
+    setRepositoryAuthority(authority: Participant): void
 }
 
 export function joinBaroEventForwarders(
@@ -36,9 +38,16 @@ export function joinBaroEventForwarders(
     return {
         dag,
         progress,
+        setLegacyReplanAuthority(authority: Participant): void {
+            dag.setLegacyReplanAuthority(authority)
+            progress.setLegacyReplanAuthority(authority)
+        },
         setRuntimeReplanAuthority(authority: Participant): void {
             dag.setRuntimeReplanAuthority(authority)
             progress.setRuntimeReplanAuthority(authority)
+        },
+        setRepositoryAuthority(authority: Participant): void {
+            progress.setRepositoryAuthority(authority)
         },
     }
 }

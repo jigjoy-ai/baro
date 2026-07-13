@@ -117,6 +117,12 @@ export interface OpenAIStoryAgentOptions {
     runtimeReplanDecisionAuthority?: Participant
     /** How long a propose_replan call waits for its exact Board decision. */
     runtimeReplanDecisionTimeoutMs?: number
+    /** Exact manager-owned helper/session made available to the contained
+     * native shell tool. No external path is trusted when omitted. */
+    collaboration?: Readonly<{
+        commandPath: string
+        sessionDir: string
+    }>
 }
 
 interface ResolvedOpenAIStoryAgentOptions {
@@ -129,6 +135,8 @@ interface ResolvedOpenAIStoryAgentOptions {
     runtimeReplanDecisionAuthority: Participant | null
     runtimeReplanDecisionTimeoutMs: number
 }
+
+let openAIStoryProducerSequence = 0
 
 export class OpenAIStoryAgent extends BaseObserver {
     private readonly spec: Required<
@@ -159,6 +167,8 @@ export class OpenAIStoryAgent extends BaseObserver {
     private resultAuthority: Participant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
+    private readonly terminalProducerId = ++openAIStoryProducerSequence
+    private terminalSequence = 0
     private resolveDone!: (outcome: StoryOutcome) => void
     public readonly done: Promise<StoryOutcome>
 
@@ -203,7 +213,9 @@ export class OpenAIStoryAgent extends BaseObserver {
             : undefined
         this.model = pickModel(this.opts.model, connection)
         this.tools = [
-            ...createStoryTools(spec.cwd),
+            ...createStoryTools(spec.cwd, {
+                collaboration: opts.collaboration,
+            }),
             ...(this.runtimeReplanEnabled()
                 ? [createRuntimeReplanTool(this.runtimeGraphVersion!)]
                 : []),
@@ -329,7 +341,7 @@ export class OpenAIStoryAgent extends BaseObserver {
                       )
                     : null
             try {
-                const result = await this.runOneAttempt()
+                const result = await this.runOneAttempt(attempts)
                 if (this.currentPhase === "done") {
                     lastError = null
                     lastFailure = undefined
@@ -389,7 +401,7 @@ export class OpenAIStoryAgent extends BaseObserver {
         })
     }
 
-    private async runOneAttempt(): Promise<{
+    private async runOneAttempt(attempt: number): Promise<{
         error: string
         failure?: StoryFailureData
         retryable?: boolean
@@ -423,6 +435,7 @@ export class OpenAIStoryAgent extends BaseObserver {
                 this,
                 AgentResult.create({
                     agentId: this.spec.id,
+                    terminalId: this.nextTerminalId(attempt, turn),
                     subtype: turnResult.success ? "success" : "error",
                     sessionId: null,
                     isError: !turnResult.success,
@@ -477,6 +490,24 @@ export class OpenAIStoryAgent extends BaseObserver {
 
         this.transition("failed", `maxTurns (${this.spec.maxTurns}) exhausted`)
         return { error: `maxTurns (${this.spec.maxTurns}) exhausted` }
+    }
+
+    private nextTerminalId(attempt: number, turn: number): string {
+        this.terminalSequence += 1
+        return [
+            "openai",
+            this.spec.runId ?? "local",
+            this.spec.leaseId ?? "unleased",
+            this.spec.generation ?? "legacy",
+            this.spec.id,
+            this.terminalProducerId,
+            attempt,
+            turn,
+            this.terminalSequence,
+        ]
+            .map(String)
+            .map(encodeURIComponent)
+            .join(":")
     }
 
     private runtimeReplanEnabled(): boolean {

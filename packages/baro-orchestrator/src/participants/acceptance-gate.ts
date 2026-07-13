@@ -1,8 +1,6 @@
 import type { Participant, SemanticEvent } from "@mozaik-ai/core"
 
 import {
-    AgentResult,
-    AgentTurnCompleted,
     Critique,
     RunCompleted,
     StoryQualityCompleted,
@@ -18,12 +16,15 @@ import {
     type SerializedObserverFailure,
 } from "../runtime/serialized-observer.js"
 import { criticInput, type CriticInput } from "./critic-input.js"
-import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
+import {
+    isAuthorizedTerminalTurn,
+    type TerminalTurnAuthorityOptions,
+} from "./terminal-turn-authority.js"
 
 /** Outlives the slowest bounded Critic default (180s) plus delivery grace. */
 export const DEFAULT_ACCEPTANCE_TIMEOUT_MS = 240_000
 
-export interface AcceptanceGateOptions {
+export interface AcceptanceGateOptions extends TerminalTurnAuthorityOptions {
     runId: string
     /** Same target map used by Critic; empty/missing criteria need no verdict. */
     targets: ReadonlyMap<string, readonly string[]>
@@ -33,8 +34,6 @@ export interface AcceptanceGateOptions {
     leaseAuthority?: Participant
     /** Optional object-identity authority for Critique events. */
     critiqueAuthority?: Participant
-    /** Dynamic execution capability used to authenticate StoryResult. */
-    outcomeAuthority?: StoryOutcomeAuthority
 }
 
 interface Correlation {
@@ -74,6 +73,7 @@ export class AcceptanceGate extends SerializedObserver {
     >()
     private readonly pending = new Map<string, PendingEvaluation>()
     private readonly settledEvaluationIds = new Set<string>()
+    private completionAuthority: Participant | null = null
 
     constructor(private readonly opts: AcceptanceGateOptions) {
         super()
@@ -83,6 +83,10 @@ export class AcceptanceGate extends SerializedObserver {
         }
         this.timeoutMs = timeoutMs
         this.targets = opts.targets
+    }
+
+    setCompletionAuthority(authority: Participant): void {
+        this.completionAuthority = authority
     }
 
     protected override handleEvent(context: SerializedEventContext): void {
@@ -99,6 +103,12 @@ export class AcceptanceGate extends SerializedObserver {
 
         const input = criticInput(event)
         if (input) {
+            if (!isAuthorizedTerminalTurn(
+                context.source,
+                event,
+                input,
+                this.opts,
+            )) return
             this.onTerminalTurn(event, input)
             return
         }
@@ -129,7 +139,14 @@ export class AcceptanceGate extends SerializedObserver {
             return
         }
 
-        if (RunCompleted.is(event)) this.stop()
+        if (RunCompleted.is(event)) {
+            if (
+                this.completionAuthority &&
+                context.source !== this.completionAuthority
+            ) return
+            if (event.data.runId && event.data.runId !== this.opts.runId) return
+            this.stop()
+        }
     }
 
     protected override onManagedFailure(failure: SerializedObserverFailure): void {
@@ -174,13 +191,16 @@ export class AcceptanceGate extends SerializedObserver {
         if (!this.hasAcceptanceCriteria(agentId) || isError || !resultText) return
 
         const lease = this.activeLeases.get(agentId)
-        const fingerprint = JSON.stringify([
-            lease?.leaseId ?? null,
-            lease?.generation ?? null,
-            terminalFingerprint(event, input),
-        ])
-        if (this.seenTerminalEvents.has(fingerprint)) return
-        this.seenTerminalEvents.add(fingerprint)
+        const terminalIdentity = terminalFingerprint(event, input)
+        if (terminalIdentity !== null) {
+            const fingerprint = JSON.stringify([
+                lease?.leaseId ?? null,
+                lease?.generation ?? null,
+                terminalIdentity,
+            ])
+            if (this.seenTerminalEvents.has(fingerprint)) return
+            this.seenTerminalEvents.add(fingerprint)
+        }
 
         const turn = (this.turnCount.get(agentId) ?? 0) + 1
         this.turnCount.set(agentId, turn)
@@ -430,35 +450,8 @@ function snapshotCritique(data: CritiqueData): CritiqueData {
 function terminalFingerprint(
     event: SemanticEvent<unknown>,
     input: CriticInput,
-): string {
-    if (AgentResult.is(event)) {
-        return JSON.stringify([
-            AgentResult.type,
-            input.agentId,
-            event.data.subtype,
-            event.data.sessionId,
-            event.data.numTurns,
-            input.isError,
-            input.resultText,
-        ])
-    }
-    if (AgentTurnCompleted.is(event)) {
-        return JSON.stringify([
-            AgentTurnCompleted.type,
-            input.agentId,
-            event.data.backend,
-            input.isError,
-            input.resultText,
-            input.canContinue,
-        ])
-    }
-    // criticInput currently recognizes only the two events above. Keep a
-    // deterministic fallback so adding another compatible event is safe.
-    return JSON.stringify([
-        event.type,
-        input.agentId,
-        input.isError,
-        input.resultText,
-        input.canContinue,
-    ])
+): string | null {
+    return input.terminalId
+        ? JSON.stringify([event.type, input.agentId, input.terminalId])
+        : null
 }

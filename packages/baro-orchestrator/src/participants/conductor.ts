@@ -46,11 +46,10 @@ import { buildDag } from "../dag.js"
 import {
     PrdFile,
     PrdStory,
-    applyReplan,
     buildDefaultStoryPrompt,
     loadPrd,
     markStoryPassed,
-    savePrd,
+    savePrdAtomic,
 } from "../prd.js"
 import {
     ConductorState,
@@ -59,15 +58,16 @@ import {
     LevelStarted,
     RecoveryStarted,
     Replan,
+    ReplanApplied,
     RunCompleted,
     RunStartRequest,
     RunStarted,
     StoryResult,
     StorySpawnRequest,
-    type ReplanData,
     type RunVerificationEvidence,
     type StoryResultData,
 } from "../semantic-events.js"
+import { validateLegacyReplan } from "../runtime/legacy-replan.js"
 
 export { applyReplan } from "../prd.js"
 
@@ -92,6 +92,12 @@ export interface ConductorOptions {
         story: PrdStory,
     ) => Promise<string | null | undefined> | string | null | undefined
     onRunComplete?: (summary: ConductorRunSummary) => Promise<void> | void
+    /**
+     * Persistence seam for tests and embedders. Defaults to atomic path
+     * replacement; a thrown error terminates the run before in-memory state
+     * or authoritative events can advance beyond the durable PRD.
+     */
+    persistPrd?: (path: string, prd: PrdFile) => void
     /**
      * Seconds to wait between successive story spawns inside the same
      * DAG level. Lets early agents make a couple of exploratory Read /
@@ -207,7 +213,7 @@ export class Conductor extends BaseObserver {
     private currentLevel: RunningLevelState | null = null
 
     /** Replan payloads emitted during a level. Applied at level boundary. */
-    private readonly pendingReplans: ReplanData[] = []
+    private readonly pendingReplans: unknown[] = []
 
     /** Stories that are queued to spawn but not yet launched (parallel cap). */
     private readonly spawnQueue: PrdStory[] = []
@@ -342,6 +348,11 @@ export class Conductor extends BaseObserver {
             RunStarted.create({
                 project: this.prd.project,
                 storyCount: this.prd.userStories.length,
+                storyIds: this.prd.userStories.map((story) => story.id),
+                completedStoryIds: this.prd.userStories
+                    .filter((story) => story.passes)
+                    .map((story) => story.id),
+                coordinationMode: "legacy",
                 ...(this.prd.executionMode ? { mode: this.prd.executionMode.mode } : {}),
             }),
         )
@@ -463,15 +474,28 @@ export class Conductor extends BaseObserver {
         this.totalAttempts += item.attempts
 
         if (item.success) {
+            if (this.prd) {
+                const persistedCandidate = markStoryPassed(
+                    this.prd,
+                    item.storyId,
+                    item.durationSecs,
+                )
+                try {
+                    this.persistPrd(persistedCandidate)
+                } catch (error) {
+                    this.terminateRun(
+                        false,
+                        `failed to persist story '${item.storyId}': ${errorMessage(error)}`,
+                    )
+                    return
+                }
+                this.prd = persistedCandidate
+            }
             this.currentLevel.passed.push(item.storyId)
             this.globalCompleted.push(item.storyId)
             this.removeGlobalFailed(item.storyId)
             // Real progress: the healing budget starts over.
             this.replansSinceProgress = 0
-            if (this.prd) {
-                this.prd = markStoryPassed(this.prd, item.storyId, item.durationSecs)
-                savePrd(this.opts.prdPath, this.prd)
-            }
             if (this.opts.onStoryPassed) {
                 try {
                     await this.opts.onStoryPassed(item.storyId)
@@ -614,11 +638,9 @@ export class Conductor extends BaseObserver {
         let healingHalt: string | null = null
         if (this.pendingReplans.length > 0 && this.prd) {
             const drained = this.pendingReplans.splice(0)
-            for (const replan of drained) {
-                if (
-                    replan.removedStoryIds.length > 0 &&
-                    replan.addedStories.length === 0
-                ) {
+            for (const proposal of drained) {
+                const validated = validateLegacyReplan(this.prd, proposal)
+                if (!validated.ok) {
                     // A pure "skip/drop this failed story" replan is a
                     // destructive product decision: it can silently leave
                     // dependent acceptance criteria undone. Do not apply it
@@ -629,7 +651,10 @@ export class Conductor extends BaseObserver {
                     this.emit(
                         ConductorState.create({
                             phase: "running_level",
-                            detail: `skip proposal deferred (source=${replan.source}, -${replan.removedStoryIds.length}): ${replan.reason}`,
+                            detail:
+                                validated.code === "destructive_removal"
+                                    ? `skip proposal deferred (source=${validated.source}): ${validated.reason}`
+                                    : `replan ignored (${validated.code}, source=${validated.source}): ${validated.reason}`,
                             currentLevel: lvl.ordinal,
                         }),
                     )
@@ -637,7 +662,21 @@ export class Conductor extends BaseObserver {
                 }
                 healingHalt = this.healingHaltReason()
                 if (healingHalt) break
-                this.prd = applyReplan(this.prd, replan)
+                const effectiveReplan = validated.applied
+                // The applied event is authoritative for progress, DAG, and
+                // Critic targeting. Publish it only after the mutated plan is
+                // durable so consumers can never observe an unpersisted plan.
+                try {
+                    this.persistPrd(validated.prd)
+                } catch (error) {
+                    this.terminateRun(
+                        false,
+                        `failed to persist replan from '${effectiveReplan.source}': ${errorMessage(error)}`,
+                    )
+                    return
+                }
+                this.prd = validated.prd
+                this.emit(ReplanApplied.create(effectiveReplan))
                 this.appliedReplans += 1
                 this.noteHealingAction(lvl.ordinal)
                 replannedThisLevel = true
@@ -646,12 +685,12 @@ export class Conductor extends BaseObserver {
                 // drop — the work is gone and the run should NOT report
                 // success. If the replan also adds stories, it's a true
                 // replan; the failing story has been supplanted.
-                if (replan.removedStoryIds.length > 0) {
-                    const removeSet = new Set(replan.removedStoryIds)
+                if (effectiveReplan.removedStoryIds.length > 0) {
+                    const removeSet = new Set(effectiveReplan.removedStoryIds)
                     // Failing stories that the replan replaces should
                     // come off globalFailed iff there's actually
                     // replacement work to track instead.
-                    if (replan.addedStories.length > 0) {
+                    if (effectiveReplan.addedStories.length > 0) {
                         for (let i = this.globalFailed.length - 1; i >= 0; i--) {
                             if (removeSet.has(this.globalFailed[i])) {
                                 this.globalFailed.splice(i, 1)
@@ -660,7 +699,7 @@ export class Conductor extends BaseObserver {
                     } else {
                         // Pure drop — record so terminateRun knows the
                         // run did not actually complete the goal.
-                        for (const id of replan.removedStoryIds) {
+                        for (const id of effectiveReplan.removedStoryIds) {
                             if (!this.globalDropped.includes(id)) {
                                 this.globalDropped.push(id)
                             }
@@ -670,12 +709,11 @@ export class Conductor extends BaseObserver {
                 this.emit(
                     ConductorState.create({
                         phase: "running_level",
-                        detail: `replan applied (source=${replan.source}, +${replan.addedStories.length}/-${replan.removedStoryIds.length}): ${replan.reason}`,
+                        detail: `replan applied (source=${effectiveReplan.source}, +${effectiveReplan.addedStories.length}/-${effectiveReplan.removedStoryIds.length}): ${effectiveReplan.reason}`,
                         currentLevel: lvl.ordinal,
                     }),
                 )
             }
-            savePrd(this.opts.prdPath, this.prd)
         }
 
         if (healingHalt) {
@@ -755,6 +793,11 @@ export class Conductor extends BaseObserver {
             void Promise.resolve(this.opts.onRunComplete(summary)).catch(() => {})
         }
         this.resolveDone(summary)
+    }
+
+    private persistPrd(prd: PrdFile): void {
+        const persist = this.opts.persistPrd ?? savePrdAtomic
+        persist(this.opts.prdPath, prd)
     }
 
     /**
@@ -961,6 +1004,10 @@ function envNonNegativeInt(name: string, fallback: number): number {
     if (raw == null || raw.trim() === "") return fallback
     const n = Number(raw)
     return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback
+}
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
 }
 
 function readFileSyncSafe(path: string): string | null {

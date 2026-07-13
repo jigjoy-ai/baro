@@ -1,13 +1,13 @@
 /**
- * CriticCodex — live acceptance-criteria evaluator via `codex exec
- * --json`. Sibling of `critic.ts` (Claude) and `critic-openai.ts`.
+ * CriticCodex — fail-closed adapter for Codex CLI Critic configuration.
  *
  * Same bus contract as the Claude variant: observes AgentResultItem
  * events, evaluates the agent's output against acceptance criteria,
  * publishes a CritiqueItem (audit trail), and emits an
  * AgentTargetedMessageItem corrective when the verdict is "fail" (up
- * to maxEmissionsPerAgent). The only difference is which subprocess
- * the verdict call shells to.
+ * to maxEmissionsPerAgent). Codex CLI currently has no tool-less inference
+ * mode, so this adapter refuses to pass untrusted evidence to its agentic
+ * harness. Use CriticOpenAI for direct, tool-less OpenAI inference.
  *
  * Library-grade: no imports from prd.ts, story-agent.ts, or
  * conductor.ts.
@@ -15,23 +15,17 @@
 
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
-import { runCodexOneShot } from "../codex-one-shot.js"
-import { runnerMeasurement } from "../runner-measurement.js"
-import type { RunnerInvocationObserver } from "../runner-invocation.js"
+import { AgentTargetedMessage, Critique } from "../semantic-events.js"
+import { buildCorrectiveMessage } from "./critic.js"
+import type { CriticEvidenceSource } from "./critic-evidence.js"
+import { criticInput, criticReplayKey } from "./critic-input.js"
+import { drainCriticPending } from "./critic-pending.js"
 import {
-    AgentTargetedMessage,
-    Critique,
-    ModelInvocationMeasured,
-} from "../semantic-events.js"
-import {
-    VERDICT_SYSTEM_PROMPT,
-    buildEvalPrompt,
-    buildCorrectiveMessage,
-    extractVerdictJson,
-} from "./critic.js"
-import { criticInput } from "./critic-input.js"
+    isAuthorizedTerminalTurn,
+    type TerminalTurnAuthorityOptions,
+} from "./terminal-turn-authority.js"
 
-export interface CriticCodexOptions {
+export interface CriticCodexOptions extends TerminalTurnAuthorityOptions {
     /** Map from agentId to its acceptance-criteria strings. */
     targets: ReadonlyMap<string, readonly string[]>
     /** Max corrective AgentTargetedMessageItem-s per agent. Default: 2. */
@@ -43,17 +37,30 @@ export interface CriticCodexOptions {
     /** Per-evaluation timeout in milliseconds. Default: 180_000 (3 min). */
     timeoutMs?: number
     runId?: string
+    /** Bounded repository + command evidence captured independently of the summary. */
+    evidence?: CriticEvidenceSource
 }
 
 export class CriticCodex extends BaseObserver {
     private readonly opts: Required<
-        Omit<CriticCodexOptions, "targets" | "model" | "codexBin" | "runId">
+        Omit<
+            CriticCodexOptions,
+            | "targets"
+            | "model"
+            | "codexBin"
+            | "runId"
+            | "evidence"
+            | "outcomeAuthority"
+            | "terminalProjectorAuthority"
+        >
     > & {
         targets: ReadonlyMap<string, readonly string[]>
         model: string | undefined
         codexBin: string
         runId: string | undefined
+        evidence: CriticEvidenceSource | undefined
     }
+    private readonly terminalAuthorities: TerminalTurnAuthorityOptions
     private readonly emissions = new Map<string, number>()
     private readonly turnCount = new Map<string, number>()
     private readonly seenTerminalIds = new Set<string>()
@@ -68,40 +75,42 @@ export class CriticCodex extends BaseObserver {
             timeoutMs: opts.timeoutMs ?? 180_000,
             targets: opts.targets,
             runId: opts.runId,
+            evidence: opts.evidence,
+        }
+        this.terminalAuthorities = {
+            outcomeAuthority: opts.outcomeAuthority,
+            terminalProjectorAuthority: opts.terminalProjectorAuthority,
         }
     }
 
     /** Resolves once every in-flight evaluation has emitted its CritiqueItem. */
     async idle(): Promise<void> {
-        await Promise.allSettled([...this.pending])
+        await drainCriticPending(this.pending)
     }
 
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         const input = criticInput(event)
         if (!input) return
+        if (!isAuthorizedTerminalTurn(source, event, input, this.terminalAuthorities)) return
         const { agentId, isError, resultText, canContinue, terminalId } = input
         if (isError || !resultText) return
 
         const criteria = this.opts.targets.get(agentId)
         if (!criteria || criteria.length === 0) return
-        if (terminalId) {
-            if (this.seenTerminalIds.has(terminalId)) return
-            this.seenTerminalIds.add(terminalId)
+        const replayKey = criticReplayKey(agentId, terminalId)
+        if (replayKey) {
+            if (this.seenTerminalIds.has(replayKey)) return
+            this.seenTerminalIds.add(replayKey)
         }
 
         const turn = (this.turnCount.get(agentId) ?? 0) + 1
         this.turnCount.set(agentId, turn)
 
         const work = (async () => {
-            const { verdict, reasoning, violatedCriteria } = await this.evaluate(
-                resultText,
-                criteria,
-                agentId,
-                turn,
-            )
+            const { verdict, reasoning, violatedCriteria } = await this.evaluate()
 
             const critiqueEvent = Critique.create({
                 agentId,
@@ -143,74 +152,21 @@ export class CriticCodex extends BaseObserver {
         await work
     }
 
-    private async evaluate(
-        resultText: string,
-        criteria: readonly string[],
-        agentId: string,
-        turn: number,
-    ): Promise<{
+    private async evaluate(): Promise<{
         verdict: "pass" | "fail"
         reasoning: string
         violatedCriteria: string[]
     }> {
-        const userPrompt = buildEvalPrompt(criteria, resultText)
-        const prompt = `${VERDICT_SYSTEM_PROMPT}\n\n${userPrompt}`
-
-        try {
-            const text = await runCodexOneShot({
-                prompt,
-                cwd: process.cwd(),
-                skipGitRepoCheck: true,
-                bypassSandbox: true,
-                model: this.opts.model,
-                codexBin: this.opts.codexBin,
-                timeoutMs: this.opts.timeoutMs,
-                label: "codex-critic",
-                onInvocation: this.invocationObserver(agentId, turn),
-            })
-
-            const verdictJson = extractVerdictJson(text.trim())
-            const parsed = JSON.parse(verdictJson) as {
-                verdict: "pass" | "fail"
-                reasoning: string
-                violated_criteria: string[]
-            }
-
-            return {
-                verdict: parsed.verdict === "pass" ? "pass" : "fail",
-                reasoning: parsed.reasoning ?? "",
-                violatedCriteria: Array.isArray(parsed.violated_criteria)
-                    ? parsed.violated_criteria
-                    : [],
-            }
-        } catch (err) {
-            return {
-                verdict: "fail",
-                reasoning: `CriticCodex LLM call failed: ${String((err as Error)?.message ?? err)}`,
-                violatedCriteria: ["[critic error — could not evaluate]"],
-            }
-        }
-    }
-
-    private invocationObserver(agentId: string, turn: number): RunnerInvocationObserver {
-        return (observation) => {
-            const event = ModelInvocationMeasured.create(
-                runnerMeasurement(
-                    {
-                        invocationBaseId: `${this.opts.runId ?? "local"}:critic:${agentId}:${turn}`,
-                        runId: this.opts.runId ?? null,
-                        phase: "critic",
-                        storyId: agentId,
-                        turn,
-                        backend: "codex",
-                        requestedModel: this.opts.model ?? null,
-                    },
-                    observation,
-                ),
-            )
-            for (const env of this.getEnvironments()) {
-                env.deliverSemanticEvent(this, event)
-            }
+        return {
+            verdict: "fail",
+            reasoning:
+                "CriticCodex is disabled: refusing to send untrusted Critic " +
+                "evidence to Codex CLI because it exposes no tool-less " +
+                "inference mode. Configure the direct OpenAI Critic backend " +
+                "or another tool-less Critic backend instead.",
+            violatedCriteria: [
+                "[critic backend unavailable — tool-less evaluation required]",
+            ],
         }
     }
 }

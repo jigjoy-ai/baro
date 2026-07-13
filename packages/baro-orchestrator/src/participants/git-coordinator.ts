@@ -77,6 +77,7 @@ export class GitCoordinator extends SerializedObserver {
     private readonly completedCleanups = new Map<string, string | null>()
     private eventAuthority: Participant | null = null
     private leaseAuthority: Participant | null = null
+    private preparedBaseSha: string | null = null
 
     constructor(private readonly opts: GitCoordinatorOptions) {
         super()
@@ -94,6 +95,11 @@ export class GitCoordinator extends SerializedObserver {
             throw new Error("git coordinator lease authority is already bound")
         }
         this.leaseAuthority = authority
+    }
+
+    /** Immutable run base captured on the actual checked-out run branch. */
+    runBaseSha(): string | null {
+        return this.preparedBaseSha
     }
 
     protected override async handleEvent(
@@ -235,7 +241,6 @@ export class GitCoordinator extends SerializedObserver {
 
     private async prepareRun(runId: string): Promise<void> {
         try {
-            const baseSha = await getHeadSha(this.opts.cwd)
             await excludeBaroArtifacts(this.opts.cwd)
             if (this.opts.prdPath) {
                 const prd = loadPrd(this.opts.prdPath)
@@ -248,6 +253,8 @@ export class GitCoordinator extends SerializedObserver {
                     )
                 }
             }
+            const baseSha = await getHeadSha(this.opts.cwd)
+            this.preparedBaseSha = baseSha
             await this.opts.worktrees?.cleanupStaleOnStart()
             this.emitBus(RunPrepared.create({ runId, baseSha }))
         } catch (error) {

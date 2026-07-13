@@ -51,6 +51,15 @@ export interface VerifyCommandSpec {
 
 export interface VerifyPlan {
     readonly commands: readonly VerifyCommandSpec[]
+    /**
+     * Package-manager choices captured with this snapshot. The root entry has
+     * no cwd; workspace entries use the same absolute cwd as command specs.
+     *
+     * Optional for backwards compatibility with caller-authored plans. Plans
+     * returned by createVerifyPlan always populate it, even when no JS scripts
+     * existed yet, so final-added gates cannot switch package managers.
+     */
+    readonly javascriptPackageManagers?: readonly VerifyJavaScriptPackageManager[]
 }
 
 export interface VerifyBuildOptions {
@@ -61,8 +70,95 @@ export interface VerifyBuildOptions {
 }
 
 interface PackageManifest {
+    packageManager?: unknown
     scripts?: Record<string, unknown>
     workspaces?: unknown
+}
+
+export type JavaScriptPackageManager = "npm" | "pnpm" | "yarn"
+
+export interface VerifyJavaScriptPackageManager {
+    /** Omitted for the repository root; absolute for a workspace package. */
+    readonly cwd?: string
+    readonly manager: JavaScriptPackageManager
+    /** Present only when package.json declared `<manager>@<version>`. */
+    readonly declaredVersion?: string
+}
+
+interface DeclaredPackageManager {
+    manager: JavaScriptPackageManager
+    version: string
+}
+
+/**
+ * package.json's packageManager field uses the Corepack form
+ * `<manager>@<version>`. A present, non-empty malformed declaration and a
+ * well-formed declaration for an unsupported manager are handled separately
+ * as deterministic verification failures instead of silently invoking a
+ * different package manager.
+ */
+function declaredPackageManager(value: unknown): DeclaredPackageManager | null {
+    if (typeof value !== "string") return null
+    const match = value.match(/^(npm|pnpm|yarn)@([^\s@]+)$/)
+    if (!match) return null
+    return {
+        manager: match[1] as JavaScriptPackageManager,
+        version: match[2]!,
+    }
+}
+
+function unsupportedDeclaredPackageManager(value: unknown): string | null {
+    if (typeof value !== "string") return null
+    const match = value.match(/^([^\s@]+)@[^\s@]+$/)
+    if (!match || /^(npm|pnpm|yarn)$/.test(match[1]!)) return null
+    return match[1]!
+}
+
+function malformedDeclaredPackageManager(value: unknown): string | null {
+    if (value === undefined || value === null) return null
+    if (typeof value === "string" && value.trim() === "") return null
+    if (
+        declaredPackageManager(value) ||
+        unsupportedDeclaredPackageManager(value)
+    ) return null
+    try {
+        return JSON.stringify(value) ?? String(value)
+    } catch {
+        return String(value)
+    }
+}
+
+function detectPackageManager(
+    cwd: string,
+    manifest: PackageManifest | null,
+    hasPnpmWorkspace: boolean,
+): JavaScriptPackageManager {
+    const declared = declaredPackageManager(manifest?.packageManager)
+    if (declared) return declared.manager
+
+    // Preserve pnpm workspace semantics, then resolve conflicting npm/Yarn
+    // lockfiles deterministically in favour of package-lock.json. Repositories
+    // can always override lockfile inference with a valid packageManager field.
+    if (existsSync(join(cwd, "pnpm-lock.yaml")) || hasPnpmWorkspace) return "pnpm"
+    if (existsSync(join(cwd, "package-lock.json"))) return "npm"
+    if (existsSync(join(cwd, "yarn.lock"))) return "yarn"
+    return "npm"
+}
+
+function packageManagerCommand(
+    pm: JavaScriptPackageManager,
+    declared: DeclaredPackageManager | null,
+    script: string,
+): Pick<VerifyCommandSpec, "tool" | "args"> {
+    // Yarn 2+ intentionally relies on Corepack. Calling a bare `yarn` binary
+    // can otherwise execute an unrelated global Yarn 1 installation.
+    const yarnMajor = declared?.manager === "yarn"
+        ? Number.parseInt(declared.version.match(/^\d+/)?.[0] ?? "", 10)
+        : Number.NaN
+    if (pm === "yarn" && yarnMajor >= 2) {
+        return { tool: "corepack", args: ["yarn", "run", script] }
+    }
+    return { tool: pm, args: ["run", script] }
 }
 
 function readPackageManifest(path: string): PackageManifest | null {
@@ -161,8 +257,14 @@ function supportedWorkspacePattern(pattern: string): boolean {
 // scripts that actually exist are included — a missing gate is a skip, never an
 // invented command. The deterministic RunVerifier owns these after all story
 // commits are integrated; they must not become separate LLM stories.
-function detectCommands(cwd: string): VerifyCommandSpec[] {
+interface DetectedVerifyPlan {
+    commands: VerifyCommandSpec[]
+    javascriptPackageManagers: VerifyJavaScriptPackageManager[]
+}
+
+function detectCommands(cwd: string): DetectedVerifyPlan {
     const cmds: VerifyCommandSpec[] = []
+    const javascriptPackageManagers: VerifyJavaScriptPackageManager[] = []
 
     const pkgPath = join(cwd, "package.json")
     const hasPackageManifest = existsSync(pkgPath)
@@ -178,12 +280,36 @@ function detectCommands(cwd: string): VerifyCommandSpec[] {
             })
         }
         const scripts = manifest?.scripts ?? {}
-        const pm = existsSync(join(cwd, "pnpm-lock.yaml"))
-            || hasPnpmWorkspace
-            ? "pnpm"
-            : existsSync(join(cwd, "yarn.lock"))
-              ? "yarn"
-              : "npm"
+        const declared = declaredPackageManager(manifest?.packageManager)
+        const unsupportedManager = unsupportedDeclaredPackageManager(
+            manifest?.packageManager,
+        )
+        const malformedManager = malformedDeclaredPackageManager(
+            manifest?.packageManager,
+        )
+        const managerResolutionFailed = unsupportedManager !== null
+            || malformedManager !== null
+        const pm = detectPackageManager(cwd, manifest, hasPnpmWorkspace)
+        if (unsupportedManager) {
+            cmds.push({
+                label: `resolve package manager ${unsupportedManager}`,
+                tool: "node",
+                args: [],
+                preflightFailure:
+                    `unsupported packageManager '${String(manifest?.packageManager)}'; ` +
+                    "supported managers are npm, pnpm, and yarn",
+            })
+        }
+        if (malformedManager) {
+            cmds.push({
+                label: "resolve package manager declaration",
+                tool: "node",
+                args: [],
+                preflightFailure:
+                    `malformed packageManager ${malformedManager}; ` +
+                    "expected npm@<version>, pnpm@<version>, or yarn@<version>",
+            })
+        }
         const declaredWorkspacePatterns = [
             ...workspacePatterns(manifest?.workspaces),
             ...pnpmWorkspacePatterns(cwd),
@@ -208,6 +334,19 @@ function detectCommands(cwd: string): VerifyCommandSpec[] {
             cwd: workspaceCwd,
             manifest: readPackageManifest(join(workspaceCwd, "package.json")),
         }))
+        if (!managerResolutionFailed) {
+            const managerSnapshot = {
+                manager: pm,
+                ...(declared ? { declaredVersion: declared.version } : {}),
+            }
+            javascriptPackageManagers.push(managerSnapshot)
+            for (const workspace of workspaces) {
+                javascriptPackageManagers.push({
+                    cwd: workspace.cwd,
+                    ...managerSnapshot,
+                })
+            }
+        }
         for (const workspace of workspaces) {
             if (workspace.manifest) continue
             const displayCwd = relative(cwd, workspace.cwd).replace(/\\/g, "/")
@@ -218,12 +357,14 @@ function detectCommands(cwd: string): VerifyCommandSpec[] {
                 preflightFailure: `${displayCwd}/package.json is not valid JSON`,
             })
         }
-        for (const script of ["build", "typecheck", "test", "lint"] as const) {
+        for (const script of managerResolutionFailed
+            ? []
+            : (["build", "typecheck", "test", "lint"] as const)) {
             if (typeof scripts[script] === "string") {
+                const command = packageManagerCommand(pm, declared, script)
                 cmds.push({
                     label: `${pm} run ${script}`,
-                    tool: pm,
-                    args: ["run", script],
+                    ...command,
                 })
                 continue
             }
@@ -234,10 +375,10 @@ function detectCommands(cwd: string): VerifyCommandSpec[] {
             for (const workspace of workspaces) {
                 if (typeof workspace.manifest?.scripts?.[script] !== "string") continue
                 const displayCwd = relative(cwd, workspace.cwd).replace(/\\/g, "/")
+                const command = packageManagerCommand(pm, declared, script)
                 cmds.push({
                     label: `${pm} run ${script} (${displayCwd})`,
-                    tool: pm,
-                    args: ["run", script],
+                    ...command,
                     cwd: workspace.cwd,
                 })
             }
@@ -254,17 +395,24 @@ function detectCommands(cwd: string): VerifyCommandSpec[] {
         cmds.push({ label: "go test ./...", tool: "go", args: ["test", "./..."] })
     }
 
-    return cmds
+    return { commands: cmds, javascriptPackageManagers }
 }
 
 /** Freeze command discovery before workers can edit manifests or remove scripts. */
 export function createVerifyPlan(cwd: string): VerifyPlan {
-    return freezeVerifyPlan(detectCommands(cwd))
+    const detected = detectCommands(cwd)
+    return freezeVerifyPlan(
+        detected.commands,
+        detected.javascriptPackageManagers,
+    )
 }
 
 /**
- * Preserve every trusted pre-run command while also admitting conventional
- * final-gate commands that only exist after the stories are integrated.
+ * Preserve every trusted pre-run executable command while also admitting
+ * conventional final-gate commands that only exist after the stories are
+ * integrated. Discovery/configuration failures are snapshot-local: only the
+ * final snapshot is authoritative for them, so a story may repair a malformed
+ * manifest while a regression introduced by a story still fails closed.
  *
  * Keeping the baseline first means an agent cannot turn a required check into
  * a skip by deleting it. Adding the final snapshot closes the opposite gap:
@@ -273,24 +421,164 @@ export function createVerifyPlan(cwd: string): VerifyPlan {
 export function mergeVerifyPlans(...plans: readonly VerifyPlan[]): VerifyPlan {
     const commands: VerifyCommandSpec[] = []
     const seen = new Set<string>()
-    for (const plan of plans) {
+    const managerAuthorities = new Map<string, VerifyJavaScriptPackageManager>()
+    const packageManagers: VerifyJavaScriptPackageManager[] = []
+    const finalPlanIndex = plans.length - 1
+    for (const [planIndex, plan] of plans.entries()) {
+        // The first snapshot establishes trusted manager choices before any
+        // command is considered. Later snapshots can establish authority only
+        // for packages that had no baseline/root authority at all.
+        if (planIndex === 0) {
+            registerPackageManagerAuthorities(
+                plan.javascriptPackageManagers,
+                managerAuthorities,
+                packageManagers,
+            )
+        }
         for (const command of plan.commands) {
-            const key = JSON.stringify([
-                command.label,
-                command.tool,
-                command.args,
-                command.cwd ?? null,
-                command.preflightFailure ?? null,
-            ])
+            // A preflight failure describes the manifest/configuration in one
+            // snapshot; retaining an older one would make that state
+            // impossible for a story to repair. Executable gates remain
+            // baseline-first and frozen below.
+            if (
+                plans.length > 1 &&
+                planIndex !== finalPlanIndex &&
+                command.preflightFailure
+            ) continue
+            const authoritativeCommand = planIndex === 0
+                ? command
+                : rewriteJavaScriptCommandForAuthority(command, managerAuthorities)
+            const key = verifyCommandIdentity(authoritativeCommand)
             if (seen.has(key)) continue
             seen.add(key)
-            commands.push(command)
+            commands.push(authoritativeCommand)
+        }
+        if (planIndex !== 0) {
+            registerPackageManagerAuthorities(
+                plan.javascriptPackageManagers,
+                managerAuthorities,
+                packageManagers,
+                true,
+            )
         }
     }
-    return freezeVerifyPlan(commands)
+    return freezeVerifyPlan(commands, packageManagers)
 }
 
-function freezeVerifyPlan(commands: readonly VerifyCommandSpec[]): VerifyPlan {
+const ROOT_PACKAGE_MANAGER_KEY = "<root>"
+
+function packageManagerKey(cwd?: string): string {
+    return cwd ?? ROOT_PACKAGE_MANAGER_KEY
+}
+
+function registerPackageManagerAuthorities(
+    managers: readonly VerifyJavaScriptPackageManager[] | undefined,
+    authorities: Map<string, VerifyJavaScriptPackageManager>,
+    collected: VerifyJavaScriptPackageManager[],
+    preserveExistingRoot = false,
+): void {
+    for (const manager of managers ?? []) {
+        const key = packageManagerKey(manager.cwd)
+        if (
+            preserveExistingRoot &&
+            manager.cwd !== undefined &&
+            authorities.has(ROOT_PACKAGE_MANAGER_KEY)
+        ) continue
+        if (authorities.has(key)) continue
+        authorities.set(key, manager)
+        collected.push(manager)
+    }
+}
+
+interface JavaScriptCommandDetails {
+    manager: JavaScriptPackageManager
+    script: string
+}
+
+function javascriptCommandDetails(
+    command: VerifyCommandSpec,
+): JavaScriptCommandDetails | null {
+    if (
+        /^(npm|pnpm|yarn)$/.test(command.tool) &&
+        command.args[0] === "run" &&
+        typeof command.args[1] === "string"
+    ) {
+        return {
+            manager: command.tool as JavaScriptPackageManager,
+            script: command.args[1],
+        }
+    }
+    if (
+        command.tool === "corepack" &&
+        /^(npm|pnpm|yarn)$/.test(command.args[0] ?? "") &&
+        command.args[1] === "run" &&
+        typeof command.args[2] === "string"
+    ) {
+        return {
+            manager: command.args[0] as JavaScriptPackageManager,
+            script: command.args[2],
+        }
+    }
+    return null
+}
+
+function rewriteJavaScriptCommandForAuthority(
+    command: VerifyCommandSpec,
+    authorities: ReadonlyMap<string, VerifyJavaScriptPackageManager>,
+): VerifyCommandSpec {
+    const details = javascriptCommandDetails(command)
+    if (!details) return command
+    // A baseline root manager governs newly introduced workspace packages too;
+    // exact workspace snapshots win when one already existed before the run.
+    const authority = authorities.get(packageManagerKey(command.cwd))
+        ?? authorities.get(ROOT_PACKAGE_MANAGER_KEY)
+    if (!authority) return command
+    const declared = authority.declaredVersion
+        ? { manager: authority.manager, version: authority.declaredVersion }
+        : null
+    const rewritten = packageManagerCommand(
+        authority.manager,
+        declared,
+        details.script,
+    )
+    return {
+        ...command,
+        label: command.label.replace(
+            new RegExp(`^${details.manager}(?= run )`),
+            authority.manager,
+        ),
+        ...rewritten,
+    }
+}
+
+/**
+ * JS package-manager commands are the same gate when they run the same named
+ * script in the same package. This deliberately omits the manager/tool: plans
+ * are merged baseline-first, so an agent cannot cause the final verifier to
+ * invoke a second manager merely by changing packageManager or a lockfile.
+ */
+function verifyCommandIdentity(command: VerifyCommandSpec): string {
+    const details = javascriptCommandDetails(command)
+    if (details) {
+        return JSON.stringify([
+            "javascript-script",
+            command.cwd ?? null,
+            details.script,
+        ])
+    }
+    return JSON.stringify([
+        command.label,
+        command.tool,
+        command.args,
+        command.cwd ?? null,
+        command.preflightFailure ?? null,
+    ])
+}
+
+function freezeVerifyPlan(
+    commands: readonly VerifyCommandSpec[],
+    javascriptPackageManagers: readonly VerifyJavaScriptPackageManager[] = [],
+): VerifyPlan {
     return Object.freeze({
         commands: Object.freeze(
             commands.map((command) =>
@@ -299,6 +587,9 @@ function freezeVerifyPlan(commands: readonly VerifyCommandSpec[]): VerifyPlan {
                     args: Object.freeze([...command.args]),
                 }),
             ),
+        ),
+        javascriptPackageManagers: Object.freeze(
+            javascriptPackageManagers.map((manager) => Object.freeze({ ...manager })),
         ),
     })
 }

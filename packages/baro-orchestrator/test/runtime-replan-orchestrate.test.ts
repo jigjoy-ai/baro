@@ -72,7 +72,7 @@ class RuntimeAdaptingExecutor extends BaseObserver implements StoryExecutor {
                                     dependsOn: ["S1"],
                                     retries: 1,
                                     acceptance: ["follow-up is integrated"],
-                                    tests: [],
+                                    tests: ["npm test"],
                                     model: "standard",
                                 },
                             ],

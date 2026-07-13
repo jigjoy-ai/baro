@@ -3,6 +3,8 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
+import type { Participant } from "@mozaik-ai/core"
+
 import { OpenCodeStoryAgent } from "../../src/participants/opencode-story-agent.js"
 import { StoryResult } from "../../src/semantic-events.js"
 import { captureEnv, withTempDir } from "./helpers.js"
@@ -37,6 +39,8 @@ printf '%s\n' \
                 // freshly-created temp binary; this is not the behavior under test.
                 timeoutSecs: 60,
             })
+            const terminalSources: Participant[] = []
+            agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
 
             const outcome = await agent.run(env)
             const event = env.events.find(StoryResult.is)
@@ -52,6 +56,8 @@ printf '%s\n' \
             assert.equal(event.data.success, true)
             assert.equal(event.data.attempts, 1)
             assert.equal(event.data.error, null)
+            assert.equal(terminalSources.length, 1)
+            assert.equal(terminalSources[0]?.agentId, "story-opencode")
         })
     })
 

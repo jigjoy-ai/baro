@@ -262,6 +262,25 @@ export async function getGitFileStats(
     }
 }
 
+/** Best-effort number of commits introduced after an immutable run base. */
+export async function getCommitCount(
+    cwd: string,
+    baseSha: string,
+    toSha = "HEAD",
+): Promise<number> {
+    try {
+        const { stdout } = await exec(
+            "git",
+            ["rev-list", "--count", `${baseSha}..${toSha}`],
+            { cwd },
+        )
+        const count = Number.parseInt(stdout.trim(), 10)
+        return Number.isSafeInteger(count) && count >= 0 ? count : 0
+    } catch {
+        return 0
+    }
+}
+
 export interface DiffFile {
     path: string
     added: number

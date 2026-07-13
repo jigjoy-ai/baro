@@ -220,7 +220,7 @@ For an already prepared `prd.json`, bypass intake/planning and exercise only the
 
 ```bash
 export OPENAI_API_KEY="$JIGJOY_API_KEY"
-export OPENAI_BASE_URL="${BARO_JIGJOY_URL:-https://baro.jigjoy.ai/v1}"
+export OPENAI_BASE_URL="${BARO_JIGJOY_URL:-https://gw.baro.jigjoy.ai/v1}"
 
 node --import tsx packages/baro-orchestrator/scripts/cli.ts \
   --cwd /absolute/path/to/remote-free-target \

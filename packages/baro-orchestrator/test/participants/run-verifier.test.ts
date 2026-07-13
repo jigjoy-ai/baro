@@ -12,6 +12,39 @@ import {
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
 
 describe("RunVerifier", () => {
+    it("accepts requests and replays only from the bound Board", async () => {
+        let calls = 0
+        const board = source("board")
+        const verifier = new RunVerifier({
+            runId: "run-authority",
+            cwd: "/repo",
+            verify: async () => {
+                calls += 1
+                return { ran: true, ok: true, failures: [], commands: [] }
+            },
+        })
+        verifier.setRequestAuthority(board)
+        const env = joinWithCapture(verifier)
+        const request = RunVerificationRequested.create({
+            runId: "run-authority",
+            verificationId: "run-authority:verification:1",
+        })
+
+        env.deliverSemanticEvent(source("attacker"), request)
+        await verifier.idle()
+        assert.equal(calls, 0)
+        assert.equal(env.events.filter(RunVerificationCompleted.is).length, 0)
+
+        env.deliverSemanticEvent(board, request)
+        await verifier.idle()
+        assert.equal(calls, 1)
+        assert.equal(env.events.filter(RunVerificationCompleted.is).length, 1)
+
+        env.deliverSemanticEvent(source("attacker-replay"), request)
+        await verifier.idle()
+        assert.equal(env.events.filter(RunVerificationCompleted.is).length, 1)
+    })
+
     it("publishes correlated objective evidence and deduplicates replay", async () => {
         let calls = 0
         const verifier = new RunVerifier({
@@ -164,9 +197,11 @@ describe("RunVerifier", () => {
                     )
                 }),
         })
+        const board = source("board")
+        verifier.setRequestAuthority(board)
         const env = joinWithCapture(verifier)
         env.deliverSemanticEvent(
-            source("board"),
+            board,
             RunVerificationRequested.create({
                 runId: "run-timeout",
                 verificationId: "verify-timeout",
@@ -174,7 +209,17 @@ describe("RunVerifier", () => {
         )
         await started
         env.deliverSemanticEvent(
-            source("board"),
+            source("attacker"),
+            RunVerificationTimedOut.create({
+                runId: "run-timeout",
+                verificationId: "verify-timeout",
+                timeoutMs: 5,
+            }),
+        )
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        assert.equal(aborted, false)
+        env.deliverSemanticEvent(
+            board,
             RunVerificationTimedOut.create({
                 runId: "run-timeout",
                 verificationId: "verify-timeout",

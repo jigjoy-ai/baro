@@ -1,4 +1,4 @@
-import type { SemanticEvent } from "@mozaik-ai/core"
+import type { Participant, SemanticEvent } from "@mozaik-ai/core"
 
 import {
     RunVerificationCompleted,
@@ -39,6 +39,7 @@ export class RunVerifier extends SerializedObserver {
     private readonly completed = new Map<string, RunVerificationCompletedData>()
     private readonly active = new Map<string, AbortController>()
     private readonly verify: (cwd: string, signal: AbortSignal) => Promise<VerifyResult>
+    private requestAuthority: Participant | null = null
 
     constructor(private readonly opts: RunVerifierOptions) {
         super()
@@ -55,14 +56,19 @@ export class RunVerifier extends SerializedObserver {
                 }))
     }
 
+    setRequestAuthority(authority: Participant): void {
+        this.requestAuthority = authority
+    }
+
     protected override async handleEvent(
         context: SerializedEventContext,
     ): Promise<void> {
-        const { event } = context
+        const { event, source } = context
         if (
             RunVerificationTimedOut.is(event) &&
             event.data.runId === this.opts.runId
         ) {
+            if (this.requestAuthority && source !== this.requestAuthority) return
             this.active.get(event.data.verificationId)?.abort(
                 new Error(
                     `verification timed out after ${Math.ceil(event.data.timeoutMs / 1_000)}s`,
@@ -76,6 +82,7 @@ export class RunVerifier extends SerializedObserver {
         ) {
             return
         }
+        if (this.requestAuthority && source !== this.requestAuthority) return
 
         const cached = this.completed.get(event.data.verificationId)
         if (cached) {

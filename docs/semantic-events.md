@@ -55,6 +55,9 @@ carry no compat constraint beyond "don't rename once shipped"):
   the machine-readable twin of the `[story-factory] S1 → backend:model`
   stderr line (which stays). See docs/tui-protocol-v2.md for the structured
   BaroEvents these feed.
+- `replan_applied` — the legacy Conductor accepted a buffered Surgeon
+  `Replan`, applied it at a level boundary, and persisted the PRD. Raw
+  `replan` remains a proposal and is never projected as committed state.
 - `runtime_replan_proposed` — a collective worker proposes a closed,
   correlated mutation of the not-yet-started DAG. Its run/story/lease/
   generation identify the active authority and `baseGraphVersion` is the

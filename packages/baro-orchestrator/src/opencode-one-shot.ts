@@ -6,6 +6,8 @@
  */
 
 import { ChildProcess, spawn } from "child_process"
+import { writeFile } from "node:fs/promises"
+import { join } from "node:path"
 
 import {
     knownMetric,
@@ -22,7 +24,7 @@ import {
 } from "./runner-invocation.js"
 
 export interface RunOpenCodeOneShotOptions {
-    /** Combined system+user prompt. Passed as the final positional argv. */
+    /** Combined system+user prompt. Safe evaluators pipe it over stdin. */
     prompt: string
     cwd: string
     /** Model in `provider/model` format; omit for OpenCode's configured default. */
@@ -35,20 +37,40 @@ export interface RunOpenCodeOneShotOptions {
     label?: string
     /** Optional invocation telemetry sink. It cannot alter runner success. */
     onInvocation?: RunnerInvocationObserver
+    /**
+     * Critic-only hardening. Installs a local, deny-all agent whose prompt is
+     * this real system prompt, disables plugins, and rejects any tool event.
+     * The caller must provide a fresh empty cwd. Other callers are unchanged.
+     */
+    safeEvaluatorSystemPrompt?: string
 }
 
 /**
  * Collects assistant text from `text` events; throws if the process exits
- * without producing any. Runs with `--dangerously-skip-permissions`.
+ * without producing any. Legacy callers run with
+ * `--dangerously-skip-permissions`; safe evaluators use a deny-all agent.
  */
 export async function runOpenCodeOneShot(
     opts: RunOpenCodeOneShotOptions,
 ): Promise<string> {
     const label = opts.label ?? "opencode"
-    const args = ["run", "--format", "json", "--dangerously-skip-permissions"]
+    const safeEvaluator = opts.safeEvaluatorSystemPrompt !== undefined
+    const safeConfig = safeEvaluator
+        ? await installSafeEvaluatorAgent(
+              opts.cwd,
+              opts.safeEvaluatorSystemPrompt!,
+          )
+        : null
+
+    const args = ["run", "--format", "json"]
+    if (safeEvaluator) {
+        args.push("--pure", "--agent", "baro-critic")
+    } else {
+        args.push("--dangerously-skip-permissions")
+    }
     if (opts.model) args.push("-m", opts.model)
     if (opts.cwd) args.push("--dir", opts.cwd)
-    args.push(opts.prompt)
+    if (!safeEvaluator) args.push(opts.prompt)
 
     const timeoutMs = opts.timeoutMs ?? 600_000
 
@@ -59,7 +81,17 @@ export async function runOpenCodeOneShot(
         try {
             proc = spawn(opts.opencodeBin ?? "opencode", args, {
                 cwd: opts.cwd,
-                stdio: ["ignore", "pipe", "pipe"],
+                env: safeConfig
+                    ? {
+                          ...process.env,
+                          // Pin both supported config injection paths so an
+                          // inherited OPENCODE_CONFIG(_CONTENT) cannot replace
+                          // the deny-all Critic agent after project discovery.
+                          OPENCODE_CONFIG: safeConfig.path,
+                          OPENCODE_CONFIG_CONTENT: safeConfig.content,
+                      }
+                    : process.env,
+                stdio: [safeEvaluator ? "pipe" : "ignore", "pipe", "pipe"],
             })
         } catch (e) {
             invocations.finish(
@@ -76,6 +108,7 @@ export async function runOpenCodeOneShot(
         let assistantText = ""
         let stdoutBuffer = ""
         const eventTypesSeen: string[] = []
+        let evaluatorToolUseSeen = false
         let timedOut = false
 
         const timer = setTimeout(() => {
@@ -129,6 +162,7 @@ export async function runOpenCodeOneShot(
                 // Real opencode emits `tool_use`; `tool_call` is the
                 // legacy paired-shape fallback. Log either.
                 if (type === "tool_use" || type === "tool_call") {
+                    if (safeEvaluator) evaluatorToolUseSeen = true
                     const part = event.part as Record<string, unknown> | undefined
                     const tool =
                         typeof part?.tool === "string"
@@ -205,6 +239,22 @@ export async function runOpenCodeOneShot(
                 return
             }
 
+            if (safeEvaluator && evaluatorToolUseSeen) {
+                if (
+                    !invocations.finish(
+                        unknownOpenCodeObservation("failed", elapsedMs, opts),
+                    )
+                ) {
+                    return
+                }
+                reject(
+                    new Error(
+                        "runOpenCodeOneShot: safe evaluator attempted a tool call",
+                    ),
+                )
+                return
+            }
+
             if (assistantText.trim()) {
                 if (
                     !invocations.finish(
@@ -234,7 +284,81 @@ export async function runOpenCodeOneShot(
                 ),
             )
         })
+
+        if (safeEvaluator) {
+            if (!proc.stdin) {
+                proc.kill()
+                invocations.finish(
+                    unknownOpenCodeObservation(
+                        "failed",
+                        Date.now() - startedAt,
+                        opts,
+                    ),
+                )
+                reject(new Error("opencode subprocess stdin is unavailable"))
+                return
+            }
+            proc.stdin.on("error", (error) => {
+                proc.kill()
+                if (
+                    invocations.finish(
+                        unknownOpenCodeObservation(
+                            "failed",
+                            Date.now() - startedAt,
+                            opts,
+                        ),
+                    )
+                ) {
+                    reject(error)
+                }
+            })
+            proc.stdin.end(opts.prompt)
+        }
     })
+}
+
+async function installSafeEvaluatorAgent(
+    cwd: string,
+    systemPrompt: string,
+): Promise<{ path: string; content: string }> {
+    const disabledTools = Object.fromEntries(
+        [
+            "bash",
+            "read",
+            "edit",
+            "write",
+            "glob",
+            "grep",
+            "webfetch",
+            "task",
+            "todowrite",
+            "websearch",
+            "lsp",
+            "skill",
+        ].map((name) => [name, false]),
+    )
+    const config = {
+        agent: {
+            "baro-critic": {
+                description: "Baro inference-only acceptance evaluator",
+                mode: "primary",
+                prompt: systemPrompt,
+                tools: disabledTools,
+                permission: { "*": "deny" },
+            },
+        },
+    }
+    const path = join(cwd, "opencode.json")
+    const content = `${JSON.stringify(config)}\n`
+
+    // `wx` deliberately fails closed if a caller accidentally points the
+    // supposedly isolated evaluator at a real project with its own config.
+    await writeFile(
+        path,
+        content,
+        { encoding: "utf8", flag: "wx", mode: 0o600 },
+    )
+    return { path, content }
 }
 
 function openCodeObservation(
