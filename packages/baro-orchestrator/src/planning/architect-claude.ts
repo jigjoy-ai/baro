@@ -4,16 +4,13 @@
  * decision documents; Claude's built-in tools do the exploration.
  */
 
-import { execFile } from "child_process"
-import { promisify } from "util"
+import { execFileCli } from "../exec-file-cli.js"
 
 import {
     ARCHITECT_SYSTEM_PROMPT,
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
 import { effortTimeoutMs } from "./planner-claude.js"
-
-const execFileAsync = promisify(execFile)
 
 export interface RunArchitectClaudeOptions {
     goal: string
@@ -31,7 +28,7 @@ export async function runArchitectClaude(
     opts: RunArchitectClaudeOptions,
 ): Promise<string> {
     const userMessage = buildArchitectUserMessage(opts.goal, opts.projectContext)
-    const { stdout } = await execFileAsync(
+    const { stdout } = await execFileCli(
         opts.claudeBin ?? "claude",
         [
             "--print",

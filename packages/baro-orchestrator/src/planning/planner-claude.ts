@@ -4,8 +4,7 @@
  * (`PrdOutput`) so the schema has a single source of truth.
  */
 
-import { execFile } from "child_process"
-import { promisify } from "util"
+import { execFileCli } from "../exec-file-cli.js"
 
 import {
     PLANNER_SYSTEM_PROMPT,
@@ -15,8 +14,6 @@ import {
     parseModeContract,
     type ModeContract,
 } from "./planner-prompts.js"
-
-const execFileAsync = promisify(execFile)
 
 export interface RunPlannerClaudeOptions {
     goal: string
@@ -65,7 +62,7 @@ export async function runPlannerClaude(
         modeContract,
     })
 
-    const { stdout } = await execFileAsync(
+    const { stdout } = await execFileCli(
         opts.claudeBin ?? "claude",
         [
             "--print",
@@ -99,7 +96,7 @@ export async function runPlannerClaude(
 
 export async function runClaudeIntake(opts: RunPlannerClaudeOptions) {
     if (opts.quick) return heuristicModeContract(opts)
-    const { stdout } = await execFileAsync(
+    const { stdout } = await execFileCli(
         opts.claudeBin ?? "claude",
         [
             "--print",
