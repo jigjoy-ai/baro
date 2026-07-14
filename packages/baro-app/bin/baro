@@ -1,9 +1,27 @@
-#!/usr/bin/env sh
-# Look for baro binary in ~/.baro/bin/
-NATIVE="$HOME/.baro/bin/baro"
-if [ -x "$NATIVE" ]; then
-    exec "$NATIVE" "$@"
-else
-    echo "baro: binary not installed. Run: npm rebuild baro-ai" >&2
-    exit 1
-fi
+#!/usr/bin/env node
+// Node launcher, not a shell script: npm generates its shims from this bin's
+// shebang, and a #!/bin/sh bin makes the Windows shim invoke sh.exe (absent on
+// Windows). A node shebang yields correct cmd/ps1/sh shims on every platform.
+import { spawnSync } from "node:child_process"
+import { existsSync } from "node:fs"
+import { homedir } from "node:os"
+import path from "node:path"
+
+const bin = path.join(
+    homedir(),
+    ".baro",
+    "bin",
+    process.platform === "win32" ? "baro.exe" : "baro",
+)
+
+if (!existsSync(bin)) {
+    console.error("baro: binary not installed. Run: npm rebuild baro-ai")
+    process.exit(1)
+}
+
+const result = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" })
+if (result.error) {
+    console.error(`baro: failed to launch binary: ${result.error.message}`)
+    process.exit(1)
+}
+process.exit(result.signal ? 1 : (result.status ?? 0))
