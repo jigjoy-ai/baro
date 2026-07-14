@@ -5,7 +5,8 @@
  * the live stderr audit trail and allows a gentler SIGTERM.
  */
 
-import { ChildProcess, spawn } from "child_process"
+import { ChildProcess } from "child_process"
+import spawn from "cross-spawn"
 
 export interface RunOpenCodeOneShotOptions {
     /** Combined system+user prompt. Passed as the final positional argv. */
