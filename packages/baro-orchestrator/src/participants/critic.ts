@@ -21,8 +21,7 @@
  * Library-grade: no imports from prd.ts, story-agent.ts, or conductor.ts.
  */
 
-import { execFile } from "child_process"
-import { promisify } from "util"
+import { execFileCli } from "../exec-file-cli.js"
 
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
@@ -31,8 +30,6 @@ import {
     AgentTargetedMessage,
     Critique,
 } from "../semantic-events.js"
-
-const execFileAsync = promisify(execFile)
 
 export const VERDICT_SYSTEM_PROMPT = `\
 You are a strict acceptance-criteria evaluator. You will receive:
@@ -168,7 +165,7 @@ export class Critic extends BaseObserver {
         const prompt = buildEvalPrompt(criteria, resultText)
 
         try {
-            const { stdout } = await execFileAsync(
+            const { stdout } = await execFileCli(
                 this.opts.claudeBin,
                 [
                     "--print",
