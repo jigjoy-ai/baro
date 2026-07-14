@@ -9,6 +9,8 @@ import { ChildProcess, spawn } from "child_process"
 import { writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
+import { harnessChildEnvironment } from "./harness-environment.js"
+
 import {
     knownMetric,
     notApplicableMetric,
@@ -79,18 +81,19 @@ export async function runOpenCodeOneShot(
         const invocations = new RunnerInvocationTracker(opts.onInvocation)
         let proc: ChildProcess
         try {
+            const childEnvironment = harnessChildEnvironment()
             proc = spawn(opts.opencodeBin ?? "opencode", args, {
                 cwd: opts.cwd,
                 env: safeConfig
                     ? {
-                          ...process.env,
+                          ...childEnvironment,
                           // Pin both supported config injection paths so an
                           // inherited OPENCODE_CONFIG(_CONTENT) cannot replace
                           // the deny-all Critic agent after project discovery.
                           OPENCODE_CONFIG: safeConfig.path,
                           OPENCODE_CONFIG_CONTENT: safeConfig.content,
                       }
-                    : process.env,
+                    : childEnvironment,
                 stdio: [safeEvaluator ? "pipe" : "ignore", "pipe", "pipe"],
             })
         } catch (e) {

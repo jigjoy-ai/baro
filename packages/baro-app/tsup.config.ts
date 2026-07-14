@@ -67,6 +67,11 @@ export default defineConfig([
         ...sharedBundleConfig,
     },
     {
+        // Short-lived, login-backed local JigJoy Gateway credential exchange.
+        entry: { "acquire-gateway-credential": "../baro-orchestrator/scripts/acquire-gateway-credential.ts" },
+        ...sharedBundleConfig,
+    },
+    {
         entry: { "baro-memory": "../baro-orchestrator/scripts/baro-memory.ts" },
         ...sharedBundleConfig,
     },

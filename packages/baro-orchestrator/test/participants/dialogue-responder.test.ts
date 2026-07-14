@@ -16,9 +16,45 @@ import {
 } from "../../src/model-telemetry.js"
 import { DialogueResponderInvocationError } from "../../src/participants/dialogue-agent.js"
 import { createDialogueResponder } from "../../src/participants/dialogue-responder.js"
-import { withTempDir } from "./helpers.js"
+import {
+    assertHarnessEnvironmentWasSanitized,
+    harnessEnvironmentCaptureProgram,
+    withInjectedJigJoyEnvironment,
+    withTempDir,
+} from "./helpers.js"
 
 describe("dialogue responders", () => {
+    it("keeps Baro's injected Gateway credential out of the Claude dialogue process", async () => {
+        await withTempDir("dialogue-responder-env-", async (dir) => {
+            const capture = join(dir, "environment.json")
+            const binary = join(dir, "claude-env.mjs")
+            writeFileSync(binary, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+${harnessEnvironmentCaptureProgram(capture)}
+process.stdout.write(JSON.stringify({ result: "{\\\"message\\\":\\\"Ready.\\\",\\\"messages\\\":[]}", usage: { input_tokens: 1, output_tokens: 1 } }));
+`)
+            chmodSync(binary, 0o755)
+
+            await withInjectedJigJoyEnvironment(async () => {
+                const responder = createDialogueResponder({
+                    backend: "claude",
+                    cwd: dir,
+                    claudeBin: binary,
+                })
+                await responder(
+                    {
+                        runId: "run-dialogue-env",
+                        messageId: "message-env",
+                        systemPrompt: "system",
+                        userPrompt: "status",
+                    },
+                    new AbortController().signal,
+                )
+            })
+            assertHarnessEnvironmentWasSanitized(capture)
+        })
+    })
+
     it("runs Claude without tools and returns CLI usage evidence", async () => {
         await withTempDir("dialogue-responder-", async (dir) => {
             const binary = join(dir, "claude")

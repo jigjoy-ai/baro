@@ -76,6 +76,7 @@ describe("CriticOpenCode", () => {
                     env.events.findIndex(Critique.is),
             )
             assert.equal(critiques[0]!.data.verdict, "fail")
+            assert.equal(critiques[0]!.data.status, "inconclusive")
             assert.match(
                 critiques[0]!.data.reasoning,
                 /CriticOpenCode LLM call failed: spawn .*missing-opencode ENOENT/,
@@ -83,9 +84,7 @@ describe("CriticOpenCode", () => {
             assert.deepEqual(critiques[0]!.data.violatedCriteria, [
                 "[critic error — could not evaluate]",
             ])
-            assert.equal(messages.length, 1)
-            assert.equal(messages[0]!.data.recipientId, "agent-a")
-            assert.equal(messages[0]!.data.metadata.criticTurn, 1)
+            assert.equal(messages.length, 0)
         })
     })
 

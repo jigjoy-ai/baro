@@ -110,10 +110,14 @@ export class CriticCodex extends BaseObserver {
         this.turnCount.set(agentId, turn)
 
         const work = (async () => {
-            const { verdict, reasoning, violatedCriteria } = await this.evaluate()
+            const evaluation = await this.evaluate()
+            const { verdict, reasoning, violatedCriteria } = evaluation
+            const status = evaluation.status ?? "evaluated"
 
             const critiqueEvent = Critique.create({
                 agentId,
+                ...(terminalId ? { terminalId } : {}),
+                status,
                 verdict,
                 reasoning,
                 violatedCriteria,
@@ -124,7 +128,7 @@ export class CriticCodex extends BaseObserver {
                 env.deliverSemanticEvent(this, critiqueEvent)
             }
 
-            if (verdict === "fail" && canContinue) {
+            if (status === "evaluated" && verdict === "fail" && canContinue) {
                 const emitted = this.emissions.get(agentId) ?? 0
                 if (emitted < this.opts.maxEmissionsPerAgent) {
                     this.emissions.set(agentId, emitted + 1)
@@ -135,6 +139,7 @@ export class CriticCodex extends BaseObserver {
                         metadata: {
                             criticTurn: turn,
                             emissionIndex: emitted + 1,
+                            ...(terminalId ? { terminalId } : {}),
                         },
                     })
                     for (const env of this.getEnvironments()) {
@@ -153,11 +158,13 @@ export class CriticCodex extends BaseObserver {
     }
 
     private async evaluate(): Promise<{
+        status?: "evaluated" | "inconclusive"
         verdict: "pass" | "fail"
         reasoning: string
         violatedCriteria: string[]
     }> {
         return {
+            status: "inconclusive",
             verdict: "fail",
             reasoning:
                 "CriticCodex is disabled: refusing to send untrusted Critic " +

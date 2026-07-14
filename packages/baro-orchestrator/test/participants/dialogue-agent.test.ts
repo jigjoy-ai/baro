@@ -1,6 +1,8 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
+import type { Participant } from "@mozaik-ai/core"
+
 import {
     knownMetric,
     notApplicableMetric,
@@ -13,27 +15,39 @@ import {
     DialogueResponderInvocationError,
     type DialogueResponderInvocation,
 } from "../../src/participants/dialogue-agent.js"
+import { conversationDelegationProposalId } from "../../src/participants/conversation-delegation.js"
 import {
     AgentTargetedMessage,
+    ConversationDelegationProposed,
     ConversationFailed,
     ConversationRequested,
     ConversationResponded,
     ModelInvocationMeasured,
+    RunCompleted,
+    RunStarted,
+    RuntimeReplanApplied,
     StoryRouted,
     WorkLeaseGranted,
+    WorkLeaseReleased,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source } from "./helpers.js"
+import {
+    joinWithCapture,
+    source,
+    type CapturedEnvironment,
+} from "./helpers.js"
 
 describe("DialogueAgent", () => {
     it("is idle without user input, source-binds requests, deduplicates replay, and messages only active workers", async () => {
         const operator = source("operator")
         const broker = source("broker")
+        const factory = source("factory")
         const observer = source("observer")
         let calls = 0
         const dialogue = new DialogueAgent({
             runId: "run-dialogue",
             operatorAuthority: operator,
             leaseAuthority: broker,
+            routeAuthoritiesByWorker: new Map([["worker-1", factory]]),
             responder: async (input) => {
                 calls += 1
                 assert.match(input.userPrompt, /ACTIVE WORKERS: S1/)
@@ -70,11 +84,14 @@ describe("DialogueAgent", () => {
             }),
         )
         env.deliverSemanticEvent(
-            source("factory"),
+            factory,
             StoryRouted.create({
                 storyId: "S1",
                 backend: "claude",
                 model: "sonnet",
+                runId: "run-dialogue",
+                leaseId: "lease-S1",
+                generation: 1,
             }),
         )
         const request = ConversationRequested.create({
@@ -144,6 +161,385 @@ describe("DialogueAgent", () => {
         assert.equal(measured[0]!.data.backend, "claude")
         assert.equal(measured[0]!.data.requestedModel, "haiku")
         assert.equal(measured[0]!.data.evidence.providerRequestId, null)
+    })
+
+    it("source-binds route capability and ignores stale lease releases", async () => {
+        const runId = "run-dialogue-route-authority"
+        const operator = source("operator")
+        const broker = source("broker")
+        const factory = source("factory")
+        const foreignFactory = source("foreign-factory")
+        const observer = source("observer")
+        const dialogue = new DialogueAgent({
+            runId,
+            operatorAuthority: operator,
+            leaseAuthority: broker,
+            routeAuthoritiesByWorker: new Map([
+                ["worker-1", factory],
+                ["worker-2", foreignFactory],
+            ]),
+            responder: async () => JSON.stringify({
+                message: "I checked the active worker.",
+                messages: [{ recipient_id: "S1", text: "Run the focused test." }],
+                delegation: null,
+            }),
+        })
+        const env = joinWithCapture(dialogue)
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseGranted.create({
+                runId,
+                offerId: "offer-S1",
+                leaseId: "lease-S1",
+                workerId: "worker-1",
+                generation: 2,
+                request: {
+                    storyId: "S1",
+                    prompt: "implement S1",
+                    retries: 0,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+
+        const routed = StoryRouted.create({
+            storyId: "S1",
+            backend: "claude",
+            model: "sonnet",
+            runId,
+            leaseId: "lease-S1",
+            generation: 2,
+        })
+        env.deliverSemanticEvent(observer, routed)
+        env.deliverSemanticEvent(foreignFactory, routed)
+        requestConversation(env, operator, runId, "forged-route")
+        await dialogue.idle()
+        assert.deepEqual(
+            env.events.filter(ConversationResponded.is).at(-1)?.data.actions,
+            [],
+        )
+
+        env.deliverSemanticEvent(factory, routed)
+        requestConversation(env, operator, runId, "exact-route")
+        await dialogue.idle()
+        assert.equal(
+            env.events.filter(ConversationResponded.is).at(-1)?.data.actions.length,
+            1,
+        )
+
+        const staleRelease = WorkLeaseReleased.create({
+            runId,
+            offerId: "offer-old",
+            leaseId: "lease-old",
+            storyId: "S1",
+            workerId: "worker-1",
+            reason: "expired",
+        })
+        env.deliverSemanticEvent(broker, staleRelease)
+        requestConversation(env, operator, runId, "stale-release")
+        await dialogue.idle()
+        assert.equal(
+            env.events.filter(ConversationResponded.is).at(-1)?.data.actions.length,
+            1,
+        )
+
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseReleased.create({
+                runId,
+                offerId: "offer-S1",
+                leaseId: "lease-S1",
+                storyId: "S1",
+                workerId: "worker-1",
+                reason: "integrated",
+            }),
+        )
+        requestConversation(env, operator, runId, "released")
+        await dialogue.idle()
+        assert.deepEqual(
+            env.events.filter(ConversationResponded.is).at(-1)?.data.actions,
+            [],
+        )
+
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseGranted.create({
+                runId,
+                offerId: "offer-S1-next",
+                leaseId: "lease-S1-next",
+                workerId: "worker-1",
+                generation: 3,
+                route: {
+                    routeId: "codex-route",
+                    backend: "codex",
+                    model: "gpt-test",
+                },
+                request: {
+                    storyId: "S1",
+                    prompt: "retry S1",
+                    retries: 0,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+        env.deliverSemanticEvent(
+            factory,
+            StoryRouted.create({
+                storyId: "S1",
+                backend: "claude",
+                model: "sonnet",
+                runId,
+                leaseId: "lease-S1-next",
+                generation: 3,
+            }),
+        )
+        requestConversation(env, operator, runId, "broker-route-locked")
+        await dialogue.idle()
+        assert.deepEqual(
+            env.events.filter(ConversationResponded.is).at(-1)?.data.actions,
+            [],
+        )
+    })
+
+    it("source-binds graph control and keeps the request-time graph version on an add-only delegation", async () => {
+        const operator = source("operator")
+        const board = source("board")
+        const impersonator = source("board")
+        let resolveResponse!: (value: string) => void
+        let markStarted!: () => void
+        const started = new Promise<void>((resolve) => {
+            markStarted = resolve
+        })
+        let prompt = ""
+        const dialogue = new DialogueAgent({
+            runId: "run-delegation",
+            operatorAuthority: operator,
+            controlAuthority: board,
+            responder: async (input) => {
+                prompt = input.userPrompt
+                markStarted()
+                return new Promise<string>((resolve) => {
+                    resolveResponse = resolve
+                })
+            },
+        })
+        const env = joinWithCapture(dialogue)
+        env.deliverSemanticEvent(
+            impersonator,
+            RunStarted.create({
+                project: "forged",
+                storyCount: 99,
+                storyIds: ["FORGED"],
+                graphVersion: 99,
+                coordinationMode: "collective",
+            }),
+        )
+        env.deliverSemanticEvent(
+            board,
+            RunStarted.create({
+                project: "delegation",
+                storyCount: 2,
+                storyIds: ["S1", "S2"],
+                graphVersion: 7,
+                coordinationMode: "collective",
+            }),
+        )
+        env.deliverSemanticEvent(
+            operator,
+            ConversationRequested.create({
+                runId: "run-delegation",
+                messageId: "message-delegate",
+                text: "Add the compatibility work we just identified.",
+                source: "user",
+            }),
+        )
+        await started
+        assert.match(prompt, /DELEGATION: available/)
+        assert.match(prompt, /GRAPH VERSION: 7/)
+        assert.match(prompt, /KNOWN STORY IDS: S1, S2/)
+        assert.doesNotMatch(prompt, /FORGED/)
+
+        // The exact Board advances while the model is answering. The proposal
+        // must retain v7, which is the state represented in its prompt.
+        env.deliverSemanticEvent(
+            board,
+            RuntimeReplanApplied.create({
+                runId: "run-delegation",
+                proposalId: "worker-proposal",
+                sourceStoryId: "S1",
+                leaseId: "lease-S1",
+                generation: 1,
+                baseGraphVersion: 7,
+                previousGraphVersion: 7,
+                graphVersion: 8,
+                currentGraphVersion: 8,
+                reason: "worker discovered a prerequisite",
+                mutation: {
+                    addedStories: [runtimeStory("S3", ["S1"])],
+                    removedStoryIds: [],
+                    modifiedDeps: {},
+                },
+            }),
+        )
+        resolveResponse(JSON.stringify({
+            message: "I proposed the compatibility implementation as new work.",
+            messages: [],
+            delegation: {
+                reason: "The user requested the missing compatibility layer.",
+                stories: [
+                    {
+                        id: "S4",
+                        title: "Compatibility layer",
+                        description: "Implement the compatibility adapter.",
+                        depends_on: ["S1"],
+                        acceptance: ["The old and new formats both work."],
+                        tests: ["npm test -- compatibility"],
+                    },
+                ],
+            },
+        }))
+        await dialogue.idle()
+
+        const proposals = env.events.filter(ConversationDelegationProposed.is)
+        assert.equal(proposals.length, 1)
+        assert.equal(proposals[0]!.data.messageId, "message-delegate")
+        assert.equal(proposals[0]!.data.baseGraphVersion, 7)
+        assert.equal(
+            proposals[0]!.data.proposalId,
+            conversationDelegationProposalId(
+                "run-delegation",
+                "message-delegate",
+            ),
+        )
+        assert.deepEqual(proposals[0]!.data.addedStories, [
+            {
+                id: "S4",
+                title: "Compatibility layer",
+                description: "Implement the compatibility adapter.",
+                dependsOn: ["S1"],
+                acceptance: ["The old and new formats both work."],
+                tests: ["npm test -- compatibility"],
+            },
+        ])
+    })
+
+    it("does not delegate without an exact active Board snapshot or after completion", async () => {
+        const operator = source("operator")
+        const board = source("board")
+        const impersonator = source("board")
+        const prompts: string[] = []
+        const dialogue = new DialogueAgent({
+            runId: "run-closed-delegation",
+            operatorAuthority: operator,
+            controlAuthority: board,
+            responder: async (input) => {
+                prompts.push(input.userPrompt)
+                return validDelegationResponse(`S${prompts.length}`)
+            },
+        })
+        const env = joinWithCapture(dialogue)
+        env.deliverSemanticEvent(
+            impersonator,
+            RunStarted.create({
+                project: "forged",
+                storyCount: 1,
+                storyIds: ["S0"],
+                graphVersion: 3,
+                coordinationMode: "collective",
+            }),
+        )
+        requestConversation(env, operator, "run-closed-delegation", "before")
+        await dialogue.idle()
+        assert.match(prompts[0]!, /DELEGATION: unavailable/)
+        assert.equal(env.events.filter(ConversationDelegationProposed.is).length, 0)
+
+        env.deliverSemanticEvent(
+            board,
+            RunStarted.create({
+                project: "real",
+                storyCount: 1,
+                storyIds: ["S0"],
+                graphVersion: 3,
+                coordinationMode: "collective",
+            }),
+        )
+        env.deliverSemanticEvent(
+            board,
+            RunCompleted.create({
+                runId: "run-closed-delegation",
+                success: true,
+                completedStories: ["S0"],
+                failedStories: [],
+                totalDurationSecs: 1,
+                totalAttempts: 1,
+                abortReason: null,
+            }),
+        )
+        requestConversation(env, operator, "run-closed-delegation", "after")
+        await dialogue.idle()
+        assert.match(prompts[1]!, /DELEGATION: unavailable/)
+        assert.equal(env.events.filter(ConversationDelegationProposed.is).length, 0)
+    })
+
+    it("advances CAS without projecting an older replay mutation", async () => {
+        const operator = source("operator")
+        const board = source("board")
+        let prompt = ""
+        const dialogue = new DialogueAgent({
+            runId: "run-historical-replay",
+            operatorAuthority: operator,
+            controlAuthority: board,
+            responder: async (input) => {
+                prompt = input.userPrompt
+                return JSON.stringify({
+                    message: "The current graph snapshot is available.",
+                    messages: [],
+                    delegation: null,
+                })
+            },
+        })
+        const env = joinWithCapture(dialogue)
+        env.deliverSemanticEvent(
+            board,
+            RunStarted.create({
+                project: "replay",
+                storyCount: 2,
+                storyIds: ["S1", "S2"],
+                graphVersion: 8,
+                coordinationMode: "collective",
+            }),
+        )
+        env.deliverSemanticEvent(
+            board,
+            RuntimeReplanApplied.create({
+                runId: "run-historical-replay",
+                proposalId: "historical-v7",
+                sourceStoryId: "S0",
+                leaseId: "lease-S0",
+                generation: 1,
+                baseGraphVersion: 6,
+                previousGraphVersion: 6,
+                graphVersion: 7,
+                currentGraphVersion: 10,
+                reason: "historical replay",
+                mutation: {
+                    addedStories: [runtimeStory("OLD", [])],
+                    removedStoryIds: ["S2"],
+                    modifiedDeps: {},
+                },
+            }),
+        )
+        requestConversation(
+            env,
+            operator,
+            "run-historical-replay",
+            "inspect-replay",
+        )
+        await dialogue.idle()
+
+        assert.match(prompt, /GRAPH VERSION: 10/)
+        assert.match(prompt, /KNOWN STORY IDS: S1, S2/)
+        assert.doesNotMatch(prompt, /KNOWN STORY IDS:.*OLD/)
     })
 
     it("measures attributable provider failures and agent-owned timeouts once", async () => {
@@ -288,6 +684,56 @@ describe("DialogueAgent", () => {
         assert.equal(abortEnv.events.filter(ConversationFailed.is).length, 0)
     })
 })
+
+function requestConversation(
+    env: CapturedEnvironment,
+    operator: Participant,
+    runId: string,
+    messageId: string,
+): void {
+    env.deliverSemanticEvent(
+        operator,
+        ConversationRequested.create({
+            runId,
+            messageId,
+            text: "Please add the required work.",
+            source: "user",
+        }),
+    )
+}
+
+function validDelegationResponse(id: string): string {
+    return JSON.stringify({
+        message: "I proposed one implementation story.",
+        messages: [],
+        delegation: {
+            reason: "Additional implementation is required.",
+            stories: [
+                {
+                    id,
+                    title: `Story ${id}`,
+                    description: `Implement ${id}.`,
+                    depends_on: [],
+                    acceptance: [`${id} works.`],
+                    tests: ["npm test"],
+                },
+            ],
+        },
+    })
+}
+
+function runtimeStory(id: string, dependsOn: string[]) {
+    return {
+        id,
+        priority: 10,
+        title: `Runtime ${id}`,
+        description: `Implement ${id}.`,
+        dependsOn,
+        retries: 1,
+        acceptance: [`${id} works.`],
+        tests: ["npm test"],
+    }
+}
 
 function measuredInvocation(): DialogueResponderInvocation {
     return {

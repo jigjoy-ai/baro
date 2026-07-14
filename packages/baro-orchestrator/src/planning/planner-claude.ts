@@ -7,6 +7,8 @@
 import { execFile } from "child_process"
 import { promisify } from "util"
 
+import { harnessChildEnvironment } from "../harness-environment.js"
+
 import {
     PLANNER_SYSTEM_PROMPT,
     buildIntakePrompt,
@@ -82,6 +84,7 @@ export async function runPlannerClaude(
         ],
         {
             cwd: opts.cwd,
+            env: harnessChildEnvironment(),
             timeout: opts.timeoutMs ?? effortTimeoutMs(opts.effort),
             maxBuffer: 16 * 1024 * 1024,
         },
@@ -116,6 +119,7 @@ export async function runClaudeIntake(opts: RunPlannerClaudeOptions) {
         ],
         {
             cwd: opts.cwd,
+            env: harnessChildEnvironment(),
             timeout: Math.min(opts.timeoutMs ?? effortTimeoutMs(opts.effort), 180_000),
             maxBuffer: 2 * 1024 * 1024,
         },

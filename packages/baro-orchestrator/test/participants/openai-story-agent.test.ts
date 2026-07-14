@@ -14,6 +14,9 @@ import {
 import { OpenAIStoryAgent } from "../../src/participants/openai-story-agent.js"
 import {
     AgentResult,
+    AgentTargetedMessage,
+    AgentUserMessage,
+    Critique,
     RuntimeReplanApplied,
     RuntimeReplanProposed,
     RuntimeReplanRejected,
@@ -23,6 +26,202 @@ import {
 import { captureEnv, source, withTempDir } from "./helpers.js"
 
 describe("OpenAIStoryAgent", () => {
+    it("waits for a delayed authoritative review instead of completing on quiet", async () => {
+        await withTempDir("openai-story-agent-review-delay-", async (dir) => {
+            const critic = source("critic")
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "story-reviewed-delay",
+                    prompt: "finish the reviewed story",
+                    cwd: dir,
+                    retries: 0,
+                    quietTimeoutMs: 1,
+                    maxTurns: 1,
+                    requiresQualityReview: true,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 1,
+                    perRoundTimeoutSecs: 1,
+                    turnReviewAuthority: critic,
+                    turnReviewTimeoutMs: 250,
+                },
+            )
+            stubInferenceRounds(agent, [
+                [ModelMessageItem.rehydrate({ text: "candidate is ready" })],
+            ])
+            const env = captureEnv()
+            agent.join(env)
+
+            const outcomePromise = agent.run(env)
+            const [terminal] = await waitForCount(env.events, AgentResult.is, 1)
+            assert.ok(terminal?.data.terminalId)
+
+            // This is deliberately much longer than the legacy quiet window.
+            await delay(25)
+            assert.equal(env.events.some(StoryResult.is), false)
+
+            env.deliverSemanticEvent(
+                critic,
+                Critique.create({
+                    agentId: agent.id,
+                    terminalId: terminal.data.terminalId,
+                    verdict: "pass",
+                    reasoning: "all acceptance criteria pass",
+                    violatedCriteria: [],
+                    turn: 1,
+                    modelUsed: "test-critic",
+                }),
+            )
+
+            const outcome = await outcomePromise
+            assert.equal(outcome.success, true)
+            assert.equal(env.events.filter(StoryResult.is).length, 1)
+            agent.leave(env)
+        })
+    })
+
+    it("continues a failed review in the same context and ignores stale or unauthorized verdicts", async () => {
+        await withTempDir("openai-story-agent-review-continuation-", async (dir) => {
+            const critic = source("critic")
+            const attacker = source("attacker")
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "story-reviewed-continuation",
+                    prompt: "finish the reviewed story",
+                    cwd: dir,
+                    runId: "run-reviewed",
+                    leaseId: "lease-reviewed",
+                    generation: 3,
+                    retries: 0,
+                    quietTimeoutMs: 1,
+                    maxTurns: 2,
+                    requiresQualityReview: true,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 1,
+                    perRoundTimeoutSecs: 1,
+                    turnReviewAuthority: critic,
+                    turnReviewTimeoutMs: 250,
+                },
+            )
+            const contexts = stubInferenceRounds(agent, [
+                [ModelMessageItem.rehydrate({ text: "candidate one" })],
+                [ModelMessageItem.rehydrate({ text: "candidate two" })],
+            ])
+            const env = captureEnv()
+            agent.join(env)
+
+            const outcomePromise = agent.run(env)
+            const [first] = await waitForCount(env.events, AgentResult.is, 1)
+            assert.ok(first?.data.terminalId)
+            env.deliverSemanticEvent(
+                critic,
+                Critique.create({
+                    agentId: agent.id,
+                    terminalId: first.data.terminalId,
+                    verdict: "fail",
+                    reasoning: "the regression test still fails",
+                    violatedCriteria: ["regression test passes"],
+                    turn: 1,
+                    modelUsed: "test-critic",
+                }),
+            )
+
+            const terminals = await waitForCount(env.events, AgentResult.is, 2)
+            const second = terminals[1]
+            assert.ok(second?.data.terminalId)
+            assert.notEqual(second.data.terminalId, first.data.terminalId)
+            assert.equal(contexts.length, 2)
+            assert.equal(contexts[1], contexts[0])
+            const continuedContext = JSON.stringify(contexts[1]!.toJSON())
+            assert.match(continuedContext, /candidate one/)
+            assert.match(continuedContext, /authoritative review rejected/i)
+            assert.match(continuedContext, /the regression test still fails/)
+            assert.match(continuedContext, /regression test passes/)
+
+            // None of these may release the currently reviewed second turn.
+            deliverReview(critic, env, agent.id, first.data.terminalId, "pass", 1)
+            deliverReview(attacker, env, agent.id, second.data.terminalId, "pass", 2)
+            deliverReview(
+                critic,
+                env,
+                agent.id,
+                `${second.data.terminalId}:wrong`,
+                "pass",
+                2,
+            )
+            await delay(20)
+            assert.equal(env.events.some(StoryResult.is), false)
+
+            deliverReview(critic, env, agent.id, second.data.terminalId, "pass", 2)
+            const outcome = await outcomePromise
+            assert.equal(outcome.success, true)
+            assert.equal(outcome.attempts, 1)
+            assert.equal(env.events.filter(AgentResult.is).length, 2)
+            assert.equal(env.events.filter(StoryResult.is).length, 1)
+
+            // Replayed final verdicts are inert after completion.
+            deliverReview(critic, env, agent.id, second.data.terminalId, "pass", 2)
+            await new Promise<void>((resolve) => setImmediate(resolve))
+            assert.equal(env.events.filter(StoryResult.is).length, 1)
+            agent.leave(env)
+        })
+    })
+
+    it("consumes targeted messages queued before its wait in FIFO order", async () => {
+        await withTempDir("openai-story-agent-message-fifo-", async (dir) => {
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "story-message-fifo",
+                    prompt: "start the story",
+                    cwd: dir,
+                    retries: 0,
+                    quietTimeoutMs: 2,
+                    maxTurns: 3,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 1,
+                    perRoundTimeoutSecs: 1,
+                },
+            )
+            stubInferenceRounds(agent, [
+                [ModelMessageItem.rehydrate({ text: "candidate one" })],
+                [ModelMessageItem.rehydrate({ text: "candidate two" })],
+                [ModelMessageItem.rehydrate({ text: "candidate three" })],
+            ])
+            const env = captureEnv()
+            agent.join(env)
+
+            for (const text of ["first queued correction", "second queued correction"]) {
+                env.deliverSemanticEvent(
+                    source("operator"),
+                    AgentTargetedMessage.create({
+                        recipientId: agent.id,
+                        text,
+                        metadata: {},
+                    }),
+                )
+            }
+
+            const outcome = await agent.run(env)
+            assert.equal(outcome.success, true)
+            assert.equal(env.events.filter(AgentResult.is).length, 3)
+            assert.deepEqual(
+                env.events.filter(AgentUserMessage.is).map((event) => event.data.text),
+                [
+                    "start the story",
+                    "first queued correction",
+                    "second queued correction",
+                ],
+            )
+            assert.equal(env.events.filter(StoryResult.is).length, 1)
+            agent.leave(env)
+        })
+    })
+
     it("emits a successful terminal StoryResult from a fake OpenAI-compatible backend", async () => {
         await withTempDir("openai-story-agent-", async (dir) => {
             const cwd = join(dir, "cwd")
@@ -185,6 +384,52 @@ describe("OpenAIStoryAgent", () => {
         })
     })
 
+    it("hands exhausted transport recovery to the Board without consuming story retries", async () => {
+        await withTempDir("openai-story-agent-transport-", async (dir) => {
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "story-openai-transport",
+                    prompt: "finish the story",
+                    cwd: dir,
+                    retries: 2,
+                    retryDelayMs: 0,
+                    quietTimeoutMs: 1,
+                    maxTurns: 1,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 1,
+                    perRoundTimeoutSecs: 1,
+                    transportRetriesPerRound: 0,
+                },
+            )
+            let requests = 0
+            Object.defineProperty(agent, "runRound", {
+                value: () => {
+                    requests += 1
+                    throw Object.assign(new Error("socket hang up"), {
+                        code: "ECONNRESET",
+                    })
+                },
+            })
+            const env = captureEnv()
+
+            const outcome = await agent.run(env)
+
+            assert.equal(requests, 1)
+            assert.equal(outcome.success, false)
+            assert.equal(outcome.attempts, 1)
+            assert.deepEqual(outcome.failure, {
+                kind: "transport",
+                code: "connection_reset",
+            })
+            assert.deepEqual(
+                env.events.find(StoryResult.is)?.data.failure,
+                outcome.failure,
+            )
+        })
+    })
+
     it("enforces the story attempt timeout across a pending native inference", async () => {
         await withTempDir("openai-story-agent-attempt-timeout-", async (dir) => {
             const agent = new OpenAIStoryAgent(
@@ -329,14 +574,16 @@ describe("OpenAIStoryAgent", () => {
                     prompt: "run a command",
                     cwd: dir,
                     retries: 0,
-                    timeoutSecs: 1,
+                    // Semantic fixture: leave child-process scheduling headroom
+                    // when the complete suite runs heavily in parallel.
+                    timeoutSecs: 60,
                     quietTimeoutMs: 1,
                     maxTurns: 1,
                 },
                 {
                     model: "fake-model",
                     maxRoundsPerTurn: 2,
-                    perRoundTimeoutSecs: 1,
+                    perRoundTimeoutSecs: 60,
                 },
             )
             const contexts = stubInferenceRounds(agent, [
@@ -371,14 +618,16 @@ describe("OpenAIStoryAgent", () => {
                     prompt: "run commands",
                     cwd: dir,
                     retries: 0,
-                    timeoutSecs: 1,
+                    // Semantic fixture: leave child-process scheduling headroom
+                    // when the complete suite runs heavily in parallel.
+                    timeoutSecs: 60,
                     quietTimeoutMs: 1,
                     maxTurns: 1,
                 },
                 {
                     model: "fake-model",
                     maxRoundsPerTurn: 2,
-                    perRoundTimeoutSecs: 1,
+                    perRoundTimeoutSecs: 60,
                 },
             )
             const contexts = stubInferenceRounds(agent, [
@@ -966,6 +1215,32 @@ describe("OpenAIStoryAgent", () => {
     })
 })
 
+function deliverReview(
+    authority: ReturnType<typeof source>,
+    env: ReturnType<typeof captureEnv>,
+    agentId: string,
+    terminalId: string,
+    verdict: "pass" | "fail",
+    turn: number,
+): void {
+    env.deliverSemanticEvent(
+        authority,
+        Critique.create({
+            agentId,
+            terminalId,
+            verdict,
+            reasoning: verdict === "pass" ? "candidate passes" : "candidate fails",
+            violatedCriteria: verdict === "pass" ? [] : ["tests pass"],
+            turn,
+            modelUsed: "test-critic",
+        }),
+    )
+}
+
+function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 function runtimeMutation(): RuntimeReplanMutation {
     return {
         addedStories: [
@@ -1075,6 +1350,19 @@ async function waitFor<T>(
         await new Promise<void>((resolve) => setImmediate(resolve))
     }
     assert.fail("timed out waiting for semantic event")
+}
+
+async function waitForCount<T>(
+    events: readonly unknown[],
+    guard: (event: unknown) => event is T,
+    count: number,
+): Promise<T[]> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+        const matches = events.filter(guard)
+        if (matches.length >= count) return matches
+        await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    assert.fail(`timed out waiting for ${count} semantic events`)
 }
 
 async function startFakeOpenAIServer(): Promise<Server> {

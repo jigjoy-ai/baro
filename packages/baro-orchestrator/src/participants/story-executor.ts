@@ -8,6 +8,7 @@
 
 import { AgenticEnvironment, type Participant } from "@mozaik-ai/core"
 
+import type { GatewayBillingCoordinator } from "../billing/index.js"
 import type { StorySpawnRequestData } from "../semantic-events.js"
 import type { StoryRoute } from "../routing.js"
 import { CodexStoryAgent } from "./codex-story-agent.js"
@@ -26,11 +27,17 @@ export interface StoryExecOpts {
     runtimeReplanDecisionAuthority?: Participant
     /** Bound for a native story tool to receive its correlated decision. */
     runtimeReplanDecisionTimeoutMs?: number
+    /** Exact Critic participant whose terminal-turn verdict may resume a
+     * continuation-capable worker. */
+    turnReviewAuthority?: Participant
+    turnReviewTimeoutMs?: number
     /** Exact run-scoped collaboration transport for native StoryAgent tools. */
     collaboration?: Readonly<{
         commandPath: string
         sessionDir: string
     }>
+    /** Exact run-scoped trusted Gateway billing interceptor. */
+    billingCoordinator?: GatewayBillingCoordinator
     /**
      * Collective executors must synchronously register the exact Participant
      * that will source StoryResult before emitting a result or returning from
@@ -134,6 +141,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                           retries: req.retries,
                           timeoutSecs: req.timeoutSecs,
                           graphVersion: req.graphVersion,
+                          requiresQualityReview: req.requiresQualityReview,
                           ...correlation,
                       },
                       {
@@ -144,7 +152,10 @@ export class LocalStoryExecutor implements StoryExecutor {
                               opts.runtimeReplanDecisionAuthority,
                           runtimeReplanDecisionTimeoutMs:
                               opts.runtimeReplanDecisionTimeoutMs,
+                          turnReviewAuthority: opts.turnReviewAuthority,
+                          turnReviewTimeoutMs: opts.turnReviewTimeoutMs,
                           collaboration: opts.collaboration,
+                          billingCoordinator: opts.billingCoordinator,
                       },
                   )
                 : new StoryAgent({
@@ -156,6 +167,9 @@ export class LocalStoryExecutor implements StoryExecutor {
                       effort: opts.effort,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
+                      requiresQualityReview: req.requiresQualityReview,
+                      turnReviewAuthority: opts.turnReviewAuthority,
+                      turnReviewTimeoutMs: opts.turnReviewTimeoutMs,
                       ...correlation,
                   })
 

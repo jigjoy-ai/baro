@@ -71,7 +71,7 @@ describe("mapCodexEvent", () => {
         assert.ok(system)
         assert.equal(system.data.agentId, agentId)
         assert.equal(system.data.subtype, "thread.started")
-        assert.equal(system.data.raw, event)
+        assert.deepEqual(system.data.raw, event)
     })
 
     it("maps thread.completed to CodexSystem", () => {
@@ -82,7 +82,7 @@ describe("mapCodexEvent", () => {
         assert.ok(system)
         assert.equal(system.data.agentId, agentId)
         assert.equal(system.data.subtype, "thread.completed")
-        assert.equal(system.data.raw, event)
+        assert.deepEqual(system.data.raw, event)
     })
 
     it("maps turn lifecycle events to CodexTurnEvent phases", () => {
@@ -94,7 +94,7 @@ describe("mapCodexEvent", () => {
             assert.ok(turn)
             assert.equal(turn.data.agentId, agentId)
             assert.equal(turn.data.phase, phase)
-            assert.equal(turn.data.raw, event)
+            assert.deepEqual(turn.data.raw, event)
         }
     })
 
@@ -106,7 +106,7 @@ describe("mapCodexEvent", () => {
         assert.ok(system)
         assert.equal(system.data.agentId, agentId)
         assert.equal(system.data.subtype, "error")
-        assert.equal(system.data.raw, event)
+        assert.deepEqual(system.data.raw, event)
     })
 
     it("maps item.started to CodexItemEvent only", () => {
@@ -274,6 +274,6 @@ describe("mapCodexEvent", () => {
         assert.ok(unknown)
         assert.equal(unknown.data.agentId, agentId)
         assert.equal(unknown.data.codexType, "unexpected.event")
-        assert.equal(unknown.data.raw, event)
+        assert.deepEqual(unknown.data.raw, event)
     })
 })

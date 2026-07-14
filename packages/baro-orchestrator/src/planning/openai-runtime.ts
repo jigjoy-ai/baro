@@ -19,9 +19,30 @@ import {
     type Tool,
 } from "@mozaik-ai/core"
 
+import type {
+    BillingInvocationContext,
+    GatewayBillingCoordinator,
+    GatewayBillingDispatch,
+} from "../billing/index.js"
+import type { UnknownMetricReason } from "../model-telemetry.js"
+
 export interface InferenceRound {
     items: ContextItem[]
     usage: TokenUsage | undefined
+    /** Present only for a call correlated through the trusted Baro Gateway. */
+    billingInvocationId: string | null
+}
+
+export type InferenceBillingContext = Omit<
+    BillingInvocationContext,
+    "backend" | "requestedModel"
+>
+
+export interface InferenceRoundOptions {
+    readonly billing?: {
+        readonly coordinator: GatewayBillingCoordinator
+        readonly context: InferenceBillingContext
+    }
 }
 
 /**
@@ -92,15 +113,30 @@ export class GenericOpenAIModel implements GenerativeModel {
 // base URL at construction. The empty key is the default env-driven endpoint.
 const chatRuntimeCache = new Map<string, OpenAICompatibleChatCompletions>()
 
-function getChatRuntime(conn?: OpenAIConnection): OpenAICompatibleChatCompletions {
-    const key = `${conn?.baseURL ?? ""}|${conn?.apiKey ?? ""}`
+function getChatRuntime(
+    conn?: OpenAIConnection,
+    cache = true,
+): OpenAICompatibleChatCompletions {
+    const key = [
+        conn?.baseURL ?? "",
+        conn?.apiKey ?? "",
+        JSON.stringify(conn?.extraBody ?? {}),
+    ].join("|")
+    if (!cache) {
+        return new OpenAICompatibleChatCompletions({
+            baseURL: conn?.baseURL,
+            apiKey: conn?.apiKey,
+            extraBody: conn?.extraBody,
+        })
+    }
     let rt = chatRuntimeCache.get(key)
     if (!rt) {
         rt =
-            conn?.baseURL || conn?.apiKey
+            conn?.baseURL || conn?.apiKey || conn?.extraBody
                 ? new OpenAICompatibleChatCompletions({
                       baseURL: conn.baseURL,
                       apiKey: conn.apiKey,
+                      extraBody: conn.extraBody,
                   })
                 : new OpenAICompatibleChatCompletions()
         chatRuntimeCache.set(key, rt)
@@ -130,15 +166,168 @@ function isOpenAINativeModel(name: string): boolean {
 export async function runInferenceRound(
     context: ModelContext,
     model: GenerativeModel,
+    options: InferenceRoundOptions = {},
 ): Promise<InferenceRound> {
     const conn = (model as Partial<GenericOpenAIModel>).connection
     const name = model.specification?.name ?? ""
-    const runtime =
-        isOpenAINativeModel(name) && !conn?.baseURL
-            ? getResponsesRuntime()
-            : getChatRuntime(conn)
-    const response = await runtime.infer(new InferenceRequest(model, context))
-    return { items: response.contextItems, usage: response.tokenUsage }
+    const endpointBaseUrl = conn?.baseURL ?? process.env.OPENAI_BASE_URL
+    const endpointApiKey = conn?.apiKey ?? process.env.OPENAI_API_KEY
+    // Construct the Mozaik request before allocating billing correlation so a
+    // local validation error cannot leave an invocation orphaned in the feed.
+    const request = new InferenceRequest(model, context)
+    const dispatch = options.billing?.coordinator.prepareDispatch(
+        endpointBaseUrl,
+        endpointApiKey,
+        {
+            ...options.billing.context,
+            backend: "openai",
+            requestedModel: name || null,
+        },
+    ) ?? null
+    const extraBody = billingExtraBody(conn?.extraBody, dispatch)
+    const startedAt = Date.now()
+
+    try {
+        const response =
+            isOpenAINativeModel(name) && !conn?.baseURL
+                ? dispatch
+                    ? await inferResponsesWithExtension(
+                          getResponsesRuntime(),
+                          request,
+                          dispatch.requestExtension,
+                      )
+                    : await getResponsesRuntime().infer(request)
+                : await inferChatRound(
+                      request,
+                      {
+                          ...conn,
+                          ...(Object.keys(extraBody).length > 0
+                              ? { extraBody }
+                              : {}),
+                      },
+                      dispatch !== null,
+                  )
+        if (dispatch && options.billing) {
+            await options.billing.coordinator.observeRunner(dispatch, {
+                status: "succeeded",
+                durationMs: Date.now() - startedAt,
+                usage: response.tokenUsage,
+            })
+        }
+        return {
+            items: response.contextItems,
+            usage: response.tokenUsage,
+            billingInvocationId: dispatch?.record.invocationId ?? null,
+        }
+    } catch (error) {
+        if (dispatch && options.billing) {
+            const reason = inferenceFailureReason(error)
+            await options.billing.coordinator.observeRunner(dispatch, {
+                status: reason === "timed_out" ? "timed_out" : "failed",
+                durationMs: Date.now() - startedAt,
+                missingReason: reason,
+            })
+        }
+        throw error
+    }
+}
+
+async function inferChatRound(
+    request: InferenceRequest,
+    connection: OpenAIConnection,
+    billed: boolean,
+) {
+    const runtime = getChatRuntime(connection, !billed)
+    if (billed) disableOpenAiSdkRetries(runtime)
+    return runtime.infer(request)
+}
+
+function billingExtraBody(
+    configured: Record<string, unknown> | undefined,
+    dispatch: GatewayBillingDispatch | null,
+): Record<string, unknown> {
+    // `_baro_billing` is reserved. Static endpoint configuration cannot forge
+    // it or leak it to an arbitrary OpenAI-compatible provider.
+    const { _baro_billing: _reserved, ...safeConfigured } = configured ?? {}
+    return dispatch
+        ? { ...safeConfigured, ...dispatch.requestExtension }
+        : safeConfigured
+}
+
+/**
+ * Mozaik 3.12 does not yet expose request extensions on its Responses
+ * adapter. Reuse its own request construction and response mapping while
+ * inserting the one gateway-only field at this single interception point.
+ */
+async function inferResponsesWithExtension(
+    runtime: OpenAIResponses,
+    request: InferenceRequest,
+    extension: GatewayBillingDispatch["requestExtension"],
+): Promise<{ contextItems: ContextItem[]; tokenUsage: TokenUsage | undefined }> {
+    const internals = runtime as unknown as {
+        client: {
+            responses: {
+                create(body: Record<string, unknown>): Promise<unknown>
+            }
+        }
+        buildRequest(input: InferenceRequest): Record<string, unknown>
+        extractContextItems(response: unknown): ContextItem[]
+        extractTokenUsage(response: unknown): TokenUsage | undefined
+    }
+    if (
+        !internals.client?.responses ||
+        typeof internals.buildRequest !== "function" ||
+        typeof internals.extractContextItems !== "function" ||
+        typeof internals.extractTokenUsage !== "function"
+    ) {
+        throw new Error(
+            "Mozaik Responses runtime cannot attach trusted billing correlation",
+        )
+    }
+    disableOpenAiSdkRetries(runtime)
+    const response = await internals.client.responses.create({
+        ...internals.buildRequest(request),
+        ...extension,
+    })
+    return {
+        contextItems: internals.extractContextItems(response),
+        tokenUsage: internals.extractTokenUsage(response),
+    }
+}
+
+/**
+ * A billing invocation is one provider attempt. Baro owns higher-level retry
+ * policy and allocates a fresh invocation ID for each explicit reconnect; the
+ * OpenAI SDK's hidden HTTP retries would otherwise reuse one ID for multiple
+ * upstream calls. Mozaik 3.12 keeps the SDK client private, so this adapter is
+ * deliberately fail-closed and covered by a version-pinned integration test.
+ */
+function disableOpenAiSdkRetries(
+    runtime: OpenAICompatibleChatCompletions | OpenAIResponses,
+): void {
+    const internals = runtime as unknown as {
+        client?: { maxRetries?: number }
+    }
+    if (!internals.client || typeof internals.client.maxRetries !== "number") {
+        throw new Error(
+            "Mozaik OpenAI runtime cannot enforce one HTTP attempt per billing invocation",
+        )
+    }
+    internals.client.maxRetries = 0
+}
+
+function inferenceFailureReason(error: unknown): UnknownMetricReason {
+    if (typeof error !== "object" || error === null) return "not_reported"
+    const item = error as Record<string, unknown>
+    if (
+        item.name === "AbortError" ||
+        item.code === "ETIMEDOUT" ||
+        (typeof item.message === "string" &&
+            /(?:timed?\s*out|timeout)/i.test(item.message))
+    ) {
+        return "timed_out"
+    }
+    return "not_reported"
 }
 
 export class UsageAccumulator {

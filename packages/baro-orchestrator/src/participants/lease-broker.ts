@@ -21,6 +21,7 @@ import {
     type WorkLeaseGrantedData,
     type WorkOfferedData,
     type WorkerCapabilityAdvertisedData,
+    type StoryFailureData,
 } from "../semantic-events.js"
 import {
     isValidWorkBidEstimate,
@@ -219,10 +220,19 @@ export class LeaseBroker extends SerializedObserver {
                     this.armLeaseTimer(lease, integrationTimeoutMs, "integration")
                 }
             } else {
-                if (isProviderCapacityFailure(event.data)) {
+                if (
+                    isProviderCapacityFailure(event.data) &&
+                    isPermanentCapacityFailure(event.data.failure?.code)
+                ) {
                     this.suppressLeaseRoute(lease)
                 }
-                this.release(event.data.storyId, "execution_failed")
+                this.release(
+                    event.data.storyId,
+                    event.data.failure &&
+                    !isSemanticWorkFailure(event.data.failure)
+                        ? "operational_failed"
+                        : "execution_failed",
+                )
             }
             return
         }
@@ -230,14 +240,19 @@ export class LeaseBroker extends SerializedObserver {
             if (
                 this.qualityAuthority !== null &&
                 context.source === this.qualityAuthority &&
-                event.data.status === "failed" &&
+                event.data.status !== "passed" &&
                 this.matchesLease(
                     event.data.storyId,
                     event.data.runId,
                     event.data.leaseId,
                 )
             ) {
-                this.release(event.data.storyId, "quality_failed")
+                this.release(
+                    event.data.storyId,
+                    event.data.status === "inconclusive"
+                        ? "quality_inconclusive"
+                        : "quality_failed",
+                )
             }
             return
         }
@@ -632,7 +647,7 @@ export class LeaseBroker extends SerializedObserver {
 
     private release(
         storyId: string,
-        reason: "integrated" | "execution_failed" | "quality_failed" | "integration_failed" | "spawn_failed" | "aborted" | "expired",
+        reason: "integrated" | "execution_failed" | "operational_failed" | "quality_failed" | "quality_inconclusive" | "integration_failed" | "spawn_failed" | "aborted" | "expired",
     ): void {
         const lease = this.activeByStory.get(storyId)
         if (!lease || !this.activeLeaseIds.delete(lease.leaseId)) return
@@ -713,6 +728,17 @@ export class LeaseBroker extends SerializedObserver {
             env.deliverSemanticEvent(this, event)
         }
     }
+}
+
+function isPermanentCapacityFailure(code: unknown): boolean {
+    return code === "session_limit" || code === "quota_exhausted"
+}
+
+function isSemanticWorkFailure(failure: StoryFailureData): boolean {
+    return failure.kind === "execution" ||
+        (failure.kind === "verification" &&
+            (failure.code === "acceptance_not_met" ||
+                failure.code === "canonical_check_failed"))
 }
 
 function validAdvertisement(item: WorkerCapabilityAdvertisedData): boolean {

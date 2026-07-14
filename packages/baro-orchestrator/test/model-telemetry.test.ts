@@ -97,6 +97,13 @@ describe("model telemetry metrics", () => {
             ),
             knownMetric(11, "provider_response"),
         )
+        assert.deepEqual(
+            mergeMetric(
+                knownMetric(0, "provider_response"),
+                knownMetric(400, "gateway_receipt"),
+            ),
+            knownMetric(400, "gateway_receipt"),
+        )
     })
 
     it("marks equal-authority disagreement as unknown instead of guessing", () => {

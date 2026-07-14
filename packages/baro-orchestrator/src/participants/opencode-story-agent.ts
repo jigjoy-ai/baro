@@ -12,9 +12,16 @@ import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
     AgentState,
+    OpenCodeUnknownEvent,
     StoryResult,
     type AgentPhase,
+    type StoryFailureData,
 } from "../semantic-events.js"
+import {
+    boardOwnsCliRecovery,
+    describeCliStoryFailure,
+    isCliFailureSignal,
+} from "./cli-story-failure.js"
 import {
     OpenCodeCliParticipant,
     type OpenCodeRunSummary,
@@ -53,6 +60,7 @@ export interface OpenCodeStoryOutcome {
     durationSecs: number
     finalSummary: OpenCodeRunSummary | null
     error: string | null
+    failure?: StoryFailureData
 }
 
 export class OpenCodeStoryAgent extends BaseObserver {
@@ -75,6 +83,7 @@ export class OpenCodeStoryAgent extends BaseObserver {
     private currentOpenCode: OpenCodeCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
+    private currentFailureSignals: unknown[] = []
     private resolveDone!: (outcome: OpenCodeStoryOutcome) => void
     public readonly done: Promise<OpenCodeStoryOutcome>
 
@@ -139,9 +148,16 @@ export class OpenCodeStoryAgent extends BaseObserver {
 
     /** No-op: OpenCode run is one-shot — no stdin channel for mid-flight messages. */
     override async onExternalEvent(
-        _source: Participant,
-        _event: SemanticEvent<unknown>,
+        source: Participant,
+        event: SemanticEvent<unknown>,
     ): Promise<void> {
+        if (
+            source === this.currentOpenCode &&
+            OpenCodeUnknownEvent.is(event) &&
+            isCliFailureSignal(event.data.raw, event.data.openCodeType)
+        ) {
+            this.currentFailureSignals.push(event.data.raw)
+        }
     }
 
     abort(): void {
@@ -153,6 +169,8 @@ export class OpenCodeStoryAgent extends BaseObserver {
         const maxAttempts = this.spec.retries + 1
         let lastSummary: OpenCodeRunSummary | null = null
         let lastError: string | null = null
+        let lastFailure: StoryFailureData | undefined
+        let attempts = 0
         let hardTimedOut = false
 
         const hardTimer =
@@ -167,6 +185,10 @@ export class OpenCodeStoryAgent extends BaseObserver {
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                    lastFailure = {
+                        kind: "infrastructure",
+                        code: "command_timeout",
+                    }
                     break
                 }
 
@@ -178,13 +200,19 @@ export class OpenCodeStoryAgent extends BaseObserver {
                     await setTimeoutPromise(this.spec.retryDelayMs)
                     if (hardTimedOut) {
                         lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                        lastFailure = {
+                            kind: "infrastructure",
+                            code: "command_timeout",
+                        }
                         break
                     }
                 }
 
+                attempts = attempt
                 const result = await this.runOneAttempt(attempt)
                 lastSummary = result.summary
                 lastError = result.error
+                lastFailure = result.failure
 
                 if (result.success) {
                     const durationSecs = Math.round(
@@ -205,8 +233,13 @@ export class OpenCodeStoryAgent extends BaseObserver {
 
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                    lastFailure = {
+                        kind: "infrastructure",
+                        code: "command_timeout",
+                    }
                     break
                 }
+                if (boardOwnsCliRecovery(result.failure)) break
             }
         } finally {
             if (hardTimer !== null) clearTimeout(hardTimer)
@@ -215,15 +248,27 @@ export class OpenCodeStoryAgent extends BaseObserver {
         const durationSecs = Math.round(
             (Date.now() - (this.startedAt ?? Date.now())) / 1000,
         )
-        this.transition("failed", `exhausted ${maxAttempts} attempts`)
-        this.emitStoryResult(false, maxAttempts, durationSecs, lastError)
+        this.transition(
+            "failed",
+            boardOwnsCliRecovery(lastFailure)
+                ? `operational failure after ${attempts} attempt(s)`
+                : `exhausted ${attempts}/${maxAttempts} attempts`,
+        )
+        this.emitStoryResult(
+            false,
+            attempts,
+            durationSecs,
+            lastError,
+            lastFailure,
+        )
         this.resolveDone({
             storyId: this.spec.id,
             success: false,
-            attempts: maxAttempts,
+            attempts,
             durationSecs,
             finalSummary: lastSummary,
             error: lastError,
+            ...(lastFailure ? { failure: lastFailure } : {}),
         })
     }
 
@@ -233,12 +278,21 @@ export class OpenCodeStoryAgent extends BaseObserver {
         success: boolean
         summary: OpenCodeRunSummary | null
         error: string | null
+        failure?: StoryFailureData
     }> {
         if (!this.envRef) {
-            return { success: false, summary: null, error: "no environment" }
+            return {
+                success: false,
+                summary: null,
+                ...describeCliStoryFailure(
+                    "no environment",
+                    { kind: "infrastructure", code: "process_spawn_failed" },
+                ),
+            }
         }
 
         this.transition("running", `attempt ${attempt}`)
+        this.currentFailureSignals = []
 
         const opencode = new OpenCodeCliParticipant(this.spec.id, {
             cwd: this.spec.cwd,
@@ -262,14 +316,23 @@ export class OpenCodeStoryAgent extends BaseObserver {
         } catch (e) {
             opencode.abort()
             const error = e instanceof Error ? e.message : String(e)
+            let stderrTail: string | null = null
             try {
-                await opencode.done
+                stderrTail = (await opencode.done).stderrTail
             } catch {
                 // ignore
             }
             opencode.leave(this.envRef)
             this.currentOpenCode = null
-            return { success: false, summary: null, error }
+            return {
+                success: false,
+                summary: null,
+                ...describeCliStoryFailure(
+                    error,
+                    { kind: "infrastructure", code: "command_timeout" },
+                    [...this.currentFailureSignals, stderrTail],
+                ),
+            }
         }
 
         opencode.leave(this.envRef)
@@ -279,24 +342,56 @@ export class OpenCodeStoryAgent extends BaseObserver {
         // empirically), so success needs positive evidence: the agent loop
         // finished (`sawStepFinish`) and at least one tool was invoked —
         // no tools ⇒ it answered in prose, not edits.
-        if (summary.exitCode !== 0 || summary.error != null) {
+        const failureSignals = [
+            ...this.currentFailureSignals,
+            summary.stderrTail,
+        ]
+        const reportedFailure = failureSignals.some((signal) =>
+            isCliFailureSignal(signal, ""),
+        )
+        if (
+            summary.exitCode !== 0 ||
+            summary.error != null ||
+            reportedFailure
+        ) {
             const reason = summary.error
                 ? summary.error.message
-                : `non-zero exit ${summary.exitCode}`
-            return { success: false, summary, error: reason }
+                : reportedFailure
+                  ? "opencode reported a failed turn"
+                  : `non-zero exit ${summary.exitCode}`
+            return {
+                success: false,
+                summary,
+                ...describeCliStoryFailure(
+                    reason,
+                    summary.error
+                        ? {
+                              kind: "infrastructure",
+                              code: "process_spawn_failed",
+                          }
+                        : { kind: "execution", code: "model_error" },
+                    failureSignals,
+                ),
+            }
         }
         if (!summary.sawStepFinish) {
             return {
                 success: false,
                 summary,
-                error: "opencode exited 0 but emitted no step_finish — the agent loop did not complete (likely a refusal or early abort)",
+                ...describeCliStoryFailure(
+                    "opencode exited 0 but emitted no step_finish — the agent loop did not complete (likely a refusal or early abort)",
+                    { kind: "execution", code: "model_error" },
+                ),
             }
         }
         if (summary.toolCallCount === 0) {
             return {
                 success: false,
                 summary,
-                error: "opencode exited 0 but invoked no tools — the agent answered in prose without editing the worktree, so the story is not verifiably done",
+                ...describeCliStoryFailure(
+                    "opencode exited 0 but invoked no tools — the agent answered in prose without editing the worktree, so the story is not verifiably done",
+                    { kind: "execution", code: "no_work_product" },
+                ),
             }
         }
 
@@ -308,6 +403,7 @@ export class OpenCodeStoryAgent extends BaseObserver {
         attempts: number,
         durationSecs: number,
         error: string | null,
+        failure?: StoryFailureData,
     ): void {
         if (!this.envRef) return
         this.envRef.deliverSemanticEvent(
@@ -318,6 +414,7 @@ export class OpenCodeStoryAgent extends BaseObserver {
                 attempts,
                 durationSecs,
                 error,
+                ...(failure ? { failure } : {}),
                 ...correlationOf(this.spec),
             }),
         )
@@ -346,10 +443,11 @@ function raceWithTimeout<T>(
 ): Promise<T> {
     let timer: ReturnType<typeof setTimeout>
     const timeout = new Promise<T>(
-        (_, rej) => { timer = setTimeout(() => rej(new Error(label)), ms) },
+        (_, rej) => {
+            timer = setTimeout(() => rej(new Error(label)), ms)
+        },
     )
-    return Promise.race([
-        p.then((v) => { clearTimeout(timer); return v }),
-        timeout,
-    ])
+    const settled = p.finally(() => clearTimeout(timer))
+    settled.catch(() => {})
+    return Promise.race([settled, timeout])
 }

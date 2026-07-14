@@ -9,6 +9,8 @@ import {
     type TokenUsage,
 } from "@mozaik-ai/core"
 
+import type { GatewayBillingCoordinator } from "../billing/index.js"
+import { harnessChildEnvironment } from "../harness-environment.js"
 import {
     GenericOpenAIModel,
     runInferenceRound,
@@ -42,6 +44,8 @@ export interface CreateDialogueResponderOptions {
     timeoutMs?: number
     claudeBin?: string
     openaiConnection?: OpenAIConnection
+    /** Trusted Gateway receipt correlation for OpenAI dialogue calls. */
+    billingCoordinator?: GatewayBillingCoordinator
     /** Narrow protocol-test seam; production uses the shared Mozaik runtime. */
     openaiRunRound?: typeof runInferenceRound
 }
@@ -141,7 +145,16 @@ function createOpenAIResponder(
     )
     model.setTools([])
     const genericEndpoint = Boolean(opts.openaiConnection?.baseURL)
-    const telemetry = openAITelemetryDescriptor(requestedModel)
+    const billingEnabled = Boolean(
+        opts.billingCoordinator?.trustsEndpoint(
+            opts.openaiConnection?.baseURL ?? process.env.OPENAI_BASE_URL,
+            opts.openaiConnection?.apiKey ?? process.env.OPENAI_API_KEY,
+        ),
+    )
+    const telemetry = openAITelemetryDescriptor(
+        requestedModel,
+        billingEnabled,
+    )
     const responder: DialogueResponder = async (input, signal) => {
         if (signal.aborted) throw abortError()
         const context = ModelContext.create(`dialogue:${input.messageId}`)
@@ -150,7 +163,27 @@ function createOpenAIResponder(
         let round: Awaited<ReturnType<typeof runInferenceRound>>
         try {
             round = await abortable(
-                (opts.openaiRunRound ?? runInferenceRound)(context, model),
+                (opts.openaiRunRound ?? runInferenceRound)(
+                    context,
+                    model,
+                    billingEnabled && opts.billingCoordinator
+                        ? {
+                              billing: {
+                                  coordinator: opts.billingCoordinator,
+                                  context: {
+                                      runId: input.runId,
+                                      phase: "dialogue",
+                                      storyId: null,
+                                      leaseId: null,
+                                      generation: null,
+                                      attempt: null,
+                                      turn: 1,
+                                      round: 1,
+                                  },
+                              },
+                          }
+                        : {},
+                ),
                 signal,
             )
         } catch (error) {
@@ -166,6 +199,7 @@ function createOpenAIResponder(
         const invocation = openAIInvocation(
             requestedModel,
             openAIObservation(round.usage, requestedModel, genericEndpoint),
+            round.billingInvocationId !== null,
         )
         let text = ""
         for (const item of round.items) {
@@ -206,6 +240,7 @@ function claudeTelemetryDescriptor(
 
 function openAITelemetryDescriptor(
     requestedModel: string,
+    measurementPublished = false,
 ): DialogueResponderTelemetry {
     return Object.freeze({
         failureInvocation(
@@ -215,6 +250,7 @@ function openAITelemetryDescriptor(
             return openAIInvocation(
                 requestedModel,
                 unknownObservation(status, reason, "openai"),
+                measurementPublished,
             )
         },
     })
@@ -230,8 +266,14 @@ function claudeInvocation(
 function openAIInvocation(
     requestedModel: string,
     observation: RunnerInvocationObservation,
+    measurementPublished = false,
 ): DialogueResponderInvocation {
-    return { backend: "openai", requestedModel, observation }
+    return {
+        backend: "openai",
+        requestedModel,
+        observation,
+        ...(measurementPublished ? { measurementPublished: true } : {}),
+    }
 }
 
 function claudeObservation(
@@ -511,6 +553,7 @@ function execClaude(
             [...args],
             {
                 cwd: opts.cwd,
+                env: harnessChildEnvironment(),
                 timeout: opts.timeoutMs,
                 maxBuffer: 4 * 1024 * 1024,
                 signal: opts.signal,

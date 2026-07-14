@@ -34,7 +34,7 @@ export interface RuntimeReplanDecisionState {
     activeLease:
         | { leaseId: string; generation: number }
         | undefined
-    healingActionsSinceProgress: number
+    adaptationsSinceProgress: number
     /** Recovery policy commits are Board-authorized after the wave settles. */
     requireActiveLease?: boolean
     /** Recovery has its own bounded retry budget, separate from discovery. */
@@ -183,7 +183,8 @@ export class RuntimeReplanCoordinator {
         }
         if (
             this.opts.adaptationBudget > 0 &&
-            state.healingActionsSinceProgress >= this.opts.adaptationBudget
+            state.storyAccounting !== "policy" &&
+            state.adaptationsSinceProgress >= this.opts.adaptationBudget
         ) {
             return this.rememberRejected(
                 proposal,

@@ -17,6 +17,7 @@ import {
 } from "@mozaik-ai/core"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
+import { harnessChildEnvironment } from "../harness-environment.js"
 import {
     AgentState,
     AgentTargetedMessage,
@@ -24,6 +25,7 @@ import {
     type AgentPhase,
 } from "../semantic-events.js"
 import { mapOpenCodeEvent } from "../opencode-stream-mapper.js"
+import { appendCliDiagnosticTail } from "./cli-story-failure.js"
 
 export interface OpenCodeCliParticipantOptions {
     cwd: string
@@ -42,6 +44,8 @@ export interface OpenCodeRunSummary {
     sessionId: string | null
     exitCode: number | null
     error: Error | null
+    /** Bounded tail used only to classify terminal operational failures. */
+    stderrTail: string | null
     /**
      * At least one `step_finish` seen. `opencode run` exits 0 even on a
      * refused/no-op turn (verified empirically), so exitCode alone is not
@@ -65,11 +69,7 @@ export class OpenCodeCliParticipant extends BaseObserver {
     /** Send a signal to every active OpenCode child. Idempotent. */
     static killAll(signal: NodeJS.Signals = "SIGTERM"): void {
         for (const p of OpenCodeCliParticipant.active) {
-            try {
-                p.proc?.kill(signal)
-            } catch {
-                // best-effort
-            }
+            p.abort(signal)
         }
     }
 
@@ -80,6 +80,7 @@ export class OpenCodeCliParticipant extends BaseObserver {
 
     private proc: ChildProcess | null = null
     private buffer = ""
+    private stderrTail = ""
     private envRef: AgenticEnvironment | null = null
     private currentPhase: AgentPhase = "idle"
     private sessionId: string | null = null
@@ -88,14 +89,19 @@ export class OpenCodeCliParticipant extends BaseObserver {
     private sawStepFinish = false
     private toolCallCount = 0
     private doneSettled = false
+    private readySettled = false
+    private killTimer: ReturnType<typeof setTimeout> | null = null
     private resolveDone!: (summary: OpenCodeRunSummary) => void
     private resolveReady!: () => void
     private rejectReady!: (e: Error) => void
 
     /** Resolves once OpenCode emits its first `step_start` event. */
     public readonly ready: Promise<void>
-    /** Resolves once the OpenCode process exits (regardless of success). */
+    /** Resolves once OpenCode exits and its stdout/stderr streams have closed. */
     public readonly done: Promise<OpenCodeRunSummary>
+
+    private static readonly KILL_GRACE_MS = 5_000
+    private static readonly MAX_BUFFER_BYTES = 16 * 1024 * 1024
 
     constructor(
         public readonly agentId: string,
@@ -121,14 +127,30 @@ export class OpenCodeCliParticipant extends BaseObserver {
     }
 
     /**
-     * `exit` and `error` can fire in either order, or one without the other;
+     * `close` and `error` can fire in either order, or one without the other;
      * every resolution path goes through here so `done` settles exactly once
-     * (an async spawn error with no `exit` used to leave `done` pending forever).
+     * (an async spawn error must not leave `done` pending for a later close).
      */
     private settleDone(summary: OpenCodeRunSummary): void {
         if (this.doneSettled) return
         this.doneSettled = true
+        if (this.killTimer !== null) {
+            clearTimeout(this.killTimer)
+            this.killTimer = null
+        }
         this.resolveDone(summary)
+    }
+
+    private settleReady(): void {
+        if (this.readySettled) return
+        this.readySettled = true
+        this.resolveReady()
+    }
+
+    private failReady(error: Error): void {
+        if (this.readySettled) return
+        this.readySettled = true
+        this.rejectReady(error)
     }
 
     getSessionId(): string | null {
@@ -149,16 +171,18 @@ export class OpenCodeCliParticipant extends BaseObserver {
         try {
             proc = spawn(this.options.opencodeBin, args, {
                 cwd: this.options.cwd,
+                env: harnessChildEnvironment(),
                 stdio: ["ignore", "pipe", "pipe"],
             })
         } catch (e) {
             this.spawnError = e instanceof Error ? e : new Error(String(e))
             this.transition("failed", this.spawnError.message)
-            this.rejectReady(this.spawnError)
+            this.failReady(this.spawnError)
             this.settleDone({
                 sessionId: null,
                 exitCode: null,
                 error: this.spawnError,
+                stderrTail: this.stderrTail || null,
                 sawStepFinish: this.sawStepFinish,
                 toolCallCount: this.toolCallCount,
             })
@@ -172,25 +196,34 @@ export class OpenCodeCliParticipant extends BaseObserver {
         proc.stdout!.setEncoding("utf8")
         proc.stderr!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => this.handleStdout(chunk))
+        proc.stdout!.on("end", () => this.flushStdout())
         proc.stderr!.on("data", (chunk: string) => this.handleStderr(chunk))
         proc.on("error", (err) => {
-            // An 'exit' may NOT follow an async process error (EACCES/EPIPE
-            // after spawn), so settle `done` here too or awaiters hang.
+            // Settle async process errors directly; a later `close` is safely
+            // ignored by settleDone's exact-once guard.
             OpenCodeCliParticipant.active.delete(this)
             this.spawnError = err
             this.transition("failed", err.message)
-            this.rejectReady(err)
+            this.failReady(err)
             this.settleDone({
                 sessionId: this.sessionId,
                 exitCode: this.exitCode,
                 error: err,
+                stderrTail: this.stderrTail || null,
                 sawStepFinish: this.sawStepFinish,
                 toolCallCount: this.toolCallCount,
             })
         })
-        proc.on("exit", (code) => {
+        // `exit` can precede the final stdout/stderr data. `close` is the
+        // terminal boundary for the normal path because it fires only after
+        // those streams close; the `error` path above still settles directly.
+        proc.on("close", (code) => {
             OpenCodeCliParticipant.active.delete(this)
             this.exitCode = code
+            this.failReady(
+                this.spawnError ??
+                    new Error("opencode exited before step_start"),
+            )
             const finalPhase: AgentPhase =
                 this.spawnError != null || (code != null && code !== 0)
                     ? "failed"
@@ -203,16 +236,34 @@ export class OpenCodeCliParticipant extends BaseObserver {
                 sessionId: this.sessionId,
                 exitCode: code,
                 error: this.spawnError,
+                stderrTail: this.stderrTail || null,
                 sawStepFinish: this.sawStepFinish,
                 toolCallCount: this.toolCallCount,
             })
         })
     }
 
-    /** Kill the OpenCode process. Resolves once exit fires. */
+    /** Kill the OpenCode process, escalating if it ignores the soft signal. */
     abort(signal: NodeJS.Signals = "SIGTERM"): void {
         this.transition("aborted")
-        this.proc?.kill(signal)
+        const proc = this.proc
+        if (!proc) return
+        try {
+            proc.kill(signal)
+        } catch {
+            // best-effort
+        }
+        if (signal === "SIGKILL" || this.killTimer !== null) return
+        this.killTimer = setTimeout(() => {
+            this.killTimer = null
+            if (this.doneSettled) return
+            try {
+                proc.kill("SIGKILL")
+            } catch {
+                // best-effort
+            }
+        }, OpenCodeCliParticipant.KILL_GRACE_MS)
+        this.killTimer.unref?.()
     }
 
     override async onExternalEvent(
@@ -251,9 +302,22 @@ export class OpenCodeCliParticipant extends BaseObserver {
             if (!line) continue
             this.processLine(line)
         }
+        if (this.buffer.length > OpenCodeCliParticipant.MAX_BUFFER_BYTES) {
+            process.stderr.write(
+                `[opencode:${this.agentId}] stdout buffer exceeded ${OpenCodeCliParticipant.MAX_BUFFER_BYTES} bytes without a newline — discarding partial line\n`,
+            )
+            this.buffer = ""
+        }
+    }
+
+    private flushStdout(): void {
+        const line = this.buffer.trim()
+        this.buffer = ""
+        if (line) this.processLine(line)
     }
 
     private handleStderr(chunk: string): void {
+        this.stderrTail = appendCliDiagnosticTail(this.stderrTail, chunk)
         const trimmed = chunk.trimEnd()
         if (!trimmed) return
         process.stderr.write(`[opencode:${this.agentId}/stderr] ${trimmed}\n`)
@@ -289,9 +353,9 @@ export class OpenCodeCliParticipant extends BaseObserver {
                     item.data.subtype === "step_start"
                 ) {
                     this.transition("running", "opencode step started")
-                    this.resolveReady()
+                    this.settleReady()
                 }
-                // Don't transition to "done" on step_finish — the process-exit
+                // Don't transition to "done" on step_finish — the process-close
                 // listener owns that, so the real exit code is observed first.
             }
             this.dispatch(item)

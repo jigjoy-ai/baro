@@ -334,14 +334,21 @@ export class CollaborationBridge extends SerializedObserver {
                     }),
                 )
             } else if (record.kind === "discover" && validStory(record.story)) {
-                this.publish(
-                    WorkDiscovered.create({
-                        runId: this.opts.runId,
-                        sourceAgentId: agentId,
-                        reason: record.reason?.trim() || "worker discovered required follow-up work",
-                        story: record.story,
-                    }),
-                )
+                const activeLease = record.leaseId
+                    ? this.activeLeases.get(record.leaseId)
+                    : undefined
+                if (activeLease?.storyId === agentId) {
+                    this.publish(
+                        WorkDiscovered.create({
+                            runId: this.opts.runId,
+                            sourceAgentId: agentId,
+                            leaseId: activeLease.leaseId,
+                            generation: activeLease.generation,
+                            reason: record.reason?.trim() || "worker discovered required follow-up work",
+                            story: record.story,
+                        }),
+                    )
+                }
             } else if (record.kind === "replan") {
                 this.publishRuntimeReplan(record, agentId)
             }

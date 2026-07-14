@@ -24,6 +24,7 @@ import {
     UsageAccumulator,
     runInferenceRound,
 } from "./openai-runtime.js"
+import type { GatewayBillingCoordinator } from "../billing/index.js"
 
 import {
     ARCHITECT_SYSTEM_PROMPT,
@@ -51,6 +52,8 @@ export interface RunArchitectOpenAIOptions {
     maxFinalizationRetries?: number
     /** Default 600 s — reasoning models can need minutes per round. */
     perRoundTimeoutSecs?: number
+    /** Present only for an explicitly trusted Baro Gateway process. */
+    billingCoordinator?: GatewayBillingCoordinator
     /** Deterministic no-network seam used by the architect state-machine tests. */
     testRuntime?: ArchitectOpenAITestRuntime
 }
@@ -130,7 +133,27 @@ export async function runArchitectOpenAI(
         // stalling `baro --headless`.
         // Do not remove the schemas during finalization. Some compatible
         // models otherwise serialize their next tool call into message text.
-        const roundPromise = inferRound(context, model)
+        const roundPromise = inferRound(
+            context,
+            model,
+            opts.billingCoordinator
+                ? {
+                      billing: {
+                          coordinator: opts.billingCoordinator,
+                          context: {
+                              runId: null,
+                              phase: "architect",
+                              storyId: null,
+                              leaseId: null,
+                              generation: null,
+                              attempt: 1,
+                              turn: round,
+                              round,
+                          },
+                      },
+                  }
+                : {},
+        )
         let timer: ReturnType<typeof setTimeout> | undefined
         const timeoutPromise = new Promise<never>((_, rej) => {
             timer = setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs)

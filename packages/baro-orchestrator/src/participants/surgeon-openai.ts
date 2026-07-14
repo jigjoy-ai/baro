@@ -32,6 +32,7 @@ import {
     type TokenUsage,
 } from "@mozaik-ai/core"
 
+import type { GatewayBillingCoordinator } from "../billing/index.js"
 import {
     GenericOpenAIModel,
     UsageAccumulator,
@@ -90,6 +91,8 @@ export interface SurgeonOpenAIOptions {
     emitRecoveryDecisions?: boolean
     /** Collective-only dynamic authority for terminal execution results. */
     outcomeAuthority?: StoryOutcomeAuthority
+    /** Trusted Gateway receipt correlation for recovery evaluator calls. */
+    billingCoordinator?: GatewayBillingCoordinator
 }
 
 interface SurgeonOpenAIEvaluation {
@@ -126,6 +129,7 @@ export class SurgeonOpenAI extends BaseObserver {
     private readonly opts: Required<Pick<SurgeonOpenAIOptions, "maxReplans" | "model">> &
         SurgeonOpenAIOptions
     private readonly model: GenerativeModel
+    private readonly billingCoordinator: GatewayBillingCoordinator | null
 
     private replansEmitted = 0
     /** Monotonic correlation for legacy failures that have no lease generation. */
@@ -149,6 +153,12 @@ export class SurgeonOpenAI extends BaseObserver {
             outcomeAuthority: opts.outcomeAuthority,
         }
         this.model = pickModel(this.opts.model)
+        this.billingCoordinator = opts.billingCoordinator?.trustsEndpoint(
+            process.env.OPENAI_BASE_URL,
+            process.env.OPENAI_API_KEY,
+        )
+            ? opts.billingCoordinator
+            : null
     }
 
     async idle(): Promise<void> {
@@ -186,8 +196,14 @@ export class SurgeonOpenAI extends BaseObserver {
         const work = (async () => {
             try {
                 const sequence = ++this.evaluationSequence
-                const evaluation = await this.evaluate(failure)
-                this.publishMeasurement(failure, sequence, evaluation.telemetry)
+                const evaluation = await this.evaluate(failure, sequence)
+                if (!this.billingCoordinator) {
+                    this.publishMeasurement(
+                        failure,
+                        sequence,
+                        evaluation.telemetry,
+                    )
+                }
                 const { replan } = evaluation
                 if (!replan) {
                     this.emitRecoveryDecision(failure, "abort", "surgeon chose abort")
@@ -300,6 +316,7 @@ export class SurgeonOpenAI extends BaseObserver {
      */
     private async evaluate(
         failure: StoryResultData,
+        sequence: number,
     ): Promise<SurgeonOpenAIEvaluation> {
         const snap = this.opts.snapshot()
         const userPrompt = buildSurgeonPrompt(
@@ -315,7 +332,7 @@ export class SurgeonOpenAI extends BaseObserver {
 
         let round: Awaited<ReturnType<typeof runInferenceRound>>
         try {
-            round = await this.runRound(context)
+            round = await this.runRound(context, failure, sequence)
         } catch (err) {
             const timedOut = isProviderTimeout(err)
             return openAIFallback(
@@ -382,8 +399,33 @@ export class SurgeonOpenAI extends BaseObserver {
     }
 
     /** Narrow override seam for protocol-focused tests; production uses the shared runtime. */
-    private runRound(context: ModelContext) {
-        return runInferenceRound(context, this.model)
+    private runRound(
+        context: ModelContext,
+        failure: StoryResultData,
+        sequence: number,
+    ) {
+        return runInferenceRound(
+            context,
+            this.model,
+            this.billingCoordinator
+                ? {
+                      billing: {
+                          coordinator: this.billingCoordinator,
+                          context: {
+                              runId:
+                                  this.opts.runId ?? failure.runId ?? null,
+                              phase: "surgeon",
+                              storyId: failure.storyId,
+                              leaseId: failure.leaseId ?? null,
+                              generation: failure.generation ?? null,
+                              attempt: null,
+                              turn: sequence,
+                              round: 1,
+                          },
+                      },
+                  }
+                : {},
+        )
     }
 }
 

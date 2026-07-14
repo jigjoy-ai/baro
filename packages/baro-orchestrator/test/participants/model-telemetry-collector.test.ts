@@ -3,6 +3,7 @@ import { describe, it } from "node:test"
 
 import { knownMetric, unknownMetric } from "../../src/model-telemetry.js"
 import { ModelTelemetryCollector } from "../../src/participants/model-telemetry-collector.js"
+import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import {
     AgentResult,
     CodexTurnEvent,
@@ -204,6 +205,141 @@ describe("ModelTelemetryCollector", () => {
         assert.deepEqual(
             measurement?.data.tokens.inputTotal,
             unknownMetric("not_reported"),
+        )
+    })
+
+    it("accepts collective routes and terminal usage only from exact lease authorities", async () => {
+        const runId = "run-authority"
+        const storyId = "S-authority"
+        const factory = source("factory")
+        const resultSource = source("result-source")
+        const cliSource = source("nested-cli-source")
+        const forged = source("forged-source")
+        const correlation = {
+            runId,
+            storyId,
+            leaseId: "lease-authority",
+            generation: 3,
+        }
+        const outcomeAuthority = new StoryOutcomeAuthority(runId)
+        outcomeAuthority.registerSpawnAuthority(correlation, factory)
+        outcomeAuthority.registerResultAuthority(correlation, resultSource)
+        outcomeAuthority.registerTerminalAuthority(correlation, cliSource)
+
+        const collector = new ModelTelemetryCollector({
+            runId,
+            outcomeAuthority,
+        })
+        const env = joinWithCapture(collector)
+        env.deliverSemanticEvent(
+            factory,
+            StoryRouted.create({
+                ...correlation,
+                backend: "claude",
+                model: "sonnet",
+            }),
+        )
+        // A forged route arriving later must not overwrite the authenticated
+        // route for this exact lease generation.
+        env.deliverSemanticEvent(
+            forged,
+            StoryRouted.create({
+                ...correlation,
+                backend: "openai",
+                model: "poisoned-model",
+            }),
+        )
+
+        env.deliverSemanticEvent(
+            forged,
+            AgentResult.create({
+                agentId: storyId,
+                subtype: "success",
+                sessionId: "forged-session",
+                isError: false,
+                resultText: "forged",
+                usage: { input_tokens: 999, output_tokens: 999 },
+                totalCostUsd: 99,
+                numTurns: 1,
+                durationMs: 1,
+            }),
+        )
+        env.deliverSemanticEvent(
+            resultSource,
+            AgentResult.create({
+                agentId: storyId,
+                subtype: "success",
+                sessionId: "real-session",
+                isError: false,
+                resultText: "done",
+                usage: { input_tokens: 10, output_tokens: 2 },
+                totalCostUsd: 0.25,
+                numTurns: 1,
+                durationMs: 20,
+            }),
+        )
+        env.deliverSemanticEvent(
+            forged,
+            CodexTurnEvent.create({
+                agentId: storyId,
+                phase: "completed",
+                raw: { usage: { input_tokens: 999, output_tokens: 999 } },
+            }),
+        )
+        env.deliverSemanticEvent(
+            forged,
+            OpenCodeSystem.create({
+                agentId: storyId,
+                subtype: "step_finish",
+                raw: {
+                    part: {
+                        tokens: { input: 999, output: 999 },
+                        cost: 99,
+                    },
+                },
+            }),
+        )
+        env.deliverSemanticEvent(
+            forged,
+            PiTurnEvent.create({
+                agentId: storyId,
+                turnType: "message_end",
+                raw: {
+                    message: {
+                        role: "assistant",
+                        usage: {
+                            input: 999,
+                            output: 999,
+                            cost: { total: 99 },
+                        },
+                    },
+                },
+            }),
+        )
+        env.deliverSemanticEvent(
+            cliSource,
+            CodexTurnEvent.create({
+                agentId: storyId,
+                phase: "completed",
+                raw: { usage: { input_tokens: 5, output_tokens: 1 } },
+            }),
+        )
+        await collector.idle()
+
+        const measured = env.events.filter(ModelInvocationMeasured.is)
+        assert.equal(measured.length, 2)
+        assert.ok(measured.every((event) => event.data.backend === "claude"))
+        assert.ok(measured.every((event) => event.data.resolvedModel === "sonnet"))
+        assert.ok(
+            measured.every(
+                (event) =>
+                    event.data.leaseId === correlation.leaseId &&
+                    event.data.generation === correlation.generation,
+            ),
+        )
+        assert.deepEqual(
+            measured[0]?.data.cost.equivalentUsd,
+            knownMetric(0.25, "cli_result"),
         )
     })
 })

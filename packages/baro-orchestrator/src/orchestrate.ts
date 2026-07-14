@@ -15,6 +15,10 @@ import { fileURLToPath } from "url"
 import { AgenticEnvironment } from "@mozaik-ai/core"
 
 import {
+    GatewayBillingCoordinator,
+    type GatewayBillingCoordinatorOptions,
+} from "./billing/index.js"
+import {
     GitGate,
     createOrCheckoutBranch,
     excludeBaroArtifacts,
@@ -92,6 +96,7 @@ import { Supervisor } from "./participants/supervisor.js"
 import { resolveEffectiveParallel } from "./planning/mode-enforcement.js"
 import { PrdFile, loadPrd, savePrd } from "./prd.js"
 import {
+    ModelInvocationMeasured,
     RunStartRequest,
     type CoordinationMode,
     type WorkBidEstimateData,
@@ -146,6 +151,8 @@ export async function withCriticEvidenceBarrier<T>(
 export interface OrchestrateConfig {
     prdPath: string
     cwd: string
+    /** Stable authority/correlation identity shared with planning and billing. */
+    runId?: string
     parallel?: number
     timeoutSecs?: number
     /** Coordination engine. `legacy` remains the default. */
@@ -154,6 +161,9 @@ export interface OrchestrateConfig {
     publishRemote?: boolean
     /** Optional collective execution-lease watchdog; disabled by default. */
     collectiveLeaseTimeoutMs?: number
+    /** Explicit trusted Baro Gateway receipt feed. Arbitrary compatible
+     * endpoints never become billing authorities implicitly. */
+    gatewayBilling?: GatewayBillingConfig
     /** Optional collective repository-integration watchdog. */
     collectiveIntegrationTimeoutMs?: number
     /** Optional whole-run objective verification watchdog. */
@@ -312,6 +322,26 @@ export interface OrchestrateConfig {
     extraParticipants?: import("@mozaik-ai/core").Participant[]
 }
 
+export function resolveOrchestrationRunId(
+    configured: string | undefined,
+    inherited: string | undefined,
+    fallback: () => string = () => `run-${Date.now()}-${process.pid}`,
+): string {
+    const requested = configured ?? inherited
+    if (
+        requested !== undefined &&
+        !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requested)
+    ) {
+        throw new Error("runId/BARO_RUN_ID must be a safe 1-128 character identifier")
+    }
+    return requested ?? fallback()
+}
+
+export type GatewayBillingConfig = Omit<
+    GatewayBillingCoordinatorOptions,
+    "runId" | "publishMeasurement"
+>
+
 /**
  * Per-story timeout (seconds). `--timeout N` is an absolute override in both
  * directions (the Rust CLI sends 0 to mean "auto"). The auto default scales
@@ -401,7 +431,7 @@ export async function orchestrate(
     // Shared by event correlation, memory sessions, and worktree names.
     // It is created before Operator so user conversation events carry the
     // same identity as the collective control plane from their first hop.
-    const runId = `run-${Date.now()}-${process.pid}`
+    const runId = resolveOrchestrationRunId(config.runId, process.env.BARO_RUN_ID)
     const outcomeAuthority = coordinationMode === "collective"
         ? new StoryOutcomeAuthority(runId)
         : undefined
@@ -500,8 +530,55 @@ export async function orchestrate(
 
     // Always-on semantic telemetry; unlike stdout/TUI forwarders this remains
     // present in headless tests and local programmatic orchestration.
-    const modelTelemetryCollector = new ModelTelemetryCollector({ runId })
+    const modelTelemetryCollector = new ModelTelemetryCollector({
+        runId,
+        outcomeAuthority,
+    })
     modelTelemetryCollector.join(env)
+    const gatewayBillingCoordinator = config.gatewayBilling
+        ? new GatewayBillingCoordinator({
+              ...config.gatewayBilling,
+              runId,
+              publishMeasurement: (measurement) => {
+                  if (
+                      measurement.phase === "story" &&
+                      measurement.evidence.producer === "runner"
+                  ) {
+                      modelTelemetryCollector.registerPerRoundStoryMeasurement(
+                          measurement,
+                      )
+                  }
+                  env.deliverSemanticEvent(
+                      modelTelemetryCollector,
+                      ModelInvocationMeasured.create(measurement),
+                  )
+              },
+          })
+        : null
+    let gatewayBillingReconciled = false
+    const reconcileGatewayBilling = async (): Promise<void> => {
+        if (!gatewayBillingCoordinator || gatewayBillingReconciled) return
+        gatewayBillingReconciled = true
+        try {
+            const billing = await gatewayBillingCoordinator.drain()
+            if (!billing.complete) {
+                process.stderr.write(
+                    `[billing] ${billing.unresolvedInvocationIds.length} invocation(s) ` +
+                        `remain without acknowledged authoritative telemetry` +
+                        (billing.feedError ? ` (${billing.feedError})` : "") +
+                        "\n",
+                )
+            }
+        } catch (error) {
+            process.stderr.write(
+                `[billing] reconciliation failed (${error instanceof Error ? error.message : "unknown error"})\n`,
+            )
+        } finally {
+            gatewayBillingCoordinator.close()
+        }
+    }
+
+    try {
     // Codex/OpenCode/Pi expose terminal turns through different native events.
     // Project them onto one neutral contract so policy participants such as the
     // Critic depend on semantics rather than a provider-specific stream shape.
@@ -681,6 +758,7 @@ export async function orchestrate(
                 runId,
                 emitRecoveryDecisions: coordinationMode === "collective",
                 outcomeAuthority,
+                billingCoordinator: gatewayBillingCoordinator ?? undefined,
             })
         } else if (surgeonLlm === "codex") {
             surgeon = new SurgeonCodex({
@@ -763,6 +841,7 @@ export async function orchestrate(
                 evidence: criticEvidence,
                 outcomeAuthority,
                 terminalProjectorAuthority: agentTurnProjector,
+                billingCoordinator: gatewayBillingCoordinator ?? undefined,
             })
         } else if (criticLlm === "codex") {
             critic = new CriticCodex({
@@ -1013,6 +1092,7 @@ export async function orchestrate(
         requireWorktree: coordinationMode === "collective" && worktrees !== null,
         collaboration: collaborationConfig,
         leaseAuthority: leaseBroker ?? undefined,
+        offerAuthority: collectiveBoard ?? undefined,
         llm: storyLlm,
         openaiModel: config.storyModel ?? "gpt-5.5",
         storyModelOverride: config.storyModel,
@@ -1023,6 +1103,11 @@ export async function orchestrate(
         executor: config.executor,
         outcomeAuthority,
         runtimeReplanDecisionAuthority: collectiveBoard ?? undefined,
+        turnReviewAuthority:
+            coordinationMode === "collective" ? critic ?? undefined : undefined,
+        turnReviewTimeoutMs: config.collectiveAcceptanceTimeoutMs,
+        telemetryAuthority: modelTelemetryCollector,
+        billingCoordinator: gatewayBillingCoordinator ?? undefined,
     } as const
     const storyFactories = collectiveWorkers.length > 0
         ? collectiveWorkers.map(
@@ -1052,13 +1137,16 @@ export async function orchestrate(
         new Supervisor().join(env)
     }
 
-    // Dialogue is an optional communication participant, never a root
-    // coordinator. It can explain observed state and send bounded messages to
-    // active workers; Board/Broker/repository/verifier authorities do not
-    // depend on it and the run never awaits its model calls.
+    // Dialogue is an optional conversational supervisor, never a root
+    // coordinator. It can explain observed state, send bounded worker messages,
+    // and propose add-only work against the graph version it actually saw.
+    // Board/Broker/repository/verifier retain every mutation, lease,
+    // integration and completion authority; the run never awaits model calls.
     if (config.withDialogue) {
-        if (!leaseBroker) {
-            throw new Error("DialogueAgent requires the collective LeaseBroker")
+        if (!leaseBroker || !collectiveBoard) {
+            throw new Error(
+                "DialogueAgent requires the collective Board and LeaseBroker",
+            )
         }
         const dialogueBackend: DialogueBackend = config.dialogueLlm ??
             (llm === "openai" ? "openai" : "claude")
@@ -1067,14 +1155,23 @@ export async function orchestrate(
             cwd: config.cwd,
             model: config.dialogueModel,
             timeoutMs: config.dialogueTimeoutMs,
+            billingCoordinator: gatewayBillingCoordinator ?? undefined,
         })
         dialogueAgent = new DialogueAgent({
             runId,
             responder,
             operatorAuthority: operator,
             leaseAuthority: leaseBroker,
+            routeAuthoritiesByWorker: new Map(
+                storyFactories.map((storyFactory) => [
+                    storyFactory.getWorkerId(),
+                    storyFactory,
+                ] as const),
+            ),
+            controlAuthority: collectiveBoard,
             timeoutMs: config.dialogueTimeoutMs,
         })
+        collectiveBoard.setConversationAuthority(dialogueAgent)
         dialogueAgent.join(env)
         if (emitTui) new DialogueForwarder(dialogueAgent).join(env)
         config.onDialogueReady?.(dialogueAgent)
@@ -1146,6 +1243,10 @@ export async function orchestrate(
     if (surgeon) await surgeon.idle()
     if (collaborationBridge) await collaborationBridge.idle()
     if (workContextProvider) await workContextProvider.idle()
+    await reconcileGatewayBilling()
+    for (const storyFactory of storyFactories) {
+        storyFactory.finishRunTelemetry()
+    }
     await modelTelemetryCollector.idle()
     // Await the PR before the TUI `done` event so the completion screen has
     // the PR URL the moment it renders instead of after a race.
@@ -1214,6 +1315,11 @@ export async function orchestrate(
         summary,
         operator,
         storyAgents: new Map(),
+    }
+    } finally {
+        // Exceptions during setup, coordination, verification, or finalization
+        // must not strand a correlated provider call without a final pull.
+        await reconcileGatewayBilling()
     }
 }
 

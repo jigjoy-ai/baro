@@ -17,6 +17,7 @@ import {
     WorkOfferExpired,
     WorkOffered,
     WorkerCapabilityAdvertised,
+    type StoryFailureData,
     type WorkRouteDescriptor,
 } from "../../src/semantic-events.js"
 import { joinWithCapture, source } from "./helpers.js"
@@ -178,6 +179,42 @@ describe("LeaseBroker", () => {
         assert.equal(
             env.events.find(WorkLeaseReleased.is)?.data.reason,
             "quality_failed",
+        )
+    })
+
+    it("releases an inconclusive quality lease as quality_inconclusive", async () => {
+        const runId = "run-quality-inconclusive"
+        const qualityGate = source("quality-gate")
+        const broker = new LeaseBroker({
+            runId,
+            parallel: 1,
+            intraLevelDelaySecs: 0,
+        })
+        broker.setQualityAuthority(qualityGate)
+        const env = joinWithCapture(broker)
+
+        offerAndClaim(env, source("board"), runId, "S1")
+        await waitFor(() => env.events.some(WorkLeaseGranted.is))
+        const lease = env.events.find(WorkLeaseGranted.is)!
+
+        env.deliverSemanticEvent(
+            qualityGate,
+            StoryQualityCompleted.create({
+                runId,
+                evaluationId: "quality-S1",
+                storyId: "S1",
+                leaseId: lease.data.leaseId,
+                generation: lease.data.generation,
+                status: "inconclusive",
+                targetTurn: 1,
+                reason: "evaluator transport failed",
+            }),
+        )
+
+        await waitFor(() => env.events.some(WorkLeaseReleased.is))
+        assert.equal(
+            env.events.find(WorkLeaseReleased.is)?.data.reason,
+            "quality_inconclusive",
         )
     })
 
@@ -614,6 +651,25 @@ describe("LeaseBroker", () => {
         )
     })
 
+    it("releases transport and infrastructure failures operationally without suppressing their route", async () => {
+        const failures: StoryFailureData[] = [
+            { kind: "transport", code: "connection_reset" },
+            { kind: "infrastructure", code: "review_timeout" },
+        ]
+
+        for (const failure of failures) {
+            await assertOperationalFailureKeepsRouteAvailable(failure)
+        }
+    })
+
+    it("keeps a transient rate-limited route available for a later story", async () => {
+        await assertOperationalFailureKeepsRouteAvailable({
+            kind: "provider_capacity",
+            code: "rate_limited",
+            retryAfterMs: 25,
+        })
+    })
+
     it("suppresses a capacity-exhausted non-market worker for later stories", async () => {
         const runId = "run-capacity-non-market"
         const broker = new LeaseBroker({
@@ -823,6 +879,72 @@ function offerAndClaim(
             model: "sonnet",
         }),
     )
+}
+
+async function assertOperationalFailureKeepsRouteAvailable(
+    failure: StoryFailureData,
+): Promise<void> {
+    const suffix = `${failure.kind}-${failure.code ?? "unknown"}`
+    const runId = `run-${suffix}`
+    const routeDescriptor = route(`route-${suffix}`, "openai", "test-model")
+    const worker = source(`worker-source-${suffix}`)
+    const broker = new LeaseBroker({
+        runId,
+        parallel: 1,
+        intraLevelDelaySecs: 0,
+        claimTimeoutMs: 50,
+    })
+    const env = joinWithCapture(broker)
+
+    const claim = (storyId: string): void => {
+        const offerId = `offer-${storyId}`
+        env.deliverSemanticEvent(
+            source("board"),
+            WorkOffered.create(offer(runId, offerId, storyId, 1)),
+        )
+        env.deliverSemanticEvent(
+            worker,
+            WorkClaimed.create({
+                runId,
+                offerId,
+                storyId,
+                workerId: `worker-${suffix}`,
+                backend: routeDescriptor.backend,
+                model: routeDescriptor.model,
+                route: routeDescriptor,
+            }),
+        )
+    }
+
+    claim("S1")
+    await waitFor(() => env.events.filter(WorkLeaseGranted.is).length === 1)
+    const first = env.events.find(WorkLeaseGranted.is)!
+
+    env.deliverSemanticEvent(
+        source("S1-agent"),
+        StoryResult.create({
+            storyId: "S1",
+            success: false,
+            attempts: 1,
+            durationSecs: 1,
+            error: `${failure.kind} failure`,
+            failure,
+            runId,
+            leaseId: first.data.leaseId,
+            generation: first.data.generation,
+        }),
+    )
+    await waitFor(() => env.events.some(WorkLeaseReleased.is))
+    assert.equal(
+        env.events.find(WorkLeaseReleased.is)?.data.reason,
+        "operational_failed",
+    )
+
+    claim("S2")
+    await waitFor(() => env.events.filter(WorkLeaseGranted.is).length === 2)
+    const second = env.events.filter(WorkLeaseGranted.is)[1]!
+    assert.equal(second.data.workerId, `worker-${suffix}`)
+    assert.equal(second.data.route?.routeId, routeDescriptor.routeId)
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {

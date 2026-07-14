@@ -14,7 +14,14 @@ import {
     StoryResult,
     WorkLeaseGranted,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source, withTempDir } from "./helpers.js"
+import {
+    assertHarnessEnvironmentWasSanitized,
+    harnessEnvironmentCaptureProgram,
+    joinWithCapture,
+    source,
+    withInjectedJigJoyEnvironment,
+    withTempDir,
+} from "./helpers.js"
 
 const snapshot: PrdSnapshot = {
     project: "Surgeon test",
@@ -40,6 +47,53 @@ const snapshot: PrdSnapshot = {
 }
 
 describe("Surgeon", () => {
+    it("keeps Baro's injected Gateway credential out of the Claude recovery process", async () => {
+        await withTempDir("baro-surgeon-env-", async (dir) => {
+            const capture = join(dir, "environment.json")
+            const bin = join(dir, "fake-claude-env.mjs")
+            const wrapper = {
+                type: "result",
+                subtype: "success",
+                is_error: false,
+                result: JSON.stringify({
+                    action: "skip",
+                    reason: "test recovery",
+                    added: [],
+                    removed: ["S2"],
+                    modifiedDeps: [],
+                }),
+            }
+            writeFileSync(bin, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+${harnessEnvironmentCaptureProgram(capture)}
+console.log(${JSON.stringify(JSON.stringify(wrapper))});
+`)
+            chmodSync(bin, 0o755)
+
+            await withInjectedJigJoyEnvironment(async () => {
+                const surgeon = new Surgeon({
+                    snapshot: () => snapshot,
+                    useLlm: true,
+                    claudeBin: bin,
+                    runId: "run-surgeon-env",
+                })
+                joinWithCapture(surgeon)
+                await surgeon.onExternalEvent(
+                    source("S2"),
+                    StoryResult.create({
+                        storyId: "S2",
+                        success: false,
+                        attempts: 3,
+                        durationSecs: 1,
+                        error: "test failure",
+                    }),
+                )
+                await surgeon.idle()
+            })
+            assertHarnessEnvironmentWasSanitized(capture)
+        })
+    })
+
     it("emits a deterministic replan for a failed story", async () => {
         const surgeon = new Surgeon({
             snapshot: () => snapshot,

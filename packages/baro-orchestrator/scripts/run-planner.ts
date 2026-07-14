@@ -7,7 +7,12 @@
  */
 
 import { readFileSync, writeFileSync } from "fs"
+import { randomUUID } from "node:crypto"
 
+import {
+    createGatewayBillingCoordinatorFromEnv,
+    reconcileAndCloseGatewayBilling,
+} from "../src/billing/index.js"
 import { runPlannerClaude } from "../src/planning/planner-claude.js"
 import { runPlannerCodex } from "../src/planning/planner-codex.js"
 import { runPlannerOpenAI } from "../src/planning/planner-openai.js"
@@ -16,6 +21,7 @@ import { runPlannerPi } from "../src/planning/planner-pi.js"
 import { parseRequiredModeContract, type ModeContract } from "../src/planning/planner-prompts.js"
 import { enforceModeContract } from "../src/planning/mode-enforcement.js"
 import { assertRunnablePlannerPrdJson } from "../src/planning/planner-validation.js"
+import { emit } from "../src/tui-protocol.js"
 
 interface Args {
     goal: string
@@ -158,15 +164,33 @@ async function main(): Promise<void> {
             if (!process.env.OPENAI_API_KEY) {
                 fatal("--llm openai requires OPENAI_API_KEY to be set")
             }
-            prdJson = await runPlannerOpenAI({
-                goal: args.goal,
-                cwd: args.cwd,
-                model: args.model,
-                projectContext,
-                decisionDocument,
-                quick: args.quick,
-                modeContract,
+            const billing = createGatewayBillingCoordinatorFromEnv({
+                runId: process.env.BARO_RUN_ID ?? `planner-${randomUUID()}`,
+                publishMeasurement: (measurement) => {
+                    if (process.env.BARO_PLAN_EVENTS === "1") {
+                        emit({ type: "model_usage", measurement })
+                    }
+                },
             })
+            try {
+                prdJson = await runPlannerOpenAI({
+                    goal: args.goal,
+                    cwd: args.cwd,
+                    model: args.model,
+                    projectContext,
+                    decisionDocument,
+                    quick: args.quick,
+                    modeContract,
+                    billingCoordinator: billing ?? undefined,
+                })
+            } finally {
+                const result = await reconcileAndCloseGatewayBilling(billing)
+                if (result && !result.complete) {
+                    process.stderr.write(
+                        `[run-planner] billing reconciliation incomplete (${result.unresolvedInvocationIds.length} invocation(s))\n`,
+                    )
+                }
+            }
         } else if (args.llm === "codex") {
             prdJson = await runPlannerCodex({
                 goal: args.goal,

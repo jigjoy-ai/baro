@@ -27,6 +27,7 @@ import {
 } from "@mozaik-ai/core"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
+import type { GatewayBillingCoordinator } from "../billing/index.js"
 import {
     GenericOpenAIModel,
     type OpenAIConnection,
@@ -39,6 +40,7 @@ import {
     AgentState,
     AgentTargetedMessage,
     AgentUserMessage,
+    Critique,
     RuntimeReplanApplied,
     RuntimeReplanProposed,
     RuntimeReplanRejected,
@@ -49,7 +51,7 @@ import {
     type StoryFailureData,
 } from "../semantic-events.js"
 import {
-    classifyProviderFailure,
+    classifyStoryFailure,
     compactProviderFailureDetail,
 } from "../provider-failure.js"
 import { correlationOf, type StoryOutcome, type StorySpec } from "./story-agent.js"
@@ -61,6 +63,12 @@ import {
     type PendingRuntimeReplan,
     type RuntimeReplanDecision,
 } from "./runtime-replan-tool.js"
+import {
+    TurnMessageMailbox,
+    TurnReviewMailbox,
+    turnReviewDisposition,
+    turnReviewTimeoutFailure,
+} from "./turn-review.js"
 
 const STORY_SYSTEM_PROMPT = `\
 You are an autonomous coding agent. The user will hand you exactly one
@@ -103,6 +111,10 @@ export interface OpenAIStoryAgentOptions {
      */
     finalizationRoundsPerTurn?: number
     perRoundTimeoutSecs?: number
+    /** Reconnect attempts for a provider request that rejected with a
+     * transport error. Local watchdog timeouts are never overlapped. */
+    transportRetriesPerRound?: number
+    transportRetryDelayMs?: number
     /**
      * Per-story OpenAI-compatible endpoint. Overrides the process-global
      * `OPENAI_BASE_URL` for this story only and forces `GenericOpenAIModel`
@@ -117,12 +129,18 @@ export interface OpenAIStoryAgentOptions {
     runtimeReplanDecisionAuthority?: Participant
     /** How long a propose_replan call waits for its exact Board decision. */
     runtimeReplanDecisionTimeoutMs?: number
+    /** Exact Critic whose verdict completes or resumes a reviewed turn. */
+    turnReviewAuthority?: Participant
+    /** Bound for one terminal-turn review. Default: 240 seconds. */
+    turnReviewTimeoutMs?: number
     /** Exact manager-owned helper/session made available to the contained
      * native shell tool. No external path is trusted when omitted. */
     collaboration?: Readonly<{
         commandPath: string
         sessionDir: string
     }>
+    /** Trusted Gateway billing interceptor. Omitted for direct/unmetered endpoints. */
+    billingCoordinator?: GatewayBillingCoordinator
 }
 
 interface ResolvedOpenAIStoryAgentOptions {
@@ -130,10 +148,14 @@ interface ResolvedOpenAIStoryAgentOptions {
     maxRoundsPerTurn: number
     finalizationRoundsPerTurn: number
     perRoundTimeoutSecs: number
+    transportRetriesPerRound: number
+    transportRetryDelayMs: number
     baseUrl: string
     apiKey: string
     runtimeReplanDecisionAuthority: Participant | null
     runtimeReplanDecisionTimeoutMs: number
+    turnReviewAuthority: Participant | null
+    turnReviewTimeoutMs: number
 }
 
 let openAIStoryProducerSequence = 0
@@ -154,6 +176,7 @@ export class OpenAIStoryAgent extends BaseObserver {
     private readonly opts: ResolvedOpenAIStoryAgentOptions
     private readonly model: GenerativeModel
     private readonly tools: Tool[]
+    private readonly billingCoordinator: GatewayBillingCoordinator | null
     private runtimeGraphVersion: number | null
     private readonly pendingRuntimeReplans = new Map<
         string,
@@ -163,6 +186,7 @@ export class OpenAIStoryAgent extends BaseObserver {
     private envRef: AgenticEnvironment | null = null
     private readonly abortController = new AbortController()
     private abortReason: string | null = null
+    private abortFailure: StoryFailureData | undefined
     /** Optional explicit bus identity for the terminal outcome. */
     private resultAuthority: Participant | null = null
     private currentPhase: AgentPhase = "idle"
@@ -172,9 +196,8 @@ export class OpenAIStoryAgent extends BaseObserver {
     private resolveDone!: (outcome: StoryOutcome) => void
     public readonly done: Promise<StoryOutcome>
 
-    private notifyMessage: (() => void) | null = null
-    /** Set alongside notifyMessage when a targeted message arrives. */
-    private pendingMessage: string | null = null
+    private readonly turnMessages = new TurnMessageMailbox<string>()
+    private readonly turnReviews = new TurnReviewMailbox()
 
     constructor(spec: StorySpec, opts: OpenAIStoryAgentOptions = {}) {
         super()
@@ -198,12 +221,28 @@ export class OpenAIStoryAgent extends BaseObserver {
                 opts.finalizationRoundsPerTurn ?? 3,
             ),
             perRoundTimeoutSecs: opts.perRoundTimeoutSecs ?? 180,
+            transportRetriesPerRound: Math.max(
+                0,
+                Math.floor(opts.transportRetriesPerRound ?? 2),
+            ),
+            transportRetryDelayMs: Math.max(
+                0,
+                Math.floor(opts.transportRetryDelayMs ?? 1_000),
+            ),
             baseUrl: opts.baseUrl ?? "",
             apiKey: opts.apiKey ?? "",
             runtimeReplanDecisionAuthority:
                 opts.runtimeReplanDecisionAuthority ?? null,
             runtimeReplanDecisionTimeoutMs:
                 opts.runtimeReplanDecisionTimeoutMs ?? 30_000,
+            turnReviewAuthority: opts.turnReviewAuthority ?? null,
+            turnReviewTimeoutMs: opts.turnReviewTimeoutMs ?? 240_000,
+        }
+        this.billingCoordinator = opts.billingCoordinator ?? null
+        if (spec.requiresQualityReview && !this.opts.turnReviewAuthority) {
+            throw new Error(
+                `OpenAIStoryAgent ${spec.id} requires a turnReviewAuthority`,
+            )
         }
         this.runtimeGraphVersion = validGraphVersion(spec.graphVersion)
             ? spec.graphVersion
@@ -287,8 +326,25 @@ export class OpenAIStoryAgent extends BaseObserver {
             AgentTargetedMessage.is(event) &&
             event.data.recipientId === this.spec.id
         ) {
-            this.pendingMessage = event.data.text
-            this.notifyMessage?.()
+            // In reviewed collective execution Critique itself is the
+            // authoritative feedback. Ignore its compatibility twin so the
+            // same correction is not injected twice.
+            if (
+                this.spec.requiresQualityReview &&
+                source === this.opts.turnReviewAuthority &&
+                typeof event.data.metadata.terminalId === "string"
+            ) return
+            this.turnMessages.deliver(event.data.text)
+            return
+        }
+        if (
+            this.spec.requiresQualityReview &&
+            source === this.opts.turnReviewAuthority &&
+            Critique.is(event) &&
+            event.data.agentId === this.spec.id &&
+            event.data.terminalId
+        ) {
+            this.turnReviews.deliver(event.data)
         }
     }
 
@@ -336,6 +392,10 @@ export class OpenAIStoryAgent extends BaseObserver {
                           () =>
                               this.abortWithReason(
                                   `attempt ${attempts} timeout after ${this.spec.timeoutSecs}s`,
+                                  {
+                                      kind: "infrastructure",
+                                      code: "command_timeout",
+                                  },
                               ),
                           this.spec.timeoutSecs * 1000,
                       )
@@ -352,16 +412,16 @@ export class OpenAIStoryAgent extends BaseObserver {
                     result.error || "attempt did not reach a terminal state"
                 if (
                     result.retryable === false ||
-                    result.failure?.kind === "provider_capacity"
+                    boardOwnsRecovery(result.failure)
                 ) break
             } catch (e) {
-                lastFailure = classifyProviderFailure(e)
+                lastFailure = classifyStoryFailure(e)
                 const detail = compactProviderFailureDetail(e)
                 lastError = lastFailure
-                    ? `provider capacity unavailable${detail ? `: ${detail}` : ""}`
+                    ? `${failureSummary(lastFailure)}${detail ? `: ${detail}` : ""}`
                     : detail || "OpenAI story attempt failed"
                 this.transition("failed", lastError)
-                if (lastFailure?.kind === "provider_capacity") break
+                if (boardOwnsRecovery(lastFailure)) break
             } finally {
                 if (attemptTimer) clearTimeout(attemptTimer)
             }
@@ -370,6 +430,7 @@ export class OpenAIStoryAgent extends BaseObserver {
         if (hardTimer) clearTimeout(hardTimer)
         if (this.abortController.signal.aborted) {
             lastError = this.abortReason ?? "story was aborted"
+            lastFailure ??= this.abortFailure
         }
 
         const durationSecs = this.startedAt
@@ -424,18 +485,19 @@ export class OpenAIStoryAgent extends BaseObserver {
         this.transition("running", "first turn")
 
         for (let turn = 1; turn <= this.spec.maxTurns; turn++) {
-            const turnResult = await this.runOneTurn(context)
+            const turnResult = await this.runOneTurn(context, attempt, turn)
             context = turnResult.context
 
             // End-of-turn AgentResult is what fires Critic. `usage` is the
             // per-turn round sum, same snake_case shape as Claude's
             // stream-json mapper produces.
             const usageJson = turnResult.usage.isEmpty ? null : turnResult.usage.toJSON()
+            const terminalId = this.nextTerminalId(attempt, turn)
             this.envRef?.deliverSemanticEvent(
                 this,
                 AgentResult.create({
                     agentId: this.spec.id,
-                    terminalId: this.nextTerminalId(attempt, turn),
+                    terminalId,
                     subtype: turnResult.success ? "success" : "error",
                     sessionId: null,
                     isError: !turnResult.success,
@@ -464,32 +526,93 @@ export class OpenAIStoryAgent extends BaseObserver {
                 }
             }
 
-            const gotMessage = await this.waitForMessageOrQuiet()
+            if (this.spec.requiresQualityReview) {
+                const reviewWait = await this.turnReviews.waitFor(terminalId, {
+                    timeoutMs: this.opts.turnReviewTimeoutMs,
+                    signal: this.abortController.signal,
+                })
+                if (this.abortController.signal.aborted) {
+                    return {
+                        error: this.abortReason ?? "story was aborted",
+                        retryable: false,
+                    }
+                }
+                if (reviewWait.kind === "timeout") {
+                    return {
+                        ...turnReviewTimeoutFailure(
+                            terminalId,
+                            this.opts.turnReviewTimeoutMs,
+                        ),
+                        retryable: false,
+                    }
+                }
+                if (reviewWait.kind === "cancelled") {
+                    return {
+                        error: this.abortReason ?? "story was aborted",
+                        retryable: false,
+                    }
+                }
+                const review = reviewWait.review
+                const disposition = turnReviewDisposition(terminalId, review)
+                if (disposition.kind === "failure") {
+                    return {
+                        error: disposition.error,
+                        failure: disposition.failure,
+                        retryable: false,
+                    }
+                }
+                if (disposition.kind === "pass") {
+                    this.transition("done", `${turn} reviewed turn(s)`)
+                    return { error: "" }
+                }
+                const feedback = disposition.feedback
+                context = context.addContextItem(UserMessageItem.create(feedback))
+                this.envRef?.deliverSemanticEvent(
+                    this,
+                    AgentUserMessage.create({
+                        agentId: this.spec.id,
+                        text: feedback,
+                    }),
+                )
+                continue
+            }
+
+            const message = await this.turnMessages.waitForNext({
+                timeoutMs: this.spec.quietTimeoutMs,
+                signal: this.abortController.signal,
+            })
             if (this.abortController.signal.aborted) {
                 return {
                     error: this.abortReason ?? "story was aborted",
                     retryable: false,
                 }
             }
-            if (!gotMessage) {
+            if (message === null) {
                 this.transition("done", `${turn} turn(s)`)
                 return { error: "" }
             }
             context = context.addContextItem(
-                UserMessageItem.create(this.pendingMessage ?? ""),
+                UserMessageItem.create(message),
             )
             this.envRef?.deliverSemanticEvent(
                 this,
                 AgentUserMessage.create({
                     agentId: this.spec.id,
-                    text: this.pendingMessage ?? "",
+                    text: message,
                 }),
             )
-            this.pendingMessage = null
         }
 
         this.transition("failed", `maxTurns (${this.spec.maxTurns}) exhausted`)
-        return { error: `maxTurns (${this.spec.maxTurns}) exhausted` }
+        return {
+            error: `maxTurns (${this.spec.maxTurns}) exhausted`,
+            failure: {
+                kind: "execution",
+                code: this.spec.requiresQualityReview
+                    ? "quality_rejected"
+                    : "turn_limit",
+            },
+        }
     }
 
     private nextTerminalId(attempt: number, turn: number): string {
@@ -538,6 +661,8 @@ export class OpenAIStoryAgent extends BaseObserver {
      */
     private async runOneTurn(
         initialContext: ModelContext,
+        attempt: number,
+        turn: number,
     ): Promise<{
         context: ModelContext
         success: boolean
@@ -573,24 +698,13 @@ export class OpenAIStoryAgent extends BaseObserver {
             let lastMessageText: string | null = null
 
             try {
-                const roundPromise = this.runRound(context)
-                // Clear the timer once the round settles — a pending setTimeout keeps
-                // the process alive for the full perRoundMs after the work is done.
-                let roundTimer: ReturnType<typeof setTimeout> | undefined
-                const timeoutPromise = new Promise<never>((_, rej) => {
-                    roundTimer = setTimeout(
-                        () =>
-                            rej(
-                                new InferenceRoundTimeoutError(
-                                    `round ${round} timed out after ${perRoundMs}ms`,
-                                ),
-                            ),
-                        perRoundMs,
-                    )
-                })
-                const result = await this.withAbort(
-                    Promise.race([roundPromise, timeoutPromise]),
-                ).finally(() => clearTimeout(roundTimer))
+                const result = await this.runRoundWithTransportRetries(
+                    context,
+                    attempt,
+                    turn,
+                    round,
+                    perRoundMs,
+                )
                 usage.add(result.usage)
 
                 for (const item of result.items) {
@@ -634,12 +748,16 @@ export class OpenAIStoryAgent extends BaseObserver {
                         assistantText,
                         usage,
                         error: e.message,
+                        failure: {
+                            kind: "transport",
+                            code: "request_timeout",
+                        },
                         // Mozaik 3.12 does not expose a provider AbortSignal.
                         // Do not overlap a retry with the still-settling request.
                         retryable: false,
                     }
                 }
-                const failure = classifyProviderFailure(e)
+                const failure = classifyStoryFailure(e)
                 const detail = compactProviderFailureDetail(e)
                 return {
                     context,
@@ -647,7 +765,7 @@ export class OpenAIStoryAgent extends BaseObserver {
                     assistantText,
                     usage,
                     error: failure
-                        ? `provider capacity unavailable in inference round ${round}${detail ? `: ${detail}` : ""}`
+                        ? `${failureSummary(failure)} in inference round ${round}${detail ? `: ${detail}` : ""}`
                         : `inference round ${round} failed${detail ? `: ${detail}` : ""}`,
                     ...(failure ? { failure } : {}),
                 }
@@ -782,8 +900,91 @@ export class OpenAIStoryAgent extends BaseObserver {
         }
     }
 
-    private runRound(context: ModelContext) {
-        return runInferenceRound(context, this.model)
+    private runRound(
+        context: ModelContext,
+        attempt: number,
+        turn: number,
+        round: number,
+    ) {
+        return runInferenceRound(
+            context,
+            this.model,
+            this.billingCoordinator
+                ? {
+                      billing: {
+                          coordinator: this.billingCoordinator,
+                          context: {
+                              runId: this.spec.runId ?? null,
+                              phase: "story",
+                              storyId: this.spec.id,
+                              leaseId: this.spec.leaseId ?? null,
+                              generation: this.spec.generation ?? null,
+                              attempt,
+                              turn,
+                              round,
+                          },
+                      },
+                  }
+                : {},
+        )
+    }
+
+    private async runRoundWithTransportRetries(
+        context: ModelContext,
+        attempt: number,
+        turn: number,
+        round: number,
+        perRoundMs: number,
+    ): Promise<Awaited<ReturnType<typeof runInferenceRound>>> {
+        for (
+            let reconnect = 0;
+            reconnect <= this.opts.transportRetriesPerRound;
+            reconnect++
+        ) {
+            try {
+                const roundPromise = this.runRound(
+                    context,
+                    attempt,
+                    turn,
+                    round,
+                )
+                // A local watchdog cannot cancel Mozaik 3.12's provider
+                // request. Never overlap it with a retry while it may settle.
+                let roundTimer: ReturnType<typeof setTimeout> | undefined
+                const timeoutPromise = new Promise<never>((_, reject) => {
+                    roundTimer = setTimeout(
+                        () =>
+                            reject(
+                                new InferenceRoundTimeoutError(
+                                    `round ${round} timed out after ${perRoundMs}ms`,
+                                ),
+                            ),
+                        perRoundMs,
+                    )
+                })
+                return await this.withAbort(
+                    Promise.race([roundPromise, timeoutPromise]),
+                ).finally(() => clearTimeout(roundTimer))
+            } catch (error) {
+                if (
+                    error instanceof InferenceRoundTimeoutError ||
+                    this.abortController.signal.aborted
+                ) throw error
+                const failure = classifyStoryFailure(error)
+                if (
+                    failure?.kind !== "transport" ||
+                    reconnect >= this.opts.transportRetriesPerRound
+                ) throw error
+                const delay = this.opts.transportRetryDelayMs * 2 ** reconnect
+                this.transition(
+                    "waiting",
+                    `transport reconnect ${reconnect + 1}/${this.opts.transportRetriesPerRound}`,
+                )
+                await this.withAbort(sleep(delay))
+                this.transition("running", `inference round ${round}`)
+            }
+        }
+        throw new Error("unreachable transport retry state")
     }
 
     private async runOrdinaryTool(call: FunctionCallItem): Promise<string> {
@@ -907,8 +1108,12 @@ export class OpenAIStoryAgent extends BaseObserver {
         setModelTools(this.model, this.tools)
     }
 
-    private abortWithReason(reason: string): void {
+    private abortWithReason(
+        reason: string,
+        failure?: StoryFailureData,
+    ): void {
         this.abortReason ??= reason
+        this.abortFailure ??= failure
         if (!this.abortController.signal.aborted) this.abortController.abort()
         this.transition("aborted", this.abortReason)
     }
@@ -927,31 +1132,6 @@ export class OpenAIStoryAgent extends BaseObserver {
         } finally {
             signal.removeEventListener("abort", onAbort)
         }
-    }
-
-    /**
-     * True if a targeted message arrives within quietTimeoutMs, false if the
-     * timer fires first. Mirrors the Claude side's quiet timer.
-     */
-    private async waitForMessageOrQuiet(): Promise<boolean> {
-        return new Promise<boolean>((resolve) => {
-            const signal = this.abortController.signal
-            let settled = false
-            const finish = (receivedMessage: boolean) => {
-                if (settled) return
-                settled = true
-                clearTimeout(timer)
-                signal.removeEventListener("abort", onAbort)
-                this.notifyMessage = null
-                resolve(receivedMessage)
-            }
-            const onAbort = () => finish(false)
-            const timer = setTimeout(() => finish(false), this.spec.quietTimeoutMs)
-
-            this.notifyMessage = () => finish(true)
-            if (signal.aborted) finish(false)
-            else signal.addEventListener("abort", onAbort, { once: true })
-        })
     }
 
     private transition(next: AgentPhase, detail?: string): void {
@@ -1090,3 +1270,22 @@ function runtimeToolStatus(output: string): string | null {
 }
 
 class InferenceRoundTimeoutError extends Error {}
+
+function failureSummary(failure: StoryFailureData): string {
+    switch (failure.kind) {
+        case "provider_capacity":
+            return "provider capacity unavailable"
+        case "transport":
+            return "provider transport failed"
+        case "infrastructure":
+            return "execution infrastructure failed"
+        case "verification":
+            return "verification failed"
+        case "execution":
+            return "story execution failed"
+    }
+}
+
+function boardOwnsRecovery(failure: StoryFailureData | undefined): boolean {
+    return failure !== undefined && failure.kind !== "execution"
+}

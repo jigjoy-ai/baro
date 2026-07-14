@@ -35,20 +35,14 @@ describe("CriticCodex", () => {
             [1, 2, 3],
         )
         assert.equal(critiques[0]!.data.verdict, "fail")
+        assert.equal(critiques[0]!.data.status, "inconclusive")
         assert.equal(critiques[0]!.data.modelUsed, "codex-default")
         assert.match(critiques[0]!.data.reasoning, /no tool-less inference mode/)
         assert.deepEqual(critiques[0]!.data.violatedCriteria, [
             "[critic backend unavailable — tool-less evaluation required]",
         ])
 
-        assert.equal(messages.length, 2)
-        assert.deepEqual(
-            messages.map((event) => event.data.metadata.emissionIndex),
-            [1, 2],
-        )
-        assert.ok(
-            messages.every((event) => event.data.recipientId === "agent-a"),
-        )
+        assert.equal(messages.length, 0)
     })
 
     it("never launches the configured Codex binary", async () => {
@@ -76,6 +70,7 @@ describe("CriticCodex", () => {
             assert.equal(existsSync(sentinel), false)
             assert.equal(critiques.length, 1)
             assert.equal(critiques[0]!.data.verdict, "fail")
+            assert.equal(critiques[0]!.data.status, "inconclusive")
             assert.match(
                 critiques[0]!.data.reasoning,
                 /no tool-less inference mode/,
@@ -83,9 +78,7 @@ describe("CriticCodex", () => {
             assert.deepEqual(critiques[0]!.data.violatedCriteria, [
                 "[critic backend unavailable — tool-less evaluation required]",
             ])
-            assert.equal(messages.length, 1)
-            assert.equal(messages[0]!.data.recipientId, "agent-a")
-            assert.equal(messages[0]!.data.metadata.criticTurn, 1)
+            assert.equal(messages.length, 0)
         })
     })
 

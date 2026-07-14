@@ -30,7 +30,8 @@ import {
     extractVerdictJson,
 } from "./critic.js"
 import {
-    prepareCriticEvalPrompt,
+    inconclusiveEvidenceVerdict,
+    prepareCriticEvaluation,
     type CriticEvidenceSource,
 } from "./critic-evidence.js"
 import { withIsolatedCriticCwd } from "./critic-cli-isolation.js"
@@ -136,20 +137,22 @@ export class CriticPi extends BaseObserver {
         this.turnCount.set(agentId, turn)
 
         const work = (async () => {
-            const prompt = await prepareCriticEvalPrompt(
+            const preparation = await prepareCriticEvaluation(
                 criteria,
                 resultText,
                 agentId,
                 this.opts.evidence,
             )
-            const { verdict, reasoning, violatedCriteria } = await this.evaluate(
-                prompt,
-                agentId,
-                turn,
-            )
+            const evaluation = preparation.status === "ready"
+                ? await this.evaluate(preparation.prompt, agentId, turn)
+                : inconclusiveEvidenceVerdict(preparation.issues)
+            const { verdict, reasoning, violatedCriteria } = evaluation
+            const status = evaluation.status ?? "evaluated"
 
             const critiqueEvent = Critique.create({
                 agentId,
+                ...(terminalId ? { terminalId } : {}),
+                status,
                 verdict,
                 reasoning,
                 violatedCriteria,
@@ -160,7 +163,7 @@ export class CriticPi extends BaseObserver {
                 env.deliverSemanticEvent(this, critiqueEvent)
             }
 
-            if (verdict === "fail" && canContinue) {
+            if (status === "evaluated" && verdict === "fail" && canContinue) {
                 const emitted = this.emissions.get(agentId) ?? 0
                 if (emitted < this.opts.maxEmissionsPerAgent) {
                     this.emissions.set(agentId, emitted + 1)
@@ -171,6 +174,7 @@ export class CriticPi extends BaseObserver {
                         metadata: {
                             criticTurn: turn,
                             emissionIndex: emitted + 1,
+                            ...(terminalId ? { terminalId } : {}),
                         },
                     })
                     for (const env of this.getEnvironments()) {
@@ -193,6 +197,7 @@ export class CriticPi extends BaseObserver {
         agentId: string,
         turn: number,
     ): Promise<{
+        status?: "evaluated" | "inconclusive"
         verdict: "pass" | "fail"
         reasoning: string
         violatedCriteria: string[]
@@ -220,6 +225,7 @@ export class CriticPi extends BaseObserver {
             }
 
             return {
+                status: "evaluated",
                 verdict: parsed.verdict === "pass" ? "pass" : "fail",
                 reasoning: parsed.reasoning ?? "",
                 violatedCriteria: Array.isArray(parsed.violated_criteria)
@@ -228,6 +234,7 @@ export class CriticPi extends BaseObserver {
             }
         } catch (err) {
             return {
+                status: "inconclusive",
                 verdict: "fail",
                 reasoning: `CriticPi LLM call failed: ${String((err as Error)?.message ?? err)}`,
                 violatedCriteria: ["[critic error — could not evaluate]"],

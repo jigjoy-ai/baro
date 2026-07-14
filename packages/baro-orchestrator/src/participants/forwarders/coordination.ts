@@ -193,7 +193,7 @@ export class CoordinationForwarder extends BaseObserver {
         emit({
             type: "story_log",
             id: item.agentId,
-            line: `[critic/${item.verdict}] ${item.reasoning}`,
+            line: `[critic/${item.status === "inconclusive" ? "inconclusive" : item.verdict}] ${item.reasoning}`,
         })
     }
 }

@@ -72,6 +72,8 @@ export {
     type ModelTelemetryReduction,
 } from "./model-telemetry.js"
 
+export * from "./billing/index.js"
+
 export type {
     RunnerInvocationObservation,
     RunnerInvocationObserver,
@@ -206,12 +208,14 @@ export {
     WorkerCapabilityAdvertised,
     WorkOffered,
     WorkBid,
+    RouteEstimateUpdated,
     WorkBidWindowClosed,
     WorkClaimed,
     WorkLeaseGranted,
     WorkLeaseReleased,
     WorkLeaseExpired,
     WorkDiscovered,
+    ConversationDelegationProposed,
     RuntimeReplanProposed,
     RuntimeReplanApplied,
     RuntimeReplanRejected,
@@ -222,7 +226,10 @@ export {
     type CoordinationMode,
     type WorkBidData,
     type WorkBidEstimateData,
+    type RouteEstimateUpdatedData,
     type WorkRouteDescriptor,
+    type ConversationDelegatedStory,
+    type ConversationDelegationProposedData,
     type RuntimeReplanMutation,
     type RuntimeReplanCorrelationData,
     type RuntimeReplanProposedData,
@@ -299,6 +306,7 @@ export {
     orchestrate,
     validateCollectiveWorkers,
     type CollectiveWorkerCandidateConfig,
+    type GatewayBillingConfig,
     type OrchestrateConfig,
     type OrchestrateResult,
 } from "./orchestrate.js"

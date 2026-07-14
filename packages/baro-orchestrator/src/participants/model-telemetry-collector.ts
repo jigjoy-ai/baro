@@ -30,9 +30,15 @@ import {
     SerializedObserver,
     type SerializedEventContext,
 } from "../runtime/serialized-observer.js"
+import type {
+    StoryOutcomeAuthority,
+    StoryResultAuthorityCorrelation,
+} from "../runtime/story-outcome-authority.js"
 
 export interface ModelTelemetryCollectorOptions {
     runId: string
+    /** Collective-only registry for exact route and terminal producers. */
+    outcomeAuthority?: StoryOutcomeAuthority
 }
 
 interface RouteInfo {
@@ -62,50 +68,143 @@ export class ModelTelemetryCollector extends SerializedObserver {
     private readonly routes = new Map<string, RouteInfo>()
     private readonly sequences = new Map<string, number>()
     private readonly seenTerminalObservations = new Set<string>()
+    private readonly perRoundStoryRoutes = new Set<string>()
 
     constructor(private readonly opts: ModelTelemetryCollectorOptions) {
         super()
+        if (
+            opts.outcomeAuthority &&
+            opts.outcomeAuthority.runId !== opts.runId
+        ) {
+            throw new Error("model telemetry outcomeAuthority runId mismatch")
+        }
+    }
+
+    /**
+     * Register a trusted, pre-dispatch per-round runner measurement so the
+     * later aggregate OpenAI AgentResult is not emitted as a second fake
+     * invocation. The actual event still enters through this collector's
+     * object identity and remains subject to StoryFactory source binding.
+     */
+    registerPerRoundStoryMeasurement(
+        data: ModelInvocationMeasuredData,
+    ): void {
+        if (
+            data.runId !== this.opts.runId ||
+            data.phase !== "story" ||
+            !data.storyId ||
+            data.backend !== "openai" ||
+            data.evidence.producer !== "runner"
+        ) {
+            throw new Error("invalid per-round story telemetry registration")
+        }
+        let correlation: StoryResultAuthorityCorrelation | null = null
+        if (this.opts.outcomeAuthority) {
+            if (
+                !data.leaseId ||
+                !Number.isInteger(data.generation) ||
+                data.generation! < 0
+            ) {
+                throw new Error(
+                    "collective per-round telemetry requires lease correlation",
+                )
+            }
+            correlation = {
+                runId: data.runId,
+                storyId: data.storyId,
+                leaseId: data.leaseId,
+                generation: data.generation!,
+            }
+        }
+        this.perRoundStoryRoutes.add(routeKey(data.storyId, correlation))
     }
 
     protected override handleEvent(context: SerializedEventContext): void {
         const { event } = context
         if (StoryRouted.is(event)) {
-            this.routes.set(event.data.storyId, {
+            const correlation = this.routeCorrelation(context, event.data)
+            if (this.opts.outcomeAuthority && !correlation) return
+            this.routes.set(routeKey(event.data.storyId, correlation), {
                 backend: event.data.backend,
                 model: event.data.model,
             })
             return
         }
         if (AgentResult.is(event)) {
-            this.publishOnce(event, this.fromAgentResult(event.data))
+            const correlation = this.terminalCorrelation(
+                context,
+                event.data.agentId,
+            )
+            if (this.opts.outcomeAuthority && !correlation) return
+            if (
+                this.perRoundStoryRoutes.has(
+                    routeKey(event.data.agentId, correlation),
+                )
+            ) return
+            this.publishOnce(
+                event,
+                this.fromAgentResult(event.data, correlation),
+                correlation,
+            )
             return
         }
         if (CodexTurnEvent.is(event) && event.data.phase === "completed") {
-            this.publishOnce(event, this.fromCodex(event.data))
+            const correlation = this.terminalCorrelation(
+                context,
+                event.data.agentId,
+            )
+            if (this.opts.outcomeAuthority && !correlation) return
+            this.publishOnce(
+                event,
+                this.fromCodex(event.data, correlation),
+                correlation,
+            )
             return
         }
         if (OpenCodeSystem.is(event) && event.data.subtype === "step_finish") {
-            this.publishOnce(event, this.fromOpenCode(event.data))
+            const correlation = this.terminalCorrelation(
+                context,
+                event.data.agentId,
+            )
+            if (this.opts.outcomeAuthority && !correlation) return
+            this.publishOnce(
+                event,
+                this.fromOpenCode(event.data, correlation),
+                correlation,
+            )
             return
         }
         if (PiTurnEvent.is(event) && event.data.turnType === "message_end") {
             const message = record(event.data.raw.message)
             if (message.role !== "assistant") return
-            this.publishOnce(event, this.fromPi(event.data))
+            const correlation = this.terminalCorrelation(
+                context,
+                event.data.agentId,
+            )
+            if (this.opts.outcomeAuthority && !correlation) return
+            this.publishOnce(
+                event,
+                this.fromPi(event.data, correlation),
+                correlation,
+            )
         }
     }
 
     private publishOnce(
         event: SemanticEvent<unknown>,
         observation: InvocationObservation,
+        correlation: StoryResultAuthorityCorrelation | null,
     ): void {
-        const key = terminalFingerprint(event)
+        const key = terminalFingerprint(event, correlation)
         if (this.seenTerminalObservations.has(key)) return
         this.seenTerminalObservations.add(key)
-        this.publishObservation(observation)
+        this.publishObservation(observation, correlation)
     }
 
-    private publishObservation(observation: InvocationObservation): void {
+    private publishObservation(
+        observation: InvocationObservation,
+        correlation: StoryResultAuthorityCorrelation | null,
+    ): void {
         const sequence = (this.sequences.get(observation.agentId) ?? 0) + 1
         this.sequences.set(observation.agentId, sequence)
         const invocationId = [
@@ -122,6 +221,12 @@ export class ModelTelemetryCollector extends SerializedObserver {
             runId: this.opts.runId,
             phase: "story",
             storyId: observation.agentId,
+            ...(correlation
+                ? {
+                      leaseId: correlation.leaseId,
+                      generation: correlation.generation,
+                  }
+                : {}),
             attempt: null,
             turn: observation.granularity === "process" ? null : sequence,
             round: observation.granularity === "round" ? sequence : null,
@@ -143,15 +248,22 @@ export class ModelTelemetryCollector extends SerializedObserver {
         this.publish(ModelInvocationMeasured.create(data))
     }
 
-    private route(agentId: string, fallbackBackend: string): RouteInfo {
-        return this.routes.get(agentId) ?? {
+    private route(
+        agentId: string,
+        fallbackBackend: string,
+        correlation: StoryResultAuthorityCorrelation | null,
+    ): RouteInfo {
+        return this.routes.get(routeKey(agentId, correlation)) ?? {
             backend: fallbackBackend,
             model: "default",
         }
     }
 
-    private fromAgentResult(item: AgentResultData): InvocationObservation {
-        const route = this.route(item.agentId, "claude")
+    private fromAgentResult(
+        item: AgentResultData,
+        correlation: StoryResultAuthorityCorrelation | null,
+    ): InvocationObservation {
+        const route = this.route(item.agentId, "claude", correlation)
         const usage = record(item.usage)
         const tokens = tokenMetrics(usage, route.backend)
         const equivalentUsd = metricFromKeys(
@@ -176,8 +288,11 @@ export class ModelTelemetryCollector extends SerializedObserver {
         }
     }
 
-    private fromCodex(item: CodexTurnEventData): InvocationObservation {
-        const route = this.route(item.agentId, "codex")
+    private fromCodex(
+        item: CodexTurnEventData,
+        correlation: StoryResultAuthorityCorrelation | null,
+    ): InvocationObservation {
+        const route = this.route(item.agentId, "codex", correlation)
         const raw = record(item.raw)
         return {
             agentId: item.agentId,
@@ -192,8 +307,11 @@ export class ModelTelemetryCollector extends SerializedObserver {
         }
     }
 
-    private fromOpenCode(item: OpenCodeSystemData): InvocationObservation {
-        const route = this.route(item.agentId, "opencode")
+    private fromOpenCode(
+        item: OpenCodeSystemData,
+        correlation: StoryResultAuthorityCorrelation | null,
+    ): InvocationObservation {
+        const route = this.route(item.agentId, "opencode", correlation)
         const raw = record(item.raw)
         const part = record(raw.part)
         return {
@@ -212,8 +330,11 @@ export class ModelTelemetryCollector extends SerializedObserver {
         }
     }
 
-    private fromPi(item: PiTurnEventData): InvocationObservation {
-        const route = this.route(item.agentId, "pi")
+    private fromPi(
+        item: PiTurnEventData,
+        correlation: StoryResultAuthorityCorrelation | null,
+    ): InvocationObservation {
+        const route = this.route(item.agentId, "pi", correlation)
         const message = record(item.raw.message)
         const usage = record(message.usage)
         const cost = record(usage.cost)
@@ -244,6 +365,49 @@ export class ModelTelemetryCollector extends SerializedObserver {
                       ? message.response_id
                       : null,
         }
+    }
+
+    private routeCorrelation(
+        context: SerializedEventContext,
+        data: {
+            storyId: string
+            runId?: string
+            leaseId?: string
+            generation?: number
+        },
+    ): StoryResultAuthorityCorrelation | null {
+        const authority = this.opts.outcomeAuthority
+        if (!authority) return null
+        const generation = data.generation
+        if (
+            data.runId !== this.opts.runId ||
+            !data.storyId ||
+            !data.leaseId ||
+            typeof generation !== "number" ||
+            !Number.isInteger(generation) ||
+            generation < 0 ||
+            !authority.matchesSpawnAuthority(context.source, {
+                runId: data.runId,
+                storyId: data.storyId,
+                leaseId: data.leaseId,
+            })
+        ) return null
+        return {
+            runId: data.runId,
+            storyId: data.storyId,
+            leaseId: data.leaseId,
+            generation,
+        }
+    }
+
+    private terminalCorrelation(
+        context: SerializedEventContext,
+        storyId: string,
+    ): StoryResultAuthorityCorrelation | null {
+        return this.opts.outcomeAuthority?.terminalCorrelationForSource(
+            context.source,
+            storyId,
+        ) ?? null
     }
 }
 
@@ -393,10 +557,29 @@ function record(value: unknown): Record<string, unknown> {
         : {}
 }
 
-function terminalFingerprint(event: SemanticEvent<unknown>): string {
+function routeKey(
+    storyId: string,
+    correlation: StoryResultAuthorityCorrelation | null,
+): string {
+    return correlation
+        ? JSON.stringify([
+              correlation.runId,
+              storyId,
+              correlation.leaseId,
+              correlation.generation,
+          ])
+        : storyId
+}
+
+function terminalFingerprint(
+    event: SemanticEvent<unknown>,
+    correlation: StoryResultAuthorityCorrelation | null,
+): string {
     return createHash("sha256")
         .update(event.type)
         .update("\0")
         .update(JSON.stringify(event.data))
+        .update("\0")
+        .update(correlation ? routeKey(correlation.storyId, correlation) : "legacy")
         .digest("hex")
 }

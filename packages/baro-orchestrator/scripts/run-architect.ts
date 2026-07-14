@@ -7,7 +7,12 @@
  */
 
 import { readFileSync, writeFileSync } from "fs"
+import { randomUUID } from "node:crypto"
 
+import {
+    createGatewayBillingCoordinatorFromEnv,
+    reconcileAndCloseGatewayBilling,
+} from "../src/billing/index.js"
 import { runArchitectClaude } from "../src/planning/architect-claude.js"
 import { runArchitectCodex } from "../src/planning/architect-codex.js"
 import { runArchitectOpenAI } from "../src/planning/architect-openai.js"
@@ -17,6 +22,7 @@ import {
     parseRequiredModeContract,
     type ModeContract,
 } from "../src/planning/planner-prompts.js"
+import { emit } from "../src/tui-protocol.js"
 
 interface Args {
     goal: string
@@ -146,13 +152,31 @@ async function main(): Promise<void> {
             if (!process.env.OPENAI_API_KEY) {
                 fatal("--llm openai requires OPENAI_API_KEY to be set")
             }
-            doc = await runArchitectOpenAI({
-                goal: args.goal,
-                cwd: args.cwd,
-                model: args.model,
-                projectContext,
-                modeContract,
+            const billing = createGatewayBillingCoordinatorFromEnv({
+                runId: process.env.BARO_RUN_ID ?? `architect-${randomUUID()}`,
+                publishMeasurement: (measurement) => {
+                    if (process.env.BARO_PLAN_EVENTS === "1") {
+                        emit({ type: "model_usage", measurement })
+                    }
+                },
             })
+            try {
+                doc = await runArchitectOpenAI({
+                    goal: args.goal,
+                    cwd: args.cwd,
+                    model: args.model,
+                    projectContext,
+                    modeContract,
+                    billingCoordinator: billing ?? undefined,
+                })
+            } finally {
+                const result = await reconcileAndCloseGatewayBilling(billing)
+                if (result && !result.complete) {
+                    process.stderr.write(
+                        `[run-architect] billing reconciliation incomplete (${result.unresolvedInvocationIds.length} invocation(s))\n`,
+                    )
+                }
+            }
         } else if (args.llm === "codex") {
             doc = await runArchitectCodex({
                 goal: args.goal,

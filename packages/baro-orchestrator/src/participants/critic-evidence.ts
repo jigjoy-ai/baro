@@ -57,6 +57,19 @@ export interface CriticEvidenceSource {
     maxDiffChars?: number
 }
 
+export interface CriticEvaluationPreparation {
+    prompt: string
+    status: "ready" | "inconclusive"
+    issues: readonly string[]
+}
+
+export interface InconclusiveCriticVerdict {
+    status: "inconclusive"
+    verdict: "fail"
+    reasoning: string
+    violatedCriteria: string[]
+}
+
 export interface CriticCommandEvidenceCollectorOptions {
     /** Collective-only exact authority for story/native tool producers. */
     outcomeAuthority?: StoryOutcomeAuthority
@@ -653,14 +666,52 @@ export async function prepareCriticEvalPrompt(
     agentId: string,
     source?: CriticEvidenceSource,
 ): Promise<string> {
-    const commandEvidence = await commandEvidenceFor(agentId, source)
-    const repositoryEvidence = await repositoryEvidenceFor(agentId, source)
-    return buildEvalPrompt(
+    return (await prepareCriticEvaluation(
         criteria,
         resultText,
-        commandEvidence,
-        repositoryEvidence,
-    )
+        agentId,
+        source,
+    )).prompt
+}
+
+/** Capture evidence once and classify evaluator readiness before spending a
+ * model call. Missing/stale/sandbox-blocked evidence is an operational lane,
+ * never a negative verdict about candidate code. */
+export async function prepareCriticEvaluation(
+    criteria: readonly string[],
+    resultText: string,
+    agentId: string,
+    source?: CriticEvidenceSource,
+): Promise<CriticEvaluationPreparation> {
+    const commandEvidence = await commandEvidenceFor(agentId, source)
+    const repositoryEvidence = await repositoryEvidenceFor(agentId, source)
+    const issues = source
+        ? evidenceReadinessIssues(commandEvidence, repositoryEvidence)
+        : []
+    return {
+        prompt: buildEvalPrompt(
+            criteria,
+            resultText,
+            commandEvidence,
+            repositoryEvidence,
+        ),
+        status: issues.length > 0 ? "inconclusive" : "ready",
+        issues,
+    }
+}
+
+export function inconclusiveEvidenceVerdict(
+    issues: readonly string[],
+): InconclusiveCriticVerdict {
+    const detail = issues.length > 0
+        ? issues.join("; ")
+        : "required acceptance evidence was unavailable"
+    return {
+        status: "inconclusive",
+        verdict: "fail",
+        reasoning: `Critic could not evaluate the candidate: ${detail}`,
+        violatedCriteria: ["[acceptance evidence unavailable]"],
+    }
 }
 
 export function buildEvalPrompt(
@@ -721,6 +772,45 @@ async function commandEvidenceFor(
     } catch (error) {
         return `Command evidence collection failed closed: ${errorMessage(error)}`
     }
+}
+
+function evidenceReadinessIssues(
+    commandEvidence: string | null,
+    repositoryEvidence: string | null,
+): string[] {
+    const issues: string[] = []
+    if (!repositoryEvidence) {
+        issues.push("repository evidence is unavailable")
+    } else if (
+        /^(?:Repository target resolution|Repository evidence collection) failed/i.test(
+            repositoryEvidence,
+        )
+    ) {
+        issues.push(boundText(repositoryEvidence, 500))
+    }
+    if (commandEvidence) {
+        if (/^Command evidence collection failed closed:/im.test(commandEvidence)) {
+            issues.push("command evidence collection failed")
+        }
+        if (
+            /^freshness:\s*STALE(?:\/UNVERIFIABLE)?(?::|\s|$)/im.test(
+                commandEvidence,
+            )
+        ) {
+            issues.push("command evidence is stale or unverifiable")
+        }
+        if (/^runtime status:\s*pending\/no output observed/im.test(commandEvidence)) {
+            issues.push("a verification command has no terminal output")
+        }
+        if (
+            /sandbox-exec|operation not permitted|permission denied|seatbelt|denied by sandbox/i.test(
+                commandEvidence,
+            )
+        ) {
+            issues.push("verification command was blocked by the sandbox")
+        }
+    }
+    return [...new Set(issues)]
 }
 
 function renderCompleteAcceptanceContract(
@@ -831,9 +921,29 @@ async function collectRepositoryEvidence(
             ),
         ])
 
-    const untrackedEvidence = untracked.exitCode === 0
-        ? await readUntrackedEvidence(directory, untracked.stdout)
-        : formatGitFailure("git ls-files --others --exclude-standard", untracked)
+    for (const [label, result] of [
+        ["git status --short", status],
+        ["git diff --name-status <base>", paths],
+        ["git diff --stat <base>", statResult],
+        ["git diff <base>", diff],
+        ["git log <base>..HEAD", commits],
+        ["git ls-files --others --exclude-standard", untracked],
+    ] as const) {
+        if (result.exitCode !== 0) {
+            throw new Error(formatGitFailure(label, result))
+        }
+    }
+    // `git diff --check` uses exit 1 for real whitespace findings. Missing
+    // exit status, timeout, or any other code is an evidence-collection
+    // incident rather than a verdict about the patch.
+    if (check.exitCode !== 0 && check.exitCode !== 1) {
+        throw new Error(formatGitFailure("git diff --check <base>", check))
+    }
+
+    const untrackedEvidence = await readUntrackedEvidence(
+        directory,
+        untracked.stdout,
+    )
 
     return [
         `comparison base: ${base}`,

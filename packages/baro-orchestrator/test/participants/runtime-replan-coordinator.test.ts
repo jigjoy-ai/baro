@@ -215,6 +215,45 @@ describe("RuntimeReplanCoordinator", () => {
         assert.equal(writes, 2)
     })
 
+    it("separates worker runtime-adaptation budget from policy recovery", () => {
+        const writes: PrdFile[] = []
+        const coordinator = new RuntimeReplanCoordinator({
+            runId: "run-1",
+            prdPath: "/unused/prd.json",
+            maxDynamicStories: 3,
+            adaptationBudget: 1,
+            persist: (_path, value) => writes.push(structuredClone(value)),
+        })
+        const initial = initialPrd()
+        coordinator.start(initial)
+
+        const worker = coordinator.decide(addProposal(), {
+            ...decisionState(initial),
+            adaptationsSinceProgress: 1,
+        })
+        assert.ok(RuntimeReplanRejected.is(worker.event))
+        if (RuntimeReplanRejected.is(worker.event)) {
+            assert.equal(worker.event.data.code, "adaptation_budget_exhausted")
+        }
+
+        const policy = coordinator.decide(
+            {
+                ...addProposal(),
+                proposalId: "policy-after-worker-budget",
+            },
+            {
+                ...decisionState(initial),
+                adaptationsSinceProgress: 99,
+                requireActiveLease: false,
+                activeLease: undefined,
+                storyAccounting: "policy",
+                maxAddedStories: 1,
+            },
+        )
+        assert.ok(RuntimeReplanApplied.is(policy.event))
+        assert.equal(writes.length, 1)
+    })
+
     it("refuses mismatched and duplicate durable replay identities", () => {
         let durable = initialPrd()
         const createCoordinator = () =>
@@ -342,7 +381,7 @@ function decisionState(prd: PrdFile = initialPrd()) {
         prd,
         immutableStoryIds: new Set(["S1"]),
         activeLease: { leaseId: "lease-1", generation: 1 },
-        healingActionsSinceProgress: 0,
+        adaptationsSinceProgress: 0,
     }
 }
 

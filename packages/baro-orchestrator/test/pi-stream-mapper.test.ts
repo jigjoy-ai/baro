@@ -59,7 +59,7 @@ describe("mapPiEvent", () => {
         assert.equal(result.sessionId, "pi-session")
         assert.equal(item.data.agentId, AGENT_ID)
         assert.equal(item.data.subtype, "session")
-        assert.equal(item.data.raw, event)
+        assert.deepEqual(item.data.raw, event)
     })
 
     it("maps agent_start and turn_start lifecycle events", () => {
@@ -271,6 +271,6 @@ describe("mapPiEvent", () => {
 
         assert.equal(item.data.agentId, AGENT_ID)
         assert.equal(item.data.piType, "mystery")
-        assert.equal(item.data.raw, event)
+        assert.deepEqual(item.data.raw, event)
     })
 })

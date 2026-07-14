@@ -125,6 +125,31 @@ describe("AcceptanceGate", () => {
         assert.deepEqual(quality.data.critique?.violatedCriteria, ["tests"])
     })
 
+    it("does not turn an evaluator incident into a code-quality failure", async () => {
+        const gate = targetedGate("run-inconclusive", 200)
+        const env = joinWithCapture(gate)
+        grantLease(env, "run-inconclusive", "S1", "lease-1", 1)
+        deliverAgentTurn(env, "S1", "openai", "done")
+        env.deliverSemanticEvent(
+            source("critic"),
+            Critique.create({
+                agentId: "S1",
+                status: "inconclusive",
+                verdict: "fail",
+                reasoning: "evaluator timed out",
+                violatedCriteria: ["[critic error — could not evaluate]"],
+                turn: 1,
+                modelUsed: "critic",
+            }),
+        )
+        deliverStoryResult(env, "run-inconclusive", "S1", "lease-1", 1)
+
+        const quality = await qualityResult(env)
+        assert.equal(quality.data.status, "inconclusive")
+        assert.equal(quality.data.critique?.status, "inconclusive")
+        assert.match(quality.data.reason, /evaluator timed out/)
+    })
+
     it("passes immediately when no acceptance criteria are configured", async () => {
         const gate = new AcceptanceGate({
             runId: "run-no-target",
@@ -142,7 +167,7 @@ describe("AcceptanceGate", () => {
         assert.equal(env.events.filter(StoryQualityTimedOut.is).length, 0)
     })
 
-    it("fails closed when no terminal turn arrives", async () => {
+    it("reports an inconclusive gate when no terminal turn arrives", async () => {
         const gate = targetedGate("run-no-turn", 10)
         const env = joinWithCapture(gate)
         grantLease(env, "run-no-turn", "S1", "lease-1", 1)
@@ -150,12 +175,12 @@ describe("AcceptanceGate", () => {
 
         const quality = await qualityResult(env)
         assert.equal(env.events.filter(StoryQualityTimedOut.is).length, 1)
-        assert.equal(quality.data.status, "failed")
+        assert.equal(quality.data.status, "inconclusive")
         assert.equal(quality.data.targetTurn, null)
         assert.match(quality.data.reason, /no terminal agent turn/)
     })
 
-    it("fails closed when the terminal turn has no critique", async () => {
+    it("reports an inconclusive gate when the terminal turn has no critique", async () => {
         const gate = targetedGate("run-no-critique", 10)
         const env = joinWithCapture(gate)
         grantLease(env, "run-no-critique", "S1", "lease-1", 1)
@@ -164,7 +189,7 @@ describe("AcceptanceGate", () => {
 
         const quality = await qualityResult(env)
         assert.equal(env.events.filter(StoryQualityTimedOut.is).length, 1)
-        assert.equal(quality.data.status, "failed")
+        assert.equal(quality.data.status, "inconclusive")
         assert.equal(quality.data.targetTurn, 1)
         assert.match(quality.data.reason, /no critique for terminal turn 1/)
     })

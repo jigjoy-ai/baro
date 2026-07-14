@@ -23,6 +23,7 @@ import {
     CriticCommandEvidenceCollector,
     buildEvalPrompt,
     prepareCriticEvalPrompt,
+    prepareCriticEvaluation,
     type CriticEvidenceSource,
 } from "../../src/participants/critic-evidence.js"
 import { CriticOpenAI } from "../../src/participants/critic-openai.js"
@@ -183,6 +184,157 @@ describe("Critic repository evidence", () => {
         assert.match(VERDICT_SYSTEM_PROMPT, /Never treat its claims as evidence/)
         assert.match(VERDICT_SYSTEM_PROMPT, /tests\/build\/lint/)
         assert.match(VERDICT_SYSTEM_PROMPT, /marked STALE/)
+    })
+
+    it("marks evaluation inconclusive when configured repository evidence is missing", async () => {
+        const preparation = await prepareCriticEvaluation(
+            ["implementation exists"],
+            "I implemented the feature",
+            "agent-a",
+            {
+                resolveRepositoryTarget: () => null,
+            },
+        )
+
+        assert.equal(preparation.status, "inconclusive")
+        assert.deepEqual(preparation.issues, [
+            "repository evidence is unavailable",
+        ])
+        assert.match(preparation.prompt, /repository evidence unavailable/)
+    })
+
+    it("marks stale and unverifiable command evidence inconclusive", async () => {
+        await withTempDir("baro-critic-readiness-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            const cases = [
+                {
+                    label: "stale",
+                    freshness:
+                        "STALE: changed-content fingerprint no longer matches the live story workspace",
+                },
+                {
+                    label: "unverifiable",
+                    freshness:
+                        "STALE/UNVERIFIABLE: current workspace fingerprint failed",
+                },
+            ]
+
+            for (const item of cases) {
+                const preparation = await prepareCriticEvaluation(
+                    ["all tests pass"],
+                    "All tests pass",
+                    "agent-a",
+                    staticEvidence(repo, baseSha, [
+                        "### Command 1",
+                        "runtime status: completed; consult captured output for the result",
+                        `freshness: ${item.freshness}`,
+                        "captured output:",
+                        "192 tests passed",
+                    ].join("\n")),
+                )
+
+                assert.equal(
+                    preparation.status,
+                    "inconclusive",
+                    item.label,
+                )
+                assert.ok(
+                    preparation.issues.includes(
+                        "command evidence is stale or unverifiable",
+                    ),
+                    item.label,
+                )
+            }
+        })
+    })
+
+    it("treats a failed repository subcommand as inconclusive evidence", async () => {
+        await withTempDir("baro-critic-git-failure-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            const realGit = execFileSync("which", ["git"], {
+                encoding: "utf8",
+            }).trim()
+            const binDir = join(repo, "fake-bin")
+            mkdirSync(binDir)
+            const fakeGit = join(binDir, "git")
+            writeFileSync(
+                fakeGit,
+                [
+                    "#!/bin/sh",
+                    "for arg in \"$@\"; do",
+                    "  if [ \"$arg\" = status ]; then",
+                    "    echo simulated-status-failure >&2",
+                    "    exit 77",
+                    "  fi",
+                    "done",
+                    `exec ${JSON.stringify(realGit)} \"$@\"`,
+                    "",
+                ].join("\n"),
+            )
+            chmodSync(fakeGit, 0o755)
+            const oldPath = process.env.PATH
+            process.env.PATH = `${binDir}:${oldPath ?? ""}`
+            try {
+                const preparation = await prepareCriticEvaluation(
+                    ["implementation exists"],
+                    "implemented",
+                    "agent-a",
+                    staticEvidence(repo, baseSha, ""),
+                )
+                assert.equal(preparation.status, "inconclusive")
+                assert.match(preparation.issues.join("\n"), /git status --short/)
+                assert.match(preparation.issues.join("\n"), /exit 77/)
+            } finally {
+                process.env.PATH = oldPath
+            }
+        })
+    })
+
+    it("marks sandbox-blocked verification inconclusive", async () => {
+        await withTempDir("baro-critic-sandbox-readiness-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            const preparation = await prepareCriticEvaluation(
+                ["all tests pass"],
+                "All tests pass",
+                "agent-a",
+                staticEvidence(repo, baseSha, [
+                    "### Command 1",
+                    "runtime status: completed; output indicates failure",
+                    "freshness: fresh: changed-content fingerprint",
+                    "captured output:",
+                    "sandbox-exec: operation not permitted",
+                ].join("\n")),
+            )
+
+            assert.equal(preparation.status, "inconclusive")
+            assert.ok(
+                preparation.issues.includes(
+                    "verification command was blocked by the sandbox",
+                ),
+            )
+        })
+    })
+
+    it("does not mistake evidence-policy prose for a stale command marker", async () => {
+        await withTempDir("baro-critic-fresh-readiness-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            const preparation = await prepareCriticEvaluation(
+                ["all tests pass"],
+                "All tests pass",
+                "agent-a",
+                staticEvidence(repo, baseSha, [
+                    "STALE/UNVERIFIABLE evidence cannot prove the current workspace.",
+                    "### Command 1",
+                    "runtime status: completed; consult captured output for the result",
+                    "freshness: fresh: changed-content fingerprint",
+                    "captured output:",
+                    "192 tests passed",
+                ].join("\n")),
+            )
+
+            assert.equal(preparation.status, "ready")
+            assert.deepEqual(preparation.issues, [])
+        })
     })
 
     it("marks test evidence stale after a later native write or edit in non-git fallback", async () => {
@@ -717,6 +869,35 @@ function resultEvent(): ReturnType<typeof AgentResult.create> {
         numTurns: 1,
         durationMs: null,
     })
+}
+
+function initializeRepository(repo: string): string {
+    git(repo, "init", "--quiet")
+    writeFileSync(join(repo, "feature.ts"), "export const value = 1\n")
+    git(repo, "add", "feature.ts")
+    git(
+        repo,
+        "-c",
+        "user.name=Baro Test",
+        "-c",
+        "user.email=baro@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "baseline",
+    )
+    return git(repo, "rev-parse", "HEAD").trim()
+}
+
+function staticEvidence(
+    repo: string,
+    baseSha: string,
+    commandEvidence: string,
+): CriticEvidenceSource {
+    return {
+        resolveRepositoryTarget: () => ({ cwd: repo, baseSha }),
+        commandEvidence: () => commandEvidence,
+    }
 }
 
 function git(cwd: string, ...args: string[]): string {

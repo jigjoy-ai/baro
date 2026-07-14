@@ -23,6 +23,7 @@ import {
     UsageAccumulator,
     runInferenceRound,
 } from "./openai-runtime.js"
+import type { GatewayBillingCoordinator } from "../billing/index.js"
 
 import { createCodebaseTools } from "./codebase-tools.js"
 import { emitPlanLine, emitToolCall } from "./plan-events.js"
@@ -60,6 +61,8 @@ export interface RunPlannerOpenAIOptions {
     /** Default 600 s — reasoning models routinely need minutes per round;
      *  the old 120 s killed planning mid-round. */
     perRoundTimeoutSecs?: number
+    /** Present only for an explicitly trusted Baro Gateway process. */
+    billingCoordinator?: GatewayBillingCoordinator
     /** Deterministic no-network seam used by the planner state-machine tests. */
     testRuntime?: PlannerOpenAITestRuntime
 }
@@ -162,7 +165,13 @@ export async function runPlannerOpenAI(
         // GLM/OpenRouter emits attempted calls as literal <tool_call> text when
         // schemas disappear mid-conversation; keeping them makes those calls
         // protocol-visible so we can answer them without executing anything.
-        const roundPromise = inferRound(context, model)
+        const roundPromise = inferRound(
+            context,
+            model,
+            opts.billingCoordinator
+                ? billingRoundOptions(opts.billingCoordinator, "planner", round)
+                : {},
+        )
         // Clear the timer once the round settles — a pending setTimeout keeps the
         // process alive for the full 600s after the work is done (see architect-openai).
         let timer: ReturnType<typeof setTimeout> | undefined
@@ -276,13 +285,13 @@ function extractRunnablePlannerPrd(raw: string): string {
 
 /** Standalone intake for scripts/run-intake.ts — no planner run required. */
 export async function runOpenAIIntake(
-    opts: Pick<RunPlannerOpenAIOptions, "goal" | "cwd" | "model" | "quick" | "projectContext" | "decisionDocument">,
+    opts: Pick<RunPlannerOpenAIOptions, "goal" | "cwd" | "model" | "quick" | "projectContext" | "decisionDocument" | "billingCoordinator">,
 ): Promise<ModeContract> {
     return decideExecutionMode(opts, pickModel(opts.model ?? "gpt-5.5"))
 }
 
 export async function decideExecutionMode(
-    opts: Pick<RunPlannerOpenAIOptions, "goal" | "quick" | "projectContext" | "decisionDocument">,
+    opts: Pick<RunPlannerOpenAIOptions, "goal" | "quick" | "projectContext" | "decisionDocument" | "billingCoordinator">,
     plannerModel: GenerativeModel,
 ): Promise<ModeContract> {
     if (opts.quick) {
@@ -302,13 +311,41 @@ export async function decideExecutionMode(
     const context = ModelContext.create("intake")
         .addContextItem(SystemMessageItem.create("You classify software tasks for an autonomous PR workflow. Output JSON only."))
         .addContextItem(UserMessageItem.create(prompt))
-    const result = await runInferenceRound(context, intakeModel)
+    const result = await runInferenceRound(
+        context,
+        intakeModel,
+        opts.billingCoordinator
+            ? billingRoundOptions(opts.billingCoordinator, "intake", 1)
+            : {},
+    )
     const raw = result.items
         .filter((i) => i.type === "message")
         .map((i) => ((i.toJSON() as { content?: Array<{ text?: string }> }).content?.[0]?.text ?? ""))
         .join("\n")
         .trim()
     return parseModeContract(raw)
+}
+
+function billingRoundOptions(
+    coordinator: GatewayBillingCoordinator,
+    phase: "intake" | "planner",
+    round: number,
+) {
+    return {
+        billing: {
+            coordinator,
+            context: {
+                runId: null,
+                phase,
+                storyId: null,
+                leaseId: null,
+                generation: null,
+                attempt: 1,
+                turn: round,
+                round,
+            },
+        },
+    } as const
 }
 
 function numberEnv(name: string, fallback: number): number {

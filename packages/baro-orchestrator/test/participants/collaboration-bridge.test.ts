@@ -83,6 +83,8 @@ describe("CollaborationBridge", () => {
             )
             const discovered = await waitFor(env.events, WorkDiscovered.is)
             assert.equal(discovered.data.sourceAgentId, "S1")
+            assert.equal(discovered.data.leaseId, "lease-1")
+            assert.equal(discovered.data.generation, 1)
             assert.equal(discovered.data.story.id, "S3")
 
             env.deliverSemanticEvent(
@@ -230,6 +232,70 @@ describe("CollaborationBridge", () => {
                 }),
             )
             await bridge.idle()
+        })
+    })
+
+    it("rejects delayed discovery from a released lease after a new generation starts", async () => {
+        await withTempDir("collaboration-bridge-stale-discovery-", async (dir) => {
+            const runId = "run-stale-discovery"
+            const broker = source("broker")
+            const bridge = new CollaborationBridge({
+                runId,
+                sessionDir: dir,
+                pollMs: 5,
+            })
+            bridge.setLeaseAuthority(broker)
+            const env = joinWithCapture(bridge)
+            const grant = (leaseId: string, generation: number) =>
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: `offer-${generation}`,
+                    leaseId,
+                    workerId: "worker",
+                    generation,
+                    request: {
+                        storyId: "S1",
+                        prompt: "S1",
+                        model: "standard",
+                        retries: 1,
+                        timeoutSecs: 60,
+                    },
+                })
+
+            env.deliverSemanticEvent(broker, grant("lease-old", 1))
+            env.deliverSemanticEvent(
+                broker,
+                WorkLeaseReleased.create({
+                    runId,
+                    offerId: "offer-1",
+                    leaseId: "lease-old",
+                    storyId: "S1",
+                    workerId: "worker",
+                    reason: "operational_failed",
+                }),
+            )
+            env.deliverSemanticEvent(broker, grant("lease-new", 2))
+            await bridge.idle()
+
+            const stalePath = join(dir, "outbox", "stale-discovery.json")
+            writeFileSync(
+                stalePath,
+                JSON.stringify({
+                    leaseId: "lease-old",
+                    kind: "discover",
+                    reason: "late old-generation result",
+                    story: {
+                        id: "S-stale",
+                        title: "Stale work",
+                        description: "Must not mutate the new generation.",
+                        dependsOn: ["S1"],
+                        acceptance: ["never scheduled"],
+                        tests: [],
+                    },
+                }),
+            )
+            await waitForGone(stalePath)
+            assert.equal(env.events.some(WorkDiscovered.is), false)
         })
     })
 
@@ -537,6 +603,14 @@ async function waitForPath(path: string): Promise<void> {
         await new Promise<void>((resolve) => setTimeout(resolve, 5))
     }
     assert.fail(`timed out waiting for ${path}`)
+}
+
+async function waitForGone(path: string): Promise<void> {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+        if (!existsSync(path)) return
+        await new Promise<void>((resolve) => setTimeout(resolve, 5))
+    }
+    assert.fail(`timed out waiting for ${path} to be consumed`)
 }
 
 async function waitForProposal(

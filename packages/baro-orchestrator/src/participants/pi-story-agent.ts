@@ -12,9 +12,17 @@ import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
     AgentState,
+    PiSystem,
+    PiUnknownEvent,
     StoryResult,
     type AgentPhase,
+    type StoryFailureData,
 } from "../semantic-events.js"
+import {
+    boardOwnsCliRecovery,
+    describeCliStoryFailure,
+    isCliFailureSignal,
+} from "./cli-story-failure.js"
 import {
     PiCliParticipant,
     type PiRunSummary,
@@ -50,6 +58,7 @@ export interface PiStoryOutcome {
     durationSecs: number
     finalSummary: PiRunSummary | null
     error: string | null
+    failure?: StoryFailureData
 }
 
 export class PiStoryAgent extends BaseObserver {
@@ -71,6 +80,7 @@ export class PiStoryAgent extends BaseObserver {
     private currentPi: PiCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
+    private currentFailureSignals: unknown[] = []
     private resolveDone!: (outcome: PiStoryOutcome) => void
     public readonly done: Promise<PiStoryOutcome>
 
@@ -134,9 +144,22 @@ export class PiStoryAgent extends BaseObserver {
 
     /** No-op: Pi `-p` is one-shot — no stdin channel for mid-flight messages. */
     override async onExternalEvent(
-        _source: Participant,
-        _event: SemanticEvent<unknown>,
+        source: Participant,
+        event: SemanticEvent<unknown>,
     ): Promise<void> {
+        if (source !== this.currentPi) return
+        if (
+            PiUnknownEvent.is(event) &&
+            isCliFailureSignal(event.data.raw, event.data.piType)
+        ) {
+            this.currentFailureSignals.push(event.data.raw)
+        } else if (
+            PiSystem.is(event) &&
+            event.data.subtype === "agent_end" &&
+            isCliFailureSignal(event.data.raw, event.data.subtype)
+        ) {
+            this.currentFailureSignals.push(event.data.raw)
+        }
     }
 
     /**
@@ -153,6 +176,8 @@ export class PiStoryAgent extends BaseObserver {
         const maxAttempts = this.spec.retries + 1
         let lastSummary: PiRunSummary | null = null
         let lastError: string | null = null
+        let lastFailure: StoryFailureData | undefined
+        let attempts = 0
         let hardTimedOut = false
 
         const hardTimer =
@@ -167,6 +192,10 @@ export class PiStoryAgent extends BaseObserver {
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                    lastFailure = {
+                        kind: "infrastructure",
+                        code: "command_timeout",
+                    }
                     break
                 }
 
@@ -178,13 +207,19 @@ export class PiStoryAgent extends BaseObserver {
                     await setTimeoutPromise(this.spec.retryDelayMs)
                     if (hardTimedOut) {
                         lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                        lastFailure = {
+                            kind: "infrastructure",
+                            code: "command_timeout",
+                        }
                         break
                     }
                 }
 
+                attempts = attempt
                 const result = await this.runOneAttempt(attempt)
                 lastSummary = result.summary
                 lastError = result.error
+                lastFailure = result.failure
 
                 if (result.success) {
                     const durationSecs = Math.round(
@@ -205,8 +240,13 @@ export class PiStoryAgent extends BaseObserver {
 
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                    lastFailure = {
+                        kind: "infrastructure",
+                        code: "command_timeout",
+                    }
                     break
                 }
+                if (boardOwnsCliRecovery(result.failure)) break
             }
         } finally {
             if (hardTimer !== null) clearTimeout(hardTimer)
@@ -215,15 +255,27 @@ export class PiStoryAgent extends BaseObserver {
         const durationSecs = Math.round(
             (Date.now() - (this.startedAt ?? Date.now())) / 1000,
         )
-        this.transition("failed", `exhausted ${maxAttempts} attempts`)
-        this.emitStoryResult(false, maxAttempts, durationSecs, lastError)
+        this.transition(
+            "failed",
+            boardOwnsCliRecovery(lastFailure)
+                ? `operational failure after ${attempts} attempt(s)`
+                : `exhausted ${attempts}/${maxAttempts} attempts`,
+        )
+        this.emitStoryResult(
+            false,
+            attempts,
+            durationSecs,
+            lastError,
+            lastFailure,
+        )
         this.resolveDone({
             storyId: this.spec.id,
             success: false,
-            attempts: maxAttempts,
+            attempts,
             durationSecs,
             finalSummary: lastSummary,
             error: lastError,
+            ...(lastFailure ? { failure: lastFailure } : {}),
         })
     }
 
@@ -233,12 +285,21 @@ export class PiStoryAgent extends BaseObserver {
         success: boolean
         summary: PiRunSummary | null
         error: string | null
+        failure?: StoryFailureData
     }> {
         if (!this.envRef) {
-            return { success: false, summary: null, error: "no environment" }
+            return {
+                success: false,
+                summary: null,
+                ...describeCliStoryFailure(
+                    "no environment",
+                    { kind: "infrastructure", code: "process_spawn_failed" },
+                ),
+            }
         }
 
         this.transition("running", `attempt ${attempt}`)
+        this.currentFailureSignals = []
 
         const pi = new PiCliParticipant(this.spec.id, {
             cwd: this.spec.cwd,
@@ -262,14 +323,23 @@ export class PiStoryAgent extends BaseObserver {
         } catch (e) {
             pi.abort()
             const error = e instanceof Error ? e.message : String(e)
+            let stderrTail: string | null = null
             try {
-                await pi.done
+                stderrTail = (await pi.done).stderrTail
             } catch {
                 // ignore
             }
             pi.leave(this.envRef)
             this.currentPi = null
-            return { success: false, summary: null, error }
+            return {
+                success: false,
+                summary: null,
+                ...describeCliStoryFailure(
+                    error,
+                    { kind: "infrastructure", code: "command_timeout" },
+                    [...this.currentFailureSignals, stderrTail],
+                ),
+            }
         }
 
         pi.leave(this.envRef)
@@ -278,27 +348,58 @@ export class PiStoryAgent extends BaseObserver {
         // Pi exits 0 even on a refusal or no-op, so success needs positive
         // evidence: the agent loop finished (`sawAgentEnd`) and at least one
         // tool call succeeded — no tools ⇒ it answered in prose, not edits.
-        if (summary.exitCode !== 0 || summary.error != null) {
+        const failureSignals = [
+            ...this.currentFailureSignals,
+            summary.stderrTail,
+        ]
+        const reportedFailure = failureSignals.some((signal) =>
+            isCliFailureSignal(signal, ""),
+        )
+        if (
+            summary.exitCode !== 0 ||
+            summary.error != null ||
+            reportedFailure
+        ) {
             const reason = summary.error
                 ? summary.error.message
-                : `non-zero exit ${summary.exitCode}`
-            return { success: false, summary, error: reason }
+                : reportedFailure
+                  ? "pi reported a failed turn"
+                  : `non-zero exit ${summary.exitCode}`
+            return {
+                success: false,
+                summary,
+                ...describeCliStoryFailure(
+                    reason,
+                    summary.error
+                        ? {
+                              kind: "infrastructure",
+                              code: "process_spawn_failed",
+                          }
+                        : { kind: "execution", code: "model_error" },
+                    failureSignals,
+                ),
+            }
         }
         if (!summary.sawAgentEnd) {
             return {
                 success: false,
                 summary,
-                error: "pi exited 0 but emitted no agent_end — the agent loop did not complete",
+                ...describeCliStoryFailure(
+                    "pi exited 0 but emitted no agent_end — the agent loop did not complete",
+                    { kind: "execution", code: "model_error" },
+                ),
             }
         }
         if (summary.toolSuccessCount === 0) {
             return {
                 success: false,
                 summary,
-                error:
+                ...describeCliStoryFailure(
                     summary.toolCallCount === 0
                         ? "pi exited 0 but invoked no tools — answered in prose without editing the worktree"
                         : "pi exited 0 and invoked tools but every tool call failed (isError) — the worktree was not successfully edited",
+                    { kind: "execution", code: "no_work_product" },
+                ),
             }
         }
 
@@ -310,6 +411,7 @@ export class PiStoryAgent extends BaseObserver {
         attempts: number,
         durationSecs: number,
         error: string | null,
+        failure?: StoryFailureData,
     ): void {
         if (!this.envRef) return
         this.envRef.deliverSemanticEvent(
@@ -320,6 +422,7 @@ export class PiStoryAgent extends BaseObserver {
                 attempts,
                 durationSecs,
                 error,
+                ...(failure ? { failure } : {}),
                 ...correlationOf(this.spec),
             }),
         )

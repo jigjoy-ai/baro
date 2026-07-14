@@ -219,7 +219,9 @@ export class ProgressForwarder extends BaseObserver {
             kind: "verdict",
             ok: item.verdict === "pass",
             text:
-                item.verdict === "pass"
+                item.status === "inconclusive"
+                    ? `Critic could not evaluate ${item.agentId}: ${item.reasoning}`
+                    : item.verdict === "pass"
                     ? `Critic accepted ${item.agentId}`
                     : `Critic rejected ${item.agentId}: ${item.reasoning}`,
         })

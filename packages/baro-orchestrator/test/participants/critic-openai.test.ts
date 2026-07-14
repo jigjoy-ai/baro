@@ -242,6 +242,7 @@ describe("CriticOpenAI", () => {
         )
         assert.equal(critiques.length, 1)
         assert.equal(critiques[0]!.data.verdict, "fail")
+        assert.equal(critiques[0]!.data.status, "inconclusive")
         assert.match(critiques[0]!.data.reasoning, /no JSON object found/)
     })
 
@@ -281,6 +282,8 @@ describe("CriticOpenAI", () => {
             await critic.idle()
 
             const measured = env.events.filter(ModelInvocationMeasured.is)
+            const critiques = env.events.filter(Critique.is)
+            const messages = env.events.filter(AgentTargetedMessage.is)
             assert.equal(measured.length, 1, item.name)
             assert.equal(measured[0]!.data.status, item.status, item.name)
             assert.deepEqual(
@@ -293,7 +296,43 @@ describe("CriticOpenAI", () => {
                 unknownMetric(item.reason),
                 item.name,
             )
+            assert.equal(critiques[0]?.data.status, "inconclusive", item.name)
+            assert.equal(messages.length, 0, item.name)
         }
+    })
+
+    it("skips the evaluator and corrective message when evidence is inconclusive", async () => {
+        const critic = new CriticOpenAI({
+            targets: new Map([["agent-a", ["must include tests"]]]),
+            model: "fake-openai-model",
+            evidence: {
+                resolveRepositoryTarget: () => null,
+            },
+        })
+        let evaluations = 0
+        Object.defineProperty(critic, "evaluate", {
+            value: async () => {
+                evaluations += 1
+                return {
+                    verdict: "fail",
+                    reasoning: "should not run",
+                    violatedCriteria: ["must include tests"],
+                }
+            },
+        })
+        const env = joinWithCapture(critic)
+
+        await critic.onExternalEvent(source("runner"), resultEvent())
+        await critic.idle()
+
+        const critiques = env.events.filter(Critique.is)
+        assert.equal(evaluations, 0)
+        assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)
+        assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
+        assert.equal(critiques.length, 1)
+        assert.equal(critiques[0]!.data.status, "inconclusive")
+        assert.equal(critiques[0]!.data.verdict, "fail")
+        assert.match(critiques[0]!.data.reasoning, /repository evidence is unavailable/)
     })
 })
 

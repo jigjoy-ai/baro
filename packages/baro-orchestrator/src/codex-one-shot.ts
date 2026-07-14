@@ -8,6 +8,8 @@
 
 import { ChildProcess, spawn } from "child_process"
 
+import { harnessChildEnvironment } from "./harness-environment.js"
+
 import {
     knownMetric,
     notApplicableMetric,
@@ -65,6 +67,7 @@ export async function runCodexOneShot(
         try {
             proc = spawn(opts.codexBin ?? "codex", args, {
                 cwd: opts.cwd,
+                env: harnessChildEnvironment(),
                 stdio: ["ignore", "pipe", "pipe"],
             })
         } catch (e) {

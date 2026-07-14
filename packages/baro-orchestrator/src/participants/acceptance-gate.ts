@@ -338,10 +338,16 @@ export class AcceptanceGate extends SerializedObserver {
             storyId: pending.storyId,
             leaseId: pending.leaseId,
             generation: pending.generation,
-            status: critique.verdict === "pass" ? "passed" : "failed",
+            status:
+                critique.status === "inconclusive"
+                    ? "inconclusive"
+                    : critique.verdict === "pass"
+                      ? "passed"
+                      : "failed",
             targetTurn: pending.targetTurn,
             reason: critique.reasoning || `critic verdict: ${critique.verdict}`,
             critique: {
+                ...(critique.status ? { status: critique.status } : {}),
                 verdict: critique.verdict,
                 reasoning: critique.reasoning,
                 violatedCriteria: [...critique.violatedCriteria],
@@ -396,7 +402,7 @@ export class AcceptanceGate extends SerializedObserver {
             storyId: pending.storyId,
             leaseId: pending.leaseId,
             generation: pending.generation,
-            status: "failed",
+            status: "inconclusive",
             targetTurn: pending.targetTurn,
             reason,
         })

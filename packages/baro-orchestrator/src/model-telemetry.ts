@@ -8,6 +8,7 @@
  */
 
 export type MetricSource =
+    | "gateway_receipt"
     | "provider_response"
     | "cli_result"
     | "gateway_rate_card"
@@ -111,6 +112,9 @@ export interface ModelInvocationMeasuredData {
     readonly runId: string | null
     readonly phase: ModelInvocationPhase
     readonly storyId: string | null
+    /** Collective execution correlation. Absent for legacy/non-story phases. */
+    readonly leaseId?: string | null
+    readonly generation?: number | null
     readonly attempt: number | null
     readonly turn: number | null
     readonly round: number | null
@@ -144,6 +148,10 @@ export interface ModelTelemetryReduction {
 }
 
 const SOURCE_PRIORITY: Readonly<Record<MetricSource, number>> = {
+    // The gateway observes the terminal provider payload and normalizes vendor
+    // fields (for example DeepSeek cache-hit tokens) that a generic runner may
+    // not understand. Its immutable cloud receipt therefore wins on conflict.
+    gateway_receipt: 7,
     provider_response: 6,
     cloud_charge: 5,
     gateway_rate_card: 4,

@@ -9,6 +9,7 @@ import { hostname, homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { createInterface } from "node:readline/promises"
 import { WebSocket } from "ws"
+import { canonicalControlHttpOrigin } from "../src/gateway-credentials.js"
 import { buildInstallServiceArgs, buildReexec, parseDoneSuccess, semverLt } from "./runner-helpers.js"
 
 interface WireEvent {
@@ -57,7 +58,7 @@ const url = process.env.CONTROL_URL ?? "wss://api.baro.jigjoy.ai"
 let token = process.env.RUNNER_TOKEN
 
 // HTTP origin of the control plane — used by `baro login` and runner self-registration.
-const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
+const httpBase = canonicalControlHttpOrigin(url)
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
 const VERSION = "0.74.7"
@@ -118,9 +119,16 @@ function reexecUpdated(): void {
     })
 }
 
-const readCliToken = (): string | undefined => {
+const readCliLogin = (): { token: string; controlUrl: string } | undefined => {
     try {
-        return (JSON.parse(readFileSync(credsPath, "utf8")) as { token?: string }).token
+        const parsed = JSON.parse(readFileSync(credsPath, "utf8")) as {
+            token?: unknown
+            controlUrl?: unknown
+        }
+        if (typeof parsed.token !== "string" || typeof parsed.controlUrl !== "string") {
+            return undefined
+        }
+        return { token: parsed.token, controlUrl: parsed.controlUrl }
     } catch {
         return undefined
     }
@@ -375,6 +383,9 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
     // makes the claude CLI use API auth. Strip it for the child.
     const env: Record<string, string | undefined> = { ...process.env }
     delete env.ANTHROPIC_API_KEY
+    // The control-plane run is the one identity shared by planning,
+    // orchestration, Gateway attribution, and Cloud receipts.
+    env.BARO_RUN_ID = d.runId
     if (d.mode) env.BARO_MODE = d.mode
 
     let cwd = workspaceDir
@@ -797,12 +808,20 @@ async function main() {
     // No --token? If `baro login` left credentials, register a runner with them — no
     // dashboard visit, no token to paste.
     if (!token) {
-        const cli = readCliToken()
+        const cli = readCliLogin()
         if (cli) {
             try {
-                const reg = (await (await fetch(`${httpBase}/cli/runners/register`, { method: "POST", headers: { authorization: `Bearer ${cli}` } })).json()) as { token?: string }
+                if (canonicalControlHttpOrigin(cli.controlUrl) !== httpBase) {
+                    throw new Error(
+                        "stored login belongs to another control plane; run `baro login` again",
+                    )
+                }
+                const reg = (await (await fetch(`${httpBase}/cli/runners/register`, { method: "POST", headers: { authorization: `Bearer ${cli.token}` } })).json()) as { token?: string }
                 token = reg.token
-            } catch {
+            } catch (error) {
+                if (error instanceof Error && error.message.includes("another control plane")) {
+                    console.error(`[baro] ${error.message}`)
+                }
                 /* fall through to the not-signed-in message */
             }
         }

@@ -17,6 +17,7 @@ import {
 } from "@mozaik-ai/core"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
+import { harnessChildEnvironment } from "../harness-environment.js"
 import {
     AgentState,
     AgentTargetedMessage,
@@ -25,6 +26,7 @@ import {
     type AgentPhase,
 } from "../semantic-events.js"
 import { mapCodexEvent } from "../codex-stream-mapper.js"
+import { appendCliDiagnosticTail } from "./cli-story-failure.js"
 
 export interface CodexCliParticipantOptions {
     cwd: string
@@ -51,6 +53,8 @@ export interface CodexRunSummary {
     threadId: string | null
     exitCode: number | null
     error: Error | null
+    /** Bounded tail used only to classify terminal operational failures. */
+    stderrTail: string | null
 }
 
 export class CodexCliParticipant extends BaseObserver {
@@ -63,11 +67,7 @@ export class CodexCliParticipant extends BaseObserver {
     /** Send a signal to every active Codex child. Idempotent. */
     static killAll(signal: NodeJS.Signals = "SIGTERM"): void {
         for (const p of CodexCliParticipant.active) {
-            try {
-                p.proc?.kill(signal)
-            } catch {
-                // best-effort
-            }
+            p.abort(signal)
         }
     }
 
@@ -81,19 +81,26 @@ export class CodexCliParticipant extends BaseObserver {
 
     private proc: ChildProcess | null = null
     private buffer = ""
+    private stderrTail = ""
     private envRef: AgenticEnvironment | null = null
     private currentPhase: AgentPhase = "idle"
     private threadId: string | null = null
     private exitCode: number | null = null
     private spawnError: Error | null = null
+    private doneSettled = false
+    private readySettled = false
+    private killTimer: ReturnType<typeof setTimeout> | null = null
     private resolveDone!: (summary: CodexRunSummary) => void
     private resolveReady!: () => void
     private rejectReady!: (e: Error) => void
 
     /** Resolves once Codex emits its first `thread.started` event. */
     public readonly ready: Promise<void>
-    /** Resolves once the Codex process exits (regardless of success). */
+    /** Resolves once Codex exits and its stdout/stderr streams have closed. */
     public readonly done: Promise<CodexRunSummary>
+
+    private static readonly KILL_GRACE_MS = 5_000
+    private static readonly MAX_BUFFER_BYTES = 16 * 1024 * 1024
 
     constructor(
         public readonly agentId: string,
@@ -112,9 +119,38 @@ export class CodexCliParticipant extends BaseObserver {
             this.resolveReady = res
             this.rejectReady = rej
         })
+        // Story agents await `done`, not `ready`. Keep an async spawn failure
+        // observable to explicit ready-awaiters without creating an unhandled
+        // rejection for the normal story lifecycle.
+        this.ready.catch(() => {
+            // suppressed — callers use `done`
+        })
         this.done = new Promise<CodexRunSummary>((res) => {
             this.resolveDone = res
         })
+    }
+
+    /** Spawn/process errors settle immediately; a later close is a no-op. */
+    private settleDone(summary: CodexRunSummary): void {
+        if (this.doneSettled) return
+        this.doneSettled = true
+        if (this.killTimer !== null) {
+            clearTimeout(this.killTimer)
+            this.killTimer = null
+        }
+        this.resolveDone(summary)
+    }
+
+    private settleReady(): void {
+        if (this.readySettled) return
+        this.readySettled = true
+        this.resolveReady()
+    }
+
+    private failReady(error: Error): void {
+        if (this.readySettled) return
+        this.readySettled = true
+        this.rejectReady(error)
     }
 
     getThreadId(): string | null {
@@ -135,16 +171,18 @@ export class CodexCliParticipant extends BaseObserver {
         try {
             proc = spawn(this.options.codexBin, args, {
                 cwd: this.options.cwd,
+                env: harnessChildEnvironment(),
                 stdio: ["ignore", "pipe", "pipe"],
             })
         } catch (e) {
             this.spawnError = e instanceof Error ? e : new Error(String(e))
             this.transition("failed", this.spawnError.message)
-            this.rejectReady(this.spawnError)
-            this.resolveDone({
+            this.failReady(this.spawnError)
+            this.settleDone({
                 threadId: null,
                 exitCode: null,
                 error: this.spawnError,
+                stderrTail: this.stderrTail || null,
             })
             return
         }
@@ -156,14 +194,30 @@ export class CodexCliParticipant extends BaseObserver {
         proc.stdout!.setEncoding("utf8")
         proc.stderr!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => this.handleStdout(chunk))
+        proc.stdout!.on("end", () => this.flushStdout())
         proc.stderr!.on("data", (chunk: string) => this.handleStderr(chunk))
         proc.on("error", (err) => {
+            CodexCliParticipant.active.delete(this)
             this.spawnError = err
-            this.rejectReady(err)
+            this.transition("failed", err.message)
+            this.failReady(err)
+            this.settleDone({
+                threadId: this.threadId,
+                exitCode: this.exitCode,
+                error: err,
+                stderrTail: this.stderrTail || null,
+            })
         })
-        proc.on("exit", (code) => {
+        // `exit` can precede the final stdout/stderr data. `close` is the
+        // terminal boundary for the normal path because it fires only after
+        // those streams close; the `error` path above still settles directly.
+        proc.on("close", (code) => {
             CodexCliParticipant.active.delete(this)
             this.exitCode = code
+            this.failReady(
+                this.spawnError ??
+                    new Error("codex exited before thread.started"),
+            )
             const finalPhase: AgentPhase =
                 this.spawnError != null || (code != null && code !== 0)
                     ? "failed"
@@ -172,18 +226,36 @@ export class CodexCliParticipant extends BaseObserver {
                 finalPhase,
                 code != null ? `exit code ${code}` : "no exit code",
             )
-            this.resolveDone({
+            this.settleDone({
                 threadId: this.threadId,
                 exitCode: code,
                 error: this.spawnError,
+                stderrTail: this.stderrTail || null,
             })
         })
     }
 
-    /** Kill the Codex process. Resolves once exit fires. */
+    /** Kill the Codex process, escalating if it ignores the soft signal. */
     abort(signal: NodeJS.Signals = "SIGTERM"): void {
         this.transition("aborted")
-        this.proc?.kill(signal)
+        const proc = this.proc
+        if (!proc) return
+        try {
+            proc.kill(signal)
+        } catch {
+            // best-effort
+        }
+        if (signal === "SIGKILL" || this.killTimer !== null) return
+        this.killTimer = setTimeout(() => {
+            this.killTimer = null
+            if (this.doneSettled) return
+            try {
+                proc.kill("SIGKILL")
+            } catch {
+                // best-effort
+            }
+        }, CodexCliParticipant.KILL_GRACE_MS)
+        this.killTimer.unref?.()
     }
 
     override async onExternalEvent(
@@ -225,9 +297,22 @@ export class CodexCliParticipant extends BaseObserver {
             if (!line) continue
             this.processLine(line)
         }
+        if (this.buffer.length > CodexCliParticipant.MAX_BUFFER_BYTES) {
+            process.stderr.write(
+                `[codex:${this.agentId}] stdout buffer exceeded ${CodexCliParticipant.MAX_BUFFER_BYTES} bytes without a newline — discarding partial line\n`,
+            )
+            this.buffer = ""
+        }
+    }
+
+    private flushStdout(): void {
+        const line = this.buffer.trim()
+        this.buffer = ""
+        if (line) this.processLine(line)
     }
 
     private handleStderr(chunk: string): void {
+        this.stderrTail = appendCliDiagnosticTail(this.stderrTail, chunk)
         const trimmed = chunk.trimEnd()
         if (!trimmed) return
         process.stderr.write(`[codex:${this.agentId}/stderr] ${trimmed}\n`)
@@ -259,7 +344,7 @@ export class CodexCliParticipant extends BaseObserver {
                     item.data.subtype === "thread.started"
                 ) {
                     this.transition("running", "codex thread started")
-                    this.resolveReady()
+                    this.settleReady()
                 }
                 if (CodexTurnEvent.is(item)) {
                     const phase = item.data.phase
@@ -268,7 +353,7 @@ export class CodexCliParticipant extends BaseObserver {
                     }
                 }
                 // Don't transition to "done" on thread.completed — the
-                // process-exit listener owns that, so the real exit code is
+                // process-close listener owns that, so the real exit code is
                 // observed first.
             }
             this.dispatch(item)

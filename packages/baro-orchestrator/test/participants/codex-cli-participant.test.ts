@@ -9,7 +9,13 @@ import {
     CodexSystem,
     CodexTurnEvent,
 } from "../../src/semantic-events.js"
-import { captureEnv, withTempDir } from "./helpers.js"
+import {
+    assertHarnessEnvironmentWasSanitized,
+    captureEnv,
+    harnessEnvironmentCaptureProgram,
+    withInjectedJigJoyEnvironment,
+    withTempDir,
+} from "./helpers.js"
 
 function writeFakeCodex(dir: string): string {
     const bin = join(dir, "fake-codex.mjs")
@@ -57,7 +63,73 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 2, o
     return { bin, argsPath }
 }
 
+function writeFakeCodexWithPostExitStdio(dir: string): string {
+    const bin = join(dir, "fake-codex-final-line.mjs")
+    const stdout = [
+        JSON.stringify({
+            type: "thread.started",
+            thread_id: "final-line",
+        }),
+        JSON.stringify({
+            type: "turn.completed",
+            usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+    ].join("\n")
+    writeFileSync(
+        bin,
+        `#!/usr/bin/env node
+import { spawn } from "node:child_process";
+const follower = spawn("/bin/sh", [
+  "-c",
+  "while kill -0 \\\"$1\\\" 2>/dev/null; do :; done; printf '%s' \\\"$2\\\"; printf '%s' \\\"$3\\\" >&2",
+  "baro-stdio-follower",
+  String(process.pid),
+  ${JSON.stringify(stdout)},
+  "codex terminal diagnostic",
+], { stdio: ["ignore", "inherit", "inherit"] });
+follower.unref();
+process.exit(0);
+`,
+    )
+    chmodSync(bin, 0o755)
+    return bin
+}
+
+function writeFakeCodexWithoutStart(dir: string): string {
+    const bin = join(dir, "fake-codex-no-start.mjs")
+    writeFileSync(bin, "#!/usr/bin/env node\nprocess.exit(7);\n")
+    chmodSync(bin, 0o755)
+    return bin
+}
+
 describe("CodexCliParticipant", () => {
+    it("keeps Baro's injected Gateway credential out of the Codex subscription process", async () => {
+        await withTempDir("baro-codex-cli-env-", async (dir) => {
+            const capture = join(dir, "env.json")
+            const bin = join(dir, "fake-codex-env.mjs")
+            writeFileSync(bin, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+${harnessEnvironmentCaptureProgram(capture)}
+console.log(JSON.stringify({ type: "thread.started", thread_id: "env-thread" }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
+`)
+            chmodSync(bin, 0o755)
+
+            await withInjectedJigJoyEnvironment(async () => {
+                const participant = new CodexCliParticipant("codex-env", {
+                    cwd: dir,
+                    prompt: "verify env",
+                    codexBin: bin,
+                    skipGitRepoCheck: true,
+                })
+                participant.start(captureEnv())
+                await participant.ready
+                assert.equal((await participant.done).exitCode, 0)
+            })
+            assertHarnessEnvironmentWasSanitized(capture)
+        })
+    })
+
     it("maps fake JSONL output into lifecycle and turn events", async () => {
         await withTempDir("baro-codex-cli-", async (dir) => {
             const env = captureEnv()
@@ -133,6 +205,48 @@ describe("CodexCliParticipant", () => {
                 "baro-test",
                 "do the configured work",
             ])
+        })
+    })
+
+    it("waits for inherited stdio to flush final JSON and stderr after process exit", async () => {
+        await withTempDir("baro-codex-cli-final-line-", async (dir) => {
+            const env = captureEnv()
+            const participant = new CodexCliParticipant("codex-agent", {
+                cwd: dir,
+                prompt: "finish",
+                codexBin: writeFakeCodexWithPostExitStdio(dir),
+                skipGitRepoCheck: true,
+            })
+
+            participant.start(env)
+            await participant.ready
+            const summary = await participant.done
+
+            assert.equal(summary.exitCode, 0)
+            assert.equal(summary.threadId, "final-line")
+            assert.equal(summary.stderrTail, "codex terminal diagnostic")
+            assert.ok(
+                env.events.some(
+                    (event) =>
+                        CodexTurnEvent.is(event) &&
+                        event.data.phase === "completed",
+                ),
+            )
+        })
+    })
+
+    it("rejects ready instead of leaving it pending when the process exits before start", async () => {
+        await withTempDir("baro-codex-cli-no-start-", async (dir) => {
+            const participant = new CodexCliParticipant("codex-agent", {
+                cwd: dir,
+                prompt: "fail",
+                codexBin: writeFakeCodexWithoutStart(dir),
+                skipGitRepoCheck: true,
+            })
+
+            participant.start(captureEnv())
+            await assert.rejects(participant.ready, /before thread\.started/)
+            assert.equal((await participant.done).exitCode, 7)
         })
     })
 })

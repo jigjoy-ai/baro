@@ -23,6 +23,18 @@ describe("StoryOutcomeAuthority", () => {
         registry.registerSpawnAuthority(correlation, factory)
         registry.registerSpawnAuthority(correlation, factory)
 
+        assert.equal(registry.matchesSpawnAuthority(factory, correlation), true)
+        assert.equal(
+            registry.matchesSpawnAuthority(impersonator, correlation),
+            false,
+        )
+        assert.equal(
+            registry.matchesSpawnAuthority(factory, {
+                ...correlation,
+                leaseId: "lease-2",
+            }),
+            false,
+        )
         assert.equal(registry.matchesSpawnFailure(factory, {
             ...correlation,
             error: "failed",
@@ -121,6 +133,14 @@ describe("StoryOutcomeAuthority", () => {
         registry.registerResultAuthority(second, secondWorker)
         assert.equal(registry.matchesTerminalTurnSource(retryCli, "S1"), false)
         assert.equal(registry.matchesTerminalTurnSource(secondWorker, "S1"), true)
+        assert.deepEqual(
+            registry.terminalCorrelationForSource(secondWorker, "S1"),
+            second,
+        )
+        assert.equal(
+            registry.terminalCorrelationForSource(impersonator, "S1"),
+            null,
+        )
 
         // A delayed replay of the old registration cannot roll authority back.
         registry.registerResultAuthority(first, firstWorker)

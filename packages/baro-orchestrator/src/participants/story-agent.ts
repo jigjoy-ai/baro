@@ -16,6 +16,7 @@ import {
     AgentState,
     AgentTargetedMessage,
     ClaudeRateLimit,
+    Critique,
     StoryResult,
     type AgentPhase,
     type AgentResultData,
@@ -23,12 +24,15 @@ import {
 } from "../semantic-events.js"
 import {
     classifyProviderFailure,
+    classifyStoryFailure,
     compactProviderFailureDetail,
 } from "../provider-failure.js"
 import {
     ClaudeCliParticipant,
     ClaudeRunSummary,
 } from "./claude-cli-participant.js"
+import { criticInput } from "./critic-input.js"
+import { StreamingTurnLifecycle } from "./turn-review.js"
 
 export interface StorySpec {
     /** Story ID, used as agentId for observer attribution. */
@@ -55,6 +59,12 @@ export interface StorySpec {
     maxTurns?: number
     /** Hard cap in seconds for the whole story across all attempts; <= 0 disables. */
     hardTimeoutSecs?: number
+    /** Await an exact Critic verdict before completing each candidate turn. */
+    requiresQualityReview?: boolean
+    /** Object-identity authority allowed to review this worker's turns. */
+    turnReviewAuthority?: Participant
+    /** Bound for one terminal-turn review. Default: 240 seconds. */
+    turnReviewTimeoutMs?: number
 }
 
 export interface StoryOutcome {
@@ -77,6 +87,8 @@ export class StoryAgent extends BaseObserver {
             | "quietTimeoutMs"
             | "maxTurns"
             | "hardTimeoutSecs"
+            | "requiresQualityReview"
+            | "turnReviewTimeoutMs"
         >
     > &
         StorySpec
@@ -93,9 +105,8 @@ export class StoryAgent extends BaseObserver {
     private resolveDone!: (outcome: StoryOutcome) => void
     public readonly done: Promise<StoryOutcome>
 
-    // Wired up per attempt by setupMultiTurnLifecycle; nulled when it ends.
-    private notifyStoryResult: (() => void) | null = null
-    private notifyStoryMessage: (() => void) | null = null
+    /** Wired up per attempt and detached when that process settles. */
+    private turnLifecycle: StreamingTurnLifecycle | null = null
 
     constructor(spec: StorySpec) {
         super()
@@ -109,7 +120,12 @@ export class StoryAgent extends BaseObserver {
             // productive refactors mid-flight; per-attempt timeoutSecs and the
             // quiet timer still close out idle agents.
             hardTimeoutSecs: 0,
+            requiresQualityReview: false,
+            turnReviewTimeoutMs: 240_000,
             ...spec,
+        }
+        if (this.spec.requiresQualityReview && !this.spec.turnReviewAuthority) {
+            throw new Error(`StoryAgent ${spec.id} requires a turnReviewAuthority`)
         }
         this.done = new Promise<StoryOutcome>((res) => {
             this.resolveDone = res
@@ -174,11 +190,27 @@ export class StoryAgent extends BaseObserver {
             AgentTargetedMessage.is(event) &&
             event.data.recipientId === this.spec.id
         ) {
-            this.notifyStoryMessage?.()
+            this.turnLifecycle?.observeMessage()
         }
 
-        if (AgentResult.is(event) && event.data.agentId === this.spec.id) {
-            this.notifyStoryResult?.()
+        if (
+            source === this.currentClaude &&
+            AgentResult.is(event) &&
+            event.data.agentId === this.spec.id
+        ) {
+            this.turnLifecycle?.observeResult(
+                criticInput(event)?.terminalId ?? null,
+            )
+        }
+
+        if (
+            this.spec.requiresQualityReview &&
+            source === this.spec.turnReviewAuthority &&
+            Critique.is(event) &&
+            event.data.agentId === this.spec.id &&
+            event.data.terminalId
+        ) {
+            this.turnLifecycle?.deliverReview(event.data)
         }
 
         if (
@@ -258,10 +290,11 @@ export class StoryAgent extends BaseObserver {
                     return
                 }
 
-                // A second attempt on the same provider cannot recover quota,
-                // session-limit, or overload state. Return control to the
-                // broker so another route can bid instead.
-                if (result.failure?.kind === "provider_capacity") break
+                // Typed operational lanes belong to Board/Broker recovery;
+                // only execution failures and legacy untyped outcomes consume
+                // this agent's local retry budget. Provider capacity remains
+                // included here so another route can bid immediately.
+                if (boardOwnsRecovery(result.failure)) break
 
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
@@ -279,7 +312,9 @@ export class StoryAgent extends BaseObserver {
             "failed",
             lastFailure?.kind === "provider_capacity"
                 ? `provider capacity unavailable after ${attempts} attempt(s)`
-                : `exhausted ${attempts}/${maxAttempts} attempts`,
+                : boardOwnsRecovery(lastFailure)
+                  ? `operational failure after ${attempts} attempt(s)`
+                  : `exhausted ${attempts}/${maxAttempts} attempts`,
         )
         this.emitStoryResult(
             false,
@@ -321,6 +356,12 @@ export class StoryAgent extends BaseObserver {
             model: this.spec.model,
             effort: this.spec.effort,
             claudeBin: this.spec.claudeBin,
+            ...(this.spec.requiresQualityReview && this.spec.turnReviewAuthority
+                ? {
+                      ignoredTargetedMessageAuthority:
+                          this.spec.turnReviewAuthority,
+                  }
+                : {}),
         })
         this.currentClaude = claude
         this.terminalSourceRegistrar?.(claude)
@@ -338,10 +379,18 @@ export class StoryAgent extends BaseObserver {
             claude.abort()
             claude.leave(this.envRef)
             this.currentClaude = null
-            return { success: false, summary: null, error }
+            return {
+                success: false,
+                summary: null,
+                error,
+                failure: {
+                    kind: "infrastructure",
+                    code: "process_spawn_failed",
+                },
+            }
         }
 
-        const cancelMultiTurn = this.setupMultiTurnLifecycle(claude)
+        const multiTurn = this.setupMultiTurnLifecycle(claude)
 
         let summary: ClaudeRunSummary
         try {
@@ -351,7 +400,8 @@ export class StoryAgent extends BaseObserver {
                 `attempt ${attempt} timeout after ${this.spec.timeoutSecs}s`,
             )
         } catch (e) {
-            cancelMultiTurn()
+            multiTurn.cancel()
+            if (this.turnLifecycle === multiTurn) this.turnLifecycle = null
             claude.abort()
             const error = e instanceof Error ? e.message : String(e)
             // Wait for the kill to land so subsequent attempts get a clean slate.
@@ -362,12 +412,34 @@ export class StoryAgent extends BaseObserver {
             }
             claude.leave(this.envRef)
             this.currentClaude = null
-            return { success: false, summary: null, error }
+            const failure = e instanceof StoryAttemptTimeoutError
+                ? {
+                      kind: "infrastructure" as const,
+                      code: "command_timeout" as const,
+                  }
+                : classifyStoryFailure(e)
+            return {
+                success: false,
+                summary: null,
+                error,
+                ...(failure ? { failure } : {}),
+            }
         }
 
-        cancelMultiTurn()
+        multiTurn.cancel()
+        if (this.turnLifecycle === multiTurn) this.turnLifecycle = null
         claude.leave(this.envRef)
         this.currentClaude = null
+
+        const reviewFailure = multiTurn.failure()
+        if (reviewFailure) {
+            return {
+                success: false,
+                summary,
+                error: reviewFailure.error,
+                failure: reviewFailure.failure,
+            }
+        }
 
         const success =
             summary.exitCode === 0 &&
@@ -390,48 +462,32 @@ export class StoryAgent extends BaseObserver {
      * Wires the quiet timer + turn counter for one attempt. The returned
      * cancel stops the timer WITHOUT closing stdin (for timeout/error aborts).
      */
-    private setupMultiTurnLifecycle(claude: ClaudeCliParticipant): () => void {
-        let turnsObserved = 0
-        let quietTimer: ReturnType<typeof setTimeout> | null = null
-        let finished = false
-
-        const finish = () => {
-            if (finished) return
-            finished = true
-            if (quietTimer) { clearTimeout(quietTimer); quietTimer = null }
-            this.notifyStoryResult = null
-            this.notifyStoryMessage = null
-            claude.closeStdin()
-        }
-
-        const resetQuietTimer = () => {
-            if (quietTimer) clearTimeout(quietTimer)
-            quietTimer = setTimeout(finish, this.spec.quietTimeoutMs)
-        }
-
-        this.notifyStoryResult = () => {
-            turnsObserved++
-            if (turnsObserved >= this.spec.maxTurns) {
-                finish()
-            } else {
-                resetQuietTimer()
-            }
-        }
-
-        // Reset the timer when a message is injected, but only once the
-        // first result has arrived (timer already started).
-        this.notifyStoryMessage = () => {
-            if (quietTimer !== null) resetQuietTimer()
-        }
-
-        return () => {
-            if (finished) return
-            finished = true
-            if (quietTimer) { clearTimeout(quietTimer); quietTimer = null }
-            this.notifyStoryResult = null
-            this.notifyStoryMessage = null
-            // Caller is responsible for aborting the process.
-        }
+    private setupMultiTurnLifecycle(claude: ClaudeCliParticipant): {
+        cancel(): void
+        failure(): { error: string; failure: StoryFailureData } | null
+    } {
+        const lifecycle = new StreamingTurnLifecycle({
+            requiresReview: this.spec.requiresQualityReview,
+            maxTurns: this.spec.maxTurns,
+            quietTimeoutMs: this.spec.quietTimeoutMs,
+            reviewTimeoutMs: this.spec.turnReviewTimeoutMs,
+            onFinish: () => {
+                claude.closeStdin()
+                if (this.turnLifecycle === lifecycle) this.turnLifecycle = null
+            },
+            onRevision: (feedback) => claude.sendUserMessage(feedback),
+            revisionFailure: (error) => ({
+                error:
+                    `could not continue reviewed Claude session: ` +
+                    ((error as Error)?.message ?? String(error)),
+                failure: {
+                    kind: "infrastructure",
+                    code: "process_spawn_failed",
+                },
+            }),
+        })
+        this.turnLifecycle = lifecycle
+        return lifecycle
     }
 
     private emitStoryResult(
@@ -480,7 +536,7 @@ function describeClaudeFailure(
     failure?: StoryFailureData
 } {
     const result = summary.lastResult
-    const failure = classifyProviderFailure(
+    const failure = classifyStoryFailure(
         capacitySignal,
         summary.error,
         result?.resultText,
@@ -492,7 +548,7 @@ function describeClaudeFailure(
         )
         const resultLabel = result ? ` (result:${result.subtype})` : ""
         return {
-            error: `claude provider capacity unavailable${resultLabel}${detail ? `: ${detail}` : ""}`,
+            error: `${failureSummary(failure)}${resultLabel}${detail ? `: ${detail}` : ""}`,
             failure,
         }
     }
@@ -507,6 +563,10 @@ function stringField(value: unknown, key: string): string | undefined {
     if (typeof value !== "object" || value === null) return undefined
     const field = (value as Record<string, unknown>)[key]
     return typeof field === "string" ? field : undefined
+}
+
+function boardOwnsRecovery(failure: StoryFailureData | undefined): boolean {
+    return failure !== undefined && failure.kind !== "execution"
 }
 
 function describeClaudeResultError(result: AgentResultData): string {
@@ -532,9 +592,26 @@ function raceWithTimeout<T>(
 ): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(label)), ms)
+        timer = setTimeout(() => reject(new StoryAttemptTimeoutError(label)), ms)
     })
     return Promise.race([p, timeout]).finally(() => {
         if (timer !== undefined) clearTimeout(timer)
     })
+}
+
+class StoryAttemptTimeoutError extends Error {}
+
+function failureSummary(failure: StoryFailureData): string {
+    switch (failure.kind) {
+        case "provider_capacity":
+            return "claude provider capacity unavailable"
+        case "transport":
+            return "claude provider transport failed"
+        case "infrastructure":
+            return "claude execution infrastructure failed"
+        case "verification":
+            return "claude verification failed"
+        case "execution":
+            return "claude story execution failed"
+    }
 }

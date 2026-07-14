@@ -33,6 +33,7 @@ import {
     type TokenUsage,
 } from "@mozaik-ai/core"
 
+import type { GatewayBillingCoordinator } from "../billing/index.js"
 import {
     GenericOpenAIModel,
     UsageAccumulator,
@@ -60,7 +61,8 @@ import {
     extractVerdictJson,
 } from "./critic.js"
 import {
-    prepareCriticEvalPrompt,
+    inconclusiveEvidenceVerdict,
+    prepareCriticEvaluation,
     type CriticEvidenceSource,
 } from "./critic-evidence.js"
 import { criticInput, criticReplayKey } from "./critic-input.js"
@@ -85,9 +87,15 @@ export interface CriticOpenAIOptions extends TerminalTurnAuthorityOptions {
     runId?: string
     /** Bounded repository + command evidence captured independently of the summary. */
     evidence?: CriticEvidenceSource
+    /** Bound one evaluator request. The result becomes inconclusive on
+     * timeout; candidate code is never blamed. Default: 180 seconds. */
+    timeoutMs?: number
+    /** Trusted Gateway receipt correlation for evaluator calls. */
+    billingCoordinator?: GatewayBillingCoordinator
 }
 
 interface CriticOpenAIEvaluation {
+    status?: "evaluated" | "inconclusive"
     verdict: "pass" | "fail"
     reasoning: string
     violatedCriteria: string[]
@@ -129,6 +137,7 @@ export class CriticOpenAI extends BaseObserver {
             | "evidence"
             | "outcomeAuthority"
             | "terminalProjectorAuthority"
+            | "billingCoordinator"
         >
     > & {
         runId?: string
@@ -136,6 +145,7 @@ export class CriticOpenAI extends BaseObserver {
     }
     private readonly terminalAuthorities: TerminalTurnAuthorityOptions
     private readonly model: GenerativeModel
+    private readonly billingCoordinator: GatewayBillingCoordinator | null
 
     private readonly emissions = new Map<string, number>()
     private readonly turnCount = new Map<string, number>()
@@ -150,12 +160,19 @@ export class CriticOpenAI extends BaseObserver {
             targets: opts.targets,
             runId: opts.runId,
             evidence: opts.evidence,
+            timeoutMs: opts.timeoutMs ?? 180_000,
         }
         this.terminalAuthorities = {
             outcomeAuthority: opts.outcomeAuthority,
             terminalProjectorAuthority: opts.terminalProjectorAuthority,
         }
         this.model = pickModel(this.opts.model)
+        this.billingCoordinator = opts.billingCoordinator?.trustsEndpoint(
+            process.env.OPENAI_BASE_URL,
+            process.env.OPENAI_API_KEY,
+        )
+            ? opts.billingCoordinator
+            : null
     }
 
     /** Resolves once every in-flight evaluation has emitted its CritiqueItem. */
@@ -185,27 +202,42 @@ export class CriticOpenAI extends BaseObserver {
         this.turnCount.set(agentId, turn)
 
         const work = (async () => {
-            const prompt = await prepareCriticEvalPrompt(
+            const preparation = await prepareCriticEvaluation(
                 criteria,
                 resultText,
                 agentId,
                 this.opts.evidence,
             )
-            const evaluation = await this.evaluate(
-                prompt,
-            )
+            const correlation = this.terminalAuthorities.outcomeAuthority
+                ?.terminalCorrelationForSource(source, agentId) ?? null
+            const evaluation = preparation.status === "ready"
+                ? await this.evaluate(
+                      preparation.prompt,
+                      agentId,
+                      turn,
+                      correlation,
+                  )
+                : inconclusiveEvidenceVerdict(preparation.issues)
             const { verdict, reasoning, violatedCriteria } = evaluation
+            const status = evaluation.status ?? "evaluated"
 
             // Consumers must see the usage evidence before the Critique it
             // explains. The stable ID also makes event-log replay idempotent.
-            this.publishMeasurement(
-                agentId,
-                turn,
-                evaluation.telemetry ?? unknownOpenAITelemetry("succeeded", "not_reported"),
-            )
+            if (preparation.status === "ready" && !this.billingCoordinator) {
+                const telemetry = "telemetry" in evaluation
+                    ? evaluation.telemetry
+                    : undefined
+                this.publishMeasurement(
+                    agentId,
+                    turn,
+                    telemetry ?? unknownOpenAITelemetry("succeeded", "not_reported"),
+                )
+            }
 
             const critiqueEvent = Critique.create({
                 agentId,
+                ...(terminalId ? { terminalId } : {}),
+                status,
                 verdict,
                 reasoning,
                 violatedCriteria,
@@ -216,7 +248,7 @@ export class CriticOpenAI extends BaseObserver {
                 env.deliverSemanticEvent(this, critiqueEvent)
             }
 
-            if (verdict === "fail" && canContinue) {
+            if (status === "evaluated" && verdict === "fail" && canContinue) {
                 const emitted = this.emissions.get(agentId) ?? 0
                 if (emitted < this.opts.maxEmissionsPerAgent) {
                     this.emissions.set(agentId, emitted + 1)
@@ -227,6 +259,7 @@ export class CriticOpenAI extends BaseObserver {
                         metadata: {
                             criticTurn: turn,
                             emissionIndex: emitted + 1,
+                            ...(terminalId ? { terminalId } : {}),
                         },
                     })
                     for (const env of this.getEnvironments()) {
@@ -288,6 +321,12 @@ export class CriticOpenAI extends BaseObserver {
      */
     private async evaluate(
         userPrompt: string,
+        agentId: string,
+        turn: number,
+        correlation: {
+            leaseId: string
+            generation: number
+        } | null,
     ): Promise<CriticOpenAIEvaluation> {
         const context = ModelContext.create("critic")
             .addContextItem(SystemMessageItem.create(VERDICT_SYSTEM_PROMPT))
@@ -295,7 +334,11 @@ export class CriticOpenAI extends BaseObserver {
 
         let round: Awaited<ReturnType<typeof runInferenceRound>>
         try {
-            round = await this.runRound(context)
+            round = await withTimeout(
+                this.runRound(context, agentId, turn, correlation),
+                this.opts.timeoutMs,
+                `Critic OpenAI request timed out after ${this.opts.timeoutMs}ms`,
+            )
         } catch (err) {
             const timedOut = isProviderTimeout(err)
             return openAIFailure(
@@ -334,6 +377,7 @@ export class CriticOpenAI extends BaseObserver {
                 violated_criteria: string[]
             }
             return {
+                status: "evaluated",
                 verdict: parsed.verdict === "pass" ? "pass" : "fail",
                 reasoning: parsed.reasoning ?? "",
                 violatedCriteria: Array.isArray(parsed.violated_criteria)
@@ -347,8 +391,33 @@ export class CriticOpenAI extends BaseObserver {
     }
 
     /** Narrow override seam for protocol-focused tests; production uses the shared runtime. */
-    private runRound(context: ModelContext) {
-        return runInferenceRound(context, this.model)
+    private runRound(
+        context: ModelContext,
+        agentId: string,
+        turn: number,
+        correlation: { leaseId: string; generation: number } | null,
+    ) {
+        return runInferenceRound(
+            context,
+            this.model,
+            this.billingCoordinator
+                ? {
+                      billing: {
+                          coordinator: this.billingCoordinator,
+                          context: {
+                              runId: this.opts.runId ?? null,
+                              phase: "critic",
+                              storyId: agentId,
+                              leaseId: correlation?.leaseId ?? null,
+                              generation: correlation?.generation ?? null,
+                              attempt: null,
+                              turn,
+                              round: 1,
+                          },
+                      },
+                  }
+                : {},
+        )
     }
 }
 
@@ -357,6 +426,7 @@ function openAIFailure(
     telemetry: CriticOpenAITelemetry,
 ): CriticOpenAIEvaluation {
     return {
+        status: "inconclusive",
         verdict: "fail",
         reasoning: `Critic (OpenAI) LLM call failed: ${String((err as Error)?.message ?? err)}`,
         violatedCriteria: ["[critic-openai error — could not evaluate]"],
@@ -433,4 +503,20 @@ function isProviderTimeout(error: unknown): boolean {
         typeof item.message === "string" &&
         /(?:timed?\s*out|timeout)/i.test(item.message)
     )
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+            () =>
+                reject(
+                    Object.assign(new Error(message), {
+                        code: "ETIMEDOUT",
+                    }),
+                ),
+            ms,
+        )
+    })
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }

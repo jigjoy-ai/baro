@@ -6,14 +6,19 @@ This experiment answers one narrow question: with the same repository state, pla
 
 `collective` is the opt-in path. A deterministic board projects run state, workers publish credential-free capabilities and bids, a broker grants a correlated lease to one deterministic winner, repository integration reacts to events, and workers can ask peers for help or discover additional work. With Critic enabled, a successful process result must also receive the correlated terminal-turn acceptance verdict before integration. A story passes only after that policy gate and `StoryMerged`, not merely after its model process exits successfully.
 
-Both modes use the same Mozaik `AgenticEnvironment`, participant membership and `SemanticEvent` delivery. Collective mode does not introduce another bus. Baro owns the product-specific layer Mozaik should not own: event schemas, ordered participant mailboxes, work leases, DAG policy, git integration, recovery policy and the local worker-to-bus bridge.
+Both modes use the same Mozaik `AgenticEnvironment`, participant membership and `SemanticEvent` delivery. Collective mode does not introduce another bus. Baro owns the product-specific layer Mozaik should not own: event schemas, correlated participant mailboxes, work leases, DAG policy, git integration, recovery policy and the local worker-to-bus bridge.
+
+The current execution, recovery, autonomy, authority, and route-learning
+contracts are summarized in [collective-runtime.md](collective-runtime.md).
 
 Collective control decisions are source-bound as well as correlated. Knowing a
 `leaseId` is not enough to report success or failure: the selected
 `StoryFactory` registers the exact dynamic participant that may publish the
-terminal `StoryResult` for that run/story/lease/generation. Repository,
-verification, quality, recovery and conversation events are likewise accepted
-only from their bound live participants. A custom `StoryExecutor` used in
+terminal `StoryResult` for that run/story/lease/generation. Integration,
+verification, quality, recovery, and runtime-graph decisions likewise require
+their bound live participants and applicable correlation. Advisory timeline
+observations are only selected, bounded context and are explicitly treated as
+untrusted. A custom `StoryExecutor` used in
 collective mode must call the supplied `registerResultAuthority` callback
 synchronously, before its first terminal event and before `start()` returns;
 otherwise the spawn fails closed. Legacy executors remain compatible because
@@ -31,6 +36,15 @@ cyclic, unauthorized, over-budget or
 non-durable candidates receive a correlated `runtime_replan_rejected`; a
 proposal is never displayed as applied merely because a model requested it.
 
+The optional DialogueAgent has a narrower second proposal edge. From an exact
+Board-sourced active graph snapshot it may propose one atomic batch of at most
+two new implementation stories. It cannot remove or rewire work and cannot
+choose priority, retries, model, route, lease, integration, verification, or
+completion. The Board source-checks the concrete Dialogue object, preserves
+the graph version captured before the model call, and commits accepted work
+through the same coordinator with worker/dynamic accounting. Broker still
+auctions the resulting offer; Dialogue never spawns a worker directly.
+
 Mozaik 3.12 does not export a separate `InferenceInterceptor` class. On the
 native OpenAI-compatible story path, Baro intercepts the model's
 `propose_replan` function item inside the in-process inference loop, before
@@ -38,13 +52,16 @@ ordinary tool execution, and returns the Board decision as the matching
 function output. The tool has a closed JSON schema and Baro parses it
 fail-closed locally. This is not a provider-side strictness guarantee: Mozaik
 3.12 does not forward the tool's `strict` marker to the provider request.
-Mozaik 3.12 also does not expose a provider `AbortSignal` from `infer()`: Baro
-stops the local story loop and forbids overlapping retries after a timeout,
-but the already-sent HTTP request may still settle and be billed once.
+Mozaik 3.12 also does not expose a provider `AbortSignal` from `infer()`: the
+timed-out worker does not retry that request locally, but the already-sent HTTP
+request may still settle and be billed. A later Board-owned operational reroute
+can overlap with that uncancellable request.
 Claude Code, Codex, OpenCode and Pi are external CLI harnesses, so an
 already-sent provider request cannot be rewritten. They use the same semantic
 contract through `agent-collab.mjs`; the shell tool waits for the correlated
-decision JSON instead of merely reporting that an outbox file was queued.
+decision JSON instead of merely reporting that an outbox file was queued. The
+shared replan protocol does not make the one-shot Codex, OpenCode, or Pi process
+persistent.
 
 Proposal IDs are idempotency keys. Re-delivering the exact same proposal
 returns its remembered decision without applying the mutation again. Reusing
@@ -162,14 +179,18 @@ cargo run -p baro-tui -- \
 The equivalent environment switches are `BARO_COORDINATION=collective` and `BARO_LOCAL_ONLY=1`. Omit them to keep the legacy Conductor coordination path as the default.
 Because story agents can execute arbitrary shell commands, `--local-only` is not an OS/network sandbox. Remove remotes from the disposable target clone when you need a hard no-push boundary; the paired A/B harness does this automatically before each arm and rechecks it after setup.
 
-### Optional conversation participant
+### Optional conversational supervisor
 
 `--with-dialogue` joins a disposable DialogueAgent to the same Mozaik bus. It
-builds a bounded, sanitized view from semantic events and invokes a text-only
-Claude or OpenAI-compatible model only after an explicit user message. The
-backing model receives no codebase tools. Its only optional action is a bounded
-`AgentTargetedMessage` to a worker that currently holds a lease; it cannot
-offer work, bid, grant a lease, replan, merge, verify, or complete a run.
+builds a bounded, selected, untrusted projection from semantic events and
+invokes a text-only Claude or OpenAI-compatible model only after an explicit
+user message. The backing model receives no codebase tools. It may emit a
+bounded `AgentTargetedMessage` to a live continuation-capable worker and one
+strict add-only `conversation_delegation_proposed` event. A proposal contains
+at most two stories and deliberately has no model, route, retry, priority,
+remove, or rewire authority. Only the exact bound Board can turn it into a
+durable runtime-DAG decision; only Broker can grant the resulting lease. A
+stale request-time graph version is rejected rather than silently rebased.
 
 ```bash
 cargo run -p baro-tui -- \
@@ -189,14 +210,25 @@ orchestrator/headless stdin command is:
 {"type":"dialogue_message","message_id":"user-1","text":"What is blocked, and why?"}
 ```
 
-Replies are semantic `conversation_responded` events and are mirrored to the
+Replies are semantic `conversation_responded` events; optional work proposals
+are separate `conversation_delegation_proposed` events so a reply cannot be
+mistaken for an applied decision. Replies are mirrored to the
 `_dialogue` story log only when they originate from the bound DialogueAgent
-object. In the interactive Rust TUI, press `c` to open the collective lane;
-the existing `m` shortcut continues to target a specific running story.
+object. `_dialogue` is a synthetic UI lane, not a story or control-plane owner.
+In the interactive Rust TUI, `c` opens that lane only when `--with-dialogue`
+is enabled. The existing `m` shortcut targets a specific running story on a
+best-effort basis: Claude and native OpenAI can consume it, while one-shot
+workers can only log and drop it.
+
+This is the headless authority contract, not yet a full Codex/Claude-Code root
+harness. Dialogue is still text-only and reconstructs continuity from bounded
+semantic history instead of repository tools or a persistent provider session.
+The richer conversational TUI is intentionally deferred until runtime and A/B
+behavior are stable.
 
 ### Exercise the worker market through the real `baro` CLI
 
-The checked-in [candidate file](collective-workers.example.json) is deliberately a configuration example, not a price/quality claim. Its cost, latency and success values are placeholders so the deterministic policy can be exercised. Replace the model IDs with the IDs exposed by your gateway and calibrate all estimates from repeated externally verified trials before making routing decisions from them. A static file must use `"estimateSource":"configured"`; `historical` is reserved for a future measured-data source.
+The checked-in [candidate file](collective-workers.example.json) is deliberately a configuration example, not a price/quality claim. Its cost, latency and success values are placeholders so the deterministic policy can be exercised. Replace the model IDs with the IDs exposed by your gateway and calibrate all estimates from repeated externally verified trials before making routing decisions from them. A static file must use `"estimateSource":"configured"`. During a run, each worker may publish a learned `historical` latency/outcome estimate from authoritative lease events and a known cost estimate from exact correlated telemetry. The production Gateway/Cloud billed-cost feed is not wired yet; tests inject that authority. Durable cross-run calibration still requires repeated externally verified trials.
 
 On a disposable clone whose git remotes have been removed:
 
@@ -234,7 +266,10 @@ node --import tsx packages/baro-orchestrator/scripts/cli.ts \
   --audit-log /tmp/baro-collective-audit.jsonl
 ```
 
-Keep `--local-only` and a remote-free disposable clone for the first runs. Credentials are resolved locally; the event bus receives only `routeId`, backend and model, never the API key or endpoint URL.
+Keep `--local-only` and a remote-free disposable clone for the first runs.
+Credentials are resolved locally. Market capability, bid, and lease route
+descriptors contain `routeId`, backend, and model—not credentials or endpoint
+URLs.
 
 Validate without writing anything:
 
@@ -321,7 +356,7 @@ runs/01-legacy/
   verify-*.log           external verification output
 ```
 
-If an orchestrator arm crashes or times out, the harness still runs and records the paired artifacts where possible, writes the report, and exits non-zero so an incomplete comparison cannot look successful. Story attempts observed in the durable audit but missing a terminal `model_usage` record are added as explicit unknown observations; token/cost coverage therefore cannot read as complete merely because an aborted provider process omitted its usage frame.
+If an orchestrator arm crashes or times out, the harness still runs and records the paired artifacts where possible, writes the report, and exits non-zero so an incomplete comparison cannot look successful. Story attempts observed in the durable audit but missing a terminal `model_usage` record are added as explicit unknown observations; token/cost coverage therefore cannot read as complete merely because an aborted provider process omitted its usage frame. Unknown provider/customer cost is never zero and cannot support a claim that Collective is cheaper. A Gateway-backed comparison is not cost-valid until charge evidence is exported and correlated with the invocation ledger.
 
 Runtime adaptation counters also come exclusively from the durable Mozaik
 audit: proposed, committed and rejected proposal identities remain separate.

@@ -6,6 +6,7 @@ import { describe, it } from "node:test"
 import type { PrdFile } from "../../src/prd.js"
 import { CollectiveBoard } from "../../src/participants/collective-board.js"
 import {
+    ConductorState,
     RecoveryDecision,
     RecoveryEvaluationStarted,
     RecoveryStarted,
@@ -23,6 +24,7 @@ import {
     StoryMerged,
     StoryQualityCompleted,
     StoryResult,
+    StorySpawnFailed,
     WorkLeaseGranted,
     WorkContextProvided,
     WorkContextRequested,
@@ -388,6 +390,84 @@ describe("CollectiveBoard", () => {
             assert.doesNotMatch(
                 offers[1]?.data.request.prompt ?? "",
                 /baro-recovery\/forged\/stale/,
+            )
+        })
+    })
+
+    it("retries an inconclusive evaluator without invoking Surgeon or healing", async () => {
+        await withTempDir("collective-quality-inconclusive-", async (dir) => {
+            const runId = "run-quality-inconclusive"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const qualityGate = source("quality-gate")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                expectQualityDecisions: true,
+                expectRecoveryDecisions: true,
+                qualityAuthority: qualityGate,
+                maxOperationalRetriesPerStory: 1,
+                marketRouteIds: ["route-a", "route-b"],
+            })
+            const env = joinWithCapture(board)
+            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            await provideContext(env, runId, 1)
+            const offer = await waitFor(env.events, WorkOffered.is)
+            env.deliverSemanticEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: offer.data.offerId,
+                    leaseId: "lease-quality",
+                    workerId: "worker",
+                    generation: offer.data.generation,
+                    request: offer.data.request,
+                    route: {
+                        routeId: "route-a",
+                        backend: "openai",
+                        model: "glm",
+                    },
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("S1"),
+                pass(runId, "S1", "lease-quality", offer.data.generation),
+            )
+            env.deliverSemanticEvent(
+                qualityGate,
+                StoryQualityCompleted.create({
+                    runId,
+                    evaluationId: "quality-inconclusive-1",
+                    storyId: "S1",
+                    leaseId: "lease-quality",
+                    generation: offer.data.generation,
+                    status: "inconclusive",
+                    targetTurn: 1,
+                    reason: "critic transport timeout",
+                }),
+            )
+            const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
+            env.deliverSemanticEvent(
+                source("repo"),
+                WorkspaceCleanupCompleted.create({
+                    ...cleanup.data,
+                    preservedBranch: `${runId}/recovery/S1/evaluator`,
+                }),
+            )
+            await waitFor(env.events, RecoveryStarted.is)
+            await provideContext(env, runId, 2)
+            const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
+            assert.equal(retry.data.request.recovery?.kind, "verification")
+            assert.deepEqual(retry.data.excludedRouteIds ?? [], [])
+            assert.equal(env.events.filter(RecoveryEvaluationStarted.is).length, 0)
+            assert.equal(
+                env.events
+                    .filter(ConductorState.is)
+                    .some((event) => /healing action/.test(event.data.detail ?? "")),
+                false,
             )
         })
     })
@@ -922,6 +1002,206 @@ describe("CollectiveBoard", () => {
         })
     })
 
+    it("retries transport incidents outside the Surgeon/healing budget", async () => {
+        await withTempDir("collective-transport-route-", async (dir) => {
+            const runId = "run-transport-route"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                expectRecoveryDecisions: true,
+                maxOperationalRetriesPerStory: 1,
+                marketRouteIds: ["route-a", "route-b"],
+            })
+            const env = joinWithCapture(board)
+
+            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            await provideContext(env, runId, 1)
+            const offered = await waitFor(env.events, WorkOffered.is)
+            env.deliverSemanticEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: offered.data.offerId,
+                    leaseId: "lease-route-a",
+                    workerId: "worker-a",
+                    generation: offered.data.generation,
+                    request: offered.data.request,
+                    route: {
+                        routeId: "route-a",
+                        backend: "openai",
+                        model: "glm",
+                    },
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("worker-a"),
+                transportFail(
+                    runId,
+                    "S1",
+                    "lease-route-a",
+                    offered.data.generation,
+                ),
+            )
+
+            const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
+            assert.equal(cleanup.data.preserveForRecovery, true)
+            env.deliverSemanticEvent(
+                source("repo"),
+                WorkspaceCleanupCompleted.create({
+                    ...cleanup.data,
+                    preservedBranch: `${runId}/recovery/S1/transport`,
+                }),
+            )
+            await waitFor(env.events, RecoveryStarted.is)
+            await provideContext(env, runId, 2)
+            const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
+            assert.deepEqual(retry.data.excludedRouteIds, ["route-a"])
+            assert.equal(retry.data.request.recovery?.kind, "transport")
+            assert.equal(env.events.filter(RecoveryEvaluationStarted.is).length, 0)
+            assert.equal(
+                env.events
+                    .filter(ConductorState.is)
+                    .some((event) => /healing action/.test(event.data.detail ?? "")),
+                false,
+            )
+        })
+    })
+
+    it("routes typed spawn failures through operational recovery", async () => {
+        await withTempDir("collective-spawn-recovery-", async (dir) => {
+            const runId = "run-spawn-recovery"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                expectRecoveryDecisions: true,
+                maxOperationalRetriesPerStory: 1,
+            })
+            const env = joinWithCapture(board)
+
+            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            await provideContext(env, runId, 1)
+            const offer = await waitFor(env.events, WorkOffered.is)
+            env.deliverSemanticEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: offer.data.offerId,
+                    leaseId: "lease-spawn",
+                    workerId: "worker",
+                    generation: offer.data.generation,
+                    request: offer.data.request,
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("factory"),
+                StorySpawnFailed.create({
+                    runId,
+                    offerId: offer.data.offerId,
+                    leaseId: "lease-spawn",
+                    storyId: "S1",
+                    error: "isolated worktree unavailable",
+                    failure: {
+                        kind: "infrastructure",
+                        code: "worktree_unavailable",
+                    },
+                }),
+            )
+            const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
+            env.deliverSemanticEvent(
+                source("repo"),
+                WorkspaceCleanupCompleted.create({ ...cleanup.data }),
+            )
+            await waitFor(env.events, RecoveryStarted.is)
+            await provideContext(env, runId, 2)
+            const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
+            assert.equal(retry.data.request.recovery?.kind, "infrastructure")
+            assert.equal(env.events.filter(RecoveryEvaluationStarted.is).length, 0)
+        })
+    })
+
+    it("honours provider retry-after before re-offering transient capacity work", async () => {
+        await withTempDir("collective-retry-after-", async (dir) => {
+            const runId = "run-retry-after"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                maxOperationalRetriesPerStory: 1,
+                marketRouteIds: ["route-a", "route-b"],
+            })
+            const env = joinWithCapture(board)
+
+            env.deliverSemanticEvent(source("operator"), RunStartRequest.create({ reason: "test" }))
+            env.deliverSemanticEvent(source("repo"), RunPrepared.create({ runId, baseSha: null }))
+            await provideContext(env, runId, 1)
+            const offer = await waitFor(env.events, WorkOffered.is)
+            env.deliverSemanticEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: offer.data.offerId,
+                    leaseId: "lease-rate-limited",
+                    workerId: "worker-a",
+                    generation: offer.data.generation,
+                    request: offer.data.request,
+                    route: {
+                        routeId: "route-a",
+                        backend: "openai",
+                        model: "glm",
+                    },
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("worker-a"),
+                StoryResult.create({
+                    runId,
+                    storyId: "S1",
+                    leaseId: "lease-rate-limited",
+                    generation: offer.data.generation,
+                    success: false,
+                    attempts: 1,
+                    durationSecs: 1,
+                    error: "rate limited",
+                    failure: {
+                        kind: "provider_capacity",
+                        code: "rate_limited",
+                        retryAfterMs: 30,
+                    },
+                }),
+            )
+            const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
+            env.deliverSemanticEvent(
+                source("repo"),
+                WorkspaceCleanupCompleted.create({
+                    ...cleanup.data,
+                    preservedBranch: `${runId}/recovery/S1/rate-limit`,
+                }),
+            )
+            await flush()
+            assert.equal(env.events.filter(RecoveryStarted.is).length, 0)
+            assert.equal(env.events.filter(WorkOffered.is).length, 1)
+
+            await new Promise<void>((resolve) => setTimeout(resolve, 40))
+            await waitFor(env.events, RecoveryStarted.is)
+            await provideContext(env, runId, 2)
+            const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
+            assert.deepEqual(retry.data.excludedRouteIds, ["route-a"])
+        })
+    })
+
     it("fails closed after checkpointing capacity work when no alternate market route exists", async () => {
         await withTempDir("collective-capacity-single-", async (dir) => {
             const runId = "run-capacity-single"
@@ -1086,6 +1366,26 @@ describe("CollectiveBoard", () => {
                 WorkDiscovered.create({
                     runId: "run-discovery",
                     sourceAgentId: "S1",
+                    leaseId: "lease-stale",
+                    generation: 0,
+                    reason: "late discovery from an old attempt",
+                    story: {
+                        id: "S-stale",
+                        title: "Stale work",
+                        description: "Must not enter the current graph.",
+                        dependsOn: ["S1"],
+                        acceptance: ["never admitted"],
+                        tests: [],
+                    },
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("S1"),
+                WorkDiscovered.create({
+                    runId: "run-discovery",
+                    sourceAgentId: "S1",
+                    leaseId: "lease-1",
+                    generation: 1,
                     reason: "The public API also needs documentation",
                     story: {
                         id: "S2",
@@ -1112,6 +1412,12 @@ describe("CollectiveBoard", () => {
             await provideContext(env, "run-discovery", 2)
             const offers = await waitForCount(env.events, WorkOffered.is, 2)
             assert.equal(offers[1]?.data.request.storyId, "S2")
+            assert.equal(
+                env.events
+                    .filter(WorkOffered.is)
+                    .some((candidate) => candidate.data.request.storyId === "S-stale"),
+                false,
+            )
             const saved = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
             assert.equal(saved.userStories.some((story) => story.id === "S2"), true)
         })
@@ -1186,6 +1492,28 @@ function capacityFail(
         failure: {
             kind: "provider_capacity",
             code: "quota_exhausted",
+        },
+    })
+}
+
+function transportFail(
+    runId: string,
+    storyId: string,
+    leaseId: string,
+    generation: number,
+) {
+    return StoryResult.create({
+        runId,
+        storyId,
+        leaseId,
+        generation,
+        success: false,
+        attempts: 1,
+        durationSecs: 2,
+        error: "provider transport failed: connection reset",
+        failure: {
+            kind: "transport",
+            code: "connection_reset",
         },
     })
 }

@@ -16,7 +16,10 @@ export function recoveryInput(
     event: SemanticEvent<unknown>,
 ): StoryResultData | null {
     if (StoryResult.is(event)) {
-        return event.data.success || isProviderCapacityFailure(event.data)
+        return event.data.success ||
+            isProviderCapacityFailure(event.data) ||
+            (event.data.failure !== undefined &&
+                !isSemanticWorkFailure(event.data))
             ? null
             : event.data
     }
@@ -40,6 +43,14 @@ export function recoveryInput(
         leaseId: event.data.leaseId,
         generation: event.data.generation,
     }
+}
+
+function isSemanticWorkFailure(result: StoryResultData): boolean {
+    const failure = result.failure
+    return failure?.kind === "execution" ||
+        (failure?.kind === "verification" &&
+            (failure.code === "acceptance_not_met" ||
+                failure.code === "canonical_check_failed"))
 }
 
 /** Bind a graph mutation to the exact failed execution that produced it. */

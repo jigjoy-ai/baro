@@ -125,12 +125,41 @@ export class StoryOutcomeAuthority {
         source: Participant,
         storyId: string,
     ): boolean {
-        if (!storyId) return false
+        return this.terminalCorrelationForSource(source, storyId) !== null
+    }
+
+    /** Resolve the exact active lease generation for an authenticated terminal source. */
+    terminalCorrelationForSource(
+        source: Participant,
+        storyId: string,
+    ): StoryResultAuthorityCorrelation | null {
+        if (!storyId) return null
         const active = this.activeTerminalKeys.get(storyId)
-        if (!active) return false
+        if (!active) return null
         const authorities = this.terminalAuthorities.get(active.key)
-        return authorities !== undefined &&
-            (authorities.result === source || authorities.nested === source)
+        if (
+            authorities === undefined ||
+            (authorities.result !== source && authorities.nested !== source)
+        ) return null
+        return {
+            runId: this.runId,
+            storyId,
+            leaseId: active.leaseId,
+            generation: active.generation,
+        }
+    }
+
+    /** Authenticate a StoryFactory against the exact lease it accepted. */
+    matchesSpawnAuthority(
+        source: Participant,
+        correlation: StorySpawnAuthorityCorrelation,
+    ): boolean {
+        if (
+            correlation.runId !== this.runId ||
+            !correlation.storyId ||
+            !correlation.leaseId
+        ) return false
+        return this.spawnAuthorities.get(spawnKey(correlation)) === source
     }
 
     matchesSpawnFailure(

@@ -644,8 +644,14 @@ describe("collective authority and replay invariants", () => {
             const offer = await waitFor(env.events, WorkOffered.is)
             env.deliverSemanticEvent(broker, lease(runId, offer, "lease-1"))
 
-            env.deliverSemanticEvent(observer, discovery(runId, "S2"))
-            env.deliverSemanticEvent(bridge, discovery(runId, "S3"))
+            env.deliverSemanticEvent(
+                observer,
+                discovery(runId, "S2", "lease-1", offer.data.generation),
+            )
+            env.deliverSemanticEvent(
+                bridge,
+                discovery(runId, "S3", "lease-1", offer.data.generation),
+            )
             env.deliverSemanticEvent(
                 source("worker"),
                 result(runId, "lease-1", offer.data.generation),
@@ -766,10 +772,14 @@ function replacementReplan(): Parameters<typeof Replan.create>[0] {
 function discovery(
     runId: string,
     storyId: string,
+    leaseId: string,
+    generation: number,
 ): ReturnType<typeof WorkDiscovered.create> {
     return WorkDiscovered.create({
         runId,
         sourceAgentId: "S1",
+        leaseId,
+        generation,
         reason: "worker found required follow-up work",
         story: {
             id: storyId,

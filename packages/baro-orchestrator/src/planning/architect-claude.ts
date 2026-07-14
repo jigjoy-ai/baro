@@ -7,6 +7,8 @@
 import { execFile } from "child_process"
 import { promisify } from "util"
 
+import { harnessChildEnvironment } from "../harness-environment.js"
+
 import {
     ARCHITECT_SYSTEM_PROMPT,
     buildArchitectUserMessage,
@@ -51,6 +53,7 @@ export async function runArchitectClaude(
         ],
         {
             cwd: opts.cwd,
+            env: harnessChildEnvironment(),
             timeout: opts.timeoutMs ?? effortTimeoutMs(opts.effort),
             maxBuffer: 16 * 1024 * 1024,
         },

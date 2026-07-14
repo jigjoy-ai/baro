@@ -21,6 +21,7 @@ import type {
 import type { StoryRoute } from "../src/routing.js"
 import {
     AgentResult,
+    RunStarted,
     StoryResult,
     StorySpawnFailed,
     StorySpawned,
@@ -60,6 +61,40 @@ class PassingExecutor implements StoryExecutor {
             )
         })
         return { dispose: () => {} }
+    }
+}
+
+class DelayedPassingExecutor extends PassingExecutor {
+    constructor(private readonly delayMs: number) {
+        super()
+    }
+
+    override start(
+        request: StorySpawnRequestData,
+        _route: StoryRoute,
+        _cwd: string,
+        environment: AgenticEnvironment,
+        options: StoryExecOpts,
+    ): StoryExecution {
+        this.started.push(request.storyId)
+        const resultSource = { agentId: request.storyId } as never
+        options.registerResultAuthority?.(resultSource)
+        const timer = setTimeout(() => {
+            environment.deliverSemanticEvent(
+                resultSource,
+                StoryResult.create({
+                    storyId: request.storyId,
+                    success: true,
+                    attempts: 1,
+                    durationSecs: 0,
+                    error: null,
+                    runId: request.runId,
+                    leaseId: request.leaseId,
+                    generation: request.generation,
+                }),
+            )
+        }, this.delayMs)
+        return { dispose: () => clearTimeout(timer) }
     }
 }
 
@@ -105,6 +140,22 @@ class CritiquedPassingExecutor extends PassingExecutor {
             )
         })
         return { dispose: () => {} }
+    }
+}
+
+class CritiquedWritingExecutor extends CritiquedPassingExecutor {
+    override start(
+        request: StorySpawnRequestData,
+        route: StoryRoute,
+        cwd: string,
+        environment: AgenticEnvironment,
+        options: StoryExecOpts,
+    ): StoryExecution {
+        writeFileSync(
+            join(cwd, `${request.storyId}.txt`),
+            `${request.storyId} reviewed and integrated\n`,
+        )
+        return super.start(request, route, cwd, environment, options)
     }
 }
 
@@ -364,6 +415,25 @@ class ForgingOutcomeObserver extends BaseObserver {
     }
 }
 
+/** Defers the user turn until every observer has seen Board's RunStarted. */
+class DialogueRunTrigger extends BaseObserver {
+    private trigger: (() => void) | null = null
+    private fired = false
+
+    bind(trigger: () => void): void {
+        this.trigger = trigger
+    }
+
+    override onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): void {
+        if (this.fired || !RunStarted.is(event) || !this.trigger) return
+        this.fired = true
+        setImmediate(this.trigger)
+    }
+}
+
 describe("orchestrate collective mode", () => {
     it("keeps the existing Conductor as the default", async () => {
         await withTempDir("legacy-default-", async (dir) => {
@@ -611,8 +681,90 @@ describe("orchestrate collective mode", () => {
         })
     })
 
+    it("turns an authority-safe conversation proposal into durable brokered work", async () => {
+        await withTempDir("collective-dialogue-delegation-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            const input = testPrd()
+            input.userStories = [input.userStories[0]!]
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            const auditPath = join(dir, "audit.jsonl")
+            const executor = new DelayedPassingExecutor(150)
+            const trigger = new DialogueRunTrigger()
+
+            const result = await orchestrate({
+                prdPath,
+                cwd: dir,
+                coordinationMode: "collective",
+                publishRemote: false,
+                withGit: false,
+                emitTuiEvents: false,
+                withLibrarian: false,
+                withMemory: false,
+                withSentry: false,
+                withCritic: false,
+                withSurgeon: false,
+                withSupervisor: false,
+                withDialogue: true,
+                dialogueResponder: async (request) => {
+                    assert.match(request.userPrompt, /DELEGATION: available/)
+                    assert.match(request.userPrompt, /GRAPH VERSION: 1/)
+                    assert.match(request.userPrompt, /KNOWN STORY IDS: S1/)
+                    return JSON.stringify({
+                        message: "I proposed a bounded follow-up story.",
+                        messages: [],
+                        delegation: {
+                            reason: "The user requested an independently testable follow-up.",
+                            stories: [{
+                                id: "S2",
+                                title: "Implement the delegated follow-up",
+                                description:
+                                    "Implement the additional behavior as a separate autonomous work item.",
+                                depends_on: [],
+                                acceptance: ["The delegated behavior is implemented."],
+                                tests: ["npm test"],
+                            }],
+                        },
+                    })
+                },
+                onOperatorReady: (operator) => trigger.bind(() => {
+                    operator.dispatch({
+                        kind: "converse",
+                        message: "Please delegate the follow-up implementation.",
+                        messageId: "e2e-delegation-message",
+                        source: "user",
+                    })
+                }),
+                extraParticipants: [trigger],
+                intraLevelDelaySecs: 0,
+                executor,
+                auditLogPath: auditPath,
+            })
+
+            assert.equal(result.summary.success, true)
+            assert.deepEqual(executor.started, ["S1", "S2"])
+            assert.deepEqual(result.summary.completedStories, ["S1", "S2"])
+            const persisted = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
+            assert.equal(persisted.userStories.find((story) => story.id === "S2")?.passes, true)
+            assert.equal(persisted.runtimeGraph?.dynamicStories, 1)
+
+            const audit = readFileSync(auditPath, "utf8")
+            const proposedAt = audit.indexOf('"type":"conversation_delegation_proposed"')
+            const appliedAt = audit.indexOf('"type":"runtime_replan_applied"')
+            const secondOfferAt = audit.indexOf('"storyId":"S2"')
+            assert.ok(proposedAt >= 0)
+            assert.ok(appliedAt > proposedAt)
+            assert.ok(secondOfferAt > appliedAt)
+        })
+    })
+
     it("does not integrate a collective story until its correlated Critic verdict passes", async () => {
         await withTempDir("collective-quality-e2e-", async (dir) => {
+            git(dir, ["init", "-b", "main"])
+            git(dir, ["config", "user.name", "Quality Test"])
+            git(dir, ["config", "user.email", "quality@test.invalid"])
+            writeFileSync(join(dir, "README.md"), "base\n")
+            git(dir, ["add", "README.md"])
+            git(dir, ["commit", "-m", "base"])
             const prdPath = join(dir, "prd.json")
             const input = testPrd()
             input.userStories = [input.userStories[0]!]
@@ -633,7 +785,7 @@ describe("orchestrate collective mode", () => {
                     cwd: dir,
                     coordinationMode: "collective",
                     publishRemote: false,
-                    withGit: false,
+                    withGit: true,
                     emitTuiEvents: false,
                     withLibrarian: false,
                     withMemory: false,
@@ -642,9 +794,13 @@ describe("orchestrate collective mode", () => {
                     criticLlm: "claude",
                     withSurgeon: false,
                     withSupervisor: false,
-                    collectiveAcceptanceTimeoutMs: 15_000,
+                    // The complete suite launches many fresh fixture binaries
+                    // concurrently; endpoint scanning can hold this fake
+                    // Critic well beyond 15s. This deadline is test scheduling
+                    // headroom, not the behavior under test.
+                    collectiveAcceptanceTimeoutMs: 90_000,
                     intraLevelDelaySecs: 0,
-                    executor: new CritiquedPassingExecutor(),
+                    executor: new CritiquedWritingExecutor(),
                     auditLogPath: auditPath,
                 })
 

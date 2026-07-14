@@ -38,6 +38,30 @@ export function classifyProviderFailure(
         : { ...strongest.failure, retryAfterMs }
 }
 
+/** Classify request-path failures that say nothing about the produced code.
+ * This deliberately runs separately from capacity classification so policy
+ * can distinguish a provider cooldown from a broken network path. */
+export function classifyTransportFailure(
+    ...signals: readonly unknown[]
+): StoryFailureData | undefined {
+    for (const signal of signals) {
+        const failure = classifyTransportOne(signal, 0, new Set<object>())
+        if (failure) return failure
+    }
+    return undefined
+}
+
+/** Preferred story-level classifier: stable capacity evidence wins, then
+ * transport. Unknown failures remain execution-compatible for old backends. */
+export function classifyStoryFailure(
+    ...signals: readonly unknown[]
+): StoryFailureData | undefined {
+    return (
+        classifyProviderFailure(...signals) ??
+        classifyTransportFailure(...signals)
+    )
+}
+
 /**
  * Policy predicate for an already-classified failure/result. Deliberately
  * does not infer from StoryResult.error: old audit events that omit `failure`
@@ -140,6 +164,94 @@ function classifyOne(
     }
 
     return bestMessage
+}
+
+function classifyTransportOne(
+    value: unknown,
+    depth: number,
+    seen: Set<object>,
+): StoryFailureData | undefined {
+    if (typeof value === "string") return classifyTransportMessage(value)
+    if (!isRecord(value) || depth > MAX_INSPECTION_DEPTH || seen.has(value)) {
+        return undefined
+    }
+    seen.add(value)
+
+    const status = numericStatus(
+        firstValue(value, [
+            "statusCode",
+            "status_code",
+            "httpStatus",
+            "http_status",
+            "status",
+        ]),
+    )
+    if (status === 408 || status === 504) {
+        return { kind: "transport", code: "request_timeout" }
+    }
+    if (status === 500 || status === 502) {
+        return { kind: "transport", code: "connection_failed" }
+    }
+    if (status === 401 || status === 403) {
+        return { kind: "infrastructure", code: "authentication_failed" }
+    }
+
+    const code = normalizeCode(
+        firstValue(value, ["code", "errorCode", "error_code", "type", "name"]),
+    )
+    if (/^(?:etimedout|esockettimedout|timeout|aborterror)$/.test(code)) {
+        return { kind: "transport", code: "request_timeout" }
+    }
+    if (/^(?:econnreset|socket_hang_up)$/.test(code)) {
+        return { kind: "transport", code: "connection_reset" }
+    }
+    if (/^(?:econnrefused|ehostunreach|enetunreach|ehostdown)$/.test(code)) {
+        return { kind: "transport", code: "connection_failed" }
+    }
+    if (/^(?:enotfound|eai_again|dns_error)$/.test(code)) {
+        return { kind: "transport", code: "dns_failed" }
+    }
+    if (/^(?:cert_|err_tls_|err_ssl_)/.test(code)) {
+        return { kind: "transport", code: "tls_failed" }
+    }
+
+    for (const key of ["message", "detail", "reason"] as const) {
+        const message = value[key]
+        if (typeof message !== "string") continue
+        const classified = classifyTransportMessage(message)
+        if (classified) return classified
+    }
+    for (const key of ["error", "cause", "response", "data", "body"] as const) {
+        const classified = classifyTransportOne(value[key], depth + 1, seen)
+        if (classified) return classified
+    }
+    return undefined
+}
+
+function classifyTransportMessage(message: string): StoryFailureData | undefined {
+    const text = message.replace(/\s+/g, " ").trim()
+    if (!text) return undefined
+    if (
+        /(?:request|connection|socket|inference(?: round)?) (?:timed? out|timeout)|timed? out (?:while|after|waiting)|\bETIMEDOUT\b/i.test(
+            text,
+        )
+    ) return { kind: "transport", code: "request_timeout" }
+    if (/\bECONNRESET\b|connection reset|socket hang up/i.test(text)) {
+        return { kind: "transport", code: "connection_reset" }
+    }
+    if (/\bECONNREFUSED\b|connection refused|network is unreachable/i.test(text)) {
+        return { kind: "transport", code: "connection_failed" }
+    }
+    if (/\bENOTFOUND\b|\bEAI_AGAIN\b|dns (?:lookup )?(?:failed|error)/i.test(text)) {
+        return { kind: "transport", code: "dns_failed" }
+    }
+    if (/tls|ssl|certificate (?:verify|verification|has expired)/i.test(text)) {
+        return { kind: "transport", code: "tls_failed" }
+    }
+    if (/network (?:changed|offline|unavailable)|internet connection/i.test(text)) {
+        return { kind: "transport", code: "network_unavailable" }
+    }
+    return undefined
 }
 
 function classifyClaudeRateLimit(value: Record<string, unknown>): {

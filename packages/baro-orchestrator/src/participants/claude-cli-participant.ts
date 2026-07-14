@@ -15,6 +15,7 @@ import {
 } from "@mozaik-ai/core"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
+import { harnessChildEnvironment } from "../harness-environment.js"
 import {
     AgentResult,
     AgentState,
@@ -44,6 +45,10 @@ export interface ClaudeCliParticipantOptions {
     effort?: string
     /** `--resume <sessionId>` — needed by agents that span multiple infer() calls. */
     resumeSessionId?: string
+    /** Compatibility targeted messages from this exact participant are
+     * ignored because the owning StoryAgent consumes correlated Critique
+     * events directly. */
+    ignoredTargetedMessageAuthority?: Participant
 }
 
 export interface ClaudeRunSummary {
@@ -141,6 +146,7 @@ export class ClaudeCliParticipant extends BaseObserver {
         try {
             proc = spawn(this.options.claudeBin, args, {
                 cwd: this.options.cwd,
+                env: harnessChildEnvironment(),
                 stdio: ["pipe", "pipe", "pipe"],
             })
         } catch (e) {
@@ -208,7 +214,7 @@ export class ClaudeCliParticipant extends BaseObserver {
     }
 
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         // This participant owns bus → stdin forwarding for its agentId;
@@ -216,7 +222,8 @@ export class ClaudeCliParticipant extends BaseObserver {
         // also write to stdin (double-delivery).
         if (
             AgentTargetedMessage.is(event) &&
-            event.data.recipientId === this.agentId
+            event.data.recipientId === this.agentId &&
+            source !== this.options.ignoredTargetedMessageAuthority
         ) {
             if (!this.proc?.stdin) return
             this.sendUserMessage(event.data.text)

@@ -97,6 +97,10 @@ printf '%s\n' \
             assert.equal(outcome.storyId, "story-opencode-retry")
             assert.equal(outcome.attempts, 2)
             assert.match(outcome.error ?? "", /opencode exited 0 but invoked no tools/)
+            assert.deepEqual(outcome.failure, {
+                kind: "execution",
+                code: "no_work_product",
+            })
             assert.equal(outcome.finalSummary?.sawStepFinish, true)
             assert.equal(outcome.finalSummary?.toolCallCount, 0)
             assert.equal(events.length, 1)
@@ -105,6 +109,84 @@ printf '%s\n' \
             assert.equal(event.data.success, false)
             assert.equal(event.data.attempts, 2)
             assert.equal(event.data.error, outcome.error)
+            assert.deepEqual(event.data.failure, outcome.failure)
+        })
+    })
+
+    it("returns structured transport failure to Board without spending local retries", async () => {
+        await withTempDir("opencode-story-agent-transport-", async (dir) => {
+            const binDir = join(dir, "bin")
+            const cwd = join(dir, "cwd")
+            const opencodeBin = join(binDir, "opencode")
+            mkdirSync(binDir)
+            mkdirSync(cwd)
+            writeFileSync(
+                opencodeBin,
+                `#!/usr/bin/env node
+console.log(JSON.stringify({
+  type: "error",
+  error: { code: "ECONNRESET", message: "socket reset by peer" }
+}))
+process.exit(1)
+`,
+            )
+            chmodSync(opencodeBin, 0o755)
+
+            const env = captureEnv()
+            const agent = new OpenCodeStoryAgent({
+                id: "story-opencode-transport",
+                prompt: "finish the story",
+                cwd,
+                opencodeBin,
+                retries: 2,
+                retryDelayMs: 0,
+                // Corporate endpoint scanners can delay fresh temp binaries.
+                timeoutSecs: 60,
+            })
+            agent.join(env)
+
+            const outcome = await agent.run(env)
+            const event = env.events.find(StoryResult.is)
+
+            assert.equal(outcome.success, false)
+            assert.equal(outcome.attempts, 1)
+            assert.deepEqual(outcome.failure, {
+                kind: "transport",
+                code: "connection_reset",
+            })
+            assert.ok(event)
+            assert.equal(event.data.attempts, 1)
+            assert.deepEqual(event.data.failure, outcome.failure)
+        })
+    })
+
+    it("settles a missing OpenCode binary as infrastructure after one attempt", async () => {
+        await withTempDir("opencode-story-agent-spawn-", async (dir) => {
+            const cwd = join(dir, "cwd")
+            mkdirSync(cwd)
+            const env = captureEnv()
+            const agent = new OpenCodeStoryAgent({
+                id: "story-opencode-spawn",
+                prompt: "finish the story",
+                cwd,
+                opencodeBin: join(dir, "missing-opencode"),
+                retries: 2,
+                retryDelayMs: 0,
+                timeoutSecs: 2,
+            })
+
+            const outcome = await agent.run(env)
+            const event = env.events.find(StoryResult.is)
+
+            assert.equal(outcome.success, false)
+            assert.equal(outcome.attempts, 1)
+            assert.match(outcome.error ?? "", /ENOENT/)
+            assert.deepEqual(outcome.failure, {
+                kind: "infrastructure",
+                code: "process_spawn_failed",
+            })
+            assert.ok(event)
+            assert.deepEqual(event.data.failure, outcome.failure)
         })
     })
 })

@@ -3,6 +3,8 @@ import { describe, it } from "node:test"
 
 import {
     classifyProviderFailure,
+    classifyStoryFailure,
+    classifyTransportFailure,
     compactProviderFailureDetail,
     isProviderCapacityFailure,
 } from "../src/provider-failure.js"
@@ -169,5 +171,47 @@ describe("provider failure classification", () => {
         assert.equal(detail.length, 80)
         assert.ok(detail.startsWith("quota exhausted diagnostic"))
         assert.ok(detail.endsWith("…"))
+    })
+
+    it("classifies transport failures without turning them into code failures", () => {
+        assert.deepEqual(classifyTransportFailure({ code: "ETIMEDOUT" }), {
+            kind: "transport",
+            code: "request_timeout",
+        })
+        assert.deepEqual(classifyTransportFailure({ cause: { code: "ECONNRESET" } }), {
+            kind: "transport",
+            code: "connection_reset",
+        })
+        assert.deepEqual(classifyTransportFailure({ code: "ENOTFOUND" }), {
+            kind: "transport",
+            code: "dns_failed",
+        })
+        assert.deepEqual(classifyTransportFailure({ status: 504 }), {
+            kind: "transport",
+            code: "request_timeout",
+        })
+        assert.deepEqual(classifyTransportFailure({ status: 502 }), {
+            kind: "transport",
+            code: "connection_failed",
+        })
+    })
+
+    it("keeps capacity evidence ahead of transport fallbacks", () => {
+        assert.deepEqual(
+            classifyStoryFailure({
+                status: 429,
+                code: "ETIMEDOUT",
+                headers: { "retry-after": "2" },
+            }),
+            {
+                kind: "provider_capacity",
+                code: "rate_limited",
+                retryAfterMs: 2_000,
+            },
+        )
+        assert.deepEqual(classifyStoryFailure({ status: 401 }), {
+            kind: "infrastructure",
+            code: "authentication_failed",
+        })
     })
 })

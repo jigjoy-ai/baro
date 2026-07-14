@@ -25,6 +25,7 @@ import { execFile } from "child_process"
 
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
+import { harnessChildEnvironment } from "../harness-environment.js"
 import {
     AgentTargetedMessage,
     Critique,
@@ -43,7 +44,8 @@ import {
     type UnknownMetricReason,
 } from "../model-telemetry.js"
 import {
-    prepareCriticEvalPrompt,
+    inconclusiveEvidenceVerdict,
+    prepareCriticEvaluation,
     type CriticEvidenceSource,
 } from "./critic-evidence.js"
 import { withIsolatedCriticCwd } from "./critic-cli-isolation.js"
@@ -98,6 +100,7 @@ export interface CriticOptions extends TerminalTurnAuthorityOptions {
 }
 
 interface CriticEvaluation {
+    status?: "evaluated" | "inconclusive"
     verdict: "pass" | "fail"
     reasoning: string
     violatedCriteria: string[]
@@ -181,28 +184,36 @@ export class Critic extends BaseObserver {
         this.turnCount.set(agentId, turn)
 
         const work = (async () => {
-            const prompt = await prepareCriticEvalPrompt(
+            const preparation = await prepareCriticEvaluation(
                 criteria,
                 resultText,
                 agentId,
                 this.opts.evidence,
             )
-            const evaluation = await this.evaluate(
-                prompt,
-            )
+            const evaluation = preparation.status === "ready"
+                ? await this.evaluate(preparation.prompt)
+                : inconclusiveEvidenceVerdict(preparation.issues)
             const { verdict, reasoning, violatedCriteria } = evaluation
+            const status = evaluation.status ?? "evaluated"
 
             // Telemetry is authoritative audit context for the verdict and
             // must be visible on the bus before the Critique it describes.
-            this.publishMeasurement(
-                agentId,
-                turn,
-                evaluation.telemetry ?? unknownClaudeTelemetry("succeeded", "not_reported"),
-            )
+            if (preparation.status === "ready") {
+                const telemetry = "telemetry" in evaluation
+                    ? evaluation.telemetry
+                    : undefined
+                this.publishMeasurement(
+                    agentId,
+                    turn,
+                    telemetry ?? unknownClaudeTelemetry("succeeded", "not_reported"),
+                )
+            }
 
             // Always emit audit trail.
             const critiqueEvent = Critique.create({
                 agentId,
+                ...(terminalId ? { terminalId } : {}),
+                status,
                 verdict,
                 reasoning,
                 violatedCriteria,
@@ -214,7 +225,7 @@ export class Critic extends BaseObserver {
             }
 
             // Emit corrective message only on fail and under the per-agent cap.
-            if (verdict === "fail" && canContinue) {
+            if (status === "evaluated" && verdict === "fail" && canContinue) {
                 const emitted = this.emissions.get(agentId) ?? 0
                 if (emitted < this.opts.maxEmissionsPerAgent) {
                     this.emissions.set(agentId, emitted + 1)
@@ -225,6 +236,7 @@ export class Critic extends BaseObserver {
                         metadata: {
                             criticTurn: turn,
                             emissionIndex: emitted + 1,
+                            ...(terminalId ? { terminalId } : {}),
                         },
                     })
                     for (const env of this.getEnvironments()) {
@@ -377,6 +389,7 @@ export class Critic extends BaseObserver {
             }
 
             return {
+                status: "evaluated",
                 verdict: parsed.verdict === "pass" ? "pass" : "fail",
                 reasoning: parsed.reasoning ?? "",
                 violatedCriteria: Array.isArray(parsed.violated_criteria)
@@ -408,7 +421,11 @@ function execFileWithStdin(
             child = execFile(
                 file,
                 args,
-                { ...options, encoding: "utf8" },
+                {
+                    ...options,
+                    encoding: "utf8",
+                    env: harnessChildEnvironment(),
+                },
                 (error, stdout, stderr) => {
                     if (error) {
                         reject(error)
@@ -440,6 +457,7 @@ function criticFailure(
     telemetry: CriticEvaluationTelemetry,
 ): CriticEvaluation {
     return {
+        status: "inconclusive",
         verdict: "fail",
         reasoning: `Critic LLM call failed: ${String((err as Error)?.message ?? err)}`,
         violatedCriteria: ["[critic error — could not evaluate]"],

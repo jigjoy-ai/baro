@@ -13,6 +13,7 @@ import {
     type CollectiveWorkerCandidateConfig,
     type OrchestrateConfig,
 } from "../src/orchestrate.js"
+import { resolveGatewayBillingForRoutes } from "../src/billing/index.js"
 import { ClaudeCliParticipant } from "../src/participants/claude-cli-participant.js"
 import { CodexCliParticipant } from "../src/participants/codex-cli-participant.js"
 import { OpenCodeCliParticipant } from "../src/participants/opencode-cli-participant.js"
@@ -21,11 +22,13 @@ import type { Operator } from "../src/participants/operator.js"
 import { handleStdinCommand } from "../src/stdin-commands.js"
 import { subscribeCommands } from "../src/tui-protocol.js"
 import type { CoordinationMode } from "../src/semantic-events.js"
+import { loadPrd } from "../src/prd.js"
 import {
     parseEndpoints,
     parseTierMap,
     resolveStoryRoute,
     type EndpointMap,
+    type StoryRoute,
     type TierMap,
 } from "../src/routing.js"
 
@@ -479,6 +482,15 @@ async function main(): Promise<void> {
         process.stderr.write(`[cli] PRD not found: ${prdPath}\n`)
         process.exit(2)
     }
+    let plannedStoryModels: Array<string | undefined>
+    try {
+        plannedStoryModels = loadPrd(prdPath).userStories.map(
+            (story) => story.model,
+        )
+    } catch (error) {
+        process.stderr.write(`[cli] invalid PRD: ${(error as Error).message}\n`)
+        process.exit(2)
+    }
     const workersFile =
         args.collectiveWorkersFile ?? process.env.BARO_COLLECTIVE_WORKERS_FILE
     let collectiveWorkers: CollectiveWorkerCandidateConfig[] | undefined
@@ -529,6 +541,80 @@ async function main(): Promise<void> {
         (collectiveBidWindowMs !== undefined || hasMarketPolicy)
     ) {
         process.stderr.write("[cli] collective bid window/policy requires --collective-workers\n")
+        process.exit(2)
+    }
+
+    // Authoritative billing is activated only for concrete OpenAI routes that
+    // canonically target the explicit Gateway. A stale billing variable must
+    // not affect an all-Claude/Codex/OpenCode/Pi run, and another compatible
+    // endpoint must never receive Gateway correlation.
+    const billingRoutes: StoryRoute[] = []
+    const storyFallbackBackend = args.storyLlm ?? args.llm
+    const resolveBillingStoryRoute = (
+        model: string | undefined,
+        includeTierMap: boolean,
+        override?: string,
+    ) =>
+        resolveStoryRoute(model, {
+            fallbackBackend: storyFallbackBackend,
+            openaiDefaultModel: args.storyModel ?? "gpt-5.5",
+            tierMap: includeTierMap ? tierMap : undefined,
+            override,
+            endpoints: openaiEndpoints,
+            defaultApiKey: process.env.OPENAI_API_KEY,
+        })
+    try {
+        if (collectiveWorkers?.length) {
+            for (const worker of collectiveWorkers) {
+                billingRoutes.push(
+                    resolveBillingStoryRoute(worker.route, false),
+                )
+            }
+        } else if (args.storyModel) {
+            billingRoutes.push(
+                resolveBillingStoryRoute(undefined, true, args.storyModel),
+            )
+        } else if (args.model) {
+            billingRoutes.push(resolveBillingStoryRoute(args.model, true))
+        } else {
+            // Empty/default covers runtime-added and recovery work; explicit
+            // PRD selectors cover routes that bypass the default lane.
+            billingRoutes.push(resolveBillingStoryRoute(undefined, true))
+            for (const model of plannedStoryModels) {
+                billingRoutes.push(resolveBillingStoryRoute(model, true))
+            }
+            for (const route of Object.values(tierMap ?? {})) {
+                billingRoutes.push(resolveBillingStoryRoute(route, false))
+            }
+        }
+    } catch (error) {
+        process.stderr.write(`[cli] billing route: ${(error as Error).message}\n`)
+        process.exit(2)
+    }
+    if (args.withCritic && (args.criticLlm ?? args.llm) === "openai") {
+        billingRoutes.push({ backend: "openai", model: args.criticModel })
+    }
+    if (
+        args.withSurgeon &&
+        args.surgeonUseLlm &&
+        (args.surgeonLlm ?? args.llm) === "openai"
+    ) {
+        billingRoutes.push({ backend: "openai", model: args.surgeonModel })
+    }
+    if (withDialogue && dialogueLlm === "openai") {
+        billingRoutes.push({ backend: "openai", model: dialogueModel })
+    }
+
+    let gatewayBilling: ReturnType<typeof resolveGatewayBillingForRoutes>
+    try {
+        gatewayBilling = resolveGatewayBillingForRoutes({
+            routes: billingRoutes,
+            environment: process.env,
+            defaultOpenAiBaseUrl: process.env.OPENAI_BASE_URL,
+            defaultOpenAiApiKey: process.env.OPENAI_API_KEY,
+        })
+    } catch (error) {
+        process.stderr.write(`[cli] ${(error as Error).message}\n`)
         process.exit(2)
     }
 
@@ -587,13 +673,15 @@ async function main(): Promise<void> {
         effort: args.effort,
         tierMap,
         openaiEndpoints,
+        gatewayBilling: gatewayBilling ?? undefined,
     }
 
     if (
-        ([args.llm, args.storyLlm, args.criticLlm, args.surgeonLlm].includes("openai") ||
-            (withDialogue && dialogueLlm === "openai") ||
-            collectiveWorkers?.some((worker) => worker.route.startsWith("openai:"))) &&
-        !process.env.OPENAI_API_KEY
+        billingRoutes.some(
+            (route) =>
+                route.backend === "openai" &&
+                !(route.apiKey ?? process.env.OPENAI_API_KEY),
+        )
     ) {
         process.stderr.write(
             "[cli] WARNING: an OpenAI phase was requested but OPENAI_API_KEY is not set.\n" +

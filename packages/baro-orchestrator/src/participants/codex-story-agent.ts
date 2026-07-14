@@ -12,9 +12,17 @@ import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 import { AgenticEnvironment } from "@mozaik-ai/core"
 import {
     AgentState,
+    CodexSystem,
+    CodexTurnEvent,
     StoryResult,
     type AgentPhase,
+    type StoryFailureData,
 } from "../semantic-events.js"
+import {
+    boardOwnsCliRecovery,
+    describeCliStoryFailure,
+    isCliFailureSignal,
+} from "./cli-story-failure.js"
 import {
     CodexCliParticipant,
     CodexRunSummary,
@@ -60,6 +68,7 @@ export interface CodexStoryOutcome {
     durationSecs: number
     finalSummary: CodexRunSummary | null
     error: string | null
+    failure?: StoryFailureData
 }
 
 export class CodexStoryAgent extends BaseObserver {
@@ -83,6 +92,7 @@ export class CodexStoryAgent extends BaseObserver {
     private currentCodex: CodexCliParticipant | null = null
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
+    private currentFailureSignals: unknown[] = []
     private resolveDone!: (outcome: CodexStoryOutcome) => void
     public readonly done: Promise<CodexStoryOutcome>
 
@@ -148,9 +158,16 @@ export class CodexStoryAgent extends BaseObserver {
 
     /** No-op: Codex exec is one-shot — no stdin channel for mid-flight messages. */
     override async onExternalEvent(
-        _source: Participant,
-        _event: SemanticEvent<unknown>,
+        source: Participant,
+        event: SemanticEvent<unknown>,
     ): Promise<void> {
+        if (source !== this.currentCodex) return
+        if (
+            (CodexSystem.is(event) && event.data.subtype === "error") ||
+            (CodexTurnEvent.is(event) && event.data.phase === "failed")
+        ) {
+            this.currentFailureSignals.push(event.data.raw)
+        }
     }
 
     abort(): void {
@@ -162,6 +179,8 @@ export class CodexStoryAgent extends BaseObserver {
         const maxAttempts = this.spec.retries + 1
         let lastSummary: CodexRunSummary | null = null
         let lastError: string | null = null
+        let lastFailure: StoryFailureData | undefined
+        let attempts = 0
         let hardTimedOut = false
 
         const hardTimer =
@@ -176,6 +195,10 @@ export class CodexStoryAgent extends BaseObserver {
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                    lastFailure = {
+                        kind: "infrastructure",
+                        code: "command_timeout",
+                    }
                     break
                 }
 
@@ -187,13 +210,19 @@ export class CodexStoryAgent extends BaseObserver {
                     await setTimeoutPromise(this.spec.retryDelayMs)
                     if (hardTimedOut) {
                         lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                        lastFailure = {
+                            kind: "infrastructure",
+                            code: "command_timeout",
+                        }
                         break
                     }
                 }
 
+                attempts = attempt
                 const result = await this.runOneAttempt(attempt)
                 lastSummary = result.summary
                 lastError = result.error
+                lastFailure = result.failure
 
                 if (result.success) {
                     const durationSecs = Math.round(
@@ -214,8 +243,13 @@ export class CodexStoryAgent extends BaseObserver {
 
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                    lastFailure = {
+                        kind: "infrastructure",
+                        code: "command_timeout",
+                    }
                     break
                 }
+                if (boardOwnsCliRecovery(result.failure)) break
             }
         } finally {
             if (hardTimer !== null) clearTimeout(hardTimer)
@@ -224,15 +258,27 @@ export class CodexStoryAgent extends BaseObserver {
         const durationSecs = Math.round(
             (Date.now() - (this.startedAt ?? Date.now())) / 1000,
         )
-        this.transition("failed", `exhausted ${maxAttempts} attempts`)
-        this.emitStoryResult(false, maxAttempts, durationSecs, lastError)
+        this.transition(
+            "failed",
+            boardOwnsCliRecovery(lastFailure)
+                ? `operational failure after ${attempts} attempt(s)`
+                : `exhausted ${attempts}/${maxAttempts} attempts`,
+        )
+        this.emitStoryResult(
+            false,
+            attempts,
+            durationSecs,
+            lastError,
+            lastFailure,
+        )
         this.resolveDone({
             storyId: this.spec.id,
             success: false,
-            attempts: maxAttempts,
+            attempts,
             durationSecs,
             finalSummary: lastSummary,
             error: lastError,
+            ...(lastFailure ? { failure: lastFailure } : {}),
         })
     }
 
@@ -242,12 +288,21 @@ export class CodexStoryAgent extends BaseObserver {
         success: boolean
         summary: CodexRunSummary | null
         error: string | null
+        failure?: StoryFailureData
     }> {
         if (!this.envRef) {
-            return { success: false, summary: null, error: "no environment" }
+            return {
+                success: false,
+                summary: null,
+                ...describeCliStoryFailure(
+                    "no environment",
+                    { kind: "infrastructure", code: "process_spawn_failed" },
+                ),
+            }
         }
 
         this.transition("running", `attempt ${attempt}`)
+        this.currentFailureSignals = []
 
         const codex = new CodexCliParticipant(this.spec.id, {
             cwd: this.spec.cwd,
@@ -272,27 +327,60 @@ export class CodexStoryAgent extends BaseObserver {
         } catch (e) {
             codex.abort()
             const error = e instanceof Error ? e.message : String(e)
+            let stderrTail: string | null = null
             try {
-                await codex.done
+                stderrTail = (await codex.done).stderrTail
             } catch {
                 // ignore
             }
             codex.leave(this.envRef)
             this.currentCodex = null
-            return { success: false, summary: null, error }
+            return {
+                success: false,
+                summary: null,
+                ...describeCliStoryFailure(
+                    error,
+                    { kind: "infrastructure", code: "command_timeout" },
+                    [...this.currentFailureSignals, stderrTail],
+                ),
+            }
         }
 
         codex.leave(this.envRef)
         this.currentCodex = null
 
+        const failureSignals = [
+            ...this.currentFailureSignals,
+            summary.stderrTail,
+        ]
+        const reportedFailure = failureSignals.some((signal) =>
+            isCliFailureSignal(signal, ""),
+        )
         const success =
-            summary.exitCode === 0 && summary.error == null
+            summary.exitCode === 0 &&
+            summary.error == null &&
+            !reportedFailure
 
         if (!success) {
             const reason = summary.error
                 ? summary.error.message
-                : `non-zero exit ${summary.exitCode}`
-            return { success: false, summary, error: reason }
+                : reportedFailure
+                  ? "codex reported a failed turn"
+                  : `non-zero exit ${summary.exitCode}`
+            return {
+                success: false,
+                summary,
+                ...describeCliStoryFailure(
+                    reason,
+                    summary.error
+                        ? {
+                              kind: "infrastructure",
+                              code: "process_spawn_failed",
+                          }
+                        : { kind: "execution", code: "model_error" },
+                    failureSignals,
+                ),
+            }
         }
 
         return { success: true, summary, error: null }
@@ -303,6 +391,7 @@ export class CodexStoryAgent extends BaseObserver {
         attempts: number,
         durationSecs: number,
         error: string | null,
+        failure?: StoryFailureData,
     ): void {
         if (!this.envRef) return
         this.envRef.deliverSemanticEvent(
@@ -313,6 +402,7 @@ export class CodexStoryAgent extends BaseObserver {
                 attempts,
                 durationSecs,
                 error,
+                ...(failure ? { failure } : {}),
                 ...correlationOf(this.spec),
             }),
         )
@@ -339,8 +429,13 @@ function raceWithTimeout<T>(
     ms: number,
     label: string,
 ): Promise<T> {
-    return Promise.race([
-        p,
-        new Promise<T>((_, rej) => setTimeout(() => rej(new Error(label)), ms)),
-    ])
+    let timer: ReturnType<typeof setTimeout>
+    const timeout = new Promise<T>(
+        (_, rej) => {
+            timer = setTimeout(() => rej(new Error(label)), ms)
+        },
+    )
+    const settled = p.finally(() => clearTimeout(timer))
+    settled.catch(() => {})
+    return Promise.race([settled, timeout])
 }

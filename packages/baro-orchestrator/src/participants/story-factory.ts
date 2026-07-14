@@ -16,9 +16,12 @@ import {
 } from "@mozaik-ai/core"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
+import type { GatewayBillingCoordinator } from "../billing/index.js"
 import {
     RunCompleted,
     RunStartRequest,
+    ModelInvocationMeasured,
+    RouteEstimateUpdated,
     StoryIntervention,
     StoryResult,
     StoryRouted,
@@ -42,6 +45,7 @@ import {
     type StoryExecution,
     type StoryExecutor,
 } from "./story-executor.js"
+import { RouteLearner } from "./route-learning.js"
 import {
     formatRoute,
     canonicalTier,
@@ -56,6 +60,7 @@ import {
     StoryOutcomeAuthority,
     type StoryResultAuthorityCorrelation,
 } from "../runtime/story-outcome-authority.js"
+import { classifyStoryFailure } from "../provider-failure.js"
 
 export interface StoryFactoryOptions {
     cwd: string
@@ -64,10 +69,18 @@ export interface StoryFactoryOptions {
     workerId?: string
     /** Object-identity authority allowed to grant/release collective leases. */
     leaseAuthority?: Participant
+    /** Exact CollectiveBoard allowed to publish executable work offers. */
+    offerAuthority?: Participant
     /** Shared run-scoped authority for dynamic factory/agent outcomes. */
     outcomeAuthority?: StoryOutcomeAuthority
     /** Collective Board allowed to answer native `propose_replan` tool calls. */
     runtimeReplanDecisionAuthority?: Participant
+    /** Exact Critic allowed to complete a continuation-capable worker turn. */
+    turnReviewAuthority?: Participant
+    /** Bound for the Critic handshake before an infrastructure failure. */
+    turnReviewTimeoutMs?: number
+    /** Exact telemetry reducer whose measurements may influence advisory bids. */
+    telemetryAuthority?: Participant
     collaboration?: {
         commandPath: string
         sessionDir: string
@@ -116,6 +129,8 @@ export interface StoryFactoryOptions {
     endpoints?: EndpointMap
     /** Default API key for inline `@https://…` endpoints (OPENAI_API_KEY). */
     defaultApiKey?: string
+    /** Run-scoped correlation for the explicitly trusted Baro Gateway. */
+    billingCoordinator?: GatewayBillingCoordinator
     /**
      * Effort level for the Claude path, passed as `claude --effort`
      * (low|medium|high|xhigh|max). Ignored by the OpenAI path.
@@ -160,6 +175,12 @@ export class StoryFactory extends BaseObserver {
     /** Terminal results delivered synchronously from inside executor.start(). */
     private readonly settledWhileSpawning = new Set<string>()
     private readonly leases = new Map<string, WorkLeaseGrantedData>()
+    /** Retained until run completion so delayed authoritative billing for a
+     * released lease cannot be attributed to a newer retry. */
+    private readonly telemetryLeases = new Map<
+        string,
+        { storyId: string; generation: number }
+    >()
     private readonly bidRoutes = new Map<
         string,
         { offerId: string; route: StoryRoute; descriptor: WorkRouteDescriptor }
@@ -167,6 +188,7 @@ export class StoryFactory extends BaseObserver {
     private readonly leasedRoutes = new Map<string, StoryRoute>()
     private readonly executor: StoryExecutor
     private readonly bidOptions: StoryFactoryBidOptions | null
+    private readonly routeLearner: RouteLearner | null
     private readonly configuredBidRoute: {
         route: StoryRoute
         descriptor: WorkRouteDescriptor
@@ -176,6 +198,9 @@ export class StoryFactory extends BaseObserver {
         super()
         if (opts.coordinationMode === "collective" && !opts.leaseAuthority) {
             throw new Error("collective StoryFactory requires a leaseAuthority")
+        }
+        if (opts.coordinationMode === "collective" && !opts.offerAuthority) {
+            throw new Error("collective StoryFactory requires an offerAuthority")
         }
         if (opts.coordinationMode === "collective" && !opts.outcomeAuthority) {
             throw new Error("collective StoryFactory requires an outcomeAuthority")
@@ -194,9 +219,27 @@ export class StoryFactory extends BaseObserver {
                   ...(opts.bid.tiers ? { tiers: [...opts.bid.tiers] } : {}),
               }
             : null
+        this.routeLearner = this.bidOptions
+            ? new RouteLearner(this.bidOptions.estimate)
+            : null
         this.configuredBidRoute = this.bidOptions
             ? this.resolveBidRoute(this.bidOptions)
             : null
+    }
+
+    /** Stable market identity used to source-bind lease-adjacent observers. */
+    getWorkerId(): string {
+        return this.workerId()
+    }
+
+    /**
+     * Called only after the authoritative billing feed has completed its final
+     * reconciliation. RunCompleted itself can precede a late cloud receipt, so
+     * clearing lease correlation there would make route learning order-racy.
+     */
+    finishRunTelemetry(): void {
+        this.telemetryLeases.clear()
+        this.routeLearner?.clearPending()
     }
 
     setEnvironment(env: AgenticEnvironment): void {
@@ -227,6 +270,31 @@ export class StoryFactory extends BaseObserver {
     ): Promise<void> {
         if (
             this.opts.coordinationMode === "collective" &&
+            this.bidOptions &&
+            source === this.opts.telemetryAuthority &&
+            ModelInvocationMeasured.is(event)
+        ) {
+            const measurement = event.data
+            const correlation = measurement.leaseId
+                ? this.telemetryLeases.get(measurement.leaseId)
+                : undefined
+            if (
+                measurement.runId === this.runId() &&
+                measurement.phase === "story" &&
+                measurement.storyId &&
+                correlation?.storyId === measurement.storyId &&
+                measurement.generation === correlation.generation
+            ) {
+                const learned = this.routeLearner!.observeInvocation(
+                    measurement.leaseId!,
+                    measurement,
+                )
+                if (learned) this.publishLearnedEstimate(learned)
+            }
+            return
+        }
+        if (
+            this.opts.coordinationMode === "collective" &&
             RunStartRequest.is(event)
         ) {
             this.advertiseCapabilities()
@@ -236,7 +304,8 @@ export class StoryFactory extends BaseObserver {
         if (
             this.opts.coordinationMode === "collective" &&
             WorkOffered.is(event) &&
-            event.data.runId === this.runId()
+            event.data.runId === this.runId() &&
+            source === this.opts.offerAuthority
         ) {
             if (this.bidOptions) this.bid(event.data)
             else this.claim(event.data)
@@ -283,6 +352,10 @@ export class StoryFactory extends BaseObserver {
                             leaseId: event.data.leaseId,
                             storyId: event.data.request.storyId,
                             error: "market lease did not match the worker's stored bid",
+                            failure: {
+                                kind: "infrastructure",
+                                code: "decision_unknown",
+                            },
                         }),
                     )
                     return
@@ -290,6 +363,14 @@ export class StoryFactory extends BaseObserver {
                 this.leasedRoutes.set(event.data.request.storyId, stored.route)
             }
             this.leases.set(event.data.request.storyId, event.data)
+            this.telemetryLeases.set(event.data.leaseId, {
+                storyId: event.data.request.storyId,
+                generation: event.data.generation,
+            })
+            this.routeLearner?.beginLease(
+                event.data.leaseId,
+                event.data.request.storyId,
+            )
             this.emitBus(
                 StorySpawnRequest.create({
                     ...event.data.request,
@@ -329,6 +410,14 @@ export class StoryFactory extends BaseObserver {
         ) {
             const lease = this.leases.get(event.data.storyId)
             if (lease?.leaseId === event.data.leaseId) {
+                if (this.routeLearner && this.configuredBidRoute) {
+                    const learned = this.routeLearner.completeLease(
+                        event.data.storyId,
+                        event.data.leaseId,
+                        event.data.reason,
+                    )
+                    this.publishLearnedEstimate(learned)
+                }
                 const exec = this.active.get(event.data.storyId)
                 if (exec && this.envRef) {
                     exec.abort?.()
@@ -336,6 +425,10 @@ export class StoryFactory extends BaseObserver {
                     this.active.delete(event.data.storyId)
                 }
                 this.leases.delete(event.data.storyId)
+                this.routeLearner?.forgetLease(
+                    event.data.storyId,
+                    event.data.leaseId,
+                )
                 this.leasedRoutes.delete(event.data.storyId)
                 if (lease.bidId) this.bidRoutes.delete(lease.bidId)
             }
@@ -429,7 +522,21 @@ export class StoryFactory extends BaseObserver {
                 bidId,
                 workerId: this.workerId(),
                 route: configured.descriptor,
-                estimate: { ...bid.estimate },
+                estimate: this.routeLearner!.currentEstimate(),
+            }),
+        )
+    }
+
+    private publishLearnedEstimate(
+        learned: ReturnType<RouteLearner["completeLease"]>,
+    ): void {
+        if (!this.configuredBidRoute) return
+        this.emitBus(
+            RouteEstimateUpdated.create({
+                runId: this.runId(),
+                workerId: this.workerId(),
+                route: { ...this.configuredBidRoute.descriptor },
+                ...learned,
             }),
         )
     }
@@ -460,6 +567,12 @@ export class StoryFactory extends BaseObserver {
             await this.buildAndLaunch(req)
         } catch (error) {
             const message = (error as Error)?.message ?? String(error)
+            const failure = classifyStoryFailure(error) ?? {
+                kind: "infrastructure" as const,
+                code: /worktree/i.test(message)
+                    ? "worktree_unavailable" as const
+                    : "process_spawn_failed" as const,
+            }
             process.stderr.write(`[story-factory] ${req.storyId} spawn failed: ${message}\n`)
             this.emitBus(
                 StorySpawnFailed.create({
@@ -468,6 +581,7 @@ export class StoryFactory extends BaseObserver {
                     leaseId: req.leaseId,
                     storyId: req.storyId,
                     error: message,
+                    failure,
                 }),
             )
             if (this.opts.coordinationMode !== "collective") {
@@ -478,6 +592,7 @@ export class StoryFactory extends BaseObserver {
                         attempts: 0,
                         durationSecs: 0,
                         error: `spawn failed: ${message}`,
+                        failure,
                         ...(req.runId && req.leaseId && req.generation != null
                             ? {
                                   runId: req.runId,
@@ -528,6 +643,16 @@ export class StoryFactory extends BaseObserver {
                 storyId: req.storyId,
                 backend: route.backend,
                 model: route.model ?? "default",
+                ...(this.opts.coordinationMode === "collective" &&
+                req.runId &&
+                req.leaseId &&
+                req.generation != null
+                    ? {
+                          runId: req.runId,
+                          leaseId: req.leaseId,
+                          generation: req.generation,
+                      }
+                    : {}),
             }),
         )
 
@@ -557,8 +682,17 @@ export class StoryFactory extends BaseObserver {
                           this.opts.runtimeReplanDecisionAuthority,
                   }
                 : {}),
+            ...(this.opts.turnReviewAuthority
+                ? {
+                      turnReviewAuthority: this.opts.turnReviewAuthority,
+                      turnReviewTimeoutMs: this.opts.turnReviewTimeoutMs,
+                  }
+                : {}),
             ...(route.backend === "openai" && this.opts.collaboration
                 ? { collaboration: this.opts.collaboration }
+                : {}),
+            ...(route.backend === "openai" && this.opts.billingCoordinator
+                ? { billingCoordinator: this.opts.billingCoordinator }
                 : {}),
             ...(collectiveCorrelation
                 ? {

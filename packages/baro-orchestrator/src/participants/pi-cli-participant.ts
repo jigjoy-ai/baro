@@ -17,6 +17,7 @@ import {
 } from "@mozaik-ai/core"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
+import { harnessChildEnvironment } from "../harness-environment.js"
 import {
     AgentState,
     AgentTargetedMessage,
@@ -24,6 +25,7 @@ import {
     type AgentPhase,
 } from "../semantic-events.js"
 import { mapPiEvent } from "../pi-stream-mapper.js"
+import { appendCliDiagnosticTail } from "./cli-story-failure.js"
 
 export interface PiCliParticipantOptions {
     cwd: string
@@ -38,6 +40,8 @@ export interface PiRunSummary {
     sessionId: string | null
     exitCode: number | null
     error: Error | null
+    /** Bounded tail used only to classify terminal operational failures. */
+    stderrTail: string | null
     /**
      * At least one `agent_end` seen. Pi exits 0 even on a no-op/refused
      * turn, so exitCode alone is not proof of completion — require this too.
@@ -77,6 +81,7 @@ export class PiCliParticipant extends BaseObserver {
 
     private proc: ChildProcess | null = null
     private buffer = ""
+    private stderrTail = ""
     private envRef: AgenticEnvironment | null = null
     private currentPhase: AgentPhase = "idle"
     private sessionId: string | null = null
@@ -103,7 +108,7 @@ export class PiCliParticipant extends BaseObserver {
 
     /** Resolves once Pi emits its first `agent_start` or `session` event. */
     public readonly ready: Promise<void>
-    /** Resolves once the Pi process exits (regardless of success). */
+    /** Resolves once Pi exits and its stdout/stderr streams have closed. */
     public readonly done: Promise<PiRunSummary>
 
     constructor(
@@ -129,9 +134,9 @@ export class PiCliParticipant extends BaseObserver {
     }
 
     /**
-     * `exit` and `error` can fire in either order, or one without the other;
+     * `close` and `error` can fire in either order, or one without the other;
      * every resolution path goes through here so `done` settles exactly once
-     * (an async spawn error with no `exit` used to leave `done` pending forever).
+     * (an async spawn error must not leave `done` pending for a later close).
      */
     private settleDone(summary: PiRunSummary): void {
         if (this.doneSettled) return
@@ -152,7 +157,7 @@ export class PiCliParticipant extends BaseObserver {
     }
 
     /**
-     * Also called on a clean exit that never produced `session`/`agent_start`
+     * Also called on a clean close that never produced `session`/`agent_start`
      * — otherwise `ready` would stay pending forever for any awaiter.
      */
     private failReady(e: Error): void {
@@ -179,6 +184,7 @@ export class PiCliParticipant extends BaseObserver {
         try {
             proc = spawn(this.options.piBin, args, {
                 cwd: this.options.cwd,
+                env: harnessChildEnvironment(),
                 stdio: ["ignore", "pipe", "pipe"],
             })
         } catch (e) {
@@ -189,6 +195,7 @@ export class PiCliParticipant extends BaseObserver {
                 sessionId: null,
                 exitCode: null,
                 error: this.spawnError,
+                stderrTail: this.stderrTail || null,
                 sawAgentEnd: this.sawAgentEnd,
                 toolCallCount: this.toolCallCount,
                 toolSuccessCount: this.toolSuccessCount,
@@ -205,12 +212,12 @@ export class PiCliParticipant extends BaseObserver {
         proc.stdout!.on("data", (chunk: string) => this.handleStdout(chunk))
         // A final line without `\n` (e.g. agent_end) would otherwise be
         // dropped, corrupting the success predicate. 'end' fires after the
-        // last 'data', before 'exit'.
+        // last 'data', before the child 'close' boundary.
         proc.stdout!.on("end", () => this.flushStdout())
         proc.stderr!.on("data", (chunk: string) => this.handleStderr(chunk))
         proc.on("error", (err) => {
-            // An 'exit' may NOT follow an async process error (EACCES/EPIPE
-            // after spawn), so settle `done` here too or awaiters hang.
+            // Settle async process errors directly; a later `close` is safely
+            // ignored by settleDone's exact-once guard.
             PiCliParticipant.active.delete(this)
             this.spawnError = err
             this.transition("failed", err.message)
@@ -219,12 +226,16 @@ export class PiCliParticipant extends BaseObserver {
                 sessionId: this.sessionId,
                 exitCode: this.exitCode,
                 error: err,
+                stderrTail: this.stderrTail || null,
                 sawAgentEnd: this.sawAgentEnd,
                 toolCallCount: this.toolCallCount,
                 toolSuccessCount: this.toolSuccessCount,
             })
         })
-        proc.on("exit", (code) => {
+        // `exit` can precede the final stdout/stderr data. `close` is the
+        // terminal boundary for the normal path because it fires only after
+        // those streams close; the `error` path above still settles directly.
+        proc.on("close", (code) => {
             PiCliParticipant.active.delete(this)
             this.exitCode = code
             const finalPhase: AgentPhase =
@@ -246,6 +257,7 @@ export class PiCliParticipant extends BaseObserver {
                 sessionId: this.sessionId,
                 exitCode: code,
                 error: this.spawnError,
+                stderrTail: this.stderrTail || null,
                 sawAgentEnd: this.sawAgentEnd,
                 toolCallCount: this.toolCallCount,
                 toolSuccessCount: this.toolSuccessCount,
@@ -332,6 +344,7 @@ export class PiCliParticipant extends BaseObserver {
     }
 
     private handleStderr(chunk: string): void {
+        this.stderrTail = appendCliDiagnosticTail(this.stderrTail, chunk)
         const trimmed = chunk.trimEnd()
         if (!trimmed) return
         process.stderr.write(`[pi:${this.agentId}/stderr] ${trimmed}\n`)
@@ -371,7 +384,7 @@ export class PiCliParticipant extends BaseObserver {
                     this.transition("running", "pi agent started")
                     this.settleReady()
                 }
-                // Don't transition to "done" on agent_end — the process-exit
+                // Don't transition to "done" on agent_end — the process-close
                 // listener owns that, so the real exit code is observed first.
             }
             this.dispatch(item)

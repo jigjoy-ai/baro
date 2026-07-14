@@ -23,11 +23,44 @@ import type { ModelInvocationMeasuredData } from "./model-telemetry.js"
 export function defineSemanticEvent<TData>(type: string) {
     return {
         type,
-        create: (data: TData): SemanticEvent<TData> =>
-            new SemanticEvent<TData>(type, data),
+        create: (data: TData): SemanticEvent<TData> => {
+            // Mozaik delivers the same event object synchronously to every
+            // subscriber, while several Baro participants defer decisions to
+            // an async mailbox. Snapshot and freeze at the producer boundary
+            // so an earlier subscriber cannot rewrite what a later authority
+            // observes, and callers cannot mutate an event after publishing it.
+            const snapshot = deepFreezeSemanticData(structuredClone(data))
+            return Object.freeze(new SemanticEvent<TData>(type, snapshot))
+        },
         is: (event: SemanticEvent<unknown>): event is SemanticEvent<TData> =>
             event.type === type,
     } as const
+}
+
+function deepFreezeSemanticData<T>(value: T, seen = new WeakSet<object>()): T {
+    if (value === null || typeof value !== "object") return value
+    const object = value as object
+    if (seen.has(object)) return value
+    seen.add(object)
+
+    // Semantic payloads are wire values (plain records/arrays plus primitive
+    // leaves). Reflective traversal also safely freezes structured-cloned Date,
+    // Map and Set wrappers should a diagnostic payload contain one.
+    if (value instanceof Map) {
+        for (const [key, item] of value) {
+            deepFreezeSemanticData(key, seen)
+            deepFreezeSemanticData(item, seen)
+        }
+    } else if (value instanceof Set) {
+        for (const item of value) deepFreezeSemanticData(item, seen)
+    }
+    for (const key of Reflect.ownKeys(object)) {
+        deepFreezeSemanticData(
+            (object as Record<PropertyKey, unknown>)[key],
+            seen,
+        )
+    }
+    return Object.freeze(value)
 }
 
 // Bus routing
@@ -194,6 +227,35 @@ export interface ConversationAction {
     text: string
 }
 
+/** Narrow implementation scope a conversational participant may propose.
+ * Scheduling priority, retry policy and model/route selection are deliberately
+ * absent: those remain Board and worker-market decisions. */
+export interface ConversationDelegatedStory {
+    id: string
+    title: string
+    description: string
+    dependsOn: readonly string[]
+    acceptance: readonly string[]
+    tests: readonly string[]
+}
+
+/** Advisory, add-only work proposal from the exact bound DialogueAgent.
+ * The Board remains the sole graph authority and must validate this against
+ * the correlated graph version before it can become runnable work. */
+export interface ConversationDelegationProposedData {
+    runId: string
+    messageId: string
+    proposalId: string
+    agentId: string
+    baseGraphVersion: number
+    reason: string
+    addedStories: readonly ConversationDelegatedStory[]
+}
+export const ConversationDelegationProposed =
+    defineSemanticEvent<ConversationDelegationProposedData>(
+        "conversation_delegation_proposed",
+    )
+
 export interface ConversationRespondedData {
     runId: string
     messageId: string
@@ -343,6 +405,14 @@ export const CodexUnknownEvent =
  */
 export interface CritiqueData {
     agentId: string
+    /** Exact producer-issued terminal turn this verdict evaluates. Optional
+     * only for replay compatibility with audit logs written before the
+     * continuation handshake existed. */
+    terminalId?: string
+    /** `inconclusive` means the evaluator/protocol failed; it is never
+     * evidence that the candidate code is wrong. Missing means `evaluated`
+     * for replay compatibility. */
+    status?: "evaluated" | "inconclusive"
     verdict: "pass" | "fail"
     reasoning: string
     violatedCriteria: readonly string[]
@@ -352,6 +422,7 @@ export interface CritiqueData {
 export const Critique = defineSemanticEvent<CritiqueData>("critique")
 
 export interface StoryQualityCritiqueSnapshot {
+    status?: "evaluated" | "inconclusive"
     verdict: "pass" | "fail"
     reasoning: string
     violatedCriteria: readonly string[]
@@ -365,7 +436,7 @@ export interface StoryQualityCompletedData {
     storyId: string
     leaseId: string
     generation: number
-    status: "passed" | "failed"
+    status: "passed" | "failed" | "inconclusive"
     /** Null only when no acceptance criteria exist or no terminal turn arrived. */
     targetTurn: number | null
     reason: string
@@ -466,6 +537,20 @@ export interface WorkBidData {
 }
 export const WorkBid = defineSemanticEvent<WorkBidData>("work_bid")
 
+/** Event-sourced, credential-free route learning. It is advisory input to
+ * later auctions, never execution or completion authority. */
+export interface RouteEstimateUpdatedData {
+    runId: string
+    workerId: string
+    route: WorkRouteDescriptor
+    verifiedSuccesses: number
+    workFailures: number
+    observations: number
+    estimate: WorkBidEstimateData
+}
+export const RouteEstimateUpdated =
+    defineSemanticEvent<RouteEstimateUpdatedData>("route_estimate_updated")
+
 /** Broker-owned semantic timer tick that closes one bounded bid window. */
 export interface WorkBidWindowClosedData {
     runId: string
@@ -507,7 +592,7 @@ export interface WorkLeaseReleasedData {
     leaseId: string
     storyId: string
     workerId: string
-    reason: "integrated" | "execution_failed" | "quality_failed" | "integration_failed" | "spawn_failed" | "aborted" | "expired"
+    reason: "integrated" | "execution_failed" | "operational_failed" | "quality_failed" | "quality_inconclusive" | "integration_failed" | "spawn_failed" | "aborted" | "expired"
 }
 export const WorkLeaseReleased =
     defineSemanticEvent<WorkLeaseReleasedData>("work_lease_released")
@@ -642,6 +727,7 @@ export interface StorySpawnFailedData {
     leaseId?: string
     storyId: string
     error: string
+    failure?: StoryFailureData
 }
 export const StorySpawnFailed =
     defineSemanticEvent<StorySpawnFailedData>("story_spawn_failed")
@@ -677,6 +763,11 @@ export interface DiscoveredWork {
 export interface WorkDiscoveredData {
     runId: string
     sourceAgentId: string
+    /** Exact lease that produced the discovery. Retained bridge attribution
+     * alone is insufficient because the same story may already be on a newer
+     * generation when a disk outbox record is polled. */
+    leaseId: string
+    generation: number
     reason: string
     story: DiscoveredWork
 }
@@ -704,6 +795,9 @@ export const RecoveryDecision =
 export interface RunStartedData {
     project: string
     storyCount: number
+    /** Current durable runtime-DAG version. Optional for legacy/replay
+     * compatibility; collective control participants should provide it. */
+    graphVersion?: number
     /** Full logical run set; optional for replay compatibility. */
     storyIds?: readonly string[]
     /** Stories already passed before this resume/continue run began. */
@@ -763,7 +857,12 @@ export interface StorySpawnRequestData {
      * integration failure. Recovery starts from the latest run branch and can
      * inspect an immutable backup whenever the failed attempt changed files. */
     recovery?: {
-        kind: "execution" | "integration"
+        kind:
+            | "execution"
+            | "integration"
+            | "transport"
+            | "infrastructure"
+            | "verification"
         reason: string
         branch?: string
     }
@@ -773,6 +872,9 @@ export interface StorySpawnRequestData {
     generation?: number
     /** DAG version from which this concrete story launch was scheduled. */
     graphVersion?: number
+    /** Keep a continuation-capable worker alive until the authoritative
+     * Critic has reviewed its exact terminal turn. */
+    requiresQualityReview?: boolean
     workerId?: string
 }
 export const StorySpawnRequest =
@@ -791,6 +893,10 @@ export interface StoryRoutedData {
     storyId: string
     backend: string
     model: string
+    /** Collective-only authority correlation; legacy routing omits it. */
+    runId?: string
+    leaseId?: string
+    generation?: number
 }
 export const StoryRouted = defineSemanticEvent<StoryRoutedData>("story_routed")
 
@@ -874,7 +980,15 @@ export interface ConductorStateData {
 export const ConductorState =
     defineSemanticEvent<ConductorStateData>("conductor_state")
 
-export type StoryFailureKind = "execution" | "provider_capacity"
+/** Terminal lane, not recovery policy. Producers classify what happened;
+ * Board/Broker policy decides whether to retry, reroute, reverify, or ask a
+ * coding agent to repair work. */
+export type StoryFailureKind =
+    | "execution"
+    | "provider_capacity"
+    | "transport"
+    | "infrastructure"
+    | "verification"
 
 export type ProviderCapacityCode =
     | "session_limit"
@@ -883,12 +997,51 @@ export type ProviderCapacityCode =
     | "overloaded"
     | "capacity_unavailable"
 
+export type TransportFailureCode =
+    | "request_timeout"
+    | "connection_failed"
+    | "connection_reset"
+    | "dns_failed"
+    | "tls_failed"
+    | "network_unavailable"
+
+export type InfrastructureFailureCode =
+    | "review_timeout"
+    | "review_uncorrelated"
+    | "sandbox_denied"
+    | "tool_unavailable"
+    | "command_timeout"
+    | "process_spawn_failed"
+    | "worktree_unavailable"
+    | "decision_unknown"
+    | "authentication_failed"
+
+export type ExecutionFailureCode =
+    | "model_error"
+    | "quality_rejected"
+    | "turn_limit"
+    | "no_work_product"
+
+export type VerificationFailureCode =
+    | "acceptance_not_met"
+    | "canonical_check_failed"
+    | "evidence_missing"
+    | "evidence_stale"
+    | "evaluator_unavailable"
+
+export type StoryFailureCode =
+    | ProviderCapacityCode
+    | TransportFailureCode
+    | InfrastructureFailureCode
+    | ExecutionFailureCode
+    | VerificationFailureCode
+
 /** Backend-neutral terminal failure classification. Human diagnostics remain
  * in `error`; this bounded structure is what deterministic recovery policy
  * consumes. Old audit logs omit it and retain the historical execution path. */
 export interface StoryFailureData {
     kind: StoryFailureKind
-    code?: ProviderCapacityCode
+    code?: StoryFailureCode
     retryAfterMs?: number
 }
 

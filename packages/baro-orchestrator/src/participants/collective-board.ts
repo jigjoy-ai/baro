@@ -12,6 +12,7 @@ import {
 } from "../prd.js"
 import {
     ConductorState,
+    ConversationDelegationProposed,
     CoordinationModeSelected,
     LevelCompleted,
     LevelStarted,
@@ -54,11 +55,17 @@ import {
     type RuntimeReplanProposedData,
     type RunVerificationCompletedData,
     type RunVerificationEvidence,
+    type StoryFailureData,
     type StoryResultData,
     type WorkDiscoveredData,
 } from "../semantic-events.js"
 import type { ConductorRunSummary } from "./conductor.js"
+import {
+    toRuntimeReplanProposal,
+    validateConversationDelegationProposal,
+} from "./conversation-delegation.js"
 import { RuntimeReplanCoordinator } from "./runtime-replan-coordinator.js"
+import { OperationalRecoveryPolicy } from "./operational-recovery.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import { isProviderCapacityFailure } from "../provider-failure.js"
 import {
@@ -76,10 +83,16 @@ export interface CollectiveBoardOptions {
     defaultModel?: string
     expectRecoveryDecisions?: boolean
     maxRecoveryAttemptsPerStory?: number
+    /** Retries for transport/tool/evaluator incidents. These never consume
+     * semantic healing or runtime-adaptation budget. Default: 2. */
+    maxOperationalRetriesPerStory?: number
     /** Credential-free routes registered in the deterministic worker market. */
     marketRouteIds?: readonly string[]
     maxDynamicStories?: number
     replanProgressBudget?: number
+    /** Independent budget for worker/discovery DAG mutations without an
+     * integrated story. It is not consumed by Surgeon recovery. Default: 6. */
+    runtimeAdaptationBudget?: number
     softDeadlineSecs?: number
     /** Gate a clean completion on objective build/test verification. */
     verifyBeforePush?: boolean
@@ -155,7 +168,12 @@ export class CollectiveBoard extends SerializedObserver {
     private readonly recoveryContext = new Map<
         string,
         {
-            kind: "execution" | "integration"
+            kind:
+                | "execution"
+                | "integration"
+                | "transport"
+                | "infrastructure"
+                | "verification"
             reason: string
             branch?: string
         }
@@ -163,6 +181,9 @@ export class CollectiveBoard extends SerializedObserver {
     private readonly recoveryAborted = new Set<string>()
     /** Capacity recovery is deterministic routing, not a Surgeon decision. */
     private readonly capacityRecoveryPending = new Set<string>()
+    /** Non-work incidents are retried/rescheduled independently of Surgeon
+     * and the runtime DAG adaptation budget. */
+    private readonly operationalRecovery: OperationalRecoveryPolicy
     private readonly marketRouteIds: ReadonlySet<string>
     private readonly unavailableMarketRouteIds = new Set<string>()
     private readonly unclaimable = new Set<string>()
@@ -172,6 +193,9 @@ export class CollectiveBoard extends SerializedObserver {
      * old level barrier as soon as their actual dependencies integrate. */
     private readonly runtimeAdaptiveStoryIds = new Set<string>()
     private readonly runtimeReplans: RuntimeReplanCoordinator
+    /** Exact DialogueAgent object allowed to propose add-only work. It is
+     * late-bound because Dialogue itself needs this Board as control authority. */
+    private conversationAuthority: Participant | null = null
     private readonly pendingRecovery = new Set<string>()
     private readonly recoveryDecided = new Set<string>()
     private readonly pendingCleanup = new Map<
@@ -184,22 +208,35 @@ export class CollectiveBoard extends SerializedObserver {
     >()
     private readonly contextRequests = new Map<string, PrdStory>()
     private readonly replanProgressBudget: number
+    private readonly runtimeAdaptationBudget: number
     private readonly softDeadlineSecs: number
     private healingActionsSinceProgress = 0
+    private runtimeAdaptationsSinceProgress = 0
     private stopReason: string | null = null
     private pendingVerificationId: string | null = null
     private verificationStatus: "passed" | "failed" | "skipped" | undefined
     private verification: RunVerificationEvidence | undefined
     private verificationTimer: ReturnType<typeof setTimeout> | null = null
+    private operationalRetryTimer: ReturnType<typeof setTimeout> | null = null
+    private operationalRetryDueAt: number | null = null
     readonly done: Promise<ConductorRunSummary>
     private resolveDone!: (summary: ConductorRunSummary) => void
 
     constructor(private readonly opts: CollectiveBoardOptions) {
         super()
         this.marketRouteIds = new Set(opts.marketRouteIds ?? [])
+        this.operationalRecovery = new OperationalRecoveryPolicy({
+            maxRetriesPerStory: opts.maxOperationalRetriesPerStory ?? 2,
+            marketRouteIds: this.marketRouteIds,
+            isRouteUnavailable: (routeId) =>
+                this.unavailableMarketRouteIds.has(routeId),
+        })
         this.replanProgressBudget =
             opts.replanProgressBudget ??
             envNonNegativeInt("BARO_REPLAN_PROGRESS_BUDGET", 3)
+        this.runtimeAdaptationBudget =
+            opts.runtimeAdaptationBudget ??
+            envNonNegativeInt("BARO_RUNTIME_ADAPTATION_BUDGET", 6)
         this.softDeadlineSecs =
             opts.softDeadlineSecs ??
             envNonNegativeInt("BARO_RUN_SOFT_DEADLINE_SECS", 0)
@@ -207,11 +244,21 @@ export class CollectiveBoard extends SerializedObserver {
             runId: opts.runId,
             prdPath: opts.prdPath,
             maxDynamicStories: opts.maxDynamicStories ?? 3,
-            adaptationBudget: this.replanProgressBudget,
+            adaptationBudget: this.runtimeAdaptationBudget,
         })
         this.done = new Promise((resolve) => {
             this.resolveDone = resolve
         })
+    }
+
+    setConversationAuthority(authority: Participant): void {
+        if (
+            this.conversationAuthority !== null &&
+            this.conversationAuthority !== authority
+        ) {
+            throw new Error("collective conversation authority is already bound")
+        }
+        this.conversationAuthority = authority
     }
 
     protected override async handleEvent(
@@ -304,11 +351,19 @@ export class CollectiveBoard extends SerializedObserver {
                 )
             ) return
             if (!this.matchesLease(event.data.storyId, event.data.leaseId)) return
+            if (isOperationalFailure(event.data.failure)) {
+                this.prepareOperationalRecovery(
+                    event.data.storyId,
+                    event.data.failure,
+                )
+            }
             this.failStory(
                 event.data.storyId,
                 `spawn failed: ${event.data.error}`,
                 true,
-                "execution",
+                isOperationalFailure(event.data.failure)
+                    ? event.data.failure.kind
+                    : "execution",
             )
             return
         }
@@ -365,7 +420,17 @@ export class CollectiveBoard extends SerializedObserver {
             (!this.opts.leaseAuthority || context.source === this.opts.leaseAuthority) &&
             this.matchesLease(event.data.storyId, event.data.leaseId)
         ) {
-            this.failStory(event.data.storyId, event.data.reason, true, "execution")
+            const failure: StoryFailureData = {
+                kind: "infrastructure",
+                code: "command_timeout",
+            }
+            this.prepareOperationalRecovery(event.data.storyId, failure)
+            this.failStory(
+                event.data.storyId,
+                event.data.reason,
+                true,
+                "infrastructure",
+            )
             return
         }
         if (
@@ -383,7 +448,7 @@ export class CollectiveBoard extends SerializedObserver {
             ) return
             if (event.data.preservedBranch) {
                 const recovery = this.recoveryContext.get(event.data.storyId)
-                if (recovery?.kind === "execution") {
+                if (recovery && recovery.kind !== "integration") {
                     this.recoveryContext.set(event.data.storyId, {
                         ...recovery,
                         branch: event.data.preservedBranch,
@@ -411,6 +476,7 @@ export class CollectiveBoard extends SerializedObserver {
             this.unmergeable.add(event.data.storyId)
             this.recoveryAborted.add(event.data.storyId)
             this.capacityRecoveryPending.delete(event.data.storyId)
+            this.operationalRecovery.abort(event.data.storyId)
             this.pendingRecovery.delete(event.data.storyId)
             this.recoveryDecided.add(event.data.storyId)
             for (let i = this.pendingReplans.length - 1; i >= 0; i -= 1) {
@@ -450,6 +516,7 @@ export class CollectiveBoard extends SerializedObserver {
         ) {
             if (
                 !this.capacityRecoveryPending.has(event.data.storyId) &&
+                !this.operationalRecovery.isPending(event.data.storyId) &&
                 !this.recoveryAborted.has(event.data.storyId) &&
                 !this.recoveryDecided.has(event.data.storyId)
             ) {
@@ -466,6 +533,7 @@ export class CollectiveBoard extends SerializedObserver {
         ) {
             if (
                 this.capacityRecoveryPending.has(event.data.storyId) ||
+                this.operationalRecovery.isPending(event.data.storyId) ||
                 this.recoveryAborted.has(event.data.storyId)
             ) return
             this.recoveryDecided.add(event.data.storyId)
@@ -481,6 +549,14 @@ export class CollectiveBoard extends SerializedObserver {
             event.data.runId === this.opts.runId
         ) {
             this.onRuntimeReplanProposed(context.source, event.data)
+            return
+        }
+        if (
+            ConversationDelegationProposed.is(event) &&
+            event.data.runId === this.opts.runId
+        ) {
+            if (context.source !== this.conversationAuthority) return
+            this.onConversationDelegationProposed(event.data)
             return
         }
         if (
@@ -588,6 +664,7 @@ export class CollectiveBoard extends SerializedObserver {
             RunStarted.create({
                 project: this.prd.project,
                 storyCount: this.prd.userStories.length,
+                graphVersion: this.runtimeReplans.graphVersion,
                 storyIds: this.prd.userStories.map((story) => story.id),
                 completedStoryIds: this.prd.userStories
                     .filter((story) => story.passes)
@@ -622,7 +699,19 @@ export class CollectiveBoard extends SerializedObserver {
         }
 
         if (isProviderCapacityFailure(result)) {
-            this.prepareCapacityRecovery(result.storyId)
+            if (isPermanentCapacityFailure(result.failure?.code)) {
+                this.prepareCapacityRecovery(result.storyId)
+            } else {
+                this.prepareOperationalRecovery(
+                    result.storyId,
+                    { kind: "provider_capacity", ...result.failure },
+                )
+            }
+        } else if (isOperationalFailure(result.failure)) {
+            this.prepareOperationalRecovery(
+                result.storyId,
+                result.failure!,
+            )
         } else if (
             this.opts.expectRecoveryDecisions &&
             !this.recoveryDecided.has(result.storyId)
@@ -633,7 +722,12 @@ export class CollectiveBoard extends SerializedObserver {
             result.storyId,
             result.error ?? "story execution failed",
             true,
-            "execution",
+            isOperationalFailure(result.failure)
+                ? result.failure.kind
+                : isProviderCapacityFailure(result) &&
+                    !isPermanentCapacityFailure(result.failure?.code)
+                  ? "transport"
+                  : "execution",
         )
     }
 
@@ -663,7 +757,7 @@ export class CollectiveBoard extends SerializedObserver {
         storyId: string
         leaseId: string
         generation: number
-        status: "passed" | "failed"
+        status: "passed" | "failed" | "inconclusive"
         reason: string
     }): void {
         if (this.phase !== "running" || !this.wave?.pending.has(data.storyId)) return
@@ -677,6 +771,19 @@ export class CollectiveBoard extends SerializedObserver {
         this.pendingQuality.delete(data.storyId)
         if (data.status === "passed") {
             this.requestIntegration(result)
+            return
+        }
+        if (data.status === "inconclusive") {
+            this.prepareOperationalRecovery(data.storyId, {
+                kind: "verification",
+                code: "evaluator_unavailable",
+            })
+            this.failStory(
+                data.storyId,
+                `acceptance gate was inconclusive: ${data.reason}`,
+                true,
+                "verification",
+            )
             return
         }
         if (
@@ -708,10 +815,12 @@ export class CollectiveBoard extends SerializedObserver {
         this.recoveryAborted.delete(storyId)
         this.capacityRecoveryPending.delete(storyId)
         this.capacityRerouteAttempts.delete(storyId)
+        this.operationalRecovery.forget(storyId)
         this.recoveryDecided.delete(storyId)
         this.leases.delete(storyId)
         this.pendingQuality.delete(storyId)
         this.healingActionsSinceProgress = 0
+        this.runtimeAdaptationsSinceProgress = 0
         this.reconcileRuntimeReadyStories()
         this.maybeCompleteWave()
     }
@@ -734,7 +843,12 @@ export class CollectiveBoard extends SerializedObserver {
         storyId: string,
         error: string,
         cleanup: boolean,
-        recoveryKind?: "execution" | "integration",
+        recoveryKind?:
+            | "execution"
+            | "integration"
+            | "transport"
+            | "infrastructure"
+            | "verification",
     ): void {
         if (this.phase !== "running" || !this.wave?.pending.has(storyId)) return
         const lease = this.leases.get(storyId)
@@ -764,7 +878,8 @@ export class CollectiveBoard extends SerializedObserver {
             // Durability is independent of automatic retry policy. Even the
             // final failed attempt may contain valuable partial work that a
             // human needs after the bounded recovery budget is exhausted.
-            const preserveForRecovery = recoveryKind === "execution"
+            const preserveForRecovery =
+                recoveryKind !== undefined && recoveryKind !== "integration"
             this.pendingCleanup.set(cleanupId, {
                 storyId,
                 ...(lease ? lease : {}),
@@ -828,6 +943,26 @@ export class CollectiveBoard extends SerializedObserver {
             this.capacityRecoveryPending.clear()
             this.recoveryAborted.add(storyId)
         }
+    }
+
+    private prepareOperationalRecovery(
+        storyId: string,
+        failure: StoryFailureData,
+    ): void {
+        this.pendingRecovery.delete(storyId)
+        this.recoveryDecided.add(storyId)
+        const routeId = this.leases.get(storyId)?.route?.routeId
+        if (!this.operationalRecovery.prepare(storyId, {
+            ...(routeId ? { failedRouteId: routeId } : {}),
+            excludeFailedRoute: failureImplicatesWorkerRoute(failure),
+            ...(failure.retryAfterMs === undefined
+                ? {}
+                : { retryAfterMs: failure.retryAfterMs }),
+        })) {
+            this.recoveryAborted.add(storyId)
+            return
+        }
+        this.recoveryAborted.delete(storyId)
     }
 
     private completeWave(): void {
@@ -906,7 +1041,7 @@ export class CollectiveBoard extends SerializedObserver {
                     .filter((story) => story.passes)
                     .map((story) => story.id),
                 activeLease: undefined,
-                healingActionsSinceProgress: this.healingActionsSinceProgress,
+                adaptationsSinceProgress: this.runtimeAdaptationsSinceProgress,
                 requireActiveLease: false,
                 storyAccounting: "policy",
                 maxAddedStories: Number.MAX_SAFE_INTEGER,
@@ -977,19 +1112,62 @@ export class CollectiveBoard extends SerializedObserver {
         this.decideRuntimeReplan(proposal)
     }
 
-    private decideRuntimeReplan(proposal: RuntimeReplanProposedData): void {
+    private onConversationDelegationProposed(
+        proposal: Parameters<typeof toRuntimeReplanProposal>[0],
+    ): void {
+        const validation = validateConversationDelegationProposal(proposal)
+        if (!validation.ok) {
+            this.emit(
+                ConductorState.create({
+                    phase: "running_level",
+                    detail:
+                        `collective rejected malformed conversation proposal ` +
+                        `${proposal.proposalId || "(missing)"}: ${validation.reason}`,
+                    currentLevel: this.wave?.ordinal,
+                    storyIds: this.wave?.storyIds,
+                }),
+            )
+            return
+        }
+        let runtimeProposal: RuntimeReplanProposedData
+        try {
+            runtimeProposal = toRuntimeReplanProposal(validation.proposal)
+        } catch (error) {
+            this.emit(
+                ConductorState.create({
+                    phase: "running_level",
+                    detail:
+                        `collective rejected malformed conversation proposal ` +
+                        `${proposal.proposalId || "(missing)"}: ${messageOf(error)}`,
+                    currentLevel: this.wave?.ordinal,
+                    storyIds: this.wave?.storyIds,
+                }),
+            )
+            return
+        }
+        this.decideRuntimeReplan(runtimeProposal, {
+            requireActiveLease: false,
+        })
+    }
+
+    private decideRuntimeReplan(
+        proposal: RuntimeReplanProposedData,
+        options: { requireActiveLease?: boolean } = {},
+    ): void {
         const lease = this.leases.get(proposal.sourceStoryId)
+        const requireActiveLease = options.requireActiveLease !== false
         const outcome = this.runtimeReplans.decide(proposal, {
             active: this.phase === "running",
             prd: this.prd,
             immutableStoryIds: this.runtimeImmutableStoryIds(),
-            activeLease: lease
+            activeLease: requireActiveLease && lease
                 ? {
                       leaseId: lease.leaseId,
                       generation: lease.generation,
                   }
                 : undefined,
-            healingActionsSinceProgress: this.healingActionsSinceProgress,
+            adaptationsSinceProgress: this.runtimeAdaptationsSinceProgress,
+            requireActiveLease,
         })
         if (outcome.applied && RuntimeReplanApplied.is(outcome.event)) {
             // The coordinator has already crossed the durable commit boundary;
@@ -1005,7 +1183,7 @@ export class CollectiveBoard extends SerializedObserver {
                 this.runtimeAdaptiveStoryIds.add(storyId)
             }
             this.emit(outcome.event)
-            this.noteHealingAction(this.wave?.ordinal ?? this.waveOrdinal)
+            this.noteRuntimeAdaptation(this.wave?.ordinal ?? this.waveOrdinal)
             this.emit(
                 ConductorState.create({
                     phase: "running_level",
@@ -1018,7 +1196,8 @@ export class CollectiveBoard extends SerializedObserver {
                     storyIds: this.wave?.storyIds,
                 }),
             )
-            this.reconcileRuntimeReadyStories()
+            if (this.wave) this.reconcileRuntimeReadyStories()
+            else this.scheduleNextWave()
             return
         }
         this.emit(outcome.event)
@@ -1088,11 +1267,15 @@ export class CollectiveBoard extends SerializedObserver {
     private onWorkDiscovered(discovery: WorkDiscoveredData): void {
         if (this.phase !== "running" || !this.prd) return
         const lease = this.leases.get(discovery.sourceAgentId)
-        if (!lease) {
+        if (
+            !lease ||
+            lease.leaseId !== discovery.leaseId ||
+            lease.generation !== discovery.generation
+        ) {
             this.emit(
                 ConductorState.create({
                     phase: "running_level",
-                    detail: `collective rejected discovered work ${discovery.story.id || "(missing id)"}: source lease is inactive`,
+                    detail: `collective rejected discovered work ${discovery.story.id || "(missing id)"}: source lease is inactive or stale`,
                     currentLevel: this.wave?.ordinal,
                 }),
             )
@@ -1192,6 +1375,49 @@ export class CollectiveBoard extends SerializedObserver {
             return
         }
 
+        const pendingOperationalRecovery = this.prd.userStories.filter((story) =>
+            !story.passes &&
+            this.failed.has(story.id) &&
+            this.operationalRecovery.isPending(story.id) &&
+            !this.recoveryAborted.has(story.id) &&
+            !this.unclaimable.has(story.id) &&
+            !this.unmergeable.has(story.id),
+        )
+        const operationalRecovery = pendingOperationalRecovery.filter((story) =>
+            this.operationalRecovery.isReady(story.id),
+        )
+        if (operationalRecovery.length > 0) {
+            const deadline = this.softDeadlineReason()
+            if (deadline) {
+                this.requestPush(deadline)
+                return
+            }
+            for (const story of operationalRecovery) {
+                this.operationalRecovery.startRetry(story.id)
+                this.failed.delete(story.id)
+            }
+            // Operational retries preserve work but do not count as semantic
+            // healing and never consume the runtime-reorganization budget.
+            this.startWave(operationalRecovery, true, this.waveOrdinal + 1)
+            return
+        }
+        if (pendingOperationalRecovery.length > 0) {
+            const deadline = this.softDeadlineReason()
+            if (deadline) {
+                this.requestPush(deadline)
+                return
+            }
+            const delay = this.operationalRecovery.nextReadyDelay(
+                pendingOperationalRecovery.map((story) => story.id),
+            )
+            if (delay !== null) {
+                this.scheduleOperationalRetry(
+                    Math.min(delay, this.softDeadlineRemainingMs()),
+                )
+                return
+            }
+        }
+
         const recovery = this.prd.userStories.filter((story) => {
             if (story.passes || !this.failed.has(story.id)) return false
             if (this.recoveryAborted.has(story.id)) return false
@@ -1256,6 +1482,7 @@ export class CollectiveBoard extends SerializedObserver {
                             Math.max(
                                 this.recoveryAttempts.get(story.id) ?? 0,
                                 this.capacityRerouteAttempts.get(story.id) ?? 0,
+                                this.operationalRecovery.attempts(story.id),
                                 1,
                             ),
                         ),
@@ -1319,7 +1546,12 @@ export class CollectiveBoard extends SerializedObserver {
         const prompt = [context?.trim() || null, recoveryPrompt, basePrompt]
             .filter((part): part is string => Boolean(part))
             .join("\n\n")
-        const excludedRouteIds = [...this.unavailableMarketRouteIds].sort()
+        const excludedRouteIds = [
+            ...new Set([
+                ...this.unavailableMarketRouteIds,
+                ...this.operationalRecovery.exclusions(story.id),
+            ]),
+        ].sort()
         this.emit(
             WorkOffered.create({
                 runId: this.opts.runId,
@@ -1334,6 +1566,10 @@ export class CollectiveBoard extends SerializedObserver {
                     retries: story.retries,
                     timeoutSecs: this.opts.timeoutSecs,
                     graphVersion: this.runtimeReplans.graphVersion,
+                    ...(this.opts.expectQualityDecisions &&
+                    story.acceptance.length > 0
+                        ? { requiresQualityReview: true }
+                        : {}),
                     ...(recovery ? { recovery } : {}),
                 },
             }),
@@ -1393,6 +1629,7 @@ export class CollectiveBoard extends SerializedObserver {
     private requestPush(reason: string | null): void {
         if (this.phase !== "running" && this.phase !== "verifying") return
         this.clearVerificationTimer()
+        this.clearOperationalRetryTimer()
         this.pendingVerificationId = null
         this.stopReason = reason
         this.phase = "pushing"
@@ -1501,6 +1738,37 @@ export class CollectiveBoard extends SerializedObserver {
             : null
     }
 
+    private softDeadlineRemainingMs(): number {
+        if (this.softDeadlineSecs <= 0) return Number.MAX_SAFE_INTEGER
+        return Math.max(
+            0,
+            this.startedAt + this.softDeadlineSecs * 1_000 - Date.now(),
+        )
+    }
+
+    private scheduleOperationalRetry(delayMs: number): void {
+        const boundedDelay = Math.max(0, Math.min(delayMs, 2_147_483_647))
+        const dueAt = Date.now() + boundedDelay
+        if (
+            this.operationalRetryTimer &&
+            this.operationalRetryDueAt !== null &&
+            this.operationalRetryDueAt <= dueAt
+        ) return
+        this.clearOperationalRetryTimer()
+        this.operationalRetryDueAt = dueAt
+        this.operationalRetryTimer = setTimeout(() => {
+            this.operationalRetryTimer = null
+            this.operationalRetryDueAt = null
+            this.scheduleNextWave()
+        }, boundedDelay)
+    }
+
+    private clearOperationalRetryTimer(): void {
+        if (this.operationalRetryTimer) clearTimeout(this.operationalRetryTimer)
+        this.operationalRetryTimer = null
+        this.operationalRetryDueAt = null
+    }
+
     private noteHealingAction(currentLevel: number): void {
         this.healingActionsSinceProgress += 1
         if (this.replanProgressBudget <= 0) return
@@ -1513,9 +1781,24 @@ export class CollectiveBoard extends SerializedObserver {
         )
     }
 
+    private noteRuntimeAdaptation(currentLevel: number): void {
+        this.runtimeAdaptationsSinceProgress += 1
+        if (this.runtimeAdaptationBudget <= 0) return
+        this.emit(
+            ConductorState.create({
+                phase: "running_level",
+                detail:
+                    `runtime adaptation ${this.runtimeAdaptationsSinceProgress}/` +
+                    `${this.runtimeAdaptationBudget} without integrated progress`,
+                currentLevel,
+            }),
+        )
+    }
+
     private terminate(success: boolean, abortReason: string | null): void {
         if (this.phase === "done") return
         this.clearVerificationTimer()
+        this.clearOperationalRetryTimer()
         this.phase = "done"
         const totalDurationSecs = Math.round((Date.now() - this.startedAt) / 1_000)
         const failedStories = this.prd
@@ -1589,4 +1872,35 @@ function envNonNegativeInt(name: string, fallback: number): number {
 
 function tokens(text: string): string[] {
     return [...new Set(text.toLowerCase().match(/[a-z0-9_./-]{3,}/g) ?? [])]
+}
+
+function isPermanentCapacityFailure(code: unknown): boolean {
+    return code === "session_limit" || code === "quota_exhausted"
+}
+
+function isOperationalFailure(
+    failure: StoryFailureData | undefined,
+): failure is StoryFailureData & {
+    kind: "transport" | "infrastructure" | "verification"
+} {
+    if (!failure) return false
+    if (failure.kind === "transport" || failure.kind === "infrastructure") {
+        return true
+    }
+    if (failure.kind !== "verification") return false
+    // These two codes are trustworthy negative evidence about the work. The
+    // remaining verification codes describe missing/stale evaluation and stay
+    // in the operational lane.
+    return failure.code !== "acceptance_not_met" &&
+        failure.code !== "canonical_check_failed"
+}
+
+function failureImplicatesWorkerRoute(failure: StoryFailureData): boolean {
+    if (failure.kind === "provider_capacity" || failure.kind === "transport") {
+        return true
+    }
+    if (failure.kind !== "infrastructure") return false
+    return failure.code === "process_spawn_failed" ||
+        failure.code === "tool_unavailable" ||
+        failure.code === "authentication_failed"
 }

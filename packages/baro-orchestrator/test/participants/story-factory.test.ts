@@ -12,6 +12,14 @@ import type {
 } from "../../src/participants/story-executor.js"
 import type { StoryRoute } from "../../src/routing.js"
 import {
+    knownMetric,
+    notApplicableMetric,
+    unknownMetric,
+    type ModelInvocationMeasuredData,
+} from "../../src/model-telemetry.js"
+import {
+    ModelInvocationMeasured,
+    RouteEstimateUpdated,
     RunStartRequest,
     RunCompleted,
     StoryIntervention,
@@ -285,6 +293,7 @@ describe("StoryFactory", () => {
                 runId: "run-market",
                 workerId: "worker-cheap",
                 leaseAuthority: broker,
+                offerAuthority: runtimeBoard,
                 outcomeAuthority,
                 llm: "claude",
                 executor,
@@ -319,7 +328,7 @@ describe("StoryFactory", () => {
                 RunStartRequest.create({ reason: "test" }),
             )
             await factory.onExternalEvent(
-                source("board"),
+                runtimeBoard,
                 WorkOffered.create({
                     runId: "run-market",
                     offerId: "offer-S1",
@@ -343,7 +352,7 @@ describe("StoryFactory", () => {
             assert.ok(bid)
 
             await factory.onExternalEvent(
-                source("board"),
+                runtimeBoard,
                 WorkOffered.create({
                     runId: "run-market",
                     offerId: "offer-excluded",
@@ -406,6 +415,21 @@ describe("StoryFactory", () => {
                 baseUrl: "https://example.invalid/v1",
                 apiKey: "super-secret-key",
             })
+            assert.deepEqual(
+                env.events.find(
+                    (event) =>
+                        StoryRouted.is(event) &&
+                        event.data.storyId === "S1",
+                )?.data,
+                {
+                    storyId: "S1",
+                    backend: "openai",
+                    model: "deepseek-v4-flash",
+                    runId: "run-market",
+                    leaseId: "lease-S1",
+                    generation: 1,
+                },
+            )
             assert.match(executor.calls[0].req.prompt, /--kind help/)
             assert.match(executor.calls[0].req.prompt, /inbox --session/)
             assert.doesNotMatch(executor.calls[0].req.prompt, /--kind discover/)
@@ -435,6 +459,368 @@ describe("StoryFactory", () => {
         })
     })
 
+    it("accepts offers only from the exact board authority, preventing predictable pre-offer tier bypass", async () => {
+        await withTempDir("story-factory-offer-authority-", async (dir) => {
+            const broker = source("broker")
+            const board = source("board")
+            const factory = new StoryFactory({
+                cwd: dir,
+                coordinationMode: "collective",
+                runId: "run-offer-authority",
+                workerId: "worker-light",
+                leaseAuthority: broker,
+                offerAuthority: board,
+                outcomeAuthority: new StoryOutcomeAuthority(
+                    "run-offer-authority",
+                ),
+                executor: new CapturingExecutor(),
+                bid: {
+                    routeId: "route-light",
+                    route: "claude:haiku",
+                    tiers: ["light"],
+                    estimate: {
+                        expectedCostUsd: 1,
+                        estimatedSuccessProbability: 0.8,
+                        estimatedLatencyMs: 100,
+                        estimateSource: "configured",
+                    },
+                },
+            })
+            const env = joinWithCapture(factory)
+            const predictable = {
+                runId: "run-offer-authority",
+                offerId: "offer-predictable",
+                generation: 1,
+                priority: 1,
+                request: {
+                    storyId: "S-predictable",
+                    prompt: "Implement predictable story",
+                    model: "light",
+                    retries: 0,
+                    timeoutSecs: 30,
+                },
+            }
+
+            // An attacker cannot seed a valid bid for a predictable future
+            // offer id by publishing a cheaper tier before the real Board.
+            await factory.onExternalEvent(
+                source("forged-board"),
+                WorkOffered.create(predictable),
+            )
+            assert.equal(env.events.filter(WorkBid.is).length, 0)
+
+            await factory.onExternalEvent(
+                board,
+                WorkOffered.create({
+                    ...predictable,
+                    request: { ...predictable.request, model: "heavy" },
+                }),
+            )
+            assert.equal(env.events.filter(WorkBid.is).length, 0)
+
+            await factory.onExternalEvent(
+                board,
+                WorkOffered.create({
+                    ...predictable,
+                    offerId: "offer-authoritative-light",
+                }),
+            )
+            assert.equal(env.events.filter(WorkBid.is).length, 1)
+        })
+    })
+
+    it("learns a historical bid from authoritative deduplicated costs and an integrated lease", async (t) => {
+        let now = 1_000
+        t.mock.method(Date, "now", () => now)
+
+        await withTempDir("story-factory-route-learning-", async (dir) => {
+            const broker = source("broker")
+            const board = source("board")
+            const telemetry = source("telemetry-reducer")
+            const configuredEstimate = {
+                expectedCostUsd: 3,
+                estimatedSuccessProbability: 0.8,
+                estimatedLatencyMs: 1_000,
+                estimateSource: "configured" as const,
+            }
+            const factory = new StoryFactory({
+                cwd: dir,
+                coordinationMode: "collective",
+                runId: "run-learning",
+                workerId: "worker-learning",
+                leaseAuthority: broker,
+                offerAuthority: board,
+                outcomeAuthority: new StoryOutcomeAuthority("run-learning"),
+                telemetryAuthority: telemetry,
+                executor: new CapturingExecutor(),
+                bid: {
+                    routeId: "route-learning",
+                    route: "claude:haiku",
+                    estimate: configuredEstimate,
+                },
+            })
+            const env = joinWithCapture(factory)
+            const first = await bidAndGrantMarketLease(
+                factory,
+                env,
+                broker,
+                board,
+                "run-learning",
+                "worker-learning",
+                "S-success",
+                1,
+            )
+
+            assert.deepEqual(first.bid.data.estimate, configuredEstimate)
+
+            // A forged producer and an authoritative but stale lease must not
+            // contribute. A replayed invocation contributes once even when
+            // its measurement id changes.
+            await factory.onExternalEvent(
+                source("forged-telemetry"),
+                ModelInvocationMeasured.create(
+                    storyCostMeasurement(
+                        "forged-cost",
+                        "forged-invocation",
+                        "run-learning",
+                        "S-success",
+                        first.lease.data.leaseId,
+                        first.lease.data.generation,
+                        90,
+                    ),
+                ),
+            )
+            await factory.onExternalEvent(
+                telemetry,
+                ModelInvocationMeasured.create(
+                    storyCostMeasurement(
+                        "stale-cost",
+                        "stale-invocation",
+                        "run-learning",
+                        "S-success",
+                        "lease-from-old-generation",
+                        0,
+                        90,
+                    ),
+                ),
+            )
+            await factory.onExternalEvent(
+                telemetry,
+                ModelInvocationMeasured.create(
+                    storyCostMeasurement(
+                        "cost-a",
+                        "invocation-a",
+                        "run-learning",
+                        "S-success",
+                        first.lease.data.leaseId,
+                        first.lease.data.generation,
+                        4,
+                    ),
+                ),
+            )
+            await factory.onExternalEvent(
+                telemetry,
+                ModelInvocationMeasured.create(
+                    storyCostMeasurement(
+                        "cost-a-replay",
+                        "invocation-a",
+                        "run-learning",
+                        "S-success",
+                        first.lease.data.leaseId,
+                        first.lease.data.generation,
+                        4,
+                    ),
+                ),
+            )
+            await factory.onExternalEvent(
+                telemetry,
+                ModelInvocationMeasured.create(
+                    storyCostMeasurement(
+                        "cost-b",
+                        "invocation-b",
+                        "run-learning",
+                        "S-success",
+                        first.lease.data.leaseId,
+                        first.lease.data.generation,
+                        2,
+                    ),
+                ),
+            )
+
+            now = 1_600
+            await factory.onExternalEvent(
+                broker,
+                WorkLeaseReleased.create({
+                    runId: "run-learning",
+                    offerId: first.lease.data.offerId,
+                    leaseId: first.lease.data.leaseId,
+                    storyId: "S-success",
+                    workerId: "worker-learning",
+                    reason: "integrated",
+                }),
+            )
+
+            const update = env.events.find(RouteEstimateUpdated.is)
+            assert.ok(update)
+            assert.deepEqual(update.data, {
+                runId: "run-learning",
+                workerId: "worker-learning",
+                route: {
+                    routeId: "route-learning",
+                    backend: "claude",
+                    model: "haiku",
+                },
+                verifiedSuccesses: 1,
+                workFailures: 0,
+                observations: 1,
+                estimate: {
+                    // Cost prior: (3 * 2 + (4 + 2)) / (2 + 1).
+                    expectedCostUsd: 4,
+                    // Quality prior: (0.8 * 4 + 1) / (4 + 1).
+                    estimatedSuccessProbability: (0.8 * 4 + 1) / 5,
+                    // Latency prior: (1000 * 2 + 600) / (2 + 1).
+                    estimatedLatencyMs: (1_000 * 2 + 600) / 3,
+                    estimateSource: "historical",
+                },
+            })
+
+            // Gateway/cloud billing may settle after the worker lease is
+            // released. Exact historical correlation is retained for this
+            // run, so it updates the next auction without being attached to a
+            // newer retry of the same story.
+            await factory.onExternalEvent(
+                telemetry,
+                ModelInvocationMeasured.create(
+                    storyCostMeasurement(
+                        "late-cost-c",
+                        "invocation-c",
+                        "run-learning",
+                        "S-success",
+                        first.lease.data.leaseId,
+                        first.lease.data.generation,
+                        3,
+                    ),
+                ),
+            )
+            const lateUpdate = env.events.filter(RouteEstimateUpdated.is).at(-1)
+            assert.ok(lateUpdate)
+            assert.equal(lateUpdate.data.estimate.expectedCostUsd, 5)
+            assert.equal(lateUpdate.data.observations, 1)
+
+            const laterOffer = marketOffer("run-learning", "S-later", 2)
+            await factory.onExternalEvent(board, laterOffer)
+            const laterBid = env.events.filter(WorkBid.is).at(-1)
+            assert.ok(laterBid)
+            assert.equal(laterBid.data.storyId, "S-later")
+            assert.deepEqual(laterBid.data.estimate, lateUpdate.data.estimate)
+        })
+    })
+
+    it("lowers route quality for semantic failure but not operational failure", async (t) => {
+        let now = 5_000
+        t.mock.method(Date, "now", () => now)
+
+        await withTempDir("story-factory-route-quality-", async (dir) => {
+            const broker = source("broker")
+            const board = source("board")
+            const initialSuccessProbability = 0.75
+            const factory = new StoryFactory({
+                cwd: dir,
+                coordinationMode: "collective",
+                runId: "run-quality-learning",
+                workerId: "worker-quality-learning",
+                leaseAuthority: broker,
+                offerAuthority: board,
+                outcomeAuthority: new StoryOutcomeAuthority(
+                    "run-quality-learning",
+                ),
+                executor: new CapturingExecutor(),
+                bid: {
+                    routeId: "route-quality-learning",
+                    route: "claude:haiku",
+                    estimate: {
+                        expectedCostUsd: 1,
+                        estimatedSuccessProbability: initialSuccessProbability,
+                        estimatedLatencyMs: 100,
+                        estimateSource: "configured",
+                    },
+                },
+            })
+            const env = joinWithCapture(factory)
+            const semantic = await bidAndGrantMarketLease(
+                factory,
+                env,
+                broker,
+                board,
+                "run-quality-learning",
+                "worker-quality-learning",
+                "S-quality-failure",
+                1,
+            )
+
+            now = 5_100
+            await factory.onExternalEvent(
+                broker,
+                WorkLeaseReleased.create({
+                    runId: "run-quality-learning",
+                    offerId: semantic.lease.data.offerId,
+                    leaseId: semantic.lease.data.leaseId,
+                    storyId: "S-quality-failure",
+                    workerId: "worker-quality-learning",
+                    reason: "quality_failed",
+                }),
+            )
+            const afterSemantic = env.events.filter(RouteEstimateUpdated.is).at(-1)
+            assert.ok(afterSemantic)
+            assert.equal(afterSemantic.data.verifiedSuccesses, 0)
+            assert.equal(afterSemantic.data.workFailures, 1)
+            assert.equal(afterSemantic.data.observations, 1)
+            assert.equal(
+                afterSemantic.data.estimate.estimatedSuccessProbability,
+                (initialSuccessProbability * 4) / 5,
+            )
+            assert.ok(
+                afterSemantic.data.estimate.estimatedSuccessProbability <
+                    initialSuccessProbability,
+            )
+
+            const operational = await bidAndGrantMarketLease(
+                factory,
+                env,
+                broker,
+                board,
+                "run-quality-learning",
+                "worker-quality-learning",
+                "S-operational-failure",
+                2,
+            )
+            now = 5_200
+            await factory.onExternalEvent(
+                broker,
+                WorkLeaseReleased.create({
+                    runId: "run-quality-learning",
+                    offerId: operational.lease.data.offerId,
+                    leaseId: operational.lease.data.leaseId,
+                    storyId: "S-operational-failure",
+                    workerId: "worker-quality-learning",
+                    reason: "operational_failed",
+                }),
+            )
+
+            const updates = env.events.filter(RouteEstimateUpdated.is)
+            assert.equal(updates.length, 2)
+            const afterOperational = updates[1]
+            assert.ok(afterOperational)
+            assert.equal(afterOperational.data.verifiedSuccesses, 0)
+            assert.equal(afterOperational.data.workFailures, 1)
+            assert.equal(afterOperational.data.observations, 2)
+            assert.equal(
+                afterOperational.data.estimate.estimatedSuccessProbability,
+                afterSemantic.data.estimate.estimatedSuccessProbability,
+            )
+        })
+    })
+
     it("selects exactly one DAG mutation mechanism for native and CLI routes", async () => {
         await withTempDir("story-factory-mutation-route-", async (dir) => {
             const broker = source("broker")
@@ -447,6 +833,7 @@ describe("StoryFactory", () => {
                 runId: "run-native",
                 workerId: "worker-native",
                 leaseAuthority: broker,
+                offerAuthority: runtimeBoard,
                 outcomeAuthority: new StoryOutcomeAuthority("run-native"),
                 llm: "claude",
                 executor: nativeExecutor,
@@ -515,6 +902,7 @@ describe("StoryFactory", () => {
                 runId: "run-cli",
                 workerId: "worker-cli",
                 leaseAuthority: broker,
+                offerAuthority: runtimeBoard,
                 outcomeAuthority: new StoryOutcomeAuthority("run-cli"),
                 llm: "codex",
                 executor: cliExecutor,
@@ -566,6 +954,7 @@ describe("StoryFactory", () => {
         await withTempDir("story-factory-market-", async (dir) => {
             const executor = new CapturingExecutor()
             const broker = source("broker")
+            const board = source("board")
             const outcomeAuthority = new StoryOutcomeAuthority("run-market")
             const factory = new StoryFactory({
                 cwd: dir,
@@ -573,6 +962,7 @@ describe("StoryFactory", () => {
                 runId: "run-market",
                 workerId: "worker-a",
                 leaseAuthority: broker,
+                offerAuthority: board,
                 outcomeAuthority,
                 executor,
                 bid: {
@@ -600,7 +990,7 @@ describe("StoryFactory", () => {
                     timeoutSecs: 30,
                 },
             })
-            await factory.onExternalEvent(source("board"), offer)
+            await factory.onExternalEvent(board, offer)
             const bid = env.events.find(WorkBid.is)
             assert.ok(bid)
 
@@ -625,7 +1015,7 @@ describe("StoryFactory", () => {
                 offerId: "offer-S1-2",
                 generation: 2,
             })
-            await factory.onExternalEvent(source("board"), secondOffer)
+            await factory.onExternalEvent(board, secondOffer)
             const secondBid = env.events.filter(WorkBid.is).at(-1)
             assert.ok(secondBid)
             await factory.onExternalEvent(
@@ -643,13 +1033,19 @@ describe("StoryFactory", () => {
             )
 
             assert.equal(executor.calls.length, 0)
-            assert.equal(env.events.filter(StorySpawnFailed.is).at(-1)?.data.leaseId, "mismatch")
+            const mismatch = env.events.filter(StorySpawnFailed.is).at(-1)
+            assert.equal(mismatch?.data.leaseId, "mismatch")
+            assert.deepEqual(mismatch?.data.failure, {
+                kind: "infrastructure",
+                code: "decision_unknown",
+            })
         })
     })
 
     it("fails closed when a collective executor does not register its result source", async () => {
         await withTempDir("story-factory-authority-", async (dir) => {
             const broker = source("broker")
+            const board = source("board")
             const outcomeAuthority = new StoryOutcomeAuthority("run-authority")
             let aborts = 0
             let disposals = 0
@@ -665,6 +1061,7 @@ describe("StoryFactory", () => {
                 runId: "run-authority",
                 workerId: "worker-a",
                 leaseAuthority: broker,
+                offerAuthority: board,
                 outcomeAuthority,
                 executor,
             })
@@ -695,6 +1092,10 @@ describe("StoryFactory", () => {
             const failed = env.events.filter(StorySpawnFailed.is).at(-1)
             assert.ok(failed)
             assert.match(failed.data.error, /without registering/)
+            assert.deepEqual(failed.data.failure, {
+                kind: "infrastructure",
+                code: "process_spawn_failed",
+            })
             assert.equal(
                 outcomeAuthority.matchesSpawnFailure(factory, failed.data),
                 true,
@@ -705,6 +1106,7 @@ describe("StoryFactory", () => {
     it("does not retain an execution when StoryResult arrives before start returns", async () => {
         await withTempDir("story-factory-sync-result-", async (dir) => {
             const broker = source("broker")
+            const board = source("board")
             const resultSource = source("worker-result")
             const outcomeAuthority = new StoryOutcomeAuthority("run-sync")
             let disposals = 0
@@ -733,6 +1135,7 @@ describe("StoryFactory", () => {
                 runId: "run-sync",
                 workerId: "worker-a",
                 leaseAuthority: broker,
+                offerAuthority: board,
                 outcomeAuthority,
                 executor,
             })
@@ -765,6 +1168,103 @@ describe("StoryFactory", () => {
         })
     })
 })
+
+function marketOffer(runId: string, storyId: string, generation: number) {
+    return WorkOffered.create({
+        runId,
+        offerId: `offer-${storyId}`,
+        generation,
+        priority: 1,
+        request: {
+            storyId,
+            prompt: `Implement ${storyId}`,
+            model: "haiku",
+            retries: 0,
+            timeoutSecs: 30,
+        },
+    })
+}
+
+async function bidAndGrantMarketLease(
+    factory: StoryFactory,
+    env: ReturnType<typeof joinWithCapture>,
+    broker: ReturnType<typeof source>,
+    board: ReturnType<typeof source>,
+    runId: string,
+    workerId: string,
+    storyId: string,
+    generation: number,
+) {
+    const offer = marketOffer(runId, storyId, generation)
+    await factory.onExternalEvent(board, offer)
+    const bid = env.events
+        .filter(WorkBid.is)
+        .find((candidate) => candidate.data.offerId === offer.data.offerId)
+    assert.ok(bid)
+    const lease = WorkLeaseGranted.create({
+        runId,
+        offerId: offer.data.offerId,
+        leaseId: `lease-${storyId}`,
+        workerId,
+        generation,
+        request: offer.data.request,
+        bidId: bid.data.bidId,
+        route: bid.data.route,
+    })
+    await factory.onExternalEvent(broker, lease)
+    await flushBus()
+    return { bid, lease }
+}
+
+function storyCostMeasurement(
+    measurementId: string,
+    invocationId: string,
+    runId: string,
+    storyId: string,
+    leaseId: string,
+    generation: number,
+    customerCostUsd: number,
+): ModelInvocationMeasuredData {
+    const unknown = () => unknownMetric("not_reported")
+    return {
+        schemaVersion: 1,
+        measurementId,
+        invocationId,
+        runId,
+        phase: "story",
+        storyId,
+        leaseId,
+        generation,
+        attempt: 1,
+        turn: 1,
+        round: 1,
+        backend: "claude",
+        provider: "anthropic",
+        requestedModel: "haiku",
+        resolvedModel: "claude-haiku",
+        status: "succeeded",
+        durationMs: unknown(),
+        tokens: {
+            inputTotal: unknown(),
+            cachedInput: unknown(),
+            cacheWriteInput: notApplicableMetric(),
+            outputTotal: unknown(),
+            reasoningOutput: notApplicableMetric(),
+            total: unknown(),
+        },
+        cost: {
+            providerUsd: unknownMetric("pending_gateway_meter"),
+            customerUsd: knownMetric(customerCostUsd, "cloud_charge"),
+            equivalentUsd: notApplicableMetric(),
+        },
+        evidence: {
+            producer: "cloud",
+            providerRequestId: `request-${invocationId}`,
+            rateCardVersion: "test-rate-card",
+            granularity: "round",
+        },
+    }
+}
 
 async function flushBus(): Promise<void> {
     await new Promise<void>((resolve) => setImmediate(resolve))

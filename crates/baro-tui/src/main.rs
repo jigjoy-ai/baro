@@ -9,6 +9,7 @@ mod doctor;
 mod events;
 mod executor;
 mod git;
+mod gateway_credential;
 mod intake_runner;
 mod notification;
 mod orchestrator_client;
@@ -56,6 +57,24 @@ fn preferred_jigjoy_gateway_key(
         // Compatibility fallback for operators who historically placed a
         // JigJoy gateway token in OPENAI_API_KEY directly.
         .or_else(|| openai_key.filter(|value| !value.is_empty()))
+}
+
+fn is_signed_jigjoy_gateway_key(value: &str) -> bool {
+    value.starts_with("hk_") || value.starts_with("gk_v1.")
+}
+
+fn legacy_hosted_run_id(value: &str) -> Option<&str> {
+    let payload = value.strip_prefix("hk_")?.split_once('.')?.0;
+    let run_id = payload.split_once('~')?.1;
+    (!run_id.is_empty() && run_id.len() <= 128).then_some(run_id)
+}
+
+fn local_client_run_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("run-local-client-{nanos}-{}", std::process::id())
 }
 
 fn preferred_jigjoy_gateway_url(
@@ -816,24 +835,80 @@ async fn run_app(
                 ));
             }
 
-            // A JigJoy run must not inherit an unrelated ambient
-            // OPENAI_BASE_URL. Only an explicit CLI flag may override the
-            // preset; otherwise use BARO_JIGJOY_URL or the hosted default.
-            let url = preferred_jigjoy_gateway_url(
-                cli.openai_base_url.clone(),
-                std::env::var("BARO_JIGJOY_URL").ok(),
-            );
-            std::env::set_var("OPENAI_BASE_URL", url);
+            let explicit_url = cli.openai_base_url.clone().filter(|value| !value.is_empty());
+            let jigjoy_url = std::env::var("BARO_JIGJOY_URL")
+                .ok()
+                .filter(|value| !value.is_empty());
+            let custom_gateway = explicit_url.is_some() || jigjoy_url.is_some();
+            let jigjoy_key = std::env::var("JIGJOY_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty());
+            let ambient_openai_key = std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty());
+            // At the hosted default, only a recognizable signed Gateway key
+            // is a safe compatibility fallback. A normal sk-* OpenAI key is
+            // unrelated and must never be sent to JigJoy. Custom/self-hosted
+            // endpoints retain the historical arbitrary-key fallback.
+            let compatible_openai_key = ambient_openai_key.filter(|key| {
+                custom_gateway || is_signed_jigjoy_gateway_key(key)
+            });
+            let manual_key = preferred_jigjoy_gateway_key(jigjoy_key, compatible_openai_key);
 
-            // This preset talks to the JigJoy gateway, so its credential must
-            // win over an unrelated OpenAI key already present in the shell.
-            // OPENAI_API_KEY remains a compatibility fallback for operators
-            // who historically stored the gateway token there directly.
-            if let Some(key) = preferred_jigjoy_gateway_key(
-                std::env::var("JIGJOY_API_KEY").ok(),
-                std::env::var("OPENAI_API_KEY").ok(),
-            ) {
-                std::env::set_var("OPENAI_API_KEY", key);
+            // No manual key at the official endpoint: exchange the local
+            // `baro login` for one server-generated run identity and a
+            // short-lived scoped credential. Never auto-send a login bearer
+            // to a caller-selected compatible endpoint.
+            let issued = if manual_key.is_none() && !custom_gateway {
+                Some(gateway_credential::acquire(&cwd).await.map_err(|error| {
+                    format!("could not acquire local JigJoy credential: {error}")
+                })?)
+            } else {
+                None
+            };
+            if manual_key.is_none() && issued.is_none() {
+                return Err(
+                    "a custom JigJoy/OpenAI endpoint requires an explicit JIGJOY_API_KEY"
+                        .into(),
+                );
+            }
+
+            // A JigJoy run must not inherit an unrelated ambient
+            // OPENAI_BASE_URL. An auto-issued credential uses only the
+            // authenticated control plane's returned Gateway URL.
+            let url = issued
+                .as_ref()
+                .map(|credential| credential.gateway_base_url.clone())
+                .unwrap_or_else(|| {
+                    preferred_jigjoy_gateway_url(explicit_url, jigjoy_url)
+                });
+            std::env::set_var("OPENAI_BASE_URL", &url);
+            // Only the explicit JigJoy preset grants billing authority to the
+            // same endpoint. Generic OPENAI_BASE_URL values remain untrusted.
+            std::env::set_var("BARO_GATEWAY_BILLING_URL", &url);
+            // Marks ownership of the injected routing variables even when a
+            // credential is missing. Subscription-backed harness children
+            // use this to remove only Baro-owned Gateway environment.
+            std::env::set_var("BARO_JIGJOY_ENV_INJECTED", "1");
+
+            let key = issued
+                .as_ref()
+                .map(|credential| credential.api_key.clone())
+                .or(manual_key)
+                .expect("JigJoy credential checked above");
+            // Inference correlation is credential-bound. Keep the model
+            // request and receipt-feed credentials byte-identical even if
+            // the parent shell contains a stale billing-specific value.
+            std::env::set_var("OPENAI_API_KEY", &key);
+            std::env::set_var("BARO_GATEWAY_BILLING_API_KEY", &key);
+
+            if std::env::var("BARO_RUN_ID").is_err() {
+                let run_id = issued
+                    .as_ref()
+                    .map(|credential| credential.run_id.clone())
+                    .or_else(|| legacy_hosted_run_id(&key).map(str::to_string))
+                    .unwrap_or_else(local_client_run_id);
+                std::env::set_var("BARO_RUN_ID", run_id);
             }
         }
         other => {
@@ -2117,6 +2192,7 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
                 openai_api_key.as_deref(),
                 openai_base_url.as_deref(),
                 plan_progress_sink(headless, tx.clone()),
+                plan_event_sink(headless, tx.clone()),
             ).await;
             if headless {
                 // Ask-after-planning (opt-in): emit the proposal and block for a

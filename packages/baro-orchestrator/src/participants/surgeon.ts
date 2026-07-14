@@ -31,6 +31,7 @@ import { promisify } from "util"
 
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
+import { harnessChildEnvironment } from "../harness-environment.js"
 import {
     Critique,
     type CritiqueData,
@@ -447,6 +448,7 @@ export class Surgeon extends BaseObserver {
                     prompt,
                 ],
                 {
+                    env: harnessChildEnvironment(),
                     timeout: this.opts.timeoutMs,
                     maxBuffer: 4 * 1024 * 1024,
                 },

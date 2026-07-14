@@ -10,7 +10,14 @@ import {
     AgentTargetedMessage,
     ClaudeSystem,
 } from "../../src/semantic-events.js"
-import { captureEnv, source, withTempDir } from "./helpers.js"
+import {
+    assertHarnessEnvironmentWasSanitized,
+    captureEnv,
+    harnessEnvironmentCaptureProgram,
+    source,
+    withInjectedJigJoyEnvironment,
+    withTempDir,
+} from "./helpers.js"
 
 function writeFakeClaude(dir: string): string {
     const bin = join(dir, "fake-claude.mjs")
@@ -73,6 +80,31 @@ process.stdin.on("end", () => {
 }
 
 describe("ClaudeCliParticipant", () => {
+    it("keeps Baro's injected Gateway credential out of the Claude subscription process", async () => {
+        await withTempDir("baro-claude-cli-env-", async (dir) => {
+            const capture = join(dir, "env.json")
+            const bin = join(dir, "fake-claude-env.mjs")
+            writeFileSync(bin, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+${harnessEnvironmentCaptureProgram(capture)}
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "env-session" }));
+console.log(JSON.stringify({ type: "result", subtype: "success", session_id: "env-session", is_error: false, result: "ok", num_turns: 1 }));
+`)
+            chmodSync(bin, 0o755)
+
+            await withInjectedJigJoyEnvironment(async () => {
+                const participant = new ClaudeCliParticipant("claude-env", {
+                    cwd: dir,
+                    claudeBin: bin,
+                })
+                participant.start(captureEnv())
+                await participant.ready
+                assert.equal((await participant.done).exitCode, 0)
+            })
+            assertHarnessEnvironmentWasSanitized(capture)
+        })
+    })
+
     it("maps fake stream-json output into lifecycle and result events", async () => {
         await withTempDir("baro-claude-cli-", async (dir) => {
             const env = captureEnv()
