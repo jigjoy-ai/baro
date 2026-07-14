@@ -5,9 +5,11 @@
  * the live stderr audit trail and allows a gentler SIGTERM.
  */
 
-import { ChildProcess, spawn } from "child_process"
+import { ChildProcess } from "child_process"
 import { writeFile } from "node:fs/promises"
 import { join } from "node:path"
+
+import spawn from "cross-spawn"
 
 import { harnessChildEnvironment } from "./harness-environment.js"
 

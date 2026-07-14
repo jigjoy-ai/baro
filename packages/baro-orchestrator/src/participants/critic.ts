@@ -21,7 +21,8 @@
  * Library-grade: no imports from prd.ts, story-agent.ts, or conductor.ts.
  */
 
-import { execFile } from "child_process"
+import type { SpawnOptions } from "child_process"
+import spawn from "cross-spawn"
 
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
@@ -416,37 +417,82 @@ function execFileWithStdin(
     options: { cwd: string; timeout: number; maxBuffer: number },
 ): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
-        let child: ReturnType<typeof execFile>
-        try {
-            child = execFile(
-                file,
-                args,
-                {
-                    ...options,
-                    encoding: "utf8",
-                    env: harnessChildEnvironment(),
-                },
-                (error, stdout, stderr) => {
-                    if (error) {
-                        reject(error)
-                        return
-                    }
-                    resolve({ stdout, stderr })
-                },
-            )
-        } catch (error) {
-            reject(error)
-            return
+        const child = spawn(file, args, {
+            cwd: options.cwd,
+            env: harnessChildEnvironment(),
+            stdio: ["pipe", "pipe", "pipe"],
+        } as SpawnOptions)
+
+        let stdout = ""
+        let stderr = ""
+        let stdoutBytes = 0
+        let settled = false
+        let timer: ReturnType<typeof setTimeout> | undefined
+
+        const finish = (fn: () => void): void => {
+            if (settled) return
+            settled = true
+            if (timer) clearTimeout(timer)
+            fn()
         }
+
+        if (options.timeout > 0) {
+            timer = setTimeout(() => {
+                child.kill("SIGTERM")
+                finish(() => {
+                    const error = new Error(
+                        `${file} timed out after ${options.timeout}ms`,
+                    ) as Error & { killed: boolean }
+                    error.killed = true
+                    reject(error)
+                })
+            }, options.timeout)
+        }
+
+        child.stdout?.on("data", (chunk: Buffer) => {
+            stdout += chunk.toString()
+            stdoutBytes += chunk.byteLength
+            if (stdoutBytes > options.maxBuffer) {
+                child.kill("SIGTERM")
+                finish(() =>
+                    reject(new Error(`${file} stdout exceeded maxBuffer`)),
+                )
+            }
+        })
+        child.stderr?.on("data", (chunk: Buffer) => {
+            stderr += chunk.toString()
+        })
+        child.on("error", (error) => finish(() => reject(error)))
+        child.on("close", (code) => {
+            finish(() => {
+                if (code === 0) {
+                    resolve({ stdout, stderr })
+                    return
+                }
+                const error = new Error(
+                    `${file} exited with code ${code}\n${stderr}`,
+                ) as Error & {
+                    code: number | null
+                    stdout: string
+                    stderr: string
+                }
+                error.code = code
+                error.stdout = stdout
+                error.stderr = stderr
+                reject(error)
+            })
+        })
 
         if (!child.stdin) {
             child.kill()
-            reject(new Error("claude subprocess stdin is unavailable"))
+            finish(() =>
+                reject(new Error("claude subprocess stdin is unavailable")),
+            )
             return
         }
         child.stdin.on("error", (error) => {
             child.kill()
-            reject(error)
+            finish(() => reject(error))
         })
         child.stdin.end(input)
     })

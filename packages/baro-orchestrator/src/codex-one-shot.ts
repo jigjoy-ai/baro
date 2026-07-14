@@ -6,7 +6,8 @@
  * trail of what Codex did with those minutes, plus a gentler SIGTERM.
  */
 
-import { ChildProcess, spawn } from "child_process"
+import { ChildProcess } from "child_process"
+import spawn from "cross-spawn"
 
 import { harnessChildEnvironment } from "./harness-environment.js"
 

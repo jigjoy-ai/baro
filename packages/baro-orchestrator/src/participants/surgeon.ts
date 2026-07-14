@@ -26,8 +26,7 @@
  * the Conductor stays the only PRD-aware piece of code.
  */
 
-import { execFile } from "child_process"
-import { promisify } from "util"
+import { execFileCli } from "../exec-file-cli.js"
 
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
@@ -82,8 +81,6 @@ export class CritiqueLog {
         return this.byStory.get(storyId) ?? []
     }
 }
-
-const execFileAsync = promisify(execFile)
 
 /**
  * Lightweight read-only view of the PRD that Surgeon needs to reason.
@@ -432,7 +429,7 @@ export class Surgeon extends BaseObserver {
 
         let stdout: string
         try {
-            const response = await execFileAsync(
+            const response = await execFileCli(
                 this.opts.claudeBin,
                 [
                     "--print",

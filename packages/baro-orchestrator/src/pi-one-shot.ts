@@ -5,7 +5,8 @@
  * keeps the live stderr audit trail and allows a gentler SIGTERM.
  */
 
-import { ChildProcess, spawn } from "child_process"
+import { ChildProcess } from "child_process"
+import spawn from "cross-spawn"
 
 import { harnessChildEnvironment } from "./harness-environment.js"
 
