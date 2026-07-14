@@ -235,13 +235,15 @@ async fn check_gh_on_path() -> CheckResult {
 /// Audit logs land in ~/.baro/runs — if it's root-owned (sudo install
 /// accident) we want to know now, not mid-run.
 async fn check_audit_dir_writable() -> CheckResult {
-    let home = match std::env::var_os("HOME") {
+    let home = match std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+    {
         Some(h) => PathBuf::from(h),
         None => {
             return CheckResult::fail(
                 "audit dir writable",
-                "$HOME is unset",
-                "baro writes audit logs to $HOME/.baro/runs. Set HOME and re-run.",
+                "$HOME / %USERPROFILE% is unset",
+                "baro writes audit logs to ~/.baro/runs. Set HOME (or USERPROFILE) and re-run.",
             );
         }
     };

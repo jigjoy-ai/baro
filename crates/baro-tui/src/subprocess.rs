@@ -231,7 +231,9 @@ fn detail_tail(stdout: &str, stderr: &str) -> String {
 /// Write `~/.baro/runs/<tag>-<unix_secs>.log` containing both streams.
 /// `None` on any failure — we'd rather lose the log than crash the run.
 fn persist_log(tag: &str, stdout: &str, stderr: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)?;
     let dir = home.join(".baro").join("runs");
     if std::fs::create_dir_all(&dir).is_err() {
         return None;

@@ -8,7 +8,7 @@
  */
 
 import { mkdirSync } from "fs"
-import { hostname } from "os"
+import { homedir, hostname } from "os"
 import { dirname, join } from "path"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
@@ -401,7 +401,7 @@ export async function orchestrate(
 
     // Session-scoped memory path (Vectra index + cache.json), shared
     // cross-process via BARO_MEMORY_PATH.
-    const sessionsDir = join(process.env.HOME || "/tmp", ".baro", "sessions")
+    const sessionsDir = join(homedir(), ".baro", "sessions")
     const memorySessionPath = useMemory
         ? join(sessionsDir, runId, "memory")
         : undefined
