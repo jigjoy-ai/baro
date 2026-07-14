@@ -3,7 +3,8 @@
  * Mozaik Participant. Event shapes: docs/stream-protocols.md § Claude Code.
  */
 
-import { ChildProcess, spawn } from "child_process"
+import { ChildProcess } from "child_process"
+import spawn from "cross-spawn"
 
 import {
     BaseObserver,

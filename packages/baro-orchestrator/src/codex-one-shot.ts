@@ -6,7 +6,8 @@
  * trail of what Codex did with those minutes, plus a gentler SIGTERM.
  */
 
-import { ChildProcess, spawn } from "child_process"
+import { ChildProcess } from "child_process"
+import spawn from "cross-spawn"
 
 export interface RunCodexOneShotOptions {
     /** Combined system+user prompt. Passed as the final positional argv. */

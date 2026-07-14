@@ -5,7 +5,8 @@
  * Library-grade: knows agent IDs, cwds, and Codex — nothing about baro/PRD/stories.
  */
 
-import { ChildProcess, spawn } from "child_process"
+import { ChildProcess } from "child_process"
+import spawn from "cross-spawn"
 
 import {
     BaseObserver,
