@@ -2287,6 +2287,7 @@ fn spawn_executor(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let audit_root = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| cwd.clone())
         .join(".baro")

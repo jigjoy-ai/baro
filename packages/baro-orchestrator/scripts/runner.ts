@@ -60,7 +60,7 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = url.replace(/^ws/, "http").replace(/\/+$/, "")
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.74.11"
+const VERSION = "0.74.12"
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
 // Latest published baro-ai version, cached ~24h in ~/.baro so we don't hit npm on every
