@@ -31,8 +31,8 @@ pub struct Cli {
     #[arg(long, default_value = "0")]
     pub parallel: u32,
 
-    /// Coordination engine: legacy (current Conductor) or collective (experimental event-bus agents).
-    #[arg(long, value_parser=["legacy", "collective"], env = "BARO_COORDINATION", default_value = "legacy")]
+    /// Coordination engine: collective event-bus agents (default) or legacy Conductor compatibility.
+    #[arg(long, value_parser=["legacy", "collective"], env = "BARO_COORDINATION", default_value = "collective")]
     pub coordination: String,
 
     /// Disable Baro-owned pushes and pull requests; use a remote-free clone for hard isolation.
@@ -59,12 +59,12 @@ pub struct Cli {
     #[arg(long, env = "BARO_COLLECTIVE_MAX_LATENCY_MS")]
     pub collective_max_latency_ms: Option<u64>,
 
-    /// Enable the optional communication-only conversation participant (collective mode only).
+    /// Explicitly enable the run-local conversation participant (already on in collective mode).
     #[arg(long)]
     pub with_dialogue: bool,
 
     /// Text-only backend for the conversation participant.
-    #[arg(long, value_parser=["claude", "openai"], env = "BARO_DIALOGUE_LLM")]
+    #[arg(long, value_parser=["claude", "openai", "codex"], env = "BARO_DIALOGUE_LLM")]
     pub dialogue_llm: Option<String>,
 
     /// Model id for the optional conversation participant.
@@ -97,7 +97,7 @@ pub struct Cli {
 
     /// (deprecated) Critic is on by default; use --no-critic to opt out.
     #[arg(long, hide = true)]
-    with_critic: bool,
+    pub with_critic: bool,
 
      /// Disable the Librarian (cross-agent runtime memory). Default: ON.
     #[arg(long)]

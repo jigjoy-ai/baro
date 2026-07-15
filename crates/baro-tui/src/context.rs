@@ -1,10 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use tokio::fs;
-use tokio::process::Command;
-
 use crate::utils::BaroResult;
+use tokio::fs;
 
 /// Build a CLAUDE.md context string by scanning the project at `cwd`.
 pub async fn build_context(cwd: &Path) -> BaroResult<String> {
@@ -95,53 +93,11 @@ pub async fn build_context(cwd: &Path) -> BaroResult<String> {
         }
     }
 
-    if let Some(enhanced) = enhance_with_haiku(&md).await {
-        Ok(enhanced)
-    } else {
-        Ok(md)
-    }
-}
-
-/// Use the haiku model to refine the raw project scan into a concise, well-structured CLAUDE.md.
-/// Falls back to the raw scan if haiku is unavailable or returns an empty result.
-async fn enhance_with_haiku(raw_context: &str) -> Option<String> {
-    let prompt = format!(
-        "You are a technical documentation assistant. Below is raw project scan data. \
-         Rewrite it as a clean, concise CLAUDE.md file that helps an AI coding assistant \
-         understand this project. Keep it under 500 words. Use markdown headers. \
-         Include: project overview, tech stack, key files, build commands, and conventions.\n\n\
-         Raw scan data:\n{}\n\nReturn ONLY the CLAUDE.md content, no preamble or code fences.",
-        raw_context
-    );
-
-    let output = Command::new("claude")
-        .args([
-            "--dangerously-skip-permissions",
-            "--model",
-            "haiku",
-            "--output-format",
-            "json",
-            "-p",
-            &prompt,
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .await
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(&stdout).ok()?;
-    let result = json.get("result").and_then(|r| r.as_str())?;
-    let trimmed = result.trim().to_string();
-    if trimmed.is_empty() || trimmed == "No response." {
-        return None;
-    }
-    Some(trimmed)
+    // This stage is deliberately deterministic and read-only. Conversation,
+    // Architect and Planner may use whichever backend the caller selected;
+    // project discovery must not silently invoke Claude or mutate repository
+    // instruction files before the user's goal has been accepted.
+    Ok(md)
 }
 
 struct TechStackEntry {
@@ -411,8 +367,13 @@ async fn build_directory_tree(base: &Path, dir: &Path, depth: u32, max_depth: u3
         if let Ok(meta) = fs::metadata(&entry_path).await {
             if meta.is_dir() {
                 result.push_str(&format!("{}{}/\n", indent, name));
-                let subtree =
-                    Box::pin(build_directory_tree(base, &entry_path, depth + 1, max_depth)).await;
+                let subtree = Box::pin(build_directory_tree(
+                    base,
+                    &entry_path,
+                    depth + 1,
+                    max_depth,
+                ))
+                .await;
                 result.push_str(&subtree);
             } else {
                 result.push_str(&format!("{}{}\n", indent, name));

@@ -1,6 +1,9 @@
 /** Text-only model adapters for DialogueAgent. No repository tools are exposed. */
 
 import { execFile } from "node:child_process"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 import {
     ModelContext,
@@ -10,7 +13,10 @@ import {
 } from "@mozaik-ai/core"
 
 import type { GatewayBillingCoordinator } from "../billing/index.js"
+import { runCodexOneShot } from "../codex-one-shot.js"
 import { harnessChildEnvironment } from "../harness-environment.js"
+import { runOpenCodeOneShot } from "../opencode-one-shot.js"
+import { runPiOneShot } from "../pi-one-shot.js"
 import {
     GenericOpenAIModel,
     runInferenceRound,
@@ -35,7 +41,12 @@ import {
     type DialogueResponderTelemetry,
 } from "./dialogue-agent.js"
 
-export type DialogueBackend = "claude" | "openai"
+export type DialogueBackend =
+    | "claude"
+    | "openai"
+    | "codex"
+    | "opencode"
+    | "pi"
 
 export interface CreateDialogueResponderOptions {
     backend: DialogueBackend
@@ -43,6 +54,11 @@ export interface CreateDialogueResponderOptions {
     model?: string
     timeoutMs?: number
     claudeBin?: string
+    codexBin?: string
+    opencodeBin?: string
+    piBin?: string
+    /** Allow an explicitly isolated caller to run Codex outside a git checkout. */
+    codexSkipGitRepoCheck?: boolean
     openaiConnection?: OpenAIConnection
     /** Trusted Gateway receipt correlation for OpenAI dialogue calls. */
     billingCoordinator?: GatewayBillingCoordinator
@@ -53,9 +69,190 @@ export interface CreateDialogueResponderOptions {
 export function createDialogueResponder(
     opts: CreateDialogueResponderOptions,
 ): DialogueResponder {
-    return opts.backend === "openai"
-        ? createOpenAIResponder(opts)
-        : createClaudeResponder(opts)
+    if (opts.backend === "openai") return createOpenAIResponder(opts)
+    if (opts.backend === "codex") return createCodexResponder(opts)
+    if (opts.backend === "opencode") return createOpenCodeResponder(opts)
+    if (opts.backend === "pi") return createPiResponder(opts)
+    return createClaudeResponder(opts)
+}
+
+function createOpenCodeResponder(
+    opts: CreateDialogueResponderOptions,
+): DialogueResponder {
+    const requestedModel = opts.model ?? "opencode-default"
+    const telemetry = localHarnessTelemetryDescriptor(
+        "opencode",
+        requestedModel,
+    )
+    const responder: DialogueResponder = async (input, signal) => {
+        let observation: RunnerInvocationObservation | undefined
+        try {
+            const text = await withIsolatedHarnessCwd(
+                "baro-opencode-dialogue-",
+                (cwd) => runOpenCodeOneShot({
+                    prompt: input.userPrompt,
+                    cwd,
+                    model: opts.model,
+                    opencodeBin: opts.opencodeBin,
+                    timeoutMs: opts.timeoutMs ?? 60_000,
+                    label: "opencode-dialogue",
+                    safeEvaluatorSystemPrompt: input.systemPrompt,
+                    signal,
+                    onInvocation: (item) => {
+                        observation = item
+                    },
+                }),
+            )
+            return {
+                text,
+                invocation: localHarnessInvocation(
+                    "opencode",
+                    requestedModel,
+                    observation ?? unknownLocalHarnessObservation(
+                        "succeeded",
+                        "not_reported",
+                        "opencode",
+                        requestedModel,
+                    ),
+                ),
+            }
+        } catch (error) {
+            if (isProcessLaunchFailure(error)) {
+                throw new Error("OpenCode dialogue process could not start")
+            }
+            const timedOut = isTimeout(error)
+            throw new DialogueResponderInvocationError(
+                "OpenCode dialogue provider failed",
+                observation
+                    ? localHarnessInvocation(
+                          "opencode",
+                          requestedModel,
+                          observation,
+                      )
+                    : telemetry.failureInvocation(
+                          timedOut ? "timed_out" : "failed",
+                          timedOut ? "timed_out" : "not_reported",
+                      ),
+            )
+        }
+    }
+    return Object.assign(responder, { telemetry })
+}
+
+function createPiResponder(
+    opts: CreateDialogueResponderOptions,
+): DialogueResponder {
+    const requestedModel = opts.model ?? "pi-default"
+    const telemetry = localHarnessTelemetryDescriptor("pi", requestedModel)
+    const responder: DialogueResponder = async (input, signal) => {
+        let observation: RunnerInvocationObservation | undefined
+        try {
+            const text = await withIsolatedHarnessCwd(
+                "baro-pi-dialogue-",
+                (cwd) => runPiOneShot({
+                    prompt: input.userPrompt,
+                    cwd,
+                    model: opts.model,
+                    piBin: opts.piBin,
+                    timeoutMs: opts.timeoutMs ?? 60_000,
+                    label: "pi-dialogue",
+                    safeEvaluatorSystemPrompt: input.systemPrompt,
+                    signal,
+                    onInvocation: (item) => {
+                        observation = item
+                    },
+                }),
+            )
+            return {
+                text,
+                invocation: localHarnessInvocation(
+                    "pi",
+                    requestedModel,
+                    observation ?? unknownLocalHarnessObservation(
+                        "succeeded",
+                        "not_reported",
+                        "pi",
+                        requestedModel,
+                    ),
+                ),
+            }
+        } catch (error) {
+            if (isProcessLaunchFailure(error)) {
+                throw new Error("Pi dialogue process could not start")
+            }
+            const timedOut = isTimeout(error)
+            throw new DialogueResponderInvocationError(
+                "Pi dialogue provider failed",
+                observation
+                    ? localHarnessInvocation(
+                          "pi",
+                          requestedModel,
+                          observation,
+                      )
+                    : telemetry.failureInvocation(
+                          timedOut ? "timed_out" : "failed",
+                          timedOut ? "timed_out" : "not_reported",
+                      ),
+            )
+        }
+    }
+    return Object.assign(responder, { telemetry })
+}
+
+function createCodexResponder(
+    opts: CreateDialogueResponderOptions,
+): DialogueResponder {
+    const requestedModel = opts.model ?? "codex-default"
+    const telemetry = codexTelemetryDescriptor(requestedModel)
+    const responder: DialogueResponder = async (input, signal) => {
+        let observation: RunnerInvocationObservation | undefined
+        try {
+            const text = await runCodexOneShot({
+                prompt: `${input.systemPrompt}\n\n${input.userPrompt}`,
+                cwd: opts.cwd,
+                model: opts.model,
+                codexBin: opts.codexBin,
+                timeoutMs: opts.timeoutMs ?? 60_000,
+                label: "codex-dialogue",
+                // Conversation is an intent/status surface. It has no reason
+                // to mutate the checkout or retain a separate Codex thread.
+                bypassSandbox: false,
+                sandboxMode: "read-only",
+                ephemeral: true,
+                skipGitRepoCheck: opts.codexSkipGitRepoCheck,
+                signal,
+                onInvocation: (item) => {
+                    observation = item
+                },
+            })
+            return {
+                text,
+                invocation: codexInvocation(
+                    requestedModel,
+                    observation ?? unknownCodexObservation(
+                        "succeeded",
+                        "not_reported",
+                        requestedModel,
+                    ),
+                ),
+            }
+        } catch (error) {
+            if (!observation && isProcessLaunchFailure(error)) {
+                throw new Error("Codex dialogue process could not start")
+            }
+            const timedOut = isTimeout(error)
+            throw new DialogueResponderInvocationError(
+                "Codex dialogue provider failed",
+                observation
+                    ? codexInvocation(requestedModel, observation)
+                    : telemetry.failureInvocation(
+                          timedOut ? "timed_out" : "failed",
+                          timedOut ? "timed_out" : "not_reported",
+                      ),
+            )
+        }
+    }
+    return Object.assign(responder, { telemetry })
 }
 
 function createClaudeResponder(
@@ -256,6 +453,45 @@ function openAITelemetryDescriptor(
     })
 }
 
+function codexTelemetryDescriptor(
+    requestedModel: string,
+): DialogueResponderTelemetry {
+    return Object.freeze({
+        failureInvocation(
+            status: Extract<ModelInvocationStatus, "failed" | "timed_out">,
+            reason: UnknownMetricReason,
+        ): DialogueResponderInvocation {
+            return codexInvocation(
+                requestedModel,
+                unknownCodexObservation(status, reason, requestedModel),
+            )
+        },
+    })
+}
+
+function localHarnessTelemetryDescriptor(
+    backend: "opencode" | "pi",
+    requestedModel: string,
+): DialogueResponderTelemetry {
+    return Object.freeze({
+        failureInvocation(
+            status: Extract<ModelInvocationStatus, "failed" | "timed_out">,
+            reason: UnknownMetricReason,
+        ): DialogueResponderInvocation {
+            return localHarnessInvocation(
+                backend,
+                requestedModel,
+                unknownLocalHarnessObservation(
+                    status,
+                    reason,
+                    backend,
+                    requestedModel,
+                ),
+            )
+        },
+    })
+}
+
 function claudeInvocation(
     requestedModel: string,
     observation: RunnerInvocationObservation,
@@ -273,6 +509,90 @@ function openAIInvocation(
         requestedModel,
         observation,
         ...(measurementPublished ? { measurementPublished: true } : {}),
+    }
+}
+
+function codexInvocation(
+    requestedModel: string,
+    observation: RunnerInvocationObservation,
+): DialogueResponderInvocation {
+    return { backend: "codex", requestedModel, observation }
+}
+
+function localHarnessInvocation(
+    backend: "opencode" | "pi",
+    requestedModel: string,
+    observation: RunnerInvocationObservation,
+): DialogueResponderInvocation {
+    return { backend, requestedModel, observation }
+}
+
+function unknownLocalHarnessObservation(
+    status: ModelInvocationStatus,
+    reason: UnknownMetricReason,
+    backend: "opencode" | "pi",
+    requestedModel: string,
+): RunnerInvocationObservation {
+    const missing = unknownMetric(reason)
+    const defaultModel = requestedModel === `${backend}-default`
+    const slash = backend === "opencode" ? requestedModel.indexOf("/") : -1
+    return {
+        sequence: 1,
+        granularity: backend === "opencode" ? "round" : "turn",
+        status,
+        durationMs: missing,
+        tokens: {
+            inputTotal: missing,
+            cachedInput: missing,
+            cacheWriteInput: missing,
+            outputTotal: missing,
+            reasoningOutput:
+                backend === "pi" ? notApplicableMetric() : missing,
+            total: missing,
+        },
+        cost: {
+            providerUsd: notApplicableMetric(),
+            customerUsd: notApplicableMetric(),
+            equivalentUsd: missing,
+        },
+        provider:
+            slash > 0 ? requestedModel.slice(0, slash) : null,
+        resolvedModel: defaultModel
+            ? null
+            : slash > 0
+              ? requestedModel.slice(slash + 1) || null
+              : requestedModel,
+        providerRequestId: null,
+    }
+}
+
+function unknownCodexObservation(
+    status: ModelInvocationStatus,
+    reason: UnknownMetricReason,
+    requestedModel: string,
+): RunnerInvocationObservation {
+    const missing = unknownMetric(reason)
+    return {
+        sequence: 1,
+        granularity: "turn",
+        status,
+        durationMs: missing,
+        tokens: {
+            inputTotal: missing,
+            cachedInput: missing,
+            cacheWriteInput: notApplicableMetric(),
+            outputTotal: missing,
+            reasoningOutput: missing,
+            total: missing,
+        },
+        cost: {
+            providerUsd: notApplicableMetric(),
+            customerUsd: notApplicableMetric(),
+            equivalentUsd: missing,
+        },
+        provider: "openai",
+        resolvedModel: requestedModel === "codex-default" ? null : requestedModel,
+        providerRequestId: null,
     }
 }
 
@@ -564,6 +884,21 @@ function execClaude(
             },
         )
     })
+}
+
+async function withIsolatedHarnessCwd<T>(
+    prefix: string,
+    run: (cwd: string) => Promise<T>,
+): Promise<T> {
+    // Each invocation gets a repository-independent directory. Besides
+    // excluding project instructions/config/context, this lets OpenCode's
+    // deny-all config use fail-closed `wx` creation on every dialogue turn.
+    const cwd = await mkdtemp(join(tmpdir(), prefix))
+    try {
+        return await run(cwd)
+    } finally {
+        await rm(cwd, { recursive: true, force: true })
+    }
 }
 
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {

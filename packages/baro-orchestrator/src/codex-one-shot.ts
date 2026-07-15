@@ -35,6 +35,11 @@ export interface RunCodexOneShotOptions {
     model?: string
     /** Bypass Codex's sandbox + approval prompts. Default: true. */
     bypassSandbox?: boolean
+    /** Sandbox used when bypassSandbox=false. Conversation/intake calls use
+     * read-only so a model classifying intent cannot mutate the checkout. */
+    sandboxMode?: "read-only" | "workspace-write" | "danger-full-access"
+    /** Do not persist a Codex harness thread for this isolated call. */
+    ephemeral?: boolean
     /** Skip the "must be inside a git repo" check. Default: false. */
     skipGitRepoCheck?: boolean
     /** Path to the `codex` binary. Default: "codex". */
@@ -45,17 +50,26 @@ export interface RunCodexOneShotOptions {
     label?: string
     /** Optional invocation telemetry sink. It cannot alter runner success. */
     onInvocation?: RunnerInvocationObserver
+    /** Caller cancellation. The child is terminated and partial output is
+     * rejected exactly like a timeout or crash. */
+    signal?: AbortSignal
 }
 
 export async function runCodexOneShot(
     opts: RunCodexOneShotOptions,
 ): Promise<string> {
+    if (opts.signal?.aborted) {
+        throw new Error("runCodexOneShot: aborted before launch")
+    }
     const label = opts.label ?? "codex"
     const args = ["exec", "--json"]
     if (opts.skipGitRepoCheck) args.push("--skip-git-repo-check")
     if (opts.bypassSandbox !== false) {
         args.push("--dangerously-bypass-approvals-and-sandbox")
+    } else if (opts.sandboxMode) {
+        args.push("--sandbox", opts.sandboxMode)
     }
+    if (opts.ephemeral) args.push("--ephemeral")
     if (opts.model) args.push("--model", opts.model)
     args.push(opts.prompt)
 
@@ -84,6 +98,20 @@ export async function runCodexOneShot(
         const eventTypesSeen: string[] = []
         const itemTypesSeen: string[] = []
         let timedOut = false
+        let aborted = false
+
+        const cleanup = (): void => {
+            clearTimeout(timer)
+            opts.signal?.removeEventListener("abort", onAbort)
+        }
+        const onAbort = (): void => {
+            aborted = true
+            try {
+                proc.kill("SIGTERM")
+            } catch {
+                /* noop */
+            }
+        }
 
         const timer = setTimeout(() => {
             timedOut = true
@@ -93,6 +121,7 @@ export async function runCodexOneShot(
                 /* noop */
             }
         }, timeoutMs)
+        opts.signal?.addEventListener("abort", onAbort, { once: true })
 
         proc.stdout!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => {
@@ -167,7 +196,7 @@ export async function runCodexOneShot(
         })
 
         proc.on("error", (err) => {
-            clearTimeout(timer)
+            cleanup()
             if (
                 !invocations.finish(
                     unknownCodexObservation(
@@ -183,7 +212,7 @@ export async function runCodexOneShot(
         })
 
         proc.on("exit", (code, signal) => {
-            clearTimeout(timer)
+            cleanup()
             const elapsedMs = Date.now() - startedAt
 
             const ctx = [
@@ -191,6 +220,7 @@ export async function runCodexOneShot(
                 `exit=${code}`,
                 signal ? `signal=${signal}` : null,
                 timedOut ? `timedOut=true (cap=${timeoutMs}ms)` : null,
+                aborted ? "aborted=true" : null,
                 `events=${eventTypesSeen.length}`,
                 `items=${itemTypesSeen.length}`,
                 eventTypesSeen.length > 0
@@ -207,7 +237,7 @@ export async function runCodexOneShot(
             // callers feed the string into a markdown/JSON extractor that
             // accepts truncated-but-closed fragments, so partial text on
             // timeout/crash would silently yield an incomplete doc or PRD.
-            if (timedOut || signal != null || (code != null && code !== 0)) {
+            if (timedOut || aborted || signal != null || (code != null && code !== 0)) {
                 if (
                     !invocations.finish(
                         unknownCodexObservation(

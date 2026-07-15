@@ -12,6 +12,11 @@ import type {
     RuntimeReplanAppliedData,
 } from "./semantic-events.js"
 import { runtimeDecisionFingerprintMatches } from "./runtime/runtime-replan-fingerprint.js"
+import {
+    assertCorrelationId,
+    type GoalEnvelope,
+    validateGoalEnvelope,
+} from "./session/conversation-contract.js"
 
 export interface PrdStory {
     id: string
@@ -44,6 +49,10 @@ export interface PrdFile {
     branchName: string
     description: string
     userStories: PrdStory[]
+    /** Durable identity of the conversation that authorized this plan. */
+    conversationSessionId?: string
+    /** Provider-neutral user intent handed from conversation intake to planning. */
+    goalEnvelope?: GoalEnvelope
     /**
      * Architect's DecisionDocument (file paths, schema shapes, naming).
      * Conductor prepends it verbatim to every story prompt so agents never
@@ -127,15 +136,46 @@ export function normalizePrd(input: Partial<PrdFile>, source: string): PrdFile {
         input.executionMode && typeof input.executionMode === "object" && typeof input.executionMode.mode === "string"
             ? input.executionMode
             : undefined
+    const conversationMetadata = normalizeConversationMetadata(input, source)
     const runtimeGraph = normalizeRuntimeGraph(input.runtimeGraph)
     return {
         project,
         branchName,
         description,
         userStories: stories.map((s, i) => normalizeStory(s, i, source)),
+        ...conversationMetadata,
         decisionDocument,
         executionMode,
         ...(runtimeGraph ? { runtimeGraph } : {}),
+    }
+}
+
+function normalizeConversationMetadata(
+    input: Partial<PrdFile>,
+    source: string,
+): Pick<PrdFile, "conversationSessionId" | "goalEnvelope"> {
+    try {
+        if (input.conversationSessionId !== undefined) {
+            assertCorrelationId(
+                input.conversationSessionId,
+                "conversationSessionId",
+            )
+        }
+        const goalEnvelope =
+            input.goalEnvelope === undefined
+                ? undefined
+                : validateGoalEnvelope(input.goalEnvelope)
+        return {
+            ...(input.conversationSessionId !== undefined
+                ? { conversationSessionId: input.conversationSessionId }
+                : {}),
+            ...(goalEnvelope ? { goalEnvelope } : {}),
+        }
+    } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        throw new Error(
+            `PRD at ${source} has invalid conversation metadata: ${reason}`,
+        )
     }
 }
 

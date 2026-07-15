@@ -681,6 +681,90 @@ describe("orchestrate collective mode", () => {
         })
     })
 
+    it("passes PRD-bound front-door continuity into the run-local DialogueAgent", async () => {
+        await withTempDir("collective-dialogue-context-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            const input = testPrd()
+            input.userStories = [input.userStories[0]!]
+            input.conversationSessionId = "session.collective-context"
+            input.goalEnvelope = {
+                objective: "Continue one user conversation through execution.",
+                constraints: ["Keep Board and Broker authoritative."],
+                acceptanceCriteria: ["Dialogue retains the accepted goal."],
+                nonGoals: ["Do not centralize scheduling."],
+                assumptions: ["The PRD is the accepted planning handoff."],
+            }
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            let promptSeen = false
+
+            const result = await orchestrate({
+                prdPath,
+                cwd: dir,
+                coordinationMode: "collective",
+                publishRemote: false,
+                withGit: false,
+                emitTuiEvents: false,
+                withLibrarian: false,
+                withMemory: false,
+                withSentry: false,
+                withCritic: false,
+                withSurgeon: false,
+                withSupervisor: false,
+                withDialogue: true,
+                conversationContext: {
+                    schemaVersion: 1,
+                    sessionId: "session.collective-context",
+                    phase: "planning",
+                    goalEnvelope: input.goalEnvelope,
+                    summary: "The user accepted the goal before planning.",
+                    history: [
+                        {
+                            requestId: "request-context",
+                            role: "user",
+                            text: "Please keep this conversation continuous.",
+                        },
+                        {
+                            requestId: "request-context",
+                            role: "assistant",
+                            text: "Clear. I am sending the accepted goal to planning.",
+                        },
+                    ],
+                },
+                dialogueResponder: async (request) => {
+                    promptSeen = true
+                    assert.match(
+                        request.systemPrompt,
+                        /session session\.collective-context.*phase planning/s,
+                    )
+                    assert.match(
+                        request.userPrompt,
+                        /Continue one user conversation through execution/,
+                    )
+                    assert.match(
+                        request.userPrompt,
+                        /USER: Please keep this conversation continuous/,
+                    )
+                    return JSON.stringify({
+                        message: "I retained the accepted context.",
+                        messages: [],
+                        delegation: null,
+                    })
+                },
+                onOperatorReady: (operator) => operator.dispatch({
+                    kind: "converse",
+                    message: "What goal are we executing?",
+                    messageId: "message-context",
+                    source: "user",
+                }),
+                intraLevelDelaySecs: 0,
+                executor: new DelayedPassingExecutor(100),
+            })
+
+            assert.equal(result.summary.success, true)
+            assert.equal(promptSeen, true)
+        })
+    })
+
     it("turns an authority-safe conversation proposal into durable brokered work", async () => {
         await withTempDir("collective-dialogue-delegation-", async (dir) => {
             const prdPath = join(dir, "prd.json")

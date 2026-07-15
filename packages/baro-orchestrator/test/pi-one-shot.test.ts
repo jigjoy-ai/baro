@@ -151,4 +151,33 @@ describe("runPiOneShot invocation telemetry", () => {
             )
         })
     })
+
+    it("aborts the child and records a timed-out terminal observation", async () => {
+        await withTempDir("baro-pi-abort-", async (dir) => {
+            const bin = join(dir, "slow-pi.mjs")
+            writeFileSync(bin, `#!/usr/bin/env node
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 1000);
+`)
+            chmodSync(bin, 0o755)
+            const controller = new AbortController()
+            const observations: RunnerInvocationObservation[] = []
+            const result = runPiOneShot({
+                prompt: "goal",
+                cwd: dir,
+                piBin: bin,
+                signal: controller.signal,
+                onInvocation: (item) => observations.push(item),
+            })
+            setTimeout(() => controller.abort(), 100)
+
+            await assert.rejects(result, { name: "AbortError" })
+            assert.equal(observations.length, 1)
+            assert.equal(observations[0]!.status, "timed_out")
+            assert.deepEqual(
+                observations[0]!.tokens.total,
+                unknownMetric("timed_out"),
+            )
+        })
+    })
 })

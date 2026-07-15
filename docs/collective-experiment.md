@@ -2,9 +2,9 @@
 
 This experiment answers one narrow question: with the same repository state, plan, models, and limits, does collective coordination produce a better result than the legacy Conductor?
 
-`legacy` is the existing production path: one Conductor owns DAG levels, retries and completion, while StoryFactory and the observer agents communicate over Mozaik. It remains the default when no flag or environment variable is set.
+`legacy` is the compatibility baseline: one Conductor owns DAG levels, retries and completion, while StoryFactory and the observer agents communicate over Mozaik. Select it explicitly with `--coordination legacy` for an A/B comparison.
 
-`collective` is the opt-in path. A deterministic board projects run state, workers publish credential-free capabilities and bids, a broker grants a correlated lease to one deterministic winner, repository integration reacts to events, and workers can ask peers for help or discover additional work. With Critic enabled, a successful process result must also receive the correlated terminal-turn acceptance verdict before integration. A story passes only after that policy gate and `StoryMerged`, not merely after its model process exits successfully.
+`collective` is the CLI default. A deterministic board projects run state, workers publish credential-free capabilities and bids, a broker grants a correlated lease to one deterministic winner, repository integration reacts to events, and workers can ask peers for help or discover additional work. With Critic enabled, a successful process result must also receive the correlated terminal-turn acceptance verdict before integration. A story passes only after that policy gate and `StoryMerged`, not merely after its model process exits successfully.
 
 Both modes use the same Mozaik `AgenticEnvironment`, participant membership and `SemanticEvent` delivery. Collective mode does not introduce another bus. Baro owns the product-specific layer Mozaik should not own: event schemas, correlated participant mailboxes, work leases, DAG policy, git integration, recovery policy and the local worker-to-bus bridge.
 
@@ -176,14 +176,15 @@ cargo run -p baro-tui -- \
   "your goal"
 ```
 
-The equivalent environment switches are `BARO_COORDINATION=collective` and `BARO_LOCAL_ONLY=1`. Omit them to keep the legacy Conductor coordination path as the default.
+The equivalent environment switches are `BARO_COORDINATION=collective` and `BARO_LOCAL_ONLY=1`. Collective is already the CLI default; use `BARO_COORDINATION=legacy` only for the comparison arm.
 Because story agents can execute arbitrary shell commands, `--local-only` is not an OS/network sandbox. Remove remotes from the disposable target clone when you need a hard no-push boundary; the paired A/B harness does this automatically before each arm and rechecks it after setup.
 
-### Optional conversational supervisor
+### Run-local conversational participant
 
-`--with-dialogue` joins a disposable DialogueAgent to the same Mozaik bus. It
+Collective mode automatically joins a disposable DialogueAgent to the same
+Mozaik bus (`--with-dialogue` remains an explicit compatibility flag). It
 builds a bounded, selected, untrusted projection from semantic events and
-invokes a text-only Claude or OpenAI-compatible model only after an explicit
+invokes a text-only Claude, Codex, or OpenAI-compatible model only after an explicit
 user message. The backing model receives no codebase tools. It may emit a
 bounded `AgentTargetedMessage` to a live continuation-capable worker and one
 strict add-only `conversation_delegation_proposed` event. A proposal contains

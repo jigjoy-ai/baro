@@ -27,11 +27,7 @@ import { emit } from "../src/tui-protocol.js"
 interface Args {
     goal: string
     cwd: string
-    /**
-     * "codex" is accepted at the boundary but currently routes through the
-     * Claude architect path — codex-architect.ts is a planned v2 follow-up.
-     * v1: Codex covers the Story phase; Architect/Planner stay on Claude.
-     */
+    /** Native architect backend selected for this isolated planning turn. */
     llm: "claude" | "openai" | "codex" | "opencode" | "pi"
     model?: string
     effort?: string

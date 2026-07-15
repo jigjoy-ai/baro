@@ -1,4 +1,4 @@
-import { chmodSync, writeFileSync } from "node:fs"
+import { chmodSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
@@ -16,13 +16,16 @@ function writeFakeCodex(
         events?: ReadonlyArray<Record<string, unknown>>
         exitCode?: number
         hangMs?: number
+        argvFile?: string
     },
 ): string {
     const bin = join(dir, "fake-codex.mjs")
     writeFileSync(
         bin,
         `#!/usr/bin/env node
+import { writeFileSync as fixtureWriteFileSync } from "node:fs";
 const texts = ${JSON.stringify(opts.texts)};
+${opts.argvFile ? `fixtureWriteFileSync(${JSON.stringify(opts.argvFile)}, JSON.stringify(process.argv.slice(2)));` : ""}
 for (const text of texts) {
     console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }));
 }
@@ -148,6 +151,51 @@ describe("runCodexOneShot exit contract", () => {
                 observations[0]!.tokens.inputTotal,
                 unknownMetric("timed_out"),
             )
+        })
+    })
+
+    it("supports an ephemeral read-only harness for conversation calls", async () => {
+        await withTempDir("baro-codex-readonly-", async (dir) => {
+            const argvFile = join(dir, "argv.json")
+            const bin = writeFakeCodex(dir, {
+                texts: ["safe"],
+                argvFile,
+            })
+
+            await runCodexOneShot({
+                prompt: "classify this goal",
+                cwd: dir,
+                codexBin: bin,
+                bypassSandbox: false,
+                sandboxMode: "read-only",
+                ephemeral: true,
+            })
+
+            const argv = JSON.parse(readFileSync(argvFile, "utf8")) as string[]
+            assert.deepEqual(argv.slice(0, 5), [
+                "exec",
+                "--json",
+                "--sandbox",
+                "read-only",
+                "--ephemeral",
+            ])
+            assert.equal(argv.includes("--dangerously-bypass-approvals-and-sandbox"), false)
+        })
+    })
+
+    it("kills and rejects a cancelled conversation call", async () => {
+        await withTempDir("baro-codex-abort-", async (dir) => {
+            const bin = writeFakeCodex(dir, { texts: ["partial"], hangMs: 30_000 })
+            const controller = new AbortController()
+            const pending = runCodexOneShot({
+                prompt: "goal",
+                cwd: dir,
+                codexBin: bin,
+                signal: controller.signal,
+            })
+            setTimeout(() => controller.abort(), 100)
+
+            await assert.rejects(pending, /terminated abnormally.*aborted=true/)
         })
     })
 })

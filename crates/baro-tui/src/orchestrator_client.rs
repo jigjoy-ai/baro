@@ -2,16 +2,22 @@
 //! streams its stdout (line-delimited BaroEvent JSON) into the TUI's
 //! event channel, and surfaces stderr to the operator.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use crate::conversation::ConversationContextSnapshot;
 use crate::discovery::{self, ScriptEntry};
 use crate::events::BaroEvent;
 
 pub struct OrchestratorConfig {
+    /// Accepted-goal conversation continuity for the run-local DialogueAgent.
+    /// `run` materializes this only as a private temporary file and keeps the
+    /// handle alive for exactly the child-process lifetime.
+    pub conversation_context: Option<ConversationContextSnapshot>,
     pub prd_path: PathBuf,
     pub cwd: PathBuf,
     pub parallel: u32,
@@ -111,7 +117,16 @@ async fn run(
         "packages/baro-orchestrator/scripts/cli.ts",
         "cli.mjs",
     )?;
-    let mut cmd = build_command(&entry, &cfg);
+    let conversation_context_file = cfg
+        .conversation_context
+        .as_ref()
+        .map(EphemeralConversationContextFile::create)
+        .transpose()?;
+    let mut cmd = build_command(
+        &entry,
+        &cfg,
+        conversation_context_file.as_ref().map(|file| file.path()),
+    );
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     cmd.stdin(std::process::Stdio::piped());
@@ -227,6 +242,11 @@ async fn run(
         .await
         .map_err(|e| format!("orchestrator wait failed: {}", e))?;
 
+    // Be explicit about the security boundary: the context file remains
+    // addressable while the child is alive and is unlinked immediately after
+    // it exits, before this run reports completion.
+    drop(conversation_context_file);
+
     // The writer may be parked on recv() forever (the app keeps its
     // sender alive across runs) — abort rather than await.
     stdin_task.abort();
@@ -242,7 +262,41 @@ async fn run(
     Ok(())
 }
 
-fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
+struct EphemeralConversationContextFile {
+    file: tempfile::NamedTempFile,
+}
+
+impl EphemeralConversationContextFile {
+    fn create(snapshot: &ConversationContextSnapshot) -> Result<Self, String> {
+        let bytes = snapshot
+            .json_bytes()
+            .map_err(|error| format!("invalid conversation context: {error}"))?;
+        let mut file = tempfile::Builder::new()
+            .prefix("baro-conversation-context-")
+            .suffix(".json")
+            .tempfile()
+            .map_err(|error| format!("failed to create conversation context file: {error}"))?;
+        if !file.path().is_absolute() {
+            return Err("conversation context tempfile path is not absolute".to_string());
+        }
+        file.write_all(&bytes)
+            .map_err(|error| format!("failed to write conversation context file: {error}"))?;
+        file.as_file_mut()
+            .sync_all()
+            .map_err(|error| format!("failed to sync conversation context file: {error}"))?;
+        Ok(Self { file })
+    }
+
+    fn path(&self) -> &Path {
+        self.file.path()
+    }
+}
+
+fn build_command(
+    entry: &ScriptEntry,
+    cfg: &OrchestratorConfig,
+    conversation_context_path: Option<&Path>,
+) -> Command {
     let mut cmd = match entry {
         ScriptEntry::Tsx { tsx, script } => {
             let mut c = Command::new(tsx);
@@ -257,6 +311,10 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
     };
     cmd.arg("--prd").arg(&cfg.prd_path);
     cmd.arg("--cwd").arg(&cfg.cwd);
+    if let Some(path) = conversation_context_path {
+        debug_assert!(path.is_absolute());
+        cmd.arg("--conversation-context-file").arg(path);
+    }
     cmd.arg("--parallel").arg(cfg.parallel.to_string());
     cmd.arg("--timeout").arg(cfg.timeout_secs.to_string());
     if let Some(m) = &cfg.override_model {
@@ -355,11 +413,16 @@ fn build_command(entry: &ScriptEntry, cfg: &OrchestratorConfig) -> Command {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{build_command, OrchestratorConfig};
+    use super::{build_command, EphemeralConversationContextFile, OrchestratorConfig};
+    use crate::conversation::{
+        ConversationKind, ConversationPhase, ConversationSession, ConversationWireResponse,
+        GoalEnvelope,
+    };
     use crate::discovery::ScriptEntry;
 
     fn config(with_surgeon: bool, surgeon_use_llm: bool) -> OrchestratorConfig {
         OrchestratorConfig {
+            conversation_context: None,
             prd_path: "prd.json".into(),
             cwd: ".".into(),
             parallel: 1,
@@ -392,7 +455,7 @@ mod tests {
     }
 
     fn command_args(cfg: &OrchestratorConfig) -> Vec<String> {
-        let command = build_command(&ScriptEntry::NodeJs("/tmp/cli.mjs".into()), cfg);
+        let command = build_command(&ScriptEntry::NodeJs("/tmp/cli.mjs".into()), cfg, None);
         command
             .as_std()
             .get_args()
@@ -434,5 +497,71 @@ mod tests {
         assert_eq!(count(&args, "--with-surgeon"), 0);
         assert_eq!(count(&args, "--surgeon-use-llm"), 1);
         assert_eq!(count(&args, "--no-surgeon-llm"), 0);
+    }
+
+    fn context_snapshot() -> crate::conversation::ConversationContextSnapshot {
+        let goal = GoalEnvelope {
+            objective: "Carry the accepted conversation into runtime".to_string(),
+            constraints: vec!["Keep the file ephemeral".to_string()],
+            acceptance_criteria: vec!["Dialogue receives the exact v1 schema".to_string()],
+            non_goals: vec!["Do not write context into the PRD".to_string()],
+            assumptions: vec!["The PRD is already session-bound".to_string()],
+        };
+        let mut session = ConversationSession::new("session-tempfile-1").unwrap();
+        session.begin_request("request-ready", "Run it").unwrap();
+        session
+            .apply_response(ConversationWireResponse {
+                schema_version: 1,
+                session_id: "session-tempfile-1".to_string(),
+                request_id: "request-ready".to_string(),
+                kind: ConversationKind::Ready,
+                message: "The goal is clear.".to_string(),
+                questions: vec![],
+                goal_envelope: Some(goal),
+            })
+            .unwrap();
+        session.take_ready_handoff().unwrap().unwrap();
+        session.transition_to(ConversationPhase::Planning).unwrap();
+        session
+            .conversation_context_snapshot(None)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn forwards_an_absolute_ephemeral_context_file_and_unlinks_it_on_drop() {
+        let context = context_snapshot();
+        let file = EphemeralConversationContextFile::create(&context).unwrap();
+        let path = file.path().to_path_buf();
+        assert!(path.is_absolute());
+        assert!(path.is_file());
+
+        let cfg = config(true, true);
+        let command = build_command(
+            &ScriptEntry::NodeJs("/tmp/cli.mjs".into()),
+            &cfg,
+            Some(&path),
+        );
+        let args: Vec<String> = command
+            .as_std()
+            .get_args()
+            .map(OsStr::to_string_lossy)
+            .map(|arg| arg.into_owned())
+            .collect();
+        let flag = args
+            .iter()
+            .position(|arg| arg == "--conversation-context-file")
+            .unwrap();
+        assert_eq!(
+            args.get(flag + 1),
+            Some(&path.to_string_lossy().into_owned())
+        );
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["schemaVersion"], 1);
+        assert_eq!(persisted["sessionId"], "session-tempfile-1");
+
+        drop(file);
+        assert!(!path.exists());
     }
 }

@@ -22,6 +22,15 @@ export class DialogueForwarder extends BaseObserver {
         if (source !== this.authority) return
         if (ConversationResponded.is(event)) {
             this.sink({
+                type: "conversation_response",
+                message_id: event.data.messageId,
+                text: event.data.text,
+                actions: event.data.actions.map((action) => ({
+                    recipient_id: action.recipientId,
+                    text: action.text,
+                })),
+            })
+            this.sink({
                 type: "activity",
                 id: "_dialogue",
                 kind: "agent_msg",
@@ -48,6 +57,11 @@ export class DialogueForwarder extends BaseObserver {
             return
         }
         if (ConversationFailed.is(event)) {
+            this.sink({
+                type: "conversation_failed",
+                message_id: event.data.messageId,
+                error: event.data.error,
+            })
             this.sink({
                 type: "activity",
                 id: "_dialogue",

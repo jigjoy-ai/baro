@@ -7,6 +7,8 @@
 import type { Operator } from "./participants/operator.js"
 import { emit, type BaroCommand, type BaroEvent } from "./tui-protocol.js"
 
+let generatedConversationSequence = 0
+
 export interface StdinCommandContext {
     /** Null until orchestrate() has joined the Operator to the bus. */
     getOperator: () => Operator | null
@@ -19,19 +21,27 @@ export function handleStdinCommand(cmd: BaroCommand, ctx: StdinCommandContext): 
         if (typeof cmd.text !== "string" || !cmd.text.trim()) return
         const operator = ctx.getOperator()
         if (!operator) return
+        const text = cmd.text.trim()
+        generatedConversationSequence += 1
+        const messageId =
+            typeof cmd.message_id === "string" && cmd.message_id.trim()
+                ? cmd.message_id.trim()
+                : `stdin-conversation-${process.pid}-${generatedConversationSequence}`
+        ;(ctx.emitEvent ?? emit)({
+            type: "conversation_request",
+            message_id: messageId,
+            text,
+        })
         operator.dispatch({
             kind: "converse",
-            message: cmd.text,
-            messageId:
-                typeof cmd.message_id === "string" && cmd.message_id.trim()
-                    ? cmd.message_id.trim()
-                    : undefined,
+            message: text,
+            messageId,
             source: "user",
         })
         ;(ctx.emitEvent ?? emit)({
             type: "story_log",
             id: "_dialogue",
-            line: `[you → collective] ${cmd.text}`,
+            line: `[you → collective] ${text}`,
         })
         return
     }

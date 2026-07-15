@@ -319,6 +319,65 @@ export {
 } from "./tui-protocol.js"
 
 export {
+    CONVERSATION_SCHEMA_VERSION,
+    ConversationContractError,
+    assertCorrelationId,
+    goalEnvelopeFingerprint,
+    parseConversationResponse,
+    validateConversationResponse,
+    validateGoalEnvelope,
+    type ClarificationQuestion,
+    type ConversationCorrelation,
+    type ConversationResponse,
+    type ConversationResponseKind,
+    type GoalEnvelope,
+} from "./session/conversation-contract.js"
+export {
+    CONVERSATION_INTAKE_SYSTEM_PROMPT,
+    ConversationIntake,
+    conversationResponseHistoryText,
+    type ConversationHistoryEntry,
+    type ConversationIntakeOptions,
+    type ConversationIntakeSnapshot,
+    type ConversationRequest,
+    type ConversationRequestIntent,
+    type ConversationResponder,
+    type ConversationResponderBackend,
+    type ConversationResponderInput,
+    type ConversationResponderResult,
+} from "./session/conversation-intake.js"
+export {
+    SessionLifecycle,
+    SessionLifecycleError,
+    type SessionLifecycleSnapshot,
+    type SessionPhase,
+    type SessionPhaseChange,
+} from "./session/session-lifecycle.js"
+export {
+    CONVERSATION_CONTEXT_SCHEMA_VERSION,
+    MAX_CONVERSATION_CONTEXT_BYTES,
+    MAX_CONVERSATION_CONTEXT_HISTORY,
+    ConversationContextError,
+    assertConversationContextBinding,
+    loadConversationContextFile,
+    parseConversationContextSnapshot,
+    validateConversationContextSnapshot,
+    type ConversationContextBinding,
+    type ConversationContextHistoryEntry,
+    type ConversationContextPhase,
+    type ConversationContextSnapshot,
+} from "./session/conversation-context.js"
+export {
+    ProcessSessionHost,
+    type HostedRunResult,
+    type ProcessIsolatedRun,
+    type ProcessRunContext,
+    type ProcessRunFactory,
+    type ProcessRunOutcome,
+    type ProcessSessionHostOptions,
+} from "./session/process-session-host.js"
+
+export {
     Operator,
     type OperatorCommand,
     type OperatorHooks,

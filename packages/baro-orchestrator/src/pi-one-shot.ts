@@ -40,8 +40,10 @@ export interface RunPiOneShotOptions {
     label?: string
     /** Optional invocation telemetry sink. It cannot alter runner success. */
     onInvocation?: RunnerInvocationObserver
+    /** Optional caller cancellation. Aborting terminates the harness child. */
+    signal?: AbortSignal
     /**
-     * Critic-only hardening: pass this as Pi's real system prompt while
+     * Text-only evaluator hardening: pass this as Pi's real system prompt while
      * disabling every tool, extension, skill, template, theme, and context
      * file. Other callers retain the existing tool-capable invocation.
      */
@@ -55,6 +57,7 @@ export interface RunPiOneShotOptions {
 export async function runPiOneShot(
     opts: RunPiOneShotOptions,
 ): Promise<string> {
+    if (opts.signal?.aborted) throw abortError()
     const label = opts.label ?? "pi"
     const safeEvaluator = opts.safeEvaluatorSystemPrompt !== undefined
     const args = ["--mode", "json", "-p", "--no-session"]
@@ -98,23 +101,28 @@ export async function runPiOneShot(
         const eventTypesSeen: string[] = []
         let evaluatorToolUseSeen = false
         let timedOut = false
+        let aborted = false
+        let timer: ReturnType<typeof setTimeout> | null = null
         let killTimer: ReturnType<typeof setTimeout> | null = null
 
         const clearTimers = (): void => {
-            clearTimeout(timer)
+            if (timer !== null) {
+                clearTimeout(timer)
+                timer = null
+            }
             if (killTimer !== null) {
                 clearTimeout(killTimer)
                 killTimer = null
             }
+            opts.signal?.removeEventListener("abort", onAbort)
         }
-
-        const timer = setTimeout(() => {
-            timedOut = true
+        const terminate = (): void => {
             try {
                 proc.kill("SIGTERM")
             } catch {
                 /* noop */
             }
+            if (killTimer !== null) return
             // Escalate to SIGKILL if Pi ignores SIGTERM; otherwise neither
             // `exit` nor `error` ever fires and this Promise hangs forever.
             killTimer = setTimeout(() => {
@@ -126,7 +134,20 @@ export async function runPiOneShot(
                 }
             }, 5_000)
             killTimer.unref?.()
+        }
+        const onAbort = (): void => {
+            if (aborted) return
+            aborted = true
+            terminate()
+        }
+        timer = setTimeout(() => {
+            timedOut = true
+            terminate()
         }, timeoutMs)
+        timer.unref?.()
+        opts.signal?.addEventListener("abort", onAbort, { once: true })
+        // Close the race between the pre-spawn check and listener install.
+        if (opts.signal?.aborted) onAbort()
 
         const maxBufferBytes = 16 * 1024 * 1024
 
@@ -157,7 +178,7 @@ export async function runPiOneShot(
                                 `[${label}] usage: in=${numberForLog(usage.input)} out=${numberForLog(usage.output)}\n`,
                             )
                         }
-                        if (!timedOut) {
+                        if (!timedOut && !aborted) {
                             invocations.observe(piObservation(message, opts))
                         }
                         const content = message.content as Array<Record<string, unknown>> | undefined
@@ -254,7 +275,7 @@ export async function runPiOneShot(
             if (
                 !invocations.finish(
                     unknownPiObservation(
-                        timedOut ? "timed_out" : "failed",
+                        timedOut || aborted ? "timed_out" : "failed",
                         Date.now() - startedAt,
                         opts,
                     ),
@@ -262,7 +283,7 @@ export async function runPiOneShot(
             ) {
                 return
             }
-            reject(err)
+            reject(aborted ? abortError() : err)
         })
 
         proc.on("exit", (code, signal) => {
@@ -274,6 +295,7 @@ export async function runPiOneShot(
                 `exit=${code}`,
                 signal ? `signal=${signal}` : null,
                 timedOut ? `timedOut=true (cap=${timeoutMs}ms)` : null,
+                aborted ? "aborted=true" : null,
                 `events=${eventTypesSeen.length}`,
                 eventTypesSeen.length > 0
                     ? `event_types=[${[...new Set(eventTypesSeen)].join(",")}]`
@@ -286,16 +308,25 @@ export async function runPiOneShot(
             // callers feed the string into a markdown/JSON extractor, so
             // partial text on timeout/crash would silently yield an
             // incomplete doc with no error surfaced.
-            if (timedOut || signal != null || (code != null && code !== 0)) {
+            if (
+                timedOut ||
+                aborted ||
+                signal != null ||
+                (code != null && code !== 0)
+            ) {
                 if (
                     !invocations.finish(
                         unknownPiObservation(
-                            timedOut ? "timed_out" : "failed",
+                            timedOut || aborted ? "timed_out" : "failed",
                             elapsedMs,
                             opts,
                         ),
                     )
                 ) {
+                    return
+                }
+                if (aborted) {
+                    reject(abortError())
                     return
                 }
                 reject(
@@ -353,7 +384,8 @@ export async function runPiOneShot(
 
         if (safeEvaluator) {
             if (!proc.stdin) {
-                proc.kill()
+                clearTimers()
+                terminate()
                 invocations.finish(
                     unknownPiObservation(
                         "failed",
@@ -365,7 +397,9 @@ export async function runPiOneShot(
                 return
             }
             proc.stdin.on("error", (error) => {
-                proc.kill()
+                if (aborted || timedOut) return
+                clearTimers()
+                terminate()
                 if (
                     invocations.finish(
                         unknownPiObservation(
@@ -381,6 +415,12 @@ export async function runPiOneShot(
             proc.stdin.end(opts.prompt)
         }
     })
+}
+
+function abortError(): Error {
+    const error = new Error("Pi one-shot aborted")
+    error.name = "AbortError"
+    return error
 }
 
 function piObservation(

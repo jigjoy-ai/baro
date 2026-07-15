@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::app::ReviewStory;
+use crate::conversation::{ConversationContextSnapshot, GoalEnvelope};
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PrdFile {
@@ -41,6 +42,23 @@ pub struct PrdFile {
         skip_serializing_if = "Option::is_none"
     )]
     pub runtime_graph: Option<serde_json::Value>,
+    /// Stable identity of the user-facing conversation that owns this goal.
+    /// This is deliberately distinct from per-attempt runtime/run ids.
+    #[serde(
+        rename = "conversationSessionId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub conversation_session_id: Option<String>,
+    /// Validated intent handed from the conversation agent to planning. It is
+    /// durable PRD metadata so a resume can recover the same session identity
+    /// even if the local transcript snapshot is unavailable.
+    #[serde(
+        rename = "goalEnvelope",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub goal_envelope: Option<GoalEnvelope>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -76,6 +94,10 @@ fn default_retries() -> u32 {
 /// mixed-polarity orchestrator flags (`--with-critic`,
 /// `--no-librarian`, `--no-sentry`).
 pub struct ExecutorConfig {
+    /// Ephemeral, accepted-goal context for the run-local DialogueAgent.
+    /// This is handed to the child through a temporary file and is never
+    /// written into the repository PRD.
+    pub conversation_context: Option<ConversationContextSnapshot>,
     pub parallel: u32,
     pub timeout_secs: u64,
     pub model_routing: bool,
@@ -131,6 +153,8 @@ pub fn prd_from_review(
         decision_document,
         execution_mode,
         runtime_graph: None,
+        conversation_session_id: None,
+        goal_envelope: None,
     }
 }
 
@@ -201,6 +225,8 @@ pub fn prd_from_resume_review(
         decision_document: original.decision_document.clone(),
         execution_mode: execution_mode.or_else(|| original.execution_mode.clone()),
         runtime_graph: original.runtime_graph.clone(),
+        conversation_session_id: original.conversation_session_id.clone(),
+        goal_envelope: original.goal_envelope.clone(),
     };
     validate_resume_prd(&prd)?;
     Ok(prd)
@@ -351,6 +377,27 @@ mod tests {
     }
 
     #[test]
+    fn conversation_metadata_round_trips_with_the_prd() {
+        let raw = serde_json::json!({
+            "project": "p",
+            "branchName": "baro/p",
+            "description": "",
+            "userStories": [],
+            "conversationSessionId": "session-42",
+            "goalEnvelope": {
+                "objective": "Keep one durable conversation around the run",
+                "constraints": ["Do not merge conversation authority into Board"],
+                "acceptanceCriteria": ["Resume restores the same session id"],
+                "nonGoals": [],
+                "assumptions": ["The PRD is the durable run checkpoint"]
+            }
+        });
+        let prd: PrdFile = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(prd.conversation_session_id.as_deref(), Some("session-42"));
+        assert_eq!(serde_json::to_value(prd).unwrap(), raw);
+    }
+
+    #[test]
     fn review_story_metadata_is_preserved_in_prd() {
         let stories = vec![ReviewStory {
             id: "S7".to_string(),
@@ -408,6 +455,14 @@ mod tests {
                 "policyStories": 0,
                 "appliedDecisions": []
             },
+            "conversationSessionId": "session-resume",
+            "goalEnvelope": {
+                "objective": "Finish the pending work",
+                "constraints": [],
+                "acceptanceCriteria": ["All pending stories pass"],
+                "nonGoals": [],
+                "assumptions": []
+            },
             "userStories": [
                 {
                     "id": "S1", "priority": 1, "title": "Done",
@@ -455,6 +510,14 @@ mod tests {
         );
         assert_eq!(merged.execution_mode.as_ref().unwrap()["mode"], "parallel");
         assert_eq!(merged.runtime_graph.as_ref().unwrap()["version"], 3);
+        assert_eq!(
+            merged.conversation_session_id.as_deref(),
+            Some("session-resume")
+        );
+        assert_eq!(
+            merged.goal_envelope.as_ref().unwrap().objective,
+            "Finish the pending work"
+        );
     }
 
     #[test]

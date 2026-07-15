@@ -130,26 +130,44 @@ cross-run calibration belongs to repeated externally verified trials.
 
 ## Conversation and TUI boundary
 
-The current `DialogueAgent` is an optional headless conversational supervisor.
-It answers an explicit operator message, can message a live
-continuation-capable worker, and can emit one atomic proposal containing at
-most two new implementation stories. The proposal ID is deterministic, its
-CAS version is snapshotted before the model call, and its schema has no
-remove/rewire/model/route/retry/priority fields. The Board accepts events only
-from the exact bound Dialogue object, revalidates the deterministic correlation
-and exact 1–2 story schema, maps it to worker-accounted runtime adaptation, and
-retains graph CAS, idempotency, dynamic-story and no-progress budgets. Dialogue
-also accepts route capability only from a correlated Broker grant or an exact
-worker-ID-mapped StoryFactory, never lets a factory override the Broker's
-route, and ignores stale lease releases. Broker still owns the auction and
-lease, so an accepted proposal does not directly spawn a process.
+Baro has two deliberately separate conversation layers owned by one durable
+logical session:
 
-This is not yet a full Codex/Claude-Code-equivalent root harness: the Dialogue
-responder remains text-only, has no repository tools, and does not retain a
-native provider session between user turns. Its bounded event projection and
-conversation history provide continuity at Baro's semantic layer. The TUI
-rework is intentionally deferred until this headless contract and benchmark
-behavior are stable.
+1. Before planning, the TUI/headless front door persists a correlated transcript
+   and runs each provider turn in a fresh process rooted in an empty temporary
+   directory. A strict schema-v1 response may clarify, answer, or hand exactly
+   one validated `GoalEnvelope` to planning. It cannot inspect the repository or
+   name workers, routes, leases, retries, or DAG operations.
+2. During collective execution, a run-local `DialogueAgent` observes a bounded
+   semantic projection on the same Mozaik bus. It answers an explicit operator
+   message, can message a live continuation-capable worker, and can emit one
+   atomic proposal containing at most two new implementation stories. The
+   proposal ID is deterministic, its CAS version is snapshotted before the
+   model call, and its schema has no remove/rewire/model/route/retry/priority
+   fields. The Board accepts events only from the exact bound Dialogue object,
+   revalidates the deterministic correlation and exact 1–2 story schema, maps
+   it to worker-accounted runtime adaptation, and retains graph CAS,
+   idempotency, dynamic-story and no-progress budgets. Dialogue also accepts
+   route capability only from a correlated Broker grant or an exact
+   worker-ID-mapped StoryFactory, never lets a factory override the Broker's
+   route, and ignores stale lease releases. Broker still owns the auction and
+   lease, so an accepted proposal does not directly spawn a process.
+
+For local Claude Code and Codex runs, Rust projects only the accepted goal,
+accepted-goal phase, optional summary, and at most 24 complete correlated
+history records into an exact schema-v1 file capped at 128 KiB. The file is
+private and temporary, is bound again to the PRD session ID and `GoalEnvelope`
+before use, is not inherited by worker subprocesses, and is deleted as soon as
+the orchestrator exits. `legacy` coordination still uses the conversation-first
+front door and durable goal metadata, but intentionally omits this run-local
+Dialogue projection because legacy has no Dialogue participant.
+
+This intentionally does not turn Dialogue into a central root coordinator. The
+provider process remains text-only and disposable; durable history and a bounded
+context snapshot provide semantic continuity, while Board, Broker, Repository,
+Critic and Verifier retain their independent authorities. That separation is
+the Mozaik-specific value: a familiar conversational surface without collapsing
+the runtime back into one harness process.
 
 ## Provider-free verification
 

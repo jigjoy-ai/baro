@@ -152,6 +152,22 @@ export type BaroEvent =
           reasoning: string
           violated: string[]
       }
+    | {
+          type: "conversation_request"
+          message_id: string
+          text: string
+      }
+    | {
+          type: "conversation_response"
+          message_id: string
+          text: string
+          actions: Array<{ recipient_id: string; text: string }>
+      }
+    | {
+          type: "conversation_failed"
+          message_id: string
+          error: string
+      }
 
 /** Caller must not include trailing newlines in any field. */
 export function emit(event: BaroEvent): void {

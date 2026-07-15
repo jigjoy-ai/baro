@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { chmodSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
@@ -136,6 +136,227 @@ process.stdout.write(JSON.stringify({ result: "{\\\"message\\\":\\\"Ready.\\\",\
                     process.env.BARO_DIALOGUE_ARGV = previous
                 }
             }
+        })
+    })
+
+    it("runs Codex as an ephemeral read-only conversation backend", async () => {
+        await withTempDir("dialogue-codex-", async (dir) => {
+            const capture = join(dir, "environment.json")
+            const argvPath = join(dir, "argv.json")
+            const binary = join(dir, "codex.mjs")
+            writeFileSync(binary, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+${harnessEnvironmentCaptureProgram(capture)}
+writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)));
+console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "{\\"message\\":\\"Ready.\\",\\"messages\\":[]}" } }));
+console.log(JSON.stringify({ type: "turn.completed", model: "gpt-codex-test", usage: { input_tokens: 9, output_tokens: 3 } }));
+`)
+            chmodSync(binary, 0o755)
+
+            let output: Awaited<ReturnType<ReturnType<typeof createDialogueResponder>>>
+            await withInjectedJigJoyEnvironment(async () => {
+                const responder = createDialogueResponder({
+                    backend: "codex",
+                    cwd: dir,
+                    codexBin: binary,
+                })
+                output = await responder(
+                    {
+                        runId: "run-codex-dialogue",
+                        messageId: "message-codex-dialogue",
+                        systemPrompt: "system",
+                        userPrompt: "status",
+                    },
+                    new AbortController().signal,
+                )
+            })
+
+            assert.notEqual(typeof output!, "string")
+            if (typeof output! === "string") throw new Error("expected telemetry result")
+            assert.equal(output!.invocation.backend, "codex")
+            assert.equal(output!.invocation.observation.status, "succeeded")
+            assert.equal(output!.invocation.observation.granularity, "turn")
+            assert.deepEqual(
+                output!.invocation.observation.tokens.total,
+                knownMetric(12, "derived"),
+            )
+            const argv = JSON.parse(readFileSync(argvPath, "utf8")) as string[]
+            assert.deepEqual(argv.slice(0, 5), [
+                "exec",
+                "--json",
+                "--sandbox",
+                "read-only",
+                "--ephemeral",
+            ])
+            assert.equal(argv.includes("--dangerously-bypass-approvals-and-sandbox"), false)
+            assertHarnessEnvironmentWasSanitized(capture)
+        })
+    })
+
+    it("runs repeatable OpenCode dialogue turns in fresh deny-all directories", async () => {
+        await withTempDir("dialogue-opencode-", async (dir) => {
+            const capture = join(dir, "opencode-captures.jsonl")
+            const binary = join(dir, "opencode.mjs")
+            writeFileSync(binary, `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from "node:fs";
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+    const configPath = process.env.OPENCODE_CONFIG;
+    appendFileSync(${JSON.stringify(capture)}, JSON.stringify({
+        argv: process.argv.slice(2),
+        cwd: process.cwd(),
+        input,
+        config: JSON.parse(readFileSync(configPath, "utf8")),
+    }) + "\\n");
+    console.log(JSON.stringify({ type: "text", part: { text: "{\\"message\\":\\"Ready.\\",\\"messages\\":[]}" } }));
+    console.log(JSON.stringify({
+        type: "step_finish",
+        part: {
+            providerID: "zhipu",
+            modelID: "glm-test",
+            tokens: { total: 4, input: 2, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+            cost: 0.001,
+        },
+    }));
+});
+`)
+            chmodSync(binary, 0o755)
+            const responder = createDialogueResponder({
+                backend: "opencode",
+                cwd: dir,
+                opencodeBin: binary,
+                model: "zhipu/glm-test",
+            })
+
+            for (const messageId of ["message-1", "message-2"]) {
+                const output = await responder(
+                    {
+                        runId: "run-opencode-dialogue",
+                        messageId,
+                        systemPrompt: "deny every repository tool",
+                        userPrompt: `status ${messageId}`,
+                    },
+                    new AbortController().signal,
+                )
+                assert.notEqual(typeof output, "string")
+                if (typeof output === "string") throw new Error("expected telemetry result")
+                assert.equal(output.invocation.backend, "opencode")
+                assert.equal(output.invocation.observation.status, "succeeded")
+                assert.equal(output.invocation.observation.provider, "zhipu")
+            }
+
+            const captures = readFileSync(capture, "utf8")
+                .trim()
+                .split("\n")
+                .map((line) => JSON.parse(line) as {
+                    argv: string[]
+                    cwd: string
+                    input: string
+                    config: {
+                        agent: Record<string, {
+                            prompt: string
+                            permission: Record<string, string>
+                            tools: Record<string, boolean>
+                        }>
+                    }
+                })
+            assert.equal(captures.length, 2)
+            assert.notEqual(captures[0]!.cwd, captures[1]!.cwd)
+            for (const [index, item] of captures.entries()) {
+                assert.notEqual(item.cwd, dir)
+                assert.match(item.cwd, /baro-opencode-dialogue-/)
+                assert.equal(existsSync(item.cwd), false)
+                assert.equal(item.input, `status message-${index + 1}`)
+                assert.deepEqual(item.argv.slice(0, 6), [
+                    "run",
+                    "--format",
+                    "json",
+                    "--pure",
+                    "--agent",
+                    "baro-critic",
+                ])
+                assert.equal(
+                    item.argv.includes("--dangerously-skip-permissions"),
+                    false,
+                )
+                const safeAgent = item.config.agent["baro-critic"]!
+                assert.equal(safeAgent.prompt, "deny every repository tool")
+                assert.equal(safeAgent.permission["*"], "deny")
+                assert.ok(Object.values(safeAgent.tools).every((value) => !value))
+            }
+        })
+    })
+
+    it("runs Pi dialogue without tools, extensions, or repository context", async () => {
+        await withTempDir("dialogue-pi-", async (dir) => {
+            const capture = join(dir, "pi-capture.json")
+            const binary = join(dir, "pi.mjs")
+            writeFileSync(binary, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+    writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), input }));
+    console.log(JSON.stringify({
+        type: "message_end",
+        message: {
+            role: "assistant",
+            provider: "deepseek",
+            model: "deepseek-test",
+            usage: { input: 2, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 4 },
+            content: [{ type: "text", text: "{\\"message\\":\\"Ready.\\",\\"messages\\":[]}" }],
+        },
+    }));
+});
+`)
+            chmodSync(binary, 0o755)
+            const responder = createDialogueResponder({
+                backend: "pi",
+                cwd: dir,
+                piBin: binary,
+                model: "deepseek-test",
+            })
+
+            const output = await responder(
+                {
+                    runId: "run-pi-dialogue",
+                    messageId: "message-pi-dialogue",
+                    systemPrompt: "text only system prompt",
+                    userPrompt: "status please",
+                },
+                new AbortController().signal,
+            )
+            assert.notEqual(typeof output, "string")
+            if (typeof output === "string") throw new Error("expected telemetry result")
+            assert.equal(output.invocation.backend, "pi")
+            assert.equal(output.invocation.observation.provider, "deepseek")
+
+            const captured = JSON.parse(readFileSync(capture, "utf8")) as {
+                argv: string[]
+                cwd: string
+                input: string
+            }
+            assert.notEqual(captured.cwd, dir)
+            assert.match(captured.cwd, /baro-pi-dialogue-/)
+            assert.equal(existsSync(captured.cwd), false)
+            assert.equal(captured.input, "status please")
+            for (const flag of [
+                "--no-tools",
+                "--no-extensions",
+                "--no-skills",
+                "--no-prompt-templates",
+                "--no-themes",
+                "--no-context-files",
+            ]) {
+                assert.equal(captured.argv.includes(flag), true, `missing ${flag}`)
+            }
+            assert.equal(
+                captured.argv[captured.argv.indexOf("--system-prompt") + 1],
+                "text only system prompt",
+            )
         })
     })
 

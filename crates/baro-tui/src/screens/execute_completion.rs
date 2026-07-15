@@ -336,30 +336,12 @@ pub fn render_completion(f: &mut Frame, app: &App) {
     }
 
     lines.push(Line::from(""));
-    if app.followup_input.is_some() {
-        // The input itself lives in the bottom strip (always visible);
-        // embedding it here once clipped past the popup's fixed height.
-        let fu_label = if app.pr_url.is_some() {
-            "Follow up — continue on this PR:"
-        } else {
-            "Follow up — continue this run:"
-        };
-        lines.push(Line::from(Span::styled(
-            fu_label,
-            Style::default().fg(banner_color).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            "type below \u{25BE}  ·  Enter run  ·  Esc cancel",
-            Style::default().fg(theme::MUTED),
-        )));
+    let footer = if abnormal {
+        "r rerun failed  |  q quit"
     } else {
-        let footer = if abnormal {
-            "r rerun failed  |  q quit"
-        } else {
-            "f follow-up  |  q quit"
-        };
-        lines.push(Line::from(Span::styled(footer, Style::default().fg(theme::MUTED))));
-    }
+        "f follow-up  |  q quit"
+    };
+    lines.push(Line::from(Span::styled(footer, Style::default().fg(theme::MUTED))));
 
     let block = Block::default()
         .borders(Borders::ALL)

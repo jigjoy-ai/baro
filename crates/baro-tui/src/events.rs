@@ -89,21 +89,13 @@ pub enum BaroEvent {
     },
 
     #[serde(rename = "dag")]
-    Dag {
-        levels: Vec<Vec<DagNode>>,
-    },
+    Dag { levels: Vec<Vec<DagNode>> },
 
     #[serde(rename = "story_start")]
-    StoryStart {
-        id: String,
-        title: String,
-    },
+    StoryStart { id: String, title: String },
 
     #[serde(rename = "story_log")]
-    StoryLog {
-        id: String,
-        line: String,
-    },
+    StoryLog { id: String, line: String },
 
     /// One condensed, typed entry for the structured Activity feed.
     #[serde(rename = "activity")]
@@ -140,10 +132,7 @@ pub enum BaroEvent {
     },
 
     #[serde(rename = "story_retry")]
-    StoryRetry {
-        id: String,
-        attempt: u32,
-    },
+    StoryRetry { id: String, attempt: u32 },
 
     #[serde(rename = "progress")]
     Progress {
@@ -160,14 +149,10 @@ pub enum BaroEvent {
     },
 
     #[serde(rename = "review_start")]
-    ReviewStart {
-        level: usize,
-    },
+    ReviewStart { level: usize },
 
     #[serde(rename = "review_log")]
-    ReviewLog {
-        line: String,
-    },
+    ReviewLog { line: String },
 
     #[serde(rename = "review_complete")]
     ReviewComplete {
@@ -180,9 +165,7 @@ pub enum BaroEvent {
     FinalizeStart,
 
     #[serde(rename = "finalize_complete")]
-    FinalizeComplete {
-        pr_url: Option<String>,
-    },
+    FinalizeComplete { pr_url: Option<String> },
 
     #[serde(rename = "done")]
     Done {
@@ -341,6 +324,18 @@ pub enum BaroEvent {
         violated: Vec<String>,
     },
 
+    /// Correlated reply from the run-local DialogueAgent. Compatibility
+    /// activity/story_log mirrors may follow, but this event is what updates
+    /// the durable user-facing conversation session.
+    #[serde(rename = "conversation_request")]
+    ConversationRequest { message_id: String, text: String },
+
+    #[serde(rename = "conversation_response")]
+    ConversationResponse { message_id: String, text: String },
+
+    #[serde(rename = "conversation_failed")]
+    ConversationFailed { message_id: String, error: String },
+
     /// Synthetic event the orchestrator client emits exactly once when
     /// the orchestrator subprocess terminates — whether cleanly with a
     /// preceding `Done` event or abruptly. Lets the TUI escape any
@@ -369,7 +364,12 @@ mod tests {
                 "removed":["S3"],"rewired":[{"id":"S4","depends_on":["S9"]}]}"#,
         );
         match e {
-            BaroEvent::Replan { added, removed, rewired, .. } => {
+            BaroEvent::Replan {
+                added,
+                removed,
+                rewired,
+                ..
+            } => {
                 assert_eq!(added[0].id, "S9");
                 assert_eq!(added[0].depends_on, vec!["S1"]);
                 assert_eq!(removed, vec!["S3"]);
@@ -381,7 +381,9 @@ mod tests {
 
     #[test]
     fn parses_intervention_and_merge_events() {
-        match parse(r#"{"type":"intervention","id":"S1","source":"sentry","action":"aborted","reason":"stall"}"#) {
+        match parse(
+            r#"{"type":"intervention","id":"S1","source":"sentry","action":"aborted","reason":"stall"}"#,
+        ) {
             BaroEvent::Intervention { id, action, .. } => {
                 assert_eq!(id, "S1");
                 assert_eq!(action, "aborted");
@@ -431,14 +433,50 @@ mod tests {
     fn parses_routed_and_critique() {
         match parse(r#"{"type":"routed","id":"S1","backend":"codex","model":"gpt-5.3-codex"}"#) {
             BaroEvent::Routed { id, backend, model } => {
-                assert_eq!((id.as_str(), backend.as_str(), model.as_str()), ("S1", "codex", "gpt-5.3-codex"));
+                assert_eq!(
+                    (id.as_str(), backend.as_str(), model.as_str()),
+                    ("S1", "codex", "gpt-5.3-codex")
+                );
             }
             other => panic!("wrong variant: {:?}", other),
         }
-        match parse(r#"{"type":"critique","id":"S1","verdict":"fail","reasoning":"missing tests","violated":["AC2"]}"#) {
-            BaroEvent::Critique { verdict, violated, .. } => {
+        match parse(
+            r#"{"type":"critique","id":"S1","verdict":"fail","reasoning":"missing tests","violated":["AC2"]}"#,
+        ) {
+            BaroEvent::Critique {
+                verdict, violated, ..
+            } => {
                 assert_eq!(verdict, "fail");
                 assert_eq!(violated, vec!["AC2"]);
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_correlated_runtime_conversation_events() {
+        match parse(r#"{"type":"conversation_request","message_id":"request-6","text":"Status?"}"#)
+        {
+            BaroEvent::ConversationRequest { message_id, text } => {
+                assert_eq!(message_id, "request-6");
+                assert_eq!(text, "Status?");
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+        match parse(
+            r#"{"type":"conversation_response","message_id":"request-7","text":"Still working.","actions":[{"recipient_id":"S1","text":"Run tests"}]}"#,
+        ) {
+            BaroEvent::ConversationResponse { message_id, text } => {
+                assert_eq!(message_id, "request-7");
+                assert_eq!(text, "Still working.");
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+        match parse(r#"{"type":"conversation_failed","message_id":"request-8","error":"timeout"}"#)
+        {
+            BaroEvent::ConversationFailed { message_id, error } => {
+                assert_eq!(message_id, "request-8");
+                assert_eq!(error, "timeout");
             }
             other => panic!("wrong variant: {:?}", other),
         }
@@ -450,7 +488,9 @@ mod tests {
         parse(r#"{"type":"replan"}"#);
         parse(r#"{"type":"critique","id":"S1"}"#);
         parse(r#"{"type":"routed","id":"S1","backend":"claude","model":"opus","future_field":42}"#);
-        match parse(r#"{"type":"activity","id":"S1","kind":"file_change","text":"src/a.rs","path":"src/a.rs","op":"modify"}"#) {
+        match parse(
+            r#"{"type":"activity","id":"S1","kind":"file_change","text":"src/a.rs","path":"src/a.rs","op":"modify"}"#,
+        ) {
             BaroEvent::Activity { path, op, .. } => {
                 assert_eq!(path.as_deref(), Some("src/a.rs"));
                 assert_eq!(op.as_deref(), Some("modify"));

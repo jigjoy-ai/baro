@@ -127,20 +127,38 @@ describe("script entrypoints run their main()", () => {
         assert.match(help.stdout, /--no-surgeon-llm\s+Use deterministic Surgeon evaluation/)
     })
 
-    it("keeps DialogueAgent collective-only and validates its text backend", async () => {
-        const legacy = await runScript("cli.ts", ["--with-dialogue"])
+    it("keeps DialogueAgent collective-only and accepts every safe text backend", async () => {
+        const legacy = await runScript("cli.ts", [
+            "--coordination",
+            "legacy",
+            "--with-dialogue",
+        ])
         assert.equal(legacy.code, 2)
         assert.match(legacy.stderr, /requires --coordination collective/)
 
-        const invalidBackend = await runScript("cli.ts", [
+        const codex = await runScript("cli.ts", [
             "--coordination",
             "collective",
             "--with-dialogue",
             "--dialogue-llm",
             "codex",
+            "--prd",
+            "missing-codex-dialogue-prd.json",
+        ])
+        assert.equal(codex.code, 2)
+        assert.match(codex.stderr, /PRD not found/)
+        assert.doesNotMatch(codex.stderr, /dialogue-llm must/)
+
+        const invalidBackend = await runScript("cli.ts", [
+            "--dialogue-llm",
+            "opencode",
         ])
         assert.equal(invalidBackend.code, 2)
-        assert.match(invalidBackend.stderr, /must be 'claude' or 'openai'/)
+        assert.match(invalidBackend.stderr, /must be 'claude', 'openai', or 'codex'/)
+
+        const help = await runScript("cli.ts", ["--help"])
+        assert.equal(help.code, 0)
+        assert.match(help.stdout, /dialogue backend: claude\|openai\|codex/)
     })
 
     it("orchestrator CLI rejects malformed collective worker files before a run", async () => {

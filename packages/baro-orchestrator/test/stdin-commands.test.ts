@@ -86,6 +86,11 @@ describe("stdin agent_message commands", () => {
         })
         assert.deepEqual(emitted, [
             {
+                type: "conversation_request",
+                message_id: "user-message-1",
+                text: "What is the collective doing?",
+            },
+            {
                 type: "story_log",
                 id: "_dialogue",
                 line: "[you → collective] What is the collective doing?",

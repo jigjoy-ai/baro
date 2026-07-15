@@ -28,16 +28,18 @@ baro "Add JWT authentication with role-based access control"
 
 You write one sentence. baro does the rest:
 
-- **You describe the goal** — plain English, in your repo.
+- **You describe the goal** — a conversation agent either confirms the scope or asks only the questions that materially change it.
 - **An Architect pins the design** — file paths, schemas, API shapes, library choices — so dozens of agents don't each invent their own.
 - **A Planner splits it into a DAG of stories** — with dependencies, so independent work runs at the same time.
 - **A fleet of agents builds it in parallel** — not one chat agent typing for an hour, dozens, each in its own isolated git branch.
-- **It reviews and repairs itself** — a Critic checks every turn and corrects on failure; a Surgeon replans stories that get stuck.
+- **It reviews and repairs itself** — a tool-less Critic gates supported routes and corrects live workers on failure; a Surgeon replans stories that get stuck.
 - **You get a pull request** — build-verified, with a stories table and run stats.
 
 ```mermaid
 flowchart LR
-    Goal([your goal]) --> A[Architect<br/><sub>pins design<br/>decisions</sub>]
+    Goal([your goal]) --> C[Conversation<br/><sub>clarifies intent<br/>when needed</sub>]
+    C --> G[Validated<br/>GoalEnvelope]
+    G --> A[Architect<br/><sub>pins design<br/>decisions</sub>]
     A --> P[Planner<br/><sub>emits story DAG</sub>]
     P --> S1[Story 1]
     P --> S2[Story 2]
@@ -81,6 +83,7 @@ key plumbing for the subscription backends.
 
 ```bash
 baro --llm claude    "Your goal"   # default — Claude Code on Anthropic Max subscription
+baro --llm codex     "Your goal"   # Codex CLI; implicit Critic is disabled safely
 baro --llm codex --critic-llm claude "Your goal" # Codex execution + tool-less Claude review
 baro --llm openai    "Your goal"   # Mozaik-native OpenAI (per-call API billing)
 baro --llm opencode  "Your goal"   # OpenCode CLI — multi-provider agent shell (any model)
@@ -181,38 +184,50 @@ Most multi-agent setups have one orchestrator function in the middle that drives
 orchestrator becomes the bottleneck the moment you push past a handful of concurrent agents — and
 adding a new behaviour means editing its control flow.
 
-The execution runtime uses one shared event bus
+Every new run starts with a durable conversation session. Each front-door model
+turn is a fresh text-only process in an empty temporary directory; it can clarify
+intent, but it cannot inspect the checkout or choose workers, routes, or DAG
+mutations. Only its strictly validated `GoalEnvelope` is handed to Architect and
+Planner.
+
+The execution runtime then uses one shared event bus
 ([Mozaik](https://github.com/jigjoy-ai/mozaik)). Its Board/Conductor, factories, critics and
 other observers are participants; N parallel story agents are N independently scheduled
 executions whose activity is projected onto typed events. CLI routes use subprocesses and a
 local bridge, while native OpenAI-compatible routes run in-process. Architect and Planner run
-before this execution environment. The default `legacy` engine uses a
-deterministic Conductor participant for DAG policy. The experimental `collective` engine splits
+before this execution environment. The default `collective` engine splits
 allocation, leases, integration and completion across participants and lets workers publish peer
 messages and propose versioned changes to the not-yet-started DAG. The Board validates and
 persists the complete candidate before it reports the change as applied; active stories remain
-fenced until a correlated revocation lifecycle exists.
+fenced until a correlated revocation lifecycle exists. `legacy` remains as the explicit
+Conductor compatibility path for old-run comparison and rollback.
 
 Try the collective engine with Baro-owned pushes and PR creation disabled:
 
 ```bash
-baro --coordination collective --local-only "Your goal"
+baro --local-only "Your goal"
 ```
 
-An experimental conversation participant can be added without turning it into
-the coordinator:
+In collective mode, the same user-facing session also has a run-local
+`DialogueAgent` on the bus:
 
 ```bash
-baro --coordination collective --local-only --with-dialogue "Your goal"
+baro --local-only "Your goal"
 ```
 
 It is text-only, receives no repository tools, and cannot grant leases, mutate
-the DAG, integrate work, verify the run, or report success. Removing it does
-not stop the collective. While a run is active, press `c` for collective chat;
+the DAG directly, integrate work, verify the run, or report success. It may
+explain the bounded run projection, message an active worker, or submit a
+versioned add-only proposal that the Board independently validates. Removing it
+does not stop the collective. While a run is active, press `c` for collective chat;
 `m` still sends a direct message to the selected worker. Direct/headless
-clients can use the `dialogue_message` stdin event.
+clients can use the `dialogue_message` stdin event. Local Claude Code and Codex
+runs pass continuity through a PRD-bound, size-limited temporary snapshot that
+is deleted when the orchestrator exits; the transcript is not copied into the
+repository.
 
-Omitting `--coordination` keeps the current Conductor coordination path as the default.
+Use `--coordination legacy` only when you explicitly want the earlier Conductor
+compatibility path.
 For hard network isolation, point it at a disposable clone with its git remotes removed;
 story agents can execute shell commands, so `--local-only` is a coordinator policy, not an OS sandbox.
 
@@ -244,11 +259,12 @@ flowchart LR
 
 | Participant | Role |
 |---|---|
-| **Architect** | One Opus call before planning — emits a `DecisionDocument` that pins every cross-cutting design decision (file paths, schemas, API shapes, library choices) so parallel agents don't each invent their own |
+| **Architect** | One strong-model design pass before planning — emits a `DecisionDocument` that pins every cross-cutting decision (file paths, schemas, API shapes, library choices) so parallel agents don't each invent their own |
 | **Planner** | Decomposes the goal into a story DAG, with the DecisionDocument already pinned |
-| **Conductor** | Default/legacy state machine that drives DAG levels by reacting to bus events |
-| **Board + Broker** | Opt-in collective policy: projects run state, collects worker bids, grants correlated leases, atomically validates versioned future-DAG proposals and never treats process exit as proof of success |
-| **DialogueAgent** | Optional, disposable conversation participant that explains a sanitized run view and may message active workers, but has no control-plane authority |
+| **Conversation session** | Durable first contact: clarifies intent, persists a correlated transcript, and hands one validated GoalEnvelope to planning without repository access |
+| **Conductor** | Explicit `legacy` compatibility state machine that drives DAG levels by reacting to bus events |
+| **Board + Broker** | Default collective policy: projects run state, collects worker bids, grants correlated leases, atomically validates versioned future-DAG proposals and never treats process exit as proof of success |
+| **DialogueAgent** | Automatic collective participant that continues the bounded conversation during a run and may message active workers or submit Board-validated add-only proposals, but has no control-plane authority |
 | **StoryAgent** | One isolated worker per story and git worktree. Native OpenAI runs in-process through Mozaik; Claude Code is a multi-turn CLI worker, while Codex, OpenCode and Pi story workers are currently one-shot CLI processes |
 | **Critic + AcceptanceGate** | Evaluates terminal output against acceptance criteria. Live backends can consume corrective turns; one-shot backends produce a blocking verdict that triggers recovery instead of a message to a dead process |
 | **Sentry** | Flags overlapping Edit/Write tool calls across concurrent stories |

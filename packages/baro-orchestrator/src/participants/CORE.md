@@ -142,5 +142,12 @@ any resulting offer. Route capability and lease lifetime are source- and
 correlation-bound before Dialogue may address a worker. Baro-created semantic
 events are immutable snapshots before Mozaik fan-out. Dialogue cannot directly
 bid, grant a lease, mutate durable state, integrate, verify, or complete a run.
+An optional ephemeral `ConversationContextSnapshot` can seed the accepted goal,
+summary, and bounded front-door history. The CLI accepts it only through
+`--conversation-context-file` (or `BARO_CONVERSATION_CONTEXT_FILE`), validates
+an exact size-bounded schema, and binds its session and goal fingerprint to the
+PRD before the run starts. Free-form context stays in an explicitly untrusted
+prompt section; only safe session correlation and the caller-owned lifecycle
+phase reach the system layer. The snapshot is not copied into the PRD.
 It is still a text-only semantic supervisor rather than a full repository-tool
 harness; the TUI redesign is deferred until the headless contract is stable.

@@ -41,9 +41,11 @@ export interface RunOpenCodeOneShotOptions {
     label?: string
     /** Optional invocation telemetry sink. It cannot alter runner success. */
     onInvocation?: RunnerInvocationObserver
+    /** Optional caller cancellation. Aborting terminates the harness child. */
+    signal?: AbortSignal
     /**
-     * Critic-only hardening. Installs a local, deny-all agent whose prompt is
-     * this real system prompt, disables plugins, and rejects any tool event.
+     * Text-only evaluator hardening. Installs a local, deny-all agent whose
+     * prompt is this real system prompt, disables plugins, and rejects tools.
      * The caller must provide a fresh empty cwd. Other callers are unchanged.
      */
     safeEvaluatorSystemPrompt?: string
@@ -57,6 +59,7 @@ export interface RunOpenCodeOneShotOptions {
 export async function runOpenCodeOneShot(
     opts: RunOpenCodeOneShotOptions,
 ): Promise<string> {
+    if (opts.signal?.aborted) throw abortError()
     const label = opts.label ?? "opencode"
     const safeEvaluator = opts.safeEvaluatorSystemPrompt !== undefined
     const safeConfig = safeEvaluator
@@ -65,6 +68,7 @@ export async function runOpenCodeOneShot(
               opts.safeEvaluatorSystemPrompt!,
           )
         : null
+    if (opts.signal?.aborted) throw abortError()
 
     const args = ["run", "--format", "json"]
     if (safeEvaluator) {
@@ -115,15 +119,51 @@ export async function runOpenCodeOneShot(
         const eventTypesSeen: string[] = []
         let evaluatorToolUseSeen = false
         let timedOut = false
+        let aborted = false
+        let timer: ReturnType<typeof setTimeout> | null = null
+        let killTimer: ReturnType<typeof setTimeout> | null = null
 
-        const timer = setTimeout(() => {
-            timedOut = true
+        const clearTimers = (): void => {
+            if (timer !== null) {
+                clearTimeout(timer)
+                timer = null
+            }
+            if (killTimer !== null) {
+                clearTimeout(killTimer)
+                killTimer = null
+            }
+            opts.signal?.removeEventListener("abort", onAbort)
+        }
+        const terminate = (): void => {
             try {
                 proc.kill("SIGTERM")
             } catch {
                 /* noop */
             }
+            if (killTimer !== null) return
+            killTimer = setTimeout(() => {
+                killTimer = null
+                try {
+                    proc.kill("SIGKILL")
+                } catch {
+                    /* noop */
+                }
+            }, 5_000)
+            killTimer.unref?.()
+        }
+        const onAbort = (): void => {
+            if (aborted) return
+            aborted = true
+            terminate()
+        }
+        timer = setTimeout(() => {
+            timedOut = true
+            terminate()
         }, timeoutMs)
+        timer.unref?.()
+        opts.signal?.addEventListener("abort", onAbort, { once: true })
+        // Close the race between the pre-spawn check and listener install.
+        if (opts.signal?.aborted) onAbort()
 
         proc.stdout!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => {
@@ -150,7 +190,7 @@ export async function runOpenCodeOneShot(
                             `[${label}] usage: in=${numberForLog(tokens.input)} out=${numberForLog(tokens.output)}\n`,
                         )
                     }
-                    if (!timedOut) {
+                    if (!timedOut && !aborted) {
                         invocations.observe(openCodeObservation(event, opts))
                     }
                     continue
@@ -188,11 +228,11 @@ export async function runOpenCodeOneShot(
         })
 
         proc.on("error", (err) => {
-            clearTimeout(timer)
+            clearTimers()
             if (
                 !invocations.finish(
                     unknownOpenCodeObservation(
-                        timedOut ? "timed_out" : "failed",
+                        timedOut || aborted ? "timed_out" : "failed",
                         Date.now() - startedAt,
                         opts,
                     ),
@@ -200,11 +240,11 @@ export async function runOpenCodeOneShot(
             ) {
                 return
             }
-            reject(err)
+            reject(aborted ? abortError() : err)
         })
 
         proc.on("exit", (code, signal) => {
-            clearTimeout(timer)
+            clearTimers()
             const elapsedMs = Date.now() - startedAt
 
             const ctx = [
@@ -212,6 +252,7 @@ export async function runOpenCodeOneShot(
                 `exit=${code}`,
                 signal ? `signal=${signal}` : null,
                 timedOut ? `timedOut=true (cap=${timeoutMs}ms)` : null,
+                aborted ? "aborted=true" : null,
                 `events=${eventTypesSeen.length}`,
                 eventTypesSeen.length > 0
                     ? `event_types=[${[...new Set(eventTypesSeen)].join(",")}]`
@@ -224,16 +265,25 @@ export async function runOpenCodeOneShot(
             // callers feed the string into a markdown/JSON extractor that
             // accepts truncated-but-closed fragments, so partial text on
             // timeout/crash would silently yield an incomplete doc or PRD.
-            if (timedOut || signal != null || (code != null && code !== 0)) {
+            if (
+                timedOut ||
+                aborted ||
+                signal != null ||
+                (code != null && code !== 0)
+            ) {
                 if (
                     !invocations.finish(
                         unknownOpenCodeObservation(
-                            timedOut ? "timed_out" : "failed",
+                            timedOut || aborted ? "timed_out" : "failed",
                             elapsedMs,
                             opts,
                         ),
                     )
                 ) {
+                    return
+                }
+                if (aborted) {
+                    reject(abortError())
                     return
                 }
                 reject(
@@ -292,7 +342,8 @@ export async function runOpenCodeOneShot(
 
         if (safeEvaluator) {
             if (!proc.stdin) {
-                proc.kill()
+                clearTimers()
+                terminate()
                 invocations.finish(
                     unknownOpenCodeObservation(
                         "failed",
@@ -304,7 +355,9 @@ export async function runOpenCodeOneShot(
                 return
             }
             proc.stdin.on("error", (error) => {
-                proc.kill()
+                if (aborted || timedOut) return
+                clearTimers()
+                terminate()
                 if (
                     invocations.finish(
                         unknownOpenCodeObservation(
@@ -320,6 +373,12 @@ export async function runOpenCodeOneShot(
             proc.stdin.end(opts.prompt)
         }
     })
+}
+
+function abortError(): Error {
+    const error = new Error("OpenCode one-shot aborted")
+    error.name = "AbortError"
+    return error
 }
 
 async function installSafeEvaluatorAgent(
@@ -345,7 +404,7 @@ async function installSafeEvaluatorAgent(
     const config = {
         agent: {
             "baro-critic": {
-                description: "Baro inference-only acceptance evaluator",
+                description: "Baro inference-only text evaluator",
                 mode: "primary",
                 prompt: systemPrompt,
                 tools: disabledTools,

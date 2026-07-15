@@ -7,8 +7,8 @@
  *   - direct TS callers (tests, demos)
  */
 
-import { existsSync, mkdirSync } from "fs"
-import { hostname } from "os"
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "fs"
+import { hostname, tmpdir } from "os"
 import { dirname, join } from "path"
 import { fileURLToPath } from "url"
 
@@ -104,6 +104,11 @@ import {
 import { emit } from "./tui-protocol.js"
 import { createVerifyPlan, recommendedVerifyTimeoutMs } from "./verify.js"
 import {
+    assertConversationContextBinding,
+    validateConversationContextSnapshot,
+    type ConversationContextSnapshot,
+} from "./session/conversation-context.js"
+import {
     isValidWorkBidEstimate,
     selectWorkBid,
     type WorkBidPolicy,
@@ -172,7 +177,7 @@ export interface OrchestrateConfig {
     collectiveAcceptanceTimeoutMs?: number
     /** Optional communication-only conversational participant. Collective only. */
     withDialogue?: boolean
-    /** Text-only backing model for DialogueAgent. Default: Claude. */
+    /** Text-only backing model for DialogueAgent. Defaults to a compatible run backend. */
     dialogueLlm?: DialogueBackend
     /** Provider model for DialogueAgent. Defaults by backend. */
     dialogueModel?: string
@@ -180,6 +185,9 @@ export interface OrchestrateConfig {
     dialogueTimeoutMs?: number
     /** Test/embedding seam; overrides the built-in text-only model adapter. */
     dialogueResponder?: DialogueResponder
+    /** Ephemeral front-door continuity for DialogueAgent. It is strictly
+     * bound to PRD conversation metadata and is never persisted to the repo. */
+    conversationContext?: ConversationContextSnapshot
     /** Opt-in autonomous worker candidates; absent preserves first-claim collective. */
     collectiveWorkers?: readonly CollectiveWorkerCandidateConfig[]
     /** Bounded local auction window. Default: 50ms when candidates are configured. */
@@ -382,6 +390,13 @@ export interface OrchestrateResult {
 export async function orchestrate(
     config: OrchestrateConfig,
 ): Promise<OrchestrateResult> {
+    const conversationContext = config.conversationContext
+        ? validateConversationContextSnapshot(config.conversationContext)
+        : undefined
+    if (conversationContext) {
+        const prd = loadPrd(config.prdPath)
+        assertConversationContextBinding(conversationContext, prd)
+    }
     // Set once at the chokepoint every run passes through; child agents
     // inherit process.env, so no shell command they issue can hang on a
     // prompt or a test watcher.
@@ -426,6 +441,9 @@ export async function orchestrate(
     })
     if (config.withDialogue && coordinationMode !== "collective") {
         throw new Error("DialogueAgent requires coordinationMode='collective'")
+    }
+    if (conversationContext && !config.withDialogue) {
+        throw new Error("conversationContext requires DialogueAgent")
     }
 
     // Shared by event correlation, memory sessions, and worktree names.
@@ -556,6 +574,8 @@ export async function orchestrate(
           })
         : null
     let gatewayBillingReconciled = false
+    let dialogueRuntimeCwd: string | null = null
+    let cleanupDialogue: (() => void) | null = null
     const reconcileGatewayBilling = async (): Promise<void> => {
         if (!gatewayBillingCoordinator || gatewayBillingReconciled) return
         gatewayBillingReconciled = true
@@ -1148,15 +1168,22 @@ export async function orchestrate(
                 "DialogueAgent requires the collective Board and LeaseBroker",
             )
         }
-        const dialogueBackend: DialogueBackend = config.dialogueLlm ??
-            (llm === "openai" ? "openai" : "claude")
-        const responder = config.dialogueResponder ?? createDialogueResponder({
-            backend: dialogueBackend,
-            cwd: config.cwd,
-            model: config.dialogueModel,
-            timeoutMs: config.dialogueTimeoutMs,
-            billingCoordinator: gatewayBillingCoordinator ?? undefined,
-        })
+        const dialogueBackend = resolveDialogueBackend(config.dialogueLlm, llm)
+        let responder = config.dialogueResponder
+        if (!responder) {
+            // Subscription harnesses normally discover project instructions
+            // and read the checkout. Dialogue receives an explicit semantic
+            // projection instead, so keep its provider process in an empty
+            // run-local directory with no repository ancestry.
+            dialogueRuntimeCwd = mkdtempSync(join(tmpdir(), "baro-dialogue-runtime-"))
+            responder = createDialogueResponder({
+                backend: dialogueBackend,
+                cwd: dialogueRuntimeCwd,
+                model: config.dialogueModel,
+                timeoutMs: config.dialogueTimeoutMs,
+                billingCoordinator: gatewayBillingCoordinator ?? undefined,
+            })
+        }
         dialogueAgent = new DialogueAgent({
             runId,
             responder,
@@ -1169,10 +1196,16 @@ export async function orchestrate(
                 ] as const),
             ),
             controlAuthority: collectiveBoard,
+            conversationContext,
             timeoutMs: config.dialogueTimeoutMs,
         })
         collectiveBoard.setConversationAuthority(dialogueAgent)
         dialogueAgent.join(env)
+        cleanupDialogue = () => {
+            if (dialogueAgent?.getEnvironments().includes(env)) {
+                dialogueAgent.leave(env)
+            }
+        }
         if (emitTui) new DialogueForwarder(dialogueAgent).join(env)
         config.onDialogueReady?.(dialogueAgent)
     }
@@ -1319,7 +1352,11 @@ export async function orchestrate(
     } finally {
         // Exceptions during setup, coordination, verification, or finalization
         // must not strand a correlated provider call without a final pull.
+        cleanupDialogue?.()
         await reconcileGatewayBilling()
+        if (dialogueRuntimeCwd) {
+            rmSync(dialogueRuntimeCwd, { recursive: true, force: true })
+        }
     }
 }
 
@@ -1333,6 +1370,15 @@ export function assertSupportedCriticBackend(
             "inference mode. Select --critic-llm claude|openai|opencode|pi " +
             "or disable the Critic with --no-critic.",
     )
+}
+
+/** Keep the dialogue lane on the selected harness when it has a safe text-only adapter. */
+export function resolveDialogueBackend(
+    configured: DialogueBackend | undefined,
+    runBackend: NonNullable<OrchestrateConfig["llm"]>,
+): DialogueBackend {
+    if (configured !== undefined) return configured
+    return runBackend
 }
 
 export function resolveDefaultStorySelector(args: {

@@ -36,10 +36,21 @@ it("forwards dialogue output only from the bound participant", () => {
     )
 
     assert.deepEqual(output, [
+        {
+            type: "conversation_response",
+            message_id: "message-1",
+            text: "One worker is active.",
+            actions: [{ recipient_id: "S1", text: "Run tests." }],
+        },
         { type: "activity", id: "_dialogue", kind: "agent_msg", text: "One worker is active." },
         { type: "story_log", id: "_dialogue", line: "[collective] One worker is active." },
         { type: "activity", id: "_dialogue", kind: "agent_msg", text: "→ S1: Run tests." },
         { type: "story_log", id: "_dialogue", line: "[collective → S1] Run tests." },
+        {
+            type: "conversation_failed",
+            message_id: "message-2",
+            error: "responder failed",
+        },
         { type: "activity", id: "_dialogue", kind: "error", text: "responder failed", ok: false },
         { type: "story_log", id: "_dialogue", line: "[collective/unavailable] responder failed" },
     ])

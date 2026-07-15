@@ -9,6 +9,7 @@ import { resolve } from "path"
 
 import {
     orchestrate,
+    resolveDialogueBackend,
     validateCollectiveWorkers,
     type CollectiveWorkerCandidateConfig,
     type OrchestrateConfig,
@@ -23,6 +24,7 @@ import { handleStdinCommand } from "../src/stdin-commands.js"
 import { subscribeCommands } from "../src/tui-protocol.js"
 import type { CoordinationMode } from "../src/semantic-events.js"
 import { loadPrd } from "../src/prd.js"
+import { loadConversationContextFile } from "../src/session/conversation-context.js"
 import {
     parseEndpoints,
     parseTierMap,
@@ -58,8 +60,9 @@ interface CliArgs {
     surgeonUseLlm: boolean
     withSupervisor: boolean
     withDialogue: boolean
-    dialogueLlm?: "claude" | "openai"
+    dialogueLlm?: "claude" | "openai" | "codex" | "opencode" | "pi"
     dialogueModel?: string
+    conversationContextFile?: string
     surgeonModel?: string
     storyModel?: string
     effort?: string
@@ -213,9 +216,15 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--dialogue-llm": {
                 const value = required(argv, ++i, "--dialogue-llm")
-                if (value !== "claude" && value !== "openai") {
+                if (
+                    value !== "claude" &&
+                    value !== "openai" &&
+                    value !== "codex" &&
+                    value !== "opencode" &&
+                    value !== "pi"
+                ) {
                     process.stderr.write(
-                        `[cli] --dialogue-llm must be 'claude' or 'openai', got '${value}'\n`,
+                        `[cli] --dialogue-llm must be 'claude', 'openai', 'codex', 'opencode', or 'pi', got '${value}'\n`,
                     )
                     process.exit(2)
                 }
@@ -224,6 +233,13 @@ function parseArgs(argv: string[]): CliArgs {
             }
             case "--dialogue-model":
                 args.dialogueModel = required(argv, ++i, "--dialogue-model")
+                break
+            case "--conversation-context-file":
+                args.conversationContextFile = required(
+                    argv,
+                    ++i,
+                    "--conversation-context-file",
+                )
                 break
             case "--surgeon-model":
                 args.surgeonModel = required(argv, ++i, "--surgeon-model")
@@ -333,7 +349,7 @@ function printHelp(): void {
             "  --cwd <path>          Working directory (default: .)",
             "  --parallel <N>        Max parallel stories per level (0 = unlimited)",
             "  --timeout <secs>      Per-story timeout (default: auto — effort-scaled; any value overrides)",
-            "  --coordination <mode> Coordination engine: legacy|collective (default: legacy)",
+            "  --coordination <mode> Coordination engine: collective|legacy (default: collective)",
             "  --local-only          Disable Baro-owned pushes/PRs (use a remote-free clone for hard isolation)",
             "  --collective-workers <json>  Candidate array file for opt-in worker bidding",
             "  --collective-bid-window-ms <N>  Local bid collection window (default: 50)",
@@ -346,9 +362,10 @@ function printHelp(): void {
             "  --audit-log <path>    Persist all bus events to JSONL",
             "  --with-critic         Enable Critic (live acceptance evaluator)",
             "  --critic-model <name> Model for Critic (default: haiku)",
-            "  --with-dialogue       Enable collective conversation participant (no control authority)",
-            "  --dialogue-llm <name> Text-only dialogue backend: claude|openai (default: claude)",
+            "  --with-dialogue       Enable conversation participant explicitly (automatic in collective mode)",
+            "  --dialogue-llm <name> Text-only dialogue backend: claude|openai|codex|opencode|pi (default: follows --llm)",
             "  --dialogue-model <id> Model for the optional DialogueAgent",
+            "  --conversation-context-file <path>  Ephemeral front-door context for DialogueAgent (or BARO_CONVERSATION_CONTEXT_FILE)",
             "  --no-librarian        Disable Librarian (cross-agent memory)",
             "  --no-memory           Disable semantic memory (uses tag-based Librarian instead)",
             "  --no-sentry           Disable Sentry (file conflict detector)",
@@ -395,12 +412,16 @@ async function main(): Promise<void> {
     const coordinationMode =
         args.coordinationMode ??
         (envCoordination as CoordinationMode | undefined) ??
-        "legacy"
+        "collective"
     const localOnly = args.localOnly || process.env.BARO_LOCAL_ONLY === "1"
-    const withDialogue = args.withDialogue || process.env.BARO_WITH_DIALOGUE === "1"
-    const dialogueLlm = args.dialogueLlm ?? parseDialogueBackend(
-        process.env.BARO_DIALOGUE_LLM,
-        "BARO_DIALOGUE_LLM",
+    const withDialogue = coordinationMode === "collective" ||
+        args.withDialogue || process.env.BARO_WITH_DIALOGUE === "1"
+    const dialogueLlm = resolveDialogueBackend(
+        args.dialogueLlm ?? parseDialogueBackend(
+            process.env.BARO_DIALOGUE_LLM,
+            "BARO_DIALOGUE_LLM",
+        ),
+        args.llm,
     )
     const dialogueModel = args.dialogueModel ?? process.env.BARO_DIALOGUE_MODEL
     if (withDialogue && coordinationMode !== "collective") {
@@ -489,6 +510,31 @@ async function main(): Promise<void> {
         )
     } catch (error) {
         process.stderr.write(`[cli] invalid PRD: ${(error as Error).message}\n`)
+        process.exit(2)
+    }
+    const conversationContextFile =
+        args.conversationContextFile ??
+        process.env.BARO_CONVERSATION_CONTEXT_FILE
+    let conversationContext: OrchestrateConfig["conversationContext"]
+    if (conversationContextFile) {
+        const path = resolve(cwd, conversationContextFile)
+        try {
+            conversationContext = loadConversationContextFile(path)
+        } catch (error) {
+            process.stderr.write(
+                `[cli] invalid conversation context file ${path}: ` +
+                    `${(error as Error).message}\n`,
+            )
+            process.exit(2)
+        }
+    }
+    // The path is an orchestrator intake seam, not ambient worker context.
+    // Remove it before any harness subprocess inherits this environment.
+    delete process.env.BARO_CONVERSATION_CONTEXT_FILE
+    if (conversationContext && !withDialogue) {
+        process.stderr.write(
+            "[cli] conversation context requires collective DialogueAgent\n",
+        )
         process.exit(2)
     }
     const workersFile =
@@ -657,6 +703,7 @@ async function main(): Promise<void> {
         withDialogue,
         dialogueLlm,
         dialogueModel,
+        conversationContext,
         withLibrarian: args.noLibrarian ? false : undefined,
         withMemory: args.noMemory ? false : undefined,
         withSentry: args.noSentry ? false : undefined,
@@ -733,10 +780,18 @@ async function main(): Promise<void> {
 function parseDialogueBackend(
     value: string | undefined,
     label: string,
-): "claude" | "openai" | undefined {
+): "claude" | "openai" | "codex" | "opencode" | "pi" | undefined {
     if (value === undefined || value === "") return undefined
-    if (value === "claude" || value === "openai") return value
-    process.stderr.write(`[cli] ${label} must be 'claude' or 'openai', got '${value}'\n`)
+    if (
+        value === "claude" ||
+        value === "openai" ||
+        value === "codex" ||
+        value === "opencode" ||
+        value === "pi"
+    ) return value
+    process.stderr.write(
+        `[cli] ${label} must be 'claude', 'openai', 'codex', 'opencode', or 'pi', got '${value}'\n`,
+    )
     process.exit(2)
 }
 

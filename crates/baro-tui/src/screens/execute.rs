@@ -557,10 +557,6 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     // Active input replaces the hint line entirely.
-    if let Some(buf) = &app.followup_input {
-        render_input_line(f, area, "follow-up", buf);
-        return;
-    }
     if let Some((id, buf)) = &app.agent_msg_input {
         let target = if id == crate::app::DIALOGUE_AGENT_ID {
             "\u{2192} collective".to_string()
@@ -800,13 +796,6 @@ mod tests {
         assert!(content.contains("→ collective ▸"));
         assert!(content.contains("status please"));
 
-        let mut app = app_mid_run();
-        app.done = true;
-        app.followup_input = Some("ship the docs too".to_string());
-        let content = draw(&mut app, 120, 40);
-        assert!(content.contains("follow-up ▸"));
-        assert!(content.contains("ship the docs too"));
-        assert!(content.contains("Esc cancel"));
     }
 
     #[test]

@@ -17,7 +17,7 @@ interface WireEvent {
     data: unknown
     agentId: string
 }
-interface RunDispatchMsg {
+export interface RunDispatchMsg {
     t: "dispatch_run"
     runId: string
     goal: string
@@ -42,12 +42,16 @@ interface RunDispatchMsg {
     confirmMode?: boolean
     // Follow-up: check out this PR's branch and run with --continue so it updates in place.
     followUp?: { prNumber: number }
+    // Additive v2 opt-in: run the collective engine with its DialogueAgent so
+    // run-scoped conversation_message commands have a live recipient.
+    conversation?: boolean
 }
 type ToRunner =
     | RunDispatchMsg
-    | { t: "cancel"; storyId: string }
-    | { t: "agent_message"; storyId: string; text: string }
-    | { t: "confirm_mode"; mode: string }
+    | { t: "cancel"; storyId?: string; runId?: string; commandId?: string }
+    | { t: "agent_message"; storyId: string; text: string; runId?: string; messageId?: string }
+    | { t: "conversation_message"; runId: string; messageId: string; text: string; sessionId?: string; afterRequestId?: string }
+    | { t: "confirm_mode"; mode: string; runId?: string; commandId?: string }
     | { t: "ping"; ts: number }
     | { t: "rejected"; reason: string }
     | { t: string }
@@ -62,6 +66,13 @@ const httpBase = canonicalControlHttpOrigin(url)
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
 const VERSION = "0.74.11"
+export const RUNNER_PROTOCOL_VERSION = 2
+export const RUNNER_PROTOCOL_FEATURES = Object.freeze([
+    "run_scoped_commands",
+    "command_ack",
+    "run_conversation",
+] as const)
+export const RUNNER_MAX_CONCURRENT_RUNS = 1
 const updateCachePath = join(homedir(), ".baro", "update-check.json")
 
 // Latest published baro-ai version, cached ~24h in ~/.baro so we don't hit npm on every
@@ -375,7 +386,42 @@ function captureDiff(cwd: string, base: string): string {
 
 // Run one dispatched goal headless and forward its native event stream. With a
 // repo, clone it (token auth) and run there so baro pushes + opens a PR.
-async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: AbortSignal): Promise<RunOutcome> {
+export interface RunnerCommandSink {
+    writable: boolean
+    destroyed: boolean
+    write(data: string, callback?: (error?: Error | null) => void): boolean
+}
+
+type BindCommandSink = (runId: string, sink: RunnerCommandSink | null, readyForRunCommands?: boolean) => void
+
+export function buildRunArgs(dispatch: RunDispatchMsg, cwd: string): string[] {
+    return [
+        "--headless",
+        dispatch.goal,
+        "--cwd",
+        cwd,
+        "--llm",
+        dispatch.route?.backend ?? "claude",
+        "--coordination",
+        "collective",
+        "--parallel",
+        String(dispatch.parallel),
+        "--timeout",
+        String(dispatch.timeoutSecs),
+        ...(dispatch.conversation ? ["--with-dialogue"] : []),
+        ...(dispatch.quick ? ["--quick"] : []),
+        ...(dispatch.confirmMode ? ["--confirm-mode"] : []),
+        ...(dispatch.followUp ? ["--continue"] : []),
+    ]
+}
+
+async function runGoal(
+    d: RunDispatchMsg,
+    emit: (e: WireEvent) => void,
+    signal: AbortSignal,
+    bindCommandSink: BindCommandSink,
+): Promise<RunOutcome> {
+    if (signal.aborted) return { success: false, durationSecs: 1, error: "cancelled" }
     // Point the shared dep caches at process.env BEFORE the child snapshot below, so
     // agents' later builds reuse whatever preinstallDeps downloads.
     setupSharedCaches()
@@ -401,6 +447,17 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
             return { success: false, durationSecs: 1, error: `clone failed: ${(e as Error).message}` }
         }
         excludeDepDirs(cwd)
+        // A cancel may arrive while the asynchronous clone is running. Do not
+        // enter a potentially minutes-long synchronous dependency install after
+        // that cancellation has already been observed.
+        if (signal.aborted) {
+            try {
+                rmSync(cwd, { recursive: true, force: true })
+            } catch {
+                // best-effort clone cleanup
+            }
+            return { success: false, durationSecs: 1, error: "cancelled" }
+        }
         // Populate the shared node_modules before worktrees symlink to it and
         // before agents run. Non-fatal — see preinstallDeps.
         preinstallDeps(cwd, emit)
@@ -466,17 +523,26 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         }
     }
 
+    // A cancel can arrive while an async clone is in flight. AbortSignal does
+    // not replay an already-fired event to listeners attached after spawn.
+    if (signal.aborted) {
+        cleanup?.()
+        return { success: false, durationSecs: 1, error: "cancelled" }
+    }
+
     const outcome = await new Promise<RunOutcome>((resolve) => {
         // Planning + execution use baro's own model routing (Architect/Planner on
         // the latest opus for the claude backend) — we don't override it.
         const child = spawn(
             baroBin,
-            ["--headless", d.goal, "--cwd", cwd, "--llm", d.route?.backend ?? "claude", "--parallel", String(d.parallel), "--timeout", String(d.timeoutSecs), ...(d.quick ? ["--quick"] : []), ...(d.confirmMode ? ["--confirm-mode"] : []), ...(d.followUp ? ["--continue"] : [])],
+            buildRunArgs(d, cwd),
             // stdin is piped: baro --headless forwards JSON command lines
             // (agent_message) into the orchestrator's stdin lane.
             { cwd, env, stdio: ["pipe", "pipe", "pipe"] },
         )
-        activeChild = child
+        // confirm_mode may be written immediately, but Dialogue/agent messages
+        // must wait for the orchestrator stdin lane (announced by init).
+        bindCommandSink(d.runId, child.stdin, false)
 
         const started = Date.now()
         const secs = () => Math.max(1, Math.round((Date.now() - started) / 1000))
@@ -502,6 +568,9 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
                     continue
                 }
                 const sid = String(ev.id ?? ev.storyId ?? ev.story_id ?? d.runId)
+                if (ev.type === "init" || ev.type === "story_start") {
+                    bindCommandSink(d.runId, child.stdin, true)
+                }
                 if (sid !== d.runId && !sid.startsWith("_")) stories.add(sid)
                 emit({ type: String(ev.type ?? "baro_event"), agentId: sid, data: ev })
                 if (ev.type === "story_complete") passed++
@@ -523,9 +592,11 @@ async function runGoal(d: RunDispatchMsg, emit: (e: WireEvent) => void, signal: 
         child.stderr?.on("data", (chunk: Buffer) => {
             stderrTail = (stderrTail + chunk.toString()).slice(-4000)
         })
-        signal.addEventListener("abort", () => child.kill("SIGTERM"))
+        const abortChild = () => child.kill("SIGTERM")
+        if (signal.aborted) abortChild()
+        else signal.addEventListener("abort", abortChild, { once: true })
         child.on("close", (code) => {
-            if (activeChild === child) activeChild = null
+            bindCommandSink(d.runId, null)
             const ok = doneSuccess ?? (code === 0 && failed === 0 && passed > 0)
             // Don't let baro's startup "User goal:" banner (it echoes the goal to stderr)
             // or the agent CLI's harmless "no stdin" warning masquerade as the failure
@@ -627,12 +698,462 @@ let rejected: string | undefined
 // started on, so events + run_result survive a reconnect: the control plane
 // re-attaches by runnerId and only fails the run after a grace window.
 let currentWs: WebSocket | null = null
-const inflight = new Map<string, AbortController>()
-// The active run's baro child — its stdin is the mid-run agent-message lane.
-let activeChild: ReturnType<typeof spawn> | null = null
 const send = (m: unknown): void => {
     if (currentWs?.readyState === WebSocket.OPEN) currentWs.send(encode(m))
 }
+
+type RunnerExecution = (
+    dispatch: RunDispatchMsg,
+    emit: (event: WireEvent) => void,
+    signal: AbortSignal,
+    bindCommandSink: BindCommandSink,
+) => Promise<RunOutcome>
+
+type CommandName = "dispatch_run" | "cancel" | "agent_message" | "conversation_message" | "confirm_mode"
+type CommandStatus = "accepted" | "delivered" | "rejected"
+interface PendingRunnerCommand {
+    command: CommandName
+    commandId?: string
+    runId: string
+    payload: unknown
+    allowBeforeRuntime?: boolean
+}
+const MAX_PENDING_RUNNER_COMMANDS = 100
+const MAX_REPLAYED_TERMINAL_RESULTS = 32
+const MAX_REPLAYED_CONVERSATION_EVENTS = 128
+
+/**
+ * The v2 runner-side control lane. It is deliberately single-run: until the
+ * transport can multiplex a child + event outbox per run, refusing a second
+ * dispatch is the only safe alternative to cross-run stdin/event delivery.
+ * Legacy commands without runId remain accepted when exactly one run is live.
+ */
+export class RunnerProtocolController {
+    private readonly inflight = new Map<string, AbortController>()
+    private readonly commandOutcomes = new Map<string, { status: CommandStatus; error?: string }>()
+    private activeRunId: string | null = null
+    private activeConversation = false
+    private commandSink: RunnerCommandSink | null = null
+    private commandLaneReady = false
+    private frontDoorGate: { sessionId: string; afterRequestId: string } | null = null
+    private readonly pendingCommands: PendingRunnerCommand[] = []
+    private readonly terminalResults = new Map<string, Record<string, unknown>>()
+    // Conversation responses/gates are control-plane state, not cosmetic logs.
+    // Keep a bounded chronological replay so a response emitted while the WS is
+    // down is projected after reconnect instead of leaving Rust blocked on stdin.
+    private readonly conversationEventReplay = new Map<string, WireEvent[]>()
+    // Distinguishes a terminal result from an accepted dispatch (whose work may
+    // itself have failed) from the synthetic terminal rejection emitted when a
+    // second dispatch arrived while the single-run runner was busy.
+    private readonly acceptedDispatches = new Set<string>()
+
+    constructor(
+        private readonly sendMessage: (message: unknown) => void,
+        private readonly execute: RunnerExecution,
+        private readonly onRunComplete?: (runId: string, outcome: RunOutcome) => void,
+    ) {}
+
+    get activeCount(): number {
+        return this.inflight.size
+    }
+
+    /** At-least-once terminal delivery across a WS reconnect. Cloud outcomes
+     * are idempotent by runId, so bounded replay is safe. */
+    replayTerminalResults(): void {
+        for (const result of this.terminalResults.values()) this.sendMessage(result)
+    }
+
+    replayConversationEvents(): void {
+        for (const [runId, events] of this.conversationEventReplay) {
+            for (const event of events) {
+                this.sendMessage({
+                    t: "event",
+                    runId,
+                    storyId: event.agentId,
+                    event,
+                })
+            }
+        }
+    }
+
+    handle(message: ToRunner): boolean {
+        switch (message.t) {
+            case "dispatch_run":
+                this.dispatch(message)
+                return true
+            case "cancel":
+                this.cancel(message)
+                return true
+            case "agent_message":
+                this.agentMessage(message)
+                return true
+            case "conversation_message":
+                this.conversationMessage(message)
+                return true
+            case "confirm_mode":
+                this.confirmMode(message)
+                return true
+            default:
+                return false
+        }
+    }
+
+    private dispatch(dispatch: RunDispatchMsg): void {
+        const terminal = this.terminalResults.get(dispatch.runId)
+        if (terminal) {
+            const accepted = this.acceptedDispatches.has(dispatch.runId)
+            this.ack(
+                dispatch.runId,
+                dispatch.runId,
+                "dispatch_run",
+                accepted ? "accepted" : "rejected",
+                accepted ? undefined : typeof terminal.error === "string" ? terminal.error : "dispatch was rejected",
+            )
+            // Control-plane dispatch is at-least-once across reconnects. A
+            // replay after completion must replay the immutable outcome, never
+            // execute the same runId a second time.
+            this.sendMessage(terminal)
+            return
+        }
+        if (this.inflight.has(dispatch.runId)) {
+            this.ack(dispatch.runId, dispatch.runId, "dispatch_run", "accepted")
+            return
+        }
+        if (this.inflight.size >= RUNNER_MAX_CONCURRENT_RUNS) {
+            const error = `runner is busy with ${this.activeRunId ?? "another run"}; maxConcurrentRuns=${RUNNER_MAX_CONCURRENT_RUNS}`
+            this.ack(dispatch.runId, dispatch.runId, "dispatch_run", "rejected", error)
+            this.sendTerminalResult({
+                t: "run_result",
+                runId: dispatch.runId,
+                success: false,
+                durationSecs: 0,
+                error,
+            })
+            return
+        }
+
+        const controller = new AbortController()
+        this.inflight.set(dispatch.runId, controller)
+        this.activeRunId = dispatch.runId
+        this.activeConversation = dispatch.conversation === true
+        this.commandSink = null
+        this.commandLaneReady = false
+        this.frontDoorGate = null
+        this.pendingCommands.length = 0
+        this.commandOutcomes.clear()
+        this.conversationEventReplay.set(dispatch.runId, [])
+        this.acceptedDispatches.add(dispatch.runId)
+        this.ack(dispatch.runId, dispatch.runId, "dispatch_run", "accepted")
+        console.log(`[baro] run ${dispatch.runId}: ${dispatch.goal.split("\n")[0]}`)
+        const emit = (event: WireEvent) => {
+            this.rememberConversationEvent(dispatch.runId, event)
+            this.observeRunEvent(dispatch.runId, event)
+            this.sendMessage({
+                t: "event",
+                runId: dispatch.runId,
+                storyId: event.agentId,
+                event,
+            })
+        }
+        const bindCommandSink: BindCommandSink = (runId, sink, readyForRunCommands = true) => {
+            if (runId !== this.activeRunId) return
+            this.commandSink = sink
+            if (!sink) this.commandLaneReady = false
+            else if (readyForRunCommands) this.commandLaneReady = true
+            if (sink) this.flushPendingCommands(runId)
+        }
+
+        void (async () => {
+            let outcome: RunOutcome
+            try {
+                outcome = await this.execute(dispatch, emit, controller.signal, bindCommandSink)
+            } catch (error) {
+                outcome = {
+                    success: false,
+                    durationSecs: 0,
+                    error: error instanceof Error ? error.message : String(error),
+                }
+            }
+            this.rejectPendingCommands(dispatch.runId, "run ended before the command lane became available")
+            this.sendTerminalResult({ t: "run_result", runId: dispatch.runId, ...outcome })
+            this.inflight.delete(dispatch.runId)
+            if (this.activeRunId === dispatch.runId) {
+                this.activeRunId = null
+                this.activeConversation = false
+                this.commandSink = null
+                this.commandLaneReady = false
+                this.frontDoorGate = null
+                this.pendingCommands.length = 0
+                this.commandOutcomes.clear()
+            }
+            console.log(`[baro] run ${dispatch.runId}: ${outcome.success ? "done" : "failed"} (${outcome.durationSecs}s)`)
+            this.onRunComplete?.(dispatch.runId, outcome)
+        })()
+    }
+
+    private cancel(message: Extract<ToRunner, { t: "cancel" }>): void {
+        const requestedRunId = message.runId ?? message.storyId
+        const runId = this.requireActiveRun("cancel", requestedRunId, message.commandId)
+        if (!runId) return
+        const commandId = message.commandId
+        if (commandId && !this.beginCommand("cancel", commandId, runId)) return
+        this.inflight.get(runId)?.abort()
+        if (commandId) this.finishCommand("cancel", commandId, runId, "delivered")
+    }
+
+    private agentMessage(message: Extract<ToRunner, { t: "agent_message" }>): void {
+        const runId = this.requireActiveRun("agent_message", message.runId, message.messageId)
+        if (!runId) return
+        if (typeof message.storyId !== "string" || !message.storyId || typeof message.text !== "string" || !message.text.trim()) {
+            this.rejectCommand("agent_message", message.messageId, runId, "invalid agent message")
+            return
+        }
+        this.writeCommand("agent_message", message.messageId, runId, {
+            type: "agent_message",
+            id: message.storyId,
+            text: message.text,
+        })
+    }
+
+    private conversationMessage(message: Extract<ToRunner, { t: "conversation_message" }>): void {
+        const runId = this.requireActiveRun("conversation_message", message.runId, message.messageId)
+        if (!runId) return
+        if (!this.activeConversation) {
+            this.rejectCommand("conversation_message", message.messageId, runId, "conversation is not enabled for the active run")
+            return
+        }
+        if (typeof message.messageId !== "string" || !message.messageId || typeof message.text !== "string" || !message.text.trim()) {
+            this.rejectCommand("conversation_message", message.messageId, runId, "invalid conversation message")
+            return
+        }
+        const targetsFrontDoor = message.sessionId !== undefined || message.afterRequestId !== undefined
+        if (targetsFrontDoor) {
+            const gate = this.frontDoorGate
+            if (
+                !gate ||
+                message.sessionId !== gate.sessionId ||
+                message.afterRequestId !== gate.afterRequestId
+            ) {
+                this.rejectCommand(
+                    "conversation_message",
+                    message.messageId,
+                    runId,
+                    "front-door conversation correlation does not match the active clarification gate",
+                )
+                return
+            }
+            this.writeCommand("conversation_message", message.messageId, runId, {
+                type: "conversation_message",
+                session_id: gate.sessionId,
+                after_request_id: gate.afterRequestId,
+                message_id: message.messageId,
+                text: message.text,
+            }, true)
+            return
+        }
+        if (!this.commandLaneReady) {
+            this.rejectCommand(
+                "conversation_message",
+                message.messageId,
+                runId,
+                "front-door conversation requires sessionId and afterRequestId before execution starts",
+            )
+            return
+        }
+        this.writeCommand("conversation_message", message.messageId, runId, {
+            type: "dialogue_message",
+            message_id: message.messageId,
+            text: message.text,
+        })
+    }
+
+    private confirmMode(message: Extract<ToRunner, { t: "confirm_mode" }>): void {
+        const runId = this.requireActiveRun("confirm_mode", message.runId, message.commandId)
+        if (!runId) return
+        if (typeof message.mode !== "string" || !message.mode) {
+            this.rejectCommand("confirm_mode", message.commandId, runId, "invalid mode")
+            return
+        }
+        this.writeCommand("confirm_mode", message.commandId, runId, {
+            kind: "confirm_mode",
+            mode: message.mode,
+        })
+    }
+
+    private requireActiveRun(command: CommandName, requestedRunId: string | undefined, commandId: string | undefined): string | null {
+        const activeRunId = this.activeRunId
+        const ackRunId = requestedRunId ?? activeRunId
+        if (!activeRunId) {
+            if (ackRunId) this.rejectCommand(command, commandId, ackRunId, "no run is active")
+            return null
+        }
+        if (requestedRunId && requestedRunId !== activeRunId) {
+            this.rejectCommand(command, commandId, requestedRunId, `command targets ${requestedRunId}, active run is ${activeRunId}`)
+            return null
+        }
+        return activeRunId
+    }
+
+    private writeCommand(command: CommandName, commandId: string | undefined, runId: string, payload: unknown, allowBeforeRuntime = false): void {
+        if (commandId && !this.beginCommand(command, commandId, runId)) return
+        const pending = { command, commandId, runId, payload, allowBeforeRuntime }
+        if (this.deliverCommand(pending)) return
+        if (this.pendingCommands.length >= MAX_PENDING_RUNNER_COMMANDS) {
+            this.finishCommand(command, commandId, runId, "rejected", "run command queue is full")
+            return
+        }
+        this.pendingCommands.push(pending)
+    }
+
+    private deliverCommand(pending: PendingRunnerCommand): boolean {
+        const { command, commandId, runId, payload } = pending
+        const sink = this.commandSink
+        if (!sink || !sink.writable || sink.destroyed) return false
+        if (command !== "confirm_mode" && !pending.allowBeforeRuntime && !this.commandLaneReady) return false
+        try {
+            sink.write(`${JSON.stringify(payload)}\n`, (error) => {
+                this.finishCommand(
+                    command,
+                    commandId,
+                    runId,
+                    error ? "rejected" : "delivered",
+                    error?.message,
+                )
+            })
+        } catch (error) {
+            this.finishCommand(
+                command,
+                commandId,
+                runId,
+                "rejected",
+                error instanceof Error ? error.message : String(error),
+            )
+        }
+        return true
+    }
+
+    private flushPendingCommands(runId: string): void {
+        if (this.activeRunId !== runId) return
+        const waiting = this.pendingCommands.splice(0)
+        for (const pending of waiting) {
+            if (!this.deliverCommand(pending)) this.pendingCommands.push(pending)
+        }
+    }
+
+    private observeRunEvent(runId: string, event: WireEvent): void {
+        if (runId !== this.activeRunId) return
+        const data = event.data && typeof event.data === "object"
+            ? event.data as Record<string, unknown>
+            : {}
+        if (event.type === "conversation_needs_input") {
+            const sessionId = data.session_id
+            const afterRequestId = data.after_request_id
+            if (typeof sessionId === "string" && sessionId && typeof afterRequestId === "string" && afterRequestId) {
+                this.frontDoorGate = { sessionId, afterRequestId }
+                this.flushPendingCommands(runId)
+            }
+            return
+        }
+        if (event.type === "conversation_response" && data.kind === "ready") {
+            this.frontDoorGate = null
+            return
+        }
+        if (event.type === "init" || event.type === "story_start") {
+            this.frontDoorGate = null
+        }
+    }
+
+    private rememberConversationEvent(runId: string, event: WireEvent): void {
+        if (![
+            "conversation_response",
+            "conversation_responded",
+            "conversation_failed",
+            "conversation_needs_input",
+            "init",
+        ].includes(event.type)) return
+        let events = this.conversationEventReplay.get(runId)
+        if (!events) this.conversationEventReplay.set(runId, (events = []))
+        events.push(event)
+        if (events.length > MAX_REPLAYED_CONVERSATION_EVENTS) {
+            events.splice(0, events.length - MAX_REPLAYED_CONVERSATION_EVENTS)
+        }
+    }
+
+    private rejectPendingCommands(runId: string, error: string): void {
+        for (const pending of this.pendingCommands.splice(0)) {
+            if (pending.runId === runId) {
+                this.finishCommand(pending.command, pending.commandId, runId, "rejected", error)
+            }
+        }
+    }
+
+    private beginCommand(command: CommandName, commandId: string, runId: string): boolean {
+        const key = `${runId}:${command}:${commandId}`
+        const previous = this.commandOutcomes.get(key)
+        if (previous) {
+            this.ack(runId, commandId, command, previous.status, previous.error)
+            return false
+        }
+        this.commandOutcomes.set(key, { status: "accepted" })
+        this.ack(runId, commandId, command, "accepted")
+        return true
+    }
+
+    private finishCommand(command: CommandName, commandId: string | undefined, runId: string, status: CommandStatus, error?: string): void {
+        if (!commandId) return
+        this.commandOutcomes.set(`${runId}:${command}:${commandId}`, { status, ...(error ? { error } : {}) })
+        this.ack(runId, commandId, command, status, error)
+    }
+
+    private rejectCommand(command: CommandName, commandId: string | undefined, runId: string, error: string): void {
+        this.finishCommand(command, commandId, runId, "rejected", error)
+    }
+
+    private ack(runId: string, commandId: string, command: CommandName, status: CommandStatus, error?: string): void {
+        this.sendMessage({
+            t: "command_ack",
+            runId,
+            commandId,
+            command,
+            status,
+            ...(error ? { error } : {}),
+        })
+    }
+
+    private sendTerminalResult(result: Record<string, unknown> & { runId: string }): void {
+        this.terminalResults.set(result.runId, result)
+        while (this.terminalResults.size > MAX_REPLAYED_TERMINAL_RESULTS) {
+            const oldest = this.terminalResults.keys().next().value as string | undefined
+            if (!oldest) break
+            this.terminalResults.delete(oldest)
+            this.acceptedDispatches.delete(oldest)
+            this.conversationEventReplay.delete(oldest)
+        }
+        this.sendMessage(result)
+    }
+}
+
+let runOnceCompletion: { runId: string; outcome: RunOutcome } | null = null
+let runOnceExitTimer: ReturnType<typeof setTimeout> | null = null
+const scheduleRunOnceExit = (): void => {
+    if (!runOnce || !runOnceCompletion || runOnceExitTimer || currentWs?.readyState !== WebSocket.OPEN) return
+    runOnceExitTimer = setTimeout(() => {
+        runOnceExitTimer = null
+        if (!runOnceCompletion || currentWs?.readyState !== WebSocket.OPEN) return
+        const { outcome } = runOnceCompletion
+        currentWs.close()
+        process.exit(outcome.success ? 0 : 1)
+    }, 1500)
+}
+
+const controller = new RunnerProtocolController(send, runGoal, (runId, outcome) => {
+    // Ephemeral worker: deliver the result, give the socket a moment to flush,
+    // then exit so the Fargate task tears down. If the socket is down, stay
+    // alive, reconnect, replay the terminal result, and only then exit.
+    if (!runOnce) return
+    runOnceCompletion = { runId, outcome }
+    scheduleRunOnceExit()
+})
 
 function handleMessage(m: ToRunner): void {
     if (m.t === "rejected") {
@@ -641,45 +1162,7 @@ function handleMessage(m: ToRunner): void {
         currentWs?.close()
     } else if (m.t === "ping") {
         send({ t: "pong", ts: (m as { ts: number }).ts })
-    } else if (m.t === "cancel") {
-        inflight.get((m as { storyId: string }).storyId)?.abort()
-    } else if (m.t === "agent_message") {
-        // Mid-run operator message → the active run's stdin command lane.
-        // Dropped silently when no run is live or stdin already closed.
-        const { storyId, text } = m as { storyId: string; text: string }
-        const stdin = activeChild?.stdin
-        if (stdin && stdin.writable && !stdin.destroyed) {
-            stdin.write(`${JSON.stringify({ type: "agent_message", id: storyId, text })}\n`)
-        }
-    } else if (m.t === "confirm_mode") {
-        // Ask-after-planning: the operator's mode choice → baro's stdin confirm
-        // gate. Dropped silently if no run is live or stdin already closed.
-        const { mode } = m as { mode: string }
-        const stdin = activeChild?.stdin
-        if (stdin && stdin.writable && !stdin.destroyed) {
-            stdin.write(`${JSON.stringify({ kind: "confirm_mode", mode })}\n`)
-        }
-    } else if (m.t === "dispatch_run") {
-        const d = m as RunDispatchMsg
-        if (inflight.has(d.runId)) return // already running — ignore a duplicate dispatch
-        const ac = new AbortController()
-        inflight.set(d.runId, ac)
-        console.log(`[baro] run ${d.runId}: ${d.goal.split("\n")[0]}`)
-        const emit = (event: WireEvent) => send({ t: "event", storyId: event.agentId, event })
-        void runGoal(d, emit, ac.signal).then((o) => {
-            send({ t: "run_result", runId: d.runId, ...o })
-            inflight.delete(d.runId)
-            console.log(`[baro] run ${d.runId}: ${o.success ? "done" : "failed"} (${o.durationSecs}s)`)
-            // Ephemeral worker: deliver the result, give the socket a moment to
-            // flush, then exit so the Fargate task tears down.
-            if (runOnce) {
-                setTimeout(() => {
-                    currentWs?.close()
-                    process.exit(o.success ? 0 : 1)
-                }, 1500)
-            }
-        })
-    }
+    } else controller.handle(m)
 }
 
 function goodbyeAndExit(): void {
@@ -732,8 +1215,22 @@ function connectOnce(): Promise<void> {
         const ws = new WebSocket(url)
         currentWs = ws
         ws.on("open", () => {
-            ws.send(encode({ t: "register", runnerId, hostname: hostname(), token, backends: ["claude"], workspaceIds: ["default"], version: VERSION }))
-            console.log(inflight.size ? `[baro] reconnected to ${url} — resuming ${inflight.size} in-flight run(s)` : `[baro] connected to ${url} — workspace ${workspaceDir}`)
+            ws.send(encode({
+                t: "register",
+                runnerId,
+                hostname: hostname(),
+                token,
+                backends: ["claude"],
+                workspaceIds: ["default"],
+                version: VERSION,
+                protocolVersion: RUNNER_PROTOCOL_VERSION,
+                features: RUNNER_PROTOCOL_FEATURES,
+                maxConcurrentRuns: RUNNER_MAX_CONCURRENT_RUNS,
+            }))
+            controller.replayConversationEvents()
+            controller.replayTerminalResults()
+            scheduleRunOnceExit()
+            console.log(controller.activeCount ? `[baro] reconnected to ${url} — resuming ${controller.activeCount} in-flight run(s)` : `[baro] connected to ${url} — workspace ${workspaceDir}`)
             void maybeOfferServiceInstall()
         })
         ws.on("message", (data: Buffer) => {
@@ -746,7 +1243,7 @@ function connectOnce(): Promise<void> {
             handleMessage(m)
         })
         ws.on("close", () => {
-            console.log(inflight.size ? "[baro] disconnected mid-run; reconnecting in 2s…" : "[baro] disconnected; reconnecting in 2s…")
+            console.log(controller.activeCount ? "[baro] disconnected mid-run; reconnecting in 2s…" : "[baro] disconnected; reconnecting in 2s…")
             resolve()
         })
         ws.on("error", (e: Error) => console.error("[baro] ws error:", e.message))
@@ -795,7 +1292,7 @@ async function main() {
             void (async () => {
                 try {
                     const latest = await getLatest(true)
-                    if (latest && semverLt(VERSION, latest) && inflight.size === 0 && (await selfUpdate(latest))) {
+                    if (latest && semverLt(VERSION, latest) && controller.activeCount === 0 && (await selfUpdate(latest))) {
                         console.log(`[baro] updated to ${latest} — restarting service…`)
                         process.exit(0)
                     }
@@ -840,7 +1337,7 @@ async function main() {
     // exit so an orphaned cloud task (paired but never given work) can't linger.
     if (runOnce) {
         setTimeout(() => {
-            if (inflight.size === 0) {
+            if (controller.activeCount === 0 && !runOnceCompletion) {
                 console.error("[baro] --once: no run dispatched within 180s; exiting")
                 process.exit(2)
             }
@@ -856,4 +1353,4 @@ async function main() {
     }
 }
 
-void main()
+if (process.env.BARO_RUNNER_LIBRARY_ONLY !== "1") void main()
