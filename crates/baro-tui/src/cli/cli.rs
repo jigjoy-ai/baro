@@ -28,8 +28,8 @@ pub struct Cli {
     pub resume: bool,
 
     /// Max parallel story executors (0 = unlimited)
-    #[arg(long, default_value = "0")]
-    pub parallel: u32,
+    #[arg(long)]
+    pub parallel: Option<u32>,
 
     /// Coordination engine: collective event-bus agents (default) or legacy Conductor compatibility.
     #[arg(long, value_parser=["legacy", "collective"], env = "BARO_COORDINATION", default_value = "collective")]

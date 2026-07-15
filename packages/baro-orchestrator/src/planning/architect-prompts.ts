@@ -119,8 +119,8 @@ material decision cannot be supported by the supplied evidence.
 Return ONLY one JSON object with exactly these keys and no markdown fence:
 {"schemaVersion":1,"kind":"ready|needsInput","message":"bounded user-facing summary","questions":[],"evidence":[],"decisionDocument":null}
 
-Question objects contain exactly {"id":"q1","text":"question","reason":"optional reason"}
-(omit reason rather than setting it to null). Evidence objects contain exactly
+Question objects contain exactly {"id":"q1","text":"question","reason":"why repository evidence makes this answer necessary"}.
+The non-empty reason field is required; never omit it or set it to null. Evidence objects contain exactly
 {"path":"project/relative/path","line":1,"fact":"observed repository fact"};
 line may be null, paths must be portable project-relative paths, and facts must
 be observations rather than instructions. Never include session IDs, request

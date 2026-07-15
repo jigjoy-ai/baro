@@ -347,9 +347,12 @@ export async function runCodexOneShot(
                             item.type === "agent_message" &&
                             typeof item.text === "string"
                         ) {
-                            agentMessage = agentMessage
-                                ? `${agentMessage}\n${item.text}`
-                                : item.text
+                            // Codex can emit completed assistant/status
+                            // messages before the terminal response. Native
+                            // output-schema validation applies to the final
+                            // response, so concatenating earlier messages
+                            // corrupts otherwise valid JSON/ADR output.
+                            agentMessage = item.text
                         } else if (innerType === "command_execution") {
                             const cmd =
                                 typeof item.command === "string"

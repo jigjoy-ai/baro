@@ -98,6 +98,14 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
                 false,
             )
             assert.equal((captured.schema as { additionalProperties?: unknown }).additionalProperties, false)
+            const questionItems = (captured.schema as {
+                properties?: {
+                    questions?: {
+                        items?: { required?: unknown }
+                    }
+                }
+            }).properties?.questions?.items
+            assert.deepEqual(questionItems?.required, ["id", "text", "reason"])
             assert.match(captured.argv.at(-1) ?? "", /PRE-ACCEPTANCE VALIDATION/)
         })
     })
@@ -256,6 +264,7 @@ const argv = process.argv.slice(2);
 const schemaIndex = argv.indexOf("--output-schema");
 const schema = schemaIndex >= 0 ? JSON.parse(readFileSync(argv[schemaIndex + 1], "utf8")) : null;
 writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, schema }));
+console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "Repository inspection is complete; preparing the terminal outcome." } }));
 console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(${JSON.stringify(payload)}) } }));
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } }));
 `)

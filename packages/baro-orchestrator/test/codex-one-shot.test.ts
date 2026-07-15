@@ -86,6 +86,23 @@ describe("runCodexOneShot exit contract", () => {
         })
     })
 
+    it("returns the terminal agent message instead of corrupting it with progress text", async () => {
+        await withTempDir("baro-codex-terminal-message-", async (dir) => {
+            const terminal = '{"schemaVersion":1,"kind":"ready"}'
+            const bin = writeFakeCodex(dir, {
+                texts: ["I am inspecting the repository now.", terminal],
+            })
+
+            const result = await runCodexOneShot({
+                prompt: "return structured output",
+                cwd: dir,
+                codexBin: bin,
+            })
+
+            assert.equal(result, terminal)
+        })
+    })
+
     it("pipes an exact large prompt instead of placing it on argv", async () => {
         await withTempDir("baro-codex-stdin-", async (dir) => {
             const argvFile = join(dir, "argv.json")

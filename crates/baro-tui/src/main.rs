@@ -783,7 +783,7 @@ async fn run_app(
 
     let rc = config::load_config(&cwd);
 
-    app.parallel_limit = rc.parallel.unwrap_or(0);
+    app.parallel_limit = resolve_parallel_limit(rc.parallel, cli.parallel);
     // 0 = "auto": the orchestrator effort-scales the per-story timeout.
     app.timeout_secs = rc.timeout.unwrap_or(0);
 
@@ -803,9 +803,6 @@ async fn run_app(
         _ => {} // "routed" or None = keep defaults
     }
 
-    if cli.parallel != 0 {
-        app.parallel_limit = cli.parallel;
-    }
     if let Some(t) = cli.timeout {
         app.timeout_secs = t;
     }
@@ -3139,7 +3136,7 @@ fn user_mode_contract(mode: &str, reason: &str) -> String {
         }),
         "parallel" => serde_json::json!({
             "mode": "parallel", "confidence": 1, "reason": reason,
-            "parallelism": 4, "source": "user",
+            "source": "user",
         }),
         _ => serde_json::json!({
             "mode": "focused", "confidence": 1, "reason": reason,
@@ -3147,6 +3144,12 @@ fn user_mode_contract(mode: &str, reason: &str) -> String {
         }),
     };
     v.to_string()
+}
+
+/// CLI values override repository configuration even when the explicit value
+/// is zero, because zero is the meaningful "unlimited" setting.
+fn resolve_parallel_limit(config: Option<u32>, cli: Option<u32>) -> u32 {
+    cli.or(config).unwrap_or(0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3592,13 +3595,15 @@ fn message_command_line(id: &str, text: &str, message_id: Option<&str>) -> Strin
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::{
         apply_primary_provider_choice, coordination_has_runtime_dialogue, delete_prev_word,
         disable_implicit_codex_critic, fixed_mode_contract, headless_failure_reason,
         message_command_line, preferred_jigjoy_gateway_key, preferred_jigjoy_gateway_url,
-        reconcile_jigjoy_phase_overrides, unsupported_critic_backend, App, PrdStoryOutput,
-        ReviewStory, JIGJOY_CHEAP_STORY_MODEL, JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL,
-        JIGJOY_STRONG_MODEL,
+        reconcile_jigjoy_phase_overrides, resolve_parallel_limit, unsupported_critic_backend, App,
+        PrdStoryOutput, ReviewStory, JIGJOY_CHEAP_STORY_MODEL, JIGJOY_GATEWAY_URL,
+        JIGJOY_HEAVY_STORY_MODEL, JIGJOY_STRONG_MODEL,
     };
 
     fn deleted(input: &str) -> String {
@@ -3705,7 +3710,20 @@ mod tests {
             serde_json::from_str(&fixed_mode_contract(false, "parallel").unwrap()).unwrap();
         assert_eq!(parallel["mode"], "parallel");
         assert_eq!(parallel["source"], "user");
-        assert_eq!(parallel["parallelism"], 4);
+        assert!(parallel.get("parallelism").is_none());
+        assert!(parallel.get("maxStories").is_none());
+
+        let sequential: serde_json::Value =
+            serde_json::from_str(&fixed_mode_contract(false, "sequential").unwrap()).unwrap();
+        assert_eq!(sequential["mode"], "sequential");
+        assert_eq!(sequential["parallelism"], 1);
+        assert_eq!(sequential["maxStories"], 5);
+
+        let focused: serde_json::Value =
+            serde_json::from_str(&fixed_mode_contract(false, "focused").unwrap()).unwrap();
+        assert_eq!(focused["mode"], "focused");
+        assert_eq!(focused["parallelism"], 1);
+        assert_eq!(focused["maxStories"], 1);
 
         // Quick is the stronger operator override even if another mode value
         // is present on the App.
@@ -3714,6 +3732,20 @@ mod tests {
         assert_eq!(quick["mode"], "focused");
         assert_eq!(quick["source"], "user");
         assert_eq!(quick["maxStories"], 1);
+    }
+
+    #[test]
+    fn explicit_unlimited_parallel_overrides_repository_cap() {
+        let omitted = crate::cli::cli::Cli::try_parse_from(["baro"]).unwrap();
+        let unlimited =
+            crate::cli::cli::Cli::try_parse_from(["baro", "--parallel", "0"]).unwrap();
+
+        assert_eq!(omitted.parallel, None);
+        assert_eq!(unlimited.parallel, Some(0));
+        assert_eq!(resolve_parallel_limit(Some(4), Some(0)), 0);
+        assert_eq!(resolve_parallel_limit(Some(4), None), 4);
+        assert_eq!(resolve_parallel_limit(None, Some(6)), 6);
+        assert_eq!(resolve_parallel_limit(None, None), 0);
     }
 
     #[test]

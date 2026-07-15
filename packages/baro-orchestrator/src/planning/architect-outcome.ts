@@ -103,7 +103,12 @@ export const ARCHITECT_OUTCOME_JSON_SCHEMA = deepFreeze({
             items: {
                 type: "object",
                 additionalProperties: false,
-                required: ["id", "text"],
+                // Codex/OpenAI strict structured outputs require every
+                // declared object property to be listed in `required`.
+                // The provider schema can require `reason` while the
+                // provider-neutral parser remains backward-compatible with
+                // Claude/OpenCode/Pi outputs that omit it.
+                required: ["id", "text", "reason"],
                 properties: {
                     id: { type: "string", minLength: 1, maxLength: MAX_CORRELATION_ID_LENGTH },
                     text: { type: "string", minLength: 1, maxLength: MAX_QUESTION_TEXT_LENGTH },

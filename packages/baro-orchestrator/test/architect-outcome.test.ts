@@ -7,6 +7,7 @@ import {
     parseArchitectOutcome,
     wrapArchitectOutcome,
 } from "../src/planning/architect-outcome.js"
+import { ARCHITECT_OUTCOME_SYSTEM_PROMPT } from "../src/planning/architect-prompts.js"
 
 const DECISION_DOCUMENT = `## Existing context
 The repository uses a strict provider-neutral planning contract.
@@ -61,6 +62,21 @@ describe("ArchitectOutcomeV1", () => {
         assert.throws(() => {
             ;(acceptedNeedsInput.evidence as unknown as unknown[]).push("forged")
         }, TypeError)
+
+        // Non-schema providers and persisted v1 payloads remain compatible
+        // with the original optional-reason parser contract.
+        const withoutReason = needsInput()
+        const question = withoutReason.questions[0] as { reason?: string }
+        delete question.reason
+        const acceptedWithoutReason = parseArchitectOutcome(
+            JSON.stringify(withoutReason),
+        )
+        assert.equal("reason" in acceptedWithoutReason.questions[0]!, false)
+    })
+
+    it("keeps the shared prompt aligned with the strict native schema", () => {
+        assert.match(ARCHITECT_OUTCOME_SYSTEM_PROMPT, /reason field is required/)
+        assert.doesNotMatch(ARCHITECT_OUTCOME_SYSTEM_PROMPT, /optional reason/)
     })
 
     it("rejects prose, unknown keys, discriminator violations and unsafe evidence", () => {
