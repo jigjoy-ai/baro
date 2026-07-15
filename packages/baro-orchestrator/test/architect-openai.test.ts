@@ -1,4 +1,13 @@
 import assert from "node:assert/strict"
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import {
@@ -14,6 +23,7 @@ import {
     type ArchitectOpenAITestRuntime,
 } from "../src/planning/architect-openai.js"
 import { GenericOpenAIModel } from "../src/planning/openai-runtime.js"
+import { createCodebaseTools } from "../src/planning/codebase-tools.js"
 
 const PARALLEL_MODE = {
     mode: "parallel" as const,
@@ -31,7 +41,141 @@ Mozaik already exposes AbortSignal in its inference parameters.
 **Decision:** Pass the same AbortSignal through every provider boundary.
 **Consequences:** Existing calls without a signal remain unchanged.`
 
+function namedTool(tools: Tool[], name: string): Tool {
+    const tool = tools.find((candidate) => candidate.name === name)
+    assert.ok(tool, `missing ${name} tool`)
+    return tool
+}
+
 describe("ArchitectOpenAI bounded finalization", () => {
+    it("accepts ArchitectOutcomeV1 and exposes no bash tool in read-only mode", async () => {
+        const outcome = {
+            schemaVersion: 1,
+            kind: "needsInput",
+            message: "One compatibility choice needs user input.",
+            questions: [{ id: "compat", text: "Must v1 remain compatible?" }],
+            evidence: [{
+                path: "src/protocol.ts",
+                line: 10,
+                fact: "The v1 serializer remains publicly exported.",
+            }],
+            decisionDocument: null,
+        }
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence([[message(JSON.stringify(outcome))]], tool)
+
+        const result = await runArchitectOpenAI({
+            goal: "Change the public protocol",
+            cwd: "/unused",
+            model: "glm-5.2",
+            modeContract: PARALLEL_MODE,
+            outcomeMode: true,
+            readOnly: true,
+            testRuntime: sequence.runtime,
+        })
+
+        assert.deepEqual(JSON.parse(result), outcome)
+        assert.doesNotMatch(
+            JSON.stringify(sequence.contexts[0]!.toJSON()),
+            /output ONLY the markdown decision document/i,
+        )
+        assert.deepEqual(
+            createCodebaseTools("/unused", { includeBash: false }).map((item) => item.name),
+            ["read_file", "list_files", "file_tree", "grep", "glob"],
+        )
+    })
+
+    it("uses shell-free, portable literal grep and shell-free glob", async () => {
+        const cwd = mkdtempSync(join(tmpdir(), "baro-architect-readonly-tools-"))
+        try {
+            mkdirSync(join(cwd, "src"))
+            writeFileSync(join(cwd, "src/example.ts"), "export const needle = true\n")
+            const grep = namedTool(
+                createCodebaseTools(cwd, { includeBash: false }),
+                "grep",
+            )
+            const glob = namedTool(
+                createCodebaseTools(cwd, { includeBash: false }),
+                "glob",
+            )
+            const grepMarker = join(cwd, "grep-injection-marker")
+            const includeMarker = join(cwd, "include-injection-marker")
+            const globMarker = join(cwd, "glob-injection-marker")
+
+            await grep.invoke({
+                pattern: `needle$(touch '${grepMarker}')`,
+                path: ".",
+                file_pattern: "*.ts",
+            })
+            await grep.invoke({
+                pattern: "needle",
+                path: ".",
+                file_pattern: `*.ts'; touch '${includeMarker}'; #`,
+            })
+            await glob.invoke({
+                pattern: `src/**/\`touch '${globMarker}'\`*.ts`,
+            })
+
+            assert.equal(existsSync(grepMarker), false)
+            assert.equal(existsSync(includeMarker), false)
+            assert.equal(existsSync(globMarker), false)
+            assert.match(
+                String(await grep.invoke({
+                    pattern: "needle",
+                    path: ".",
+                    file_pattern: "*.ts",
+                })),
+                /src\/example\.ts:1/,
+            )
+            assert.equal(
+                String(await grep.invoke({
+                    pattern: "needle[",
+                    path: ".",
+                    file_pattern: "*.ts",
+                })),
+                "No matches found.",
+                "grep patterns are bounded literal text, not host regex syntax",
+            )
+
+            const originalPath = process.env.PATH
+            try {
+                // The read-only search must work on Windows and minimal images
+                // that do not ship a `grep` executable.
+                process.env.PATH = ""
+                assert.match(
+                    String(await grep.invoke({
+                        pattern: "NEEDLE",
+                        path: ".",
+                        file_pattern: "*.ts",
+                    })),
+                    /src\/example\.ts:1:export const needle = true/,
+                )
+            } finally {
+                if (originalPath === undefined) delete process.env.PATH
+                else process.env.PATH = originalPath
+            }
+            assert.match(
+                String(await glob.invoke({ pattern: "src/**/*.ts" })),
+                /src\/example\.ts/,
+            )
+
+            mkdirSync(join(cwd, "wide"))
+            for (let index = 0; index < 200; index += 1) {
+                writeFileSync(
+                    join(cwd, "wide", `${"a".repeat(180)}${String(index).padStart(3, "0")}`),
+                    "bounded\n",
+                )
+            }
+            assert.match(
+                String(await glob.invoke({ pattern: "?".repeat(512) })),
+                /glob matching limit reached/,
+                "model-controlled globs have a deterministic total work budget",
+            )
+        } finally {
+            rmSync(cwd, { recursive: true, force: true })
+        }
+    })
+
     it("refuses post-budget calls without hiding tool schemas, then accepts the document", async () => {
         let invokes = 0
         const tool = fakeTool(async () => {

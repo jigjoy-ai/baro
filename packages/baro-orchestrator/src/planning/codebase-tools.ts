@@ -6,7 +6,7 @@
  * Claude side — `claude --print` ships its own Read/Grep/Glob/Bash.
  */
 
-import { execFile, execFileSync, execSync } from "child_process"
+import { execFile, execFileSync } from "child_process"
 import * as fs from "fs"
 import * as os from "os"
 import * as path from "path"
@@ -30,13 +30,34 @@ const IGNORE = new Set([
 
 const MAX_FILE_BYTES = 15_000
 const MAX_GREP_LINES = 80
+const MAX_GREP_MATCHES_PER_FILE = 50
+const MAX_GREP_VISITS = 50_000
+const MAX_GREP_FILE_BYTES = 1_000_000
+const MAX_GREP_TOTAL_BYTES = 16_000_000
+const MAX_GREP_LINE_CHARS = 1_000
+const MAX_SEARCH_PATTERN_CHARS = 1_000
+const MAX_FILE_PATTERN_CHARS = 512
+const MAX_GLOB_VISITS = 50_000
+const MAX_GLOB_RESULTS = 200
+const MAX_GLOB_MATCH_WORK = 16_000_000
 const MAX_BASH_OUTPUT_BYTES = 8_000
+
+type GlobToken =
+    | Readonly<{ kind: "literal"; value: string }>
+    | Readonly<{ kind: "one" | "star" | "globstar" }>
+
+interface BoundedGlobMatcher {
+    readonly exhausted: boolean
+    test(value: string): boolean
+}
 
 type SignalAwareTool = Tool & {
     invokeWithSignal: (args: any, signal: AbortSignal) => Promise<unknown>
 }
 
 export interface CodebaseToolOptions {
+    /** Set false for inspection-only roles that must never receive a shell. */
+    includeBash?: boolean
     /**
      * Exact manager-owned transport used by collective StoryAgents. The shell
      * guard recognizes it only as `node <commandPath> ... --session
@@ -52,14 +73,15 @@ export function createCodebaseTools(
     cwd: string,
     options: CodebaseToolOptions = {},
 ): Tool[] {
-    return [
+    const tools: Tool[] = [
         readFileTool(cwd),
         listFilesTool(cwd),
         fileTreeTool(cwd),
         grepTool(cwd),
         globTool(cwd),
-        bashTool(cwd, options),
     ]
+    if (options.includeBash !== false) tools.push(bashTool(cwd, options))
+    return tools
 }
 
 function readFileTool(cwd: string): Tool {
@@ -206,7 +228,7 @@ function grepTool(cwd: string): Tool {
         type: "function",
         name: "grep",
         description:
-            "Search for a text pattern across project files. Returns matching lines with " +
+            "Search for literal text across project files. Returns matching lines with " +
             "their file paths. Case-insensitive. Skips dependency directories. Caps results at 80 lines.",
         strict: true,
         parameters: {
@@ -214,7 +236,7 @@ function grepTool(cwd: string): Tool {
             properties: {
                 pattern: {
                     type: "string",
-                    description: "Text or regex (POSIX) to search for.",
+                    description: "Literal text to search for (case-insensitive).",
                 },
                 path: {
                     type: "string",
@@ -229,28 +251,199 @@ function grepTool(cwd: string): Tool {
             additionalProperties: false,
         },
         async invoke(args: { pattern: string; path: string; file_pattern: string }) {
+            if (!boundedSearchText(args.pattern, MAX_SEARCH_PATTERN_CHARS)) {
+                return `Error: grep pattern must contain 1-${MAX_SEARCH_PATTERN_CHARS} safe characters.`
+            }
+            if (
+                args.file_pattern &&
+                !boundedSearchText(args.file_pattern, MAX_FILE_PATTERN_CHARS)
+            ) {
+                return `Error: file_pattern must contain at most ${MAX_FILE_PATTERN_CHARS} safe characters.`
+            }
             const searchDir = safePath(cwd, args.path || ".")
             if (!searchDir) return `Error: path '${args.path}' escapes the project root.`
             if (!fs.existsSync(searchDir)) return `Directory not found: ${args.path}`
+
+            let fileMatcher: BoundedGlobMatcher | null = null
             try {
-                const excludes = Array.from(IGNORE)
-                    .map((d) => `--exclude-dir=${d}`)
-                    .join(" ")
-                const include = args.file_pattern ? `--include='${args.file_pattern}'` : ""
-                const cmd = `grep -rn -i ${excludes} ${include} --max-count=50 -- ${JSON.stringify(
-                    args.pattern,
-                )} ${JSON.stringify(searchDir)} 2>/dev/null || true`
-                const output = execSync(cmd, { encoding: "utf-8", maxBuffer: 2 * 1024 * 1024 })
-                const lines = output
-                    .split("\n")
-                    .filter(Boolean)
-                    .map((line) => (line.startsWith(cwd) ? line.slice(cwd.length + 1) : line))
-                return lines.slice(0, MAX_GREP_LINES).join("\n") || "No matches found."
-            } catch {
-                return "No matches found."
+                if (args.file_pattern) {
+                    fileMatcher = compileBoundedGlob(
+                        args.file_pattern.replace(/^\.\//u, ""),
+                    )
+                }
+            } catch (error) {
+                return `Error: invalid file_pattern: ${errorMessage(error)}`
             }
+
+            return nativeLiteralSearch(cwd, searchDir, args.pattern, fileMatcher)
         },
     }
+}
+
+/**
+ * Bounded, shell-free repository search. Keeping this in-process removes the
+ * GNU/BSD/Windows `grep` portability split and ensures an operational read
+ * failure is never reported as a successful "no matches" result.
+ */
+function nativeLiteralSearch(
+    cwd: string,
+    searchPath: string,
+    pattern: string,
+    fileMatcher: BoundedGlobMatcher | null,
+): string {
+    const root = path.resolve(cwd)
+    const needle = pattern.toLowerCase()
+    const matches: string[] = []
+    let visits = 0
+    let bytesRead = 0
+    let truncated = false
+    let firstFailure: string | null = null
+
+    const recordFailure = (target: string, error: unknown): void => {
+        if (firstFailure !== null) return
+        const relative = normalizedRelativePath(root, target)
+        firstFailure = `${relative}: ${errorMessage(error)}`
+    }
+
+    const searchFile = (target: string): void => {
+        if (
+            matches.length >= MAX_GREP_LINES ||
+            visits >= MAX_GREP_VISITS ||
+            bytesRead >= MAX_GREP_TOTAL_BYTES ||
+            fileMatcher?.exhausted === true
+        ) {
+            truncated = true
+            return
+        }
+        visits += 1
+
+        const relative = normalizedRelativePath(root, target)
+        const basename = path.basename(target)
+        if (
+            fileMatcher !== null &&
+            !fileMatcher.test(relative) &&
+            !fileMatcher.test(basename)
+        ) {
+            if (fileMatcher.exhausted) truncated = true
+            return
+        }
+
+        let stat: fs.Stats
+        try {
+            stat = fs.statSync(target)
+        } catch (error) {
+            recordFailure(target, error)
+            return
+        }
+        if (!stat.isFile()) return
+        if (stat.size > MAX_GREP_FILE_BYTES) return
+        if (bytesRead + stat.size > MAX_GREP_TOTAL_BYTES) {
+            truncated = true
+            return
+        }
+
+        let content: Buffer
+        try {
+            content = fs.readFileSync(target)
+        } catch (error) {
+            recordFailure(target, error)
+            return
+        }
+        bytesRead += content.byteLength
+        // NUL is a cheap, deterministic binary-file signal. Binary payloads
+        // should not be decoded into model context.
+        if (content.includes(0)) return
+
+        const lines = content.toString("utf8").split(/\r?\n/u)
+        let fileMatches = 0
+        for (let index = 0; index < lines.length; index += 1) {
+            const line = lines[index]!
+            if (!line.toLowerCase().includes(needle)) continue
+            const clipped = line.length > MAX_GREP_LINE_CHARS
+                ? `${line.slice(0, MAX_GREP_LINE_CHARS)}... (line truncated)`
+                : line
+            matches.push(`${relative}:${index + 1}:${clipped}`)
+            fileMatches += 1
+            if (matches.length >= MAX_GREP_LINES) {
+                truncated = true
+                return
+            }
+            if (fileMatches >= MAX_GREP_MATCHES_PER_FILE) break
+        }
+    }
+
+    const walk = (directory: string): void => {
+        if (
+            matches.length >= MAX_GREP_LINES ||
+            visits >= MAX_GREP_VISITS ||
+            bytesRead >= MAX_GREP_TOTAL_BYTES ||
+            fileMatcher?.exhausted === true
+        ) {
+            truncated = true
+            return
+        }
+
+        let entries: fs.Dirent[]
+        try {
+            entries = fs
+                .readdirSync(directory, { withFileTypes: true })
+                .sort((left, right) => left.name.localeCompare(right.name, "en"))
+        } catch (error) {
+            recordFailure(directory, error)
+            return
+        }
+        for (const entry of entries) {
+            if (visits >= MAX_GREP_VISITS) {
+                truncated = true
+                return
+            }
+            visits += 1
+            if (IGNORE.has(entry.name)) continue
+            const target = path.join(directory, entry.name)
+            if (entry.isDirectory()) {
+                walk(target)
+            } else if (entry.isFile()) {
+                // searchFile accounts for file reads separately; the entry
+                // itself has already consumed the traversal visit above.
+                visits -= 1
+                searchFile(target)
+            }
+            // Symlinks and special files are never followed.
+            if (matches.length >= MAX_GREP_LINES) return
+        }
+    }
+
+    let searchStat: fs.Stats
+    try {
+        searchStat = fs.statSync(searchPath)
+    } catch (error) {
+        return `Error: search failed: ${errorMessage(error)}`
+    }
+    if (searchStat.isDirectory()) walk(searchPath)
+    else if (searchStat.isFile()) searchFile(searchPath)
+    else return `Error: search path is neither a directory nor a regular file.`
+
+    const notes: string[] = []
+    if (truncated) notes.push("... (search limit reached)")
+    if (firstFailure !== null) {
+        notes.push(`... (search incomplete: ${firstFailure})`)
+    }
+    const suffix = notes.length > 0 ? `\n${notes.join("\n")}` : ""
+    if (matches.length > 0) return matches.join("\n") + suffix
+    if (firstFailure !== null) return `Error: search incomplete: ${firstFailure}`
+    return truncated
+        ? "No matches found before the search limit was reached."
+        : "No matches found."
+}
+
+function normalizedRelativePath(root: string, target: string): string {
+    const relative = path.relative(root, target) || path.basename(target)
+    return relative.split(path.sep).join("/")
+}
+
+function errorMessage(error: unknown): string {
+    if (error instanceof Error && error.message) return error.message
+    return String(error)
 }
 
 function globTool(cwd: string): Tool {
@@ -273,17 +466,48 @@ function globTool(cwd: string): Tool {
             additionalProperties: false,
         },
         async invoke(args: { pattern: string }) {
+            if (!boundedSearchText(args.pattern, MAX_FILE_PATTERN_CHARS)) {
+                return `Error: glob pattern must contain 1-${MAX_FILE_PATTERN_CHARS} safe characters.`
+            }
             try {
-                // Shell glob via `find` + grep so we don't take a new dep.
-                const cmd = `cd ${JSON.stringify(cwd)} && find . -path './node_modules' -prune -o -path './.git' -prune -o -path './target' -prune -o -path './dist' -prune -o -path './build' -prune -o -type f -print | grep -E ${JSON.stringify(
-                    globToRegex(args.pattern),
-                )} 2>/dev/null | head -200 || true`
-                const output = execSync(cmd, { encoding: "utf-8", maxBuffer: 1024 * 1024 })
-                const lines = output
-                    .split("\n")
-                    .filter(Boolean)
-                    .map((l) => l.replace(/^\.\//, ""))
-                return lines.join("\n") || "(no matches)"
+                const matcher = compileBoundedGlob(args.pattern.replace(/^\.\//u, ""))
+                const results: string[] = []
+                let visits = 0
+                const walk = (directory: string, prefix: string): void => {
+                    if (
+                        results.length >= MAX_GLOB_RESULTS ||
+                        visits >= MAX_GLOB_VISITS ||
+                        matcher.exhausted
+                    ) return
+                    const entries = fs
+                        .readdirSync(directory, { withFileTypes: true })
+                        .sort((left, right) => left.name.localeCompare(right.name, "en"))
+                    for (const entry of entries) {
+                        visits += 1
+                        if (visits > MAX_GLOB_VISITS) return
+                        if (IGNORE.has(entry.name)) continue
+                        const relative = prefix ? `${prefix}/${entry.name}` : entry.name
+                        const absolute = path.join(directory, entry.name)
+                        if (entry.isDirectory()) {
+                            walk(absolute, relative)
+                            if (matcher.exhausted) return
+                        } else if (entry.isFile()) {
+                            if (matcher.test(relative)) {
+                                results.push(relative)
+                                if (results.length >= MAX_GLOB_RESULTS) return
+                            }
+                            if (matcher.exhausted) return
+                        }
+                        // Symlinks and special files are never followed.
+                    }
+                }
+                walk(path.resolve(cwd), "")
+                if (matcher.exhausted) {
+                    return results.length > 0
+                        ? `${results.join("\n")}\n... (glob matching limit reached)`
+                        : "Error: glob matching limit reached."
+                }
+                return results.join("\n") || "(no matches)"
             } catch {
                 return "(glob failed)"
             }
@@ -723,6 +947,15 @@ function pathIsWithin(root: string, candidate: string): boolean {
         (relative !== ".." &&
             !relative.startsWith(`..${path.sep}`) &&
             !path.isAbsolute(relative))
+    )
+}
+
+function boundedSearchText(value: unknown, maximum: number): value is string {
+    return (
+        typeof value === "string" &&
+        value.length > 0 &&
+        value.length <= maximum &&
+        !/[\u0000-\u001f\u007f]/u.test(value)
     )
 }
 
@@ -1213,41 +1446,93 @@ function tokenizeShell(command: string): ShellToken[] | string {
     return tokens
 }
 
-/** Tiny glob → regex translator: covers `*`, `**`, `?` — enough for the common cases. */
-function globToRegex(glob: string): string {
-    let regex = "^"
+/**
+ * Compile the small supported glob language without constructing a
+ * backtracking regular expression. Model-controlled patterns therefore have
+ * deterministic work bounds even for inputs such as `*a*a*a...`.
+ */
+function compileBoundedGlob(glob: string): BoundedGlobMatcher {
+    const tokens: GlobToken[] = []
     let i = 0
     while (i < glob.length) {
         const ch = glob[i]!
         if (ch === "*") {
             if (glob[i + 1] === "*") {
-                regex += ".*"
+                if (tokens.at(-1)?.kind !== "globstar") {
+                    tokens.push(Object.freeze({ kind: "globstar" }))
+                }
                 i += 2
+                // Preserve the former `**/` behavior: the slash is optional,
+                // so both `src/file.ts` and `src/nested/file.ts` match.
                 if (glob[i] === "/") i++
                 continue
             }
-            regex += "[^/]*"
+            if (tokens.at(-1)?.kind !== "star" && tokens.at(-1)?.kind !== "globstar") {
+                tokens.push(Object.freeze({ kind: "star" }))
+            }
             i++
             continue
         }
         if (ch === "?") {
-            regex += "[^/]"
+            tokens.push(Object.freeze({ kind: "one" }))
             i++
             continue
         }
-        if (ch === ".") {
-            regex += "\\."
-            i++
-            continue
-        }
-        if ("()[]{}+|^$\\".includes(ch)) {
-            regex += "\\" + ch
-            i++
-            continue
-        }
-        regex += ch
+        tokens.push(Object.freeze({ kind: "literal", value: ch }))
         i++
     }
-    regex += "$"
-    return regex
+
+    let remainingWork = MAX_GLOB_MATCH_WORK
+    let exhausted = false
+    return {
+        get exhausted() {
+            return exhausted
+        },
+        test(value: string): boolean {
+            if (exhausted) return false
+            const work = Math.max(1, tokens.length) * (value.length + 1)
+            if (work > remainingWork) {
+                exhausted = true
+                return false
+            }
+            remainingWork -= work
+            return matchGlobTokens(tokens, value)
+        },
+    }
+}
+
+/** Dynamic-programming wildcard match: O(pattern length × path length). */
+function matchGlobTokens(tokens: readonly GlobToken[], value: string): boolean {
+    let previous = new Uint8Array(value.length + 1)
+    let current = new Uint8Array(value.length + 1)
+    previous[0] = 1
+
+    for (const token of tokens) {
+        current.fill(0)
+        if (token.kind === "star" || token.kind === "globstar") {
+            current[0] = previous[0]!
+            for (let position = 1; position <= value.length; position += 1) {
+                const canExtend = token.kind === "globstar" || value[position - 1] !== "/"
+                current[position] = previous[position] === 1 ||
+                    (canExtend && current[position - 1] === 1)
+                    ? 1
+                    : 0
+            }
+        } else {
+            for (let position = 0; position < value.length; position += 1) {
+                if (previous[position] !== 1) continue
+                const character = value[position]!
+                if (
+                    (token.kind === "one" && character !== "/") ||
+                    (token.kind === "literal" && character === token.value)
+                ) {
+                    current[position + 1] = 1
+                }
+            }
+        }
+        const swap = previous
+        previous = current
+        current = swap
+    }
+    return previous[value.length] === 1
 }

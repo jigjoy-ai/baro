@@ -308,7 +308,7 @@ function boundedString(value: unknown, maximum: number, label: string): string {
     if (
         normalized.length === 0 ||
         normalized.length > maximum ||
-        /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(normalized)
+        /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u.test(normalized)
     ) {
         throw new ConversationContractError(`${label} is empty, too long, or unsafe`)
     }

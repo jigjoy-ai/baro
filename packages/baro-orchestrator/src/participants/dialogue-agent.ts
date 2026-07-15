@@ -48,6 +48,7 @@ import {
     validateConversationContextSnapshot,
     type ConversationContextSnapshot,
 } from "../session/conversation-context.js"
+import type { FrontDoorBillingRole } from "../session/frontdoor-billing.js"
 import {
     conversationDelegationProposalId,
     parseConversationDelegation,
@@ -85,6 +86,8 @@ story whose only purpose is final build, test, or lint verification.`
 export interface DialogueResponderInput {
     runId: string
     messageId: string
+    /** Optional pre-PRD attribution; ordinary runtime dialogue omits it. */
+    billingRole?: FrontDoorBillingRole
     systemPrompt: string
     userPrompt: string
 }
@@ -105,9 +108,12 @@ export interface DialogueResponderResult {
 }
 
 export interface DialogueResponderTelemetry {
-    /** Build the single fallback observation when DialogueAgent owns timeout. */
+    /** Build one fallback observation for an unobserved failed invocation. */
     failureInvocation(
-        status: Extract<ModelInvocationStatus, "failed" | "timed_out">,
+        status: Extract<
+            ModelInvocationStatus,
+            "failed" | "timed_out" | "cancelled"
+        >,
         reason: UnknownMetricReason,
     ): DialogueResponderInvocation
 }

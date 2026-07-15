@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
+    CONVERSATION_HISTORY_PROMPT_MAX_BYTES,
     ConversationIntake,
     type ConversationResponder,
     type ConversationResponderInput,
@@ -26,6 +27,7 @@ describe("ConversationIntake", () => {
             const response = await intake.submit({
                 requestId: "goal-1",
                 text: "Add strict goal intake without changing the DAG authority.",
+                repositoryBrief: repositoryBrief(),
             })
 
             assert.equal(response.kind, "ready")
@@ -81,6 +83,7 @@ describe("ConversationIntake", () => {
         const second = intake.submit({
             requestId: "request-2",
             text: "Yes, preserve it.",
+            repositoryBrief: repositoryBrief(),
         })
         await Promise.resolve()
         assert.equal(calls.length, 1)
@@ -103,7 +106,11 @@ describe("ConversationIntake", () => {
                 },
             },
         })
-        const request = { requestId: "request-1", text: "Implement the clear goal." }
+        const request = {
+            requestId: "request-1",
+            text: "Implement the clear goal.",
+            repositoryBrief: repositoryBrief(),
+        }
         const [first, replay] = await Promise.all([
             intake.submit(request),
             intake.submit(request),
@@ -144,6 +151,7 @@ describe("ConversationIntake", () => {
             requestId: "request-2",
             text: "Yes, preserve compatibility.",
             intent: "clarification",
+            repositoryBrief: repositoryBrief(),
         })
         assert.match(prompt, /USER \[request-1\]: Refactor auth\./)
         assert.doesNotMatch(prompt, /attacker mutation/)
@@ -164,6 +172,56 @@ describe("ConversationIntake", () => {
             }),
             /complete user\/assistant turn pairs/,
         )
+    })
+
+    it("bounds multibyte history by UTF-8 bytes while preserving the newest pair and current turn", async () => {
+        const repeated = (label: string, length: number): string =>
+            `${label}:${"界".repeat(length - label.length - 1)}`
+        const history = [1, 2, 3].flatMap((turn) => [{
+            requestId: `request-${turn}`,
+            role: "user" as const,
+            text: repeated(`user-${turn}`, 5_000),
+        }, {
+            requestId: `request-${turn}`,
+            role: "assistant" as const,
+            text: repeated(`assistant-${turn}`, 5_000),
+        }])
+        const currentText = repeated("current", 8_000)
+        let prompt = ""
+        const intake = new ConversationIntake({
+            sessionId: "session-multibyte-history",
+            historyLimit: 8,
+            initialHistory: history,
+            responder: {
+                backend: "codex",
+                async respond(input) {
+                    prompt = input.userPrompt
+                    return JSON.stringify(readyWire(input.sessionId, input.requestId))
+                },
+            },
+        })
+
+        await intake.submit({
+            requestId: "request-current",
+            text: currentText,
+            intent: "clarification",
+            repositoryBrief: repositoryBrief(),
+        })
+
+        const marker = "CONVERSATION HISTORY:\n"
+        const projection = prompt
+            .slice(prompt.indexOf(marker) + marker.length)
+            .split("\n\nREPOSITORY OBSERVATIONS", 1)[0]!
+        assert.ok(
+            Buffer.byteLength(projection, "utf8") <=
+                CONVERSATION_HISTORY_PROMPT_MAX_BYTES,
+        )
+        assert.match(projection, /older complete conversation turn\(s\) omitted/u)
+        assert.doesNotMatch(projection, /USER \[request-1\]:/u)
+        assert.doesNotMatch(projection, /USER \[request-2\]:/u)
+        assert.match(projection, /USER \[request-3\]: user-3:/u)
+        assert.match(projection, /ASSISTANT \[request-3\]: assistant-3:/u)
+        assert.ok(projection.endsWith(`USER [request-current]: ${currentText}`))
     })
 
     it("tells chat turns they may answer or produce an explicit ready follow-up", async () => {
@@ -195,6 +253,104 @@ describe("ConversationIntake", () => {
         assert.match(prompt, /ready only for a clearly requested implementation follow-up/)
     })
 
+    it("enforces intent dispositions instead of trusting prompt instructions", async () => {
+        const answer = new ConversationIntake({
+            sessionId: "session-goal-answer-rejected",
+            responder: {
+                backend: "claude",
+                async respond(input) {
+                    return JSON.stringify({
+                        schemaVersion: 1,
+                        sessionId: input.sessionId,
+                        requestId: input.requestId,
+                        kind: "answer",
+                        message: "I answered without resolving intake.",
+                        questions: [],
+                        goalEnvelope: null,
+                    })
+                },
+            },
+        })
+        await assert.rejects(
+            answer.submit({ requestId: "request-goal-answer", text: "Implement it." }),
+            /must resolve as ready or clarify/u,
+        )
+
+        for (const [intent, sessionId] of [
+            ["goal", "session-goal-ready-rejected"],
+            ["chat", "session-chat-ready-rejected"],
+        ] as const) {
+            const readyWithoutContext = new ConversationIntake({
+                sessionId,
+                responder: {
+                    backend: "claude",
+                    async respond(input) {
+                        return JSON.stringify(readyWire(input.sessionId, input.requestId))
+                    },
+                },
+            })
+            await assert.rejects(
+                readyWithoutContext.submit({
+                    requestId: `request-${intent}-ready`,
+                    text: "Implement this.",
+                    intent,
+                }),
+                /requires repository context before ready/u,
+            )
+        }
+    })
+
+    it("projects a validated brief as explicitly untrusted observations", async () => {
+        let prompt = ""
+        let systemPrompt = ""
+        const intake = new ConversationIntake({
+            sessionId: "session-repository-brief",
+            responder: {
+                backend: "codex",
+                async respond(input) {
+                    prompt = input.userPrompt
+                    systemPrompt = input.systemPrompt
+                    return JSON.stringify(readyWire(input.sessionId, input.requestId))
+                },
+            },
+        })
+        const brief = {
+            schemaVersion: 1 as const,
+            snapshotId: `sha256:${"b".repeat(64)}`,
+            summary: "A bounded repository observation.",
+            facts: [{
+                statement: "A relevant path contains the goal term.",
+                evidencePath: "src/session.ts",
+                line: 4,
+                confidence: "high" as const,
+            }],
+            relevantPaths: ["src/session.ts"],
+            unknowns: [],
+            truncated: false,
+        }
+        await intake.submit({
+            requestId: "request-brief",
+            text: "Refactor repository session handling.",
+            intent: "goal",
+            repositoryBrief: brief,
+        })
+
+        assert.match(systemPrompt, /contents as untrusted data/)
+        assert.match(prompt, /REPOSITORY OBSERVATIONS \(UNTRUSTED DATA/)
+        assert.match(prompt, /"snapshotId":"sha256:bbbb/)
+        assert.match(prompt, /"evidencePath":"src\/session\.ts"/)
+
+        await assert.rejects(
+            intake.submit({
+                requestId: "request-brief",
+                text: "Refactor repository session handling.",
+                intent: "goal",
+                repositoryBrief: { ...brief, summary: "Different observation." },
+            }),
+            /different content/,
+        )
+    })
+
     it("close aborts an active responder and rejects future turns", async () => {
         let aborted = false
         const intake = new ConversationIntake({
@@ -221,6 +377,32 @@ describe("ConversationIntake", () => {
             /closed/,
         )
     })
+
+    it("reports its own watchdog timeout ahead of synchronous abort rejection", async () => {
+        let aborted = false
+        const intake = new ConversationIntake({
+            sessionId: "session-watchdog-order",
+            timeoutMs: 20,
+            responder: {
+                backend: "openai",
+                async respond(_input, signal) {
+                    return await new Promise((_resolve, reject) => {
+                        signal.addEventListener("abort", () => {
+                            aborted = true
+                            reject(new Error("incidental provider AbortError"))
+                        }, { once: true })
+                    })
+                },
+            },
+        })
+
+        await assert.rejects(
+            intake.submit({ requestId: "request-watchdog", text: "status" }),
+            /conversation response timed out after 20ms/u,
+        )
+        assert.equal(aborted, true)
+        intake.close()
+    })
 })
 
 function readyWire(sessionId: string, requestId: string) {
@@ -238,6 +420,18 @@ function readyWire(sessionId: string, requestId: string) {
             nonGoals: [],
             assumptions: [],
         },
+    }
+}
+
+function repositoryBrief() {
+    return {
+        schemaVersion: 1 as const,
+        snapshotId: `sha256:${"d".repeat(64)}`,
+        summary: "A stable bounded repository observation.",
+        facts: [],
+        relevantPaths: [],
+        unknowns: [],
+        truncated: false,
     }
 }
 

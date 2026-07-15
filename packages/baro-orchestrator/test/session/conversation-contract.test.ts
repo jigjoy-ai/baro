@@ -149,6 +149,34 @@ describe("conversation wire contract", () => {
             /ids must be unique/,
         )
     })
+
+    it("rejects bidi controls in model-authored user-facing text", () => {
+        const message = readyWire()
+        message.message = "Safe prefix\u202Emoc.elpmaxe"
+        assert.throws(
+            () => validateConversationResponse(message, correlation),
+            /unsafe/,
+        )
+
+        const objective = readyWire()
+        objective.goalEnvelope.objective = "Safe goal\u2066spoof"
+        assert.throws(
+            () => validateConversationResponse(objective, correlation),
+            /unsafe/,
+        )
+
+        assert.throws(
+            () => validateConversationResponse({
+                schemaVersion: 1,
+                ...correlation,
+                kind: "clarify",
+                message: "Need input.",
+                questions: [{ id: "q1", text: "Safe\u202Aquestion?" }],
+                goalEnvelope: null,
+            }, correlation),
+            /unsafe/,
+        )
+    })
 })
 
 function readyWire() {

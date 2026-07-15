@@ -1,11 +1,12 @@
 //! Isolated provider bridge for one durable conversation turn.
 //!
-//! Rust owns the session and lifecycle. The TypeScript child owns exactly one
-//! text-only model call and exits, so planning/run Mozaik state can never leak
-//! across follow-ups.
+//! Rust owns the session and lifecycle. The TypeScript child owns bounded
+//! bounded RepoScout research calls followed by one text-only Conversation call and
+//! exits, so planning/run Mozaik state can never leak across follow-ups.
 
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 use serde::Serialize;
 use tokio::process::Command;
@@ -20,6 +21,7 @@ use crate::subprocess::{self, ProcessRunError};
 const SCRIPT_REL_PATH: &str = "packages/baro-orchestrator/scripts/run-conversation.ts";
 const BUNDLE_NAME: &str = "run-conversation.mjs";
 const HISTORY_LIMIT: usize = 24;
+const OUTER_TIMEOUT_SHUTDOWN_GRACE_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -52,7 +54,10 @@ pub struct ConversationRunOptions<'a> {
     pub cwd: &'a Path,
     pub llm: LlmProvider,
     pub model: Option<&'a str>,
+    /// Hard deadline for the complete RepoScout + Conversation turn.
     pub timeout_ms: u64,
+    /// Deadline for one provider invocation inside that turn.
+    pub provider_timeout_ms: u64,
     pub openai_api_key: Option<&'a str>,
     pub openai_base_url: Option<&'a str>,
 }
@@ -129,6 +134,8 @@ pub async fn run_conversation_turn(
         .arg("--llm")
         .arg(llm)
         .arg("--timeout-ms")
+        .arg(options.provider_timeout_ms.to_string())
+        .arg("--turn-timeout-ms")
         .arg(options.timeout_ms.to_string());
     if let Some(model) = options.model {
         command.arg("--model").arg(model);
@@ -142,7 +149,30 @@ pub async fn run_conversation_turn(
         }
     }
 
-    subprocess::spawn_and_capture_streaming(command, "conversation", |_| {}).await?;
+    let outer_timeout = Duration::from_millis(
+        options
+            .timeout_ms
+            .saturating_add(OUTER_TIMEOUT_SHUTDOWN_GRACE_MS),
+    );
+    match tokio::time::timeout(
+        outer_timeout,
+        subprocess::spawn_and_capture_streaming(command, "conversation", |_| {}),
+    )
+    .await
+    {
+        Ok(result) => {
+            result?;
+        }
+        Err(_) => {
+            return Err(ProcessRunError {
+                message: format!(
+                    "conversation turn exceeded its {}ms wall-clock deadline",
+                    options.timeout_ms
+                ),
+                log_path: None,
+            });
+        }
+    }
     let raw = std::fs::read_to_string(result_file.path()).map_err(|error| ProcessRunError {
         message: format!("could not read conversation result: {error}"),
         log_path: None,

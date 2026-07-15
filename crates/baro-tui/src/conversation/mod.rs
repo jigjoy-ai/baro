@@ -14,7 +14,8 @@ use std::fmt;
 
 pub use context::ConversationContextSnapshot;
 pub use contract::{
-    render_planning_prompt, ConversationKind, ConversationWireResponse, GoalEnvelope,
+    render_planning_prompt, ClarificationQuestion, ConversationKind, ConversationWireResponse,
+    GoalEnvelope,
 };
 pub use session::{ApplyOutcome, ConversationPhase, ConversationSession, TranscriptRole};
 
@@ -79,6 +80,9 @@ pub enum ConversationError {
     ReadyHandoffNotTaken,
     ResponseNotAllowedInPhase {
         kind: ConversationKind,
+        phase: ConversationPhase,
+    },
+    InitialRequestFailureNotAllowedInPhase {
         phase: ConversationPhase,
     },
     InvalidPhaseTransition {
@@ -165,6 +169,10 @@ impl fmt::Display for ConversationError {
             Self::ResponseNotAllowedInPhase { kind, phase } => write!(
                 formatter,
                 "{kind:?} response is not allowed in phase {phase:?}"
+            ),
+            Self::InitialRequestFailureNotAllowedInPhase { phase } => write!(
+                formatter,
+                "an initial conversation request cannot fail in phase {phase:?}"
             ),
             Self::InvalidPhaseTransition { from, to } => write!(
                 formatter,

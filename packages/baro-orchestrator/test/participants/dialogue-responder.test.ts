@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
 import { describe, it } from "node:test"
 
 import {
@@ -14,8 +15,10 @@ import {
     notApplicableMetric,
     unknownMetric,
 } from "../../src/model-telemetry.js"
+import { GatewayBillingCoordinator } from "../../src/billing/index.js"
 import { DialogueResponderInvocationError } from "../../src/participants/dialogue-agent.js"
 import { createDialogueResponder } from "../../src/participants/dialogue-responder.js"
+import { ConversationIntake } from "../../src/session/conversation-intake.js"
 import {
     assertHarnessEnvironmentWasSanitized,
     harnessEnvironmentCaptureProgram,
@@ -139,7 +142,67 @@ process.stdout.write(JSON.stringify({ result: "{\\\"message\\\":\\\"Ready.\\\",\
         })
     })
 
-    it("runs Codex as an ephemeral read-only conversation backend", async () => {
+    it("kills a TERM-resistant Claude descendant before cancellation returns", async () => {
+        await withTempDir("dialogue-claude-tree-", async (dir) => {
+            const started = join(dir, "descendant-started")
+            const escaped = join(dir, "descendant-escaped")
+            const binary = join(dir, "tree-claude.mjs")
+            const descendantSource = `
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(started)}, "yes");
+process.on("SIGTERM", () => {});
+setTimeout(() => writeFileSync(${JSON.stringify(escaped)}, "yes"), 700);
+setInterval(() => {}, 10_000);
+`
+            writeFileSync(binary, `#!/usr/bin/env node
+import { spawn } from "node:child_process";
+spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(descendantSource)}], { stdio: "ignore" });
+setInterval(() => {}, 10_000);
+`)
+            chmodSync(binary, 0o755)
+            const responder = createDialogueResponder({
+                backend: "claude",
+                cwd: dir,
+                claudeBin: binary,
+                terminationGraceMs: 50,
+            })
+            const controller = new AbortController()
+            const result = responder(
+                {
+                    runId: "run-claude-tree",
+                    messageId: "message-claude-tree",
+                    systemPrompt: "No tools.",
+                    userPrompt: "status",
+                },
+                controller.signal,
+            )
+
+            try {
+                await waitForFile(started)
+                controller.abort()
+                await assert.rejects(result, (error: unknown) => {
+                    assert.ok(error instanceof DialogueResponderInvocationError)
+                    assert.equal(error.invocation.observation.status, "cancelled")
+                    assert.deepEqual(
+                        error.invocation.observation.tokens.total,
+                        unknownMetric("not_reported"),
+                    )
+                    return true
+                })
+            } finally {
+                controller.abort()
+            }
+
+            await delay(750)
+            assert.equal(
+                existsSync(escaped),
+                false,
+                "Claude descendant survived cancellation escalation",
+            )
+        })
+    })
+
+    it("runs Codex read-only and ignores ambient config/rules for conversation", async () => {
         await withTempDir("dialogue-codex-", async (dir) => {
             const capture = join(dir, "environment.json")
             const argvPath = join(dir, "argv.json")
@@ -147,7 +210,10 @@ process.stdout.write(JSON.stringify({ result: "{\\\"message\\\":\\\"Ready.\\\",\
             writeFileSync(binary, `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
 ${harnessEnvironmentCaptureProgram(capture)}
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
 writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(process.argv.slice(2)));
+writeFileSync(${JSON.stringify(`${argvPath}.stdin`)}, input);
 console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "{\\"message\\":\\"Ready.\\",\\"messages\\":[]}" } }));
 console.log(JSON.stringify({ type: "turn.completed", model: "gpt-codex-test", usage: { input_tokens: 9, output_tokens: 3 } }));
 `)
@@ -181,15 +247,94 @@ console.log(JSON.stringify({ type: "turn.completed", model: "gpt-codex-test", us
                 knownMetric(12, "derived"),
             )
             const argv = JSON.parse(readFileSync(argvPath, "utf8")) as string[]
-            assert.deepEqual(argv.slice(0, 5), [
-                "exec",
-                "--json",
-                "--sandbox",
-                "read-only",
+            assert.deepEqual(argv.slice(0, 2), ["exec", "--json"])
+            for (const value of [
+                'default_permissions="baro_dialogue"',
+                'permissions.baro_dialogue.description="Baro brokered text-only front door"',
+                'permissions.baro_dialogue.filesystem={":minimal"="read",":workspace_roots"={"."="deny"}}',
+                'approval_policy="never"',
+                'web_search="disabled"',
+                'shell_environment_policy.inherit="none"',
+                "allow_login_shell=false",
+                "project_doc_max_bytes=0",
                 "--ephemeral",
-            ])
+                "--ignore-user-config",
+                "--ignore-rules",
+            ]) {
+                assert.equal(argv.includes(value), true, `missing ${value}`)
+            }
+            assert.equal(argv.filter((value) => value === "--strict-config").length, 1)
+            assert.equal(argv.includes("--sandbox"), false)
             assert.equal(argv.includes("--dangerously-bypass-approvals-and-sandbox"), false)
+            assert.equal(argv.at(-1), "-")
+            assert.equal(readFileSync(`${argvPath}.stdin`, "utf8"), "system\n\nstatus")
             assertHarnessEnvironmentWasSanitized(capture)
+        })
+    })
+
+    it("transports Windows-unsafe large Claude and Codex prompts over stdin", async () => {
+        await withTempDir("dialogue-large-stdin-", async (dir) => {
+            const large = `large:${"x".repeat(40_000)}`
+            const claudeCapture = join(dir, "claude-large.json")
+            const claude = join(dir, "claude-large.mjs")
+            writeFileSync(claude, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+writeFileSync(${JSON.stringify(claudeCapture)}, JSON.stringify({ argv: process.argv.slice(2), input }));
+process.stdout.write(JSON.stringify({
+  result: ${JSON.stringify(JSON.stringify({ message: "Ready.", messages: [] }))},
+  usage: { input_tokens: 1, output_tokens: 1 }
+}));
+`)
+            chmodSync(claude, 0o755)
+            const claudeResponder = createDialogueResponder({
+                backend: "claude",
+                cwd: dir,
+                claudeBin: claude,
+            })
+            await claudeResponder({
+                runId: "run-large-claude",
+                messageId: "message-large-claude",
+                systemPrompt: "system",
+                userPrompt: large,
+            }, new AbortController().signal)
+            const claudeObserved = JSON.parse(
+                readFileSync(claudeCapture, "utf8"),
+            ) as { argv: string[]; input: string }
+            assert.equal(claudeObserved.input, large)
+            assert.equal(claudeObserved.argv.includes(large), false)
+            assert.equal(claudeObserved.argv.includes("-p"), false)
+
+            const codexCapture = join(dir, "codex-large.json")
+            const codex = join(dir, "codex-large.mjs")
+            writeFileSync(codex, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+writeFileSync(${JSON.stringify(codexCapture)}, JSON.stringify({ argv: process.argv.slice(2), input }));
+console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: ${JSON.stringify(JSON.stringify({ message: "Ready.", messages: [] }))} } }));
+console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }));
+`)
+            chmodSync(codex, 0o755)
+            const codexResponder = createDialogueResponder({
+                backend: "codex",
+                cwd: dir,
+                codexBin: codex,
+                codexSkipGitRepoCheck: true,
+            })
+            await codexResponder({
+                runId: "run-large-codex",
+                messageId: "message-large-codex",
+                systemPrompt: "system",
+                userPrompt: large,
+            }, new AbortController().signal)
+            const codexObserved = JSON.parse(
+                readFileSync(codexCapture, "utf8"),
+            ) as { argv: string[]; input: string }
+            assert.equal(codexObserved.input, `system\n\n${large}`)
+            assert.equal(codexObserved.argv.at(-1), "-")
+            assert.equal(codexObserved.argv.includes(large), false)
         })
     })
 
@@ -430,6 +575,267 @@ process.stdin.on("end", () => {
         )
     })
 
+    it("keeps Conversation and repository scout billing phases distinct", async () => {
+        const phases: string[] = []
+        const billing = new GatewayBillingCoordinator({
+            runId: "session-front-door-billing",
+            gatewayBaseUrl: "https://gateway.example/v1",
+            apiKey: "test-gateway-key",
+            publishMeasurement: () => undefined,
+            drainTimeoutMs: 0,
+        })
+        try {
+            const responder = createDialogueResponder({
+                backend: "openai",
+                cwd: process.cwd(),
+                model: "deepseek-chat",
+                openaiConnection: {
+                    baseURL: "https://gateway.example/v1",
+                    apiKey: "test-gateway-key",
+                },
+                billingCoordinator: billing,
+                openaiRunRound: async (_context, _model, options) => {
+                    phases.push(options.billing?.context.phase ?? "missing")
+                    return {
+                        items: [{
+                            type: "message",
+                            toJSON: () => ({
+                                content: [{
+                                    text: "{\"message\":\"Ready.\",\"messages\":[]}",
+                                }],
+                            }),
+                        }] as never,
+                        usage: new TokenUsage(1, 1, 2),
+                        billingInvocationId: null,
+                    }
+                },
+            })
+
+            for (const billingRole of [
+                "conversation",
+                "repository_scout",
+            ] as const) {
+                await responder(
+                    {
+                        runId: "session-front-door-billing",
+                        messageId: `message-${billingRole}`,
+                        billingRole,
+                        systemPrompt: "system",
+                        userPrompt: "status",
+                    },
+                    new AbortController().signal,
+                )
+            }
+            assert.deepEqual(phases, ["dialogue", "intake"])
+        } finally {
+            billing.close()
+        }
+    })
+
+    it("threads cancellation into OpenAI inference and awaits provider settlement", async () => {
+        let providerSettled = false
+        const responder = createDialogueResponder({
+            backend: "openai",
+            cwd: process.cwd(),
+            openaiRunRound: async (_context, _model, options) =>
+                new Promise((_resolve, reject) => {
+                    const signal = options.signal
+                    assert.ok(signal)
+                    signal.addEventListener(
+                        "abort",
+                        () => {
+                            setTimeout(() => {
+                                providerSettled = true
+                                reject(
+                                    Object.assign(new Error("provider aborted"), {
+                                        name: "AbortError",
+                                    }),
+                                )
+                            }, 25)
+                        },
+                        { once: true },
+                    )
+                }),
+        })
+        const controller = new AbortController()
+        const pending = responder(
+            {
+                runId: "run-openai-abort",
+                messageId: "message-openai-abort",
+                systemPrompt: "system",
+                userPrompt: "status",
+            },
+            controller.signal,
+        )
+
+        controller.abort()
+        await assert.rejects(pending, (error: unknown) => {
+            assert.ok(error instanceof DialogueResponderInvocationError)
+            assert.equal(error.invocation.observation.status, "cancelled")
+            assert.deepEqual(
+                error.invocation.observation.durationMs,
+                unknownMetric("not_reported"),
+            )
+            return true
+        })
+        assert.equal(providerSettled, true)
+    })
+
+    it("overrides local one-shot timeout attribution for caller cancellation", async () => {
+        await withTempDir("dialogue-local-cancel-", async (dir) => {
+            const binary = join(dir, "hanging-provider.mjs")
+            writeFileSync(binary, `#!/usr/bin/env node
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 10_000);
+`)
+            chmodSync(binary, 0o755)
+
+            for (const backend of ["codex", "opencode", "pi"] as const) {
+                const responder = createDialogueResponder({
+                    backend,
+                    cwd: dir,
+                    terminationGraceMs: 50,
+                    ...(backend === "codex"
+                        ? { codexBin: binary, codexSkipGitRepoCheck: true }
+                        : backend === "opencode"
+                          ? { opencodeBin: binary }
+                          : { piBin: binary }),
+                })
+                const controller = new AbortController()
+                const pending = responder(
+                    {
+                        runId: `run-${backend}-cancel`,
+                        messageId: `message-${backend}-cancel`,
+                        systemPrompt: "No tools.",
+                        userPrompt: "status",
+                    },
+                    controller.signal,
+                )
+                controller.abort()
+
+                await assert.rejects(pending, (error: unknown) => {
+                    assert.ok(error instanceof DialogueResponderInvocationError)
+                    assert.equal(error.invocation.observation.status, "cancelled")
+                    assert.deepEqual(
+                        error.invocation.observation.tokens.total,
+                        unknownMetric("not_reported"),
+                    )
+                    return true
+                })
+            }
+        })
+    })
+
+    it("times out one OpenAI provider call without aborting the caller turn", async () => {
+        const caller = new AbortController()
+        let providerSignal: AbortSignal | undefined
+        const responder = createDialogueResponder({
+            backend: "openai",
+            cwd: process.cwd(),
+            timeoutMs: 20,
+            openaiRunRound: async (_context, _model, options) => {
+                providerSignal = options.signal
+                return await new Promise((_resolve, reject) => {
+                    options.signal?.addEventListener(
+                        "abort",
+                        () => reject(options.signal?.reason),
+                        { once: true },
+                    )
+                })
+            },
+        })
+
+        await assert.rejects(
+            responder(
+                {
+                    runId: "run-openai-call-timeout",
+                    messageId: "message-openai-call-timeout",
+                    systemPrompt: "system",
+                    userPrompt: "status",
+                },
+                caller.signal,
+            ),
+            (error: unknown) => {
+                assert.ok(error instanceof DialogueResponderInvocationError)
+                assert.equal(error.invocation.observation.status, "timed_out")
+                return true
+            },
+        )
+        assert.equal(providerSignal?.aborted, true)
+        assert.equal(caller.signal.aborted, false)
+    })
+
+    it("preserves provider-timeout versus explicit-cancel attribution through intake", async () => {
+        const createIntake = (
+            providerTimeoutMs: number,
+            onStarted?: () => void,
+        ) => {
+            const dialogue = createDialogueResponder({
+                backend: "openai",
+                cwd: process.cwd(),
+                timeoutMs: providerTimeoutMs,
+                openaiRunRound: async (_context, _model, options) => {
+                    onStarted?.()
+                    return await new Promise((_resolve, reject) => {
+                        options.signal?.addEventListener(
+                            "abort",
+                            () => reject(options.signal?.reason),
+                            { once: true },
+                        )
+                    })
+                },
+            })
+            return new ConversationIntake({
+                sessionId: "session-dialogue-intake-timeout",
+                timeoutMs: providerTimeoutMs + 1_000,
+                responder: {
+                    backend: "openai",
+                    async respond(input, signal) {
+                        const result = await dialogue({
+                            runId: "frontdoor:dialogue-intake-timeout",
+                            messageId: input.requestId,
+                            billingRole: "conversation",
+                            systemPrompt: input.systemPrompt,
+                            userPrompt: input.userPrompt,
+                        }, signal)
+                        return result.text
+                    },
+                },
+            })
+        }
+
+        const timedOut = createIntake(20)
+        await assert.rejects(
+            timedOut.submit({
+                requestId: "request-provider-timeout",
+                text: "status",
+                intent: "chat",
+            }),
+            (error: unknown) => {
+                assert.ok(error instanceof DialogueResponderInvocationError)
+                assert.equal(error.invocation.observation.status, "timed_out")
+                return true
+            },
+        )
+        timedOut.close()
+
+        let markStarted: (() => void) | undefined
+        const started = new Promise<void>((resolve) => { markStarted = resolve })
+        const cancelled = createIntake(10_000, () => markStarted?.())
+        const pending = cancelled.submit({
+            requestId: "request-explicit-cancel",
+            text: "status",
+            intent: "chat",
+        })
+        await started
+        cancelled.close()
+        await assert.rejects(pending, (error: unknown) => {
+            assert.ok(error instanceof DialogueResponderInvocationError)
+            assert.equal(error.invocation.observation.status, "cancelled")
+            return true
+        })
+    })
+
     it("attaches one unknown observation to attributable provider failures", async () => {
         await withTempDir("dialogue-responder-failure-", async (dir) => {
             const binary = join(dir, "claude")
@@ -517,3 +923,11 @@ process.stdin.on("end", () => {
         )
     })
 })
+
+async function waitForFile(path: string, timeoutMs = 10_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (!existsSync(path)) {
+        if (Date.now() >= deadline) throw new Error("descendant never started")
+        await delay(25)
+    }
+}

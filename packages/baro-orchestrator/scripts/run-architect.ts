@@ -19,6 +19,12 @@ import { runArchitectOpenAI } from "../src/planning/architect-openai.js"
 import { runArchitectOpenCode } from "../src/planning/architect-opencode.js"
 import { runArchitectPi } from "../src/planning/architect-pi.js"
 import {
+    parseArchitectOutcome,
+    validateArchitectOutcomeCorrelation,
+    wrapArchitectOutcome,
+    type ArchitectOutcomeCorrelationV1,
+} from "../src/planning/architect-outcome.js"
+import {
     parseRequiredModeContract,
     type ModeContract,
 } from "../src/planning/planner-prompts.js"
@@ -36,6 +42,15 @@ interface Args {
     modeFile?: string
     /** When set, the doc is written here and stdout is freed for the event stream. */
     resultFile?: string
+    /** Opt-in strict ArchitectOutcomeV1 transport. Mutually exclusive with resultFile. */
+    outcomeFile?: string
+    sessionId?: string
+    goalRequestId?: string
+    architectRequestId?: string
+    claudeBin?: string
+    codexBin?: string
+    opencodeBin?: string
+    piBin?: string
 }
 
 function parseArgs(argv: string[]): Args {
@@ -47,6 +62,14 @@ function parseArgs(argv: string[]): Args {
     let contextFile: string | undefined
     let modeFile: string | undefined
     let resultFile: string | undefined
+    let outcomeFile: string | undefined
+    let sessionId: string | undefined
+    let goalRequestId: string | undefined
+    let architectRequestId: string | undefined
+    let claudeBin: string | undefined
+    let codexBin: string | undefined
+    let opencodeBin: string | undefined
+    let piBin: string | undefined
 
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i]
@@ -80,6 +103,30 @@ function parseArgs(argv: string[]): Args {
             case "--result-file":
                 resultFile = required(argv, ++i, "--result-file")
                 break
+            case "--outcome-file":
+                outcomeFile = required(argv, ++i, "--outcome-file")
+                break
+            case "--conversation-session-id":
+                sessionId = required(argv, ++i, "--conversation-session-id")
+                break
+            case "--goal-request-id":
+                goalRequestId = required(argv, ++i, "--goal-request-id")
+                break
+            case "--architect-request-id":
+                architectRequestId = required(argv, ++i, "--architect-request-id")
+                break
+            case "--claude-bin":
+                claudeBin = required(argv, ++i, "--claude-bin")
+                break
+            case "--codex-bin":
+                codexBin = required(argv, ++i, "--codex-bin")
+                break
+            case "--opencode-bin":
+                opencodeBin = required(argv, ++i, "--opencode-bin")
+                break
+            case "--pi-bin":
+                piBin = required(argv, ++i, "--pi-bin")
+                break
             default:
                 fatal(`unknown flag: ${a}`)
         }
@@ -87,6 +134,18 @@ function parseArgs(argv: string[]): Args {
     if (!goal) fatal("--goal is required")
     if (!cwd) fatal("--cwd is required")
     if (!llm) fatal("--llm is required")
+    if (resultFile && outcomeFile) {
+        fatal("--result-file and --outcome-file are mutually exclusive")
+    }
+    const correlationFlags = [sessionId, goalRequestId, architectRequestId]
+    if (outcomeFile && correlationFlags.some((value) => !value)) {
+        fatal(
+            "--outcome-file requires --conversation-session-id, --goal-request-id, and --architect-request-id",
+        )
+    }
+    if (!outcomeFile && correlationFlags.some((value) => value !== undefined)) {
+        fatal("architect correlation flags require --outcome-file")
+    }
     return {
         goal: goal!,
         cwd: cwd!,
@@ -96,6 +155,14 @@ function parseArgs(argv: string[]): Args {
         contextFile,
         modeFile,
         resultFile,
+        outcomeFile,
+        sessionId,
+        goalRequestId,
+        architectRequestId,
+        claudeBin,
+        codexBin,
+        opencodeBin,
+        piBin,
     }
 }
 
@@ -112,8 +179,21 @@ function fatal(msg: string): never {
 
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2))
-    // With a result file, stdout is the event stream — let the architect emit.
-    if (args.resultFile) process.env.BARO_PLAN_EVENTS = "1"
+    const outcomeMode = args.outcomeFile !== undefined
+    let correlation: ArchitectOutcomeCorrelationV1 | undefined
+    if (outcomeMode) {
+        try {
+            correlation = validateArchitectOutcomeCorrelation({
+                sessionId: args.sessionId!,
+                goalRequestId: args.goalRequestId!,
+                architectRequestId: args.architectRequestId!,
+            })
+        } catch (error) {
+            fatal(`invalid architect outcome correlation: ${(error as Error).message}`)
+        }
+    }
+    // With a result/outcome file, stdout is the event stream — let the architect emit.
+    if (args.resultFile || args.outcomeFile) process.env.BARO_PLAN_EVENTS = "1"
 
     let projectContext: string | undefined
     if (args.contextFile) {
@@ -141,7 +221,7 @@ async function main(): Promise<void> {
             "\n",
     )
 
-    let doc: string
+    let result: string
     const t0 = Date.now()
     try {
         if (args.llm === "openai") {
@@ -157,13 +237,15 @@ async function main(): Promise<void> {
                 },
             })
             try {
-                doc = await runArchitectOpenAI({
+                result = await runArchitectOpenAI({
                     goal: args.goal,
                     cwd: args.cwd,
                     model: args.model,
                     projectContext,
                     modeContract,
                     billingCoordinator: billing ?? undefined,
+                    outcomeMode,
+                    readOnly: outcomeMode,
                 })
             } finally {
                 const result = await reconcileAndCloseGatewayBilling(billing)
@@ -174,37 +256,47 @@ async function main(): Promise<void> {
                 }
             }
         } else if (args.llm === "codex") {
-            doc = await runArchitectCodex({
+            result = await runArchitectCodex({
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,
                 projectContext,
                 modeContract,
+                codexBin: args.codexBin,
+                outcomeMode,
+                readOnly: outcomeMode,
             })
         } else if (args.llm === "opencode") {
-            doc = await runArchitectOpenCode({
+            result = await runArchitectOpenCode({
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,
                 projectContext,
                 modeContract,
+                opencodeBin: args.opencodeBin,
+                outcomeMode,
             })
         } else if (args.llm === "pi") {
-            doc = await runArchitectPi({
+            result = await runArchitectPi({
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,
                 projectContext,
                 modeContract,
+                piBin: args.piBin,
+                outcomeMode,
             })
         } else {
-            doc = await runArchitectClaude({
+            result = await runArchitectClaude({
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,
                 effort: args.effort,
                 projectContext,
                 modeContract,
+                claudeBin: args.claudeBin,
+                outcomeMode,
+                readOnly: outcomeMode,
             })
         }
     } catch (e) {
@@ -214,12 +306,32 @@ async function main(): Promise<void> {
         process.exit(1)
     }
 
-    process.stderr.write(`[run-architect] ok in ${Date.now() - t0}ms (${doc.length} chars)\n`)
+    let outcomeTransport: ReturnType<typeof wrapArchitectOutcome> | undefined
+    if (args.outcomeFile) {
+        // Provider output is untrusted and contains no authority fields. Only
+        // this runner can attach the caller correlation after strict parsing.
+        try {
+            outcomeTransport = wrapArchitectOutcome(
+                parseArchitectOutcome(result),
+                correlation!,
+            )
+        } catch (error) {
+            process.stderr.write(
+                `[run-architect] FAILED after ${Date.now() - t0}ms: ${(error as Error)?.message ?? String(error)}\n`,
+            )
+            process.exit(1)
+        }
+    }
+    process.stderr.write(`[run-architect] ok in ${Date.now() - t0}ms (${result.length} chars)\n`)
+    if (args.outcomeFile) {
+        writeFileSync(args.outcomeFile, JSON.stringify(outcomeTransport!))
+        return
+    }
     // Result to the file (stdout is the event stream); legacy path keeps it on stdout.
     if (args.resultFile) {
-        writeFileSync(args.resultFile, doc)
+        writeFileSync(args.resultFile, result)
     } else {
-        process.stdout.write(doc)
+        process.stdout.write(result)
     }
 }
 

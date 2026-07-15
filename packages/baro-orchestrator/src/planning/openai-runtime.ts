@@ -24,7 +24,10 @@ import type {
     GatewayBillingCoordinator,
     GatewayBillingDispatch,
 } from "../billing/index.js"
-import type { UnknownMetricReason } from "../model-telemetry.js"
+import type {
+    ModelInvocationStatus,
+    UnknownMetricReason,
+} from "../model-telemetry.js"
 
 export interface InferenceRound {
     items: ContextItem[]
@@ -39,10 +42,28 @@ export type InferenceBillingContext = Omit<
 >
 
 export interface InferenceRoundOptions {
+    /** Cancels the actual provider request, not only the caller's wait. */
+    readonly signal?: AbortSignal
     readonly billing?: {
         readonly coordinator: GatewayBillingCoordinator
         readonly context: InferenceBillingContext
     }
+}
+
+const PROVIDER_CALL_TIMEOUT_CODE = "BARO_PROVIDER_CALL_TIMEOUT"
+
+/**
+ * Marks a timeout owned by the provider-call cap. Plain AbortSignal
+ * cancellation is intentionally not a timeout: shutdown/turn cancellation
+ * must remain distinguishable in runner and billing telemetry.
+ */
+export function providerCallTimeoutError(timeoutMs: number): Error {
+    const error = new Error(
+        `inference provider call timed out after ${timeoutMs}ms`,
+    ) as Error & { code: string }
+    error.name = "TimeoutError"
+    error.code = PROVIDER_CALL_TIMEOUT_CODE
+    return error
 }
 
 /**
@@ -195,8 +216,13 @@ export async function runInferenceRound(
                           getResponsesRuntime(),
                           request,
                           dispatch.requestExtension,
+                          options.signal,
                       )
-                    : await getResponsesRuntime().infer(request)
+                    : await inferResponsesRound(
+                          getResponsesRuntime(),
+                          request,
+                          options.signal,
+                      )
                 : await inferChatRound(
                       request,
                       {
@@ -206,6 +232,7 @@ export async function runInferenceRound(
                               : {}),
                       },
                       dispatch !== null,
+                      options.signal,
                   )
         if (dispatch && options.billing) {
             await options.billing.coordinator.observeRunner(dispatch, {
@@ -221,11 +248,11 @@ export async function runInferenceRound(
         }
     } catch (error) {
         if (dispatch && options.billing) {
-            const reason = inferenceFailureReason(error)
+            const failure = inferenceFailureAttribution(error, options.signal)
             await options.billing.coordinator.observeRunner(dispatch, {
-                status: reason === "timed_out" ? "timed_out" : "failed",
+                status: failure.status,
                 durationMs: Date.now() - startedAt,
-                missingReason: reason,
+                missingReason: failure.reason,
             })
         }
         throw error
@@ -236,10 +263,57 @@ async function inferChatRound(
     request: InferenceRequest,
     connection: OpenAIConnection,
     billed: boolean,
+    signal?: AbortSignal,
 ) {
     const runtime = getChatRuntime(connection, !billed)
     if (billed) disableOpenAiSdkRetries(runtime)
-    return runtime.infer(request)
+    if (!signal) return runtime.infer(request)
+
+    const internals = runtime as unknown as ChatRuntimeInternals
+    assertChatRuntimeInternals(internals)
+    const response = await internals.client.chat.completions.create(
+        internals.buildRequest(request),
+        { signal },
+    )
+    return {
+        contextItems: internals.extractContextItems(response),
+        tokenUsage: internals.extractTokenUsage(response),
+    }
+}
+
+interface ProviderRequestOptions {
+    signal?: AbortSignal
+}
+
+interface ChatRuntimeInternals {
+    client: {
+        chat: {
+            completions: {
+                create(
+                    body: Record<string, unknown>,
+                    options?: ProviderRequestOptions,
+                ): Promise<unknown>
+            }
+        }
+    }
+    buildRequest(input: InferenceRequest): Record<string, unknown>
+    extractContextItems(response: unknown): ContextItem[]
+    extractTokenUsage(response: unknown): TokenUsage | undefined
+}
+
+function assertChatRuntimeInternals(
+    internals: ChatRuntimeInternals,
+): void {
+    if (
+        !internals.client?.chat?.completions ||
+        typeof internals.buildRequest !== "function" ||
+        typeof internals.extractContextItems !== "function" ||
+        typeof internals.extractTokenUsage !== "function"
+    ) {
+        throw new Error(
+            "Mozaik Chat Completions runtime cannot attach provider cancellation",
+        )
+    }
 }
 
 function billingExtraBody(
@@ -263,17 +337,64 @@ async function inferResponsesWithExtension(
     runtime: OpenAIResponses,
     request: InferenceRequest,
     extension: GatewayBillingDispatch["requestExtension"],
+    signal?: AbortSignal,
 ): Promise<{ contextItems: ContextItem[]; tokenUsage: TokenUsage | undefined }> {
-    const internals = runtime as unknown as {
-        client: {
-            responses: {
-                create(body: Record<string, unknown>): Promise<unknown>
-            }
-        }
-        buildRequest(input: InferenceRequest): Record<string, unknown>
-        extractContextItems(response: unknown): ContextItem[]
-        extractTokenUsage(response: unknown): TokenUsage | undefined
+    const internals = responseInternals(runtime)
+    disableOpenAiSdkRetries(runtime)
+    const response = await internals.client.responses.create(
+        {
+            ...internals.buildRequest(request),
+            ...extension,
+        },
+        signal ? { signal } : undefined,
+    )
+    return {
+        contextItems: internals.extractContextItems(response),
+        tokenUsage: internals.extractTokenUsage(response),
     }
+}
+
+async function inferResponsesRound(
+    runtime: OpenAIResponses,
+    request: InferenceRequest,
+    signal?: AbortSignal,
+): Promise<{ contextItems: ContextItem[]; tokenUsage: TokenUsage | undefined }> {
+    if (!signal) {
+        const response = await runtime.infer(request)
+        return {
+            contextItems: response.contextItems,
+            tokenUsage: response.tokenUsage,
+        }
+    }
+    const internals = responseInternals(runtime)
+    const response = await internals.client.responses.create(
+        internals.buildRequest(request),
+        { signal },
+    )
+    return {
+        contextItems: internals.extractContextItems(response),
+        tokenUsage: internals.extractTokenUsage(response),
+    }
+}
+
+interface ResponsesRuntimeInternals {
+    client: {
+        responses: {
+            create(
+                body: Record<string, unknown>,
+                options?: ProviderRequestOptions,
+            ): Promise<unknown>
+        }
+    }
+    buildRequest(input: InferenceRequest): Record<string, unknown>
+    extractContextItems(response: unknown): ContextItem[]
+    extractTokenUsage(response: unknown): TokenUsage | undefined
+}
+
+function responseInternals(
+    runtime: OpenAIResponses,
+): ResponsesRuntimeInternals {
+    const internals = runtime as unknown as ResponsesRuntimeInternals
     if (
         !internals.client?.responses ||
         typeof internals.buildRequest !== "function" ||
@@ -281,18 +402,10 @@ async function inferResponsesWithExtension(
         typeof internals.extractTokenUsage !== "function"
     ) {
         throw new Error(
-            "Mozaik Responses runtime cannot attach trusted billing correlation",
+            "Mozaik Responses runtime cannot attach trusted request controls",
         )
     }
-    disableOpenAiSdkRetries(runtime)
-    const response = await internals.client.responses.create({
-        ...internals.buildRequest(request),
-        ...extension,
-    })
-    return {
-        contextItems: internals.extractContextItems(response),
-        tokenUsage: internals.extractTokenUsage(response),
-    }
+    return internals
 }
 
 /**
@@ -316,18 +429,45 @@ function disableOpenAiSdkRetries(
     internals.client.maxRetries = 0
 }
 
+function inferenceFailureAttribution(
+    error: unknown,
+    signal?: AbortSignal,
+): {
+    status: Extract<
+        ModelInvocationStatus,
+        "failed" | "timed_out" | "cancelled"
+    >
+    reason: UnknownMetricReason
+} {
+    if (signal?.aborted) {
+        return isProviderCallTimeout(signal.reason)
+            ? { status: "timed_out", reason: "timed_out" }
+            : { status: "cancelled", reason: "not_reported" }
+    }
+    const reason = inferenceFailureReason(error)
+    return reason === "timed_out"
+        ? { status: "timed_out", reason }
+        : { status: "failed", reason }
+}
+
 function inferenceFailureReason(error: unknown): UnknownMetricReason {
     if (typeof error !== "object" || error === null) return "not_reported"
     const item = error as Record<string, unknown>
     if (
-        item.name === "AbortError" ||
+        (typeof item.name === "string" && /abort/i.test(item.name)) ||
         item.code === "ETIMEDOUT" ||
         (typeof item.message === "string" &&
-            /(?:timed?\s*out|timeout)/i.test(item.message))
+            /(?:abort|timed?\s*out|timeout)/i.test(item.message))
     ) {
         return "timed_out"
     }
     return "not_reported"
+}
+
+function isProviderCallTimeout(reason: unknown): boolean {
+    return typeof reason === "object"
+        && reason !== null
+        && (reason as { code?: unknown }).code === PROVIDER_CALL_TIMEOUT_CODE
 }
 
 export class UsageAccumulator {

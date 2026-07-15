@@ -9,7 +9,11 @@ import {
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import type { Participant } from "@mozaik-ai/core"
+import {
+    BaseObserver,
+    type Participant,
+    type SemanticEvent,
+} from "@mozaik-ai/core"
 
 import {
     AgentResult,
@@ -418,7 +422,9 @@ process.exit(0)
                 prompt: "finish the reviewed story",
                 cwd: fake.cwd,
                 claudeBin: fake.bin,
-                retries: 2,
+                // This test exercises reviewed continuation inside exactly
+                // one process, not StoryAgent's cross-process retry path.
+                retries: 0,
                 retryDelayMs: 0,
                 timeoutSecs: FIXTURE_TIMEOUT_SECS,
                 maxTurns: 3,
@@ -429,97 +435,106 @@ process.exit(0)
             agent.join(env)
 
             const outcomePromise = agent.run(env)
-            const [first] = await waitForAgentResults(env, 1)
-            const firstTerminalId = criticInput(first)?.terminalId
-            assert.ok(firstTerminalId)
+            try {
+                const [first] = await waitForAgentResults(env, 1)
+                const firstTerminalId = criticInput(first)?.terminalId
+                assert.ok(firstTerminalId)
 
-            env.deliverSemanticEvent(
-                reviewAuthority,
-                Critique.create({
-                    agentId: "story-reviewed",
-                    terminalId: firstTerminalId,
-                    verdict: "fail",
-                    reasoning: "the first candidate is incomplete",
-                    violatedCriteria: ["missing regression test"],
-                    turn: 1,
-                    modelUsed: "test-critic",
-                }),
-            )
-            env.deliverSemanticEvent(
-                reviewAuthority,
-                AgentTargetedMessage.create({
-                    recipientId: "story-reviewed",
-                    text: "legacy duplicate review feedback",
-                    metadata: { terminalId: firstTerminalId },
-                }),
-            )
+                env.deliverSemanticEvent(
+                    reviewAuthority,
+                    Critique.create({
+                        agentId: "story-reviewed",
+                        terminalId: firstTerminalId,
+                        verdict: "fail",
+                        reasoning: "the first candidate is incomplete",
+                        violatedCriteria: ["missing regression test"],
+                        turn: 1,
+                        modelUsed: "test-critic",
+                    }),
+                )
+                env.deliverSemanticEvent(
+                    reviewAuthority,
+                    AgentTargetedMessage.create({
+                        recipientId: "story-reviewed",
+                        text: "legacy duplicate review feedback",
+                        metadata: { terminalId: firstTerminalId },
+                    }),
+                )
 
-            const results = await waitForAgentResults(env, 2)
-            const second = results[1]!
-            const secondTerminalId = criticInput(second)?.terminalId
-            assert.ok(secondTerminalId)
-            assert.notEqual(secondTerminalId, firstTerminalId)
-            assert.equal(second.data.sessionId, first.data.sessionId)
+                const results = await waitForAgentResults(env, 2)
+                const second = results[1]!
+                const secondTerminalId = criticInput(second)?.terminalId
+                assert.ok(secondTerminalId)
+                assert.notEqual(secondTerminalId, firstTerminalId)
+                assert.equal(second.data.sessionId, first.data.sessionId)
 
-            const inputsBeforePass = readJsonLines(fake.stdinPath)
-            assert.equal(inputsBeforePass.length, 2)
-            assert.equal(
-                inputsBeforePass[0]?.message?.content,
-                "finish the reviewed story",
-            )
-            assert.match(
-                String(inputsBeforePass[1]?.message?.content),
-                /authoritative review rejected this candidate/i,
-            )
-            assert.doesNotMatch(
-                readFileSync(fake.stdinPath, "utf8"),
-                /legacy duplicate review feedback/,
-            )
-            assert.equal(
-                readLifecycle(fake.lifecyclePath).filter(
-                    (entry) => entry.event === "spawn",
-                ).length,
-                1,
-            )
-            assert.equal(
-                readLifecycle(fake.lifecyclePath).some(
-                    (entry) => entry.event === "stdin_end",
-                ),
-                false,
-            )
+                const inputsBeforePass = readJsonLines(fake.stdinPath)
+                assert.equal(inputsBeforePass.length, 2)
+                assert.equal(
+                    inputsBeforePass[0]?.message?.content,
+                    "finish the reviewed story",
+                )
+                assert.match(
+                    String(inputsBeforePass[1]?.message?.content),
+                    /authoritative review rejected this candidate/i,
+                )
+                assert.doesNotMatch(
+                    readFileSync(fake.stdinPath, "utf8"),
+                    /legacy duplicate review feedback/,
+                )
+                assert.equal(
+                    readLifecycle(fake.lifecyclePath).filter(
+                        (entry) => entry.event === "spawn",
+                    ).length,
+                    1,
+                )
+                assert.equal(
+                    readLifecycle(fake.lifecyclePath).some(
+                        (entry) => entry.event === "stdin_end",
+                    ),
+                    false,
+                )
 
-            env.deliverSemanticEvent(
-                reviewAuthority,
-                Critique.create({
-                    agentId: "story-reviewed",
-                    terminalId: secondTerminalId,
-                    verdict: "pass",
-                    reasoning: "the corrected candidate passes",
-                    violatedCriteria: [],
-                    turn: 2,
-                    modelUsed: "test-critic",
-                }),
-            )
+                env.deliverSemanticEvent(
+                    reviewAuthority,
+                    Critique.create({
+                        agentId: "story-reviewed",
+                        terminalId: secondTerminalId,
+                        verdict: "pass",
+                        reasoning: "the corrected candidate passes",
+                        violatedCriteria: [],
+                        turn: 2,
+                        modelUsed: "test-critic",
+                    }),
+                )
 
-            const outcome = await outcomePromise
-            agent.leave(env)
-
-            assert.equal(outcome.success, true)
-            assert.equal(outcome.attempts, 1)
-            assert.equal(outcome.finalSummary?.sessionId, "review-session")
-            assert.equal(outcome.finalSummary?.lastResult?.resultText, "candidate 2")
-            assert.equal(
-                readLifecycle(fake.lifecyclePath).filter(
-                    (entry) => entry.event === "spawn",
-                ).length,
-                1,
-            )
-            assert.equal(
-                readLifecycle(fake.lifecyclePath).filter(
-                    (entry) => entry.event === "stdin_end",
-                ).length,
-                1,
-            )
+                const outcome = await outcomePromise
+                assert.equal(outcome.success, true)
+                assert.equal(outcome.attempts, 1)
+                assert.equal(outcome.finalSummary?.sessionId, "review-session")
+                assert.equal(
+                    outcome.finalSummary?.lastResult?.resultText,
+                    "candidate 2",
+                )
+                assert.equal(
+                    readLifecycle(fake.lifecyclePath).filter(
+                        (entry) => entry.event === "spawn",
+                    ).length,
+                    1,
+                )
+                assert.equal(
+                    readLifecycle(fake.lifecyclePath).filter(
+                        (entry) => entry.event === "stdin_end",
+                    ).length,
+                    1,
+                )
+            } finally {
+                // Never let a failed assertion tear down the fixture while
+                // its child still owns paths below the temporary directory.
+                if (agent.getCurrentClaude()) agent.abort()
+                await outcomePromise
+                agent.leave(env)
+            }
         })
     })
 
@@ -746,15 +761,44 @@ process.stdin.resume()
 async function waitForAgentResults(
     env: CapturedEnvironment,
     count: number,
-    timeoutMs = 5_000,
+    timeoutMs = FIXTURE_WAIT_TIMEOUT_MS,
 ) {
-    const deadline = Date.now() + timeoutMs
-    while (Date.now() < deadline) {
-        const results = env.events.filter(AgentResult.is)
-        if (results.length >= count) return results
-        await new Promise((resolve) => setTimeout(resolve, 5))
-    }
-    assert.fail(`timed out waiting for ${count} AgentResult event(s)`)
+    const currentResults = () => env.events.filter(AgentResult.is)
+    type Results = ReturnType<typeof currentResults>
+
+    return new Promise<Results>((resolve, reject) => {
+        let settled = false
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const waiter = new (class extends BaseObserver {
+            override onExternalEvent(
+                _source: Participant,
+                event: SemanticEvent<unknown>,
+            ): void {
+                if (AgentResult.is(event)) settleIfReady()
+            }
+        })()
+
+        const cleanup = (): boolean => {
+            if (settled) return false
+            settled = true
+            if (timer !== undefined) clearTimeout(timer)
+            waiter.leave(env)
+            return true
+        }
+        const settleIfReady = (): void => {
+            const results = currentResults()
+            if (results.length < count || !cleanup()) return
+            resolve(results)
+        }
+
+        waiter.join(env)
+        timer = setTimeout(() => {
+            if (!cleanup()) return
+            reject(new Error(`timed out waiting for ${count} AgentResult event(s)`))
+        }, timeoutMs)
+        // Cover results delivered before this waiter subscribed.
+        settleIfReady()
+    })
 }
 
 async function waitForCondition(

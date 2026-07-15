@@ -133,12 +133,75 @@ cross-run calibration belongs to repeated externally verified trials.
 Baro has two deliberately separate conversation layers owned by one durable
 logical session:
 
-1. Before planning, the TUI/headless front door persists a correlated transcript
-   and runs each provider turn in a fresh process rooted in an empty temporary
-   directory. A strict schema-v1 response may clarify, answer, or hand exactly
-   one validated `GoalEnvelope` to planning. It cannot inspect the repository or
-   name workers, routes, leases, retries, or DAG operations.
-2. During collective execution, a run-local `DialogueAgent` observes a bounded
+1. Before planning, the TUI/headless front door persists a correlated transcript.
+   Every front-door request uses an isolated, short-lived Mozaik
+   environment: the Conversation participant emits
+   `repository_context_requested`, and an exact source-bound RepoScout returns a
+   frozen, size-bounded `RepositoryBriefV1`. RepoScout starts from a
+   deterministic snapshot, then its separate model policy iteratively selects
+   exactly one Baro-owned `read_file`, literal `grep`, or `glob` observation per
+   step. The broker is shell-free, rejects observed symlinks, excludes known
+   credential/key/local-cloud-state paths, and enforces cumulative wall-clock and
+   model-visible observation-byte bounds plus per-invocation traversal, search, and
+   glob-work bounds. Model decisions have exact correlation; invalid decisions
+   receive bounded same-step repair, and an unrecoverable provider/validation
+   failure performs a final stability rescan before returning the explicitly
+   truncated deterministic fallback. The Scout and Conversation roles default
+   to the same selected backend/model but have
+   independent responder seams for future cost routing.
+   Successful autonomous briefs use an evidence-snapshot identity composed from
+   the exact bootstrap projection and ordered observation suffix visible in the
+   finishing policy call, plus the omitted-observation count. Clipped bootstrap
+   paths must be rediscovered, and omitted earlier observations force an
+   explicitly truncated result. That identity proves which evidence was projected, not
+   that a model-authored statement is semantically true. Fact paths require
+   bootstrap/read/search provenance, and a cited line must be visibly covered by
+   a successful read/search observation. This is capability isolation, not a
+   proof that model-authored summaries or questions are immune to repository
+   prompt injection; user-facing text remains untrusted model output.
+   Their harness process is rooted in an empty temporary directory and receives
+   repository contents only as untrusted tool observations. Claude, OpenCode and
+   Pi use explicit no-tool profiles. Codex uses a strict least-privilege profile
+   that denies its empty workspace, tool network and inherited shell environment
+   while ignoring local config, rules and project documents. A strict
+   schema-v1 Conversation response may clarify, answer, or propose exactly one
+   GoalEnvelope; it cannot name workers, routes, leases, retries, or DAG
+   operations. Chat turns also request context because they may identify a new
+   implementation follow-up; a direct repository-free chat call cannot return
+   `ready`. A
+   repository-scoped active-session index restores an unfinished clarification
+   after restart and closes an interrupted old request before accepting a retry.
+   Each provider call requests a 5-minute deadline, configurable with
+   `BARO_CONVERSATION_PROVIDER_TIMEOUT_SECS` (15–1800). The Rust host clamps the
+   effective value so two sequential provider windows plus a 30-second cleanup
+   margin fit inside the configured turn deadline; the direct Node entry point
+   rejects incompatible timeout pairs. A failed Scout call
+   preserves deterministic context so Conversation can still be attempted;
+   Conversation itself still requires the selected provider.
+   The outer front-door wall-clock fail-safe defaults to 30 minutes and is
+   configurable with `BARO_CONVERSATION_TURN_TIMEOUT_SECS` (60–7200); its high
+   step cap is only a last-resort safety bound, not a target exploration budget.
+2. A proposed `ready` GoalEnvelope remains in the single pending response slot
+   until it is accepted. Every provider route runs a pre-acceptance Architect
+   validation. Claude, Codex and native OpenAI-compatible routes validate with
+   repository read-only capabilities. The Architect may
+   replace the candidate with correlated, repository-cited clarification; a
+   ready decision document is reused by Planner without a second Architect call.
+   Brokered pre-accept context is checkout-contained, symlink-free and capped at
+   8 KiB; the candidate goal has the same 8 KiB process-boundary cap. A
+   30-minute wall-clock fail-safe has no turn budget, emits progress heartbeats,
+   and terminates the complete provider process tree if it expires.
+   The Codex route retains the checkout as its read-only working root for
+   exploration, but disables automatic project-document/`AGENTS.md` prompt
+   injection with strict CLI config (`project_doc_max_bytes=0`); repository
+   files are evidence rather than pre-acceptance instructions.
+   OpenCode and Pi lack a repository read-only CLI profile, so their
+   pre-acceptance Architect is an inference-only evaluator in an empty directory
+   with only the bounded brokered context. Quick mode retains the existing
+   Architect skip. The broker rejects observed symlinks; use a disposable,
+   remote-free immutable clone when hard isolation against concurrent checkout
+   mutation is required.
+3. During collective execution, a run-local `DialogueAgent` observes a bounded
    semantic projection on the same Mozaik bus. It answers an explicit operator
    message, can message a live continuation-capable worker, and can emit one
    atomic proposal containing at most two new implementation stories. The
@@ -178,24 +241,21 @@ processes. They do not call paid providers:
 cd packages/baro-orchestrator
 npm run typecheck
 node --import tsx --test \
-  test/provider-failure.test.ts \
-  test/participants/openai-story-agent.test.ts \
-  test/participants/story-agent.test.ts \
-  test/participants/critic-evidence.test.ts \
-  test/participants/acceptance-gate.test.ts \
-  test/participants/collaboration-bridge.test.ts \
-  test/participants/dialogue-agent.test.ts \
-  test/participants/conversation-delegation-board.test.ts \
-  test/participants/collective-authority.test.ts \
-  test/participants/lease-broker.test.ts \
-  test/participants/model-telemetry-collector.test.ts \
-  test/participants/operational-recovery.test.ts \
-  test/participants/collective-board.test.ts \
-  test/participants/runtime-replan-coordinator.test.ts \
-  test/participants/story-factory.test.ts \
-  test/collective-orchestrate.test.ts \
-  test/runtime/story-outcome-authority.test.ts
+  test/session/repository-brief.test.ts \
+  test/session/repository-scanner.test.ts \
+  test/session/autonomous-repository-scout.test.ts \
+  test/session/conversation-frontdoor.test.ts \
+  test/run-conversation-script.test.ts \
+  test/architect-outcome.test.ts \
+  test/run-architect-outcome.test.ts \
+  test/architect-openai.test.ts \
+  test/codex-one-shot.test.ts \
+  test/exec-file-cli.test.ts \
+  test/process-tree.test.ts
 npm test
+
+cd ../..
+cargo test -p baro-tui
 ```
 
 The paid A/B benchmark remains a separate final step. It should compare the

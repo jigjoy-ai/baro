@@ -16,6 +16,10 @@ import type { WorkBidEstimate } from "./work-market.js"
 
 import type { ModelInvocationMeasuredData } from "./model-telemetry.js"
 
+import type { ConversationResponse } from "./session/conversation-contract.js"
+import type { ConversationRequestIntent } from "./session/conversation-intake.js"
+import type { RepositoryBriefV1 } from "./session/repository-brief.js"
+
 /**
  * One event "kind": wire type string + typed `create()` factory + `is()`
  * type guard — class-event ergonomics without a JS class identity.
@@ -274,6 +278,90 @@ export interface ConversationFailedData {
 }
 export const ConversationFailed =
     defineSemanticEvent<ConversationFailedData>("conversation_failed")
+
+// Short-lived, pre-PRD conversation lane. These events intentionally carry no
+// cwd, model, route, worker, DAG, lease, or execution authority. Exact source
+// participant identity is enforced by the front-door participants.
+
+export interface FrontDoorConversationRequestedData {
+    schemaVersion: 1
+    sessionId: string
+    requestId: string
+    intent: ConversationRequestIntent
+    text: string
+}
+export const FrontDoorConversationRequested =
+    defineSemanticEvent<FrontDoorConversationRequestedData>(
+        "frontdoor_conversation_requested",
+    )
+
+export interface RepositoryContextRequestedData {
+    schemaVersion: 1
+    sessionId: string
+    requestId: string
+    contextRequestId: string
+    intent: Exclude<ConversationRequestIntent, "chat">
+    query: string
+}
+export const RepositoryContextRequested =
+    defineSemanticEvent<RepositoryContextRequestedData>(
+        "repository_context_requested",
+    )
+
+export interface RepositoryContextProvidedData {
+    schemaVersion: 1
+    sessionId: string
+    requestId: string
+    contextRequestId: string
+    scoutId: string
+    brief: RepositoryBriefV1
+}
+export const RepositoryContextProvided =
+    defineSemanticEvent<RepositoryContextProvidedData>(
+        "repository_context_provided",
+    )
+
+export type RepositoryContextFailureCode =
+    | "timeout"
+    | "scan_failed"
+    | "invalid_brief"
+    | "request_conflict"
+
+export interface RepositoryContextFailedData {
+    schemaVersion: 1
+    sessionId: string
+    requestId: string
+    contextRequestId: string
+    scoutId: string
+    code: RepositoryContextFailureCode
+    error: string
+}
+export const RepositoryContextFailed =
+    defineSemanticEvent<RepositoryContextFailedData>(
+        "repository_context_failed",
+    )
+
+export interface FrontDoorConversationCompletedData {
+    schemaVersion: 1
+    sessionId: string
+    requestId: string
+    response: ConversationResponse
+}
+export const FrontDoorConversationCompleted =
+    defineSemanticEvent<FrontDoorConversationCompletedData>(
+        "frontdoor_conversation_completed",
+    )
+
+export interface FrontDoorConversationFailedData {
+    schemaVersion: 1
+    sessionId: string
+    requestId: string
+    error: string
+}
+export const FrontDoorConversationFailed =
+    defineSemanticEvent<FrontDoorConversationFailedData>(
+        "frontdoor_conversation_failed",
+    )
 
 // Agent lifecycle
 

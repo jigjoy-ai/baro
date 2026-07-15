@@ -233,4 +233,29 @@ mod tests {
         ));
         assert!(!missing_parent.exists());
     }
+
+    #[test]
+    fn failed_initial_request_round_trips_and_accepts_a_fresh_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conversation.json");
+        let mut session = ConversationSession::new("session-1").unwrap();
+        session
+            .begin_request("request-1", "Goal whose backend call failed")
+            .unwrap();
+        session
+            .fail_pending_initial_request("request-1", "Backend unavailable; retry is safe.")
+            .unwrap();
+        session.save_to_path(&path).unwrap();
+
+        let mut loaded = ConversationSession::load_from_path(&path).unwrap();
+        assert_eq!(loaded.pending_request_id(), None);
+        assert_eq!(loaded.goal_envelope(), None);
+        assert!(!loaded
+            .fail_pending_initial_request("request-1", "duplicate failure")
+            .unwrap());
+        loaded
+            .begin_request("request-2", "Retry the same goal")
+            .unwrap();
+        assert_eq!(loaded.pending_request_id(), Some("request-2"));
+    }
 }

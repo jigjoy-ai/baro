@@ -2,9 +2,10 @@
  * One isolated turn of Baro's durable conversation session.
  *
  * Rust owns the session lifecycle and transcript. This process receives one
- * trusted snapshot, performs one text-only model call, writes one strictly
- * correlated decision, reconciles billing, and exits. No Mozaik run or
- * repository tool is kept alive across turns.
+ * trusted snapshot, performs bounded autonomous RepoScout policy calls plus
+ * one Conversation call, writes one strictly correlated decision, reconciles
+ * billing, and exits. No Mozaik run or repository tool is kept alive across
+ * turns.
  */
 
 import {
@@ -31,6 +32,13 @@ import {
     type ConversationResponder,
 } from "../src/session/conversation-intake.js"
 import { assertCorrelationId } from "../src/session/conversation-contract.js"
+import { runFrontDoorConversationTurn } from "../src/session/conversation-frontdoor.js"
+import {
+    AutonomousRepositoryScanner,
+    type RepositoryScoutResponder,
+} from "../src/session/autonomous-repository-scout.js"
+import { DeterministicRepositoryScanner } from "../src/session/repository-scanner.js"
+import { trustedFrontDoorBillingRunId } from "../src/session/frontdoor-billing.js"
 
 interface Args {
     inputFile: string
@@ -39,6 +47,7 @@ interface Args {
     llm: DialogueBackend
     model?: string
     timeoutMs?: number
+    turnTimeoutMs?: number
     claudeBin?: string
     codexBin?: string
     opencodeBin?: string
@@ -53,6 +62,10 @@ interface TurnInput {
     text: string
     history: ConversationHistoryEntry[]
 }
+
+const DEFAULT_PROVIDER_TIMEOUT_MS = 60_000
+const DEFAULT_TURN_TIMEOUT_MS = 30 * 60 * 1_000
+const PROVIDER_CLEANUP_MARGIN_MS = 30_000
 
 function parseArgs(argv: readonly string[]): Args {
     const values = new Map<string, string>()
@@ -74,6 +87,7 @@ function parseArgs(argv: readonly string[]): Args {
         "--llm",
         "--model",
         "--timeout-ms",
+        "--turn-timeout-ms",
         "--claude-bin",
         "--codex-bin",
         "--opencode-bin",
@@ -103,6 +117,18 @@ function parseArgs(argv: readonly string[]): Args {
     ) {
         fatal("--timeout-ms must be a positive bounded integer")
     }
+    const turnTimeoutRaw = values.get("--turn-timeout-ms")
+    const turnTimeoutMs = turnTimeoutRaw === undefined
+        ? undefined
+        : Number(turnTimeoutRaw)
+    if (
+        turnTimeoutMs !== undefined &&
+        (!Number.isSafeInteger(turnTimeoutMs) ||
+            turnTimeoutMs < 1 ||
+            turnTimeoutMs > 86_400_000)
+    ) {
+        fatal("--turn-timeout-ms must be a positive bounded integer")
+    }
     return {
         inputFile,
         resultFile,
@@ -110,6 +136,7 @@ function parseArgs(argv: readonly string[]): Args {
         llm,
         model: values.get("--model"),
         timeoutMs,
+        turnTimeoutMs,
         claudeBin: values.get("--claude-bin"),
         codexBin: values.get("--codex-bin"),
         opencodeBin: values.get("--opencode-bin"),
@@ -161,7 +188,17 @@ function parseTurnInput(path: string): TurnInput {
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2))
     const input = parseTurnInput(args.inputFile)
-    const billingRunId = process.env.BARO_RUN_ID ?? input.sessionId
+    const providerTimeoutMs = args.timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS
+    const turnTimeoutMs = args.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS
+    if (
+        turnTimeoutMs - providerTimeoutMs * 2 <
+        PROVIDER_CLEANUP_MARGIN_MS
+    ) {
+        fatal(
+            "--turn-timeout-ms must fit two provider deadlines plus 30000ms cleanup",
+        )
+    }
+    const billingRunId = trustedFrontDoorBillingRunId(input.sessionId)
     const billing = args.llm === "openai"
         ? createGatewayBillingCoordinatorFromEnv({
               runId: billingRunId,
@@ -179,7 +216,7 @@ async function main(): Promise<void> {
             backend: args.llm,
             cwd: isolatedCwd,
             model: args.model,
-            timeoutMs: args.timeoutMs,
+            timeoutMs: providerTimeoutMs,
             claudeBin: args.claudeBin,
             codexBin: args.codexBin,
             opencodeBin: args.opencodeBin,
@@ -194,6 +231,28 @@ async function main(): Promise<void> {
                     {
                         runId: billingRunId,
                         messageId: request.requestId,
+                        billingRole: "conversation",
+                        systemPrompt: request.systemPrompt,
+                        userPrompt: request.userPrompt,
+                    },
+                    signal,
+                )
+                return typeof result === "string" ? result : result.text
+            },
+        }
+        // Keep a distinct policy seam even while the CLI defaults both roles
+        // to the same selected backend/model. A future route can move Scout to
+        // a cheaper model without changing the Mozaik event contract.
+        const scoutResponder: RepositoryScoutResponder = {
+            backend: args.llm,
+            respond: async (request, signal) => {
+                const result = await dialogue(
+                    {
+                        runId: billingRunId,
+                        messageId:
+                            `${request.contextRequestId}.scout.` +
+                            `${request.step}.${request.attempt}`,
+                        billingRole: "repository_scout",
                         systemPrompt: request.systemPrompt,
                         userPrompt: request.userPrompt,
                     },
@@ -205,13 +264,29 @@ async function main(): Promise<void> {
         intake = new ConversationIntake({
             sessionId: input.sessionId,
             responder,
-            timeoutMs: args.timeoutMs,
+            // This is a caller/whole-turn watchdog, not a second provider
+            // deadline. Keeping it strictly above the provider deadline makes
+            // billing attribution deterministic when a provider hangs.
+            timeoutMs: turnTimeoutMs,
             initialHistory: input.history,
         })
-        const response = await intake.submit({
-            requestId: input.requestId,
-            text: input.text,
-            intent: input.intent,
+        const bootstrapScanner = new DeterministicRepositoryScanner(args.cwd)
+        const scanner = new AutonomousRepositoryScanner(args.cwd, {
+            responder: scoutResponder,
+            bootstrapScanner,
+        })
+        const response = await runFrontDoorConversationTurn({
+            sessionId: input.sessionId,
+            intake,
+            scanner,
+            repositoryTimeoutMs:
+                turnTimeoutMs - providerTimeoutMs - PROVIDER_CLEANUP_MARGIN_MS,
+            turnTimeoutMs,
+            turn: {
+                requestId: input.requestId,
+                text: input.text,
+                intent: input.intent,
+            },
         })
         writeFileSync(args.resultFile, JSON.stringify(response))
     } finally {

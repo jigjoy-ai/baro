@@ -12,6 +12,16 @@ use crate::app::LlmProvider;
 use crate::discovery::{self, ScriptEntry};
 use crate::subprocess::{self, ProcessRunError};
 
+mod outcome;
+
+#[allow(unused_imports)]
+pub use outcome::{
+    parse_architect_outcome_transport_v1, ArchitectClarificationQuestionV1,
+    ArchitectOutcomeContractError, ArchitectOutcomeKindV1, ArchitectOutcomeTransportV1,
+    ArchitectOutcomeV1, ArchitectRepositoryEvidenceV1, ARCHITECT_OUTCOME_SCHEMA_VERSION,
+    MAX_ARCHITECT_OUTCOME_BYTES,
+};
+
 const SCRIPT_REL_PATH: &str = "packages/baro-orchestrator/scripts/run-architect.ts";
 const BUNDLE_NAME: &str = "run-architect.mjs";
 
@@ -32,7 +42,10 @@ pub async fn run_architect(
     on_event: impl Fn(&str),
 ) -> Result<String, ProcessRunError> {
     let entry = discovery::locate_script(cwd, SCRIPT_REL_PATH, BUNDLE_NAME).map_err(|e| {
-        ProcessRunError { message: e, log_path: None }
+        ProcessRunError {
+            message: e,
+            log_path: None,
+        }
     })?;
 
     // The tempfile must outlive the subprocess — kept alive by this binding.
@@ -85,9 +98,12 @@ pub async fn run_architect(
             c
         }
     };
-    cmd.arg("--goal").arg(goal)
-        .arg("--cwd").arg(cwd)
-        .arg("--llm").arg(llm.as_str());
+    cmd.arg("--goal")
+        .arg(goal)
+        .arg("--cwd")
+        .arg(cwd)
+        .arg("--llm")
+        .arg(llm.as_str());
     if let Some(m) = model {
         cmd.arg("--model").arg(m);
     }
@@ -127,4 +143,281 @@ pub async fn run_architect(
         });
     }
     Ok(doc)
+}
+
+/// Opt-in repository-aware Architect run. Unlike [`run_architect`], this path
+/// requires the TS child to write an exact, correlated `ArchitectOutcomeV1`
+/// wrapper. Existing markdown callers remain byte-for-byte unchanged.
+pub async fn run_architect_outcome(
+    goal: &str,
+    cwd: &Path,
+    llm: LlmProvider,
+    model: Option<&str>,
+    context: Option<&str>,
+    mode_json: Option<&str>,
+    openai_api_key: Option<&str>,
+    openai_base_url: Option<&str>,
+    effort: &str,
+    session_id: &str,
+    goal_request_id: &str,
+    architect_request_id: &str,
+    on_event: impl Fn(&str),
+) -> Result<ArchitectOutcomeTransportV1, ProcessRunError> {
+    let entry = discovery::locate_script(cwd, SCRIPT_REL_PATH, BUNDLE_NAME).map_err(|message| {
+        ProcessRunError {
+            message,
+            log_path: None,
+        }
+    })?;
+    run_architect_outcome_with_entry(
+        entry,
+        goal,
+        cwd,
+        llm,
+        model,
+        context,
+        mode_json,
+        openai_api_key,
+        openai_base_url,
+        effort,
+        session_id,
+        goal_request_id,
+        architect_request_id,
+        on_event,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_architect_outcome_with_entry(
+    entry: ScriptEntry,
+    goal: &str,
+    cwd: &Path,
+    llm: LlmProvider,
+    model: Option<&str>,
+    context: Option<&str>,
+    mode_json: Option<&str>,
+    openai_api_key: Option<&str>,
+    openai_base_url: Option<&str>,
+    effort: &str,
+    session_id: &str,
+    goal_request_id: &str,
+    architect_request_id: &str,
+    on_event: impl Fn(&str),
+) -> Result<ArchitectOutcomeTransportV1, ProcessRunError> {
+    for (label, value) in [
+        ("sessionId", session_id),
+        ("goalRequestId", goal_request_id),
+        ("architectRequestId", architect_request_id),
+    ] {
+        outcome::validate_safe_id(label, value).map_err(|error| ProcessRunError {
+            message: error.to_string(),
+            log_path: None,
+        })?;
+    }
+
+    let ctx_tempfile = outcome_input_tempfile("architect context", context)?;
+    let mode_tempfile = outcome_input_tempfile("architect mode", mode_json)?;
+    let outcome_tempfile = tempfile::NamedTempFile::new().map_err(|error| ProcessRunError {
+        message: format!("could not create architect outcome tempfile: {error}"),
+        log_path: None,
+    })?;
+
+    let mut cmd = match entry {
+        ScriptEntry::Tsx { tsx, script } => {
+            let mut command = Command::new(tsx);
+            command.arg(script);
+            command
+        }
+        ScriptEntry::NodeJs(mjs) => {
+            let mut command = Command::new("node");
+            command.arg(mjs);
+            command
+        }
+    };
+    cmd.arg("--goal")
+        .arg(goal)
+        .arg("--cwd")
+        .arg(cwd)
+        .arg("--llm")
+        .arg(llm.as_str());
+    if let Some(model) = model {
+        cmd.arg("--model").arg(model);
+    }
+    cmd.arg("--effort").arg(effort);
+    if let Some(ref file) = ctx_tempfile {
+        cmd.arg("--context-file").arg(file.path());
+    }
+    if let Some(ref file) = mode_tempfile {
+        cmd.arg("--mode-file").arg(file.path());
+    }
+    cmd.arg("--outcome-file")
+        .arg(outcome_tempfile.path())
+        .arg("--conversation-session-id")
+        .arg(session_id)
+        .arg("--goal-request-id")
+        .arg(goal_request_id)
+        .arg("--architect-request-id")
+        .arg(architect_request_id);
+    if matches!(llm, LlmProvider::OpenAI) {
+        if let Some(key) = openai_api_key {
+            cmd.env("OPENAI_API_KEY", key);
+        }
+        if let Some(url) = openai_base_url {
+            cmd.env("OPENAI_BASE_URL", url);
+        }
+    }
+
+    let log_path = subprocess::spawn_and_stream_events(cmd, "architect", on_event).await?;
+    drop(ctx_tempfile);
+    drop(mode_tempfile);
+
+    let metadata = std::fs::metadata(outcome_tempfile.path()).map_err(|error| ProcessRunError {
+        message: format!("could not inspect architect outcome file: {error}"),
+        log_path: log_path.clone(),
+    })?;
+    if metadata.len() > MAX_ARCHITECT_OUTCOME_BYTES as u64 {
+        return Err(ProcessRunError {
+            message: format!(
+                "architect outcome transport is {} bytes; limit is {}",
+                metadata.len(),
+                MAX_ARCHITECT_OUTCOME_BYTES
+            ),
+            log_path,
+        });
+    }
+    let raw =
+        std::fs::read_to_string(outcome_tempfile.path()).map_err(|error| ProcessRunError {
+            message: format!("could not read architect outcome file: {error}"),
+            log_path: log_path.clone(),
+        })?;
+    if raw.trim().is_empty() {
+        return Err(ProcessRunError {
+            message: "architect returned an empty outcome".to_string(),
+            log_path,
+        });
+    }
+    parse_architect_outcome_transport_v1(&raw, session_id, goal_request_id, architect_request_id)
+        .map_err(|error| ProcessRunError {
+            message: format!("invalid architect outcome: {error}"),
+            log_path,
+        })
+}
+
+fn outcome_input_tempfile(
+    label: &str,
+    value: Option<&str>,
+) -> Result<Option<tempfile::NamedTempFile>, ProcessRunError> {
+    match value {
+        Some(value) if !value.is_empty() => {
+            let mut file = tempfile::NamedTempFile::new().map_err(|error| ProcessRunError {
+                message: format!("could not create tempfile for {label}: {error}"),
+                log_path: None,
+            })?;
+            file.write_all(value.as_bytes())
+                .map_err(|error| ProcessRunError {
+                    message: format!("could not write {label} tempfile: {error}"),
+                    log_path: None,
+                })?;
+            Ok(Some(file))
+        }
+        _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::Mutex;
+
+    use super::*;
+
+    fn fake_node_script(body: &str) -> (tempfile::TempDir, ScriptEntry) {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("fake-architect.mjs");
+        fs::write(&script, body).unwrap();
+        (directory, ScriptEntry::NodeJs(script))
+    }
+
+    async fn run_fake(
+        entry: ScriptEntry,
+        events: &Mutex<Vec<String>>,
+    ) -> Result<ArchitectOutcomeTransportV1, ProcessRunError> {
+        run_architect_outcome_with_entry(
+            entry,
+            "Implement it",
+            Path::new("."),
+            LlmProvider::Claude,
+            None,
+            Some("project context"),
+            Some(r#"{"schemaVersion":1}"#),
+            None,
+            None,
+            "high",
+            "session-1",
+            "goal-1",
+            "architect-1",
+            |event| events.lock().unwrap().push(event.to_string()),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn outcome_subprocess_passes_correlations_and_streams_events() {
+        let (_directory, entry) = fake_node_script(
+            r#"
+import { readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const get = (flag) => args[args.indexOf(flag) + 1];
+if (get("--conversation-session-id") !== "session-1" ||
+    get("--goal-request-id") !== "goal-1" ||
+    get("--architect-request-id") !== "architect-1" ||
+    readFileSync(get("--context-file"), "utf8") !== "project context" ||
+    readFileSync(get("--mode-file"), "utf8") !== '{"schemaVersion":1}') {
+  process.exit(9);
+}
+writeFileSync(get("--outcome-file"), JSON.stringify({
+  schemaVersion: 1,
+  sessionId: get("--conversation-session-id"),
+  goalRequestId: get("--goal-request-id"),
+  architectRequestId: get("--architect-request-id"),
+  outcome: {
+    schemaVersion: 1,
+    kind: "needsInput",
+    message: "Choose the public API.",
+    questions: [{id: "q1", text: "Which API?"}],
+    evidence: [{path: "src/lib.rs", line: 3, fact: "Two APIs exist."}],
+    decisionDocument: null
+  }
+}));
+process.stdout.write('{"type":"agent_status","status":"working"}\n');
+"#,
+        );
+        let events = Mutex::new(Vec::new());
+        let outcome = run_fake(entry, &events).await.unwrap();
+        assert_eq!(outcome.outcome.kind, ArchitectOutcomeKindV1::NeedsInput);
+        assert_eq!(events.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn outcome_subprocess_fails_closed_on_empty_and_malformed_files() {
+        let events = Mutex::new(Vec::new());
+        let (_empty_directory, empty_entry) = fake_node_script("// leave outcome file empty");
+        let empty = run_fake(empty_entry, &events).await.unwrap_err();
+        assert!(empty.message.contains("empty outcome"), "{}", empty.message);
+
+        let (_bad_directory, bad_entry) = fake_node_script(
+            r#"
+const args = process.argv.slice(2);
+const output = args[args.indexOf("--outcome-file") + 1];
+(await import("node:fs")).writeFileSync(output, "not-json");
+"#,
+        );
+        let malformed = run_fake(bad_entry, &events).await.unwrap_err();
+        assert!(
+            malformed.message.contains("invalid architect outcome"),
+            "{}",
+            malformed.message
+        );
+    }
 }

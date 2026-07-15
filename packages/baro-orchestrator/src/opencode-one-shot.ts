@@ -12,6 +12,7 @@ import { join } from "node:path"
 import spawn from "cross-spawn"
 
 import { harnessChildEnvironment } from "./harness-environment.js"
+import { anyProcessAlive, signalProcessTree } from "./process-tree.js"
 
 import {
     knownMetric,
@@ -37,6 +38,8 @@ export interface RunOpenCodeOneShotOptions {
     opencodeBin?: string
     /** Per-call timeout in milliseconds. Default: 600_000 (10 minutes). */
     timeoutMs?: number
+    /** Grace after SIGTERM before SIGKILL. Default: 5_000ms. */
+    terminationGraceMs?: number
     /** Per-phase prefix for the live stderr stream. Default: "opencode". */
     label?: string
     /** Optional invocation telemetry sink. It cannot alter runner success. */
@@ -81,6 +84,12 @@ export async function runOpenCodeOneShot(
     if (!safeEvaluator) args.push(opts.prompt)
 
     const timeoutMs = opts.timeoutMs ?? 600_000
+    const terminationGraceMs = opts.terminationGraceMs ?? 5_000
+    if (!Number.isFinite(terminationGraceMs) || terminationGraceMs < 1) {
+        throw new RangeError(
+            "runOpenCodeOneShot: terminationGraceMs must be positive",
+        )
+    }
 
     return await new Promise<string>((resolve, reject) => {
         const startedAt = Date.now()
@@ -122,6 +131,15 @@ export async function runOpenCodeOneShot(
         let aborted = false
         let timer: ReturnType<typeof setTimeout> | null = null
         let killTimer: ReturnType<typeof setTimeout> | null = null
+        let pollTimer: ReturnType<typeof setInterval> | null = null
+        let signalledPids = new Set<number>()
+        let escalated = false
+        let terminationRequested = false
+        let forcedError: Error | null = null
+        let deferredExit: {
+            code: number | null
+            signal: NodeJS.Signals | null
+        } | null = null
 
         const clearTimers = (): void => {
             if (timer !== null) {
@@ -132,24 +150,26 @@ export async function runOpenCodeOneShot(
                 clearTimeout(killTimer)
                 killTimer = null
             }
+            if (pollTimer !== null) {
+                clearInterval(pollTimer)
+                pollTimer = null
+            }
             opts.signal?.removeEventListener("abort", onAbort)
         }
         const terminate = (): void => {
-            try {
-                proc.kill("SIGTERM")
-            } catch {
-                /* noop */
-            }
+            terminationRequested = true
+            signalledPids = signalProcessTree(proc, "SIGTERM", signalledPids)
             if (killTimer !== null) return
             killTimer = setTimeout(() => {
                 killTimer = null
-                try {
-                    proc.kill("SIGKILL")
-                } catch {
-                    /* noop */
-                }
-            }, 5_000)
-            killTimer.unref?.()
+                escalated = true
+                signalledPids = signalProcessTree(
+                    proc,
+                    "SIGKILL",
+                    signalledPids,
+                )
+                finishDeferredExit()
+            }, terminationGraceMs)
         }
         const onAbort = (): void => {
             if (aborted) return
@@ -228,6 +248,12 @@ export async function runOpenCodeOneShot(
         })
 
         proc.on("error", (err) => {
+            if (terminationRequested && proc.pid !== undefined) {
+                if (!timedOut && !aborted) forcedError ??= err
+                // A started process emits exit after its runtime error. Keep
+                // the tree escalation alive and settle through that path.
+                return
+            }
             clearTimers()
             if (
                 !invocations.finish(
@@ -243,7 +269,10 @@ export async function runOpenCodeOneShot(
             reject(aborted ? abortError() : err)
         })
 
-        proc.on("exit", (code, signal) => {
+        const finalizeExit = (
+            code: number | null,
+            signal: NodeJS.Signals | null,
+        ): void => {
             clearTimers()
             const elapsedMs = Date.now() - startedAt
 
@@ -260,6 +289,17 @@ export async function runOpenCodeOneShot(
             ]
                 .filter((x): x is string => x !== null)
                 .join(" ")
+
+            if (forcedError) {
+                if (
+                    invocations.finish(
+                        unknownOpenCodeObservation("failed", elapsedMs, opts),
+                    )
+                ) {
+                    reject(forcedError)
+                }
+                return
+            }
 
             // Abnormal termination must fail even if SOME text accumulated:
             // callers feed the string into a markdown/JSON extractor that
@@ -338,37 +378,50 @@ export async function runOpenCodeOneShot(
                     `runOpenCodeOneShot: opencode produced no text output (${ctx})`,
                 ),
             )
+        }
+        const finishDeferredExit = (): void => {
+            const exit = deferredExit
+            if (!exit) return
+            deferredExit = null
+            finalizeExit(exit.code, exit.signal)
+        }
+
+        proc.on("exit", (code, signal) => {
+            if (
+                terminationRequested &&
+                !escalated &&
+                anyProcessAlive(signalledPids)
+            ) {
+                deferredExit = { code, signal }
+                // The direct CLI may exit on TERM while a provider child
+                // ignores it. Keep the promise (and Node process) alive until
+                // the descendant exits or the SIGKILL grace expires.
+                pollTimer = setInterval(() => {
+                    if (!anyProcessAlive(signalledPids)) finishDeferredExit()
+                }, 25)
+                return
+            }
+            finalizeExit(code, signal)
         })
 
         if (safeEvaluator) {
             if (!proc.stdin) {
-                clearTimers()
+                if (timer !== null) {
+                    clearTimeout(timer)
+                    timer = null
+                }
+                forcedError = new Error("opencode subprocess stdin is unavailable")
                 terminate()
-                invocations.finish(
-                    unknownOpenCodeObservation(
-                        "failed",
-                        Date.now() - startedAt,
-                        opts,
-                    ),
-                )
-                reject(new Error("opencode subprocess stdin is unavailable"))
                 return
             }
             proc.stdin.on("error", (error) => {
                 if (aborted || timedOut) return
-                clearTimers()
-                terminate()
-                if (
-                    invocations.finish(
-                        unknownOpenCodeObservation(
-                            "failed",
-                            Date.now() - startedAt,
-                            opts,
-                        ),
-                    )
-                ) {
-                    reject(error)
+                if (timer !== null) {
+                    clearTimeout(timer)
+                    timer = null
                 }
+                forcedError ??= error
+                terminate()
             })
             proc.stdin.end(opts.prompt)
         }

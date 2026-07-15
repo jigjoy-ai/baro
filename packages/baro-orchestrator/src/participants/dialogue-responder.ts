@@ -1,6 +1,11 @@
-/** Text-only model adapters for DialogueAgent. No repository tools are exposed. */
+/**
+ * Text-only response adapters for DialogueAgent. Claude, OpenCode, and Pi have
+ * explicit tool-denial modes. Codex uses a least-privilege permission profile:
+ * spawned tools receive only minimal runtime reads, the empty workspace is
+ * denied, tool network is disabled, and project/user configuration is ignored.
+ * Repository knowledge arrives only through brokered prompt observations.
+ */
 
-import { execFile } from "node:child_process"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -14,11 +19,13 @@ import {
 
 import type { GatewayBillingCoordinator } from "../billing/index.js"
 import { runCodexOneShot } from "../codex-one-shot.js"
+import { execFileCli } from "../exec-file-cli.js"
 import { harnessChildEnvironment } from "../harness-environment.js"
 import { runOpenCodeOneShot } from "../opencode-one-shot.js"
 import { runPiOneShot } from "../pi-one-shot.js"
 import {
     GenericOpenAIModel,
+    providerCallTimeoutError,
     runInferenceRound,
     type OpenAIConnection,
 } from "../planning/openai-runtime.js"
@@ -34,6 +41,7 @@ import {
     type UnknownMetricReason,
 } from "../model-telemetry.js"
 import type { RunnerInvocationObservation } from "../runner-invocation.js"
+import { frontDoorBillingPhase } from "../session/frontdoor-billing.js"
 import {
     DialogueResponderInvocationError,
     type DialogueResponder,
@@ -53,6 +61,8 @@ export interface CreateDialogueResponderOptions {
     cwd: string
     model?: string
     timeoutMs?: number
+    /** Testable TERM-to-KILL grace shared by local CLI dialogue backends. */
+    terminationGraceMs?: number
     claudeBin?: string
     codexBin?: string
     opencodeBin?: string
@@ -95,6 +105,7 @@ function createOpenCodeResponder(
                     model: opts.model,
                     opencodeBin: opts.opencodeBin,
                     timeoutMs: opts.timeoutMs ?? 60_000,
+                    terminationGraceMs: opts.terminationGraceMs,
                     label: "opencode-dialogue",
                     safeEvaluatorSystemPrompt: input.systemPrompt,
                     signal,
@@ -120,18 +131,18 @@ function createOpenCodeResponder(
             if (isProcessLaunchFailure(error)) {
                 throw new Error("OpenCode dialogue process could not start")
             }
-            const timedOut = isTimeout(error)
+            const failure = dialogueFailureAttribution(error, signal)
             throw new DialogueResponderInvocationError(
                 "OpenCode dialogue provider failed",
-                observation
+                failure.status !== "cancelled" && observation
                     ? localHarnessInvocation(
                           "opencode",
                           requestedModel,
                           observation,
                       )
                     : telemetry.failureInvocation(
-                          timedOut ? "timed_out" : "failed",
-                          timedOut ? "timed_out" : "not_reported",
+                          failure.status,
+                          failure.reason,
                       ),
             )
         }
@@ -155,6 +166,7 @@ function createPiResponder(
                     model: opts.model,
                     piBin: opts.piBin,
                     timeoutMs: opts.timeoutMs ?? 60_000,
+                    terminationGraceMs: opts.terminationGraceMs,
                     label: "pi-dialogue",
                     safeEvaluatorSystemPrompt: input.systemPrompt,
                     signal,
@@ -180,18 +192,18 @@ function createPiResponder(
             if (isProcessLaunchFailure(error)) {
                 throw new Error("Pi dialogue process could not start")
             }
-            const timedOut = isTimeout(error)
+            const failure = dialogueFailureAttribution(error, signal)
             throw new DialogueResponderInvocationError(
                 "Pi dialogue provider failed",
-                observation
+                failure.status !== "cancelled" && observation
                     ? localHarnessInvocation(
                           "pi",
                           requestedModel,
                           observation,
                       )
                     : telemetry.failureInvocation(
-                          timedOut ? "timed_out" : "failed",
-                          timedOut ? "timed_out" : "not_reported",
+                          failure.status,
+                          failure.reason,
                       ),
             )
         }
@@ -209,16 +221,24 @@ function createCodexResponder(
         try {
             const text = await runCodexOneShot({
                 prompt: `${input.systemPrompt}\n\n${input.userPrompt}`,
+                promptViaStdin: true,
                 cwd: opts.cwd,
                 model: opts.model,
                 codexBin: opts.codexBin,
                 timeoutMs: opts.timeoutMs ?? 60_000,
+                terminationGraceMs: opts.terminationGraceMs,
                 label: "codex-dialogue",
                 // Conversation is an intent/status surface. It has no reason
-                // to mutate the checkout or retain a separate Codex thread.
+                // to mutate a checkout, inherit local instructions/policies,
+                // or retain a separate Codex thread. Codex has no tool-less
+                // inference mode, so combine a fresh cwd with a cross-platform
+                // filesystem-deny permission profile.
                 bypassSandbox: false,
-                sandboxMode: "read-only",
+                isolateToolFilesystem: true,
                 ephemeral: true,
+                ignoreUserConfig: true,
+                ignoreRules: true,
+                disableProjectDocs: true,
                 skipGitRepoCheck: opts.codexSkipGitRepoCheck,
                 signal,
                 onInvocation: (item) => {
@@ -240,14 +260,14 @@ function createCodexResponder(
             if (!observation && isProcessLaunchFailure(error)) {
                 throw new Error("Codex dialogue process could not start")
             }
-            const timedOut = isTimeout(error)
+            const failure = dialogueFailureAttribution(error, signal)
             throw new DialogueResponderInvocationError(
                 "Codex dialogue provider failed",
-                observation
+                failure.status !== "cancelled" && observation
                     ? codexInvocation(requestedModel, observation)
                     : telemetry.failureInvocation(
-                          timedOut ? "timed_out" : "failed",
-                          timedOut ? "timed_out" : "not_reported",
+                          failure.status,
+                          failure.reason,
                       ),
             )
         }
@@ -277,13 +297,13 @@ function createClaudeResponder(
                     "",
                     "--system-prompt",
                     input.systemPrompt,
-                    "-p",
-                    input.userPrompt,
                 ],
                 {
                     cwd: opts.cwd,
                     timeoutMs: opts.timeoutMs ?? 60_000,
+                    terminationGraceMs: opts.terminationGraceMs,
                     signal,
+                    input: input.userPrompt,
                 },
             )
         } catch (error) {
@@ -292,12 +312,12 @@ function createClaudeResponder(
             if (isProcessLaunchFailure(error)) {
                 throw new Error("Claude dialogue process could not start")
             }
-            const timedOut = isTimeout(error)
+            const failure = dialogueFailureAttribution(error, signal)
             throw new DialogueResponderInvocationError(
                 "Claude dialogue provider failed",
                 telemetry.failureInvocation(
-                    timedOut ? "timed_out" : "failed",
-                    timedOut ? "timed_out" : "not_reported",
+                    failure.status,
+                    failure.reason,
                 ),
             )
         }
@@ -353,45 +373,60 @@ function createOpenAIResponder(
         billingEnabled,
     )
     const responder: DialogueResponder = async (input, signal) => {
-        if (signal.aborted) throw abortError()
+        if (signal.aborted) {
+            throw new DialogueResponderInvocationError(
+                "OpenAI dialogue provider cancelled",
+                telemetry.failureInvocation("cancelled", "not_reported"),
+            )
+        }
         const context = ModelContext.create(`dialogue:${input.messageId}`)
             .addContextItem(SystemMessageItem.create(input.systemPrompt))
             .addContextItem(UserMessageItem.create(input.userPrompt))
+        const providerCall = providerCallSignal(
+            signal,
+            opts.timeoutMs ?? 60_000,
+        )
         let round: Awaited<ReturnType<typeof runInferenceRound>>
         try {
-            round = await abortable(
-                (opts.openaiRunRound ?? runInferenceRound)(
-                    context,
-                    model,
-                    billingEnabled && opts.billingCoordinator
-                        ? {
-                              billing: {
-                                  coordinator: opts.billingCoordinator,
-                                  context: {
-                                      runId: input.runId,
-                                      phase: "dialogue",
-                                      storyId: null,
-                                      leaseId: null,
-                                      generation: null,
-                                      attempt: null,
-                                      turn: 1,
-                                      round: 1,
-                                  },
+            round = await (opts.openaiRunRound ?? runInferenceRound)(
+                context,
+                model,
+                billingEnabled && opts.billingCoordinator
+                    ? {
+                          signal: providerCall.signal,
+                          billing: {
+                              coordinator: opts.billingCoordinator,
+                              context: {
+                                  runId: input.runId,
+                                  phase: frontDoorBillingPhase(
+                                      input.billingRole,
+                                  ),
+                                  storyId: null,
+                                  leaseId: null,
+                                  generation: null,
+                                  attempt: null,
+                                  turn: 1,
+                                  round: 1,
                               },
-                          }
-                        : {},
-                ),
-                signal,
+                          },
+                      }
+                    : { signal: providerCall.signal },
             )
         } catch (error) {
-            const timedOut = isTimeout(error)
+            const failure = dialogueFailureAttribution(
+                error,
+                signal,
+                providerCall.timedOut(),
+            )
             throw new DialogueResponderInvocationError(
                 "OpenAI dialogue provider failed",
                 telemetry.failureInvocation(
-                    timedOut ? "timed_out" : "failed",
-                    timedOut ? "timed_out" : "not_reported",
+                    failure.status,
+                    failure.reason,
                 ),
             )
+        } finally {
+            providerCall.close()
         }
         const invocation = openAIInvocation(
             requestedModel,
@@ -424,7 +459,7 @@ function claudeTelemetryDescriptor(
 ): DialogueResponderTelemetry {
     return Object.freeze({
         failureInvocation(
-            status: Extract<ModelInvocationStatus, "failed" | "timed_out">,
+            status: DialogueFailureStatus,
             reason: UnknownMetricReason,
         ): DialogueResponderInvocation {
             return claudeInvocation(
@@ -441,7 +476,7 @@ function openAITelemetryDescriptor(
 ): DialogueResponderTelemetry {
     return Object.freeze({
         failureInvocation(
-            status: Extract<ModelInvocationStatus, "failed" | "timed_out">,
+            status: DialogueFailureStatus,
             reason: UnknownMetricReason,
         ): DialogueResponderInvocation {
             return openAIInvocation(
@@ -458,7 +493,7 @@ function codexTelemetryDescriptor(
 ): DialogueResponderTelemetry {
     return Object.freeze({
         failureInvocation(
-            status: Extract<ModelInvocationStatus, "failed" | "timed_out">,
+            status: DialogueFailureStatus,
             reason: UnknownMetricReason,
         ): DialogueResponderInvocation {
             return codexInvocation(
@@ -475,7 +510,7 @@ function localHarnessTelemetryDescriptor(
 ): DialogueResponderTelemetry {
     return Object.freeze({
         failureInvocation(
-            status: Extract<ModelInvocationStatus, "failed" | "timed_out">,
+            status: DialogueFailureStatus,
             reason: UnknownMetricReason,
         ): DialogueResponderInvocation {
             return localHarnessInvocation(
@@ -843,10 +878,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isTimeout(error: unknown): boolean {
     if (!isRecord(error)) return false
-    if (error.name === "AbortError" || error.code === "ETIMEDOUT") return true
+    if (
+        (typeof error.name === "string" && /abort/i.test(error.name)) ||
+        error.code === "ETIMEDOUT"
+    ) return true
     if (error.killed === true) return true
     return typeof error.message === "string"
-        && /(?:timed?\s*out|timeout)/i.test(error.message)
+        && /(?:abort|timed?\s*out|timeout)/i.test(error.message)
+}
+
+type DialogueFailureStatus = Extract<
+    ModelInvocationStatus,
+    "failed" | "timed_out" | "cancelled"
+>
+
+function dialogueFailureAttribution(
+    error: unknown,
+    callerSignal: AbortSignal,
+    providerTimedOut = false,
+): { status: DialogueFailureStatus; reason: UnknownMetricReason } {
+    if (callerSignal.aborted) {
+        return { status: "cancelled", reason: "not_reported" }
+    }
+    if (providerTimedOut || isTimeout(error)) {
+        return { status: "timed_out", reason: "timed_out" }
+    }
+    return { status: "failed", reason: "not_reported" }
 }
 
 function isProcessLaunchFailure(error: unknown): boolean {
@@ -859,7 +916,9 @@ function isProcessLaunchFailure(error: unknown): boolean {
 interface ExecClaudeOptions {
     cwd: string
     timeoutMs: number
+    terminationGraceMs?: number
     signal: AbortSignal
+    input: string
 }
 
 function execClaude(
@@ -867,23 +926,15 @@ function execClaude(
     args: readonly string[],
     opts: ExecClaudeOptions,
 ): Promise<string> {
-    return new Promise((resolve, reject) => {
-        execFile(
-            binary,
-            [...args],
-            {
-                cwd: opts.cwd,
-                env: harnessChildEnvironment(),
-                timeout: opts.timeoutMs,
-                maxBuffer: 4 * 1024 * 1024,
-                signal: opts.signal,
-            },
-            (error, stdout) => {
-                if (error) reject(error)
-                else resolve(stdout)
-            },
-        )
-    })
+    return execFileCli(binary, args, {
+        cwd: opts.cwd,
+        env: harnessChildEnvironment(),
+        timeout: opts.timeoutMs,
+        terminationGraceMs: opts.terminationGraceMs,
+        maxBuffer: 4 * 1024 * 1024,
+        signal: opts.signal,
+        input: opts.input,
+    }).then(({ stdout }) => stdout)
 }
 
 async function withIsolatedHarnessCwd<T>(
@@ -901,26 +952,29 @@ async function withIsolatedHarnessCwd<T>(
     }
 }
 
-function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-    if (signal.aborted) return Promise.reject(abortError())
-    return new Promise<T>((resolve, reject) => {
-        const onAbort = (): void => reject(abortError())
-        signal.addEventListener("abort", onAbort, { once: true })
-        promise.then(
-            (value) => {
-                signal.removeEventListener("abort", onAbort)
-                resolve(value)
-            },
-            (error) => {
-                signal.removeEventListener("abort", onAbort)
-                reject(error)
-            },
-        )
-    })
-}
-
-function abortError(): Error {
-    const error = new Error("dialogue response aborted")
-    error.name = "AbortError"
-    return error
+function providerCallSignal(
+    callerSignal: AbortSignal,
+    timeoutMs: number,
+): { signal: AbortSignal; timedOut(): boolean; close(): void } {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+        throw new RangeError("dialogue provider timeoutMs must be positive")
+    }
+    const controller = new AbortController()
+    let providerTimedOut = false
+    const onCallerAbort = (): void => controller.abort(callerSignal.reason)
+    callerSignal.addEventListener("abort", onCallerAbort, { once: true })
+    if (callerSignal.aborted) onCallerAbort()
+    const timer = setTimeout(() => {
+        providerTimedOut = true
+        controller.abort(providerCallTimeoutError(timeoutMs))
+    }, timeoutMs)
+    timer.unref?.()
+    return {
+        signal: controller.signal,
+        timedOut: () => providerTimedOut,
+        close: () => {
+            clearTimeout(timer)
+            callerSignal.removeEventListener("abort", onCallerAbort)
+        },
+    }
 }

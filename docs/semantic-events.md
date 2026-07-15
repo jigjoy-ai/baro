@@ -70,6 +70,26 @@ carry no compat constraint beyond "don't rename once shipped"):
 - `runtime_replan_rejected` — the correlated proposal did not mutate the DAG.
   It carries a stable machine-readable rejection `code` and the Board's
   current graph version so the worker does not continue from stale state.
+- `frontdoor_conversation_requested` — the caller-owned host submits one
+  correlated pre-PRD turn to the exact bound Conversation participant.
+- `repository_context_requested` — Conversation requests bounded read-only
+  repository research before every ready-capable turn. Chat is projected as
+  clarification research because it may identify a new implementation follow-up.
+  The exact correlation enters an autonomous RepoScout policy loop whose
+  internal read/search/glob actions are executed only by Baro's fixed,
+  shell-free capability broker.
+- `repository_context_provided` / `repository_context_failed` — the exact bound
+  RepoScout returns a frozen `RepositoryBriefV1` or a correlated terminal
+  failure. Autonomous findings remain untrusted repository data; the trusted
+  envelope retains the deterministic snapshot identity for fallback results and
+  a composite exact-bootstrap-projection plus finishing-observation-suffix
+  identity for an autonomous success. The omission count is bound too; clipped
+  paths are not trusted until rediscovered. The identity binds projected evidence, not the semantic
+  truth of model-authored statements. Both participant identity and declared
+  `scoutId` are checked.
+- `frontdoor_conversation_completed` / `frontdoor_conversation_failed` — the
+  exact bound Conversation participant closes the host request. A completed
+  event carries the unchanged public ConversationResponse v1 contract.
 
 `proposalId` is the runtime-replan idempotency key. The same ID and identical
 content replays the remembered decision; the same ID with different content

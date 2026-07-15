@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
-import { chmodSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
 import { describe, it } from "node:test"
 
 import { knownMetric, unknownMetric } from "../src/model-telemetry.js"
@@ -179,4 +180,59 @@ setInterval(() => {}, 1000);
             )
         })
     })
+
+    it("kills a TERM-resistant provider descendant before cancellation settles", async () => {
+        await withTempDir("baro-opencode-tree-", async (dir) => {
+            const started = join(dir, "descendant-started")
+            const escaped = join(dir, "descendant-escaped")
+            const bin = join(dir, "tree-opencode.mjs")
+            const descendantSource = `
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(started)}, "yes");
+process.on("SIGTERM", () => {});
+setTimeout(() => writeFileSync(${JSON.stringify(escaped)}, "yes"), 700);
+setInterval(() => {}, 10_000);
+`
+            writeFileSync(bin, `#!/usr/bin/env node
+import { spawn } from "node:child_process";
+spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(descendantSource)}], { stdio: "ignore" });
+console.log(JSON.stringify({ type: "text", part: { text: "partial" } }));
+setInterval(() => {}, 10_000);
+`)
+            chmodSync(bin, 0o755)
+
+            const controller = new AbortController()
+            const result = runOpenCodeOneShot({
+                prompt: "goal",
+                cwd: dir,
+                opencodeBin: bin,
+                terminationGraceMs: 50,
+                safeEvaluatorSystemPrompt: "No tools.",
+                signal: controller.signal,
+            })
+
+            try {
+                await waitForFile(started)
+                controller.abort()
+                await assert.rejects(result, { name: "AbortError" })
+            } finally {
+                controller.abort()
+            }
+
+            await delay(750)
+            assert.equal(
+                existsSync(escaped),
+                false,
+                "OpenCode descendant survived timeout escalation",
+            )
+        })
+    })
 })
+
+async function waitForFile(path: string, timeoutMs = 10_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (!existsSync(path)) {
+        if (Date.now() >= deadline) throw new Error("descendant never started")
+        await delay(25)
+    }
+}

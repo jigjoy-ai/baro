@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use crate::conversation::ConversationContextSnapshot;
 use crate::discovery::{self, ScriptEntry};
 use crate::events::BaroEvent;
+use crate::subprocess::{configure_process_tree, ProcessTreeGuard};
 
 pub struct OrchestratorConfig {
     /// Accepted-goal conversation continuity for the run-local DialogueAgent.
@@ -134,10 +135,12 @@ async fn run(
     // Drop rather than orphaning it; the orchestrator's ppid watchdog
     // is the backup if we miss this.
     cmd.kill_on_drop(true);
+    configure_process_tree(&mut cmd);
 
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn orchestrator: {}", e))?;
+    let mut process_tree = ProcessTreeGuard::new(child.id());
 
     let stdout = child
         .stdout
@@ -241,6 +244,7 @@ async fn run(
         .wait()
         .await
         .map_err(|e| format!("orchestrator wait failed: {}", e))?;
+    process_tree.disarm();
 
     // Be explicit about the security boundary: the context file remains
     // addressable while the child is alive and is unlinked immediately after

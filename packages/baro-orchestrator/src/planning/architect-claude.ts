@@ -9,9 +9,11 @@ import { execFileCli } from "../exec-file-cli.js"
 import { harnessChildEnvironment } from "../harness-environment.js"
 
 import {
+    ARCHITECT_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_SYSTEM_PROMPT,
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
+import { ARCHITECT_OUTCOME_JSON_SCHEMA } from "./architect-outcome.js"
 import { effortTimeoutMs } from "./planner-claude.js"
 import type { ModeContract } from "./planner-prompts.js"
 
@@ -26,6 +28,10 @@ export interface RunArchitectClaudeOptions {
     /** Defaults scale with `effort` ({@link effortTimeoutMs}) — a flat
      *  3-minute timeout SIGTERM'd `--effort max` turns mid-thought. */
     timeoutMs?: number
+    /** Emit the strict provider payload instead of legacy markdown. */
+    outcomeMode?: boolean
+    /** Repository inspection only: no Bash, edits, project customizations or MCP. */
+    readOnly?: boolean
 }
 
 export async function runArchitectClaude(
@@ -36,6 +42,9 @@ export async function runArchitectClaude(
         opts.projectContext,
         opts.modeContract,
     )
+    const systemPrompt = opts.outcomeMode
+        ? ARCHITECT_OUTCOME_SYSTEM_PROMPT
+        : ARCHITECT_SYSTEM_PROMPT
     const { stdout } = await execFileCli(
         opts.claudeBin ?? "claude",
         [
@@ -45,10 +54,25 @@ export async function runArchitectClaude(
             "--model",
             opts.model ?? "opus",
             ...(opts.effort ? ["--effort", opts.effort] : []),
-            "--permission-mode",
-            "bypassPermissions",
+            ...(opts.outcomeMode
+                ? ["--json-schema", JSON.stringify(ARCHITECT_OUTCOME_JSON_SCHEMA)]
+                : []),
+            ...(opts.readOnly
+                ? [
+                      "--tools",
+                      "Read,Glob,Grep",
+                      "--safe-mode",
+                      "--disable-slash-commands",
+                      "--strict-mcp-config",
+                      "--mcp-config",
+                      "{}",
+                      "--no-session-persistence",
+                      "--permission-mode",
+                      "dontAsk",
+                  ]
+                : ["--permission-mode", "bypassPermissions"]),
             "--system-prompt",
-            ARCHITECT_SYSTEM_PROMPT,
+            systemPrompt,
             "-p",
             userMessage,
         ],
@@ -60,8 +84,15 @@ export async function runArchitectClaude(
         },
     )
 
-    const wrapper = JSON.parse(stdout) as { result?: string }
-    const doc = typeof wrapper.result === "string" ? wrapper.result.trim() : ""
+    const wrapper = JSON.parse(stdout) as {
+        result?: string
+        structured_output?: unknown
+    }
+    const doc = opts.outcomeMode && wrapper.structured_output !== undefined
+        ? JSON.stringify(wrapper.structured_output)
+        : typeof wrapper.result === "string"
+          ? wrapper.result.trim()
+          : ""
     if (!doc) {
         throw new Error("ArchitectClaude: claude returned empty result")
     }

@@ -212,6 +212,64 @@ impl ConversationSession {
         Ok(ApplyOutcome::Accepted(kind))
     }
 
+    /// Close exactly one failed front-door request without inventing an
+    /// assistant response or changing goal ownership. The correlated system
+    /// turn makes the failure durable, while marking the request completed
+    /// makes a late subprocess response an idempotent replay.
+    ///
+    /// Returns `Ok(true)` when this call closes the pending request and
+    /// `Ok(false)` when the same request was already completed. Runtime
+    /// Dialogue phases are deliberately rejected; callers must continue to
+    /// use [`Self::apply_runtime_failure`] for those requests.
+    pub fn fail_pending_initial_request(
+        &mut self,
+        request_id: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<bool, ConversationError> {
+        const PREFIX: &str = "Conversation request failed before a response was accepted: ";
+
+        let request_id = request_id.into();
+        validate_id("requestId", &request_id)?;
+        if self.completed_request_ids.contains(&request_id) {
+            return Ok(false);
+        }
+        match self.pending_request_id.as_deref() {
+            Some(expected) if expected == request_id => {}
+            expected => {
+                return Err(ConversationError::StaleRequest {
+                    expected: expected.map(str::to_string),
+                    actual: request_id,
+                });
+            }
+        }
+        if !matches!(
+            self.phase,
+            ConversationPhase::Clarifying
+                | ConversationPhase::NeedsInput
+                | ConversationPhase::Completed
+                | ConversationPhase::Failed
+        ) {
+            return Err(ConversationError::InitialRequestFailureNotAllowedInPhase {
+                phase: self.phase,
+            });
+        }
+
+        let reason = normalized_text(
+            "initial conversation failure",
+            reason.into(),
+            MAX_MESSAGE_CHARS.saturating_sub(PREFIX.chars().count()),
+        )?;
+        self.push_turn(TranscriptTurn {
+            role: TranscriptRole::System,
+            text: format!("{PREFIX}{reason}"),
+            request_id: Some(request_id.clone()),
+            kind: None,
+        });
+        self.pending_request_id = None;
+        self.completed_request_ids.insert(request_id);
+        Ok(true)
+    }
+
     /// Correlate a reply from the run-local DialogueAgent without allowing it
     /// to mutate the goal lifecycle. Runtime conversation is advisory; only a
     /// later front-door `Ready` response may create a new planning handoff.
@@ -574,6 +632,102 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(session.phase(), ConversationPhase::Ready);
+    }
+
+    #[test]
+    fn failed_initial_request_closes_only_the_exact_slot_and_allows_retry() {
+        let mut session = ConversationSession::new("session-1").unwrap();
+        session
+            .begin_request("request-1", "Implement the clear goal")
+            .unwrap();
+
+        assert!(session
+            .fail_pending_initial_request(
+                "request-1",
+                "Conversation backend did not return a valid response.",
+            )
+            .unwrap());
+        assert_eq!(session.pending_request_id(), None);
+        assert_eq!(session.phase(), ConversationPhase::Clarifying);
+        assert_eq!(session.goal_envelope(), None);
+        let failure = session.transcript().last().unwrap();
+        assert_eq!(failure.role, TranscriptRole::System);
+        assert_eq!(failure.request_id.as_deref(), Some("request-1"));
+        assert_eq!(failure.kind, None);
+        assert!(failure
+            .text
+            .starts_with("Conversation request failed before a response was accepted: "));
+
+        session
+            .begin_request("request-2", "Retry the same goal")
+            .unwrap();
+        assert_eq!(session.pending_request_id(), Some("request-2"));
+        assert!(!session
+            .fail_pending_initial_request("request-1", "late duplicate")
+            .unwrap());
+        assert_eq!(session.pending_request_id(), Some("request-2"));
+    }
+
+    #[test]
+    fn failed_initial_request_rejects_stale_correlation_and_runtime_phases() {
+        let mut session = ConversationSession::new("session-1").unwrap();
+        session.begin_request("request-1", "Clear task").unwrap();
+        assert!(matches!(
+            session.fail_pending_initial_request("request-stale", "backend failed"),
+            Err(ConversationError::StaleRequest { .. })
+        ));
+        assert_eq!(session.pending_request_id(), Some("request-1"));
+
+        session
+            .apply_response(response(
+                "request-1",
+                ConversationKind::Ready,
+                vec![],
+                Some(envelope()),
+            ))
+            .unwrap();
+        session.take_ready_handoff().unwrap().unwrap();
+        session.transition_to(ConversationPhase::Planning).unwrap();
+        session.transition_to(ConversationPhase::Executing).unwrap();
+        session
+            .begin_request("runtime-1", "What is blocked?")
+            .unwrap();
+        assert_eq!(
+            session.fail_pending_initial_request("runtime-1", "runtime backend failed"),
+            Err(ConversationError::InitialRequestFailureNotAllowedInPhase {
+                phase: ConversationPhase::Executing,
+            })
+        );
+        assert_eq!(session.pending_request_id(), Some("runtime-1"));
+        session
+            .apply_runtime_failure("runtime-1", "runtime backend failed")
+            .unwrap();
+        assert_eq!(session.pending_request_id(), None);
+    }
+
+    #[test]
+    fn failed_initial_request_system_turn_is_bounded() {
+        const PREFIX: &str = "Conversation request failed before a response was accepted: ";
+        let mut session = ConversationSession::new("session-1").unwrap();
+        session.begin_request("request-1", "Clear task").unwrap();
+        session
+            .fail_pending_initial_request(
+                "request-1",
+                "x".repeat(MAX_MESSAGE_CHARS - PREFIX.chars().count()),
+            )
+            .unwrap();
+        assert_eq!(
+            session.transcript().last().unwrap().text.chars().count(),
+            MAX_MESSAGE_CHARS
+        );
+
+        let mut too_long = ConversationSession::new("session-2").unwrap();
+        too_long.begin_request("request-2", "Clear task").unwrap();
+        assert!(matches!(
+            too_long.fail_pending_initial_request("request-2", "x".repeat(MAX_MESSAGE_CHARS)),
+            Err(ConversationError::TextTooLong { .. })
+        ));
+        assert_eq!(too_long.pending_request_id(), Some("request-2"));
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod config;
 mod constants;
 mod context;
 mod conversation;
+mod conversation_frontdoor;
 mod conversation_host;
 mod conversation_runner;
 mod dag_state;
@@ -20,6 +21,7 @@ mod intake_runner;
 mod notification;
 mod orchestrator_client;
 mod planner_runner;
+mod preaccept_context;
 mod resume;
 mod review_refiner;
 mod screens;
@@ -45,9 +47,15 @@ use tokio::sync::mpsc;
 
 use app::{App, Planner, ReviewStory, Screen};
 use conversation::{ConversationKind, ConversationPhase, ConversationWireResponse};
+use conversation_frontdoor::{
+    apply_or_close_conversation_response, architect_clarification_response,
+    close_failed_initial_request, spawn_conversation_architect_validation,
+    supports_preaccept_architect_outcome, PrevalidatedArchitect,
+};
 use conversation_host::{
     attach_conversation_metadata, begin_conversation_execution, fail_conversation_run,
     finish_conversation_run, persist_conversation, restore_conversation_from_prd,
+    restore_pre_prd_conversation,
 };
 use events::BaroEvent;
 use headless_transport::StdinHub;
@@ -201,14 +209,13 @@ fn executor_config_from_app(app: &App) -> Result<executor::ExecutorConfig, Strin
     // Runtime Dialogue is a collective participant. Legacy still uses the
     // same conversation-first intake and durable GoalEnvelope, but must not
     // receive a context flag that the legacy orchestrator correctly rejects.
-    let conversation_context =
-        if current_coordination_has_runtime_dialogue() {
-            app.conversation
-                .conversation_context_snapshot(None)
-                .map_err(|error| error.to_string())?
-        } else {
-            None
-        };
+    let conversation_context = if current_coordination_has_runtime_dialogue() {
+        app.conversation
+            .conversation_context_snapshot(None)
+            .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
     Ok(executor::ExecutorConfig {
         parallel: app.parallel_limit,
         timeout_secs: app.timeout_secs,
@@ -242,8 +249,7 @@ fn coordination_has_runtime_dialogue(mode: &str) -> bool {
 }
 
 fn current_coordination_has_runtime_dialogue() -> bool {
-    std::env::var("BARO_COORDINATION")
-        .is_ok_and(|mode| coordination_has_runtime_dialogue(&mode))
+    std::env::var("BARO_COORDINATION").is_ok_and(|mode| coordination_has_runtime_dialogue(&mode))
 }
 
 enum AppEvent {
@@ -252,7 +258,20 @@ enum AppEvent {
     ContextReady(String),
     ContextError(String),
     ConversationResponse(ConversationWireResponse),
-    ConversationError(String, Option<std::path::PathBuf>),
+    /// A conversation `ready` response is only a candidate until the
+    /// repository-aware Architect validates it. The durable session keeps one
+    /// pending response slot: either this candidate or an Architect-authored
+    /// clarification consumes it, never both.
+    ConversationArchitectOutcome {
+        candidate: ConversationWireResponse,
+        repository_context: String,
+        transport: architect_runner::ArchitectOutcomeTransportV1,
+    },
+    ConversationError {
+        request_id: String,
+        error: String,
+        log_path: Option<std::path::PathBuf>,
+    },
     /// Last element is the planner-stamped `executionMode` contract,
     /// carried opaquely into prd.json.
     PlanReady(
@@ -1227,6 +1246,13 @@ async fn run_app(
         }
     }
 
+    // An explicit new goal wins over an unfinished local intake. Interactive
+    // startup without one resumes the repository-scoped clarification or
+    // closes an interrupted provider turn so the user can retry safely.
+    if !entered_resume && cli.goal.is_none() {
+        restore_pre_prd_conversation(&mut app, &cwd);
+    }
+
     // Every new goal is now the first user turn of the durable conversation
     // session. Provider selection may precede it because the front-door agent
     // needs a backend; planning never starts until a validated GoalEnvelope is
@@ -1350,87 +1376,174 @@ async fn run_app(
                 }
             }
             Some(AppEvent::ConversationResponse(response)) => {
-                app.conversation_busy = false;
-                let kind = response.kind;
-                let request_id = response.request_id.clone();
-                let message = response.message.clone();
-                let questions = response.questions.clone();
-                match app.conversation.apply_response(response) {
-                    Ok(conversation::ApplyOutcome::Duplicate) => continue,
-                    Ok(conversation::ApplyOutcome::Accepted(_)) => {}
-                    Err(error) => {
+                if response.kind == ConversationKind::Ready
+                    && !app.quick
+                    && supports_preaccept_architect_outcome(app.architect_llm)
+                {
+                    let failed_request_id = response.request_id.clone();
+                    if let Err(error) = spawn_conversation_architect_validation(
+                        &mut app,
+                        &cwd,
+                        tx.clone(),
+                        response,
+                        headless,
+                    ) {
+                        let close_result = close_failed_initial_request(
+                            &mut app,
+                            &failed_request_id,
+                            "Repository validation could not start; retry the request.",
+                        );
+                        persist_conversation(&app.conversation, &cwd);
+                        match &close_result {
+                            Ok(false) => continue,
+                            Ok(true) => app.conversation_busy = false,
+                            Err(_) => {}
+                        }
+                        let error = match close_result {
+                            Err(close_error) => format!("{error}; {close_error}"),
+                            Ok(_) => error,
+                        };
                         if headless {
-                            return Err(format!("invalid conversation response: {error}").into());
+                            return Err(format!("goal validation failed: {error}").into());
                         }
-                        app.conversation_error = Some(error.to_string());
-                        continue;
-                    }
-                }
-                persist_conversation(&app.conversation, &cwd);
-                if headless {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "type": "conversation_response",
-                            "session_id": app.conversation.session_id(),
-                            "request_id": request_id,
-                            "kind": match kind {
-                                ConversationKind::Ready => "ready",
-                                ConversationKind::Clarify => "clarify",
-                                ConversationKind::Answer => "answer",
-                            },
-                            "message": message,
-                            "questions": questions,
-                        })
-                    );
-                }
-                match kind {
-                    ConversationKind::Ready => {
-                        if let Err(error) =
-                            start_planning_from_conversation(&mut app, &cwd, tx.clone(), headless)
-                        {
-                            if headless {
-                                return Err(format!("goal handoff failed: {error}").into());
-                            }
-                            app.conversation_error = Some(error);
-                            app.screen = Screen::Conversation;
-                        }
-                    }
-                    ConversationKind::Clarify | ConversationKind::Answer => {
+                        app.conversation_error = Some(error);
                         app.screen = Screen::Conversation;
-                        if headless {
-                            println!(
-                                "{}",
-                                serde_json::json!({
-                                    "type": "conversation_needs_input",
-                                    "session_id": app.conversation.session_id(),
-                                    "after_request_id": request_id,
-                                })
-                            );
-                            let session_id = app.conversation.session_id().to_string();
-                            match StdinHub::global()
-                                .await_conversation_message(&session_id, &request_id)
-                                .await
-                            {
-                                Some(text) => {
-                                    submit_conversation_message(&mut app, &cwd, tx.clone(), text)
-                                        .map_err(|error| {
-                                        format!("cannot continue conversation: {error}")
-                                    })?;
-                                }
-                                None => {
-                                    return Err(
-                                        "conversation requires another user message, but the headless stdin transport closed"
-                                            .into(),
-                                    );
-                                }
-                            }
-                        }
                     }
+                    continue;
+                }
+                if let Err(error) = accept_conversation_response(
+                    &mut app,
+                    &cwd,
+                    tx.clone(),
+                    response,
+                    headless,
+                    None,
+                )
+                .await
+                {
+                    if headless {
+                        return Err(error.into());
+                    }
+                    app.conversation_error = Some(error);
+                    app.screen = Screen::Conversation;
                 }
             }
-            Some(AppEvent::ConversationError(error, log_path)) => {
-                app.conversation_busy = false;
+            Some(AppEvent::ConversationArchitectOutcome {
+                candidate,
+                repository_context,
+                transport,
+            }) => match transport.outcome.kind {
+                architect_runner::ArchitectOutcomeKindV1::Ready => {
+                    let decision_document = transport
+                        .outcome
+                        .decision_document
+                        .ok_or("validated Architect outcome has no decision document")?;
+                    if let Err(error) = accept_conversation_response(
+                        &mut app,
+                        &cwd,
+                        tx.clone(),
+                        candidate,
+                        headless,
+                        Some(PrevalidatedArchitect {
+                            repository_context,
+                            decision_document,
+                        }),
+                    )
+                    .await
+                    {
+                        if headless {
+                            return Err(error.into());
+                        }
+                        app.conversation_error = Some(error);
+                        app.screen = Screen::Conversation;
+                    }
+                }
+                architect_runner::ArchitectOutcomeKindV1::NeedsInput => {
+                    app.architect_status = app::ArchitectStatus::Skipped(
+                        "Waiting for repository-specific clarification.".to_string(),
+                    );
+                    app.planning_progress = None;
+                    let clarification = match architect_clarification_response(
+                        &candidate,
+                        transport.outcome,
+                    ) {
+                        Ok(clarification) => clarification,
+                        Err(error) => {
+                            let close_result = close_failed_initial_request(
+                                &mut app,
+                                &candidate.request_id,
+                                "Repository validation returned an invalid clarification; retry the request.",
+                            );
+                            persist_conversation(&app.conversation, &cwd);
+                            match &close_result {
+                                Ok(false) => continue,
+                                Ok(true) => app.conversation_busy = false,
+                                Err(_) => {}
+                            }
+                            let error = match close_result {
+                                Err(close_error) => format!("{error}; {close_error}"),
+                                Ok(_) => error,
+                            };
+                            if headless {
+                                return Err(
+                                    format!("invalid Architect clarification: {error}").into()
+                                );
+                            }
+                            app.conversation_error =
+                                Some(format!("Invalid Architect clarification: {error}"));
+                            app.screen = Screen::Conversation;
+                            continue;
+                        }
+                    };
+                    if let Err(error) = accept_conversation_response(
+                        &mut app,
+                        &cwd,
+                        tx.clone(),
+                        clarification,
+                        headless,
+                        None,
+                    )
+                    .await
+                    {
+                        if headless {
+                            return Err(error.into());
+                        }
+                        app.conversation_error = Some(error);
+                        app.screen = Screen::Conversation;
+                    }
+                }
+            },
+            Some(AppEvent::ConversationError {
+                request_id,
+                error,
+                log_path,
+            }) => {
+                let architect_failure = app.architect_status == app::ArchitectStatus::Running;
+                let deterministic_reason = if architect_failure {
+                    "Repository validation failed before the goal was accepted; retry the request."
+                } else {
+                    "The conversation backend failed before returning a response; retry the request."
+                };
+                let close_result =
+                    close_failed_initial_request(&mut app, &request_id, deterministic_reason);
+                persist_conversation(&app.conversation, &cwd);
+                match &close_result {
+                    Ok(false) => {
+                        // A late failure for an already completed request
+                        // cannot unlock or overwrite a newer in-flight turn.
+                        continue;
+                    }
+                    Ok(true) => app.conversation_busy = false,
+                    Err(_) => {}
+                }
+                if architect_failure {
+                    app.architect_status =
+                        app::ArchitectStatus::Skipped("Validation failed.".to_string());
+                }
+                let error = match close_result {
+                    Err(close_error) => format!("{error}; {close_error}"),
+                    Ok(_) => error,
+                };
                 if headless {
                     return Err(format!("conversation failed: {error}").into());
                 }
@@ -1443,7 +1556,7 @@ async fn run_app(
             Some(AppEvent::ContextReady(content)) => {
                 app.claude_md_content = Some(content);
                 app.start_planning();
-                spawn_planner(&app, &cwd, tx.clone(), headless);
+                spawn_planner(&app, &cwd, tx.clone(), headless, None);
             }
             Some(AppEvent::ContextError(err)) => {
                 let conversation_owned = app.conversation.goal_envelope().is_some();
@@ -1803,7 +1916,7 @@ async fn run_app(
                                 if let Some(content) = load_project_instructions(&cwd) {
                                     app.claude_md_content = Some(content);
                                     app.start_planning();
-                                    spawn_planner(&app, &cwd, tx.clone(), headless);
+                                    spawn_planner(&app, &cwd, tx.clone(), headless, None);
                                 } else {
                                     app.start_context();
                                     spawn_context_builder(&cwd, tx.clone());
@@ -1885,7 +1998,8 @@ async fn run_app(
                             if app.planning_error.is_some() {
                                 app.planning_error = None;
                                 app.start_planning();
-                                spawn_planner(&app, &cwd, tx.clone(), headless);
+                                let validated_document = app.decision_document.clone();
+                                spawn_planner(&app, &cwd, tx.clone(), headless, validated_document);
                             }
                         }
                         _ => {}
@@ -2547,6 +2661,10 @@ fn spawn_pending_conversation(
     intent: conversation_runner::ConversationIntent,
 ) {
     let session = app.conversation.clone();
+    let request_id = session
+        .pending_request_id()
+        .expect("spawn_pending_conversation requires a pending request")
+        .to_string();
     let cwd = cwd.to_path_buf();
     let llm = app.llm;
     let model = conversation_model(app);
@@ -2558,6 +2676,9 @@ fn spawn_pending_conversation(
     persist_conversation(&app.conversation, &cwd);
 
     tokio::spawn(async move {
+        let turn_timeout_ms = conversation_frontdoor::conversation_turn_timeout_ms();
+        let provider_timeout_ms =
+            conversation_frontdoor::conversation_provider_timeout_ms(turn_timeout_ms);
         let result = conversation_runner::run_conversation_turn(
             &session,
             intent,
@@ -2565,7 +2686,8 @@ fn spawn_pending_conversation(
                 cwd: &cwd,
                 llm,
                 model: model.as_deref(),
-                timeout_ms: 120_000,
+                timeout_ms: turn_timeout_ms,
+                provider_timeout_ms,
                 openai_api_key: openai_api_key.as_deref(),
                 openai_base_url: openai_base_url.as_deref(),
             },
@@ -2577,7 +2699,11 @@ fn spawn_pending_conversation(
             }
             Err(error) => {
                 let _ = tx
-                    .send(AppEvent::ConversationError(error.message, error.log_path))
+                    .send(AppEvent::ConversationError {
+                        request_id,
+                        error: error.message,
+                        log_path: error.log_path,
+                    })
                     .await;
             }
         }
@@ -2612,6 +2738,92 @@ fn submit_conversation_message(
     Ok(())
 }
 
+/// Apply one conversation response and perform the caller-owned lifecycle
+/// action. A non-quick `ready` response reaches this function only after
+/// repository validation, so its decision document can be handed directly to
+/// Planner without invoking Architect a second time.
+async fn accept_conversation_response(
+    app: &mut App,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+    response: ConversationWireResponse,
+    headless: bool,
+    prevalidated: Option<PrevalidatedArchitect>,
+) -> Result<(), String> {
+    let kind = response.kind;
+    if prevalidated.is_some() && kind != ConversationKind::Ready {
+        return Err("prevalidated Architect data requires a ready response".to_string());
+    }
+    let request_id = response.request_id.clone();
+    let message = response.message.clone();
+    let questions = response.questions.clone();
+    match apply_or_close_conversation_response(app, response) {
+        Ok(conversation::ApplyOutcome::Duplicate) => return Ok(()),
+        Ok(conversation::ApplyOutcome::Accepted(_)) => {}
+        Err(error) => {
+            persist_conversation(&app.conversation, cwd);
+            return Err(error);
+        }
+    }
+    persist_conversation(&app.conversation, cwd);
+
+    if headless {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "conversation_response",
+                "session_id": app.conversation.session_id(),
+                "request_id": request_id,
+                "kind": match kind {
+                    ConversationKind::Ready => "ready",
+                    ConversationKind::Clarify => "clarify",
+                    ConversationKind::Answer => "answer",
+                },
+                "message": message,
+                "questions": questions,
+            })
+        );
+    }
+
+    match kind {
+        ConversationKind::Ready => {
+            let result = match prevalidated {
+                Some(architect) => {
+                    start_prevalidated_planning_from_conversation(app, cwd, tx, headless, architect)
+                }
+                None => start_planning_from_conversation(app, cwd, tx, headless),
+            };
+            result.map_err(|error| format!("goal handoff failed: {error}"))
+        }
+        ConversationKind::Clarify | ConversationKind::Answer => {
+            app.screen = Screen::Conversation;
+            if !headless {
+                return Ok(());
+            }
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "conversation_needs_input",
+                    "session_id": app.conversation.session_id(),
+                    "after_request_id": request_id,
+                })
+            );
+            let session_id = app.conversation.session_id().to_string();
+            match StdinHub::global()
+                .await_conversation_message(&session_id, &request_id)
+                .await
+            {
+                Some(text) => submit_conversation_message(app, cwd, tx, text)
+                    .map_err(|error| format!("cannot continue conversation: {error}")),
+                None => Err(
+                    "conversation requires another user message, but the headless stdin transport closed"
+                        .to_string(),
+                ),
+            }
+        }
+    }
+}
+
 fn start_planning_from_conversation(
     app: &mut App,
     cwd: &Path,
@@ -2637,11 +2849,41 @@ fn start_planning_from_conversation(
     if let Some(context) = load_project_instructions(cwd) {
         app.claude_md_content = Some(context);
         app.start_planning();
-        spawn_planner(app, cwd, tx, headless);
+        spawn_planner(app, cwd, tx, headless, None);
     } else {
         app.start_context();
         spawn_context_builder(cwd, tx);
     }
+    Ok(())
+}
+
+fn start_prevalidated_planning_from_conversation(
+    app: &mut App,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+    headless: bool,
+    architect: PrevalidatedArchitect,
+) -> Result<(), String> {
+    let handoff = app
+        .conversation
+        .take_ready_handoff()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "conversation produced no new ready handoff".to_string())?;
+    app.goal_input = handoff.planning_prompt;
+    if app.is_followup {
+        std::env::set_var("BARO_CONTINUE", "1");
+    }
+    app.conversation
+        .transition_to(ConversationPhase::Planning)
+        .map_err(|error| error.to_string())?;
+    app.conversation
+        .record_system_turn("Goal validated against repository evidence. Planner is starting.")
+        .map_err(|error| error.to_string())?;
+    persist_conversation(&app.conversation, cwd);
+
+    app.claude_md_content = Some(architect.repository_context);
+    app.start_planning();
+    spawn_planner(app, cwd, tx, headless, Some(architect.decision_document));
     Ok(())
 }
 
@@ -2695,7 +2937,13 @@ fn plan_line_from_event(raw: &str) -> Option<String> {
     }
 }
 
-fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bool) {
+fn spawn_planner(
+    app: &App,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+    headless: bool,
+    prevalidated_decision_doc: Option<String>,
+) {
     let goal = app.goal_input.clone();
     let planner = app.planner;
     let cwd = cwd.to_path_buf();
@@ -2730,6 +2978,12 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
                 ))
                 .await;
             None
+        } else if let Some(doc) = prevalidated_decision_doc {
+            // Conversation pre-acceptance already ran the repository-aware
+            // Architect. Publish the usual lifecycle event, but never spend a
+            // second model call rediscovering the same decision document.
+            let _ = tx.send(AppEvent::ArchitectComplete(doc.clone())).await;
+            Some(doc)
         } else {
             // The Architect runs for every backend (run-architect.ts
             // handles all providers) — only quick mode skips it. Routing
@@ -3341,8 +3595,7 @@ mod tests {
     use super::{
         apply_primary_provider_choice, coordination_has_runtime_dialogue, delete_prev_word,
         disable_implicit_codex_critic, fixed_mode_contract, headless_failure_reason,
-        message_command_line,
-        preferred_jigjoy_gateway_key, preferred_jigjoy_gateway_url,
+        message_command_line, preferred_jigjoy_gateway_key, preferred_jigjoy_gateway_url,
         reconcile_jigjoy_phase_overrides, unsupported_critic_backend, App, PrdStoryOutput,
         ReviewStory, JIGJOY_CHEAP_STORY_MODEL, JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL,
         JIGJOY_STRONG_MODEL,

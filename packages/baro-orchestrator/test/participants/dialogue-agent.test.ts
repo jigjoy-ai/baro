@@ -678,7 +678,10 @@ describe("DialogueAgent", () => {
             {
                 telemetry: {
                     failureInvocation(
-                        status: Extract<ModelInvocationStatus, "failed" | "timed_out">,
+                        status: Extract<
+                            ModelInvocationStatus,
+                            "failed" | "timed_out" | "cancelled"
+                        >,
                         reason: UnknownMetricReason,
                     ): DialogueResponderInvocation {
                         return unknownInvocation(status, reason)

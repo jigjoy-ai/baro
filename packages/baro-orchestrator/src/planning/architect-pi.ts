@@ -4,8 +4,13 @@
  * comparable decision documents; Pi's built-in tools explore.
  */
 
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
 import { runPiOneShot } from "../pi-one-shot.js"
 import {
+    ARCHITECT_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_SYSTEM_PROMPT,
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
@@ -23,23 +28,40 @@ export interface RunArchitectPiOptions {
     /** Default 10 min — tool-call exploration blew past the old
      *  3-minute timeout mid-exploration. */
     timeoutMs?: number
+    outcomeMode?: boolean
 }
 
 export async function runArchitectPi(
     opts: RunArchitectPiOptions,
 ): Promise<string> {
     const userMessage = buildArchitectUserMessage(opts.goal, opts.projectContext, opts.modeContract)
-    const prompt = `${ARCHITECT_SYSTEM_PROMPT}\n\n${userMessage}`
+    const prompt = opts.outcomeMode
+        ? userMessage
+        : `${ARCHITECT_SYSTEM_PROMPT}\n\n${userMessage}`
+    // Pi exposes only an all-tools/no-tools switch. Pre-acceptance validation
+    // uses its deny-all evaluator in an empty disposable directory and relies
+    // on Baro's brokered context. Legacy Architect calls keep their tools.
+    const isolatedCwd = opts.outcomeMode
+        ? mkdtempSync(join(tmpdir(), "baro-architect-pi-"))
+        : undefined
 
-    const text = await runPiOneShot({
-        prompt,
-        cwd: opts.cwd,
-        provider: opts.provider,
-        model: opts.model,
-        piBin: opts.piBin,
-        timeoutMs: opts.timeoutMs ?? 600_000,
-        label: "pi-architect",
-    })
+    let text: string
+    try {
+        text = await runPiOneShot({
+            prompt,
+            cwd: isolatedCwd ?? opts.cwd,
+            provider: opts.provider,
+            model: opts.model,
+            piBin: opts.piBin,
+            timeoutMs: opts.timeoutMs ?? 600_000,
+            label: "pi-architect",
+            ...(opts.outcomeMode
+                ? { safeEvaluatorSystemPrompt: ARCHITECT_OUTCOME_SYSTEM_PROMPT }
+                : {}),
+        })
+    } finally {
+        if (isolatedCwd) rmSync(isolatedCwd, { recursive: true, force: true })
+    }
 
     const doc = text.trim()
     if (!doc) {

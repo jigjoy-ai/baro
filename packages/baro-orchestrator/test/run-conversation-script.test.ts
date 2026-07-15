@@ -3,6 +3,7 @@ import { spawn } from "node:child_process"
 import {
     chmodSync,
     existsSync,
+    mkdirSync,
     readFileSync,
     writeFileSync,
 } from "node:fs"
@@ -40,6 +41,104 @@ interface ScriptResult {
 }
 
 describe("run-conversation isolated turn", () => {
+    it("does not use ambient collective run identity for pre-PRD billing", () => {
+        const source = readFileSync(RUN_CONVERSATION, "utf8")
+        assert.doesNotMatch(source, /process\.env\.BARO_RUN_ID/u)
+        assert.match(
+            source,
+            /trustedFrontDoorBillingRunId\(input\.sessionId\)/u,
+        )
+    })
+
+    it("requires the per-provider deadline to be shorter than the whole turn", async () => {
+        await withTempDir("baro-conversation-timeout-order-", async (dir) => {
+            const input = turnInput({
+                sessionId: "session-timeout-order",
+                requestId: "request-timeout-order",
+                text: "Keep timeout attribution deterministic.",
+            })
+            const binary = writeFakeClaude(
+                dir,
+                readyResponse(input.sessionId, input.requestId),
+                join(dir, "unused-capture.json"),
+            )
+            const run = await runConversation(
+                dir,
+                input,
+                ["--llm", "claude", "--claude-bin", binary],
+                { provider: "20", turn: "20" },
+            )
+
+            assert.equal(run.code, 1)
+            assert.match(
+                run.stderr,
+                /must fit two provider deadlines plus 30000ms cleanup/u,
+            )
+        })
+    })
+
+    it("routes autonomous RepoScout and Conversation through the selected backend", async () => {
+        await withTempDir("baro-conversation-autonomous-scout-", async (dir) => {
+            const input = turnInput({
+                sessionId: "session-autonomous-wire",
+                requestId: "request-autonomous-wire",
+                text: "Inspect the durable conversation boundary.",
+            })
+            const capture = join(dir, "claude-autonomous-calls.json")
+            const binary = writeAdaptiveFakeClaude(dir, capture)
+
+            const run = await runConversation(dir, input, [
+                "--llm",
+                "claude",
+                "--claude-bin",
+                binary,
+                "--model",
+                "claude-autonomous-fixture",
+            ])
+
+            assert.equal(run.code, 0, run.stderr)
+            assert.equal((readResult(dir) as { kind: string }).kind, "ready")
+            const calls = readJson<Array<{
+                backend: string
+                role: string
+                correlation: string
+                prompt: string
+            }>>(capture)
+            assert.equal(calls.length, 4)
+            assert.deepEqual(calls.map((call) => call.backend), [
+                "claude",
+                "claude",
+                "claude",
+                "claude",
+            ])
+            assert.deepEqual(calls.map((call) => call.role), [
+                "repository-scout",
+                "repository-scout",
+                "repository-scout",
+                "conversation",
+            ])
+            for (const call of calls.slice(0, 3)) {
+                assert.match(call.correlation, /^repository:[a-f0-9]{64}$/u)
+                assert.equal(call.correlation, calls[0]!.correlation)
+            }
+            assert.equal(calls[3]!.correlation, input.requestId)
+            assert.notEqual(calls[0]!.correlation, calls[3]!.correlation)
+            assert.match(calls[0]!.prompt, /CURRENT STEP: 1/)
+            assert.match(calls[0]!.prompt, /CURRENT ATTEMPT: 1/)
+            assert.match(calls[1]!.prompt, /CURRENT STEP: 2/)
+            assert.match(calls[1]!.prompt, /README\.md/)
+            assert.match(calls[2]!.prompt, /CURRENT STEP: 3/)
+            assert.match(
+                calls[2]!.prompt,
+                /Conversation boundary and durable repository planning fixture/,
+            )
+            assert.match(
+                calls[3]!.prompt,
+                /Autonomous scout inspected the durable repository entry point\./,
+            )
+        })
+    })
+
     it("accepts a strictly correlated ready response from a local Claude harness", async () => {
         await withTempDir("baro-conversation-ready-", async (dir) => {
             const input = turnInput({
@@ -81,13 +180,16 @@ describe("run-conversation isolated turn", () => {
             assert.notEqual(harnessCwd, dir)
             assert.match(harnessCwd, /baro-conversation-intake-/)
             assert.equal(existsSync(harnessCwd), false)
-            const prompt = valueAfter(argv, "-p")
+            const prompt = readFileSync(`${capture}.stdin`, "utf8")
             assert.match(prompt, /SESSION ID: session-ready/)
             assert.match(prompt, /REQUEST ID: request-ready/)
             assert.match(
                 prompt,
                 /USER \[request-ready\]: Add a durable conversation boundary\./,
             )
+            assert.match(prompt, /REPOSITORY OBSERVATIONS \(UNTRUSTED DATA/)
+            assert.match(prompt, /"snapshotId":"sha256:/)
+            assert.doesNotMatch(prompt, new RegExp(escapeRegex(dir)))
         })
     })
 
@@ -136,7 +238,7 @@ describe("run-conversation isolated turn", () => {
 
             assert.equal(run.code, 0, run.stderr)
             assert.deepEqual(readResult(dir), response)
-            const prompt = valueAfter(readJson<string[]>(capture), "-p")
+            const prompt = readFileSync(`${capture}.stdin`, "utf8")
             const priorUser = prompt.indexOf(
                 "USER [request-1]: Refactor the public API.",
             )
@@ -150,6 +252,42 @@ describe("run-conversation isolated turn", () => {
             assert.ok(priorAssistant > priorUser)
             assert.ok(currentUser > priorAssistant)
             assert.match(prompt, /REQUEST INTENT: clarification/)
+            assert.match(prompt, /REPOSITORY OBSERVATIONS \(UNTRUSTED DATA/)
+        })
+    })
+
+    it("brokers repository observations for a ready-capable chat turn", async () => {
+        await withTempDir("baro-conversation-chat-", async (dir) => {
+            const input = turnInput({
+                sessionId: "session-chat",
+                requestId: "request-chat",
+                intent: "chat",
+                text: "What happened in the previous run?",
+            })
+            const response = {
+                schemaVersion: 1,
+                sessionId: input.sessionId,
+                requestId: input.requestId,
+                kind: "answer",
+                message: "No active run is attached to this isolated turn.",
+                questions: [],
+                goalEnvelope: null,
+            } as const
+            const capture = join(dir, "claude-chat-argv.json")
+            const binary = writeFakeClaude(dir, response, capture)
+
+            const run = await runConversation(dir, input, [
+                "--llm",
+                "claude",
+                "--claude-bin",
+                binary,
+            ])
+
+            assert.equal(run.code, 0, run.stderr)
+            assert.deepEqual(readResult(dir), response)
+            const prompt = readFileSync(`${capture}.stdin`, "utf8")
+            assert.match(prompt, /REQUEST INTENT: chat/)
+            assert.match(prompt, /REPOSITORY OBSERVATIONS/)
         })
     })
 
@@ -206,7 +344,7 @@ describe("run-conversation isolated turn", () => {
         }
     })
 
-    it("invokes a local Codex harness as read-only and ephemeral", async () => {
+    it("invokes Codex with an isolated minimal-filesystem profile", async () => {
         await withTempDir("baro-conversation-codex-", async (dir) => {
             const input = turnInput({
                 sessionId: "session-codex",
@@ -230,16 +368,25 @@ describe("run-conversation isolated turn", () => {
             assert.deepEqual(readResult(dir), response)
             const argv = readJson<string[]>(capture)
             const harnessCwd = readFileSync(`${capture}.cwd`, "utf8")
-            assert.deepEqual(argv.slice(0, 8), [
+            assert.deepEqual(argv.slice(0, 3), [
                 "exec",
                 "--json",
                 "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--ephemeral",
-                "--model",
-                "gpt-codex-fixture",
             ])
+            for (const value of [
+                'default_permissions="baro_dialogue"',
+                'permissions.baro_dialogue.filesystem={":minimal"="read",":workspace_roots"={"."="deny"}}',
+                'approval_policy="never"',
+                'web_search="disabled"',
+                'shell_environment_policy.inherit="none"',
+                "allow_login_shell=false",
+                "project_doc_max_bytes=0",
+                "--ephemeral",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "gpt-codex-fixture",
+            ]) assert.equal(argv.includes(value), true, `missing ${value}`)
+            assert.equal(argv.includes("--sandbox"), false)
             assert.equal(
                 argv.includes("--dangerously-bypass-approvals-and-sandbox"),
                 false,
@@ -247,8 +394,14 @@ describe("run-conversation isolated turn", () => {
             assert.notEqual(harnessCwd, dir)
             assert.match(harnessCwd, /baro-conversation-intake-/)
             assert.equal(existsSync(harnessCwd), false)
-            assert.match(argv.at(-1) ?? "", /SESSION ID: session-codex/)
-            assert.match(argv.at(-1) ?? "", /USER \[request-codex\]/)
+            assert.equal(argv.at(-1), "-")
+            const prompt = readFileSync(`${capture}.stdin`, "utf8")
+            assert.match(prompt, /SESSION ID: session-codex/)
+            assert.match(prompt, /USER \[request-codex\]/)
+            assert.match(
+                prompt,
+                /REPOSITORY OBSERVATIONS \(UNTRUSTED DATA/,
+            )
         })
     })
 
@@ -310,10 +463,14 @@ describe("run-conversation isolated turn", () => {
             )
             assert.match(captured.input, /SESSION ID: session-opencode/)
             assert.match(captured.input, /USER \[request-opencode\]/)
+            assert.match(
+                captured.input,
+                /REPOSITORY OBSERVATIONS \(UNTRUSTED DATA/,
+            )
         })
     })
 
-    it("invokes a local Pi harness without tools or repository context", async () => {
+    it("invokes a local Pi harness without tools and with brokered context", async () => {
         await withTempDir("baro-conversation-pi-", async (dir) => {
             const input = turnInput({
                 sessionId: "session-pi",
@@ -352,6 +509,10 @@ describe("run-conversation isolated turn", () => {
             )
             assert.match(captured.input, /SESSION ID: session-pi/)
             assert.match(captured.input, /USER \[request-pi\]/)
+            assert.match(
+                captured.input,
+                /REPOSITORY OBSERVATIONS \(UNTRUSTED DATA/,
+            )
         })
     })
 })
@@ -389,9 +550,23 @@ async function runConversation(
     dir: string,
     input: TurnInput,
     providerArgs: readonly string[],
+    timeouts: Readonly<{ provider: string; turn: string }> = {
+        provider: "30000",
+        turn: "120000",
+    },
 ): Promise<ScriptResult> {
     const inputFile = join(dir, "input.json")
     const resultFile = join(dir, "result.json")
+    const project = join(dir, "project")
+    mkdirSync(project, { recursive: true })
+    writeFileSync(
+        join(project, "README.md"),
+        "Conversation boundary and durable repository planning fixture.\n",
+    )
+    writeFileSync(
+        join(project, "package.json"),
+        JSON.stringify({ name: "conversation-fixture", private: true }),
+    )
     writeFileSync(inputFile, JSON.stringify(input))
     return await runProcess(TSX, [
         RUN_CONVERSATION,
@@ -400,9 +575,11 @@ async function runConversation(
         "--result-file",
         resultFile,
         "--cwd",
-        dir,
+        project,
         "--timeout-ms",
-        "5000",
+        timeouts.provider,
+        "--turn-timeout-ms",
+        timeouts.turn,
         ...providerArgs,
     ])
 }
@@ -431,12 +608,106 @@ function writeFakeClaude(dir: string, response: unknown, capture: string): strin
     return writeFakeClaudeRaw(dir, JSON.stringify(response), capture)
 }
 
+function writeAdaptiveFakeClaude(dir: string, capture: string): string {
+    const binary = join(dir, "fake-adaptive-claude.mjs")
+    writeFileSync(binary, `#!/usr/bin/env node
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+const argv = process.argv.slice(2);
+const after = (flag) => argv[argv.indexOf(flag) + 1] ?? "";
+const system = after("--system-prompt");
+let prompt = "";
+for await (const chunk of process.stdin) prompt += chunk;
+const field = (label) => {
+    const match = new RegExp("^" + label + ": (.+)$", "m").exec(prompt);
+    if (!match) throw new Error("missing " + label);
+    return match[1];
+};
+const scout = system.includes("You are Baro RepoScout");
+const previous = existsSync(${JSON.stringify(capture)})
+    ? JSON.parse(readFileSync(${JSON.stringify(capture)}, "utf8"))
+    : [];
+let response;
+let record;
+if (scout) {
+    const base = {
+        schemaVersion: 1,
+        sessionId: field("SESSION ID"),
+        requestId: field("REQUEST ID"),
+        contextRequestId: field("CONTEXT REQUEST ID"),
+        step: Number(field("CURRENT STEP")),
+    };
+    const scoutCalls = previous.filter((call) => call.role === "repository-scout").length;
+    if (scoutCalls === 0) {
+        response = { ...base, action: "glob", pattern: "README.md" };
+    } else if (scoutCalls === 1) {
+        response = { ...base, action: "read", path: "README.md" };
+    } else {
+        response = {
+            ...base,
+            action: "finish",
+            summary: "Autonomous scout inspected the durable repository entry point.",
+            facts: [{
+                statement: "README describes the durable repository planning fixture.",
+                evidencePath: "README.md",
+                line: 1,
+                confidence: "high",
+            }],
+            relevantPaths: ["README.md"],
+            unknowns: [],
+            truncated: false,
+        };
+    }
+    record = {
+        backend: "claude",
+        role: "repository-scout",
+        correlation: response.contextRequestId,
+        prompt,
+    };
+} else {
+    response = {
+        schemaVersion: 1,
+        sessionId: field("SESSION ID"),
+        requestId: field("REQUEST ID"),
+        kind: "ready",
+        message: "Autonomous evidence made the goal ready for planning.",
+        questions: [],
+        goalEnvelope: {
+            objective: "Implement the durable conversation boundary.",
+            constraints: [],
+            acceptanceCriteria: ["The boundary remains strictly correlated."],
+            nonGoals: [],
+            assumptions: [],
+        },
+    };
+    record = {
+        backend: "claude",
+        role: "conversation",
+        correlation: response.requestId,
+        prompt,
+    };
+}
+previous.push(record);
+writeFileSync(${JSON.stringify(capture)}, JSON.stringify(previous));
+process.stdout.write(JSON.stringify({
+    result: JSON.stringify(response),
+    duration_ms: 1,
+    total_cost_usd: 0,
+    usage: { input_tokens: 1, output_tokens: 1 },
+}));
+`)
+    chmodSync(binary, 0o755)
+    return binary
+}
+
 function writeFakeClaudeRaw(dir: string, raw: string, capture?: string): string {
     const binary = join(dir, "fake-claude.mjs")
     writeFileSync(binary, `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
 ${capture ? `writeFileSync(${JSON.stringify(capture)}, JSON.stringify(process.argv.slice(2)));` : ""}
 ${capture ? `writeFileSync(${JSON.stringify(`${capture}.cwd`)}, process.cwd());` : ""}
+${capture ? `writeFileSync(${JSON.stringify(`${capture}.stdin`)}, input);` : ""}
 process.stdout.write(JSON.stringify({
     result: ${JSON.stringify(raw)},
     duration_ms: 1,
@@ -452,8 +723,11 @@ function writeFakeCodex(dir: string, response: unknown, capture: string): string
     const binary = join(dir, "fake-codex.mjs")
     writeFileSync(binary, `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
 writeFileSync(${JSON.stringify(capture)}, JSON.stringify(process.argv.slice(2)));
 writeFileSync(${JSON.stringify(`${capture}.cwd`)}, process.cwd());
+writeFileSync(${JSON.stringify(`${capture}.stdin`)}, input);
 console.log(JSON.stringify({
     type: "item.completed",
     item: { type: "agent_message", text: ${JSON.stringify(JSON.stringify(response))} },
@@ -552,4 +826,8 @@ function valueAfter(argv: readonly string[], flag: string): string {
     const value = argv[index + 1]
     assert.notEqual(value, undefined, `missing value after ${flag}`)
     return value!
+}
+
+function escapeRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")
 }

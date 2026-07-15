@@ -27,9 +27,11 @@ import {
 import type { GatewayBillingCoordinator } from "../billing/index.js"
 
 import {
+    ARCHITECT_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_SYSTEM_PROMPT,
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
+import { parseArchitectOutcome } from "./architect-outcome.js"
 import { createCodebaseTools } from "./codebase-tools.js"
 import { emitPlanLine, emitToolCall } from "./plan-events.js"
 import { decideExecutionMode, resolvePlannerModelName } from "./planner-openai.js"
@@ -56,6 +58,9 @@ export interface RunArchitectOpenAIOptions {
     billingCoordinator?: GatewayBillingCoordinator
     /** Deterministic no-network seam used by the architect state-machine tests. */
     testRuntime?: ArchitectOpenAITestRuntime
+    outcomeMode?: boolean
+    /** Excludes the bash tool; remaining tools are project-contained reads. */
+    readOnly?: boolean
 }
 
 export interface ArchitectOpenAITestRuntime {
@@ -96,12 +101,18 @@ export async function runArchitectOpenAI(
     emitPlanLine("designing the architecture")
 
     const model = opts.testRuntime?.model ?? pickModel(architectModelName)
-    const tools = opts.testRuntime?.tools ?? createCodebaseTools(opts.cwd)
+    const tools = opts.testRuntime?.tools ?? createCodebaseTools(opts.cwd, {
+        includeBash: opts.readOnly !== true,
+    })
     const inferRound = opts.testRuntime?.inferRound ?? runInferenceRound
     setModelTools(model, tools)
 
     let context = ModelContext.create("architect")
-        .addContextItem(SystemMessageItem.create(ARCHITECT_SYSTEM_PROMPT))
+        .addContextItem(SystemMessageItem.create(
+            opts.outcomeMode
+                ? ARCHITECT_OUTCOME_SYSTEM_PROMPT
+                : ARCHITECT_SYSTEM_PROMPT,
+        ))
         .addContextItem(
             UserMessageItem.create(buildArchitectUserMessage(opts.goal, opts.projectContext, intake)),
         )
@@ -212,11 +223,13 @@ export async function runArchitectOpenAI(
                     round,
                     maxExplorationRounds,
                     maxTokens,
+                    opts.outcomeMode === true,
                 )))
                 emitPlanLine("architecture exploration budget reached — finalizing decisions")
             } else if (finalRequested) {
                 context = context.addContextItem(UserMessageItem.create(architectRepairInstruction(
                     "The previous response requested another tool after the exploration budget closed.",
+                    opts.outcomeMode === true,
                 )))
                 emitPlanLine("architect tool request refused after budget — retrying final document")
             }
@@ -231,17 +244,26 @@ export async function runArchitectOpenAI(
             if (!doc) {
                 throw new Error("ArchitectOpenAI: empty final document")
             }
-            const invalidReason = containsRawToolCall(doc)
-                ? "The previous response contained a literal <tool_call> instead of the final architecture document."
-                : !isArchitectureDocument(doc)
-                  ? "The previous response was not an ADR decision document with the required headings and fields."
-                  : null
+            let normalizedOutcome: string | null = null
+            let invalidReason: string | null = null
+            if (containsRawToolCall(doc)) {
+                invalidReason = "The previous response contained a literal <tool_call> instead of the final architecture result."
+            } else if (opts.outcomeMode) {
+                try {
+                    normalizedOutcome = JSON.stringify(parseArchitectOutcome(doc))
+                } catch (error) {
+                    invalidReason = `The previous response violated ArchitectOutcomeV1: ${(error as Error).message}`
+                }
+            } else if (!isArchitectureDocument(doc)) {
+                invalidReason = "The previous response was not an ADR decision document with the required headings and fields."
+            }
             if (invalidReason) {
                 invalidFinalResponses += 1
                 if (round < maxRounds && invalidFinalResponses <= maxFinalizationRetries) {
                     finalRequested = true
                     context = context.addContextItem(UserMessageItem.create(architectRepairInstruction(
                         invalidReason,
+                        opts.outcomeMode === true,
                     )))
                     process.stderr.write(`[architect-openai] invalid final document — repair ${invalidFinalResponses}/${maxFinalizationRetries}\n`)
                     emitPlanLine(`invalid architect document — repair ${invalidFinalResponses}/${maxFinalizationRetries}`)
@@ -250,7 +272,7 @@ export async function runArchitectOpenAI(
                 throw new Error("ArchitectOpenAI: invalid document persisted after bounded finalization repairs")
             }
             process.stderr.write(`[architect-openai] ${usage.summary()}\n`)
-            return doc
+            return normalizedOutcome ?? doc
         }
     }
 
@@ -266,20 +288,24 @@ function numberEnv(name: string, fallback: number): number {
     return Number.isFinite(n) && n > 0 ? n : fallback
 }
 
-function finalArchitectInstruction(summary: string, round: number, maxExplorationRounds: number, maxTokens: number): string {
+function finalArchitectInstruction(summary: string, round: number, maxExplorationRounds: number, maxTokens: number, outcomeMode: boolean): string {
     return [
         "You have explored enough. Stop calling tools and finalize the architecture document.",
         `Exploration round ${round}/${maxExplorationRounds}; architecture budget ${maxTokens} tokens; usage so far: ${summary}.`,
         "Tool schemas remain visible only for protocol compatibility. Any further tool request will be refused.",
-        "Output ONLY the markdown decision document required by the system prompt. Do not emit tool-call markup or commentary.",
+        outcomeMode
+            ? "Output ONLY the exact ArchitectOutcomeV1 JSON object required by the system prompt. Do not use a markdown fence or commentary."
+            : "Output ONLY the markdown decision document required by the system prompt. Do not emit tool-call markup or commentary.",
     ].join("\n")
 }
 
-function architectRepairInstruction(reason: string): string {
+function architectRepairInstruction(reason: string, outcomeMode: boolean): string {
     return [
         reason,
         "Do not call tools and do not emit <tool_call> tags; tool execution is closed.",
-        "Output ONLY the final markdown decision document required by the system prompt.",
+        outcomeMode
+            ? "Output ONLY the exact ArchitectOutcomeV1 JSON object required by the system prompt. Do not use a markdown fence."
+            : "Output ONLY the final markdown decision document required by the system prompt.",
     ].join("\n")
 }
 

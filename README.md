@@ -38,9 +38,13 @@ You write one sentence. baro does the rest:
 ```mermaid
 flowchart LR
     Goal([your goal]) --> C[Conversation<br/><sub>clarifies intent<br/>when needed</sub>]
-    C --> G[Validated<br/>GoalEnvelope]
-    G --> A[Architect<br/><sub>pins design<br/>decisions</sub>]
-    A --> P[Planner<br/><sub>emits story DAG</sub>]
+    C --> R[RepoScout<br/><sub>autonomous read-only<br/>research</sub>]
+    R --> C
+    C --> K[Candidate<br/>GoalEnvelope]
+    K --> A[Architect<br/><sub>validates repository<br/>and pins decisions</sub>]
+    A -. material question .-> C
+    A --> G[Validated<br/>GoalEnvelope]
+    G --> P[Planner<br/><sub>emits story DAG</sub>]
     P --> S1[Story 1]
     P --> S2[Story 2]
     P --> S3[Story 3]
@@ -184,11 +188,60 @@ Most multi-agent setups have one orchestrator function in the middle that drives
 orchestrator becomes the bottleneck the moment you push past a handful of concurrent agents — and
 adding a new behaviour means editing its control flow.
 
-Every new run starts with a durable conversation session. Each front-door model
-turn is a fresh text-only process in an empty temporary directory; it can clarify
-intent, but it cannot inspect the checkout or choose workers, routes, or DAG
-mutations. Only its strictly validated `GoalEnvelope` is handed to Architect and
-Planner.
+Every new run starts with a durable conversation session. Goal and clarification
+turns first enter a short-lived pre-PRD Mozaik environment: Conversation requests
+a bounded repository brief over semantic events, and a Baro-owned `RepoScout`
+first builds a deterministic snapshot, then autonomously chooses bounded
+`read_file`, literal `grep`, or `glob` observations until it can finish a
+structured evidence brief. Baro, not the model, executes those shell-free
+tools; observed symlinks, known credential/key/cloud-state paths, generated work
+directories, binary files and configured work/byte limits are excluded. On
+success, the brief identity hashes the exact bootstrap projection and ordered
+observation suffix visible in the finishing policy call, including its omission
+count; it identifies the evidence set, not the semantic truth of model-authored text.
+Clipped bootstrap paths are not trusted until Scout rediscovers them, and an
+omitted observation suffix forces an explicitly truncated result.
+This is a capability boundary, not a proof that model-authored summaries or
+questions are immune to repository prompt injection; they remain untrusted model output.
+Fact paths require bootstrap/read/search provenance, and an optional source line
+must have been visibly returned by read/search. A malformed decision receives a
+bounded same-step repair, while Scout provider failure performs a final stability
+rescan and falls back to the latest deterministic snapshot so Conversation can
+still be attempted; Conversation itself still requires the selected provider.
+RepoScout and the provider-facing Conversation model run as
+separate roles in an empty temporary harness directory. They default to the
+same selected backend/model, but use independent provider-neutral seams so the
+Scout can later be routed to a cheaper model. Claude, OpenCode and Pi receive
+explicit no-tool profiles. Codex runs with a strict least-privilege permission
+profile: its empty workspace is denied, tool network and inherited shell
+environment are disabled, and user/project config and rules are ignored. Large
+Claude/Codex prompt payloads travel over stdin instead of argv for Windows-safe
+launches. Repository
+observations remain explicitly untrusted data; neither role can choose workers,
+routes, leases or DAG mutations. Chat turns also request context because a chat
+response may identify a new implementation follow-up and return `ready`.
+
+A `ready` GoalEnvelope is only a candidate. Every provider route runs a
+pre-acceptance Architect validation before the durable session accepts it. The
+Claude Code, Codex and native OpenAI-compatible routes can inspect the checkout
+with repository read-only capabilities. OpenCode and Pi have no equivalent
+repository read-only CLI profile, so their pre-acceptance Architect runs as an
+inference-only evaluator in an empty directory and receives only Baro's bounded,
+brokered repository context. The Architect may return repository-cited questions;
+when it returns `ready`, the same validated decision document is reused by Planner,
+so there is no second Architect charge. Quick mode keeps its existing single-story
+Architect skip.
+
+The pre-acceptance Codex Architect keeps the checkout as its read-only working
+root so its normal search tools can investigate it, but starts with strict CLI
+config and `project_doc_max_bytes=0`. This prevents repository-owned
+`AGENTS.md`/project documents from becoming model instructions before the goal
+is trusted; their contents remain ordinary repository evidence if Codex
+explicitly reads them during investigation.
+
+The broker rejects symlinks it observes, but a concurrently hostile checkout can
+still race path checks. Use a disposable, remote-free immutable clone when hard
+filesystem isolation is required.
 
 The execution runtime then uses one shared event bus
 ([Mozaik](https://github.com/jigjoy-ai/mozaik)). Its Board/Conductor, factories, critics and
@@ -259,9 +312,10 @@ flowchart LR
 
 | Participant | Role |
 |---|---|
-| **Architect** | One strong-model design pass before planning — emits a `DecisionDocument` that pins every cross-cutting decision (file paths, schemas, API shapes, library choices) so parallel agents don't each invent their own |
+| **Architect** | One strong-model design pass before planning — for read-only-capable routes it first validates the candidate goal and may return repository-cited questions; its accepted `DecisionDocument` is reused by Planner without a second call |
 | **Planner** | Decomposes the goal into a story DAG, with the DecisionDocument already pinned |
-| **Conversation session** | Durable first contact: clarifies intent, persists a correlated transcript, and hands one validated GoalEnvelope to planning without repository access |
+| **Conversation session** | Durable first contact and sole user-facing intake authority: clarifies intent, persists a repository-scoped correlated transcript across pre-PRD restarts, and hands exactly one accepted GoalEnvelope to planning |
+| **RepoScout** | Source-bound autonomous researcher in the short-lived pre-PRD Mozaik lane. It iteratively chooses from Baro-owned read/search/glob capabilities and returns a frozen 64 KiB evidence brief; deterministic retrieval remains its bootstrap and fail-safe. It cannot plan, route work, mutate the DAG, run code, use the network, or write the checkout |
 | **Conductor** | Explicit `legacy` compatibility state machine that drives DAG levels by reacting to bus events |
 | **Board + Broker** | Default collective policy: projects run state, collects worker bids, grants correlated leases, atomically validates versioned future-DAG proposals and never treats process exit as proof of success |
 | **DialogueAgent** | Automatic collective participant that continues the bounded conversation during a run and may message active workers or submit Board-validated add-only proposals, but has no control-plane authority |

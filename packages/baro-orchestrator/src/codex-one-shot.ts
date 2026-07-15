@@ -10,6 +10,7 @@ import { ChildProcess } from "child_process"
 import spawn from "cross-spawn"
 
 import { harnessChildEnvironment } from "./harness-environment.js"
+import { anyProcessAlive, signalProcessTree } from "./process-tree.js"
 
 import {
     knownMetric,
@@ -26,8 +27,10 @@ import {
 } from "./runner-invocation.js"
 
 export interface RunCodexOneShotOptions {
-    /** Combined system+user prompt. Passed as the final positional argv. */
+    /** Combined system+user prompt. */
     prompt: string
+    /** Pipe the prompt over stdin with a `-` positional marker. */
+    promptViaStdin?: boolean
     /** Working directory. Must be a git repo (Codex enforces) unless
      *  skipGitRepoCheck=true. */
     cwd: string
@@ -38,14 +41,29 @@ export interface RunCodexOneShotOptions {
     /** Sandbox used when bypassSandbox=false. Conversation/intake calls use
      * read-only so a model classifying intent cannot mutate the checkout. */
     sandboxMode?: "read-only" | "workspace-write" | "danger-full-access"
+    /** Use a Codex permission profile that grants spawned tools only minimal
+     * runtime reads, denies the workspace, and disables tool network access. */
+    isolateToolFilesystem?: boolean
     /** Do not persist a Codex harness thread for this isolated call. */
     ephemeral?: boolean
+    /** Ignore user config while retaining CODEX_HOME authentication. */
+    ignoreUserConfig?: boolean
+    /** Ignore user/project exec-policy rules for this isolated call. */
+    ignoreRules?: boolean
+    /** Disable automatic AGENTS.md/project-document prompt injection. The
+     * CLI is run with strict config so an older Codex fails closed instead of
+     * silently losing this trust boundary. */
+    disableProjectDocs?: boolean
+    /** Native final-response JSON Schema file, owned by the caller. */
+    outputSchemaFile?: string
     /** Skip the "must be inside a git repo" check. Default: false. */
     skipGitRepoCheck?: boolean
     /** Path to the `codex` binary. Default: "codex". */
     codexBin?: string
     /** Per-call timeout in milliseconds. Default: 600_000 (10 minutes). */
     timeoutMs?: number
+    /** Grace after SIGTERM before SIGKILL. Default: 5_000ms; injectable for tests. */
+    terminationGraceMs?: number
     /** Per-phase prefix for the live stderr stream. Default: "codex". */
     label?: string
     /** Optional invocation telemetry sink. It cannot alter runner success. */
@@ -64,16 +82,55 @@ export async function runCodexOneShot(
     const label = opts.label ?? "codex"
     const args = ["exec", "--json"]
     if (opts.skipGitRepoCheck) args.push("--skip-git-repo-check")
+    if (opts.isolateToolFilesystem && opts.bypassSandbox !== false) {
+        throw new TypeError(
+            "runCodexOneShot: isolateToolFilesystem requires bypassSandbox=false",
+        )
+    }
+    if (opts.isolateToolFilesystem && opts.sandboxMode) {
+        throw new TypeError(
+            "runCodexOneShot: permission profiles cannot be combined with sandboxMode",
+        )
+    }
     if (opts.bypassSandbox !== false) {
         args.push("--dangerously-bypass-approvals-and-sandbox")
+    } else if (opts.isolateToolFilesystem) {
+        args.push(
+            "--strict-config",
+            "--config",
+            'default_permissions="baro_dialogue"',
+            "--config",
+            'permissions.baro_dialogue.description="Baro brokered text-only front door"',
+            "--config",
+            'permissions.baro_dialogue.filesystem={":minimal"="read",":workspace_roots"={"."="deny"}}',
+            "--config",
+            'approval_policy="never"',
+            "--config",
+            'web_search="disabled"',
+            "--config",
+            'shell_environment_policy.inherit="none"',
+            "--config",
+            "allow_login_shell=false",
+        )
     } else if (opts.sandboxMode) {
         args.push("--sandbox", opts.sandboxMode)
     }
     if (opts.ephemeral) args.push("--ephemeral")
+    if (opts.ignoreUserConfig) args.push("--ignore-user-config")
+    if (opts.ignoreRules) args.push("--ignore-rules")
+    if (opts.disableProjectDocs) {
+        if (!args.includes("--strict-config")) args.push("--strict-config")
+        args.push("--config", "project_doc_max_bytes=0")
+    }
+    if (opts.outputSchemaFile) args.push("--output-schema", opts.outputSchemaFile)
     if (opts.model) args.push("--model", opts.model)
-    args.push(opts.prompt)
+    args.push(opts.promptViaStdin ? "-" : opts.prompt)
 
     const timeoutMs = opts.timeoutMs ?? 600_000
+    const terminationGraceMs = opts.terminationGraceMs ?? 5_000
+    if (!Number.isFinite(terminationGraceMs) || terminationGraceMs < 1) {
+        throw new RangeError("runCodexOneShot: terminationGraceMs must be positive")
+    }
 
     return await new Promise<string>((resolve, reject) => {
         const startedAt = Date.now()
@@ -83,7 +140,7 @@ export async function runCodexOneShot(
             proc = spawn(opts.codexBin ?? "codex", args, {
                 cwd: opts.cwd,
                 env: harnessChildEnvironment(),
-                stdio: ["ignore", "pipe", "pipe"],
+                stdio: [opts.promptViaStdin ? "pipe" : "ignore", "pipe", "pipe"],
             })
         } catch (e) {
             invocations.finish(
@@ -99,29 +156,148 @@ export async function runCodexOneShot(
         const itemTypesSeen: string[] = []
         let timedOut = false
         let aborted = false
+        let stdinError: Error | null = null
+        let killTimer: ReturnType<typeof setTimeout> | null = null
+        let pollTimer: ReturnType<typeof setInterval> | null = null
+        let signalledPids = new Set<number>()
+        let deferredExit: {
+            code: number | null
+            signal: NodeJS.Signals | null
+        } | null = null
 
         const cleanup = (): void => {
             clearTimeout(timer)
+            if (killTimer !== null) {
+                clearTimeout(killTimer)
+                killTimer = null
+            }
+            if (pollTimer !== null) {
+                clearInterval(pollTimer)
+                pollTimer = null
+            }
             opts.signal?.removeEventListener("abort", onAbort)
         }
-        const onAbort = (): void => {
-            aborted = true
-            try {
-                proc.kill("SIGTERM")
-            } catch {
-                /* noop */
+        const finalizeExit = (
+            code: number | null,
+            signal: NodeJS.Signals | null,
+        ): void => {
+            cleanup()
+            const elapsedMs = Date.now() - startedAt
+
+            const ctx = [
+                `elapsed=${elapsedMs}ms`,
+                `exit=${code}`,
+                signal ? `signal=${signal}` : null,
+                timedOut ? `timedOut=true (cap=${timeoutMs}ms)` : null,
+                aborted ? "aborted=true" : null,
+                `events=${eventTypesSeen.length}`,
+                `items=${itemTypesSeen.length}`,
+                eventTypesSeen.length > 0
+                    ? `event_types=[${[...new Set(eventTypesSeen)].join(",")}]`
+                    : null,
+                itemTypesSeen.length > 0
+                    ? `item_types=[${[...new Set(itemTypesSeen)].join(",")}]`
+                    : null,
+            ]
+                .filter((x): x is string => x !== null)
+                .join(" ")
+
+            // Abnormal termination must fail even if SOME text accumulated:
+            // callers feed the string into a markdown/JSON extractor that
+            // accepts truncated-but-closed fragments, so partial text on
+            // timeout/crash would silently yield an incomplete doc or PRD.
+            if (
+                stdinError ||
+                timedOut ||
+                aborted ||
+                signal != null ||
+                (code != null && code !== 0)
+            ) {
+                if (
+                    !invocations.finish(
+                        unknownCodexObservation(
+                            timedOut ? "timed_out" : "failed",
+                            elapsedMs,
+                            opts,
+                        ),
+                    )
+                ) {
+                    return
+                }
+                reject(
+                    stdinError ?? new Error(
+                        `runCodexOneShot: codex terminated abnormally before completing (${ctx})`,
+                    ),
+                )
+                return
             }
+
+            if (agentMessage.trim()) {
+                if (
+                    !invocations.finish(
+                        unknownCodexObservation(
+                            "succeeded",
+                            elapsedMs,
+                            opts,
+                        ),
+                    )
+                ) {
+                    return
+                }
+                resolve(agentMessage)
+                return
+            }
+
+            if (
+                !invocations.finish(
+                    unknownCodexObservation("failed", elapsedMs, opts),
+                )
+            ) {
+                return
+            }
+            reject(
+                new Error(
+                    `runCodexOneShot: codex produced no agent_message (${ctx})`,
+                ),
+            )
+        }
+        const finishDeferredExit = (): void => {
+            const exit = deferredExit
+            if (!exit) return
+            deferredExit = null
+            finalizeExit(exit.code, exit.signal)
+        }
+        const terminate = (): void => {
+            signalledPids = signalProcessTree(proc, "SIGTERM", signalledPids)
+            if (killTimer !== null) return
+            killTimer = setTimeout(() => {
+                killTimer = null
+                signalledPids = signalProcessTree(
+                    proc,
+                    "SIGKILL",
+                    signalledPids,
+                )
+                // If the direct CLI already exited, every captured descendant
+                // has now received SIGKILL. Do not clear this timer merely
+                // because the root exited before a resistant grandchild.
+                finishDeferredExit()
+            }, terminationGraceMs)
+        }
+        const onAbort = (): void => {
+            if (aborted) return
+            aborted = true
+            terminate()
         }
 
         const timer = setTimeout(() => {
+            if (timedOut) return
             timedOut = true
-            try {
-                proc.kill("SIGTERM")
-            } catch {
-                /* noop */
-            }
+            terminate()
         }, timeoutMs)
+        timer.unref?.()
         opts.signal?.addEventListener("abort", onAbort, { once: true })
+        // Close the race between the pre-spawn check and listener install.
+        if (opts.signal?.aborted) onAbort()
 
         proc.stdout!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => {
@@ -212,80 +388,29 @@ export async function runCodexOneShot(
         })
 
         proc.on("exit", (code, signal) => {
-            cleanup()
-            const elapsedMs = Date.now() - startedAt
-
-            const ctx = [
-                `elapsed=${elapsedMs}ms`,
-                `exit=${code}`,
-                signal ? `signal=${signal}` : null,
-                timedOut ? `timedOut=true (cap=${timeoutMs}ms)` : null,
-                aborted ? "aborted=true" : null,
-                `events=${eventTypesSeen.length}`,
-                `items=${itemTypesSeen.length}`,
-                eventTypesSeen.length > 0
-                    ? `event_types=[${[...new Set(eventTypesSeen)].join(",")}]`
-                    : null,
-                itemTypesSeen.length > 0
-                    ? `item_types=[${[...new Set(itemTypesSeen)].join(",")}]`
-                    : null,
-            ]
-                .filter((x): x is string => x !== null)
-                .join(" ")
-
-            // Abnormal termination must fail even if SOME text accumulated:
-            // callers feed the string into a markdown/JSON extractor that
-            // accepts truncated-but-closed fragments, so partial text on
-            // timeout/crash would silently yield an incomplete doc or PRD.
-            if (timedOut || aborted || signal != null || (code != null && code !== 0)) {
-                if (
-                    !invocations.finish(
-                        unknownCodexObservation(
-                            timedOut ? "timed_out" : "failed",
-                            elapsedMs,
-                            opts,
-                        ),
-                    )
-                ) {
-                    return
-                }
-                reject(
-                    new Error(
-                        `runCodexOneShot: codex terminated abnormally before completing (${ctx})`,
-                    ),
-                )
+            if ((timedOut || aborted) && anyProcessAlive(signalledPids)) {
+                deferredExit = { code, signal }
+                // Graceful descendants have no Node event to wake us when
+                // they finish, so poll only after the direct child has exited.
+                pollTimer = setInterval(() => {
+                    if (!anyProcessAlive(signalledPids)) finishDeferredExit()
+                }, 25)
                 return
             }
-
-            if (agentMessage.trim()) {
-                if (
-                    !invocations.finish(
-                        unknownCodexObservation(
-                            "succeeded",
-                            elapsedMs,
-                            opts,
-                        ),
-                    )
-                ) {
-                    return
-                }
-                resolve(agentMessage)
-                return
-            }
-
-            if (
-                !invocations.finish(
-                    unknownCodexObservation("failed", elapsedMs, opts),
-                )
-            ) {
-                return
-            }
-            reject(
-                new Error(
-                    `runCodexOneShot: codex produced no agent_message (${ctx})`,
-                ),
-            )
+            finalizeExit(code, signal)
         })
+        if (opts.promptViaStdin) {
+            if (!proc.stdin) {
+                stdinError = new Error("runCodexOneShot: codex stdin is unavailable")
+                terminate()
+            } else {
+                proc.stdin.on("error", (error) => {
+                    stdinError = error
+                    terminate()
+                })
+                proc.stdin.end(opts.prompt)
+            }
+        }
     })
 }
 

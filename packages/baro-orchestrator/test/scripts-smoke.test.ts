@@ -151,14 +151,20 @@ describe("script entrypoints run their main()", () => {
 
         const invalidBackend = await runScript("cli.ts", [
             "--dialogue-llm",
-            "opencode",
+            "unsupported",
         ])
         assert.equal(invalidBackend.code, 2)
-        assert.match(invalidBackend.stderr, /must be 'claude', 'openai', or 'codex'/)
+        assert.match(
+            invalidBackend.stderr,
+            /must be 'claude', 'openai', 'codex', 'opencode', or 'pi'/,
+        )
 
         const help = await runScript("cli.ts", ["--help"])
         assert.equal(help.code, 0)
-        assert.match(help.stdout, /dialogue backend: claude\|openai\|codex/)
+        assert.match(
+            help.stdout,
+            /dialogue backend: claude\|openai\|codex\|opencode\|pi/,
+        )
     })
 
     it("orchestrator CLI rejects malformed collective worker files before a run", async () => {

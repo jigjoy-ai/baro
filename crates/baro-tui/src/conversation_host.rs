@@ -4,11 +4,15 @@
 //! those rules to the application's PRD metadata, on-disk snapshots, and run
 //! lifecycle without coupling the domain itself to the TUI `App`.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::app::App;
 use crate::conversation::{self, ConversationKind, ConversationPhase, ConversationWireResponse};
 use crate::executor;
+
+const ACTIVE_SESSION_FILE: &str = "active-session";
+const MAX_ACTIVE_SESSION_BYTES: u64 = 256;
 
 fn conversation_snapshot_path(repository_root: &Path, session_id: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME")
@@ -63,6 +67,121 @@ pub(crate) fn persist_conversation(
     }
     if let Err(error) = session.save_to_path(&path) {
         eprintln!("[baro] warning: could not persist conversation: {error}");
+        return;
+    }
+    if let Some(directory) = path.parent() {
+        if let Err(error) = write_active_session_index(directory, session.session_id()) {
+            eprintln!("[baro] warning: could not persist active conversation index: {error}");
+        }
+    }
+}
+
+fn write_active_session_index(directory: &Path, session_id: &str) -> Result<(), String> {
+    // Session ids have already passed the conversation contract. Keep the
+    // index intentionally tiny and atomically replace it only after the full
+    // snapshot has been persisted.
+    if session_id.is_empty() || session_id.len() as u64 > MAX_ACTIVE_SESSION_BYTES {
+        return Err("session id is outside active-index bounds".to_string());
+    }
+    let path = directory.join(ACTIVE_SESSION_FILE);
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)
+        .map_err(|error| format!("could not create temporary index: {error}"))?;
+    temporary
+        .write_all(session_id.as_bytes())
+        .and_then(|()| temporary.write_all(b"\n"))
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|error| format!("could not write temporary index: {error}"))?;
+    temporary
+        .persist(&path)
+        .map(|_| ())
+        .map_err(|error| format!("could not replace active index: {}", error.error))
+}
+
+fn read_active_session_index(directory: &Path) -> Result<Option<String>, String> {
+    let path = directory.join(ACTIVE_SESSION_FILE);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("could not inspect active index: {error}")),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_ACTIVE_SESSION_BYTES
+    {
+        return Err("active conversation index is not a bounded regular file".to_string());
+    }
+    let session_id = std::fs::read_to_string(&path)
+        .map_err(|error| format!("could not read active index: {error}"))?
+        .trim()
+        .to_string();
+    conversation::ConversationSession::new(session_id.clone())
+        .map_err(|error| format!("active index has an invalid session id: {error}"))?;
+    Ok(Some(session_id))
+}
+
+fn load_snapshot_no_follow(path: &Path) -> Result<conversation::ConversationSession, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("could not inspect active snapshot: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("active conversation snapshot is not a regular file".to_string());
+    }
+    conversation::ConversationSession::load_from_path(path)
+        .map_err(|error| format!("could not load active snapshot: {error}"))
+}
+
+fn restore_pre_prd_from_directory(app: &mut App, directory: &Path) -> Result<bool, String> {
+    let Some(session_id) = read_active_session_index(directory)? else {
+        return Ok(false);
+    };
+    let path = directory.join(format!("{session_id}.json"));
+    let mut session = load_snapshot_no_follow(&path)?;
+    if session.goal_envelope().is_some() {
+        return Ok(false);
+    }
+
+    match (
+        session.phase(),
+        session.pending_request_id().map(str::to_string),
+    ) {
+        (ConversationPhase::NeedsInput | ConversationPhase::Clarifying, None) => {}
+        (ConversationPhase::Clarifying, Some(request_id)) => {
+            session
+                .fail_pending_initial_request(
+                    request_id,
+                    "Baro restarted before this response completed. Retry the request.",
+                )
+                .map_err(|error| format!("could not reconcile interrupted request: {error}"))?;
+        }
+        _ => return Ok(false),
+    }
+
+    app.conversation = session;
+    app.conversation_busy = false;
+    Ok(true)
+}
+
+/// Restore only an unfinished pre-PRD conversation for this checkout. A new
+/// explicit CLI goal deliberately starts a new session; the caller controls
+/// that precedence. Interrupted provider turns are closed deterministically so
+/// a late child result cannot consume a newly opened request after restart.
+pub(crate) fn restore_pre_prd_conversation(app: &mut App, repository_root: &Path) -> bool {
+    let Some(path) = conversation_snapshot_path(repository_root, app.conversation.session_id())
+    else {
+        return false;
+    };
+    let Some(directory) = path.parent() else {
+        return false;
+    };
+    match restore_pre_prd_from_directory(app, directory) {
+        Ok(true) => {
+            persist_conversation(&app.conversation, repository_root);
+            true
+        }
+        Ok(false) => false,
+        Err(error) => {
+            eprintln!("[baro] warning: could not restore active conversation: {error}");
+            false
+        }
     }
 }
 
@@ -83,9 +202,7 @@ pub(crate) fn restore_conversation_from_prd(
         prd.conversation_session_id.as_deref(),
         prd.goal_envelope.as_ref(),
     ) {
-        (Some(session_id), Some(goal_envelope)) => {
-            (session_id.to_string(), goal_envelope.clone())
-        }
+        (Some(session_id), Some(goal_envelope)) => (session_id.to_string(), goal_envelope.clone()),
         (None, None) => {
             // PRDs created before conversation-first still need a valid
             // execution-phase owner. Reconstruct only the minimum bounded
@@ -253,11 +370,7 @@ pub(crate) fn fail_conversation_run(app: &mut App, reason: &str, repository_root
     persist_conversation(&app.conversation, repository_root);
 }
 
-pub(crate) fn finish_conversation_run(
-    app: &mut App,
-    received_done: bool,
-    repository_root: &Path,
-) {
+pub(crate) fn finish_conversation_run(app: &mut App, received_done: bool, repository_root: &Path) {
     if app.conversation.goal_envelope().is_none() {
         return;
     }
@@ -342,6 +455,13 @@ fn bounded_status_text(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn save_active_fixture(directory: &Path, session: &conversation::ConversationSession) {
+        session
+            .save_to_path(&directory.join(format!("{}.json", session.session_id())))
+            .unwrap();
+        write_active_session_index(directory, session.session_id()).unwrap();
+    }
+
     #[test]
     fn conversation_snapshots_are_namespaced_by_repository_root() {
         let first = repository_storage_key(Path::new("/workspace/first"));
@@ -369,5 +489,163 @@ mod tests {
         let session = rebuild_conversation_from_prd("session-legacy", &envelope).unwrap();
         assert_eq!(session.phase(), ConversationPhase::Planning);
         assert_eq!(session.goal_envelope(), Some(&envelope));
+    }
+
+    #[test]
+    fn unfinished_clarification_resumes_from_the_repository_active_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = conversation::ConversationSession::new("session-active").unwrap();
+        session
+            .begin_request("request-1", "Change the public API")
+            .unwrap();
+        session
+            .apply_response(ConversationWireResponse {
+                schema_version: conversation::CONVERSATION_SCHEMA_VERSION,
+                session_id: "session-active".to_string(),
+                request_id: "request-1".to_string(),
+                kind: ConversationKind::Clarify,
+                message: "One compatibility choice is still needed.".to_string(),
+                questions: vec![conversation::ClarificationQuestion {
+                    id: "q1".to_string(),
+                    text: "Which API must remain compatible?".to_string(),
+                    reason: None,
+                }],
+                goal_envelope: None,
+            })
+            .unwrap();
+        save_active_fixture(directory.path(), &session);
+
+        let mut app = App::new();
+        assert!(restore_pre_prd_from_directory(&mut app, directory.path()).unwrap());
+        assert_eq!(app.conversation.session_id(), "session-active");
+        assert_eq!(app.conversation.phase(), ConversationPhase::NeedsInput);
+        assert_eq!(app.conversation.pending_request_id(), None);
+    }
+
+    #[test]
+    fn interrupted_pre_prd_turn_is_closed_before_a_retry_can_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = conversation::ConversationSession::new("session-interrupted").unwrap();
+        session
+            .begin_request("request-old", "Inspect the repository")
+            .unwrap();
+        save_active_fixture(directory.path(), &session);
+
+        let mut app = App::new();
+        assert!(restore_pre_prd_from_directory(&mut app, directory.path()).unwrap());
+        assert_eq!(app.conversation.pending_request_id(), None);
+        assert!(app
+            .conversation
+            .transcript()
+            .iter()
+            .any(|turn| turn.text.contains("Baro restarted")));
+        assert_eq!(
+            app.conversation
+                .apply_response(ConversationWireResponse {
+                    schema_version: conversation::CONVERSATION_SCHEMA_VERSION,
+                    session_id: "session-interrupted".to_string(),
+                    request_id: "request-old".to_string(),
+                    kind: ConversationKind::Answer,
+                    message: "late result".to_string(),
+                    questions: vec![],
+                    goal_envelope: None,
+                })
+                .unwrap(),
+            conversation::ApplyOutcome::Duplicate,
+        );
+        app.conversation
+            .begin_request("request-new", "Retry the inspection")
+            .unwrap();
+        assert_eq!(app.conversation.pending_request_id(), Some("request-new"));
+    }
+
+    #[test]
+    fn reconciled_pre_prd_turn_keeps_its_transcript_across_repeated_restarts() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session =
+            conversation::ConversationSession::new("session-restarted-twice").unwrap();
+        session
+            .begin_request("request-interrupted", "Inspect the public protocol")
+            .unwrap();
+        save_active_fixture(directory.path(), &session);
+
+        let mut first_restart = App::new();
+        assert!(restore_pre_prd_from_directory(&mut first_restart, directory.path()).unwrap());
+        assert_eq!(
+            first_restart.conversation.phase(),
+            ConversationPhase::Clarifying
+        );
+        assert_eq!(first_restart.conversation.pending_request_id(), None);
+        let reconciled_transcript = first_restart.conversation.transcript().to_vec();
+        assert!(reconciled_transcript
+            .iter()
+            .any(|turn| turn.text.contains("Baro restarted")));
+        save_active_fixture(directory.path(), &first_restart.conversation);
+
+        let mut second_restart = App::new();
+        assert!(restore_pre_prd_from_directory(&mut second_restart, directory.path()).unwrap());
+        assert_eq!(
+            second_restart.conversation.phase(),
+            ConversationPhase::Clarifying
+        );
+        assert_eq!(second_restart.conversation.pending_request_id(), None);
+        assert_eq!(
+            second_restart.conversation.transcript(),
+            reconciled_transcript
+        );
+    }
+
+    #[test]
+    fn answered_pre_prd_chat_is_restored_without_inventing_a_pending_turn() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = conversation::ConversationSession::new("session-chat").unwrap();
+        session
+            .begin_request("request-chat", "What does this repository contain?")
+            .unwrap();
+        session
+            .apply_response(ConversationWireResponse {
+                schema_version: conversation::CONVERSATION_SCHEMA_VERSION,
+                session_id: "session-chat".to_string(),
+                request_id: "request-chat".to_string(),
+                kind: ConversationKind::Answer,
+                message: "It contains the Rust TUI and TypeScript orchestrator.".to_string(),
+                questions: vec![],
+                goal_envelope: None,
+            })
+            .unwrap();
+        save_active_fixture(directory.path(), &session);
+
+        let mut app = App::new();
+        assert!(restore_pre_prd_from_directory(&mut app, directory.path()).unwrap());
+        assert_eq!(app.conversation.phase(), ConversationPhase::Clarifying);
+        assert_eq!(app.conversation.pending_request_id(), None);
+        assert_eq!(app.conversation.transcript(), session.transcript());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_index_and_snapshot_must_be_regular_files() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_index = outside.path().join("index");
+        std::fs::write(&outside_index, "session-linked\n").unwrap();
+        symlink(&outside_index, directory.path().join(ACTIVE_SESSION_FILE)).unwrap();
+        assert!(read_active_session_index(directory.path()).is_err());
+
+        std::fs::remove_file(directory.path().join(ACTIVE_SESSION_FILE)).unwrap();
+        write_active_session_index(directory.path(), "session-linked").unwrap();
+        let outside_snapshot = outside.path().join("snapshot.json");
+        let session = conversation::ConversationSession::new("session-linked").unwrap();
+        session.save_to_path(&outside_snapshot).unwrap();
+        symlink(
+            &outside_snapshot,
+            directory.path().join("session-linked.json"),
+        )
+        .unwrap();
+
+        let mut app = App::new();
+        assert!(restore_pre_prd_from_directory(&mut app, directory.path()).is_err());
     }
 }
