@@ -59,6 +59,7 @@ pub(crate) fn spawn_refiner(
             openai_base_url.as_deref(),
             &effort,
             mode_json.as_deref(),
+            None,
             plan_event_sink(false, tx.clone()),
         )
         .await

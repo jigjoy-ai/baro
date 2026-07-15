@@ -46,6 +46,28 @@ describe("script entrypoints run their main()", () => {
         assert.match(r.stderr, /--mode-file requires a value/)
     })
 
+    it("run-planner enforces the private progressive flag group before provider startup", async () => {
+        const partial = await runScript("run-planner.ts", [
+            "--goal", "test",
+            "--cwd", ".",
+            "--llm", "claude",
+            "--progressive-run-id", "run-1",
+        ])
+        assert.equal(partial.code, 2)
+        assert.match(partial.stderr, /--progressive-planning-id is required/)
+
+        const missingResult = await runScript("run-planner.ts", [
+            "--goal", "test",
+            "--cwd", ".",
+            "--llm", "claude",
+            "--progressive-run-id", "run-1",
+            "--progressive-planning-id", "planning-1",
+            "--progressive-bootstrap-file", "bootstrap.json",
+        ])
+        assert.equal(missingResult.code, 2)
+        assert.match(missingResult.stderr, /requires --result-file/)
+    })
+
     it("run-architect knows --mode-file", async () => {
         const r = await runScript("run-architect.ts", ["--mode-file"])
         assert.equal(r.code, 2)

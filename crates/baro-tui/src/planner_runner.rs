@@ -16,6 +16,13 @@ use crate::subprocess::{self, ProcessRunError};
 const SCRIPT_REL_PATH: &str = "packages/baro-orchestrator/scripts/run-planner.ts";
 const BUNDLE_NAME: &str = "run-planner.mjs";
 
+#[derive(Debug, Clone)]
+pub struct ProgressivePlannerInvocation {
+    pub run_id: String,
+    pub planning_id: String,
+    pub bootstrap_json: String,
+}
+
 pub async fn run_planner(
     goal: &str,
     cwd: &Path,
@@ -28,16 +35,24 @@ pub async fn run_planner(
     openai_base_url: Option<&str>,
     effort: &str,
     mode_json: Option<&str>,
+    progressive: Option<&ProgressivePlannerInvocation>,
     on_event: impl Fn(&str),
 ) -> Result<String, ProcessRunError> {
     let entry = discovery::locate_script(cwd, SCRIPT_REL_PATH, BUNDLE_NAME).map_err(|e| {
-        ProcessRunError { message: e, log_path: None }
+        ProcessRunError {
+            message: e,
+            log_path: None,
+        }
     })?;
 
     // All tempfiles must stay alive until the child exits.
     let ctx_tempfile = write_optional_tempfile("context", context)?;
     let dec_tempfile = write_optional_tempfile("decision", decision_doc)?;
     let mode_tempfile = write_optional_tempfile("mode", mode_json)?;
+    let progressive_bootstrap_tempfile = write_optional_tempfile(
+        "progressive bootstrap",
+        progressive.map(|config| config.bootstrap_json.as_str()),
+    )?;
     // The child writes the PRD here so its stdout is free for the event
     // stream; we read the file back after it exits.
     let result_tempfile = tempfile::NamedTempFile::new().map_err(|e| ProcessRunError {
@@ -57,9 +72,12 @@ pub async fn run_planner(
             c
         }
     };
-    cmd.arg("--goal").arg(goal)
-        .arg("--cwd").arg(cwd)
-        .arg("--llm").arg(llm.as_str());
+    cmd.arg("--goal")
+        .arg(goal)
+        .arg("--cwd")
+        .arg(cwd)
+        .arg("--llm")
+        .arg(llm.as_str());
     if let Some(m) = model {
         cmd.arg("--model").arg(m);
     }
@@ -74,6 +92,15 @@ pub async fn run_planner(
         cmd.arg("--mode-file").arg(f.path());
     }
     cmd.arg("--result-file").arg(result_tempfile.path());
+    if let (Some(config), Some(bootstrap)) = (progressive, progressive_bootstrap_tempfile.as_ref())
+    {
+        cmd.arg("--progressive-run-id")
+            .arg(&config.run_id)
+            .arg("--progressive-planning-id")
+            .arg(&config.planning_id)
+            .arg("--progressive-bootstrap-file")
+            .arg(bootstrap.path());
+    }
     if quick {
         cmd.arg("--quick");
     }
@@ -91,6 +118,7 @@ pub async fn run_planner(
     drop(ctx_tempfile);
     drop(dec_tempfile);
     drop(mode_tempfile);
+    drop(progressive_bootstrap_tempfile);
 
     let raw = std::fs::read_to_string(result_tempfile.path())
         .map_err(|e| ProcessRunError {

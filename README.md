@@ -255,6 +255,18 @@ persists the complete candidate before it reports the change as applied; active 
 fenced until a correlated revocation lifecycle exists. `legacy` remains as the explicit
 Conductor compatibility path for old-run comparison and rollback.
 
+Fresh headless Collective runs also have an experimental progressive-planning
+path. With `BARO_PROGRESSIVE_PLANNING=1`, a native OpenAI-compatible Planner
+(including GLM on that route) may publish dependency-closed, add-only story
+fragments through Mozaik while it continues planning. The Board validates and
+durably admits each fragment before it can execute, and the final PRD must keep
+the admitted stories as an exact prefix. CLI Planner backends currently retain
+the complete-plan barrier. Resume and follow-up runs are not eligible for this
+version; interactive and `legacy` runs are unchanged. See
+[Collective runtime architecture](docs/collective-runtime.md#progressive-planning-experimental-opt-in)
+for the fail-closed lifecycle, limitations and provider-free checks. This
+opt-in is an evaluation surface, not a production-readiness or benchmark claim.
+
 Try the collective engine with Baro-owned pushes and PR creation disabled:
 
 ```bash

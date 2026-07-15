@@ -28,6 +28,11 @@ import type { GatewayBillingCoordinator } from "../billing/index.js"
 import { createCodebaseTools } from "./codebase-tools.js"
 import { emitPlanLine, emitToolCall } from "./plan-events.js"
 import {
+    createPlannerOpenAIProgressiveSupport,
+    type PlannerOpenAIProgressiveConfig,
+    type PlannerOpenAIProgressiveSupport,
+} from "./planner-openai-progressive.js"
+import {
     PLANNER_SYSTEM_PROMPT,
     buildIntakePrompt,
     buildPlannerUserMessage,
@@ -39,6 +44,11 @@ import {
     type ModeContract,
 } from "./planner-prompts.js"
 import { assertRunnablePlannerPrdJson } from "./planner-validation.js"
+
+export type {
+    PlannerOpenAIPlanFragmentEvent,
+    PlannerOpenAIProgressiveConfig,
+} from "./planner-openai-progressive.js"
 
 export interface RunPlannerOpenAIOptions {
     goal: string
@@ -63,6 +73,9 @@ export interface RunPlannerOpenAIOptions {
     perRoundTimeoutSecs?: number
     /** Present only for an explicitly trusted Baro Gateway process. */
     billingCoordinator?: GatewayBillingCoordinator
+    /** Optional collective-only early-plan transport. No config preserves the
+     * historical one-shot final-PRD behavior byte-for-byte. */
+    progressive?: PlannerOpenAIProgressiveConfig
     /** Deterministic no-network seam used by the planner state-machine tests. */
     testRuntime?: PlannerOpenAITestRuntime
 }
@@ -121,23 +134,32 @@ export async function runPlannerOpenAI(
     emitPlanLine(`planning approach: ${intake.mode}`)
     const model = opts.testRuntime?.model ?? pickModel(plannerModelName)
 
-    const tools = opts.testRuntime?.tools ?? createCodebaseTools(opts.cwd)
+    const progressive = createPlannerOpenAIProgressiveSupport(opts.progressive)
+    const baseTools = opts.testRuntime?.tools ?? createCodebaseTools(opts.cwd)
+    const tools = progressive.extraTools.length > 0
+        ? [...baseTools, ...progressive.extraTools]
+        : baseTools
     const inferRound = opts.testRuntime?.inferRound ?? runInferenceRound
     setModelTools(model, tools)
 
     let context = ModelContext.create("planner")
         .addContextItem(SystemMessageItem.create(PLANNER_SYSTEM_PROMPT))
-        .addContextItem(
-            UserMessageItem.create(
-                buildPlannerUserMessage({
-                    goal: opts.goal,
-                    decisionDocument: opts.decisionDocument,
-                    quick: opts.quick,
-                    projectContext: opts.projectContext,
-                    modeContract: renderModeContract(intake),
-                }),
-            ),
+    if (progressive.systemInstruction) {
+        context = context.addContextItem(
+            SystemMessageItem.create(progressive.systemInstruction),
         )
+    }
+    context = context.addContextItem(
+        UserMessageItem.create(
+            buildPlannerUserMessage({
+                goal: opts.goal,
+                decisionDocument: opts.decisionDocument,
+                quick: opts.quick,
+                projectContext: opts.projectContext,
+                modeContract: renderModeContract(intake),
+            }),
+        ),
+    )
 
     const maxRounds = opts.maxRounds ?? 8
     // Cheap OpenAI-compatible planners usually inspect fewer files per round
@@ -244,7 +266,7 @@ export async function runPlannerOpenAI(
             if (!raw) throw new Error("PlannerOpenAI: empty final response")
             process.stderr.write(`[planner-openai] ${usage.summary()}\n`)
             try {
-                return extractRunnablePlannerPrd(raw)
+                return extractRunnablePlannerPrd(raw, progressive)
             } catch (e) {
                 invalidFinalResponses += 1
                 const reason = (e as Error)?.message ?? String(e)
@@ -255,18 +277,48 @@ export async function runPlannerOpenAI(
                     emitPlanLine(`invalid final PRD — repair ${invalidFinalResponses}/${maxFinalizationRetries}`)
                     continue
                 }
+                if (progressive.hasEarlyPlan()) {
+                    process.stderr.write(
+                        `[planner-openai] invalid final JSON (${reason}) — ` +
+                            "repair budget exhausted; rejecting because an immutable prefix was published\n",
+                    )
+                    emitPlanLine("planner final PRD changed or omitted its published prefix — rejecting")
+                    throw new Error(
+                        `PlannerOpenAI: final PRD rejected after bounded repair attempts: ${reason}`,
+                    )
+                }
                 process.stderr.write(`[planner-openai] invalid final JSON (${reason}) — repair budget exhausted, using fallback PRD\n`)
                 emitPlanLine("planner could not produce valid PRD JSON — using one-story fallback")
-                return fallbackPrdJson(opts.goal, "Planner returned invalid JSON after bounded repair attempts.")
+                return extractRunnablePlannerPrd(
+                    fallbackPrdJson(
+                        opts.goal,
+                        "Planner returned invalid JSON after bounded repair attempts.",
+                    ),
+                    progressive,
+                )
             }
         }
     }
 
+    if (progressive.hasEarlyPlan()) {
+        throw new Error(
+            `PlannerOpenAI: exceeded maxRounds=${maxRounds} after publishing an immutable plan prefix`,
+        )
+    }
     process.stderr.write(`[planner-openai] ${usage.summary()} — exceeded maxRounds=${maxRounds}, using fallback PRD\n`)
-    return fallbackPrdJson(opts.goal, `Planner exceeded maxRounds=${maxRounds} without producing a final plan.`)
+    return extractRunnablePlannerPrd(
+        fallbackPrdJson(
+            opts.goal,
+            `Planner exceeded maxRounds=${maxRounds} without producing a final plan.`,
+        ),
+        progressive,
+    )
 }
 
-function extractRunnablePlannerPrd(raw: string): string {
+function extractRunnablePlannerPrd(
+    raw: string,
+    progressive: PlannerOpenAIProgressiveSupport,
+): string {
     const candidates = extractJsonObjects(raw)
     if (candidates.length === 0) {
         throw new Error(`no valid JSON object in response: ${raw.trim().slice(0, 200)}`)
@@ -275,6 +327,7 @@ function extractRunnablePlannerPrd(raw: string): string {
     for (const candidate of candidates) {
         try {
             assertRunnablePlannerPrdJson(candidate)
+            progressive.reconcileFinalCandidate(candidate)
             return candidate
         } catch (error) {
             lastError = error

@@ -14,6 +14,7 @@ import {
     fallbackPrdJson,
     resolvePlannerModelName,
     runPlannerOpenAI,
+    type PlannerOpenAIPlanFragmentEvent,
     type PlannerOpenAITestRuntime,
 } from "../src/planning/planner-openai.js"
 
@@ -40,6 +41,34 @@ const VALID_PRD = JSON.stringify({
             tests: ["npm test"],
             model: "heavy",
         },
+    ],
+})
+
+const RAW_TAIL_STORY = {
+    id: "S2",
+    priority: 2,
+    title: "Verify cancellation",
+    description: "Cover cancellation across the integrated provider boundary.",
+    dependsOn: ["S1"],
+    retries: 2,
+    acceptance: ["Cancellation remains observable after integration."],
+    tests: ["npm test -- cancellation"],
+    model: "standard",
+}
+
+const PUBLISHED_STORY = {
+    ...(JSON.parse(VALID_PRD) as { userStories: Array<Record<string, unknown>> })
+        .userStories[0]!,
+    passes: false,
+    completedAt: null,
+    durationSecs: null,
+}
+
+const FINAL_WITH_TAIL = JSON.stringify({
+    ...(JSON.parse(VALID_PRD) as Record<string, unknown>),
+    userStories: [
+        (JSON.parse(VALID_PRD) as { userStories: unknown[] }).userStories[0],
+        RAW_TAIL_STORY,
     ],
 })
 
@@ -82,6 +111,183 @@ describe("PlannerOpenAI complexity routing", () => {
     it("does not downgrade a focused local run when the floor env is unset", () => {
         delete process.env.BARO_PLANNER_FOCUSED_MODEL
         assert.equal(resolvePlannerModelName("focused", "gpt-5.5"), "gpt-5.5")
+    })
+})
+
+describe("PlannerOpenAI progressive fragments", () => {
+    it("publishes a validated runtime-ordinal fragment before an exact-prefix final", async () => {
+        const published: PlannerOpenAIPlanFragmentEvent[] = []
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence(
+            [
+                [publishFragmentCall("publish-1", "foundation", [PUBLISHED_STORY])],
+                [message(FINAL_WITH_TAIL)],
+            ],
+            tool,
+            (round) => {
+                if (round === 2) assert.equal(published.length, 1)
+            },
+        )
+
+        const result = await runPlannerOpenAI({
+            goal: "Implement cooperative cancellation",
+            cwd: "/unused",
+            model: "gpt-5.5",
+            modeContract: PARALLEL_MODE,
+            maxRounds: 4,
+            maxExplorationRounds: 2,
+            progressive: {
+                runId: "run-1",
+                planningId: "planning-1",
+                publish: (event) => published.push(event),
+            },
+            testRuntime: sequence.runtime,
+        })
+
+        assert.deepEqual(JSON.parse(result), JSON.parse(FINAL_WITH_TAIL))
+        assert.deepEqual(published, [
+            {
+                type: "plan_fragment",
+                run_id: "run-1",
+                planning_id: "planning-1",
+                fragment_id: "foundation",
+                ordinal: 1,
+                stories: [PUBLISHED_STORY],
+            },
+        ])
+        assert.deepEqual(sequence.toolCounts, [2, 2])
+        assert.match(
+            JSON.stringify(sequence.contexts[0]!.toJSON()),
+            /immutable.*exact, same-order.*prefix/is,
+        )
+    })
+
+    it("routes a changed published prefix through the existing repair loop", async () => {
+        const changed = JSON.parse(FINAL_WITH_TAIL) as {
+            userStories: Array<Record<string, unknown>>
+        }
+        changed.userStories[0]!.description = "Planner silently changed admitted work."
+        const published: PlannerOpenAIPlanFragmentEvent[] = []
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence([
+            [publishFragmentCall("publish-1", "foundation", [PUBLISHED_STORY])],
+            [message(JSON.stringify(changed))],
+            [message(FINAL_WITH_TAIL)],
+        ], tool)
+
+        const result = await runPlannerOpenAI({
+            goal: "Implement cooperative cancellation",
+            cwd: "/unused",
+            model: "gpt-5.5",
+            modeContract: PARALLEL_MODE,
+            maxRounds: 4,
+            maxExplorationRounds: 2,
+            maxFinalizationRetries: 1,
+            progressive: {
+                runId: "run-1",
+                planningId: "planning-1",
+                publish: (event) => published.push(event),
+            },
+            testRuntime: sequence.runtime,
+        })
+
+        assert.deepEqual(JSON.parse(result), JSON.parse(FINAL_WITH_TAIL))
+        assert.equal(published.length, 1)
+        assert.equal(sequence.rounds(), 3)
+        assert.match(
+            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            /does not exactly match admitted prefix story/i,
+        )
+    })
+
+    it("rejects a changed prefix when the bounded repair budget is exhausted", async () => {
+        const changed = JSON.parse(VALID_PRD) as {
+            userStories: Array<Record<string, unknown>>
+        }
+        changed.userStories[0]!.title = "Changed after early publication"
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence([
+            [publishFragmentCall("publish-1", "foundation", [PUBLISHED_STORY])],
+            [message(JSON.stringify(changed))],
+        ], tool)
+
+        await assert.rejects(
+            runPlannerOpenAI({
+                goal: "Implement cooperative cancellation",
+                cwd: "/unused",
+                model: "gpt-5.5",
+                modeContract: PARALLEL_MODE,
+                maxRounds: 3,
+                maxExplorationRounds: 2,
+                maxFinalizationRetries: 0,
+                progressive: {
+                    runId: "run-1",
+                    planningId: "planning-1",
+                    publish: () => undefined,
+                },
+                testRuntime: sequence.runtime,
+            }),
+            /final PRD rejected.*admitted prefix/is,
+        )
+    })
+
+    it("closes fragment publishing with all other tools after exploration", async () => {
+        const published: PlannerOpenAIPlanFragmentEvent[] = []
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence([
+            [publishFragmentCall("publish-1", "foundation", [PUBLISHED_STORY])],
+            [publishFragmentCall("publish-2", "late", [{
+                ...RAW_TAIL_STORY,
+                passes: false,
+                completedAt: null,
+                durationSecs: null,
+            }])],
+            [message(VALID_PRD)],
+        ], tool)
+
+        const result = await runPlannerOpenAI({
+            goal: "Implement cooperative cancellation",
+            cwd: "/unused",
+            model: "gpt-5.5",
+            modeContract: PARALLEL_MODE,
+            maxRounds: 4,
+            maxExplorationRounds: 1,
+            progressive: {
+                runId: "run-1",
+                planningId: "planning-1",
+                publish: (event) => published.push(event),
+            },
+            testRuntime: sequence.runtime,
+        })
+
+        assert.deepEqual(JSON.parse(result), JSON.parse(VALID_PRD))
+        assert.equal(published.length, 1)
+        assert.match(
+            JSON.stringify(sequence.contexts[2]!.toJSON()),
+            /this call was not executed/i,
+        )
+    })
+
+    it("leaves a zero-fragment final response unchanged", async () => {
+        const published: PlannerOpenAIPlanFragmentEvent[] = []
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence([[message(VALID_PRD)]], tool)
+
+        const result = await runPlannerOpenAI({
+            goal: "Implement cooperative cancellation",
+            cwd: "/unused",
+            model: "gpt-5.5",
+            modeContract: PARALLEL_MODE,
+            progressive: {
+                runId: "run-1",
+                planningId: "planning-1",
+                publish: (event) => published.push(event),
+            },
+            testRuntime: sequence.runtime,
+        })
+
+        assert.equal(result, VALID_PRD)
+        assert.deepEqual(published, [])
     })
 })
 
@@ -293,6 +499,18 @@ function call(callId: string): ContextItem {
     })
 }
 
+function publishFragmentCall(
+    callId: string,
+    fragmentId: string,
+    stories: unknown[],
+): ContextItem {
+    return FunctionCallItem.rehydrate({
+        callId,
+        name: "publish_plan_fragment",
+        args: JSON.stringify({ fragmentId, stories }),
+    })
+}
+
 function message(text: string): ContextItem {
     return ModelMessageItem.rehydrate({ text })
 }
@@ -308,7 +526,11 @@ function fakeTool(invoke: Tool["invoke"]): Tool {
     }
 }
 
-function fakeSequence(roundItems: ContextItem[][], tool: Tool): {
+function fakeSequence(
+    roundItems: ContextItem[][],
+    tool: Tool,
+    beforeRound?: (round: number) => void,
+): {
     runtime: PlannerOpenAITestRuntime
     contexts: ModelContext[]
     toolCounts: number[]
@@ -323,6 +545,7 @@ function fakeSequence(roundItems: ContextItem[][], tool: Tool): {
             model,
             tools: [tool],
             inferRound: async (context, activeModel) => {
+                beforeRound?.(round + 1)
                 contexts.push(context)
                 toolCounts.push(activeModel.getTools().length)
                 const items = roundItems[round]

@@ -65,6 +65,7 @@ import {
     validateConversationDelegationProposal,
 } from "./conversation-delegation.js"
 import { RuntimeReplanCoordinator } from "./runtime-replan-coordinator.js"
+import { ProgressivePlanningCoordinator } from "./progressive-planning-coordinator.js"
 import { OperationalRecoveryPolicy } from "./operational-recovery.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import { isProviderCapacityFailure } from "../provider-failure.js"
@@ -117,6 +118,12 @@ export interface CollectiveBoardOptions {
     /** Object-identity bridge authority allowed to relay CLI runtime replans.
      * Native story participants are authorized through `outcomeAuthority`. */
     runtimeReplanAuthority?: Participant
+    /** Opt-in host-owned planner stream. Absence preserves the full-plan path. */
+    progressivePlanningId?: string
+    /** Exact private PlanningFeed object allowed to publish planner events. */
+    planningAuthority?: Participant
+    /** Explicitly unsafe unit-test seam. Never enable in a real run. */
+    unsafeAllowUnboundPlanningAuthority?: boolean
     /** Explicitly unsafe unit-test seam. Never enable in a real run. */
     unsafeAllowUnboundRuntimeReplanAuthority?: boolean
     /** Object-identity WorkContextProvider allowed to answer context requests. */
@@ -193,6 +200,7 @@ export class CollectiveBoard extends SerializedObserver {
      * old level barrier as soon as their actual dependencies integrate. */
     private readonly runtimeAdaptiveStoryIds = new Set<string>()
     private readonly runtimeReplans: RuntimeReplanCoordinator
+    private readonly progressivePlanning: ProgressivePlanningCoordinator
     /** Exact DialogueAgent object allowed to propose add-only work. It is
      * late-bound because Dialogue itself needs this Board as control authority. */
     private conversationAuthority: Participant | null = null
@@ -245,6 +253,62 @@ export class CollectiveBoard extends SerializedObserver {
             prdPath: opts.prdPath,
             maxDynamicStories: opts.maxDynamicStories ?? 3,
             adaptationBudget: this.runtimeAdaptationBudget,
+        })
+        this.progressivePlanning = new ProgressivePlanningCoordinator({
+            runId: opts.runId,
+            planningId: opts.progressivePlanningId,
+            host: {
+                snapshot: () => ({
+                    phase: this.phase,
+                    prd: this.prd,
+                    graphVersion: this.runtimeReplans.graphVersion,
+                    wave: this.wave
+                        ? {
+                              ordinal: this.wave.ordinal,
+                              storyIds: [...this.wave.storyIds],
+                          }
+                        : null,
+                }),
+                commitPrd: (prd) => {
+                    savePrdAtomic(this.opts.prdPath, prd)
+                    this.prd = prd
+                },
+                admitGraph: ({ proposal, planningState, maxAddedStories }) => {
+                    const outcome = this.runtimeReplans.decide(proposal, {
+                        active:
+                            this.phase === "preparing" ||
+                            this.phase === "running",
+                        prd: this.prd,
+                        immutableStoryIds: this.runtimeImmutableStoryIds(),
+                        activeLease: undefined,
+                        adaptationsSinceProgress:
+                            this.runtimeAdaptationsSinceProgress,
+                        requireActiveLease: false,
+                        storyAccounting: "planner",
+                        maxAddedStories,
+                        planningState,
+                    })
+                    if (outcome.applied && RuntimeReplanApplied.is(outcome.event)) {
+                        this.prd = outcome.applied.prd
+                        for (const storyId of outcome.applied.addedStoryIds) {
+                            this.runtimeAdaptiveStoryIds.add(storyId)
+                        }
+                    }
+                    return outcome
+                },
+                emit: (event) => this.emit(event),
+                afterAdmission: () => {
+                    if (this.phase !== "running") return
+                    if (this.wave) this.reconcileRuntimeReadyStories()
+                    else this.scheduleNextWave()
+                },
+                afterClose: () => {
+                    if (this.phase === "running" && !this.wave) {
+                        this.scheduleNextWave()
+                    }
+                },
+                terminate: (reason) => this.terminate(false, reason),
+            },
         })
         this.done = new Promise((resolve) => {
             this.resolveDone = resolve
@@ -545,6 +609,12 @@ export class CollectiveBoard extends SerializedObserver {
             return
         }
         if (
+            this.isPlanningAuthority(context.source) &&
+            this.progressivePlanning.handleEvent(event)
+        ) {
+            return
+        }
+        if (
             RuntimeReplanProposed.is(event) &&
             event.data.runId === this.opts.runId
         ) {
@@ -566,6 +636,7 @@ export class CollectiveBoard extends SerializedObserver {
                     (!this.opts.recoveryAuthority ||
                         context.source === this.opts.recoveryAuthority)))
         ) {
+            if (this.progressivePlanning.isFailed()) return
             if (!context.internal) {
                 const recovery = event.data.recovery
                 // Autonomous recovery mutations must identify the exact failed
@@ -638,7 +709,7 @@ export class CollectiveBoard extends SerializedObserver {
         if (this.phase !== "idle") return
         this.phase = "preparing"
         this.startedAt = Date.now()
-        this.prd = loadPrd(this.opts.prdPath)
+        this.prd = this.progressivePlanning.initialize(loadPrd(this.opts.prdPath))
         // A run starts a fresh optimistic-concurrency domain. PRD contents are
         // durable; outstanding proposals never survive across run identities.
         this.runtimeReplans.start(this.prd)
@@ -674,6 +745,14 @@ export class CollectiveBoard extends SerializedObserver {
             }),
         )
         this.scheduleNextWave()
+    }
+
+    private isPlanningAuthority(source: Participant): boolean {
+        return (
+            (this.opts.planningAuthority !== undefined &&
+                source === this.opts.planningAuthority) ||
+            this.opts.unsafeAllowUnboundPlanningAuthority === true
+        )
     }
 
     private onStoryResult(result: StoryResultData): void {
@@ -995,6 +1074,10 @@ export class CollectiveBoard extends SerializedObserver {
 
     private applyPendingReplans(currentLevel: number): string | null {
         if (!this.prd) return null
+        if (this.progressivePlanning.isFailed()) {
+            this.pendingReplans.length = 0
+            return null
+        }
         const replans = this.pendingReplans.splice(0)
         for (const replan of replans) {
             if (replan.removedStoryIds.length > 0 && replan.addedStories.length === 0) {
@@ -1154,6 +1237,7 @@ export class CollectiveBoard extends SerializedObserver {
         proposal: RuntimeReplanProposedData,
         options: { requireActiveLease?: boolean } = {},
     ): void {
+        if (this.progressivePlanning.isFailed()) return
         const lease = this.leases.get(proposal.sourceStoryId)
         const requireActiveLease = options.requireActiveLease !== false
         const outcome = this.runtimeReplans.decide(proposal, {
@@ -1317,6 +1401,14 @@ export class CollectiveBoard extends SerializedObserver {
     private scheduleNextWave(): void {
         if (this.phase !== "running" || !this.prd || this.wave) return
 
+        const planningLatch = this.progressivePlanning.scheduleLatch()
+        if (planningLatch?.status === "failed") {
+            this.requestPush(
+                `progressive planning failed: ${planningLatch.reason}`,
+            )
+            return
+        }
+
         const blocked = this.computeBlockedStoryIds()
         const runnable = this.prd.userStories.filter(
             (story) =>
@@ -1440,6 +1532,19 @@ export class CollectiveBoard extends SerializedObserver {
                 this.failed.delete(story.id)
             }
             this.startWave(recovery, true, this.waveOrdinal + 1)
+            return
+        }
+
+        if (planningLatch?.status === "open") {
+            this.emit(
+                ConductorState.create({
+                    phase: "running_level",
+                    detail:
+                        `all currently admitted work is settled; waiting for ` +
+                        `progressive planner fragment ${planningLatch.nextOrdinal}`,
+                    currentLevel: this.waveOrdinal,
+                }),
+            )
             return
         }
 

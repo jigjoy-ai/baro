@@ -232,6 +232,13 @@ export {
     RuntimeReplanProposed,
     RuntimeReplanApplied,
     RuntimeReplanRejected,
+    PlanningStreamOpened,
+    PlanFragmentProposed,
+    PlanFragmentAdmitted,
+    PlanFragmentRejected,
+    PlanningStreamCompleted,
+    PlanningStreamFailed,
+    PlanningStreamClosed,
     ReplanApplied,
     PeerHelpRequested,
     CollaborationNote,
@@ -249,6 +256,14 @@ export {
     type RuntimeReplanAppliedData,
     type RuntimeReplanRejectedData,
     type RuntimeReplanRejectionCode,
+    type PlanningStreamOpenedData,
+    type PlanFragmentProposedData,
+    type PlanFragmentAdmittedData,
+    type PlanFragmentRejectedData,
+    type PlanFragmentRejectionCode,
+    type PlanningStreamCompletedData,
+    type PlanningStreamFailedData,
+    type PlanningStreamClosedData,
     type ReplanData,
 } from "./semantic-events.js"
 export {
@@ -287,6 +302,8 @@ export {
 export {
     type PrdFile,
     type PrdStory,
+    type PrdProgressivePlanningState,
+    type PrdPlanningFragmentDecision,
     loadPrd,
     savePrd,
     savePrdAtomic,
@@ -294,6 +311,20 @@ export {
     markStoryPassed,
     buildDefaultStoryPrompt,
 } from "./prd.js"
+
+export { PlanningFeed } from "./participants/planning-feed.js"
+export {
+    PROGRESSIVE_PLAN_SCHEMA_VERSION,
+    ProgressivePlanContractError,
+    openProgressivePlanSession,
+    restoreProgressivePlanSession,
+    reconcileProgressivePlanStories,
+    validateProgressivePlanFragment,
+    validateProgressivePlannerStory,
+    type ProgressivePlanFragmentV1,
+    type ProgressivePlanAdmissionV1,
+    type ProgressivePlanSnapshotV1,
+} from "./planning/progressive-plan.js"
 
 export {
     buildDag,

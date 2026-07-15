@@ -77,6 +77,30 @@ export interface PrdRuntimeGraphState {
     /** Board/Surgeon recovery stories committed at safe wave boundaries. */
     policyStories: number
     appliedDecisions: PrdRuntimeReplanDecision[]
+    /** Present only for the opt-in collective progressive-planning lane. */
+    planning?: PrdProgressivePlanningState
+}
+
+export interface PrdPlanningFragmentDecision {
+    fragmentId: string
+    ordinal: number
+    fingerprint: string
+    storyIds: string[]
+    graphVersion: number
+}
+
+/** Durable planner-stream latch and idempotency ledger. It lives beside the
+ * runtime graph so fragment admission and graph-version advancement can cross
+ * one atomic persistence boundary. */
+export interface PrdProgressivePlanningState {
+    schemaVersion: 1
+    runId: string
+    planningId: string
+    status: "open" | "completed" | "failed"
+    nextOrdinal: number
+    admittedStoryIds: string[]
+    fragments: PrdPlanningFragmentDecision[]
+    terminalReason?: string
 }
 
 const STORY_DEFAULTS: Pick<PrdStory, "retries"> = { retries: 2 }
@@ -137,7 +161,7 @@ export function normalizePrd(input: Partial<PrdFile>, source: string): PrdFile {
             ? input.executionMode
             : undefined
     const conversationMetadata = normalizeConversationMetadata(input, source)
-    const runtimeGraph = normalizeRuntimeGraph(input.runtimeGraph)
+    const runtimeGraph = normalizeRuntimeGraph(input.runtimeGraph, source)
     return {
         project,
         branchName,
@@ -179,7 +203,10 @@ function normalizeConversationMetadata(
     }
 }
 
-function normalizeRuntimeGraph(value: unknown): PrdRuntimeGraphState | undefined {
+function normalizeRuntimeGraph(
+    value: unknown,
+    source: string,
+): PrdRuntimeGraphState | undefined {
     if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
     const graph = value as Partial<PrdRuntimeGraphState>
     if (
@@ -213,6 +240,12 @@ function normalizeRuntimeGraph(value: unknown): PrdRuntimeGraphState | undefined
         )
         .slice(-32)
         .map((decision) => structuredClone(decision))
+    const planning = normalizeProgressivePlanning(
+        graph.planning,
+        graph.runId,
+        Number(graph.version),
+        source,
+    )
     return {
         runId: graph.runId,
         version: Number(graph.version),
@@ -221,6 +254,83 @@ function normalizeRuntimeGraph(value: unknown): PrdRuntimeGraphState | undefined
         // adaptations had their own accounting lane.
         policyStories: Number(graph.policyStories ?? 0),
         appliedDecisions,
+        ...(planning ? { planning } : {}),
+    }
+}
+
+function normalizeProgressivePlanning(
+    value: unknown,
+    runtimeRunId: string,
+    graphVersion: number,
+    source: string,
+): PrdProgressivePlanningState | undefined {
+    if (value === undefined) return undefined
+    if (!plainRecord(value)) {
+        throw new Error(`PRD at ${source} has malformed progressive planning state`)
+    }
+    const state = value as Partial<PrdProgressivePlanningState>
+    const validStatus =
+        state.status === "open" ||
+        state.status === "completed" ||
+        state.status === "failed"
+    if (
+        state.schemaVersion !== 1 ||
+        state.runId !== runtimeRunId ||
+        !nonBlank(state.planningId) ||
+        !validStatus ||
+        !safeIntegerAtLeast(state.nextOrdinal, 0) ||
+        !stringArrayValue(state.admittedStoryIds) ||
+        !Array.isArray(state.fragments) ||
+        state.fragments.length > 128 ||
+        (state.status === "failed" && !nonBlank(state.terminalReason)) ||
+        (state.status !== "failed" && state.terminalReason !== undefined)
+    ) {
+        throw new Error(`PRD at ${source} has malformed progressive planning state`)
+    }
+    const admittedIds = state.admittedStoryIds!
+    if (new Set(admittedIds).size !== admittedIds.length) {
+        throw new Error(`PRD at ${source} has duplicate progressive story ids`)
+    }
+    const fragments: PrdPlanningFragmentDecision[] = []
+    const fragmentIds = new Set<string>()
+    const ledgerStoryIds: string[] = []
+    for (let index = 0; index < state.fragments.length; index += 1) {
+        const fragment = state.fragments[index]
+        if (
+            !plainRecord(fragment) ||
+            !nonBlank(fragment.fragmentId) ||
+            fragmentIds.has(fragment.fragmentId) ||
+        fragment.ordinal !== index + 1 ||
+            !nonBlank(fragment.fingerprint) ||
+            !stringArrayValue(fragment.storyIds) ||
+            fragment.storyIds.length === 0 ||
+            new Set(fragment.storyIds).size !== fragment.storyIds.length ||
+            !safeIntegerAtLeast(fragment.graphVersion, 2) ||
+            Number(fragment.graphVersion) > graphVersion
+        ) {
+            throw new Error(`PRD at ${source} has malformed progressive fragment ledger`)
+        }
+        fragmentIds.add(fragment.fragmentId)
+        ledgerStoryIds.push(...fragment.storyIds)
+        fragments.push(structuredClone(fragment as PrdPlanningFragmentDecision))
+    }
+    if (
+        Number(state.nextOrdinal) !== fragments.length + 1 ||
+        new Set(ledgerStoryIds).size !== ledgerStoryIds.length ||
+        ledgerStoryIds.length !== admittedIds.length ||
+        ledgerStoryIds.some((id, index) => id !== admittedIds[index])
+    ) {
+        throw new Error(`PRD at ${source} has inconsistent progressive planning ledger`)
+    }
+    return {
+        schemaVersion: 1,
+        runId: runtimeRunId,
+        planningId: state.planningId!,
+        status: state.status!,
+        nextOrdinal: Number(state.nextOrdinal),
+        admittedStoryIds: [...admittedIds],
+        fragments,
+        ...(state.terminalReason ? { terminalReason: state.terminalReason } : {}),
     }
 }
 

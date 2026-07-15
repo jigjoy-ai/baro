@@ -78,6 +78,7 @@ import { LocalRepositoryAgent } from "./participants/local-repository-agent.js"
 import { MemoryLibrarian } from "./participants/memory-librarian.js"
 import { ModelTelemetryCollector } from "./participants/model-telemetry-collector.js"
 import { Operator } from "./participants/operator.js"
+import { PlanningFeed } from "./participants/planning-feed.js"
 import { RunVerifier } from "./participants/run-verifier.js"
 import { Sentry } from "./participants/sentry.js"
 import { StoryFactory } from "./participants/story-factory.js"
@@ -326,6 +327,11 @@ export interface OrchestrateConfig {
     onOperatorReady?: (operator: Operator) => void
     /** Called after the optional DialogueAgent has joined the same bus. */
     onDialogueReady?: (dialogue: DialogueAgent) => void
+    /** Opt-in, collective-only Planner stream identity. Omit to preserve the
+     * existing full-plan startup barrier exactly. */
+    progressivePlanningId?: string
+    /** Called only after the Board has opened/persisted the planning latch. */
+    onPlanningFeedReady?: (feed: PlanningFeed) => void
     /** Extra participants to attach to the bus before the run starts. */
     extraParticipants?: import("@mozaik-ai/core").Participant[]
 }
@@ -441,6 +447,11 @@ export async function orchestrate(
     })
     if (config.withDialogue && coordinationMode !== "collective") {
         throw new Error("DialogueAgent requires coordinationMode='collective'")
+    }
+    if (config.progressivePlanningId && coordinationMode !== "collective") {
+        throw new Error(
+            "progressive planning requires coordinationMode='collective'",
+        )
     }
     if (conversationContext && !config.withDialogue) {
         throw new Error("conversationContext requires DialogueAgent")
@@ -950,6 +961,7 @@ export async function orchestrate(
     let leaseBroker: LeaseBroker | null = null
     let acceptanceGate: AcceptanceGate | null = null
     let dialogueAgent: DialogueAgent | null = null
+    let planningFeed: PlanningFeed | null = null
     let collectiveBoard: CollectiveBoard | null = null
     if (coordinationMode === "legacy") {
         const conductor = new Conductor({
@@ -1006,6 +1018,9 @@ export async function orchestrate(
         finalizer?.setCoordinationAuthority(conductor)
         coordinationDone = conductor.done
     } else {
+        if (config.progressivePlanningId) {
+            planningFeed = new PlanningFeed()
+        }
         const collectiveParallel = useGit ? effectiveParallel : 1
         if (!repositoryAuthority) {
             throw new Error("collective coordination requires a repository authority")
@@ -1070,6 +1085,8 @@ export async function orchestrate(
             recoveryAuthority: surgeon ?? undefined,
             discoveryAuthority: collaborationBridge ?? undefined,
             runtimeReplanAuthority: collaborationBridge ?? undefined,
+            progressivePlanningId: config.progressivePlanningId,
+            planningAuthority: planningFeed ?? undefined,
             contextAuthority: workContextProvider ?? undefined,
             outcomeAuthority,
             verifyBeforePush: true,
@@ -1098,6 +1115,7 @@ export async function orchestrate(
         if (acceptanceGate) surgeon?.setQualityAuthority(acceptanceGate)
         leaseBroker.join(env)
         board.join(env)
+        planningFeed?.join(env)
         acceptanceGate?.join(env)
         coordinationDone = board.done
     }
@@ -1243,6 +1261,12 @@ export async function orchestrate(
         operator,
         RunStartRequest.create({ reason: "orchestrate" }),
     )
+    if (planningFeed && collectiveBoard) {
+        // Do not expose the private ingress until start() has loaded the
+        // bootstrap PRD and atomically installed the planning-open latch.
+        await collectiveBoard.idle()
+        config.onPlanningFeedReady?.(planningFeed)
+    }
     const summary = await coordinationDone
     if (coordinationMode === "collective" && useGit) {
         baseSha = gitCoordinator?.runBaseSha() ?? null

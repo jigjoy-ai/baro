@@ -102,6 +102,95 @@ incidents do not consume either counter. Runtime mutation also has an overall
 counters prevent accidental cross-charging; they do not by themselves
 guarantee that one lane cannot consume wall-clock time.
 
+## Progressive planning (experimental opt-in)
+
+Progressive planning removes the complete-plan startup barrier for one narrow
+path. Enable it explicitly for a fresh headless Collective run:
+
+```bash
+BARO_PROGRESSIVE_PLANNING=1 baro --headless --coordination collective --local-only \
+  "Your goal"
+```
+
+The switch is ignored outside headless `collective` coordination. On that
+path, version 1 rejects an opted-in resume or follow-up instead of silently
+changing its semantics. Without the opt-in, resume/follow-up and interactive
+runs, as well as every `legacy` run, retain the existing behavior of waiting
+for the complete Planner PRD before execution starts. This is an experimental
+local evaluation surface, not a production-readiness or benchmark claim.
+
+The fresh-run host first persists an empty bootstrap PRD with a correlated,
+open `runtimeGraph.planning` latch. It starts the Collective and Planner
+concurrently, then relays the private lifecycle records `planning_open`,
+`plan_fragment`, `plan_complete`, and `plan_failed` into an exact
+`PlanningFeed` participant on the Mozaik environment. While continuing to
+inspect the repository and plan the remaining work, a capable Planner may
+publish an ordered, add-only fragment whose dependencies are already admitted
+or included in that same fragment. No fragment may contain a provisional
+forward reference.
+
+The Planner does not schedule work by publishing. The Board accepts records
+only from its bound feed authority with matching run/planning correlation and
+an open planning latch. It validates the schema, continuous ordinal,
+idempotency fingerprint, unique story identities, dependency closure and DAG,
+then applies the addition through the same durable runtime-graph/CAS path used
+for other Collective adaptations. Only an admitted graph update can make a
+story schedulable. When all currently admitted work settles while planning is
+still open, the Board waits for the next fragment instead of treating the run
+as complete.
+
+Published stories are immutable. The final PRD must repeat every admitted
+story as an exact, same-order prefix; it may only append a final suffix. Both
+the native Planner session and the Board reconcile that contract, and the
+Board also requires the final metadata to match the bootstrap. Invalid final
+output can use the Planner's bounded repair loop before closure. Once an early
+prefix exists, exhausted repair, a conflicting final plan or a rejected final
+tail cannot fall back to an unrelated plan. Any terminal `plan_failed` closes
+the planning latch as failed. The runtime may let already in-flight admitted
+stories settle, but it cannot report the run successfully verified. This is
+the fail-closed boundary that makes early execution safe to evaluate.
+
+Native OpenAI-compatible planning currently exposes the strict
+`publish_plan_fragment` tool. That includes GLM when it is reached through the
+native OpenAI-compatible route. Claude Code, Codex, OpenCode and Pi Planner
+backends do not yet publish early fragments: under the progressive host
+lifecycle they produce the complete PRD, which is admitted at
+`plan_complete`. Their story-execution capabilities are separate from this
+Planner limitation.
+
+In this document, `legacy` means the explicit compatibility engine in which a
+Conductor reacts to bus events and drives the already-complete DAG by levels.
+It remains useful for rollback and old-run comparison; it does not mean that
+its code or protocol is silently selected on a Collective failure. Progressive
+planning is Collective-only because its open-plan latch, durable fragment
+admission and scheduling authority live on the Board.
+
+This design sits directly on Mozaik without assigning domain authority to the
+bus. Mozaik provides the shared environment, typed event delivery and exact
+participant identity. Baro supplies the planning contract, correlation,
+admission policy, durable graph mutation and scheduling. The Planner is
+therefore an autonomous event producer, but neither a central coordinator nor
+a bypass around Board, Broker, Repository, Critic or Verifier authority.
+
+The focused control-plane checks are provider-free:
+
+```bash
+cd packages/baro-orchestrator
+npm run typecheck
+node --import tsx --test \
+  test/planning/progressive-plan.test.ts \
+  test/planning/progressive-planner-protocol.test.ts \
+  test/participants/progressive-planning-board.test.ts \
+  test/progressive-orchestrate.test.ts \
+  test/progressive-cli-smoke.test.ts \
+  test/stdin-commands.test.ts \
+  test/planner-openai.test.ts
+
+cd ../..
+cargo test -p baro-tui progressive
+cargo test -p baro-tui planner_stream_bridge
+```
+
 ## Cost/quality routing
 
 Each market worker learns its own route estimate from exact lease-correlated

@@ -21,6 +21,14 @@ import { runPlannerPi } from "../src/planning/planner-pi.js"
 import { parseRequiredModeContract, type ModeContract } from "../src/planning/planner-prompts.js"
 import { enforceModeContract } from "../src/planning/mode-enforcement.js"
 import { assertRunnablePlannerPrdJson } from "../src/planning/planner-validation.js"
+import {
+    applyProgressiveBootstrapMetadata,
+    parseProgressiveBootstrapMetadata,
+    persistProgressivePlannerResult,
+    ProgressivePlannerLifecycle,
+    resolveProgressivePlannerConfig,
+    type ProgressiveBootstrapMetadata,
+} from "../src/planning/progressive-planner-protocol.js"
 import { emit } from "../src/tui-protocol.js"
 
 interface Args {
@@ -39,8 +47,13 @@ interface Args {
     modeFile?: string
     /** When set, the PRD is written here and stdout is freed for the event stream. */
     resultFile?: string
+    progressiveRunId?: string
+    progressivePlanningId?: string
+    progressiveBootstrapFile?: string
     quick: boolean
 }
+
+let activeProgressiveLifecycle: ProgressivePlannerLifecycle | undefined
 
 function parseArgs(argv: string[]): Args {
     let goal: string | undefined
@@ -52,6 +65,9 @@ function parseArgs(argv: string[]): Args {
     let decisionFile: string | undefined
     let modeFile: string | undefined
     let resultFile: string | undefined
+    let progressiveRunId: string | undefined
+    let progressivePlanningId: string | undefined
+    let progressiveBootstrapFile: string | undefined
     let quick = false
 
     for (let i = 0; i < argv.length; i++) {
@@ -89,6 +105,23 @@ function parseArgs(argv: string[]): Args {
             case "--result-file":
                 resultFile = required(argv, ++i, "--result-file")
                 break
+            case "--progressive-run-id":
+                progressiveRunId = required(argv, ++i, "--progressive-run-id")
+                break
+            case "--progressive-planning-id":
+                progressivePlanningId = required(
+                    argv,
+                    ++i,
+                    "--progressive-planning-id",
+                )
+                break
+            case "--progressive-bootstrap-file":
+                progressiveBootstrapFile = required(
+                    argv,
+                    ++i,
+                    "--progressive-bootstrap-file",
+                )
+                break
             case "--quick":
                 quick = true
                 break
@@ -109,6 +142,9 @@ function parseArgs(argv: string[]): Args {
         decisionFile,
         modeFile,
         resultFile,
+        progressiveRunId,
+        progressivePlanningId,
+        progressiveBootstrapFile,
         quick,
     }
 }
@@ -138,8 +174,32 @@ function tryRead(path: string | undefined): string | undefined {
 
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2))
+    let progressiveConfig
+    try {
+        progressiveConfig = resolveProgressivePlannerConfig(args)
+    } catch (error) {
+        fatal((error as Error).message)
+    }
     // With a result file, stdout is the event stream — let the planner emit.
     if (args.resultFile) process.env.BARO_PLAN_EVENTS = "1"
+    const progressive = progressiveConfig
+        ? new ProgressivePlannerLifecycle(progressiveConfig)
+        : undefined
+    progressive?.open()
+    activeProgressiveLifecycle = progressive
+    let bootstrapMetadata: ProgressiveBootstrapMetadata | undefined
+    if (progressiveConfig) {
+        try {
+            bootstrapMetadata = parseProgressiveBootstrapMetadata(
+                readFileSync(progressiveConfig.bootstrapFile, "utf8"),
+                progressiveConfig.bootstrapFile,
+            )
+        } catch (error) {
+            const reason = (error as Error)?.message ?? String(error)
+            emitProgressiveFailure(progressive, "invalid_bootstrap", reason)
+            fatal(`invalid --progressive-bootstrap-file: ${reason}`)
+        }
+    }
     const projectContext = tryRead(args.contextFile)
     const decisionDocument = tryRead(args.decisionFile)
     let modeContract: ModeContract | undefined
@@ -147,6 +207,11 @@ async function main(): Promise<void> {
         try {
             modeContract = parseRequiredModeContract(readFileSync(args.modeFile, "utf-8"))
         } catch (e) {
+            emitProgressiveFailure(
+                progressive,
+                "invalid_mode_contract",
+                (e as Error).message,
+            )
             fatal(`invalid --mode-file: ${(e as Error).message}`)
         }
     }
@@ -162,6 +227,11 @@ async function main(): Promise<void> {
     try {
         if (args.llm === "openai") {
             if (!process.env.OPENAI_API_KEY) {
+                emitProgressiveFailure(
+                    progressive,
+                    "missing_provider_credentials",
+                    "--llm openai requires OPENAI_API_KEY to be set",
+                )
                 fatal("--llm openai requires OPENAI_API_KEY to be set")
             }
             const billing = createGatewayBillingCoordinatorFromEnv({
@@ -182,6 +252,16 @@ async function main(): Promise<void> {
                     quick: args.quick,
                     modeContract,
                     billingCoordinator: billing ?? undefined,
+                    ...(progressive
+                        ? {
+                              progressive: {
+                                  runId: progressive.config.runId,
+                                  planningId: progressive.config.planningId,
+                                  publish: (event: unknown) =>
+                                      progressive.publish(event),
+                              },
+                          }
+                        : {}),
                 })
             } finally {
                 const result = await reconcileAndCloseGatewayBilling(billing)
@@ -234,6 +314,11 @@ async function main(): Promise<void> {
             })
         }
     } catch (e) {
+        emitProgressiveFailure(
+            progressive,
+            "planner_failed",
+            (e as Error)?.message ?? String(e),
+        )
         process.stderr.write(
             `[run-planner] FAILED after ${Date.now() - t0}ms: ${(e as Error)?.message ?? String(e)}\n`,
         )
@@ -246,7 +331,19 @@ async function main(): Promise<void> {
             prdJson = enforceModeContract(prdJson, modeContract, args.goal)
         }
         prdJson = assertRunnablePlannerPrdJson(prdJson)
+        if (bootstrapMetadata) {
+            prdJson = applyProgressiveBootstrapMetadata(
+                prdJson,
+                bootstrapMetadata,
+            )
+            prdJson = assertRunnablePlannerPrdJson(prdJson)
+        }
     } catch (e) {
+        emitProgressiveFailure(
+            progressive,
+            "invalid_final_plan",
+            (e as Error)?.message ?? String(e),
+        )
         process.stderr.write(
             `[run-planner] FAILED after ${Date.now() - t0}ms: ${(e as Error)?.message ?? String(e)}\n`,
         )
@@ -258,13 +355,48 @@ async function main(): Promise<void> {
     )
     // Result to the file (stdout is the event stream); legacy path keeps it on stdout.
     if (args.resultFile) {
-        writeFileSync(args.resultFile, prdJson)
+        try {
+            if (progressive) {
+                persistProgressivePlannerResult(
+                    args.resultFile,
+                    prdJson,
+                    progressive,
+                )
+            } else {
+                writeFileSync(args.resultFile, prdJson)
+            }
+        } catch (error) {
+            if (!progressive) throw error
+            const reason = (error as Error)?.message ?? String(error)
+            emitProgressiveFailure(progressive, "result_finalize_failed", reason)
+            process.stderr.write(
+                `[run-planner] FAILED after ${Date.now() - t0}ms: ${reason}\n`,
+            )
+            process.exit(1)
+        }
     } else {
         process.stdout.write(prdJson)
     }
 }
 
+function emitProgressiveFailure(
+    lifecycle: ProgressivePlannerLifecycle | undefined,
+    code: string,
+    reason: string,
+): void {
+    try {
+        lifecycle?.fail(code, reason)
+    } catch {
+        // Preserve the original non-zero failure even if stdout itself closed.
+    }
+}
+
 main().catch((e) => {
+    emitProgressiveFailure(
+        activeProgressiveLifecycle,
+        "planner_crashed",
+        (e as Error)?.message ?? String(e),
+    )
     process.stderr.write(`[run-planner] crashed: ${e?.stack ?? String(e)}\n`)
     process.exit(3)
 })

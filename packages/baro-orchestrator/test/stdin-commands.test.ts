@@ -6,7 +6,10 @@ import {
     AgentTargetedMessage,
     ConversationRequested,
 } from "../src/semantic-events.js"
-import { handleStdinCommand } from "../src/stdin-commands.js"
+import {
+    handleStdinCommand,
+    type PlanningFeed,
+} from "../src/stdin-commands.js"
 import type { BaroCommand, BaroEvent } from "../src/tui-protocol.js"
 import { joinWithCapture } from "./participants/helpers.js"
 
@@ -96,5 +99,130 @@ describe("stdin agent_message commands", () => {
                 line: "[you → collective] What is the collective doing?",
             },
         ])
+    })
+})
+
+describe("stdin progressive-planning commands", () => {
+    function planningHarness() {
+        const received: Array<{ method: keyof PlanningFeed; command: BaroCommand }> = []
+        const feed: PlanningFeed = {
+            open: (command) => received.push({ method: "open", command }),
+            fragment: (command) => received.push({ method: "fragment", command }),
+            complete: (command) => received.push({ method: "complete", command }),
+            failed: (command) => received.push({ method: "failed", command }),
+        }
+        const ctx = {
+            getOperator: () => null,
+            getPlanningFeed: () => feed,
+        }
+        return { received, feed, ctx }
+    }
+
+    it("delegates every correlated lifecycle command without rewriting it", () => {
+        const { received, ctx } = planningHarness()
+        const commands: BaroCommand[] = [
+            {
+                type: "planning_open",
+                run_id: "run-7",
+                planning_id: "planning-3",
+            },
+            {
+                type: "plan_fragment",
+                run_id: "run-7",
+                planning_id: "planning-3",
+                fragment_id: "fragment-1",
+                ordinal: 1,
+                stories: [{ id: "S1", acceptance: ["works"] }],
+            },
+            {
+                type: "plan_complete",
+                run_id: "run-7",
+                planning_id: "planning-3",
+                final_prd: { project: "progressive", userStories: [] },
+            },
+            {
+                type: "plan_failed",
+                run_id: "run-7",
+                planning_id: "planning-3",
+                code: "planner_crashed",
+                reason: "planner process exited with code 1",
+            },
+        ]
+
+        for (const command of commands) handleStdinCommand(command, ctx)
+
+        assert.deepEqual(received, [
+            { method: "open", command: commands[0] },
+            { method: "fragment", command: commands[1] },
+            { method: "complete", command: commands[2] },
+            { method: "failed", command: commands[3] },
+        ])
+        assert.equal(received[0]?.command, commands[0])
+        assert.equal(received[1]?.command, commands[1])
+        assert.equal(received[2]?.command, commands[2])
+        assert.equal(received[3]?.command, commands[3])
+    })
+
+    it("is a safe no-op before a planning feed is attached", () => {
+        const commands: BaroCommand[] = [
+            { type: "planning_open", run_id: "run-1", planning_id: "plan-1" },
+            {
+                type: "plan_fragment",
+                run_id: "run-1",
+                planning_id: "plan-1",
+                fragment_id: "fragment-1",
+                ordinal: 1,
+                stories: [],
+            },
+            {
+                type: "plan_complete",
+                run_id: "run-1",
+                planning_id: "plan-1",
+                final_prd: null,
+            },
+            {
+                type: "plan_failed",
+                run_id: "run-1",
+                planning_id: "plan-1",
+                code: "unavailable",
+                reason: "not attached yet",
+            },
+        ]
+
+        assert.doesNotThrow(() => {
+            for (const command of commands) {
+                handleStdinCommand(command, { getOperator: () => null })
+            }
+        })
+    })
+
+    it("contains exceptions from a late-bound feed", () => {
+        const command: BaroCommand = {
+            type: "planning_open",
+            run_id: "run-1",
+            planning_id: "plan-1",
+        }
+
+        assert.doesNotThrow(() =>
+            handleStdinCommand(command, {
+                getOperator: () => null,
+                getPlanningFeed: () => {
+                    throw new Error("feed startup failed")
+                },
+            }),
+        )
+        assert.doesNotThrow(() =>
+            handleStdinCommand(command, {
+                getOperator: () => null,
+                getPlanningFeed: () => ({
+                    open: () => {
+                        throw new Error("feed rejected command")
+                    },
+                    fragment: () => {},
+                    complete: () => {},
+                    failed: () => {},
+                }),
+            }),
+        )
     })
 })

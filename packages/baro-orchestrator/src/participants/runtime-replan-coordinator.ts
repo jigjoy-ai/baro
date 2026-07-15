@@ -38,9 +38,12 @@ export interface RuntimeReplanDecisionState {
     /** Recovery policy commits are Board-authorized after the wave settles. */
     requireActiveLease?: boolean
     /** Recovery has its own bounded retry budget, separate from discovery. */
-    storyAccounting?: "worker" | "policy"
+    storyAccounting?: "worker" | "policy" | "planner"
     /** Override the remaining dynamic-add allowance for policy commits. */
     maxAddedStories?: number
+    /** Planner fragment ledger to persist in the same atomic snapshot as the
+     * admitted graph mutation. Other mutation lanes preserve the current one. */
+    planningState?: PrdRuntimeGraphState["planning"]
 }
 
 export type RuntimeReplanDecisionEvent =
@@ -184,6 +187,7 @@ export class RuntimeReplanCoordinator {
         if (
             this.opts.adaptationBudget > 0 &&
             state.storyAccounting !== "policy" &&
+            state.storyAccounting !== "planner" &&
             state.adaptationsSinceProgress >= this.opts.adaptationBudget
         ) {
             return this.rememberRejected(
@@ -220,9 +224,10 @@ export class RuntimeReplanCoordinator {
         const graphVersion = previousGraphVersion + 1
         const dynamicStories =
             this.dynamicStories +
-            (state.storyAccounting === "policy"
-                ? 0
-                : validation.addedStoryIds.length)
+            (state.storyAccounting === undefined ||
+            state.storyAccounting === "worker"
+                ? validation.addedStoryIds.length
+                : 0)
         const policyStories =
             this.policyStories +
             (state.storyAccounting === "policy"
@@ -249,6 +254,7 @@ export class RuntimeReplanCoordinator {
                 policyStories,
                 fingerprint,
                 event.data,
+                state.planningState ?? state.prd.runtimeGraph?.planning,
             ),
         }
         try {
@@ -301,6 +307,7 @@ export class RuntimeReplanCoordinator {
         policyStories: number,
         fingerprint: string,
         applied: RuntimeReplanAppliedData,
+        planning: PrdRuntimeGraphState["planning"],
     ): PrdRuntimeGraphState {
         const appliedDecisions: PrdRuntimeGraphState["appliedDecisions"] = []
         for (const decision of this.decisions.values()) {
@@ -320,6 +327,7 @@ export class RuntimeReplanCoordinator {
             dynamicStories,
             policyStories,
             appliedDecisions: appliedDecisions.slice(-32),
+            ...(planning ? { planning: structuredClone(planning) } : {}),
         }
     }
 

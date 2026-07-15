@@ -20,8 +20,9 @@ import { CodexCliParticipant } from "../src/participants/codex-cli-participant.j
 import { OpenCodeCliParticipant } from "../src/participants/opencode-cli-participant.js"
 import { PiCliParticipant } from "../src/participants/pi-cli-participant.js"
 import type { Operator } from "../src/participants/operator.js"
+import type { PlanningFeed } from "../src/participants/planning-feed.js"
 import { handleStdinCommand } from "../src/stdin-commands.js"
-import { subscribeCommands } from "../src/tui-protocol.js"
+import { subscribeCommands, type BaroCommand } from "../src/tui-protocol.js"
 import type { CoordinationMode } from "../src/semantic-events.js"
 import { loadPrd } from "../src/prd.js"
 import { loadConversationContextFile } from "../src/session/conversation-context.js"
@@ -40,6 +41,7 @@ interface CliArgs {
     parallel: number
     timeout: number
     coordinationMode?: CoordinationMode
+    progressivePlanningId?: string
     collectiveWorkersFile?: string
     collectiveBidWindowMs?: number
     collectiveMinSuccessProbability?: number
@@ -133,6 +135,13 @@ function parseArgs(argv: string[]): CliArgs {
                 args.coordinationMode = value
                 break
             }
+            case "--progressive-planning":
+                args.progressivePlanningId = required(
+                    argv,
+                    ++i,
+                    "--progressive-planning",
+                )
+                break
             case "--local-only":
                 args.localOnly = true
                 break
@@ -328,6 +337,15 @@ function probability(raw: string, flag: string): number {
     return value
 }
 
+function isProgressivePlanningCommand(command: BaroCommand): boolean {
+    return (
+        command.type === "planning_open" ||
+        command.type === "plan_fragment" ||
+        command.type === "plan_complete" ||
+        command.type === "plan_failed"
+    )
+}
+
 function optionalEnvNumber(
     name: string,
     parse: (raw: string, label: string) => number,
@@ -350,6 +368,7 @@ function printHelp(): void {
             "  --parallel <N>        Max parallel stories per level (0 = unlimited)",
             "  --timeout <secs>      Per-story timeout (default: auto — effort-scaled; any value overrides)",
             "  --coordination <mode> Coordination engine: collective|legacy (default: collective)",
+            "  --progressive-planning <id>  Open a private Planner stream and dispatch dependency-closed fragments early",
             "  --local-only          Disable Baro-owned pushes/PRs (use a remote-free clone for hard isolation)",
             "  --collective-workers <json>  Candidate array file for opt-in worker bidding",
             "  --collective-bid-window-ms <N>  Local bid collection window (default: 50)",
@@ -413,6 +432,15 @@ async function main(): Promise<void> {
         args.coordinationMode ??
         (envCoordination as CoordinationMode | undefined) ??
         "collective"
+    const progressivePlanningId =
+        args.progressivePlanningId ??
+        process.env.BARO_PROGRESSIVE_PLANNING_ID
+    if (progressivePlanningId && coordinationMode !== "collective") {
+        process.stderr.write(
+            "[cli] --progressive-planning requires --coordination collective\n",
+        )
+        process.exit(2)
+    }
     const localOnly = args.localOnly || process.env.BARO_LOCAL_ONLY === "1"
     const withDialogue = coordinationMode === "collective" ||
         args.withDialogue || process.env.BARO_WITH_DIALOGUE === "1"
@@ -668,8 +696,26 @@ async function main(): Promise<void> {
     // joins the bus a beat after startup; commands arriving before that
     // are dropped, like any other malformed/unknown line.
     let operatorRef: Operator | null = null
+    let planningFeedRef: PlanningFeed | null = null
+    const pendingPlanningCommands: BaroCommand[] = []
     subscribeCommands((cmd) => {
-        handleStdinCommand(cmd, { getOperator: () => operatorRef })
+        if (
+            progressivePlanningId &&
+            planningFeedRef === null &&
+            isProgressivePlanningCommand(cmd)
+        ) {
+            // Rust may start Planner immediately after spawning this child.
+            // Preserve a small bounded startup burst until orchestrate() has
+            // durably installed the planning-open latch and exposes the feed.
+            if (pendingPlanningCommands.length < 256) {
+                pendingPlanningCommands.push(cmd)
+            }
+            return
+        }
+        handleStdinCommand(cmd, {
+            getOperator: () => operatorRef,
+            getPlanningFeed: () => planningFeedRef,
+        })
     })
 
     const config: OrchestrateConfig = {
@@ -677,6 +723,16 @@ async function main(): Promise<void> {
         cwd,
         onOperatorReady: (operator) => {
             operatorRef = operator
+        },
+        progressivePlanningId,
+        onPlanningFeedReady: (planningFeed) => {
+            planningFeedRef = planningFeed
+            for (const command of pendingPlanningCommands.splice(0)) {
+                handleStdinCommand(command, {
+                    getOperator: () => operatorRef,
+                    getPlanningFeed: () => planningFeedRef,
+                })
+            }
         },
         parallel: args.parallel,
         timeoutSecs: args.timeout,

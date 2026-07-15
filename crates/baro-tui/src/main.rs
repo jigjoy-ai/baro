@@ -20,8 +20,11 @@ mod headless_transport;
 mod intake_runner;
 mod notification;
 mod orchestrator_client;
+mod planner_host;
 mod planner_runner;
+mod planner_stream_bridge;
 mod preaccept_context;
+mod progressive_planning;
 mod resume;
 mod review_refiner;
 mod screens;
@@ -59,6 +62,8 @@ use conversation_host::{
 };
 use events::BaroEvent;
 use headless_transport::StdinHub;
+pub(crate) use planner_host::PrdOutput;
+use planner_host::{PlannerOutcome, PlannerRunSpec, ProgressivePlannerRuntime};
 
 const JIGJOY_STRONG_MODEL: &str = "glm-5.2";
 const JIGJOY_CHEAP_STORY_MODEL: &str = "deepseek-v4-flash";
@@ -252,6 +257,12 @@ fn current_coordination_has_runtime_dialogue() -> bool {
     std::env::var("BARO_COORDINATION").is_ok_and(|mode| coordination_has_runtime_dialogue(&mode))
 }
 
+fn progressive_planning_enabled(headless: bool) -> bool {
+    let coordination =
+        std::env::var("BARO_COORDINATION").unwrap_or_else(|_| "collective".to_string());
+    progressive_planning::progressive_planning_enabled(headless, &coordination, false)
+}
+
 enum AppEvent {
     Baro(BaroEvent),
     Key(crossterm::event::KeyEvent),
@@ -272,18 +283,12 @@ enum AppEvent {
         error: String,
         log_path: Option<std::path::PathBuf>,
     },
-    /// Last element is the planner-stamped `executionMode` contract,
-    /// carried opaquely into prd.json.
-    PlanReady(
-        Vec<ReviewStory>,
-        String,
-        String,
-        String,
-        Option<serde_json::Value>,
-    ),
-    /// Planner or Architect failure; second element is the persisted
-    /// log path, if any.
-    PlanError(String, Option<std::path::PathBuf>),
+    /// Architect + intake are complete. Headless progressive mode now opens
+    /// the empty collective bootstrap before starting Planner.
+    ProgressivePlanningPrepared(PlannerRunSpec),
+    /// The host boundary normalizes legacy/progressive success and failure;
+    /// this loop only applies the result to App state.
+    PlannerFinished(PlannerOutcome),
     /// Intake finished (`--mode auto`, interactive): show the ModePicker.
     IntakeReady {
         decision_doc: Option<String>,
@@ -345,21 +350,6 @@ fn open_terminal_writer() -> io::Result<Box<dyn Write>> {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct PrdOutput {
-    project: String,
-    #[serde(default)]
-    #[serde(rename = "branchName")]
-    branch_name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(rename = "userStories")]
-    user_stories: Vec<PrdStoryOutput>,
-    #[serde(default)]
-    #[serde(rename = "executionMode")]
-    execution_mode: Option<serde_json::Value>,
-}
-
 /// Display fields of a ModeContract; the raw JSON stays authoritative.
 #[derive(serde::Deserialize)]
 struct ModeContractView {
@@ -368,48 +358,6 @@ struct ModeContractView {
     confidence: f64,
     #[serde(default)]
     reason: String,
-}
-
-#[derive(serde::Deserialize)]
-struct PrdStoryOutput {
-    id: String,
-    #[serde(default)]
-    priority: i32,
-    title: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    #[serde(rename = "dependsOn")]
-    depends_on: Vec<String>,
-    #[serde(default = "default_story_retries")]
-    retries: u32,
-    #[serde(default)]
-    acceptance: Vec<String>,
-    #[serde(default)]
-    tests: Vec<String>,
-    #[serde(default)]
-    model: Option<String>,
-}
-
-fn default_story_retries() -> u32 {
-    2
-}
-
-impl From<PrdStoryOutput> for ReviewStory {
-    fn from(story: PrdStoryOutput) -> Self {
-        Self {
-            id: story.id,
-            priority: story.priority,
-            title: story.title,
-            description: story.description,
-            depends_on: story.depends_on,
-            retries: story.retries,
-            acceptance: story.acceptance,
-            tests: story.tests,
-            completed: false,
-            model: story.model,
-        }
-    }
 }
 
 #[tokio::main]
@@ -1569,20 +1517,89 @@ async fn run_app(
                     app.screen = Screen::Conversation;
                 }
             }
-            Some(AppEvent::PlanReady(stories, project, branch, description, execution_mode)) => {
-                app.project = project;
-                app.branch_name = branch;
-                app.description = description;
-                app.execution_mode = execution_mode;
-                if headless {
-                    // Emit a planning event for the runner/dashboard, then
-                    // auto-confirm and execute (no review screen).
-                    println!(r#"{{"type":"plan_ready","stories":{}}}"#, stories.len());
-                    confirm_and_execute(&mut app, stories, &cwd, tx.clone());
-                } else {
-                    app.show_review(stories);
+            Some(AppEvent::ProgressivePlanningPrepared(spec)) => {
+                if let Err(error) =
+                    begin_progressive_execution(&mut app, spec, &cwd, tx.clone()).await
+                {
+                    if headless {
+                        return Err(format!("progressive planning could not start: {error}").into());
+                    }
+                    app.planning_error = Some(error);
+                    app.screen = Screen::Conversation;
                 }
             }
+            Some(AppEvent::PlannerFinished(outcome)) => match outcome {
+                PlannerOutcome::Ready {
+                    stories,
+                    project,
+                    branch,
+                    description,
+                    execution_mode,
+                    progressive: false,
+                } => {
+                    app.project = project;
+                    app.branch_name = branch;
+                    app.description = description;
+                    app.execution_mode = execution_mode;
+                    if headless {
+                        // Emit a planning event for the runner/dashboard, then
+                        // auto-confirm and execute (no review screen).
+                        println!(r#"{{"type":"plan_ready","stories":{}}}"#, stories.len());
+                        confirm_and_execute(&mut app, stories, &cwd, tx.clone());
+                    } else {
+                        app.show_review(stories);
+                    }
+                }
+                PlannerOutcome::Ready {
+                    stories,
+                    project,
+                    branch,
+                    description,
+                    execution_mode,
+                    progressive: true,
+                } => {
+                    app.project = project;
+                    app.branch_name = branch;
+                    app.description = description;
+                    app.execution_mode = execution_mode;
+                    println!(
+                        r#"{{"type":"plan_ready","stories":{},"progressive":true}}"#,
+                        stories.len()
+                    );
+                    app.review_stories = stories;
+                }
+                PlannerOutcome::Failed {
+                    message,
+                    log_path,
+                    progressive: true,
+                } => {
+                    // The host attempted a backpressured correlated
+                    // plan_failed before publishing this outcome. A closed
+                    // command lane is included in the message below.
+                    eprintln!("[baro] progressive planner failed: {message}");
+                    app.planning_error = Some(message);
+                    app.planning_log_path = log_path;
+                }
+                PlannerOutcome::Failed {
+                    message,
+                    log_path,
+                    progressive: false,
+                } => {
+                    let conversation_owned = app.conversation.goal_envelope().is_some();
+                    fail_conversation_run(&mut app, &format!("planning failed: {message}"), &cwd);
+                    if headless {
+                        return Err(format!("planning failed: {message}").into());
+                    }
+                    app.planning_error = Some(message.clone());
+                    app.planning_log_path = log_path;
+                    if conversation_owned {
+                        app.conversation_error = Some(format!(
+                            "Planning failed: {message}. Tell me to retry or adjust the goal."
+                        ));
+                        app.screen = Screen::Conversation;
+                    }
+                }
+            },
             Some(AppEvent::IntakeReady {
                 decision_doc,
                 contract_json,
@@ -1611,21 +1628,6 @@ async fn run_app(
                     contract_json: json,
                 });
                 app.screen = Screen::ModePicker;
-            }
-            Some(AppEvent::PlanError(err, log_path)) => {
-                let conversation_owned = app.conversation.goal_envelope().is_some();
-                fail_conversation_run(&mut app, &format!("planning failed: {err}"), &cwd);
-                if headless {
-                    return Err(format!("planning failed: {}", err).into());
-                }
-                app.planning_error = Some(err.clone());
-                app.planning_log_path = log_path;
-                if conversation_owned {
-                    app.conversation_error = Some(format!(
-                        "Planning failed: {err}. Tell me to retry or adjust the goal."
-                    ));
-                    app.screen = Screen::Conversation;
-                }
             }
             Some(AppEvent::RefineReady(
                 generation,
@@ -2129,7 +2131,9 @@ async fn run_app(
                                                     .await;
                                                 return;
                                             }
-                                            spawn_executor(prd, exec_cwd, branch_tx, cfg, false);
+                                            spawn_executor(
+                                                prd, exec_cwd, branch_tx, cfg, false, None,
+                                            );
                                         });
                                     } else {
                                         let mut prd = executor::prd_from_review(
@@ -2272,7 +2276,7 @@ async fn run_app(
                                                     }
                                                 }
                                                 spawn_executor(
-                                                    exec_prd, exec_cwd, branch_tx, cfg, false,
+                                                    exec_prd, exec_cwd, branch_tx, cfg, false, None,
                                                 );
                                             });
                                         }
@@ -2434,7 +2438,7 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(prd, exec_cwd, branch_tx, cfg, false);
+                                        spawn_executor(prd, exec_cwd, branch_tx, cfg, false, None);
                                     });
                                 }
                                 Err(e) => {
@@ -2916,21 +2920,9 @@ fn plan_event_sink(headless: bool, tx: mpsc::Sender<AppEvent>) -> impl Fn(&str) 
     move |raw: &str| {
         if headless {
             println!("{}", raw);
-        } else if let Some(line) = plan_line_from_event(raw) {
+        } else if let Some(line) = planner_host::line_from_event(raw) {
             let _ = tx.try_send(AppEvent::PlanProgress(line));
         }
-    }
-}
-
-/// Pull the human-readable line out of a planner/architect BaroEvent JSON:
-/// `story_log.line` or `activity.text`. Unrecognized/non-JSON lines are
-/// dropped from the TUI (they still reach headless via the raw echo).
-fn plan_line_from_event(raw: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
-    match v.get("type").and_then(|t| t.as_str())? {
-        "story_log" => v.get("line").and_then(|l| l.as_str()).map(str::to_string),
-        "activity" => v.get("text").and_then(|t| t.as_str()).map(str::to_string),
-        _ => None,
     }
 }
 
@@ -3059,7 +3051,7 @@ fn spawn_planner(
             }
         };
 
-        run_planner_and_report(
+        let spec = PlannerRunSpec {
             goal,
             cwd,
             planner_llm,
@@ -3071,10 +3063,12 @@ fn spawn_planner(
             openai_base_url,
             effort,
             mode_json,
-            tx,
-            headless,
-        )
-        .await;
+        };
+        if progressive_planning_enabled(headless) {
+            let _ = tx.send(AppEvent::ProgressivePlanningPrepared(spec)).await;
+        } else {
+            run_planner_and_report(spec, tx, headless, None).await;
+        }
     });
 }
 
@@ -3107,19 +3101,22 @@ fn spawn_planner_stage_b(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, mode
     let effort = app.effort.clone();
     tokio::spawn(async move {
         run_planner_and_report(
-            goal,
-            cwd,
-            planner_llm,
-            model,
-            context,
-            decision_doc,
-            false, // the picker never shows in quick mode
-            openai_api_key,
-            openai_base_url,
-            effort,
-            Some(mode_json),
+            PlannerRunSpec {
+                goal,
+                cwd,
+                planner_llm,
+                model,
+                context,
+                decision_doc,
+                quick: false, // the picker never shows in quick mode
+                openai_api_key,
+                openai_base_url,
+                effort,
+                mode_json: Some(mode_json),
+            },
             tx,
             false, // stage B only runs interactively (the picker never shows headless)
+            None,
         )
         .await;
     });
@@ -3152,78 +3149,15 @@ fn resolve_parallel_limit(config: Option<u32>, cli: Option<u32>) -> u32 {
     cli.or(config).unwrap_or(0)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_planner_and_report(
-    goal: String,
-    cwd: PathBuf,
-    planner_llm: app::LlmProvider,
-    model: Option<String>,
-    context: Option<String>,
-    decision_doc: Option<String>,
-    quick: bool,
-    openai_api_key: Option<String>,
-    openai_base_url: Option<String>,
-    effort: String,
-    mode_json: Option<String>,
+    spec: PlannerRunSpec,
     tx: mpsc::Sender<AppEvent>,
     headless: bool,
+    progressive: Option<ProgressivePlannerRuntime>,
 ) {
-    let result = planner_runner::run_planner(
-        &goal,
-        &cwd,
-        planner_llm,
-        model.as_deref(),
-        context.as_deref(),
-        decision_doc.as_deref(),
-        quick,
-        openai_api_key.as_deref(),
-        openai_base_url.as_deref(),
-        &effort,
-        mode_json.as_deref(),
-        plan_event_sink(headless, tx.clone()),
-    )
-    .await;
-
-    match result.and_then(|raw_json| {
-        let prd: PrdOutput =
-            serde_json::from_str(&raw_json).map_err(|e| subprocess::ProcessRunError {
-                message: format!(
-                    "Failed to parse PRD JSON from planner: {}\nRaw (first 500 chars): {}",
-                    e,
-                    &raw_json[..raw_json.len().min(500)],
-                ),
-                log_path: None,
-            })?;
-        let stories: Vec<ReviewStory> = prd
-            .user_stories
-            .into_iter()
-            .map(ReviewStory::from)
-            .collect();
-        Ok((
-            stories,
-            prd.project,
-            prd.branch_name,
-            prd.description,
-            prd.execution_mode,
-        ))
-    }) {
-        Ok((stories, project, branch, description, execution_mode)) => {
-            let _ = tx
-                .send(AppEvent::PlanReady(
-                    stories,
-                    project,
-                    branch,
-                    description,
-                    execution_mode,
-                ))
-                .await;
-        }
-        Err(err) => {
-            let _ = tx
-                .send(AppEvent::PlanError(err.message.clone(), err.log_path))
-                .await;
-        }
-    }
+    let outcome =
+        planner_host::run_planner(spec, progressive, plan_event_sink(headless, tx.clone())).await;
+    let _ = tx.send(AppEvent::PlannerFinished(outcome)).await;
 }
 
 /// Read existing repository instructions without changing the checkout.
@@ -3390,8 +3324,105 @@ fn confirm_and_execute(
             return;
         }
         let _ = tx.send(AppEvent::BranchReady(actual_full_branch)).await;
-        spawn_executor(exec_prd, exec_cwd, tx, cfg, true);
+        spawn_executor(exec_prd, exec_cwd, tx, cfg, true, None);
     });
+}
+
+async fn begin_progressive_execution(
+    app: &mut App,
+    spec: PlannerRunSpec,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+) -> Result<(), String> {
+    if app.is_followup || app.is_resume {
+        return Err(
+            "progressive planning v1 supports fresh headless runs only; resume/follow-up keeps the complete-plan barrier"
+                .to_string(),
+        );
+    }
+
+    let generated = progressive_planning::ProgressivePlanningIds::generate();
+    let run_id = std::env::var("BARO_RUN_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| generated.run_id().to_string());
+    let ids = progressive_planning::ProgressivePlanningIds::new(
+        run_id.clone(),
+        generated.planning_id().to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+    // The TS orchestrator and Planner billing/session lanes must inherit the
+    // exact identity stamped into runtimeGraph.
+    std::env::set_var("BARO_RUN_ID", ids.run_id());
+
+    let execution_mode = spec
+        .mode_json
+        .as_deref()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .transpose()
+        .map_err(|error| format!("invalid progressive execution mode: {error}"))?;
+    let mut bootstrap = progressive_planning::build_progressive_bootstrap_prd(
+        progressive_planning::ProgressiveBootstrapInput {
+            cwd,
+            goal: &spec.goal,
+            ids: &ids,
+            decision_document: spec.decision_doc.as_deref(),
+            execution_mode: execution_mode.as_ref(),
+            conversation_session_id: None,
+            goal_envelope: None,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    attach_conversation_metadata(&mut bootstrap, app);
+
+    let actual_branch = git::create_fresh_branch(cwd, &bootstrap.branch_name)
+        .await
+        .map_err(|error| format!("progressive branch creation failed: {error}"))?;
+    bootstrap.branch_name = actual_branch.clone();
+    executor::write_prd(&bootstrap, cwd)
+        .map_err(|error| format!("could not persist progressive bootstrap PRD: {error}"))?;
+
+    app.project = bootstrap.project.clone();
+    app.branch_name = actual_branch.clone();
+    app.description = bootstrap.description.clone();
+    app.execution_mode = bootstrap.execution_mode.clone();
+    app.review_stories.clear();
+    begin_conversation_execution(app, cwd)?;
+    let executor_config = executor_config_from_app(app)?;
+    app.start_execution();
+    let _ = tx.send(AppEvent::BranchReady(actual_branch)).await;
+
+    let planning_id = ids.planning_id().to_string();
+    let orchestrator_stdin = spawn_executor(
+        bootstrap.clone(),
+        cwd.to_path_buf(),
+        tx.clone(),
+        executor_config,
+        true,
+        Some(planning_id.clone()),
+    );
+    // Queue the open command immediately. The TS CLI has a bounded startup
+    // buffer until the Board persists and exposes its PlanningFeed authority.
+    orchestrator_stdin
+        .send(
+            serde_json::json!({
+                "type": "planning_open",
+                "run_id": ids.run_id(),
+                "planning_id": ids.planning_id(),
+            })
+            .to_string(),
+        )
+        .await
+        .map_err(|_| "orchestrator command lane closed before Planner start".to_string())?;
+
+    let bootstrap_json = serde_json::to_string(&bootstrap)
+        .map_err(|error| format!("could not serialize progressive bootstrap: {error}"))?;
+    let runtime =
+        ProgressivePlannerRuntime::new(run_id, planning_id, bootstrap_json, orchestrator_stdin);
+    tokio::spawn(async move {
+        run_planner_and_report(spec, tx, true, Some(runtime)).await;
+    });
+    Ok(())
 }
 
 fn spawn_executor(
@@ -3400,15 +3431,16 @@ fn spawn_executor(
     tx: mpsc::Sender<AppEvent>,
     config: executor::ExecutorConfig,
     echo_raw: bool,
-) {
+    progressive_planning_id: Option<String>,
+) -> mpsc::Sender<String> {
     // Bridge the orchestrator's BaroEvents to AppEvent::Baro so
     // app/screens stay untouched.
     let (exec_tx, mut exec_rx) = mpsc::channel::<BaroEvent>(256);
 
     // TUI→orchestrator command lane (agent chat): hand the app loop the
     // sender, the child-stdin writer consumes the receiver.
-    let (stdin_tx, stdin_rx) = mpsc::channel::<String>(64);
-    let _ = tx.try_send(AppEvent::OrchestratorStdin(stdin_tx));
+    let (stdin_tx, stdin_rx) = mpsc::channel::<String>(256);
+    let _ = tx.try_send(AppEvent::OrchestratorStdin(stdin_tx.clone()));
 
     let tx_fwd = tx.clone();
     tokio::spawn(async move {
@@ -3486,6 +3518,7 @@ fn spawn_executor(
     let orch_cfg = orchestrator_client::OrchestratorConfig {
         prd_path: cwd.join("prd.json"),
         cwd,
+        progressive_planning_id,
         parallel: config.parallel,
         timeout_secs: config.timeout_secs,
         override_model: config.override_model,
@@ -3515,6 +3548,7 @@ fn spawn_executor(
         echo_raw,
     };
     orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx, stdin_rx);
+    stdin_tx
 }
 
 /// Ask-after-planning (headless): emit the `mode_proposal` event, then block
@@ -3602,8 +3636,8 @@ mod tests {
         disable_implicit_codex_critic, fixed_mode_contract, headless_failure_reason,
         message_command_line, preferred_jigjoy_gateway_key, preferred_jigjoy_gateway_url,
         reconcile_jigjoy_phase_overrides, resolve_parallel_limit, unsupported_critic_backend, App,
-        PrdStoryOutput, ReviewStory, JIGJOY_CHEAP_STORY_MODEL, JIGJOY_GATEWAY_URL,
-        JIGJOY_HEAVY_STORY_MODEL, JIGJOY_STRONG_MODEL,
+        JIGJOY_CHEAP_STORY_MODEL, JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL,
+        JIGJOY_STRONG_MODEL,
     };
 
     fn deleted(input: &str) -> String {
@@ -3737,8 +3771,7 @@ mod tests {
     #[test]
     fn explicit_unlimited_parallel_overrides_repository_cap() {
         let omitted = crate::cli::cli::Cli::try_parse_from(["baro"]).unwrap();
-        let unlimited =
-            crate::cli::cli::Cli::try_parse_from(["baro", "--parallel", "0"]).unwrap();
+        let unlimited = crate::cli::cli::Cli::try_parse_from(["baro", "--parallel", "0"]).unwrap();
 
         assert_eq!(omitted.parallel, None);
         assert_eq!(unlimited.parallel, Some(0));
@@ -3832,21 +3865,5 @@ mod tests {
         let evidence = app.verification.as_ref().unwrap();
         assert_eq!(evidence.verification_id, "verify-1");
         assert_eq!(evidence.commands[0].tail.as_deref(), Some("tests failed"));
-    }
-
-    #[test]
-    fn planner_story_metadata_reaches_review_story() {
-        let output: PrdStoryOutput = serde_json::from_str(
-            r#"{"id":"S4","priority":17,"title":"Keep metadata","description":"Round trip","dependsOn":["S1"],"retries":4,"acceptance":["criterion"],"tests":["cargo test"],"model":"heavy"}"#,
-        )
-        .unwrap();
-
-        let story = ReviewStory::from(output);
-        assert_eq!(story.priority, 17);
-        assert_eq!(story.depends_on, ["S1"]);
-        assert_eq!(story.retries, 4);
-        assert_eq!(story.acceptance, ["criterion"]);
-        assert_eq!(story.tests, ["cargo test"]);
-        assert_eq!(story.model.as_deref(), Some("heavy"));
     }
 }

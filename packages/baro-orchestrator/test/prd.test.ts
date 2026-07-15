@@ -203,6 +203,69 @@ describe("normalizePrd", () => {
         )
     })
 
+    it("preserves a valid progressive-planning latch and rejects a corrupt ledger", () => {
+        const planning = {
+            schemaVersion: 1 as const,
+            runId: "run-runtime",
+            planningId: "planning-1",
+            status: "open" as const,
+            nextOrdinal: 2,
+            admittedStoryIds: ["S1"],
+            fragments: [
+                {
+                    fragmentId: "fragment-1",
+                    ordinal: 1,
+                    fingerprint: "sha256:fragment-1",
+                    storyIds: ["S1"],
+                    graphVersion: 2,
+                },
+            ],
+        }
+        const normalized = normalizePrd(
+            {
+                userStories: [story()],
+                runtimeGraph: {
+                    runId: "run-runtime",
+                    version: 2,
+                    dynamicStories: 0,
+                    policyStories: 0,
+                    appliedDecisions: [],
+                    planning,
+                },
+            },
+            "progressive-prd.json",
+        )
+
+        assert.deepEqual(normalized.runtimeGraph?.planning, planning)
+        planning.fragments[0]!.storyIds.push("S2")
+        assert.deepEqual(
+            normalized.runtimeGraph?.planning?.fragments[0]?.storyIds,
+            ["S1"],
+        )
+
+        assert.throws(
+            () =>
+                normalizePrd(
+                    {
+                        userStories: [],
+                        runtimeGraph: {
+                            runId: "run-runtime",
+                            version: 2,
+                            dynamicStories: 0,
+                            policyStories: 0,
+                            appliedDecisions: [],
+                            planning: {
+                                ...planning,
+                                nextOrdinal: 3,
+                            },
+                        },
+                    },
+                    "corrupt-progressive-prd.json",
+                ),
+            /inconsistent progressive planning ledger/,
+        )
+    })
+
     it("drops fingerprint mismatches and every ambiguous duplicate proposal id", () => {
         const mismatched = appliedDecision({
             proposalId: "mismatched",

@@ -192,6 +192,32 @@ export type BaroCommand =
     | { type: "agent_message"; id: string; text: string }
     /** Mid-run chat with the optional, non-authoritative DialogueAgent. */
     | { type: "dialogue_message"; message_id?: string; text: string }
+    /** Open one correlated progressive-planning stream. */
+    | { type: "planning_open"; run_id: string; planning_id: string }
+    /** Admit one ordered batch of provisional stories for consideration. */
+    | {
+          type: "plan_fragment"
+          run_id: string
+          planning_id: string
+          fragment_id: string
+          ordinal: number
+          stories: unknown[]
+      }
+    /** Close the correlated stream with the Planner's authoritative result. */
+    | {
+          type: "plan_complete"
+          run_id: string
+          planning_id: string
+          final_prd: unknown
+      }
+    /** Close the correlated stream without an authoritative final plan. */
+    | {
+          type: "plan_failed"
+          run_id: string
+          planning_id: string
+          code: string
+          reason: string
+      }
     | { type: "shutdown" }
 
 export type CommandHandler = (cmd: BaroCommand) => Promise<void> | void

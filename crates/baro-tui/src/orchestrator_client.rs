@@ -21,6 +21,9 @@ pub struct OrchestratorConfig {
     pub conversation_context: Option<ConversationContextSnapshot>,
     pub prd_path: PathBuf,
     pub cwd: PathBuf,
+    /// Enables the collective-only private Planner stream. Absence preserves
+    /// the historical complete-PRD startup path.
+    pub progressive_planning_id: Option<String>,
     pub parallel: u32,
     pub timeout_secs: u64,
     pub override_model: Option<String>,
@@ -315,6 +318,9 @@ fn build_command(
     };
     cmd.arg("--prd").arg(&cfg.prd_path);
     cmd.arg("--cwd").arg(&cfg.cwd);
+    if let Some(planning_id) = &cfg.progressive_planning_id {
+        cmd.arg("--progressive-planning").arg(planning_id);
+    }
     if let Some(path) = conversation_context_path {
         debug_assert!(path.is_absolute());
         cmd.arg("--conversation-context-file").arg(path);
@@ -429,6 +435,7 @@ mod tests {
             conversation_context: None,
             prd_path: "prd.json".into(),
             cwd: ".".into(),
+            progressive_planning_id: None,
             parallel: 1,
             timeout_secs: 60,
             override_model: None,
@@ -489,6 +496,24 @@ mod tests {
                 usize::from(!surgeon_use_llm),
             );
         }
+    }
+
+    #[test]
+    fn forwards_progressive_planning_only_when_explicitly_configured() {
+        let mut cfg = config(true, true);
+        assert_eq!(count(&command_args(&cfg), "--progressive-planning"), 0);
+
+        cfg.progressive_planning_id = Some("planning-test-1".to_string());
+        let args = command_args(&cfg);
+        assert_eq!(count(&args, "--progressive-planning"), 1);
+        let position = args
+            .iter()
+            .position(|arg| arg == "--progressive-planning")
+            .expect("progressive flag");
+        assert_eq!(
+            args.get(position + 1).map(String::as_str),
+            Some("planning-test-1")
+        );
     }
 
     #[test]
