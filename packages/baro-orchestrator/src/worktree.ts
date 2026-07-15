@@ -631,7 +631,10 @@ export class WorktreeManager {
             try {
                 if (!existsSync(shared)) mkdirSync(shared, { recursive: true })
                 mkdirSync(join(worktreePath, rel), { recursive: true })
-                symlinkSync(shared, dest, "dir")
+                // "junction" (not "dir"): a dir symlink needs admin/Developer
+                // Mode on Windows; a junction doesn't. Ignored off Windows, so
+                // this stays a normal symlink on macOS/Linux.
+                symlinkSync(shared, dest, "junction")
             } catch (e) {
                 this.log(`could not symlink ${join(rel, dir)} into worktree (${errMsg(e)})`)
             }

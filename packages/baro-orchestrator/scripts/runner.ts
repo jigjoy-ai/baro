@@ -65,7 +65,7 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = canonicalControlHttpOrigin(url)
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.74.11"
+const VERSION = "0.74.12"
 export const RUNNER_PROTOCOL_VERSION = 2
 export const RUNNER_PROTOCOL_FEATURES = Object.freeze([
     "run_scoped_commands",

@@ -8,7 +8,7 @@
  */
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "fs"
-import { hostname, tmpdir } from "os"
+import { homedir, hostname, tmpdir } from "os"
 import { dirname, join } from "path"
 import { fileURLToPath } from "url"
 
@@ -660,7 +660,7 @@ export async function orchestrate(
 
     // Session-scoped memory path (Vectra index + cache.json), shared
     // cross-process via BARO_MEMORY_PATH.
-    const sessionsDir = join(process.env.HOME || "/tmp", ".baro", "sessions")
+    const sessionsDir = join(homedir(), ".baro", "sessions")
     const memorySessionPath = useMemory
         ? join(sessionsDir, runId, "memory")
         : undefined
