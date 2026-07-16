@@ -199,8 +199,8 @@ describe("subscription planner progressive harness adapters", () => {
                     assert.ok(argv.includes('web_search="disabled"'))
                     assert.ok(
                         argv.some((value) =>
-                            value.startsWith("projects.") &&
-                            value.endsWith('.trust_level="untrusted"'),
+                            value.startsWith("projects={") &&
+                            value.endsWith('={trust_level="untrusted"}}'),
                         ),
                     )
                     const overrides = codexMcpOverrides(argv)

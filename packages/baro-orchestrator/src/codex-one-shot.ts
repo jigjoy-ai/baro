@@ -180,7 +180,11 @@ export async function runCodexOneShot(
         if (!args.includes("--strict-config")) args.push("--strict-config")
         args.push(
             "--config",
-            `projects.${tomlString(opts.untrustedProjectPath)}.trust_level="untrusted"`,
+            // Codex's CLI override path parser splits dotted keys before it
+            // interprets quoted segments. A checkout path such as
+            // `Miodrag.todorovic.ext/...` therefore cannot safely appear in a
+            // dotted override. Send the complete map as one TOML value.
+            `projects={${tomlString(opts.untrustedProjectPath)}={trust_level="untrusted"}}`,
         )
     }
     if (opts.disableProjectDocs) {

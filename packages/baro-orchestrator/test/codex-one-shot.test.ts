@@ -375,6 +375,34 @@ describe("runCodexOneShot exit contract", () => {
         })
     })
 
+    it("encodes dotted checkout paths as one untrusted projects map", async () => {
+        await withTempDir("baro-codex-project-trust-", async (dir) => {
+            const argvFile = join(dir, "argv.json")
+            const bin = writeFakeCodex(dir, { texts: ["safe"], argvFile })
+            const dottedPath = join(dir, "Miodrag.todorovic.ext", "repo")
+
+            await runCodexOneShot({
+                prompt: "inspect safely",
+                cwd: dir,
+                codexBin: bin,
+                bypassSandbox: false,
+                sandboxMode: "read-only",
+                untrustedProjectPath: dottedPath,
+            })
+
+            const argv = JSON.parse(readFileSync(argvFile, "utf8")) as string[]
+            const trust = argv.find((value) => value.startsWith("projects={"))
+            assert.equal(
+                trust,
+                `projects={${JSON.stringify(dottedPath)}={trust_level="untrusted"}}`,
+            )
+            assert.equal(
+                argv.some((value) => value.startsWith("projects.")),
+                false,
+            )
+        })
+    })
+
     it("injects one required run-scoped MCP server with Windows-safe TOML", async () => {
         await withTempDir("baro-codex-mcp-", async (dir) => {
             const argvFile = join(dir, "argv.json")
