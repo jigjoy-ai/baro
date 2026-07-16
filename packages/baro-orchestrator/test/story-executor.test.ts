@@ -145,6 +145,49 @@ describe("StoryFactory — StoryExecutor seam", () => {
         assert.ok(registered)
     })
 
+    it("LocalStoryExecutor keeps the Claude review timeout default when Factory wiring passes undefined", () => {
+        const executor = new LocalStoryExecutor()
+        const env = {} as AgenticEnvironment
+        const critic = source("critic")
+
+        for (const [configured, expected] of [
+            [undefined, 240_000],
+            [0, 0],
+        ] as const) {
+            assert.throws(
+                () =>
+                    executor.start(
+                        {
+                            storyId: `S-claude-${String(configured)}`,
+                            prompt: "do not run",
+                            model: "sonnet",
+                            retries: 0,
+                            timeoutSecs: 1,
+                            requiresQualityReview: true,
+                        },
+                        { backend: "claude", model: "sonnet" },
+                        "/work",
+                        env,
+                        {
+                            turnReviewAuthority: critic,
+                            turnReviewTimeoutMs: configured,
+                            registerResultAuthority: (participant) => {
+                                const agent = participant as unknown as {
+                                    spec: { turnReviewTimeoutMs: number }
+                                }
+                                assert.equal(
+                                    agent.spec.turnReviewTimeoutMs,
+                                    expected,
+                                )
+                                throw new Error("stop before join")
+                            },
+                        },
+                    ),
+                /stop before join/,
+            )
+        }
+    })
+
     it("LocalStoryExecutor forwards correlated runtime replan context to OpenAI", () => {
         const executor = new LocalStoryExecutor()
         const env = {} as AgenticEnvironment

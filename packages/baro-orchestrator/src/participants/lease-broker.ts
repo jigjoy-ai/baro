@@ -71,6 +71,12 @@ interface RegisteredWorker {
     advertisement: WorkerCapabilityAdvertisedData
 }
 
+interface LeaseCompletionState {
+    executionSucceeded: boolean
+    qualityPassed: boolean
+    integrationTimerArmed: boolean
+}
+
 export class LeaseBroker extends SerializedObserver {
     private readonly opts: LeaseBrokerOptions
     private readonly offers = new Map<string, WorkOfferedData>()
@@ -84,6 +90,10 @@ export class LeaseBroker extends SerializedObserver {
     private readonly activeByStory = new Map<string, WorkLeaseGrantedData>()
     private readonly activeLeaseIds = new Set<string>()
     private readonly leaseTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    private readonly completionByLeaseId = new Map<
+        string,
+        LeaseCompletionState
+    >()
     private readonly unavailableRouteIds = new Set<string>()
     private readonly unavailableWorkerIds = new Set<string>()
     private nextLease = 1
@@ -214,11 +224,14 @@ export class LeaseBroker extends SerializedObserver {
                 event.data.generation !== lease.generation
             ) return
             if (event.data.success) {
-                const integrationTimeoutMs =
-                    this.opts.integrationTimeoutMs ?? this.opts.leaseTimeoutMs
-                if (integrationTimeoutMs && integrationTimeoutMs > 0) {
-                    this.armLeaseTimer(lease, integrationTimeoutMs, "integration")
-                }
+                const completion = this.completionByLeaseId.get(lease.leaseId)
+                if (!completion || completion.executionSucceeded) return
+                completion.executionSucceeded = true
+                // Execution has terminated. A quality-gated lease now waits
+                // without an execution/integration timer while the Gate runs
+                // its independently bounded initial verdict and rechecks.
+                this.clearLeaseTimer(lease.leaseId)
+                this.maybeArmIntegrationTimer(lease, completion)
             } else {
                 if (
                     isProviderCapacityFailure(event.data) &&
@@ -237,16 +250,25 @@ export class LeaseBroker extends SerializedObserver {
             return
         }
         if (StoryQualityCompleted.is(event)) {
+            const qualityLease = this.activeByStory.get(event.data.storyId)
             if (
-                this.qualityAuthority !== null &&
-                context.source === this.qualityAuthority &&
-                event.data.status !== "passed" &&
-                this.matchesLease(
+                this.qualityAuthority === null ||
+                context.source !== this.qualityAuthority ||
+                qualityLease?.request.requiresQualityReview !== true ||
+                !this.matchesLeaseGeneration(
                     event.data.storyId,
                     event.data.runId,
                     event.data.leaseId,
+                    event.data.generation,
                 )
-            ) {
+            ) return
+            if (event.data.status === "passed") {
+                const lease = this.activeByStory.get(event.data.storyId)!
+                const completion = this.completionByLeaseId.get(lease.leaseId)
+                if (!completion || completion.qualityPassed) return
+                completion.qualityPassed = true
+                this.maybeArmIntegrationTimer(lease, completion)
+            } else {
                 this.release(
                     event.data.storyId,
                     event.data.status === "inconclusive"
@@ -565,6 +587,11 @@ export class LeaseBroker extends SerializedObserver {
         }
         this.activeByStory.set(offer.request.storyId, lease)
         this.activeLeaseIds.add(lease.leaseId)
+        this.completionByLeaseId.set(lease.leaseId, {
+            executionSucceeded: false,
+            qualityPassed: false,
+            integrationTimerArmed: false,
+        })
         const delayMs = Math.max(0, this.opts.intraLevelDelaySecs ?? 0) * 1_000
         this.nextGrantAt = Date.now() + delayMs
         this.emit(WorkLeaseGranted.create(lease))
@@ -652,9 +679,8 @@ export class LeaseBroker extends SerializedObserver {
         const lease = this.activeByStory.get(storyId)
         if (!lease || !this.activeLeaseIds.delete(lease.leaseId)) return
         this.activeByStory.delete(storyId)
-        const timer = this.leaseTimers.get(lease.leaseId)
-        if (timer) clearTimeout(timer)
-        this.leaseTimers.delete(lease.leaseId)
+        this.clearLeaseTimer(lease.leaseId)
+        this.completionByLeaseId.delete(lease.leaseId)
         this.emit(
             WorkLeaseReleased.create({
                 runId: this.opts.runId,
@@ -678,6 +704,47 @@ export class LeaseBroker extends SerializedObserver {
             leaseId !== undefined &&
             this.activeByStory.get(storyId)?.leaseId === leaseId
         )
+    }
+
+    private matchesLeaseGeneration(
+        storyId: string,
+        runId: string | undefined,
+        leaseId: string | undefined,
+        generation: number | undefined,
+    ): boolean {
+        const lease = this.activeByStory.get(storyId)
+        return (
+            runId === this.opts.runId &&
+            leaseId !== undefined &&
+            Number.isInteger(generation) &&
+            lease?.leaseId === leaseId &&
+            lease.generation === generation
+        )
+    }
+
+    private maybeArmIntegrationTimer(
+        lease: WorkLeaseGrantedData,
+        completion: LeaseCompletionState,
+    ): void {
+        if (
+            completion.integrationTimerArmed ||
+            !completion.executionSucceeded ||
+            (this.qualityAuthority !== null &&
+                lease.request.requiresQualityReview === true &&
+                !completion.qualityPassed)
+        ) return
+        completion.integrationTimerArmed = true
+        const timeoutMs =
+            this.opts.integrationTimeoutMs ?? this.opts.leaseTimeoutMs
+        if (timeoutMs && timeoutMs > 0) {
+            this.armLeaseTimer(lease, timeoutMs, "integration")
+        }
+    }
+
+    private clearLeaseTimer(leaseId: string): void {
+        const timer = this.leaseTimers.get(leaseId)
+        if (timer) clearTimeout(timer)
+        this.leaseTimers.delete(leaseId)
     }
 
     private armLeaseTimer(
@@ -712,6 +779,7 @@ export class LeaseBroker extends SerializedObserver {
         for (const timer of this.leaseTimers.values()) clearTimeout(timer)
         this.offerTimers.clear()
         this.leaseTimers.clear()
+        this.completionByLeaseId.clear()
         this.offers.clear()
         this.earlyClaims.clear()
         this.workers.clear()

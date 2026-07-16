@@ -19,6 +19,7 @@ import {
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
 import { harnessChildEnvironment } from "../harness-environment.js"
+import { ManagedProcessTree } from "../process-tree.js"
 import {
     AgentState,
     AgentTargetedMessage,
@@ -34,6 +35,8 @@ export interface OpenCodeCliParticipantOptions {
     /** `provider/model` format (e.g. "anthropic/claude-sonnet-4-20250514"). */
     model?: string
     opencodeBin?: string
+    /** Bound inherited-stdio drain after the direct CLI root exits. */
+    closeDrainTimeoutMs?: number
     /**
      * Pass `--dangerously-skip-permissions` — OpenCode's default mode prompts
      * for tool approvals, which blocks autonomous runs. Default: true.
@@ -75,11 +78,12 @@ export class OpenCodeCliParticipant extends BaseObserver {
     }
 
     private readonly options: Required<
-        Pick<OpenCodeCliParticipantOptions, "opencodeBin" | "skipPermissions">
+        Pick<OpenCodeCliParticipantOptions, "opencodeBin" | "skipPermissions" | "closeDrainTimeoutMs">
     > &
         OpenCodeCliParticipantOptions
 
     private proc: ChildProcess | null = null
+    private processTree: ManagedProcessTree | null = null
     private buffer = ""
     private stderrTail = ""
     private envRef: AgenticEnvironment | null = null
@@ -91,18 +95,18 @@ export class OpenCodeCliParticipant extends BaseObserver {
     private toolCallCount = 0
     private doneSettled = false
     private readySettled = false
-    private killTimer: ReturnType<typeof setTimeout> | null = null
+    private closeDrainTimer: ReturnType<typeof setTimeout> | null = null
     private resolveDone!: (summary: OpenCodeRunSummary) => void
     private resolveReady!: () => void
     private rejectReady!: (e: Error) => void
 
     /** Resolves once OpenCode emits its first `step_start` event. */
     public readonly ready: Promise<void>
-    /** Resolves once OpenCode exits and its stdout/stderr streams have closed. */
+    /** Resolves after stream close, or a bounded post-root-exit drain failure. */
     public readonly done: Promise<OpenCodeRunSummary>
 
-    private static readonly KILL_GRACE_MS = 5_000
     private static readonly MAX_BUFFER_BYTES = 16 * 1024 * 1024
+    private static readonly CLOSE_DRAIN_TIMEOUT_MS = 7_500
 
     constructor(
         public readonly agentId: string,
@@ -114,6 +118,17 @@ export class OpenCodeCliParticipant extends BaseObserver {
             ...opts,
             opencodeBin: opts.opencodeBin ?? "opencode",
             skipPermissions: opts.skipPermissions ?? true,
+            closeDrainTimeoutMs:
+                opts.closeDrainTimeoutMs ??
+                OpenCodeCliParticipant.CLOSE_DRAIN_TIMEOUT_MS,
+        }
+        if (
+            !Number.isFinite(this.options.closeDrainTimeoutMs) ||
+            this.options.closeDrainTimeoutMs < 1
+        ) {
+            throw new RangeError(
+                "OpenCode closeDrainTimeoutMs must be positive",
+            )
         }
         this.ready = new Promise<void>((res, rej) => {
             this.resolveReady = res
@@ -132,14 +147,72 @@ export class OpenCodeCliParticipant extends BaseObserver {
      * every resolution path goes through here so `done` settles exactly once
      * (an async spawn error must not leave `done` pending for a later close).
      */
-    private settleDone(summary: OpenCodeRunSummary): void {
+    private settleDone(
+        summary: OpenCodeRunSummary,
+        waitForProcessTree = true,
+    ): void {
+        this.clearCloseDrainWatchdog()
         if (this.doneSettled) return
         this.doneSettled = true
-        if (this.killTimer !== null) {
-            clearTimeout(this.killTimer)
-            this.killTimer = null
+        const releaseTreeOwnership = (): void => {
+            OpenCodeCliParticipant.active.delete(this)
         }
-        this.resolveDone(summary)
+        const processTree = this.processTree
+        if (processTree === null) {
+            releaseTreeOwnership()
+            this.resolveDone(summary)
+            return
+        }
+        processTree.markRootClosed()
+        if (!waitForProcessTree) {
+            // The participant result is bounded, while both registries retain
+            // the tree until its independent cleanup actually completes.
+            this.resolveDone(summary)
+            void processTree.done.then(releaseTreeOwnership)
+            return
+        }
+        void processTree.done.then(() => {
+            releaseTreeOwnership()
+            this.resolveDone(summary)
+        })
+    }
+
+    private startCloseDrainWatchdog(code: number | null): void {
+        this.exitCode = code
+        if (this.doneSettled || this.closeDrainTimer !== null) return
+        this.closeDrainTimer = setTimeout(() => {
+            if (this.doneSettled) return
+            const error = new Error(
+                `opencode streams remained open ${this.options.closeDrainTimeoutMs}ms after root exit`,
+            )
+            this.spawnError = error
+            this.transition("failed", error.message)
+            this.failReady(error)
+            this.settleDone(
+                {
+                    sessionId: this.sessionId,
+                    exitCode: this.exitCode,
+                    error,
+                    stderrTail: this.stderrTail || null,
+                    sawStepFinish: this.sawStepFinish,
+                    toolCallCount: this.toolCallCount,
+                },
+                false,
+            )
+            this.destroyLocalStdio()
+        }, this.options.closeDrainTimeoutMs)
+    }
+
+    private clearCloseDrainWatchdog(): void {
+        if (this.closeDrainTimer === null) return
+        clearTimeout(this.closeDrainTimer)
+        this.closeDrainTimer = null
+    }
+
+    private destroyLocalStdio(): void {
+        this.proc?.stdin?.destroy()
+        this.proc?.stdout?.destroy()
+        this.proc?.stderr?.destroy()
     }
 
     private settleReady(): void {
@@ -191,18 +264,27 @@ export class OpenCodeCliParticipant extends BaseObserver {
         }
 
         this.proc = proc
+        this.processTree = new ManagedProcessTree(proc)
         OpenCodeCliParticipant.active.add(this)
         this.transition("starting")
 
         proc.stdout!.setEncoding("utf8")
         proc.stderr!.setEncoding("utf8")
+        proc.stdout!.once("data", () => this.processTree?.refresh())
         proc.stdout!.on("data", (chunk: string) => this.handleStdout(chunk))
         proc.stdout!.on("end", () => this.flushStdout())
         proc.stderr!.on("data", (chunk: string) => this.handleStderr(chunk))
+        // Root `exit` precedes `close` when a descendant inherited stdio. Tell
+        // the tree supervisor now so that descendant cannot hold `done` open.
+        proc.on("exit", (code) => {
+            this.processTree?.markRootClosed()
+            this.startCloseDrainWatchdog(code)
+        })
         proc.on("error", (err) => {
+            this.clearCloseDrainWatchdog()
+            if (this.doneSettled) return
             // Settle async process errors directly; a later `close` is safely
             // ignored by settleDone's exact-once guard.
-            OpenCodeCliParticipant.active.delete(this)
             this.spawnError = err
             this.transition("failed", err.message)
             this.failReady(err)
@@ -219,7 +301,8 @@ export class OpenCodeCliParticipant extends BaseObserver {
         // terminal boundary for the normal path because it fires only after
         // those streams close; the `error` path above still settles directly.
         proc.on("close", (code) => {
-            OpenCodeCliParticipant.active.delete(this)
+            this.clearCloseDrainWatchdog()
+            if (this.doneSettled) return
             this.exitCode = code
             this.failReady(
                 this.spawnError ??
@@ -246,25 +329,8 @@ export class OpenCodeCliParticipant extends BaseObserver {
 
     /** Kill the OpenCode process, escalating if it ignores the soft signal. */
     abort(signal: NodeJS.Signals = "SIGTERM"): void {
-        this.transition("aborted")
-        const proc = this.proc
-        if (!proc) return
-        try {
-            proc.kill(signal)
-        } catch {
-            // best-effort
-        }
-        if (signal === "SIGKILL" || this.killTimer !== null) return
-        this.killTimer = setTimeout(() => {
-            this.killTimer = null
-            if (this.doneSettled) return
-            try {
-                proc.kill("SIGKILL")
-            } catch {
-                // best-effort
-            }
-        }, OpenCodeCliParticipant.KILL_GRACE_MS)
-        this.killTimer.unref?.()
+        if (!this.doneSettled) this.transition("aborted")
+        this.processTree?.terminate(signal)
     }
 
     override async onExternalEvent(

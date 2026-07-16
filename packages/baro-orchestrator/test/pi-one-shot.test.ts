@@ -112,6 +112,33 @@ describe("runPiOneShot invocation telemetry", () => {
         })
     })
 
+    it("flushes a final message_end without a trailing newline before completion", async () => {
+        await withTempDir("baro-pi-final-fragment-", async (dir) => {
+            const bin = join(dir, "fragment-pi.mjs")
+            writeFileSync(
+                bin,
+                `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({
+    type: "message_end",
+    message: {
+        role: "assistant",
+        content: [{ type: "text", text: "final fragment" }],
+    },
+}));
+`,
+            )
+            chmodSync(bin, 0o755)
+
+            const result = await runPiOneShot({
+                prompt: "goal",
+                cwd: dir,
+                piBin: bin,
+            })
+
+            assert.equal(result, "final fragment")
+        })
+    })
+
     it("emits one failed unknown observation when no assistant message ends", async () => {
         await withTempDir("baro-pi-failure-", async (dir) => {
             const bin = writeFakePi(
@@ -153,6 +180,25 @@ describe("runPiOneShot invocation telemetry", () => {
         })
     })
 
+    it("settles an asynchronous spawn error exactly once", async () => {
+        await withTempDir("baro-pi-spawn-error-", async (dir) => {
+            const observations: RunnerInvocationObservation[] = []
+
+            await assert.rejects(
+                runPiOneShot({
+                    prompt: "goal",
+                    cwd: dir,
+                    piBin: join(dir, "missing-pi"),
+                    onInvocation: (item) => observations.push(item),
+                }),
+                { code: "ENOENT" },
+            )
+
+            assert.equal(observations.length, 1)
+            assert.equal(observations[0]!.status, "failed")
+        })
+    })
+
     it("aborts the child and records a timed-out terminal observation", async () => {
         await withTempDir("baro-pi-abort-", async (dir) => {
             const bin = join(dir, "slow-pi.mjs")
@@ -182,7 +228,7 @@ setInterval(() => {}, 1000);
         })
     })
 
-    it("kills a TERM-resistant provider descendant before cancellation settles", async () => {
+    it("kills an inherited-stdio, TERM-resistant descendant before cancellation settles", async () => {
         await withTempDir("baro-pi-tree-", async (dir) => {
             const started = join(dir, "descendant-started")
             const escaped = join(dir, "descendant-escaped")
@@ -196,7 +242,13 @@ setInterval(() => {}, 10_000);
 `
             writeFileSync(bin, `#!/usr/bin/env node
 import { spawn } from "node:child_process";
-spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(descendantSource)}], { stdio: "ignore" });
+spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(descendantSource)}], {
+    stdio: ["ignore", "inherit", "inherit"],
+});
+console.log(JSON.stringify({
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: "partial" }] },
+}));
 setInterval(() => {}, 10_000);
 `)
             chmodSync(bin, 0o755)

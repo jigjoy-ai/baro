@@ -10,7 +10,9 @@ import {
     CodexTurnEvent,
     OpenCodeSystem,
     PiTurnEvent,
+    StoryQualityReverificationRequested,
     StoryRouted,
+    WorkLeaseGranted,
 } from "../../src/semantic-events.js"
 import { joinWithCapture, source } from "./helpers.js"
 
@@ -281,5 +283,91 @@ describe("AgentTurnProjector", () => {
         assert.equal(projected.length, 1)
         assert.equal(projected[0]?.data.resultText, "retry output")
         assert.equal(projected[0]?.data.terminalId, "projected:S1:1")
+    })
+
+    it("replays only the exact active candidate for the bound gate", async () => {
+        const runId = "run-reverify-authority"
+        const broker = source("broker")
+        const gate = source("acceptance-gate")
+        const attacker = source("acceptance-gate")
+        const codex = source("S1")
+        const projector = new AgentTurnProjector()
+        projector.setLeaseAuthority(broker)
+        projector.setReverificationAuthority(gate)
+        const env = joinWithCapture(projector)
+
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseGranted.create({
+                runId,
+                offerId: "offer-S1",
+                leaseId: "lease-1",
+                workerId: "worker",
+                generation: 3,
+                request: {
+                    storyId: "S1",
+                    prompt: "S1",
+                    model: "standard",
+                    retries: 0,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+        await projector.onExternalModelMessage(
+            codex,
+            ModelMessageItem.rehydrate({ text: "candidate bytes A" }),
+        )
+        await projector.onExternalEvent(
+            codex,
+            CodexTurnEvent.create({
+                agentId: "S1",
+                phase: "completed",
+                raw: {},
+            }),
+        )
+        const original = env.events.find(AgentTurnCompleted.is)!
+
+        const request = StoryQualityReverificationRequested.create({
+            runId,
+            requestId: "reverify-1",
+            previousEvaluationId: "quality-1",
+            evaluationId: "quality-2",
+            storyId: "S1",
+            leaseId: "lease-1",
+            generation: 3,
+            targetTurn: 1,
+            terminalId: original.data.terminalId,
+            attempt: 1,
+            reason: "critic unavailable",
+        })
+        env.deliverSemanticEvent(attacker, request)
+        env.deliverSemanticEvent(
+            gate,
+            StoryQualityReverificationRequested.create({
+                ...request.data,
+                requestId: "stale-generation",
+                generation: 2,
+            }),
+        )
+        env.deliverSemanticEvent(
+            gate,
+            StoryQualityReverificationRequested.create({
+                ...request.data,
+                requestId: "wrong-terminal",
+                terminalId: "some-other-candidate",
+            }),
+        )
+        assert.equal(env.events.filter(AgentTurnCompleted.is).length, 1)
+
+        env.deliverSemanticEvent(gate, request)
+        env.deliverSemanticEvent(gate, request)
+
+        const projected = env.events.filter(AgentTurnCompleted.is)
+        assert.equal(projected.length, 2)
+        assert.equal(projected[1]?.data.resultText, original.data.resultText)
+        assert.equal(projected[1]?.data.backend, original.data.backend)
+        assert.equal(projected[1]?.data.canContinue, false)
+        assert.notEqual(projected[1]?.data.terminalId, original.data.terminalId)
+        assert.match(projected[1]?.data.terminalId ?? "", /^reverification:/)
     })
 })

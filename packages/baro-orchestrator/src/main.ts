@@ -33,8 +33,10 @@ export {
     type AgentTurnCompletedData,
     ModelInvocationMeasured,
     StoryQualityCompleted,
+    StoryQualityReverificationRequested,
     StoryQualityTimedOut,
     type StoryQualityCompletedData,
+    type StoryQualityReverificationRequestedData,
     type StoryQualityTimedOutData,
     RunVerificationTimedOut,
 } from "./semantic-events.js"
@@ -61,6 +63,7 @@ export {
 
 export {
     AcceptanceGate,
+    DEFAULT_ACCEPTANCE_REVERIFICATIONS,
     type AcceptanceGateOptions,
 } from "./participants/acceptance-gate.js"
 

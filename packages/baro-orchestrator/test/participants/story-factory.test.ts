@@ -193,6 +193,81 @@ describe("StoryFactory", () => {
         })
     })
 
+    it("enables inconclusive handoff only for a quality-gated collective lease", async () => {
+        await withTempDir("story-factory-quality-handoff-", async (dir) => {
+            const broker = source("broker")
+            const board = source("board")
+            const critic = source("critic")
+            const gate = source("acceptance-gate")
+            const collectiveExecutor = new CapturingExecutor()
+            const collective = new StoryFactory({
+                cwd: dir,
+                coordinationMode: "collective",
+                runId: "run-quality-handoff",
+                workerId: "worker-a",
+                leaseAuthority: broker,
+                offerAuthority: board,
+                outcomeAuthority: new StoryOutcomeAuthority(
+                    "run-quality-handoff",
+                ),
+                executor: collectiveExecutor,
+                turnReviewAuthority: critic,
+                acceptanceGateAuthority: gate,
+            })
+            joinWithCapture(collective)
+            await collective.onExternalEvent(
+                broker,
+                WorkLeaseGranted.create({
+                    runId: "run-quality-handoff",
+                    offerId: "offer-S1",
+                    leaseId: "lease-S1",
+                    workerId: "worker-a",
+                    generation: 1,
+                    request: {
+                        storyId: "S1",
+                        prompt: "Implement S1",
+                        model: "sonnet",
+                        retries: 0,
+                        timeoutSecs: 30,
+                        requiresQualityReview: true,
+                    },
+                }),
+            )
+            await flushBus()
+            assert.equal(
+                collectiveExecutor.calls[0]?.opts
+                    .handoffInconclusiveToAcceptanceGate,
+                true,
+            )
+
+            const legacyExecutor = new CapturingExecutor()
+            const legacy = new StoryFactory({
+                cwd: dir,
+                coordinationMode: "legacy",
+                executor: legacyExecutor,
+                turnReviewAuthority: critic,
+                acceptanceGateAuthority: gate,
+            })
+            joinWithCapture(legacy)
+            await legacy.onExternalEvent(
+                source("conductor"),
+                StorySpawnRequest.create({
+                    storyId: "S2",
+                    prompt: "Implement S2",
+                    model: "sonnet",
+                    retries: 0,
+                    timeoutSecs: 30,
+                    requiresQualityReview: true,
+                }),
+            )
+            assert.equal(
+                legacyExecutor.calls[0]?.opts
+                    .handoffInconclusiveToAcceptanceGate,
+                false,
+            )
+        })
+    })
+
     it("aborts a running story on a StoryIntervention(abort) bus event", async () => {
         await withTempDir("story-factory-test-", async (dir) => {
             const aborted: string[] = []

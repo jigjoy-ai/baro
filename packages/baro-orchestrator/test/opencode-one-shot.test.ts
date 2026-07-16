@@ -123,6 +123,38 @@ describe("runOpenCodeOneShot invocation telemetry", () => {
         })
     })
 
+    it("flushes terminal output and usage when the final NDJSON record has no newline", async () => {
+        await withTempDir("baro-opencode-final-fragment-", async (dir) => {
+            const bin = join(dir, "fragment-opencode.mjs")
+            writeFileSync(
+                bin,
+                `#!/usr/bin/env node
+const events = [
+    { type: "text", part: { text: "final answer" } },
+    { type: "step_finish", part: { tokens: { input: 11, output: 7, total: 18 }, cost: 0.001 } },
+];
+process.stdout.write(events.map((event) => JSON.stringify(event)).join("\\n"));
+`,
+            )
+            chmodSync(bin, 0o755)
+            const observations: RunnerInvocationObservation[] = []
+
+            const result = await runOpenCodeOneShot({
+                prompt: "goal",
+                cwd: dir,
+                opencodeBin: bin,
+                onInvocation: (item) => observations.push(item),
+            })
+
+            assert.equal(result, "final answer")
+            assert.equal(observations.length, 1)
+            assert.deepEqual(
+                observations[0]!.tokens.total,
+                knownMetric(18, "provider_response"),
+            )
+        })
+    })
+
     it("emits one failed unknown observation when no step finishes", async () => {
         await withTempDir("baro-opencode-failure-", async (dir) => {
             const bin = writeFakeOpenCode(
@@ -149,6 +181,25 @@ describe("runOpenCodeOneShot invocation telemetry", () => {
                 observations[0]!.cost.equivalentUsd,
                 unknownMetric("not_reported"),
             )
+        })
+    })
+
+    it("settles an asynchronous spawn error exactly once", async () => {
+        await withTempDir("baro-opencode-spawn-error-", async (dir) => {
+            const observations: RunnerInvocationObservation[] = []
+
+            await assert.rejects(
+                runOpenCodeOneShot({
+                    prompt: "goal",
+                    cwd: dir,
+                    opencodeBin: join(dir, "missing-opencode"),
+                    onInvocation: (item) => observations.push(item),
+                }),
+                { code: "ENOENT" },
+            )
+
+            assert.equal(observations.length, 1)
+            assert.equal(observations[0]!.status, "failed")
         })
     })
 
@@ -181,7 +232,7 @@ setInterval(() => {}, 1000);
         })
     })
 
-    it("kills a TERM-resistant provider descendant before cancellation settles", async () => {
+    it("kills an inherited-stdio, TERM-resistant descendant before cancellation settles", async () => {
         await withTempDir("baro-opencode-tree-", async (dir) => {
             const started = join(dir, "descendant-started")
             const escaped = join(dir, "descendant-escaped")
@@ -195,7 +246,9 @@ setInterval(() => {}, 10_000);
 `
             writeFileSync(bin, `#!/usr/bin/env node
 import { spawn } from "node:child_process";
-spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(descendantSource)}], { stdio: "ignore" });
+spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(descendantSource)}], {
+    stdio: ["ignore", "inherit", "inherit"],
+});
 console.log(JSON.stringify({ type: "text", part: { text: "partial" } }));
 setInterval(() => {}, 10_000);
 `)

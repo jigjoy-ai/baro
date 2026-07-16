@@ -15,6 +15,9 @@ export interface TurnReviewFailure {
 
 export type TurnReviewDisposition =
     | { kind: "pass" }
+    /** Execution may close, but AcceptanceGate still owns integration and
+     * must re-evaluate this unchanged candidate. This is not a semantic pass. */
+    | { kind: "handoff" }
     | { kind: "revise"; feedback: string }
     | ({ kind: "failure" } & TurnReviewFailure)
 
@@ -23,6 +26,9 @@ export interface StreamingTurnLifecycleOptions {
     maxTurns: number
     quietTimeoutMs: number
     reviewTimeoutMs: number
+    /** Collective-only: an external AcceptanceGate remains the final quality
+     * authority and can recheck an inconclusive terminal after execution ends. */
+    handoffInconclusiveToAcceptanceGate?: boolean
     onFinish(): void
     onRevision(feedback: string, review: CritiqueData): void
     revisionFailure(error: unknown): TurnReviewFailure
@@ -226,6 +232,15 @@ export class StreamingTurnLifecycle {
         this.waitingTerminalId = null
         if (result.kind === "cancelled") return
         if (result.kind === "timeout") {
+            // In collective mode the worker's review wait only keeps a
+            // streaming process open for same-session correction.  Once an
+            // AcceptanceGate is bound, a missing/late Critique is Gate work:
+            // close this execution successfully so its unchanged terminal
+            // candidate reaches the Gate's independently bounded recheck.
+            if (this.options.handoffInconclusiveToAcceptanceGate === true) {
+                this.finish()
+                return
+            }
             this.fail(
                 turnReviewTimeoutFailure(
                     terminalId,
@@ -235,10 +250,16 @@ export class StreamingTurnLifecycle {
             return
         }
 
-        const disposition = turnReviewDisposition(terminalId, result.review)
+        const disposition = turnReviewDisposition(terminalId, result.review, {
+            handoffInconclusiveToAcceptanceGate:
+                this.options.handoffInconclusiveToAcceptanceGate === true,
+        })
         if (disposition.kind === "failure") {
             this.fail(disposition)
-        } else if (disposition.kind === "pass") {
+        } else if (
+            disposition.kind === "pass" ||
+            disposition.kind === "handoff"
+        ) {
             this.finish()
         } else if (this.turnsObserved >= this.options.maxTurns) {
             this.fail({
@@ -312,8 +333,12 @@ export function turnReviewFeedback(review: CritiqueData): string {
 export function turnReviewDisposition(
     terminalId: string,
     review: CritiqueData,
+    options: { handoffInconclusiveToAcceptanceGate?: boolean } = {},
 ): TurnReviewDisposition {
     if (review.status === "inconclusive") {
+        if (options.handoffInconclusiveToAcceptanceGate === true) {
+            return { kind: "handoff" }
+        }
         return {
             kind: "failure",
             ...inconclusiveTurnReviewFailure(terminalId, review),

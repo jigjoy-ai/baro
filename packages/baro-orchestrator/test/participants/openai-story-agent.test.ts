@@ -81,6 +81,214 @@ describe("OpenAIStoryAgent", () => {
         })
     })
 
+    it("hands an inconclusive native candidate to collective AcceptanceGate", async () => {
+        await withTempDir("openai-story-agent-review-handoff-", async (dir) => {
+            const critic = source("critic")
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "story-reviewed-handoff",
+                    prompt: "finish the collective candidate",
+                    cwd: dir,
+                    retries: 0,
+                    quietTimeoutMs: 1,
+                    maxTurns: 1,
+                    requiresQualityReview: true,
+                    handoffInconclusiveToAcceptanceGate: true,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 1,
+                    perRoundTimeoutSecs: 1,
+                    turnReviewAuthority: critic,
+                    turnReviewTimeoutMs: 250,
+                },
+            )
+            stubInferenceRounds(agent, [
+                [ModelMessageItem.rehydrate({ text: "candidate is ready" })],
+            ])
+            const env = captureEnv()
+            agent.join(env)
+
+            const outcomePromise = agent.run(env)
+            const [terminal] = await waitForCount(env.events, AgentResult.is, 1)
+            assert.ok(terminal?.data.terminalId)
+            env.deliverSemanticEvent(
+                critic,
+                Critique.create({
+                    agentId: agent.id,
+                    terminalId: terminal.data.terminalId,
+                    status: "inconclusive",
+                    verdict: "fail",
+                    reasoning: "evaluator unavailable",
+                    violatedCriteria: ["[acceptance evidence unavailable]"],
+                    turn: 1,
+                    modelUsed: "test-critic",
+                }),
+            )
+
+            const outcome = await outcomePromise
+            assert.equal(outcome.success, true)
+            assert.equal(outcome.failure, undefined)
+            assert.equal(env.events.filter(AgentResult.is).length, 1)
+            assert.equal(env.events.filter(StoryResult.is).length, 1)
+            agent.leave(env)
+        })
+    })
+
+    it("hands a missing same-deadline review to AcceptanceGate and ignores a late Critique", async () => {
+        await withTempDir("openai-story-agent-review-timeout-handoff-", async (dir) => {
+            const critic = source("critic")
+            const acceptanceTimeoutMs = 20
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "story-reviewed-timeout-handoff",
+                    prompt: "finish the collective candidate",
+                    cwd: dir,
+                    retries: 2,
+                    quietTimeoutMs: 1,
+                    maxTurns: 1,
+                    requiresQualityReview: true,
+                    handoffInconclusiveToAcceptanceGate: true,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 1,
+                    perRoundTimeoutSecs: 1,
+                    turnReviewAuthority: critic,
+                    turnReviewTimeoutMs: acceptanceTimeoutMs,
+                },
+            )
+            const contexts = stubInferenceRounds(agent, [
+                [ModelMessageItem.rehydrate({ text: "candidate is ready" })],
+            ])
+            const env = captureEnv()
+            agent.join(env)
+
+            const outcomePromise = agent.run(env)
+            const [terminal] = await waitForCount(env.events, AgentResult.is, 1)
+            assert.ok(terminal?.data.terminalId)
+            const outcome = await outcomePromise
+
+            assert.equal(outcome.success, true)
+            assert.equal(outcome.attempts, 1)
+            assert.equal(outcome.failure, undefined)
+            assert.equal(contexts.length, 1)
+            assert.equal(env.events.filter(StoryResult.is).length, 1)
+
+            env.deliverSemanticEvent(
+                critic,
+                Critique.create({
+                    agentId: agent.id,
+                    terminalId: terminal.data.terminalId,
+                    status: "evaluated",
+                    verdict: "fail",
+                    reasoning: "late verdict",
+                    violatedCriteria: ["late criterion"],
+                    turn: 1,
+                    modelUsed: "test-critic",
+                }),
+            )
+            await new Promise<void>((resolve) => setImmediate(resolve))
+            assert.equal(contexts.length, 1)
+            assert.equal(env.events.filter(AgentResult.is).length, 1)
+            assert.equal(env.events.filter(StoryResult.is).length, 1)
+            agent.leave(env)
+        })
+    })
+
+    it("keeps missing-review timeout failure semantics without an AcceptanceGate handoff", async () => {
+        await withTempDir("openai-story-agent-review-timeout-no-handoff-", async (dir) => {
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "story-reviewed-timeout-no-handoff",
+                    prompt: "finish without a collective gate",
+                    cwd: dir,
+                    retries: 2,
+                    quietTimeoutMs: 1,
+                    maxTurns: 1,
+                    requiresQualityReview: true,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 1,
+                    perRoundTimeoutSecs: 1,
+                    turnReviewAuthority: source("critic"),
+                    turnReviewTimeoutMs: 20,
+                },
+            )
+            stubInferenceRounds(agent, [
+                [ModelMessageItem.rehydrate({ text: "candidate is ready" })],
+            ])
+            const env = captureEnv()
+
+            const outcome = await agent.run(env)
+            assert.equal(outcome.success, false)
+            assert.equal(outcome.attempts, 1)
+            assert.deepEqual(outcome.failure, {
+                kind: "infrastructure",
+                code: "review_timeout",
+            })
+            assert.deepEqual(
+                env.events.find(StoryResult.is)?.data.failure,
+                outcome.failure,
+            )
+        })
+    })
+
+    it("keeps inconclusive review failure semantics without an AcceptanceGate handoff", async () => {
+        await withTempDir("openai-story-agent-review-no-handoff-", async (dir) => {
+            const critic = source("critic")
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "story-reviewed-no-handoff",
+                    prompt: "finish without a collective gate",
+                    cwd: dir,
+                    retries: 0,
+                    quietTimeoutMs: 1,
+                    maxTurns: 1,
+                    requiresQualityReview: true,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 1,
+                    perRoundTimeoutSecs: 1,
+                    turnReviewAuthority: critic,
+                    turnReviewTimeoutMs: 250,
+                },
+            )
+            stubInferenceRounds(agent, [
+                [ModelMessageItem.rehydrate({ text: "candidate is ready" })],
+            ])
+            const env = captureEnv()
+            agent.join(env)
+
+            const outcomePromise = agent.run(env)
+            const [terminal] = await waitForCount(env.events, AgentResult.is, 1)
+            assert.ok(terminal?.data.terminalId)
+            env.deliverSemanticEvent(
+                critic,
+                Critique.create({
+                    agentId: agent.id,
+                    terminalId: terminal.data.terminalId,
+                    status: "inconclusive",
+                    verdict: "fail",
+                    reasoning: "evaluator unavailable",
+                    violatedCriteria: [],
+                    turn: 1,
+                    modelUsed: "test-critic",
+                }),
+            )
+
+            const outcome = await outcomePromise
+            assert.equal(outcome.success, false)
+            assert.deepEqual(outcome.failure, {
+                kind: "verification",
+                code: "evaluator_unavailable",
+            })
+            agent.leave(env)
+        })
+    })
+
     it("continues a failed review in the same context and ignores stale or unauthorized verdicts", async () => {
         await withTempDir("openai-story-agent-review-continuation-", async (dir) => {
             const critic = source("critic")

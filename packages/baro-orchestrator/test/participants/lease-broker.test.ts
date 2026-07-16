@@ -133,6 +133,70 @@ describe("LeaseBroker", () => {
         assert.equal(released?.data.reason, "expired")
     })
 
+    it("keeps the legacy integration timeout after a successful result", async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout"] })
+        const runId = "run-legacy-integration-timeout"
+        const broker = new LeaseBroker({
+            runId,
+            parallel: 1,
+            intraLevelDelaySecs: 0,
+            leaseTimeoutMs: 50,
+            integrationTimeoutMs: 10,
+        })
+        const env = joinWithCapture(broker)
+
+        offerAndClaim(env, source("board"), runId, "S1")
+        await flush()
+        const lease = env.events.find(WorkLeaseGranted.is)!
+        env.deliverSemanticEvent(
+            source("S1-agent"),
+            successfulResult(runId, lease.data),
+        )
+        await flush()
+
+        t.mock.timers.tick(9)
+        await flush()
+        assert.equal(env.events.filter(WorkLeaseReleased.is).length, 0)
+        t.mock.timers.tick(1)
+        await flush()
+        assert.equal(env.events.filter(WorkLeaseExpired.is).length, 1)
+        assert.equal(
+            env.events.find(WorkLeaseReleased.is)?.data.reason,
+            "expired",
+        )
+    })
+
+    it("does not make an unreviewed story wait merely because a quality authority is globally bound", async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout"] })
+        const runId = "run-unreviewed-with-gate"
+        const broker = new LeaseBroker({
+            runId,
+            parallel: 1,
+            intraLevelDelaySecs: 0,
+            leaseTimeoutMs: 50,
+            integrationTimeoutMs: 10,
+        })
+        broker.setQualityAuthority(source("quality-gate"))
+        const env = joinWithCapture(broker)
+
+        offerAndClaim(env, source("board"), runId, "S1")
+        await flush()
+        const lease = env.events.find(WorkLeaseGranted.is)!
+        env.deliverSemanticEvent(
+            source("S1-agent"),
+            successfulResult(runId, lease.data),
+        )
+        await flush()
+
+        t.mock.timers.tick(10)
+        await flush()
+        assert.equal(env.events.filter(WorkLeaseExpired.is).length, 1)
+        assert.equal(
+            env.events.find(WorkLeaseReleased.is)?.data.reason,
+            "expired",
+        )
+    })
+
     it("releases a failed quality lease only from its bound gate", async () => {
         const broker = new LeaseBroker({
             runId: "run-quality",
@@ -144,7 +208,9 @@ describe("LeaseBroker", () => {
         const env = joinWithCapture(broker)
         env.deliverSemanticEvent(
             source("board"),
-            WorkOffered.create(offer("run-quality", "offer-S1", "S1", 1)),
+            WorkOffered.create(
+                qualityOffer("run-quality", "offer-S1", "S1", 1),
+            ),
         )
         env.deliverSemanticEvent(
             source("worker"),
@@ -193,7 +259,7 @@ describe("LeaseBroker", () => {
         broker.setQualityAuthority(qualityGate)
         const env = joinWithCapture(broker)
 
-        offerAndClaim(env, source("board"), runId, "S1")
+        offerAndClaim(env, source("board"), runId, "S1", true)
         await waitFor(() => env.events.some(WorkLeaseGranted.is))
         const lease = env.events.find(WorkLeaseGranted.is)!
 
@@ -215,6 +281,119 @@ describe("LeaseBroker", () => {
         assert.equal(
             env.events.find(WorkLeaseReleased.is)?.data.reason,
             "quality_inconclusive",
+        )
+    })
+
+    it("keeps a successful lease alive through Gate rechecks and starts integration timeout only after exact pass", async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout"] })
+        const runId = "run-quality-wait-timeout"
+        const qualityGate = source("quality-gate")
+        const broker = new LeaseBroker({
+            runId,
+            parallel: 1,
+            intraLevelDelaySecs: 0,
+            leaseTimeoutMs: 10,
+            integrationTimeoutMs: 10,
+        })
+        broker.setQualityAuthority(qualityGate)
+        const env = joinWithCapture(broker)
+
+        offerAndClaim(env, source("board"), runId, "S1", true)
+        await flush()
+        const lease = env.events.find(WorkLeaseGranted.is)!
+        assert.ok(lease)
+        const result = successfulResult(runId, lease.data)
+        env.deliverSemanticEvent(source("S1-agent"), result)
+        await flush()
+
+        // Both the old execution deadline and the configured integration
+        // deadline may pass while the Gate performs bounded same-candidate
+        // rechecks. Neither owns the Gate's quality wait.
+        t.mock.timers.tick(30)
+        await flush()
+        assert.equal(env.events.filter(WorkLeaseExpired.is).length, 0)
+        assert.equal(env.events.filter(WorkLeaseReleased.is).length, 0)
+
+        const pass = passedQuality(runId, lease.data)
+        env.deliverSemanticEvent(source("forged-gate"), pass)
+        env.deliverSemanticEvent(
+            qualityGate,
+            StoryQualityCompleted.create({
+                ...pass.data,
+                generation: pass.data.generation + 1,
+            }),
+        )
+        await flush()
+        t.mock.timers.tick(30)
+        await flush()
+        assert.equal(env.events.filter(WorkLeaseExpired.is).length, 0)
+        assert.equal(env.events.filter(WorkLeaseReleased.is).length, 0)
+
+        env.deliverSemanticEvent(qualityGate, pass)
+        await flush()
+        t.mock.timers.tick(9)
+        await flush()
+        assert.equal(env.events.filter(WorkLeaseReleased.is).length, 0)
+        t.mock.timers.tick(1)
+        await flush()
+        assert.equal(env.events.filter(WorkLeaseExpired.is).length, 1)
+        assert.equal(env.events.filter(WorkLeaseReleased.is).length, 1)
+        assert.equal(
+            env.events.find(WorkLeaseReleased.is)?.data.reason,
+            "expired",
+        )
+
+        // A late/replayed Gate pass cannot resurrect an expired correlation.
+        env.deliverSemanticEvent(qualityGate, pass)
+        t.mock.timers.tick(30)
+        await flush()
+        assert.equal(env.events.filter(WorkLeaseExpired.is).length, 1)
+        assert.equal(env.events.filter(WorkLeaseReleased.is).length, 1)
+    })
+
+    it("preserves the integration timer when an early quality pass precedes StoryResult", async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout"] })
+        const runId = "run-quality-pass-first"
+        const qualityGate = source("quality-gate")
+        const broker = new LeaseBroker({
+            runId,
+            parallel: 1,
+            intraLevelDelaySecs: 0,
+            leaseTimeoutMs: 10,
+            integrationTimeoutMs: 10,
+        })
+        broker.setQualityAuthority(qualityGate)
+        const env = joinWithCapture(broker)
+
+        offerAndClaim(env, source("board"), runId, "S1", true)
+        await flush()
+        const lease = env.events.find(WorkLeaseGranted.is)!
+        assert.ok(lease)
+        const pass = passedQuality(runId, lease.data)
+        const result = successfulResult(runId, lease.data)
+
+        env.deliverSemanticEvent(qualityGate, pass)
+        await flush()
+        t.mock.timers.tick(9)
+        await flush()
+        assert.equal(env.events.filter(WorkLeaseReleased.is).length, 0)
+
+        env.deliverSemanticEvent(source("S1-agent"), result)
+        await flush()
+        t.mock.timers.tick(9)
+        await flush()
+        // A duplicate success after the early pass must not clear or re-arm
+        // the already-running integration deadline.
+        env.deliverSemanticEvent(source("S1-agent"), result)
+        await flush()
+        t.mock.timers.tick(1)
+        await flush()
+
+        assert.equal(env.events.filter(WorkLeaseExpired.is).length, 1)
+        assert.equal(env.events.filter(WorkLeaseReleased.is).length, 1)
+        assert.equal(
+            env.events.find(WorkLeaseReleased.is)?.data.reason,
+            "expired",
         )
     })
 
@@ -798,6 +977,22 @@ function offer(runId: string, offerId: string, storyId: string, generation: numb
     }
 }
 
+function qualityOffer(
+    runId: string,
+    offerId: string,
+    storyId: string,
+    generation: number,
+) {
+    const item = offer(runId, offerId, storyId, generation)
+    return {
+        ...item,
+        request: {
+            ...item.request,
+            requiresQualityReview: true,
+        },
+    }
+}
+
 function advertise(
     env: ReturnType<typeof joinWithCapture>,
     worker: ReturnType<typeof source>,
@@ -862,11 +1057,16 @@ function offerAndClaim(
     board: ReturnType<typeof source>,
     runId: string,
     storyId: string,
+    requiresQualityReview = false,
 ): void {
     const offerId = `offer-${storyId}`
     env.deliverSemanticEvent(
         board,
-        WorkOffered.create(offer(runId, offerId, storyId, 1)),
+        WorkOffered.create(
+            requiresQualityReview
+                ? qualityOffer(runId, offerId, storyId, 1)
+                : offer(runId, offerId, storyId, 1),
+        ),
     )
     env.deliverSemanticEvent(
         source("worker"),
@@ -879,6 +1079,38 @@ function offerAndClaim(
             model: "sonnet",
         }),
     )
+}
+
+function successfulResult(
+    runId: string,
+    lease: ReturnType<typeof WorkLeaseGranted.create>["data"],
+): ReturnType<typeof StoryResult.create> {
+    return StoryResult.create({
+        storyId: lease.request.storyId,
+        success: true,
+        attempts: 1,
+        durationSecs: 1,
+        error: null,
+        runId,
+        leaseId: lease.leaseId,
+        generation: lease.generation,
+    })
+}
+
+function passedQuality(
+    runId: string,
+    lease: ReturnType<typeof WorkLeaseGranted.create>["data"],
+): ReturnType<typeof StoryQualityCompleted.create> {
+    return StoryQualityCompleted.create({
+        runId,
+        evaluationId: `quality-${lease.request.storyId}`,
+        storyId: lease.request.storyId,
+        leaseId: lease.leaseId,
+        generation: lease.generation,
+        status: "passed",
+        targetTurn: 1,
+        reason: "candidate passed",
+    })
 }
 
 async function assertOperationalFailureKeepsRouteAvailable(

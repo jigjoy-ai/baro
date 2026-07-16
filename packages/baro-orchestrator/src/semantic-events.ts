@@ -619,6 +619,35 @@ export interface StoryQualityCompletedData {
 export const StoryQualityCompleted =
     defineSemanticEvent<StoryQualityCompletedData>("story_quality_completed")
 
+/**
+ * AcceptanceGate asks the neutral terminal projector to present the exact
+ * same candidate to Critic again after an operationally inconclusive verdict.
+ * The lease/worktree remain active; this event never authorizes execution or
+ * a new WorkOffer.
+ */
+export interface StoryQualityReverificationRequestedData {
+    runId: string
+    requestId: string
+    /** Evaluation superseded by this bounded recheck. */
+    previousEvaluationId: string
+    /** Evaluation id that will settle from the replayed terminal turn. */
+    evaluationId: string
+    storyId: string
+    leaseId: string
+    generation: number
+    /** Critic/AcceptanceGate turn containing the original candidate. */
+    targetTurn: number
+    /** Stable producer identity when the original stream supplied one. */
+    terminalId?: string
+    /** One-based recheck count for this unchanged candidate. */
+    attempt: number
+    reason: string
+}
+export const StoryQualityReverificationRequested =
+    defineSemanticEvent<StoryQualityReverificationRequestedData>(
+        "story_quality_reverification_requested",
+    )
+
 /** Gate-owned semantic timer tick for a missing terminal turn or critique. */
 export interface StoryQualityTimedOutData {
     runId: string

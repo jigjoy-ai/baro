@@ -31,6 +31,9 @@ export interface StoryExecOpts {
      * continuation-capable worker. */
     turnReviewAuthority?: Participant
     turnReviewTimeoutMs?: number
+    /** True only when collective AcceptanceGate remains the final integration
+     * authority after a continuation-capable worker exits. */
+    handoffInconclusiveToAcceptanceGate?: boolean
     /** Exact run-scoped collaboration transport for native StoryAgent tools. */
     collaboration?: Readonly<{
         commandPath: string
@@ -142,6 +145,8 @@ export class LocalStoryExecutor implements StoryExecutor {
                           timeoutSecs: req.timeoutSecs,
                           graphVersion: req.graphVersion,
                           requiresQualityReview: req.requiresQualityReview,
+                          handoffInconclusiveToAcceptanceGate:
+                              opts.handoffInconclusiveToAcceptanceGate,
                           ...correlation,
                       },
                       {
@@ -168,6 +173,8 @@ export class LocalStoryExecutor implements StoryExecutor {
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
                       requiresQualityReview: req.requiresQualityReview,
+                      handoffInconclusiveToAcceptanceGate:
+                          opts.handoffInconclusiveToAcceptanceGate,
                       turnReviewAuthority: opts.turnReviewAuthority,
                       turnReviewTimeoutMs: opts.turnReviewTimeoutMs,
                       ...correlation,

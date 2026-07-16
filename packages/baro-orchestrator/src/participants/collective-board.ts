@@ -853,10 +853,14 @@ export class CollectiveBoard extends SerializedObserver {
             return
         }
         if (data.status === "inconclusive") {
-            this.prepareOperationalRecovery(data.storyId, {
-                kind: "verification",
-                code: "evaluator_unavailable",
-            })
+            // AcceptanceGate has already exhausted its bounded rechecks of
+            // this exact lease/worktree. Preserve the candidate for diagnosis,
+            // but never turn missing evaluator evidence into a new coding
+            // generation (or a Surgeon quality-repair decision).
+            this.pendingRecovery.delete(data.storyId)
+            this.recoveryDecided.add(data.storyId)
+            this.operationalRecovery.abort(data.storyId)
+            this.recoveryAborted.add(data.storyId)
             this.failStory(
                 data.storyId,
                 `acceptance gate was inconclusive: ${data.reason}`,

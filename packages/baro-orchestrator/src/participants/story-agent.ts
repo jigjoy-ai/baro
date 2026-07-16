@@ -65,6 +65,9 @@ export interface StorySpec {
     turnReviewAuthority?: Participant
     /** Bound for one terminal-turn review. Default: 240 seconds. */
     turnReviewTimeoutMs?: number
+    /** Collective-only execution handoff. An inconclusive review closes the
+     * worker, while AcceptanceGate keeps the candidate pending and rechecks it. */
+    handoffInconclusiveToAcceptanceGate?: boolean
 }
 
 export interface StoryOutcome {
@@ -89,6 +92,7 @@ export class StoryAgent extends BaseObserver {
             | "hardTimeoutSecs"
             | "requiresQualityReview"
             | "turnReviewTimeoutMs"
+            | "handoffInconclusiveToAcceptanceGate"
         >
     > &
         StorySpec
@@ -121,8 +125,13 @@ export class StoryAgent extends BaseObserver {
             // quiet timer still close out idle agents.
             hardTimeoutSecs: 0,
             requiresQualityReview: false,
-            turnReviewTimeoutMs: 240_000,
+            handoffInconclusiveToAcceptanceGate: false,
             ...spec,
+            // `StoryFactory` legitimately forwards an optional timeout. Keep
+            // an omitted/explicit-undefined value from erasing the default;
+            // nullish coalescing deliberately preserves an explicit 0ms test
+            // or operator configuration.
+            turnReviewTimeoutMs: spec.turnReviewTimeoutMs ?? 240_000,
         }
         if (this.spec.requiresQualityReview && !this.spec.turnReviewAuthority) {
             throw new Error(`StoryAgent ${spec.id} requires a turnReviewAuthority`)
@@ -471,6 +480,8 @@ export class StoryAgent extends BaseObserver {
             maxTurns: this.spec.maxTurns,
             quietTimeoutMs: this.spec.quietTimeoutMs,
             reviewTimeoutMs: this.spec.turnReviewTimeoutMs,
+            handoffInconclusiveToAcceptanceGate:
+                this.spec.handoffInconclusiveToAcceptanceGate,
             onFinish: () => {
                 claude.closeStdin()
                 if (this.turnLifecycle === lifecycle) this.turnLifecycle = null

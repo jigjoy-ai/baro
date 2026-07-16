@@ -7,6 +7,8 @@ import { describe, it } from "node:test"
 
 import {
     BaseObserver,
+    FunctionCallItem,
+    FunctionCallOutputItem,
     type AgenticEnvironment,
     type Participant,
     type SemanticEvent,
@@ -146,16 +148,83 @@ class CritiquedPassingExecutor extends PassingExecutor {
 class CritiquedWritingExecutor extends CritiquedPassingExecutor {
     override start(
         request: StorySpawnRequestData,
-        route: StoryRoute,
+        _route: StoryRoute,
         cwd: string,
         environment: AgenticEnvironment,
         options: StoryExecOpts,
     ): StoryExecution {
+        this.started.push(request.storyId)
         writeFileSync(
             join(cwd, `${request.storyId}.txt`),
             `${request.storyId} reviewed and integrated\n`,
         )
-        return super.start(request, route, cwd, environment, options)
+        const verificationPath = join(cwd, `${request.storyId}.txt`)
+        const verificationScript =
+            'const { accessSync } = require("node:fs"); ' +
+            'accessSync(process.argv[1]); ' +
+            'process.stdout.write("fixture verification passed\\n")'
+        const verificationArgs = ["-e", verificationScript, verificationPath]
+        const command = [process.execPath, ...verificationArgs]
+            .map((part) => JSON.stringify(part))
+            .join(" ")
+        const output = execFileSync(process.execPath, verificationArgs, {
+            cwd,
+            encoding: "utf8",
+        })
+        const resultSource = { agentId: request.storyId } as never
+        options.registerResultAuthority?.(resultSource)
+        options.registerTerminalAuthority?.(resultSource)
+        setImmediate(() => {
+            const callId = `verify-${request.storyId}`
+            // The fixture executes this command above, then emits the same
+            // exact-source call/output pair a real worker projects onto the
+            // Mozaik bus. Critic evidence is therefore terminal and bound to
+            // the current candidate bytes.
+            environment.deliverFunctionCall(
+                resultSource,
+                FunctionCallItem.rehydrate({
+                    callId,
+                    name: "Bash",
+                    args: JSON.stringify({ command }),
+                }),
+            )
+            environment.deliverFunctionCallOutput(
+                resultSource,
+                FunctionCallOutputItem.create(
+                    callId,
+                    output,
+                ),
+            )
+            environment.deliverSemanticEvent(
+                resultSource,
+                AgentResult.create({
+                    agentId: request.storyId,
+                    terminalId: `custom:${request.storyId}:1`,
+                    subtype: "success",
+                    sessionId: null,
+                    isError: false,
+                    resultText: `${request.storyId} implementation and tests completed`,
+                    usage: null,
+                    totalCostUsd: null,
+                    numTurns: 1,
+                    durationMs: 1,
+                }),
+            )
+            environment.deliverSemanticEvent(
+                resultSource,
+                StoryResult.create({
+                    storyId: request.storyId,
+                    success: true,
+                    attempts: 1,
+                    durationSecs: 1,
+                    error: null,
+                    runId: request.runId,
+                    leaseId: request.leaseId,
+                    generation: request.generation,
+                }),
+            )
+        })
+        return { dispose: () => {} }
     }
 }
 

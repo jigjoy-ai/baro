@@ -52,9 +52,36 @@ export interface CriticEvidenceSource {
     /** Resolve the live story workspace immediately before the verdict call. */
     resolveRepositoryTarget: CriticRepositoryTargetResolver
     /** Actual shell/test calls observed on the bus, not claims from the summary. */
-    commandEvidence?(agentId: string): string | null | Promise<string | null>
+    commandEvidence?(
+        agentId: string,
+    ):
+        | CriticCommandEvidenceSnapshot
+        | string
+        | null
+        | Promise<CriticCommandEvidenceSnapshot | string | null>
     gitTimeoutMs?: number
     maxDiffChars?: number
+}
+
+export type CriticCommandFreshness = "fresh" | "stale" | "unverifiable"
+
+export interface CriticCommandEvidenceEntry {
+    /** A FunctionCallOutputItem was observed for this command. */
+    terminal: boolean
+    /** Whether this command is bound to the current changed repository bytes. */
+    freshness: CriticCommandFreshness
+    /** The terminal output shows that the sandbox prevented execution. */
+    sandboxBlocked: boolean
+}
+
+/**
+ * Machine-readable readiness metadata paired with the unchanged evidence text
+ * shown to the Critic. Keeping these separate prevents an old status line (or
+ * command output that merely contains one) from deciding readiness globally.
+ */
+export interface CriticCommandEvidenceSnapshot {
+    text: string
+    commands: readonly CriticCommandEvidenceEntry[]
 }
 
 export interface CriticEvaluationPreparation {
@@ -185,13 +212,19 @@ export class CriticCommandEvidenceCollector extends BaseObserver {
     }
 
     async snapshot(agentId: string): Promise<string | null> {
+        return (await this.snapshotForEvaluation(agentId))?.text ?? null
+    }
+
+    async snapshotForEvaluation(
+        agentId: string,
+    ): Promise<CriticCommandEvidenceSnapshot | null> {
         await this.drainFingerprintTasks(agentId)
         const retained = this.commands.get(agentId)
         if (!retained || retained.length === 0) return null
         const currentFingerprint = await this.captureCurrentFingerprint(agentId)
-        const rendered = retained.map((entry, index) => {
+        const captured = retained.map((entry, index) => {
             const output = entry.output
-            const freshness = renderFingerprintFreshness(
+            const freshness = fingerprintFreshness(
                 entry.fingerprint,
                 currentFingerprint,
             )
@@ -200,19 +233,33 @@ export class CriticCommandEvidenceCollector extends BaseObserver {
                 : commandOutputLooksFailed(output)
                   ? "completed; output indicates failure"
                   : "completed; consult captured output for the result"
-            return [
-                `### Command ${index + 1}`,
-                `tool: ${entry.tool}`,
-                `command: ${boundText(entry.command, MAX_COMMAND_CHARS)}`,
-                `runtime status: ${status}`,
-                `freshness: ${freshness}`,
-                "captured output:",
-                output === null
-                    ? "(no FunctionCallOutputItem observed)"
-                    : boundText(output || "(empty output)", MAX_COMMAND_OUTPUT_CHARS),
-            ].join("\n")
-        }).reverse().join("\n\n")
-        return boundText(
+            return {
+                readiness: {
+                    terminal: output !== null,
+                    freshness: freshness.state,
+                    sandboxBlocked:
+                        output !== null && outputLooksSandboxBlocked(output),
+                } satisfies CriticCommandEvidenceEntry,
+                rendered: [
+                    `### Command ${index + 1}`,
+                    `tool: ${entry.tool}`,
+                    `command: ${boundText(entry.command, MAX_COMMAND_CHARS)}`,
+                    `runtime status: ${status}`,
+                    `freshness: ${freshness.text}`,
+                    "captured output:",
+                    output === null
+                        ? "(no FunctionCallOutputItem observed)"
+                        : boundText(
+                              output || "(empty output)",
+                              MAX_COMMAND_OUTPUT_CHARS,
+                          ),
+                ].join("\n"),
+            }
+        })
+        const rendered = captured.map((entry) => entry.rendered)
+            .reverse()
+            .join("\n\n")
+        const text = boundText(
             [
                 "Freshness compares the exact changed-file content captured after each command with the live story workspace. Git metadata-only operations such as add/commit remain fresh; any changed path, type, mode, symlink target, or file bytes make earlier evidence stale.",
                 "STALE/UNVERIFIABLE evidence cannot prove the current workspace.",
@@ -222,6 +269,10 @@ export class CriticCommandEvidenceCollector extends BaseObserver {
             ].join("\n"),
             MAX_COMMAND_EVIDENCE_CHARS,
         )
+        return {
+            text,
+            commands: captured.map((entry) => entry.readiness),
+        }
     }
 
     private resetAttempt(agentId: string): void {
@@ -361,33 +412,60 @@ export class CriticCommandEvidenceCollector extends BaseObserver {
     }
 }
 
-function renderFingerprintFreshness(
+function fingerprintFreshness(
     captured: CommandFingerprint,
     current: CommandFingerprint,
-): string {
+): { state: CriticCommandFreshness; text: string } {
     if (captured.state === "pending") {
-        return "STALE/UNVERIFIABLE: no changed-content fingerprint was captured after this command"
+        return {
+            state: "unverifiable",
+            text: "STALE/UNVERIFIABLE: no changed-content fingerprint was captured after this command",
+        }
     }
     if (captured.state === "unavailable") {
-        return `STALE/UNVERIFIABLE: command fingerprint failed (${boundText(redactSensitiveText(captured.reason), 500)})`
+        return {
+            state: "unverifiable",
+            text: `STALE/UNVERIFIABLE: command fingerprint failed (${boundText(redactSensitiveText(captured.reason), 500)})`,
+        }
     }
     if (current.state === "unavailable") {
-        return `STALE/UNVERIFIABLE: current workspace fingerprint failed (${boundText(redactSensitiveText(current.reason), 500)})`
+        return {
+            state: "unverifiable",
+            text: `STALE/UNVERIFIABLE: current workspace fingerprint failed (${boundText(redactSensitiveText(current.reason), 500)})`,
+        }
     }
     if (current.state === "pending") {
-        return "STALE/UNVERIFIABLE: current workspace fingerprint is pending"
+        return {
+            state: "unverifiable",
+            text: "STALE/UNVERIFIABLE: current workspace fingerprint is pending",
+        }
     }
     if (captured.state === "fallback" || current.state === "fallback") {
         if (captured.state !== "fallback" || current.state !== "fallback") {
-            return "STALE/UNVERIFIABLE: repository fingerprint availability changed after this command"
+            return {
+                state: "unverifiable",
+                text: "STALE/UNVERIFIABLE: repository fingerprint availability changed after this command",
+            }
         }
         return captured.revision === current.revision
-            ? `fresh at conservative non-git revision ${current.revision}`
-            : `STALE: captured at conservative non-git revision ${captured.revision}; later shell/write activity advanced it to ${current.revision}`
+            ? {
+                  state: "fresh",
+                  text: `fresh at conservative non-git revision ${current.revision}`,
+              }
+            : {
+                  state: "stale",
+                  text: `STALE: captured at conservative non-git revision ${captured.revision}; later shell/write activity advanced it to ${current.revision}`,
+              }
     }
     return captured.value === current.value
-        ? `fresh: changed-content fingerprint ${current.value}`
-        : `STALE: changed-content fingerprint no longer matches the live story workspace (captured ${captured.value}; current ${current.value})`
+        ? {
+              state: "fresh",
+              text: `fresh: changed-content fingerprint ${current.value}`,
+          }
+        : {
+              state: "stale",
+              text: `STALE: changed-content fingerprint no longer matches the live story workspace (captured ${captured.value}; current ${current.value})`,
+          }
 }
 
 async function changedContentFingerprint(
@@ -692,7 +770,7 @@ export async function prepareCriticEvaluation(
         prompt: buildEvalPrompt(
             criteria,
             resultText,
-            commandEvidence,
+            commandEvidence.text,
             repositoryEvidence,
         ),
         status: issues.length > 0 ? "inconclusive" : "ready",
@@ -767,17 +845,54 @@ export function buildEvalPrompt(
 async function commandEvidenceFor(
     agentId: string,
     source?: CriticEvidenceSource,
-): Promise<string | null> {
-    if (!source?.commandEvidence) return null
+): Promise<ResolvedCommandEvidence> {
+    if (!source?.commandEvidence) {
+        return {
+            text: null,
+            commands: null,
+            collectionFailed: false,
+            hookConfigured: false,
+        }
+    }
     try {
-        return await source.commandEvidence(agentId)
+        const evidence = await source.commandEvidence(agentId)
+        if (evidence === null || typeof evidence === "string") {
+            return {
+                text: evidence,
+                commands: evidence === null
+                    ? null
+                    : parseRenderedCommandEvidence(evidence),
+                collectionFailed: false,
+                hookConfigured: true,
+            }
+        }
+        return {
+            text: evidence.text,
+            commands: evidence.commands,
+            collectionFailed: false,
+            hookConfigured: true,
+        }
     } catch (error) {
-        return `Command evidence collection failed closed: ${errorMessage(error)}`
+        return {
+            text: `Command evidence collection failed closed: ${errorMessage(error)}`,
+            commands: null,
+            collectionFailed: true,
+            hookConfigured: true,
+        }
     }
 }
 
+interface ResolvedCommandEvidence {
+    text: string | null
+    /** Null means legacy/unstructured evidence rather than an empty ledger. */
+    commands: readonly CriticCommandEvidenceEntry[] | null
+    collectionFailed: boolean
+    /** Distinguishes legacy sources with no collector from an empty collector. */
+    hookConfigured: boolean
+}
+
 function evidenceReadinessIssues(
-    commandEvidence: string | null,
+    commandEvidence: ResolvedCommandEvidence,
     repositoryEvidence: string | null,
 ): string[] {
     const issues: string[] = []
@@ -790,29 +905,106 @@ function evidenceReadinessIssues(
     ) {
         issues.push(boundText(repositoryEvidence, 500))
     }
-    if (commandEvidence) {
-        if (/^Command evidence collection failed closed:/im.test(commandEvidence)) {
-            issues.push("command evidence collection failed")
+    if (commandEvidence.collectionFailed) {
+        issues.push("command evidence collection failed")
+    } else if (
+        commandEvidence.hookConfigured &&
+        (commandEvidence.commands?.length === 0 ||
+            !commandEvidence.text?.trim())
+    ) {
+        issues.push("no terminal shell command evidence was observed")
+    } else if (commandEvidence.commands && commandEvidence.commands.length > 0) {
+        const hasUsableFreshTerminalCommand = commandEvidence.commands.some(
+            (command) =>
+                command.freshness === "fresh" &&
+                command.terminal &&
+                !command.sandboxBlocked,
+        )
+        if (!hasUsableFreshTerminalCommand) {
+            if (
+                commandEvidence.commands.some(
+                    (command) => command.freshness !== "fresh",
+                )
+            ) {
+                issues.push("command evidence is stale or unverifiable")
+            }
+            if (commandEvidence.commands.some((command) => !command.terminal)) {
+                issues.push("a verification command has no terminal output")
+            }
+            if (
+                commandEvidence.commands.some(
+                    (command) => command.sandboxBlocked,
+                )
+            ) {
+                issues.push("verification command was blocked by the sandbox")
+            }
+            if (
+                !issues.some((issue) =>
+                    issue === "command evidence is stale or unverifiable" ||
+                    issue === "a verification command has no terminal output" ||
+                    issue === "verification command was blocked by the sandbox"
+                )
+            ) {
+                issues.push("command evidence has no usable fresh terminal command")
+            }
         }
+    } else if (commandEvidence.text) {
+        // Compatibility for custom evidence sources that predate structured
+        // collector snapshots. Production collector output takes the branch
+        // above, so untrusted command output cannot forge readiness markers.
         if (
             /^freshness:\s*STALE(?:\/UNVERIFIABLE)?(?::|\s|$)/im.test(
-                commandEvidence,
+                commandEvidence.text,
             )
         ) {
             issues.push("command evidence is stale or unverifiable")
         }
-        if (/^runtime status:\s*pending\/no output observed/im.test(commandEvidence)) {
-            issues.push("a verification command has no terminal output")
-        }
         if (
-            /sandbox-exec|operation not permitted|permission denied|seatbelt|denied by sandbox/i.test(
-                commandEvidence,
+            /^runtime status:\s*pending\/no output observed/im.test(
+                commandEvidence.text,
             )
         ) {
+            issues.push("a verification command has no terminal output")
+        }
+        if (outputLooksSandboxBlocked(commandEvidence.text)) {
             issues.push("verification command was blocked by the sandbox")
         }
     }
     return [...new Set(issues)]
+}
+
+/** Parse only the collector's command blocks for legacy string sources. */
+function parseRenderedCommandEvidence(
+    evidence: string,
+): readonly CriticCommandEvidenceEntry[] | null {
+    const matches = [...evidence.matchAll(/^### Command \d+\s*$/gm)]
+    if (matches.length === 0) return null
+
+    return matches.map((match, index) => {
+        const start = (match.index ?? 0) + match[0].length
+        const end = matches[index + 1]?.index ?? evidence.length
+        const block = evidence.slice(start, end)
+        const outputMarker = /^captured output:\s*$/m.exec(block)
+        const metadata = outputMarker?.index === undefined
+            ? block
+            : block.slice(0, outputMarker.index)
+        const output = outputMarker?.index === undefined
+            ? ""
+            : block.slice(outputMarker.index + outputMarker[0].length)
+        const runtime = /^runtime status:\s*(.+)$/m.exec(metadata)?.[1]?.trim()
+        const freshnessText = /^freshness:\s*(.+)$/m.exec(metadata)?.[1]?.trim()
+        const freshness: CriticCommandFreshness =
+            freshnessText?.startsWith("fresh") === true
+                ? "fresh"
+                : freshnessText?.startsWith("STALE/UNVERIFIABLE") === true
+                  ? "unverifiable"
+                  : "stale"
+        return {
+            terminal: runtime?.startsWith("completed;") === true,
+            freshness,
+            sandboxBlocked: outputLooksSandboxBlocked(output),
+        }
+    })
 }
 
 function renderCompleteAcceptanceContract(
@@ -1192,6 +1384,12 @@ function extractCommand(rawArgs: unknown): string {
 
 function commandOutputLooksFailed(output: string): boolean {
     return /^(?:\[error\]|error:)|\b(?:exit(?:ed)?(?: with)? (?:code|status)|status=)[1-9]\d*\b/im.test(
+        output,
+    )
+}
+
+function outputLooksSandboxBlocked(output: string): boolean {
+    return /sandbox-exec|operation not permitted|permission denied|seatbelt|denied by sandbox/i.test(
         output,
     )
 }

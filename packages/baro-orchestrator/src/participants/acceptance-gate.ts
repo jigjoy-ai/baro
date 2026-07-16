@@ -4,6 +4,7 @@ import {
     Critique,
     RunCompleted,
     StoryQualityCompleted,
+    StoryQualityReverificationRequested,
     StoryQualityTimedOut,
     StoryResult,
     WorkLeaseGranted,
@@ -23,6 +24,7 @@ import {
 
 /** Outlives the slowest bounded Critic default (180s) plus delivery grace. */
 export const DEFAULT_ACCEPTANCE_TIMEOUT_MS = 240_000
+export const DEFAULT_ACCEPTANCE_REVERIFICATIONS = 2
 
 export interface AcceptanceGateOptions extends TerminalTurnAuthorityOptions {
     runId: string
@@ -30,6 +32,9 @@ export interface AcceptanceGateOptions extends TerminalTurnAuthorityOptions {
     targets: ReadonlyMap<string, readonly string[]>
     /** Bound for a missing terminal turn or matching Critique. Default: 240s. */
     timeoutMs?: number
+    /** Same-candidate Critic rechecks after an operationally inconclusive
+     * verdict. These never launch implementation work. Default: 2. */
+    maxReverificationAttempts?: number
     /** Optional object-identity authority for lease events. */
     leaseAuthority?: Participant
     /** Optional object-identity authority for Critique events. */
@@ -46,6 +51,7 @@ interface Correlation {
 interface PendingEvaluation extends Correlation {
     targetTurn: number | null
     timer: ReturnType<typeof setTimeout> | null
+    reverificationAttempts: number
 }
 
 interface LeaseWindow {
@@ -64,6 +70,7 @@ export class AcceptanceGate extends SerializedObserver {
     private readonly targets: ReadonlyMap<string, readonly string[]>
     private readonly turnCount = new Map<string, number>()
     private readonly latestTerminalTurn = new Map<string, number>()
+    private readonly terminalIds = new Map<string, Map<number, string | null>>()
     private readonly seenTerminalEvents = new Set<string>()
     private readonly critiques = new Map<string, Map<number, CritiqueData>>()
     private readonly activeLeases = new Map<string, LeaseWindow>()
@@ -74,6 +81,7 @@ export class AcceptanceGate extends SerializedObserver {
     private readonly pending = new Map<string, PendingEvaluation>()
     private readonly settledEvaluationIds = new Set<string>()
     private completionAuthority: Participant | null = null
+    private readonly maxReverificationAttempts: number
 
     constructor(private readonly opts: AcceptanceGateOptions) {
         super()
@@ -82,6 +90,18 @@ export class AcceptanceGate extends SerializedObserver {
             throw new RangeError("acceptance gate timeoutMs must be finite and non-negative")
         }
         this.timeoutMs = timeoutMs
+        const maxReverificationAttempts =
+            opts.maxReverificationAttempts ??
+            DEFAULT_ACCEPTANCE_REVERIFICATIONS
+        if (
+            !Number.isSafeInteger(maxReverificationAttempts) ||
+            maxReverificationAttempts < 0
+        ) {
+            throw new RangeError(
+                "acceptance gate maxReverificationAttempts must be a non-negative safe integer",
+            )
+        }
+        this.maxReverificationAttempts = maxReverificationAttempts
         this.targets = opts.targets
     }
 
@@ -185,7 +205,7 @@ export class AcceptanceGate extends SerializedObserver {
         event: SemanticEvent<unknown>,
         input: CriticInput,
     ): void {
-        const { agentId, isError, resultText } = input
+        const { agentId, isError, resultText, terminalId } = input
         // Match Critic's turn accounting exactly: only watched, actionable
         // terminal outputs advance the turn number.
         if (!this.hasAcceptanceCriteria(agentId) || isError || !resultText) return
@@ -205,6 +225,12 @@ export class AcceptanceGate extends SerializedObserver {
         const turn = (this.turnCount.get(agentId) ?? 0) + 1
         this.turnCount.set(agentId, turn)
         this.latestTerminalTurn.set(agentId, turn)
+        let terminalIds = this.terminalIds.get(agentId)
+        if (!terminalIds) {
+            terminalIds = new Map()
+            this.terminalIds.set(agentId, terminalIds)
+        }
+        terminalIds.set(turn, terminalId)
 
         const pending = this.pending.get(agentId)
         if (!pending || pending.targetTurn !== null) return
@@ -303,6 +329,7 @@ export class AcceptanceGate extends SerializedObserver {
             ...correlation,
             targetTurn: this.terminalTurnFor(correlation),
             timer: null,
+            reverificationAttempts: 0,
         }
         this.pending.set(data.storyId, pending)
         if (!this.tryResolve(pending)) this.armTimeout(pending)
@@ -332,6 +359,17 @@ export class AcceptanceGate extends SerializedObserver {
             ?.get(pending.targetTurn)
         if (!critique) return false
 
+        if (
+            critique.status === "inconclusive" &&
+            this.requestReverification(
+                pending,
+                critique.reasoning ||
+                    "Critic evaluation was operationally inconclusive",
+            )
+        ) {
+            return true
+        }
+
         this.complete({
             runId: this.opts.runId,
             evaluationId: pending.evaluationId,
@@ -355,6 +393,55 @@ export class AcceptanceGate extends SerializedObserver {
                 modelUsed: critique.modelUsed,
             },
         })
+        return true
+    }
+
+    private requestReverification(
+        pending: PendingEvaluation,
+        reason: string,
+    ): boolean {
+        if (
+            pending.targetTurn === null ||
+            pending.reverificationAttempts >= this.maxReverificationAttempts
+        ) return false
+
+        const previousEvaluationId = pending.evaluationId
+        const targetTurn = pending.targetTurn
+        const terminalId = this.terminalIds
+            .get(pending.storyId)
+            ?.get(targetTurn)
+        const attempt = pending.reverificationAttempts + 1
+        const evaluationId = reverificationEvaluationId(
+            this.opts.runId,
+            pending.storyId,
+            pending.leaseId,
+            pending.generation,
+            attempt,
+        )
+        const requestId = `${evaluationId}:request`
+
+        if (pending.timer) clearTimeout(pending.timer)
+        this.settledEvaluationIds.add(previousEvaluationId)
+        pending.evaluationId = evaluationId
+        pending.targetTurn = null
+        pending.timer = null
+        pending.reverificationAttempts = attempt
+        this.armTimeout(pending)
+        this.publish(
+            StoryQualityReverificationRequested.create({
+                runId: this.opts.runId,
+                requestId,
+                previousEvaluationId,
+                evaluationId,
+                storyId: pending.storyId,
+                leaseId: pending.leaseId,
+                generation: pending.generation,
+                targetTurn,
+                ...(terminalId ? { terminalId } : {}),
+                attempt,
+                reason,
+            }),
+        )
         return true
     }
 
@@ -396,6 +483,10 @@ export class AcceptanceGate extends SerializedObserver {
         const reason = pending.targetTurn === null
             ? `no terminal agent turn arrived within ${this.timeoutMs}ms`
             : `no critique for terminal turn ${pending.targetTurn} arrived within ${this.timeoutMs}ms`
+        if (
+            pending.targetTurn !== null &&
+            this.requestReverification(pending, reason)
+        ) return
         this.complete({
             runId: this.opts.runId,
             evaluationId: pending.evaluationId,
@@ -442,6 +533,25 @@ function evaluationId(
     generation: number,
 ): string {
     return [runId, "quality", storyId, generation, leaseId]
+        .map(encodeURIComponent)
+        .join(":")
+}
+
+function reverificationEvaluationId(
+    runId: string,
+    storyId: string,
+    leaseId: string,
+    generation: number,
+    attempt: number,
+): string {
+    return [
+        runId,
+        "quality-reverification",
+        storyId,
+        generation,
+        leaseId,
+        attempt,
+    ]
         .map(encodeURIComponent)
         .join(":")
 }

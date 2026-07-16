@@ -5,6 +5,7 @@ import {
     AcceptanceGate,
     DEFAULT_ACCEPTANCE_TIMEOUT_MS,
 } from "../../src/participants/acceptance-gate.js"
+import { AgentTurnProjector } from "../../src/participants/agent-turn-projector.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import {
     AgentResult,
@@ -12,11 +13,12 @@ import {
     Critique,
     RunCompleted,
     StoryQualityCompleted,
+    StoryQualityReverificationRequested,
     StoryQualityTimedOut,
     StoryResult,
     WorkLeaseGranted,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source } from "./helpers.js"
+import { captureEnv, joinWithCapture, source } from "./helpers.js"
 
 describe("AcceptanceGate", () => {
     it("ignores forged RunCompleted while a Board quality decision is pending", async () => {
@@ -126,7 +128,12 @@ describe("AcceptanceGate", () => {
     })
 
     it("does not turn an evaluator incident into a code-quality failure", async () => {
-        const gate = targetedGate("run-inconclusive", 200)
+        const gate = new AcceptanceGate({
+            runId: "run-inconclusive",
+            targets: new Map([["S1", ["tests"]]]),
+            timeoutMs: 200,
+            maxReverificationAttempts: 0,
+        })
         const env = joinWithCapture(gate)
         grantLease(env, "run-inconclusive", "S1", "lease-1", 1)
         deliverAgentTurn(env, "S1", "openai", "done")
@@ -148,6 +155,243 @@ describe("AcceptanceGate", () => {
         assert.equal(quality.data.status, "inconclusive")
         assert.equal(quality.data.critique?.status, "inconclusive")
         assert.match(quality.data.reason, /evaluator timed out/)
+    })
+
+    it("re-evaluates the same leased candidate without launching new work", async () => {
+        const runId = "run-same-candidate"
+        const broker = source("broker")
+        const critic = source("critic")
+        const story = source("S1")
+        const gate = new AcceptanceGate({
+            runId,
+            targets: new Map([["S1", ["tests"]]]),
+            timeoutMs: 200,
+            maxReverificationAttempts: 2,
+            leaseAuthority: broker,
+            critiqueAuthority: critic,
+        })
+        const projector = new AgentTurnProjector()
+        projector.setLeaseAuthority(broker)
+        projector.setReverificationAuthority(gate)
+        const env = captureEnv()
+        gate.join(env)
+        projector.join(env)
+
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseGranted.create({
+                runId,
+                offerId: "offer-S1",
+                leaseId: "lease-1",
+                workerId: "worker",
+                generation: 1,
+                request: {
+                    storyId: "S1",
+                    prompt: "S1",
+                    model: "standard",
+                    retries: 0,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+        const terminal = AgentResult.create({
+            agentId: "S1",
+            terminalId: "candidate-terminal-1",
+            subtype: "success",
+            sessionId: null,
+            isError: false,
+            resultText: "candidate commit 7bdb1b7",
+            usage: null,
+            totalCostUsd: null,
+            numTurns: 1,
+            durationMs: 1,
+        })
+        env.deliverSemanticEvent(story, terminal)
+        env.deliverSemanticEvent(
+            story,
+            StoryResult.create({
+                storyId: "S1",
+                success: true,
+                attempts: 1,
+                durationSecs: 1,
+                error: null,
+                runId,
+                leaseId: "lease-1",
+                generation: 1,
+            }),
+        )
+        env.deliverSemanticEvent(
+            critic,
+            Critique.create({
+                agentId: "S1",
+                terminalId: "candidate-terminal-1",
+                status: "inconclusive",
+                verdict: "fail",
+                reasoning: "old stale evidence obscured newer fresh evidence",
+                violatedCriteria: ["[acceptance evidence unavailable]"],
+                turn: 1,
+                modelUsed: "critic",
+            }),
+        )
+        await gate.idle()
+
+        const request = env.events.find(StoryQualityReverificationRequested.is)
+        assert.ok(request)
+        assert.equal(request.data.leaseId, "lease-1")
+        assert.equal(request.data.generation, 1)
+        assert.equal(request.data.targetTurn, 1)
+        assert.equal(request.data.terminalId, "candidate-terminal-1")
+        assert.equal(env.events.filter(StoryResult.is).length, 1)
+
+        const terminals = env.events.filter(AgentTurnCompleted.is)
+        assert.equal(terminals.length, 1)
+        assert.equal(terminals[0]?.data.resultText, terminal.data.resultText)
+        assert.equal(terminals[0]?.data.canContinue, false)
+        assert.match(terminals[0]?.data.terminalId ?? "", /^reverification:/)
+
+        env.deliverSemanticEvent(
+            critic,
+            Critique.create({
+                agentId: "S1",
+                terminalId: terminals[0]!.data.terminalId,
+                status: "evaluated",
+                verdict: "pass",
+                reasoning: "same candidate satisfies the criteria",
+                violatedCriteria: [],
+                turn: 2,
+                modelUsed: "critic",
+            }),
+        )
+        const quality = await qualityResult(env)
+        assert.equal(quality.data.status, "passed")
+        assert.equal(quality.data.targetTurn, 2)
+        assert.equal(quality.data.leaseId, "lease-1")
+        assert.equal(env.events.filter(StoryQualityReverificationRequested.is).length, 1)
+    })
+
+    it("fails closed after the bounded same-candidate rechecks are exhausted", async () => {
+        const runId = "run-reverification-bounded"
+        const broker = source("broker")
+        const critic = source("critic")
+        const story = source("S1")
+        const gate = new AcceptanceGate({
+            runId,
+            targets: new Map([["S1", ["tests"]]]),
+            timeoutMs: 200,
+            maxReverificationAttempts: 1,
+            leaseAuthority: broker,
+            critiqueAuthority: critic,
+        })
+        const projector = new AgentTurnProjector()
+        projector.setLeaseAuthority(broker)
+        projector.setReverificationAuthority(gate)
+        const env = captureEnv()
+        gate.join(env)
+        projector.join(env)
+
+        grantLeaseFrom(env, broker, runId, "S1", "lease-1", 1)
+        env.deliverSemanticEvent(
+            story,
+            AgentResult.create({
+                agentId: "S1",
+                terminalId: "candidate-1",
+                subtype: "success",
+                sessionId: null,
+                isError: false,
+                resultText: "unchanged candidate",
+                usage: null,
+                totalCostUsd: null,
+                numTurns: 1,
+                durationMs: 1,
+            }),
+        )
+        env.deliverSemanticEvent(
+            story,
+            StoryResult.create({
+                storyId: "S1",
+                success: true,
+                attempts: 1,
+                durationSecs: 1,
+                error: null,
+                runId,
+                leaseId: "lease-1",
+                generation: 1,
+            }),
+        )
+        deliverCritiqueFrom(env, critic, "S1", 1, "inconclusive")
+        await gate.idle()
+        deliverCritiqueFrom(env, critic, "S1", 2, "inconclusive")
+
+        const quality = await qualityResult(env)
+        assert.equal(quality.data.status, "inconclusive")
+        assert.equal(quality.data.targetTurn, 2)
+        assert.equal(env.events.filter(StoryQualityReverificationRequested.is).length, 1)
+        assert.equal(env.events.filter(StoryResult.is).length, 1)
+    })
+
+    it("rechecks the same candidate after a missing-Critic timeout, then stops boundedly", async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout"] })
+        const runId = "run-reverification-timeout"
+        const broker = source("broker")
+        const story = source("S1")
+        const gate = new AcceptanceGate({
+            runId,
+            targets: new Map([["S1", ["tests"]]]),
+            timeoutMs: 10,
+            maxReverificationAttempts: 1,
+            leaseAuthority: broker,
+        })
+        const projector = new AgentTurnProjector()
+        projector.setLeaseAuthority(broker)
+        projector.setReverificationAuthority(gate)
+        const env = captureEnv()
+        gate.join(env)
+        projector.join(env)
+
+        grantLeaseFrom(env, broker, runId, "S1", "lease-1", 1)
+        env.deliverSemanticEvent(
+            story,
+            AgentResult.create({
+                agentId: "S1",
+                terminalId: "candidate-timeout",
+                subtype: "success",
+                sessionId: null,
+                isError: false,
+                resultText: "same candidate after timeout",
+                usage: null,
+                totalCostUsd: null,
+                numTurns: 1,
+                durationMs: 1,
+            }),
+        )
+        env.deliverSemanticEvent(
+            story,
+            StoryResult.create({
+                storyId: "S1",
+                success: true,
+                attempts: 1,
+                durationSecs: 1,
+                error: null,
+                runId,
+                leaseId: "lease-1",
+                generation: 1,
+            }),
+        )
+        await gate.idle()
+
+        t.mock.timers.tick(10)
+        await gate.idle()
+        assert.equal(env.events.filter(StoryQualityReverificationRequested.is).length, 1)
+        assert.equal(env.events.filter(AgentTurnCompleted.is).length, 1)
+        assert.equal(env.events.filter(StoryQualityCompleted.is).length, 0)
+
+        t.mock.timers.tick(10)
+        await gate.idle()
+        const quality = env.events.find(StoryQualityCompleted.is)
+        assert.ok(quality)
+        assert.equal(quality.data.status, "inconclusive")
+        assert.equal(quality.data.targetTurn, 2)
+        assert.equal(env.events.filter(StoryQualityReverificationRequested.is).length, 1)
     })
 
     it("passes immediately when no acceptance criteria are configured", async () => {
@@ -181,7 +425,12 @@ describe("AcceptanceGate", () => {
     })
 
     it("reports an inconclusive gate when the terminal turn has no critique", async () => {
-        const gate = targetedGate("run-no-critique", 10)
+        const gate = new AcceptanceGate({
+            runId: "run-no-critique",
+            targets: new Map([["S1", ["tests"]]]),
+            timeoutMs: 10,
+            maxReverificationAttempts: 0,
+        })
         const env = joinWithCapture(gate)
         grantLease(env, "run-no-critique", "S1", "lease-1", 1)
         deliverAgentResult(env, "S1", "done")
@@ -391,6 +640,33 @@ function grantLease(
     )
 }
 
+function grantLeaseFrom(
+    env: ReturnType<typeof captureEnv>,
+    broker: ReturnType<typeof source>,
+    runId: string,
+    storyId: string,
+    leaseId: string,
+    generation: number,
+): void {
+    env.deliverSemanticEvent(
+        broker,
+        WorkLeaseGranted.create({
+            runId,
+            offerId: `offer-${storyId}`,
+            leaseId,
+            workerId: "worker",
+            generation,
+            request: {
+                storyId,
+                prompt: storyId,
+                model: "standard",
+                retries: 0,
+                timeoutSecs: 60,
+            },
+        }),
+    )
+}
+
 function deliverAgentResult(
     env: ReturnType<typeof joinWithCapture>,
     agentId: string,
@@ -448,6 +724,27 @@ function deliverCritique(
             verdict,
             reasoning,
             violatedCriteria: verdict === "fail" ? ["tests"] : [],
+            turn,
+            modelUsed: "test-critic",
+        }),
+    )
+}
+
+function deliverCritiqueFrom(
+    env: ReturnType<typeof captureEnv>,
+    critic: ReturnType<typeof source>,
+    agentId: string,
+    turn: number,
+    status: "inconclusive",
+): void {
+    env.deliverSemanticEvent(
+        critic,
+        Critique.create({
+            agentId,
+            status,
+            verdict: "fail",
+            reasoning: `evidence unavailable on turn ${turn}`,
+            violatedCriteria: ["[acceptance evidence unavailable]"],
             turn,
             modelUsed: "test-critic",
         }),

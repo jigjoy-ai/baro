@@ -10,7 +10,7 @@ import { ChildProcess } from "child_process"
 import spawn from "cross-spawn"
 
 import { harnessChildEnvironment } from "./harness-environment.js"
-import { anyProcessAlive, signalProcessTree } from "./process-tree.js"
+import { ManagedProcessTree } from "./process-tree.js"
 
 import {
     knownMetric,
@@ -241,6 +241,10 @@ export async function runCodexOneShot(
             reject(e instanceof Error ? e : new Error(String(e)))
             return
         }
+        const processTree = new ManagedProcessTree(proc, {
+            terminationGraceMs,
+            pollIntervalMs: 25,
+        })
 
         let agentMessage = ""
         let stdoutBuffer = ""
@@ -249,30 +253,29 @@ export async function runCodexOneShot(
         let timedOut = false
         let aborted = false
         let stdinError: Error | null = null
-        let killTimer: ReturnType<typeof setTimeout> | null = null
-        let pollTimer: ReturnType<typeof setInterval> | null = null
-        let signalledPids = new Set<number>()
-        let deferredExit: {
+        let processError: Error | null = null
+        let finalized = false
+        let treeRefreshed = false
+        let rootExit: {
             code: number | null
             signal: NodeJS.Signals | null
         } | null = null
 
         const cleanup = (): void => {
             clearTimeout(timer)
-            if (killTimer !== null) {
-                clearTimeout(killTimer)
-                killTimer = null
-            }
-            if (pollTimer !== null) {
-                clearInterval(pollTimer)
-                pollTimer = null
-            }
             opts.signal?.removeEventListener("abort", onAbort)
+        }
+        const refreshProcessTree = (): void => {
+            if (treeRefreshed) return
+            treeRefreshed = true
+            processTree.refresh()
         }
         const finalizeExit = (
             code: number | null,
             signal: NodeJS.Signals | null,
         ): void => {
+            if (finalized) return
+            finalized = true
             cleanup()
             const elapsedMs = Date.now() - startedAt
 
@@ -299,6 +302,7 @@ export async function runCodexOneShot(
             // accepts truncated-but-closed fragments, so partial text on
             // timeout/crash would silently yield an incomplete doc or PRD.
             if (
+                processError ||
                 stdinError ||
                 timedOut ||
                 aborted ||
@@ -317,7 +321,7 @@ export async function runCodexOneShot(
                     return
                 }
                 reject(
-                    stdinError ?? new Error(
+                    processError ?? stdinError ?? new Error(
                         `runCodexOneShot: codex terminated abnormally before completing (${ctx})`,
                     ),
                 )
@@ -353,27 +357,22 @@ export async function runCodexOneShot(
                 ),
             )
         }
-        const finishDeferredExit = (): void => {
-            const exit = deferredExit
-            if (!exit) return
-            deferredExit = null
-            finalizeExit(exit.code, exit.signal)
+        const finalizeAbnormalAfterTree = (): void => {
+            void processTree.done.then(() => {
+                // An unobserved descendant can retain the inherited pipe even
+                // after ManagedProcessTree has exhausted what it can discover.
+                // Abnormal completion is already discarding partial output, so
+                // release our local handles instead of waiting forever on close.
+                proc.stdin?.destroy()
+                proc.stdout?.destroy()
+                proc.stderr?.destroy()
+                const terminal = rootExit ?? { code: null, signal: null }
+                finalizeExit(terminal.code, terminal.signal)
+            })
         }
         const terminate = (): void => {
-            signalledPids = signalProcessTree(proc, "SIGTERM", signalledPids)
-            if (killTimer !== null) return
-            killTimer = setTimeout(() => {
-                killTimer = null
-                signalledPids = signalProcessTree(
-                    proc,
-                    "SIGKILL",
-                    signalledPids,
-                )
-                // If the direct CLI already exited, every captured descendant
-                // has now received SIGKILL. Do not clear this timer merely
-                // because the root exited before a resistant grandchild.
-                finishDeferredExit()
-            }, terminationGraceMs)
+            processTree.terminate("SIGTERM")
+            finalizeAbnormalAfterTree()
         }
         const onAbort = (): void => {
             if (aborted) return
@@ -391,75 +390,82 @@ export async function runCodexOneShot(
         // Close the race between the pre-spawn check and listener install.
         if (opts.signal?.aborted) onAbort()
 
+        const processLine = (rawLine: string): void => {
+            const line = rawLine.trim()
+            if (!line) return
+            let event: Record<string, unknown>
+            try {
+                event = JSON.parse(line) as Record<string, unknown>
+            } catch {
+                return
+            }
+            const type = typeof event.type === "string" ? event.type : ""
+            if (type) eventTypesSeen.push(type)
+
+            if (type === "turn.completed") {
+                const usage = record(event.usage)
+                if (Object.keys(usage).length > 0) {
+                    process.stderr.write(
+                        `[${label}] usage: in=${numberForLog(usage.input_tokens)} out=${numberForLog(usage.output_tokens)}\n`,
+                    )
+                }
+                // A thread id identifies the Codex harness session, not
+                // an upstream model request, so it must never populate
+                // providerRequestId.
+                if (!timedOut) {
+                    invocations.observe(
+                        codexObservation(
+                            event,
+                            Date.now() - startedAt,
+                            opts,
+                        ),
+                    )
+                }
+                return
+            }
+            if (type === "item.completed") {
+                const item = event.item as Record<string, unknown> | undefined
+                if (!item) return
+                const innerType =
+                    typeof item.type === "string" ? item.type : "?"
+                itemTypesSeen.push(innerType)
+                if (
+                    item.type === "agent_message" &&
+                    typeof item.text === "string"
+                ) {
+                    // Codex can emit completed assistant/status messages before
+                    // the terminal response. Keep only the terminal message.
+                    agentMessage = item.text
+                } else if (innerType === "command_execution") {
+                    const cmd =
+                        typeof item.command === "string"
+                            ? item.command.slice(0, 120)
+                            : "?"
+                    process.stderr.write(`[${label}] $ ${cmd}\n`)
+                }
+            }
+        }
+
         proc.stdout!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => {
+            refreshProcessTree()
             stdoutBuffer += chunk
             let nl: number
             while ((nl = stdoutBuffer.indexOf("\n")) >= 0) {
-                const line = stdoutBuffer.slice(0, nl).trim()
+                const line = stdoutBuffer.slice(0, nl)
                 stdoutBuffer = stdoutBuffer.slice(nl + 1)
-                if (!line) continue
-                let event: Record<string, unknown>
-                try {
-                    event = JSON.parse(line) as Record<string, unknown>
-                } catch {
-                    continue
-                }
-                const type = typeof event.type === "string" ? event.type : ""
-                if (type) eventTypesSeen.push(type)
-
-                if (type === "turn.completed") {
-                    const usage = record(event.usage)
-                    if (Object.keys(usage).length > 0) {
-                        process.stderr.write(
-                            `[${label}] usage: in=${numberForLog(usage.input_tokens)} out=${numberForLog(usage.output_tokens)}\n`,
-                        )
-                    }
-                    // A thread id identifies the Codex harness session, not
-                    // an upstream model request, so it must never populate
-                    // providerRequestId.
-                    if (!timedOut) {
-                        invocations.observe(
-                            codexObservation(
-                                event,
-                                Date.now() - startedAt,
-                                opts,
-                            ),
-                        )
-                    }
-                    continue
-                }
-                if (type === "item.completed") {
-                    const item = event.item as Record<string, unknown> | undefined
-                    if (item) {
-                        const innerType =
-                            typeof item.type === "string" ? item.type : "?"
-                        itemTypesSeen.push(innerType)
-                        if (
-                            item.type === "agent_message" &&
-                            typeof item.text === "string"
-                        ) {
-                            // Codex can emit completed assistant/status
-                            // messages before the terminal response. Native
-                            // output-schema validation applies to the final
-                            // response, so concatenating earlier messages
-                            // corrupts otherwise valid JSON/ADR output.
-                            agentMessage = item.text
-                        } else if (innerType === "command_execution") {
-                            const cmd =
-                                typeof item.command === "string"
-                                    ? item.command.slice(0, 120)
-                                    : "?"
-                            process.stderr.write(`[${label}] $ ${cmd}\n`)
-                        }
-                    }
-                    continue
-                }
+                processLine(line)
             }
+        })
+        proc.stdout!.on("end", () => {
+            if (stdoutBuffer.length === 0) return
+            processLine(stdoutBuffer)
+            stdoutBuffer = ""
         })
 
         proc.stderr!.setEncoding("utf8")
         proc.stderr!.on("data", (chunk: string) => {
+            refreshProcessTree()
             const trimmed = chunk.trimEnd()
             if (trimmed) {
                 process.stderr.write(`[${label}/stderr] ${trimmed}\n`)
@@ -467,32 +473,23 @@ export async function runCodexOneShot(
         })
 
         proc.on("error", (err) => {
-            cleanup()
-            if (
-                !invocations.finish(
-                    unknownCodexObservation(
-                        timedOut ? "timed_out" : "failed",
-                        Date.now() - startedAt,
-                        opts,
-                    ),
-                )
-            ) {
-                return
-            }
-            reject(err)
+            processError ??= err
+            if (proc.pid === undefined) processTree.markRootClosed()
+            else processTree.terminate("SIGTERM")
+            finalizeAbnormalAfterTree()
         })
 
         proc.on("exit", (code, signal) => {
-            if ((timedOut || aborted) && anyProcessAlive(signalledPids)) {
-                deferredExit = { code, signal }
-                // Graceful descendants have no Node event to wake us when
-                // they finish, so poll only after the direct child has exited.
-                pollTimer = setInterval(() => {
-                    if (!anyProcessAlive(signalledPids)) finishDeferredExit()
-                }, 25)
-                return
-            }
-            finalizeExit(code, signal)
+            rootExit = { code, signal }
+            processTree.markRootClosed()
+        })
+        proc.on("close", (code, signal) => {
+            rootExit ??= { code, signal }
+            processTree.markRootClosed()
+            const terminal = rootExit
+            void processTree.done.then(() =>
+                finalizeExit(terminal.code, terminal.signal),
+            )
         })
         if (opts.promptViaStdin) {
             if (!proc.stdin) {

@@ -19,6 +19,7 @@ import {
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
 import { harnessChildEnvironment } from "../harness-environment.js"
+import { ManagedProcessTree } from "../process-tree.js"
 import {
     AgentState,
     AgentTargetedMessage,
@@ -35,6 +36,8 @@ export interface PiCliParticipantOptions {
     provider?: string
     model?: string
     piBin?: string
+    /** Bound inherited-stdio drain after the direct CLI root exits. */
+    closeDrainTimeoutMs?: number
 }
 
 export interface PiRunSummary {
@@ -76,11 +79,12 @@ export class PiCliParticipant extends BaseObserver {
     }
 
     private readonly options: Required<
-        Pick<PiCliParticipantOptions, "piBin">
+        Pick<PiCliParticipantOptions, "piBin" | "closeDrainTimeoutMs">
     > &
         PiCliParticipantOptions
 
     private proc: ChildProcess | null = null
+    private processTree: ManagedProcessTree | null = null
     private buffer = ""
     private stderrTail = ""
     private envRef: AgenticEnvironment | null = null
@@ -93,23 +97,18 @@ export class PiCliParticipant extends BaseObserver {
     private toolSuccessCount = 0
     private doneSettled = false
     private readySettled = false
-    private killTimer: ReturnType<typeof setTimeout> | null = null
+    private closeDrainTimer: ReturnType<typeof setTimeout> | null = null
     private resolveDone!: (summary: PiRunSummary) => void
     private resolveReady!: () => void
     private rejectReady!: (e: Error) => void
 
-    /**
-     * SIGTERM→SIGKILL grace (ms) in {@link abort}. A child wedged in a
-     * blocking syscall ignores SIGTERM; without escalation `await done` hangs.
-     */
-    private static readonly KILL_GRACE_MS = 5_000
-
     /** Cap on the un-newlined stdout buffer (16 MiB). See handleStdout. */
     private static readonly MAX_BUFFER_BYTES = 16 * 1024 * 1024
+    private static readonly CLOSE_DRAIN_TIMEOUT_MS = 7_500
 
     /** Resolves once Pi emits its first `agent_start` or `session` event. */
     public readonly ready: Promise<void>
-    /** Resolves once Pi exits and its stdout/stderr streams have closed. */
+    /** Resolves after stream close, or a bounded post-root-exit drain failure. */
     public readonly done: Promise<PiRunSummary>
 
     constructor(
@@ -121,6 +120,15 @@ export class PiCliParticipant extends BaseObserver {
         this.options = {
             ...opts,
             piBin: opts.piBin ?? "pi",
+            closeDrainTimeoutMs:
+                opts.closeDrainTimeoutMs ??
+                PiCliParticipant.CLOSE_DRAIN_TIMEOUT_MS,
+        }
+        if (
+            !Number.isFinite(this.options.closeDrainTimeoutMs) ||
+            this.options.closeDrainTimeoutMs < 1
+        ) {
+            throw new RangeError("Pi closeDrainTimeoutMs must be positive")
         }
         this.ready = new Promise<void>((res, rej) => {
             this.resolveReady = res
@@ -139,16 +147,70 @@ export class PiCliParticipant extends BaseObserver {
      * every resolution path goes through here so `done` settles exactly once
      * (an async spawn error must not leave `done` pending for a later close).
      */
-    private settleDone(summary: PiRunSummary): void {
+    private settleDone(summary: PiRunSummary, waitForProcessTree = true): void {
+        this.clearCloseDrainWatchdog()
         if (this.doneSettled) return
         this.doneSettled = true
-        // Cancel pending SIGKILL escalation — it could fire against a
-        // recycled pid and its timer keeps the event loop alive.
-        if (this.killTimer !== null) {
-            clearTimeout(this.killTimer)
-            this.killTimer = null
+        const releaseTreeOwnership = (): void => {
+            PiCliParticipant.active.delete(this)
         }
-        this.resolveDone(summary)
+        const processTree = this.processTree
+        if (processTree === null) {
+            releaseTreeOwnership()
+            this.resolveDone(summary)
+            return
+        }
+        processTree.markRootClosed()
+        if (!waitForProcessTree) {
+            // The participant result is bounded, while both registries retain
+            // the tree until its independent cleanup actually completes.
+            this.resolveDone(summary)
+            void processTree.done.then(releaseTreeOwnership)
+            return
+        }
+        void processTree.done.then(() => {
+            releaseTreeOwnership()
+            this.resolveDone(summary)
+        })
+    }
+
+    private startCloseDrainWatchdog(code: number | null): void {
+        this.exitCode = code
+        if (this.doneSettled || this.closeDrainTimer !== null) return
+        this.closeDrainTimer = setTimeout(() => {
+            if (this.doneSettled) return
+            const error = new Error(
+                `pi streams remained open ${this.options.closeDrainTimeoutMs}ms after root exit`,
+            )
+            this.spawnError = error
+            this.transition("failed", error.message)
+            this.failReady(error)
+            this.settleDone(
+                {
+                    sessionId: this.sessionId,
+                    exitCode: this.exitCode,
+                    error,
+                    stderrTail: this.stderrTail || null,
+                    sawAgentEnd: this.sawAgentEnd,
+                    toolCallCount: this.toolCallCount,
+                    toolSuccessCount: this.toolSuccessCount,
+                },
+                false,
+            )
+            this.destroyLocalStdio()
+        }, this.options.closeDrainTimeoutMs)
+    }
+
+    private clearCloseDrainWatchdog(): void {
+        if (this.closeDrainTimer === null) return
+        clearTimeout(this.closeDrainTimer)
+        this.closeDrainTimer = null
+    }
+
+    private destroyLocalStdio(): void {
+        this.proc?.stdin?.destroy()
+        this.proc?.stdout?.destroy()
+        this.proc?.stderr?.destroy()
     }
 
     private settleReady(): void {
@@ -205,21 +267,30 @@ export class PiCliParticipant extends BaseObserver {
         }
 
         this.proc = proc
+        this.processTree = new ManagedProcessTree(proc)
         PiCliParticipant.active.add(this)
         this.transition("starting")
 
         proc.stdout!.setEncoding("utf8")
         proc.stderr!.setEncoding("utf8")
+        proc.stdout!.once("data", () => this.processTree?.refresh())
         proc.stdout!.on("data", (chunk: string) => this.handleStdout(chunk))
         // A final line without `\n` (e.g. agent_end) would otherwise be
         // dropped, corrupting the success predicate. 'end' fires after the
         // last 'data', before the child 'close' boundary.
         proc.stdout!.on("end", () => this.flushStdout())
         proc.stderr!.on("data", (chunk: string) => this.handleStderr(chunk))
+        // Root `exit` precedes `close` when a descendant inherited stdio. Tell
+        // the tree supervisor now so that descendant cannot hold `done` open.
+        proc.on("exit", (code) => {
+            this.processTree?.markRootClosed()
+            this.startCloseDrainWatchdog(code)
+        })
         proc.on("error", (err) => {
+            this.clearCloseDrainWatchdog()
+            if (this.doneSettled) return
             // Settle async process errors directly; a later `close` is safely
             // ignored by settleDone's exact-once guard.
-            PiCliParticipant.active.delete(this)
             this.spawnError = err
             this.transition("failed", err.message)
             this.failReady(err)
@@ -237,7 +308,8 @@ export class PiCliParticipant extends BaseObserver {
         // terminal boundary for the normal path because it fires only after
         // those streams close; the `error` path above still settles directly.
         proc.on("close", (code) => {
-            PiCliParticipant.active.delete(this)
+            this.clearCloseDrainWatchdog()
+            if (this.doneSettled) return
             this.exitCode = code
             const finalPhase: AgentPhase =
                 this.spawnError != null || (code != null && code !== 0)
@@ -266,32 +338,10 @@ export class PiCliParticipant extends BaseObserver {
         })
     }
 
-    /**
-     * Soft signal first, SIGKILL after KILL_GRACE_MS — a child that ignores
-     * SIGTERM would otherwise leave `await done` hanging forever.
-     */
+    /** Shared tree supervisor escalates and retains ownership until clean. */
     abort(signal: NodeJS.Signals = "SIGTERM"): void {
-        this.transition("aborted")
-        const proc = this.proc
-        if (!proc) return
-        try {
-            proc.kill(signal)
-        } catch {
-            // best-effort
-        }
-        // SIGKILL is unconditional; if already escalating, don't stack timers.
-        if (signal === "SIGKILL" || this.killTimer !== null) return
-        this.killTimer = setTimeout(() => {
-            this.killTimer = null
-            if (this.doneSettled) return
-            try {
-                proc.kill("SIGKILL")
-            } catch {
-                // best-effort
-            }
-        }, PiCliParticipant.KILL_GRACE_MS)
-        // unref: don't let the escalation timer hold the process open.
-        this.killTimer.unref?.()
+        if (!this.doneSettled) this.transition("aborted")
+        this.processTree?.terminate(signal)
     }
 
     override async onExternalEvent(

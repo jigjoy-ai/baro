@@ -9,7 +9,7 @@ import { ChildProcess } from "child_process"
 import spawn from "cross-spawn"
 
 import { harnessChildEnvironment } from "./harness-environment.js"
-import { anyProcessAlive, signalProcessTree } from "./process-tree.js"
+import { ManagedProcessTree } from "./process-tree.js"
 
 import {
     knownMetric,
@@ -103,6 +103,10 @@ export async function runPiOneShot(
             reject(e instanceof Error ? e : new Error(String(e)))
             return
         }
+        const processTree = new ManagedProcessTree(proc, {
+            terminationGraceMs,
+            pollIntervalMs: 25,
+        })
         let assistantText = ""
         let stdoutBuffer = ""
         const eventTypesSeen: string[] = []
@@ -110,13 +114,10 @@ export async function runPiOneShot(
         let timedOut = false
         let aborted = false
         let timer: ReturnType<typeof setTimeout> | null = null
-        let killTimer: ReturnType<typeof setTimeout> | null = null
-        let pollTimer: ReturnType<typeof setInterval> | null = null
-        let signalledPids = new Set<number>()
-        let escalated = false
-        let terminationRequested = false
         let forcedError: Error | null = null
-        let deferredExit: {
+        let finalized = false
+        let treeRefreshed = false
+        let rootExit: {
             code: number | null
             signal: NodeJS.Signals | null
         } | null = null
@@ -126,32 +127,25 @@ export async function runPiOneShot(
                 clearTimeout(timer)
                 timer = null
             }
-            if (killTimer !== null) {
-                clearTimeout(killTimer)
-                killTimer = null
-            }
-            if (pollTimer !== null) {
-                clearInterval(pollTimer)
-                pollTimer = null
-            }
             opts.signal?.removeEventListener("abort", onAbort)
         }
+        const refreshProcessTree = (): void => {
+            if (treeRefreshed) return
+            treeRefreshed = true
+            processTree.refresh()
+        }
+        const finalizeAbnormalAfterTree = (): void => {
+            void processTree.done.then(() => {
+                proc.stdin?.destroy()
+                proc.stdout?.destroy()
+                proc.stderr?.destroy()
+                const terminal = rootExit ?? { code: null, signal: null }
+                finalizeExit(terminal.code, terminal.signal)
+            })
+        }
         const terminate = (): void => {
-            terminationRequested = true
-            signalledPids = signalProcessTree(proc, "SIGTERM", signalledPids)
-            if (killTimer !== null) return
-            // Escalate to SIGKILL if Pi ignores SIGTERM; otherwise neither
-            // `exit` nor `error` ever fires and this Promise hangs forever.
-            killTimer = setTimeout(() => {
-                killTimer = null
-                escalated = true
-                signalledPids = signalProcessTree(
-                    proc,
-                    "SIGKILL",
-                    signalledPids,
-                )
-                finishDeferredExit()
-            }, terminationGraceMs)
+            processTree.terminate("SIGTERM")
+            finalizeAbnormalAfterTree()
         }
         const onAbort = (): void => {
             if (aborted) return
@@ -255,6 +249,7 @@ export async function runPiOneShot(
 
         proc.stdout!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => {
+            refreshProcessTree()
             stdoutBuffer += chunk
             let nl: number
             while ((nl = stdoutBuffer.indexOf("\n")) >= 0) {
@@ -282,6 +277,7 @@ export async function runPiOneShot(
 
         proc.stderr!.setEncoding("utf8")
         proc.stderr!.on("data", (chunk: string) => {
+            refreshProcessTree()
             const trimmed = chunk.trimEnd()
             if (trimmed) {
                 process.stderr.write(`[${label}/stderr] ${trimmed}\n`)
@@ -289,29 +285,18 @@ export async function runPiOneShot(
         })
 
         proc.on("error", (err) => {
-            if (terminationRequested && proc.pid !== undefined) {
-                if (!timedOut && !aborted) forcedError ??= err
-                return
-            }
-            clearTimers()
-            if (
-                !invocations.finish(
-                    unknownPiObservation(
-                        timedOut || aborted ? "timed_out" : "failed",
-                        Date.now() - startedAt,
-                        opts,
-                    ),
-                )
-            ) {
-                return
-            }
-            reject(aborted ? abortError() : err)
+            if (!timedOut && !aborted) forcedError ??= err
+            if (proc.pid === undefined) processTree.markRootClosed()
+            else processTree.terminate("SIGTERM")
+            finalizeAbnormalAfterTree()
         })
 
         const finalizeExit = (
             code: number | null,
             signal: NodeJS.Signals | null,
         ): void => {
+            if (finalized) return
+            finalized = true
             clearTimers()
             const elapsedMs = Date.now() - startedAt
 
@@ -417,26 +402,18 @@ export async function runPiOneShot(
                 ),
             )
         }
-        const finishDeferredExit = (): void => {
-            const exit = deferredExit
-            if (!exit) return
-            deferredExit = null
-            finalizeExit(exit.code, exit.signal)
-        }
 
         proc.on("exit", (code, signal) => {
-            if (
-                terminationRequested &&
-                !escalated &&
-                anyProcessAlive(signalledPids)
-            ) {
-                deferredExit = { code, signal }
-                pollTimer = setInterval(() => {
-                    if (!anyProcessAlive(signalledPids)) finishDeferredExit()
-                }, 25)
-                return
-            }
-            finalizeExit(code, signal)
+            rootExit = { code, signal }
+            processTree.markRootClosed()
+        })
+        proc.on("close", (code, signal) => {
+            rootExit ??= { code, signal }
+            processTree.markRootClosed()
+            const terminal = rootExit
+            void processTree.done.then(() =>
+                finalizeExit(terminal.code, terminal.signal),
+            )
         })
 
         if (safeEvaluator) {

@@ -538,6 +538,15 @@ export class OpenAIStoryAgent extends BaseObserver {
                     }
                 }
                 if (reviewWait.kind === "timeout") {
+                    if (
+                        this.spec.handoffInconclusiveToAcceptanceGate === true
+                    ) {
+                        this.transition(
+                            "done",
+                            `${turn} turn(s); missing review handed to AcceptanceGate`,
+                        )
+                        return { error: "" }
+                    }
                     return {
                         ...turnReviewTimeoutFailure(
                             terminalId,
@@ -553,7 +562,10 @@ export class OpenAIStoryAgent extends BaseObserver {
                     }
                 }
                 const review = reviewWait.review
-                const disposition = turnReviewDisposition(terminalId, review)
+                const disposition = turnReviewDisposition(terminalId, review, {
+                    handoffInconclusiveToAcceptanceGate:
+                        this.spec.handoffInconclusiveToAcceptanceGate === true,
+                })
                 if (disposition.kind === "failure") {
                     return {
                         error: disposition.error,
@@ -563,6 +575,13 @@ export class OpenAIStoryAgent extends BaseObserver {
                 }
                 if (disposition.kind === "pass") {
                     this.transition("done", `${turn} reviewed turn(s)`)
+                    return { error: "" }
+                }
+                if (disposition.kind === "handoff") {
+                    this.transition(
+                        "done",
+                        `${turn} turn(s); inconclusive review handed to AcceptanceGate`,
+                    )
                     return { error: "" }
                 }
                 const feedback = disposition.feedback

@@ -215,6 +215,70 @@ describe("Critic repository evidence", () => {
         assert.match(preparation.prompt, /repository evidence unavailable/)
     })
 
+    it("fails closed when a configured command collector has no evidence", async () => {
+        await withTempDir("baro-critic-missing-command-evidence-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            const cases = [
+                {
+                    label: "null collector snapshot",
+                    commandEvidence: () => null,
+                },
+                {
+                    label: "empty legacy snapshot",
+                    commandEvidence: () => "",
+                },
+                {
+                    label: "empty structured snapshot",
+                    commandEvidence: () => ({ text: "", commands: [] }),
+                },
+            ] satisfies Array<{
+                label: string
+                commandEvidence: CriticEvidenceSource["commandEvidence"]
+            }>
+
+            for (const item of cases) {
+                const preparation = await prepareCriticEvaluation(
+                    ["all tests pass"],
+                    "All tests pass",
+                    "agent-a",
+                    {
+                        resolveRepositoryTarget: () => ({ cwd: repo, baseSha }),
+                        commandEvidence: item.commandEvidence,
+                    },
+                )
+
+                assert.equal(preparation.status, "inconclusive", item.label)
+                assert.deepEqual(
+                    preparation.issues,
+                    ["no terminal shell command evidence was observed"],
+                    item.label,
+                )
+                assert.match(
+                    preparation.prompt,
+                    /no shell\/test command evidence was observed/,
+                    item.label,
+                )
+            }
+        })
+    })
+
+    it("keeps a source without a command evidence hook backward-compatible", async () => {
+        await withTempDir("baro-critic-no-command-hook-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            const preparation = await prepareCriticEvaluation(
+                ["implementation exists"],
+                "Implemented",
+                "agent-a",
+                {
+                    resolveRepositoryTarget: () => ({ cwd: repo, baseSha }),
+                },
+            )
+
+            assert.equal(preparation.status, "ready")
+            assert.deepEqual(preparation.issues, [])
+        })
+    })
+
     it("marks stale and unverifiable command evidence inconclusive", async () => {
         await withTempDir("baro-critic-readiness-", async (repo) => {
             const baseSha = initializeRepository(repo)
@@ -257,6 +321,111 @@ describe("Critic repository evidence", () => {
                     item.label,
                 )
             }
+        })
+    })
+
+    it("keeps older stale history visible without poisoning newer fresh evidence", async () => {
+        await withTempDir("baro-critic-mixed-readiness-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            const collector = new CriticCommandEvidenceCollector()
+            collector.onExternalFunctionCall(
+                source("agent-a"),
+                FunctionCallItem.rehydrate({
+                    callId: "older-tests",
+                    name: "shell",
+                    args: JSON.stringify({ command: "npm run build" }),
+                }),
+            )
+            collector.onExternalFunctionCallOutput(
+                source("agent-a"),
+                FunctionCallOutputItem.create("older-tests", "build passed"),
+            )
+            collector.onExternalFunctionCall(
+                source("agent-a"),
+                FunctionCallItem.rehydrate({
+                    callId: "final-tests",
+                    name: "shell",
+                    args: JSON.stringify({ command: "npm test" }),
+                }),
+            )
+            collector.onExternalFunctionCallOutput(
+                source("agent-a"),
+                FunctionCallOutputItem.create("final-tests", "192 tests passed"),
+            )
+
+            const snapshot = await collector.snapshotForEvaluation("agent-a")
+            assert.ok(snapshot)
+            assert.deepEqual(
+                snapshot.commands.map((command) => command.freshness),
+                ["stale", "fresh"],
+            )
+            const preparation = await prepareCriticEvaluation(
+                ["all tests pass"],
+                "All tests pass",
+                "agent-a",
+                {
+                    resolveRepositoryTarget: () => ({ cwd: repo, baseSha }),
+                    commandEvidence: () => snapshot,
+                },
+            )
+
+            assert.equal(preparation.status, "ready")
+            assert.deepEqual(preparation.issues, [])
+            assert.match(preparation.prompt, /freshness: STALE/)
+            assert.match(preparation.prompt, /fresh at conservative non-git revision 2/)
+            assert.match(preparation.prompt, /build passed/)
+            assert.match(preparation.prompt, /192 tests passed/)
+        })
+    })
+
+    it("fails closed when a mixed ledger has no usable fresh terminal evidence", async () => {
+        await withTempDir("baro-critic-no-fresh-readiness-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            const collector = new CriticCommandEvidenceCollector()
+            collector.onExternalFunctionCall(
+                source("agent-a"),
+                FunctionCallItem.rehydrate({
+                    callId: "older-tests",
+                    name: "shell",
+                    args: JSON.stringify({ command: "npm test" }),
+                }),
+            )
+            collector.onExternalFunctionCallOutput(
+                source("agent-a"),
+                FunctionCallOutputItem.create("older-tests", "192 tests passed"),
+            )
+            collector.onExternalFunctionCall(
+                source("agent-a"),
+                FunctionCallItem.rehydrate({
+                    callId: "pending-final-check",
+                    name: "shell",
+                    args: JSON.stringify({ command: "npm run typecheck" }),
+                }),
+            )
+
+            const snapshot = await collector.snapshotForEvaluation("agent-a")
+            assert.ok(snapshot)
+            const preparation = await prepareCriticEvaluation(
+                ["all tests pass"],
+                "All tests pass",
+                "agent-a",
+                {
+                    resolveRepositoryTarget: () => ({ cwd: repo, baseSha }),
+                    commandEvidence: () => snapshot,
+                },
+            )
+
+            assert.equal(preparation.status, "inconclusive")
+            assert.ok(
+                preparation.issues.includes(
+                    "command evidence is stale or unverifiable",
+                ),
+            )
+            assert.ok(
+                preparation.issues.includes(
+                    "a verification command has no terminal output",
+                ),
+            )
         })
     })
 

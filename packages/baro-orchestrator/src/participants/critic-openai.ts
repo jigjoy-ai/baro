@@ -67,6 +67,8 @@ import {
 } from "./critic-evidence.js"
 import { criticInput, criticReplayKey } from "./critic-input.js"
 import { drainCriticPending } from "./critic-pending.js"
+import type { AgentTurnProjector } from "./agent-turn-projector.js"
+import type { StoryResultAuthorityCorrelation } from "../runtime/story-outcome-authority.js"
 import {
     isAuthorizedTerminalTurn,
     type TerminalTurnAuthorityOptions,
@@ -200,6 +202,14 @@ export class CriticOpenAI extends BaseObserver {
 
         const turn = (this.turnCount.get(agentId) ?? 0) + 1
         this.turnCount.set(agentId, turn)
+        // Snapshot correlation synchronously with the authenticated terminal.
+        // Evidence collection is asynchronous and may outlive the active
+        // lease, so resolving it inside the work item would be racy.
+        const correlation = this.terminalCorrelation(
+            source,
+            agentId,
+            terminalId,
+        )
 
         const work = (async () => {
             const preparation = await prepareCriticEvaluation(
@@ -208,8 +218,6 @@ export class CriticOpenAI extends BaseObserver {
                 agentId,
                 this.opts.evidence,
             )
-            const correlation = this.terminalAuthorities.outcomeAuthority
-                ?.terminalCorrelationForSource(source, agentId) ?? null
             const evaluation = preparation.status === "ready"
                 ? await this.evaluate(
                       preparation.prompt,
@@ -230,6 +238,7 @@ export class CriticOpenAI extends BaseObserver {
                 this.publishMeasurement(
                     agentId,
                     turn,
+                    correlation,
                     telemetry ?? unknownOpenAITelemetry("succeeded", "not_reported"),
                 )
             }
@@ -276,6 +285,7 @@ export class CriticOpenAI extends BaseObserver {
     private publishMeasurement(
         agentId: string,
         turn: number,
+        correlation: StoryResultAuthorityCorrelation | null,
         telemetry: CriticOpenAITelemetry,
     ): void {
         const invocationId = `${this.opts.runId ?? "local"}:critic:${agentId}:${turn}`
@@ -286,6 +296,8 @@ export class CriticOpenAI extends BaseObserver {
             runId: this.opts.runId ?? null,
             phase: "critic",
             storyId: agentId,
+            leaseId: correlation?.leaseId ?? null,
+            generation: correlation?.generation ?? null,
             attempt: null,
             turn,
             round: 1,
@@ -310,6 +322,31 @@ export class CriticOpenAI extends BaseObserver {
         for (const env of this.getEnvironments()) {
             env.deliverSemanticEvent(this, event)
         }
+    }
+
+    private terminalCorrelation(
+        source: Participant,
+        agentId: string,
+        terminalId: string | null,
+    ): StoryResultAuthorityCorrelation | null {
+        const native = this.terminalAuthorities.outcomeAuthority
+            ?.terminalCorrelationForSource(source, agentId) ?? null
+        if (native) return native
+
+        const projector = this.terminalAuthorities.terminalProjectorAuthority
+        if (source !== projector || !terminalId) return null
+        const resolver = projector as Partial<
+            Pick<AgentTurnProjector, "terminalCorrelationFor">
+        >
+        if (typeof resolver.terminalCorrelationFor !== "function") return null
+        const projected = resolver.terminalCorrelationFor(agentId, terminalId)
+        if (
+            !projected ||
+            projected.storyId !== agentId ||
+            (this.opts.runId !== undefined &&
+                projected.runId !== this.opts.runId)
+        ) return null
+        return projected
     }
 
     /**

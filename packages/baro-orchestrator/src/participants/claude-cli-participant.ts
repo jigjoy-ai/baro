@@ -17,6 +17,7 @@ import {
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
 import { harnessChildEnvironment } from "../harness-environment.js"
+import { ManagedProcessTree } from "../process-tree.js"
 import {
     AgentResult,
     AgentState,
@@ -43,6 +44,8 @@ export interface ClaudeCliParticipantOptions {
     permissionMode?: "default" | "acceptEdits" | "auto" | "bypassPermissions" | "dontAsk" | "plan"
     extraArgs?: string[]
     claudeBin?: string
+    /** Bound inherited-stdio drain after the direct CLI root exits. */
+    closeDrainTimeoutMs?: number
     effort?: string
     /** `--resume <sessionId>` — needed by agents that span multiple infer() calls. */
     resumeSessionId?: string
@@ -73,23 +76,20 @@ export class ClaudeCliParticipant extends BaseObserver {
     /** Send a signal to every active Claude child. Idempotent. */
     static killAll(signal: NodeJS.Signals = "SIGTERM"): void {
         for (const p of ClaudeCliParticipant.active) {
-            try {
-                p.proc?.kill(signal)
-            } catch {
-                // best-effort
-            }
+            p.abort(signal)
         }
     }
 
     private readonly options: Required<
         Pick<
             ClaudeCliParticipantOptions,
-            "includePartialMessages" | "replayUserMessages" | "permissionMode" | "claudeBin"
+            "includePartialMessages" | "replayUserMessages" | "permissionMode" | "claudeBin" | "closeDrainTimeoutMs"
         >
     > &
         ClaudeCliParticipantOptions
 
     private proc: ChildProcess | null = null
+    private processTree: ManagedProcessTree | null = null
     private buffer = ""
     private envRef: AgenticEnvironment | null = null
     private currentPhase: AgentPhase = "idle"
@@ -97,14 +97,19 @@ export class ClaudeCliParticipant extends BaseObserver {
     private lastResult: AgentResultData | null = null
     private exitCode: number | null = null
     private spawnError: Error | null = null
+    private doneSettled = false
+    private readySettled = false
+    private closeDrainTimer: ReturnType<typeof setTimeout> | null = null
     private resolveDone!: (summary: ClaudeRunSummary) => void
     private resolveReady!: () => void
     private rejectReady!: (e: Error) => void
 
     /** Resolves once Claude emits its first `system:init` event. */
     public readonly ready: Promise<void>
-    /** Resolves once the Claude process exits (regardless of success). */
+    /** Resolves after stream close, or a bounded post-root-exit drain failure. */
     public readonly done: Promise<ClaudeRunSummary>
+
+    private static readonly CLOSE_DRAIN_TIMEOUT_MS = 7_500
 
     constructor(
         public readonly agentId: string,
@@ -119,14 +124,106 @@ export class ClaudeCliParticipant extends BaseObserver {
             replayUserMessages: opts.replayUserMessages ?? true,
             permissionMode: opts.permissionMode ?? "bypassPermissions",
             claudeBin: opts.claudeBin ?? "claude",
+            closeDrainTimeoutMs:
+                opts.closeDrainTimeoutMs ??
+                ClaudeCliParticipant.CLOSE_DRAIN_TIMEOUT_MS,
+        }
+        if (
+            !Number.isFinite(this.options.closeDrainTimeoutMs) ||
+            this.options.closeDrainTimeoutMs < 1
+        ) {
+            throw new RangeError(
+                "Claude closeDrainTimeoutMs must be positive",
+            )
         }
         this.ready = new Promise<void>((res, rej) => {
             this.resolveReady = res
             this.rejectReady = rej
         })
+        this.ready.catch(() => {
+            // suppressed — story agents normally await `done`
+        })
         this.done = new Promise<ClaudeRunSummary>((res) => {
             this.resolveDone = res
         })
+    }
+
+    private settleDone(
+        summary: ClaudeRunSummary,
+        waitForProcessTree = true,
+    ): void {
+        this.clearCloseDrainWatchdog()
+        if (this.doneSettled) return
+        this.doneSettled = true
+        const releaseTreeOwnership = (): void => {
+            ClaudeCliParticipant.active.delete(this)
+        }
+        const processTree = this.processTree
+        if (processTree === null) {
+            releaseTreeOwnership()
+            this.resolveDone(summary)
+            return
+        }
+        processTree.markRootClosed()
+        if (!waitForProcessTree) {
+            // The participant result is bounded, while both registries retain
+            // the tree until its independent cleanup actually completes.
+            this.resolveDone(summary)
+            void processTree.done.then(releaseTreeOwnership)
+            return
+        }
+        void processTree.done.then(() => {
+            releaseTreeOwnership()
+            this.resolveDone(summary)
+        })
+    }
+
+    private startCloseDrainWatchdog(code: number | null): void {
+        this.exitCode = code
+        if (this.doneSettled || this.closeDrainTimer !== null) return
+        this.closeDrainTimer = setTimeout(() => {
+            if (this.doneSettled) return
+            const error = new Error(
+                `claude streams remained open ${this.options.closeDrainTimeoutMs}ms after root exit`,
+            )
+            this.spawnError = error
+            this.transition("failed", error.message)
+            this.failReady(error)
+            this.settleDone(
+                {
+                    sessionId: this.sessionId,
+                    exitCode: this.exitCode,
+                    error,
+                    lastResult: this.lastResult,
+                },
+                false,
+            )
+            this.destroyLocalStdio()
+        }, this.options.closeDrainTimeoutMs)
+    }
+
+    private clearCloseDrainWatchdog(): void {
+        if (this.closeDrainTimer === null) return
+        clearTimeout(this.closeDrainTimer)
+        this.closeDrainTimer = null
+    }
+
+    private destroyLocalStdio(): void {
+        this.proc?.stdin?.destroy()
+        this.proc?.stdout?.destroy()
+        this.proc?.stderr?.destroy()
+    }
+
+    private settleReady(): void {
+        if (this.readySettled) return
+        this.readySettled = true
+        this.resolveReady()
+    }
+
+    private failReady(error: Error): void {
+        if (this.readySettled) return
+        this.readySettled = true
+        this.rejectReady(error)
     }
 
     getSessionId(): string | null {
@@ -153,8 +250,8 @@ export class ClaudeCliParticipant extends BaseObserver {
         } catch (e) {
             this.spawnError = e instanceof Error ? e : new Error(String(e))
             this.transition("failed", this.spawnError.message)
-            this.rejectReady(this.spawnError)
-            this.resolveDone({
+            this.failReady(this.spawnError)
+            this.settleDone({
                 sessionId: null,
                 exitCode: null,
                 error: this.spawnError,
@@ -164,26 +261,52 @@ export class ClaudeCliParticipant extends BaseObserver {
         }
 
         this.proc = proc
+        this.processTree = new ManagedProcessTree(proc)
         ClaudeCliParticipant.active.add(this)
         this.transition("starting")
 
         proc.stdout!.setEncoding("utf8")
         proc.stderr!.setEncoding("utf8")
+        proc.stdout!.once("data", () => this.processTree?.refresh())
         proc.stdout!.on("data", (chunk: string) => this.handleStdout(chunk))
         proc.stderr!.on("data", (chunk: string) => this.handleStderr(chunk))
-        proc.on("error", (err) => {
-            this.spawnError = err
-            this.rejectReady(err)
-        })
+        // `close` waits for every inherited stdio handle. A provider child can
+        // keep those handles open after the direct CLI shim has exited, so the
+        // tree supervisor must learn about root exit independently.
         proc.on("exit", (code) => {
-            ClaudeCliParticipant.active.delete(this)
+            this.processTree?.markRootClosed()
+            this.startCloseDrainWatchdog(code)
+        })
+        proc.on("error", (err) => {
+            this.clearCloseDrainWatchdog()
+            if (this.doneSettled) return
+            this.spawnError = err
+            this.transition("failed", err.message)
+            this.failReady(err)
+            this.settleDone({
+                sessionId: this.sessionId,
+                exitCode: this.exitCode,
+                error: err,
+                lastResult: this.lastResult,
+            })
+        })
+        proc.on("close", (code) => {
+            this.clearCloseDrainWatchdog()
+            if (this.doneSettled) return
             this.exitCode = code
+            this.failReady(
+                this.spawnError ??
+                    new Error("claude exited before system:init"),
+            )
             const finalPhase: AgentPhase =
                 this.spawnError != null || (code != null && code !== 0)
                     ? "failed"
                     : "done"
-            this.transition(finalPhase, code != null ? `exit code ${code}` : "no exit code")
-            this.resolveDone({
+            this.transition(
+                finalPhase,
+                code != null ? `exit code ${code}` : "no exit code",
+            )
+            this.settleDone({
                 sessionId: this.sessionId,
                 exitCode: code,
                 error: this.spawnError,
@@ -208,10 +331,10 @@ export class ClaudeCliParticipant extends BaseObserver {
         this.proc?.stdin?.end()
     }
 
-    /** Kill the Claude process. Resolves once exit fires. */
+    /** Kill Claude and every provider descendant, with shared escalation. */
     abort(signal: NodeJS.Signals = "SIGTERM"): void {
-        this.transition("aborted")
-        this.proc?.kill(signal)
+        if (!this.doneSettled) this.transition("aborted")
+        this.processTree?.terminate(signal)
     }
 
     override async onExternalEvent(
@@ -301,7 +424,7 @@ export class ClaudeCliParticipant extends BaseObserver {
             if (item instanceof SemanticEvent) {
                 if (ClaudeSystem.is(item) && item.data.subtype === "init") {
                     this.transition("running", "claude init received")
-                    this.resolveReady()
+                    this.settleReady()
                 }
                 if (AgentResult.is(item)) {
                     this.lastResult = item.data

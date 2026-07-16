@@ -33,6 +33,22 @@ evidence, stale or unverifiable command evidence, an unfinished command, or a
 sandbox-blocked check produces `inconclusive`; it does not invoke an evaluator
 model and does not send corrective prose to the worker.
 
+AcceptanceGate keeps that lease and isolated worktree intact and requests up
+to two neutral terminal replays through `AgentTurnProjector`. Each replay gives
+Critic the same candidate output and a fresh repository snapshot; it does not
+publish a `WorkOffer` or run another implementation agent. Continuation-capable
+workers hand an inconclusive execution result to this gate instead of treating
+it as a semantic pass. If the bounded rechecks remain inconclusive, Board
+preserves the candidate and fails closed without a healing/implementation wave.
+
+This protocol can recover from an evaluator outage and from readiness bugs when
+usable fresh command evidence already exists. Baro does not yet have a trusted
+per-story `CandidateVerifier` that executes new deterministic commands in the
+active isolated worktree and contributes their output to Critic evidence.
+Therefore genuinely missing or entirely stale command evidence remains
+inconclusive after the bounded rechecks; a new coding worker is deliberately
+not mislabeled as verification.
+
 ## Failure policy
 
 `StoryResult.failure` is typed so infrastructure incidents cannot silently

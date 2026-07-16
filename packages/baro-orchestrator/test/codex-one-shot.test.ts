@@ -48,7 +48,9 @@ setTimeout(() => writeFileSync(${JSON.stringify(opts.stubbornDescendant.escapedF
 writeFileSync(${JSON.stringify(opts.stubbornDescendant.startedFile)}, "yes");
 setInterval(() => {}, 10_000);
 `)};
-fixtureSpawn(process.execPath, ["--input-type=module", "-e", descendantSource], { stdio: "ignore" });
+fixtureSpawn(process.execPath, ["--input-type=module", "-e", descendantSource], {
+    stdio: ["ignore", "inherit", "inherit"],
+});
 `
         : ""
 }
@@ -194,6 +196,38 @@ describe("runCodexOneShot exit contract", () => {
         })
     })
 
+    it("flushes terminal output and usage when the final NDJSON record has no newline", async () => {
+        await withTempDir("baro-codex-final-fragment-", async (dir) => {
+            const bin = join(dir, "fragment-codex.mjs")
+            writeFileSync(
+                bin,
+                `#!/usr/bin/env node
+const events = [
+    { type: "item.completed", item: { type: "agent_message", text: "final answer" } },
+    { type: "turn.completed", model: "gpt-final", usage: { input_tokens: 11, output_tokens: 7 } },
+];
+process.stdout.write(events.map((event) => JSON.stringify(event)).join("\\n"));
+`,
+            )
+            chmodSync(bin, 0o755)
+            const observations: RunnerInvocationObservation[] = []
+
+            const result = await runCodexOneShot({
+                prompt: "goal",
+                cwd: dir,
+                codexBin: bin,
+                onInvocation: (item) => observations.push(item),
+            })
+
+            assert.equal(result, "final answer")
+            assert.equal(observations.length, 1)
+            assert.deepEqual(
+                observations[0]!.tokens.total,
+                knownMetric(18, "derived"),
+            )
+        })
+    })
+
     it("rejects on a non-zero exit instead of returning the partial output", async () => {
         // Codex streams part of the answer, then crashes. The partial text
         // must not come back as success — a truncated PRD parses as a
@@ -205,6 +239,25 @@ describe("runCodexOneShot exit contract", () => {
                 runCodexOneShot({ prompt: "goal", cwd: dir, codexBin: bin }),
                 /terminated abnormally.*exit=3/,
             )
+        })
+    })
+
+    it("settles an asynchronous spawn error exactly once", async () => {
+        await withTempDir("baro-codex-spawn-error-", async (dir) => {
+            const observations: RunnerInvocationObservation[] = []
+
+            await assert.rejects(
+                runCodexOneShot({
+                    prompt: "goal",
+                    cwd: dir,
+                    codexBin: join(dir, "missing-codex"),
+                    onInvocation: (item) => observations.push(item),
+                }),
+                { code: "ENOENT" },
+            )
+
+            assert.equal(observations.length, 1)
+            assert.equal(observations[0]!.status, "failed")
         })
     })
 
@@ -256,7 +309,7 @@ describe("runCodexOneShot exit contract", () => {
         })
     })
 
-    it("kills a ready TERM-resistant descendant before rejecting cancellation", async () => {
+    it("kills an inherited-stdio, TERM-resistant descendant before rejecting cancellation", async () => {
         await withTempDir("baro-codex-tree-", async (dir) => {
             const started = join(dir, "descendant-started")
             const escaped = join(dir, "descendant-escaped")
@@ -299,6 +352,64 @@ describe("runCodexOneShot exit contract", () => {
                 existsSync(escaped),
                 false,
                 "Codex descendant survived termination escalation",
+            )
+        })
+    })
+
+    it("honors an abort that arrives after the direct Codex root exits", async () => {
+        await withTempDir("baro-codex-late-abort-", async (dir) => {
+            const rootExited = join(dir, "root-exited")
+            const escaped = join(dir, "descendant-escaped")
+            const bin = join(dir, "late-abort-codex.mjs")
+            writeFileSync(
+                bin,
+                `#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const descendantSource = ${JSON.stringify(`
+import { writeFileSync } from "node:fs";
+process.on("SIGTERM", () => {});
+setTimeout(() => writeFileSync(${JSON.stringify(escaped)}, "yes"), 1_300);
+setInterval(() => {}, 10_000);
+`)};
+const descendant = spawn(process.execPath, ["--input-type=module", "-e", descendantSource], {
+    stdio: ["ignore", "inherit", "inherit"],
+});
+descendant.unref();
+console.log(JSON.stringify({
+    type: "item.completed",
+    item: { type: "agent_message", text: "premature success" },
+}));
+await new Promise((resolve) => setTimeout(resolve, 150));
+writeFileSync(${JSON.stringify(rootExited)}, "yes");
+process.exit(0);
+`,
+            )
+            chmodSync(bin, 0o755)
+            const controller = new AbortController()
+            const pending = runCodexOneShot({
+                prompt: "goal",
+                cwd: dir,
+                codexBin: bin,
+                signal: controller.signal,
+                terminationGraceMs: 1_000,
+            })
+
+            await waitForFile(rootExited)
+            await delay(75)
+            const abortedAt = Date.now()
+            controller.abort()
+
+            await assert.rejects(pending, /aborted=true/)
+            assert.ok(
+                Date.now() - abortedAt < 2_500,
+                "late abort exceeded the bounded cleanup window",
+            )
+            await delay(350)
+            assert.equal(
+                existsSync(escaped),
+                false,
+                "Codex descendant survived late-abort cleanup",
             )
         })
     })

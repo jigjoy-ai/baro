@@ -60,11 +60,24 @@ async function withSpawnOutput(
         const proc = new EventEmitter() as ChildProcess
         const stdout = new PassThrough()
         const stderr = new PassThrough()
+        let terminalEmitted = false
+        const emitTerminal = (
+            code: number | null,
+            signal: NodeJS.Signals | null,
+        ): void => {
+            if (terminalEmitted) return
+            terminalEmitted = true
+            proc.emit("exit", code, signal)
+            // A real ChildProcess emits `close` only after its stdio streams
+            // have drained. One-shot finalization deliberately owns this later
+            // boundary so a final newline-less JSON event is never lost.
+            queueMicrotask(() => proc.emit("close", code, signal))
+        }
         Object.assign(proc, {
             stdout,
             stderr,
             kill: () => {
-                proc.emit("exit", null, "SIGTERM")
+                emitTerminal(null, "SIGTERM")
                 return true
             },
         })
@@ -72,7 +85,7 @@ async function withSpawnOutput(
             for (const line of stdoutLines) stdout.write(`${line}\n`)
             stdout.end()
             stderr.end()
-            proc.emit("exit", exitCode, null)
+            emitTerminal(exitCode, null)
         })
         return proc
     }) as typeof childProcess.spawn

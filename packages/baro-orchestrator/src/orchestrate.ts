@@ -176,6 +176,9 @@ export interface OrchestrateConfig {
     collectiveVerificationTimeoutMs?: number
     /** Optional per-story Critic evidence watchdog. Default: 240 seconds. */
     collectiveAcceptanceTimeoutMs?: number
+    /** Bounded same-candidate Critic rechecks after an inconclusive verdict.
+     * Default: 2. No implementation worker is launched by these rechecks. */
+    collectiveAcceptanceReverificationAttempts?: number
     /** Optional communication-only conversational participant. Collective only. */
     withDialogue?: boolean
     /** Text-only backing model for DialogueAgent. Defaults to a compatible run backend. */
@@ -851,7 +854,8 @@ export async function orchestrate(
         commandEvidence.join(env)
         const criticEvidence: CriticEvidenceSource = {
             resolveRepositoryTarget: resolveCriticTarget,
-            commandEvidence: (storyId) => commandEvidence.snapshot(storyId),
+            commandEvidence: (storyId) =>
+                commandEvidence.snapshotForEvaluation(storyId),
         }
         const prd = loadPrd(config.prdPath)
         criticTargets = new Map<string, readonly string[]>(
@@ -1059,12 +1063,18 @@ export async function orchestrate(
                   runId,
                   targets: criticTargets,
                   timeoutMs: config.collectiveAcceptanceTimeoutMs,
+                  maxReverificationAttempts:
+                      config.collectiveAcceptanceReverificationAttempts,
                   leaseAuthority: leaseBroker,
                   critiqueAuthority: critic,
                   outcomeAuthority,
                   terminalProjectorAuthority: agentTurnProjector,
               })
             : null
+        agentTurnProjector.setLeaseAuthority(leaseBroker)
+        if (acceptanceGate) {
+            agentTurnProjector.setReverificationAuthority(acceptanceGate)
+        }
         if (acceptanceGate) leaseBroker.setQualityAuthority(acceptanceGate)
         const board = collectiveBoard = new CollectiveBoard({
             runId,
@@ -1142,6 +1152,10 @@ export async function orchestrate(
         runtimeReplanDecisionAuthority: collectiveBoard ?? undefined,
         turnReviewAuthority:
             coordinationMode === "collective" ? critic ?? undefined : undefined,
+        acceptanceGateAuthority:
+            coordinationMode === "collective"
+                ? acceptanceGate ?? undefined
+                : undefined,
         turnReviewTimeoutMs: config.collectiveAcceptanceTimeoutMs,
         telemetryAuthority: modelTelemetryCollector,
         billingCoordinator: gatewayBillingCoordinator ?? undefined,

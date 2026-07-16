@@ -6,17 +6,41 @@ import {
 } from "@mozaik-ai/core"
 
 import {
+    AgentResult,
     AgentTurnCompleted,
     CodexTurnEvent,
     OpenCodeSystem,
     PiTurnEvent,
+    StoryQualityReverificationRequested,
     StoryRouted,
+    WorkLeaseGranted,
+    WorkLeaseReleased,
 } from "../semantic-events.js"
-import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
+import type {
+    StoryOutcomeAuthority,
+    StoryResultAuthorityCorrelation,
+} from "../runtime/story-outcome-authority.js"
+import { criticInput, criticReplayKey } from "./critic-input.js"
 
 export interface AgentTurnProjectorOptions {
     /** Collective-only exact authority for native CLI event producers. */
     outcomeAuthority?: StoryOutcomeAuthority
+}
+
+interface LeaseCorrelation {
+    runId: string
+    leaseId: string
+    generation: number
+    /** True only when the grant came from the exact bound lease authority. */
+    authoritative: boolean
+}
+
+interface CachedCandidate {
+    turn: number
+    terminalId: string | null
+    backend: string
+    resultText: string
+    lease: LeaseCorrelation | null
 }
 
 /** Projects one-shot CLI message streams into the Critic's neutral terminal contract. */
@@ -25,10 +49,68 @@ export class AgentTurnProjector extends BaseObserver {
     private readonly backends = new Map<string, string>()
     private readonly completed = new Set<string>()
     private readonly terminalSequences = new Map<string, number>()
+    /** Critic/Gate turn count: unlike provider terminal ids, errors and empty
+     * outputs do not advance it. */
+    private readonly candidateTurns = new Map<string, number>()
+    private readonly candidates = new Map<string, Map<number, CachedCandidate>>()
+    private readonly activeLeases = new Map<string, LeaseCorrelation>()
+    private readonly seenNativeTerminalIds = new Set<string>()
+    private readonly handledReverifications = new Set<string>()
     private readonly nativeSources = new Map<string, Participant>()
+    private leaseAuthority: Participant | null = null
+    private reverificationAuthority: Participant | null = null
 
     constructor(private readonly opts: AgentTurnProjectorOptions = {}) {
         super()
+    }
+
+    setLeaseAuthority(authority: Participant): void {
+        if (this.leaseAuthority && this.leaseAuthority !== authority) {
+            throw new Error("terminal projector lease authority is already bound")
+        }
+        this.leaseAuthority = authority
+    }
+
+    /** Bind the exact AcceptanceGate allowed to request a same-candidate replay. */
+    setReverificationAuthority(authority: Participant): void {
+        if (
+            this.reverificationAuthority &&
+            this.reverificationAuthority !== authority
+        ) {
+            throw new Error(
+                "terminal projector reverification authority is already bound",
+            )
+        }
+        this.reverificationAuthority = authority
+    }
+
+    /**
+     * Resolve billing correlation for one terminal emitted by this projector.
+     *
+     * The terminal id is only a lookup key into the projector's retained
+     * candidate ledger.  Lease fields are never copied from the replay event;
+     * they originate in an exact-identity WorkLeaseGranted authority and are
+     * snapshotted with the candidate before the terminal is emitted.
+     */
+    terminalCorrelationFor(
+        agentId: string,
+        terminalId: string | null,
+    ): StoryResultAuthorityCorrelation | null {
+        if (!agentId || !terminalId) return null
+        const candidates = this.candidates.get(agentId)
+        if (!candidates) return null
+        for (const candidate of candidates.values()) {
+            if (candidate.terminalId !== terminalId) continue
+            const lease = candidate.lease
+            if (!lease?.authoritative) return null
+            return {
+                runId: lease.runId,
+                storyId: agentId,
+                leaseId: lease.leaseId,
+                generation: lease.generation,
+            }
+        }
+        return null
     }
 
     override async onExternalModelMessage(
@@ -58,8 +140,43 @@ export class AgentTurnProjector extends BaseObserver {
         source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
+        if (WorkLeaseGranted.is(event)) {
+            if (this.leaseAuthority && source !== this.leaseAuthority) return
+            if (
+                this.opts.outcomeAuthority &&
+                event.data.runId !== this.opts.outcomeAuthority.runId
+            ) return
+            this.activeLeases.set(event.data.request.storyId, {
+                runId: event.data.runId,
+                leaseId: event.data.leaseId,
+                generation: event.data.generation,
+                authoritative:
+                    this.leaseAuthority !== null &&
+                    source === this.leaseAuthority,
+            })
+            return
+        }
+        if (WorkLeaseReleased.is(event)) {
+            if (this.leaseAuthority && source !== this.leaseAuthority) return
+            const active = this.activeLeases.get(event.data.storyId)
+            if (
+                active?.runId === event.data.runId &&
+                active.leaseId === event.data.leaseId
+            ) {
+                this.activeLeases.delete(event.data.storyId)
+            }
+            return
+        }
+        if (StoryQualityReverificationRequested.is(event)) {
+            this.reverify(source, event.data)
+            return
+        }
         if (StoryRouted.is(event)) {
             this.backends.set(event.data.storyId, event.data.backend)
+            return
+        }
+        if (AgentResult.is(event)) {
+            this.rememberNativeCandidate(source, event)
             return
         }
         if (CodexTurnEvent.is(event)) {
@@ -97,6 +214,26 @@ export class AgentTurnProjector extends BaseObserver {
             this.opts.outcomeAuthority.matchesTerminalTurnSource(source, agentId)
     }
 
+    private rememberNativeCandidate(
+        source: Participant,
+        event: SemanticEvent<unknown>,
+    ): void {
+        const input = criticInput(event)
+        if (!input || input.isError || !input.resultText) return
+        if (!this.acceptsNativeSource(source, input.agentId)) return
+        const key = criticReplayKey(input.agentId, input.terminalId)
+        if (key) {
+            if (this.seenNativeTerminalIds.has(key)) return
+            this.seenNativeTerminalIds.add(key)
+        }
+        this.retainCandidate({
+            agentId: input.agentId,
+            terminalId: input.terminalId,
+            backend: this.backends.get(input.agentId) ?? "native",
+            resultText: input.resultText,
+        })
+    }
+
     private selectNativeSource(source: Participant, agentId: string): void {
         // Legacy adapters historically reconstruct lightweight source objects
         // around the same agentId. Exact identity is meaningful only when the
@@ -117,17 +254,131 @@ export class AgentTurnProjector extends BaseObserver {
         this.text.delete(agentId)
         const sequence = (this.terminalSequences.get(agentId) ?? 0) + 1
         this.terminalSequences.set(agentId, sequence)
+        const terminalId = ["projected", agentId, sequence]
+            .map(String)
+            .map(encodeURIComponent)
+            .join(":")
+        const backend = this.backends.get(agentId) ?? fallbackBackend
+        if (!isError && resultText) {
+            this.retainCandidate({
+                agentId,
+                terminalId,
+                backend,
+                resultText,
+            })
+        }
         const event = AgentTurnCompleted.create({
             agentId,
-            terminalId: ["projected", agentId, sequence]
-                .map(String)
-                .map(encodeURIComponent)
-                .join(":"),
-            backend: this.backends.get(agentId) ?? fallbackBackend,
+            terminalId,
+            backend,
             isError,
             resultText: resultText || null,
             canContinue: false,
         })
+        this.emit(event)
+    }
+
+    private retainCandidate(candidate: {
+        agentId: string
+        terminalId: string | null
+        backend: string
+        resultText: string
+    }): CachedCandidate {
+        const turn = (this.candidateTurns.get(candidate.agentId) ?? 0) + 1
+        this.candidateTurns.set(candidate.agentId, turn)
+        const retained: CachedCandidate = {
+            turn,
+            terminalId: candidate.terminalId,
+            backend: candidate.backend,
+            resultText: candidate.resultText,
+            lease: this.activeLeases.get(candidate.agentId) ?? null,
+        }
+        let byTurn = this.candidates.get(candidate.agentId)
+        if (!byTurn) {
+            byTurn = new Map()
+            this.candidates.set(candidate.agentId, byTurn)
+        }
+        byTurn.set(turn, retained)
+        // Reverification is bounded; retaining a small tail also prevents a
+        // long native continuation from becoming unbounded projector state.
+        while (byTurn.size > 8) {
+            const oldest = byTurn.keys().next().value as number | undefined
+            if (oldest === undefined) break
+            byTurn.delete(oldest)
+        }
+        return retained
+    }
+
+    private reverify(
+        source: Participant,
+        request: {
+            runId: string
+            requestId: string
+            storyId: string
+            leaseId: string
+            generation: number
+            targetTurn: number
+            terminalId?: string
+            attempt: number
+        },
+    ): void {
+        if (
+            !this.reverificationAuthority ||
+            source !== this.reverificationAuthority ||
+            this.handledReverifications.has(request.requestId) ||
+            !Number.isInteger(request.attempt) ||
+            request.attempt <= 0
+        ) return
+        const active = this.activeLeases.get(request.storyId)
+        const candidate = this.candidates
+            .get(request.storyId)
+            ?.get(request.targetTurn)
+        if (
+            !active ||
+            active.runId !== request.runId ||
+            active.leaseId !== request.leaseId ||
+            active.generation !== request.generation ||
+            !candidate ||
+            !candidate.lease ||
+            candidate.lease.runId !== request.runId ||
+            candidate.lease.leaseId !== request.leaseId ||
+            candidate.lease.generation !== request.generation ||
+            (request.terminalId !== undefined &&
+                candidate.terminalId !== request.terminalId)
+        ) return
+
+        this.handledReverifications.add(request.requestId)
+        const sequence = (this.terminalSequences.get(request.storyId) ?? 0) + 1
+        this.terminalSequences.set(request.storyId, sequence)
+        const terminalId = [
+            "reverification",
+            request.storyId,
+            request.requestId,
+        ]
+            .map(String)
+            .map(encodeURIComponent)
+            .join(":")
+        this.retainCandidate({
+            agentId: request.storyId,
+            terminalId,
+            backend: candidate.backend,
+            resultText: candidate.resultText,
+        })
+        this.emit(
+            AgentTurnCompleted.create({
+                agentId: request.storyId,
+                terminalId,
+                backend: candidate.backend,
+                isError: false,
+                resultText: candidate.resultText,
+                // A re-evaluation may reject the candidate, but it must never
+                // target prose at the already-finished implementation worker.
+                canContinue: false,
+            }),
+        )
+    }
+
+    private emit(event: SemanticEvent<unknown>): void {
         for (const environment of this.getEnvironments()) {
             environment.deliverSemanticEvent(this, event)
         }

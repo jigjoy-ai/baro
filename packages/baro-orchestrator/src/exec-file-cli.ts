@@ -12,7 +12,7 @@
 import type { SpawnOptions } from "child_process"
 import spawn from "cross-spawn"
 
-import { anyProcessAlive, signalProcessTree } from "./process-tree.js"
+import { ManagedProcessTree } from "./process-tree.js"
 
 export interface ExecFileCliOptions {
     cwd?: string
@@ -50,22 +50,22 @@ export function execFileCli(
             env: options.env,
             stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
         } as SpawnOptions)
+        const processTree = new ManagedProcessTree(child, {
+            terminationGraceMs,
+            pollIntervalMs: 25,
+        })
 
         let stdout = ""
         let stderr = ""
         let settled = false
         let timer: ReturnType<typeof setTimeout> | undefined
-        let killTimer: ReturnType<typeof setTimeout> | undefined
-        let pollTimer: ReturnType<typeof setInterval> | undefined
         let terminationError: Error | undefined
-        let signalledPids = new Set<number>()
+        let treeRefreshed = false
 
         const finish = (fn: () => void): void => {
             if (settled) return
             settled = true
             if (timer) clearTimeout(timer)
-            if (killTimer) clearTimeout(killTimer)
-            if (pollTimer) clearInterval(pollTimer)
             options.signal?.removeEventListener("abort", onAbort)
             fn()
         }
@@ -78,23 +78,19 @@ export function execFileCli(
         const terminate = (error: Error): void => {
             if (terminationError) return
             terminationError = error
-            signalledPids = signalProcessTree(child, "SIGTERM", signalledPids)
-
-            // A direct child can exit before a TERM-resistant grandchild. Keep
-            // supervising the captured pids until all are gone or escalation
-            // has been sent; resolving the promise earlier would recreate the
-            // orphan race this helper exists to prevent.
-            pollTimer = setInterval(() => {
-                if (!anyProcessAlive(signalledPids)) finishTerminated()
-            }, 25)
-            killTimer = setTimeout(() => {
-                signalledPids = signalProcessTree(
-                    child,
-                    "SIGKILL",
-                    signalledPids,
-                )
+            processTree.terminate("SIGTERM")
+            void processTree.done.then(() => {
+                child.stdin?.destroy()
+                child.stdout?.destroy()
+                child.stderr?.destroy()
                 finishTerminated()
-            }, terminationGraceMs)
+            })
+        }
+
+        const refreshProcessTree = (): void => {
+            if (treeRefreshed) return
+            treeRefreshed = true
+            processTree.refresh()
         }
 
         const onAbort = (): void => terminate(abortError(command))
@@ -112,38 +108,47 @@ export function execFileCli(
         if (options.signal?.aborted) onAbort()
 
         child.stdout?.on("data", (d: Buffer) => {
+            refreshProcessTree()
             stdout += d.toString()
             if (stdout.length > maxBuffer) {
                 terminate(new Error(`${command} stdout exceeded maxBuffer`))
             }
         })
         child.stderr?.on("data", (d: Buffer) => {
+            refreshProcessTree()
             stderr += d.toString()
         })
         child.stdin?.on("error", (err) => {
             if (!settled) terminate(err)
         })
         child.on("error", (err) => {
-            if (terminationError) finishTerminated()
-            else finish(() => reject(err))
+            if (!terminationError) terminationError = err
+            if (child.pid === undefined) processTree.markRootClosed()
+            else processTree.terminate("SIGTERM")
+            void processTree.done.then(finishTerminated)
+        })
+        child.on("exit", () => {
+            processTree.markRootClosed()
         })
         child.on("close", (code) => {
             if (terminationError) {
-                if (!anyProcessAlive(signalledPids)) finishTerminated()
+                void processTree.done.then(finishTerminated)
                 return
             }
-            finish(() => {
-                if (code === 0) {
-                    resolve({ stdout, stderr })
-                    return
-                }
-                const err = new Error(
-                    `${command} exited with code ${code}\n${stderr}`,
-                ) as Error & { code: number | null; stdout: string; stderr: string }
-                err.code = code
-                err.stdout = stdout
-                err.stderr = stderr
-                reject(err)
+            void processTree.done.then(() => {
+                finish(() => {
+                    if (code === 0) {
+                        resolve({ stdout, stderr })
+                        return
+                    }
+                    const err = new Error(
+                        `${command} exited with code ${code}\n${stderr}`,
+                    ) as Error & { code: number | null; stdout: string; stderr: string }
+                    err.code = code
+                    err.stdout = stdout
+                    err.stderr = stderr
+                    reject(err)
+                })
             })
         })
         if (options.input !== undefined) child.stdin?.end(options.input)

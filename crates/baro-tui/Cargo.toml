@@ -22,3 +22,12 @@ tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 crossterm = { version = "0.28", features = ["use-dev-tty"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

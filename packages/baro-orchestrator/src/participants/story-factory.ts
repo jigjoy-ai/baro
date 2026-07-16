@@ -77,6 +77,9 @@ export interface StoryFactoryOptions {
     runtimeReplanDecisionAuthority?: Participant
     /** Exact Critic allowed to complete a continuation-capable worker turn. */
     turnReviewAuthority?: Participant
+    /** Exact collective AcceptanceGate that remains responsible for quality
+     * after an inconclusive continuation-worker handoff. */
+    acceptanceGateAuthority?: Participant
     /** Bound for the Critic handshake before an infrastructure failure. */
     turnReviewTimeoutMs?: number
     /** Exact telemetry reducer whose measurements may influence advisory bids. */
@@ -686,6 +689,10 @@ export class StoryFactory extends BaseObserver {
                 ? {
                       turnReviewAuthority: this.opts.turnReviewAuthority,
                       turnReviewTimeoutMs: this.opts.turnReviewTimeoutMs,
+                      handoffInconclusiveToAcceptanceGate:
+                          this.opts.coordinationMode === "collective" &&
+                          req.requiresQualityReview === true &&
+                          this.opts.acceptanceGateAuthority !== undefined,
                   }
                 : {}),
             ...(route.backend === "openai" && this.opts.collaboration

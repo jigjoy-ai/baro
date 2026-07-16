@@ -591,6 +591,71 @@ process.exit(0)
         })
     })
 
+    it("hands a missing same-deadline review to AcceptanceGate and ignores a late Critique", async () => {
+        await withTempDir("story-agent-review-timeout-handoff-", async (dir) => {
+            const fake = writeReviewClaude(dir)
+            const env = captureEnv()
+            const reviewAuthority = source("critic")
+            // This deliberately models the worker and Gate using the same
+            // deadline. The worker must not manufacture a failed StoryResult
+            // when its own timer wins the race.
+            const acceptanceTimeoutMs = 40
+            const agent = new StoryAgent({
+                id: "story-review-timeout-handoff",
+                prompt: "finish for the collective gate",
+                cwd: fake.cwd,
+                claudeBin: fake.bin,
+                retries: 2,
+                retryDelayMs: 0,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
+                maxTurns: 2,
+                requiresQualityReview: true,
+                turnReviewAuthority: reviewAuthority,
+                turnReviewTimeoutMs: acceptanceTimeoutMs,
+                handoffInconclusiveToAcceptanceGate: true,
+            })
+            agent.join(env)
+
+            const outcomePromise = agent.run(env)
+            const [terminal] = await waitForAgentResults(env, 1, 10_000)
+            const terminalId = criticInput(terminal)?.terminalId
+            assert.ok(terminalId)
+
+            const outcome = await outcomePromise
+            assert.equal(outcome.success, true)
+            assert.equal(outcome.attempts, 1)
+            assert.equal(outcome.failure, undefined)
+            assert.equal(env.events.filter(StoryResult.is).length, 1)
+
+            // A verdict that arrives after execution handed the candidate to
+            // the Gate cannot reopen the finished worker or trigger repair.
+            env.deliverSemanticEvent(
+                reviewAuthority,
+                Critique.create({
+                    agentId: agent.id,
+                    terminalId,
+                    status: "evaluated",
+                    verdict: "fail",
+                    reasoning: "late verdict",
+                    violatedCriteria: ["late criterion"],
+                    turn: 1,
+                    modelUsed: "test-critic",
+                }),
+            )
+            await new Promise<void>((resolve) => setImmediate(resolve))
+
+            assert.equal(env.events.filter(AgentResult.is).length, 1)
+            assert.equal(env.events.filter(StoryResult.is).length, 1)
+            assert.equal(
+                readLifecycle(fake.lifecyclePath).filter(
+                    (entry) => entry.event === "spawn",
+                ).length,
+                1,
+            )
+            agent.leave(env)
+        })
+    })
+
     it("does not retry an uncorrelated review terminal internally", async () => {
         await withTempDir("story-agent-review-uncorrelated-", async (dir) => {
             const fake = writeReviewClaude(dir, { correlated: false })
@@ -674,6 +739,59 @@ process.exit(0)
                 kind: "verification",
                 code: "evaluator_unavailable",
             })
+            assert.equal(
+                readLifecycle(fake.lifecyclePath).filter(
+                    (entry) => entry.event === "spawn",
+                ).length,
+                1,
+            )
+        })
+    })
+
+    it("hands an inconclusive collective candidate to AcceptanceGate without semantic repair", async () => {
+        await withTempDir("story-agent-review-handoff-", async (dir) => {
+            const fake = writeReviewClaude(dir)
+            const env = captureEnv()
+            const reviewAuthority = source("critic")
+            const agent = new StoryAgent({
+                id: "story-review-handoff",
+                prompt: "finish for the collective gate",
+                cwd: fake.cwd,
+                claudeBin: fake.bin,
+                retries: 2,
+                retryDelayMs: 0,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
+                maxTurns: 2,
+                requiresQualityReview: true,
+                turnReviewAuthority: reviewAuthority,
+                turnReviewTimeoutMs: 15_000,
+                handoffInconclusiveToAcceptanceGate: true,
+            })
+            agent.join(env)
+
+            const outcomePromise = agent.run(env)
+            const [terminal] = await waitForAgentResults(env, 1, 10_000)
+            const terminalId = criticInput(terminal)?.terminalId
+            assert.ok(terminalId)
+            env.deliverSemanticEvent(
+                reviewAuthority,
+                Critique.create({
+                    agentId: agent.id,
+                    terminalId,
+                    status: "inconclusive",
+                    verdict: "fail",
+                    reasoning: "evaluator transport unavailable",
+                    violatedCriteria: [],
+                    turn: 1,
+                    modelUsed: "test-critic",
+                }),
+            )
+
+            const outcome = await outcomePromise
+            agent.leave(env)
+            assert.equal(outcome.success, true)
+            assert.equal(outcome.attempts, 1)
+            assert.equal(outcome.failure, undefined)
             assert.equal(
                 readLifecycle(fake.lifecyclePath).filter(
                     (entry) => entry.event === "spawn",

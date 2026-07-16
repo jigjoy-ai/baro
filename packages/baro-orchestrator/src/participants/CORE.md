@@ -88,8 +88,12 @@ Critic evaluates a terminal candidate only when repository and command
 evidence are ready. AcceptanceGate correlates that verdict with the exact
 lease, generation, and terminal identity before permitting integration.
 Missing, stale, sandbox-blocked, or evaluator-unavailable evidence is
-inconclusive and enters operational recovery; an evaluated rejection is a
-semantic quality failure.
+inconclusive. AcceptanceGate first asks AgentTurnProjector for a bounded replay
+of the exact active lease/candidate, without another WorkOffer. Exhaustion
+preserves the candidate and fails closed without an implementation recovery
+wave; an evaluated rejection remains a semantic quality failure. This is
+re-evaluation only: a trusted per-story CandidateVerifier that can create new
+command evidence in the isolated worktree is still future work.
 
 ### Runtime replan and recovery
 

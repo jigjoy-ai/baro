@@ -12,7 +12,7 @@ import { join } from "node:path"
 import spawn from "cross-spawn"
 
 import { harnessChildEnvironment } from "./harness-environment.js"
-import { anyProcessAlive, signalProcessTree } from "./process-tree.js"
+import { ManagedProcessTree } from "./process-tree.js"
 
 import {
     knownMetric,
@@ -122,6 +122,10 @@ export async function runOpenCodeOneShot(
             reject(e instanceof Error ? e : new Error(String(e)))
             return
         }
+        const processTree = new ManagedProcessTree(proc, {
+            terminationGraceMs,
+            pollIntervalMs: 25,
+        })
 
         let assistantText = ""
         let stdoutBuffer = ""
@@ -130,13 +134,10 @@ export async function runOpenCodeOneShot(
         let timedOut = false
         let aborted = false
         let timer: ReturnType<typeof setTimeout> | null = null
-        let killTimer: ReturnType<typeof setTimeout> | null = null
-        let pollTimer: ReturnType<typeof setInterval> | null = null
-        let signalledPids = new Set<number>()
-        let escalated = false
-        let terminationRequested = false
         let forcedError: Error | null = null
-        let deferredExit: {
+        let finalized = false
+        let treeRefreshed = false
+        let rootExit: {
             code: number | null
             signal: NodeJS.Signals | null
         } | null = null
@@ -146,30 +147,25 @@ export async function runOpenCodeOneShot(
                 clearTimeout(timer)
                 timer = null
             }
-            if (killTimer !== null) {
-                clearTimeout(killTimer)
-                killTimer = null
-            }
-            if (pollTimer !== null) {
-                clearInterval(pollTimer)
-                pollTimer = null
-            }
             opts.signal?.removeEventListener("abort", onAbort)
         }
+        const refreshProcessTree = (): void => {
+            if (treeRefreshed) return
+            treeRefreshed = true
+            processTree.refresh()
+        }
+        const finalizeAbnormalAfterTree = (): void => {
+            void processTree.done.then(() => {
+                proc.stdin?.destroy()
+                proc.stdout?.destroy()
+                proc.stderr?.destroy()
+                const terminal = rootExit ?? { code: null, signal: null }
+                finalizeExit(terminal.code, terminal.signal)
+            })
+        }
         const terminate = (): void => {
-            terminationRequested = true
-            signalledPids = signalProcessTree(proc, "SIGTERM", signalledPids)
-            if (killTimer !== null) return
-            killTimer = setTimeout(() => {
-                killTimer = null
-                escalated = true
-                signalledPids = signalProcessTree(
-                    proc,
-                    "SIGKILL",
-                    signalledPids,
-                )
-                finishDeferredExit()
-            }, terminationGraceMs)
+            processTree.terminate("SIGTERM")
+            finalizeAbnormalAfterTree()
         }
         const onAbort = (): void => {
             if (aborted) return
@@ -185,62 +181,73 @@ export async function runOpenCodeOneShot(
         // Close the race between the pre-spawn check and listener install.
         if (opts.signal?.aborted) onAbort()
 
+        const processLine = (rawLine: string): void => {
+            const line = rawLine.trim()
+            if (!line) return
+            let event: Record<string, unknown>
+            try {
+                event = JSON.parse(line) as Record<string, unknown>
+            } catch {
+                return
+            }
+            const type = typeof event.type === "string" ? event.type : ""
+            if (type) eventTypesSeen.push(type)
+
+            if (type === "step_finish") {
+                const part = record(event.part)
+                const tokens = record(part.tokens)
+                if (Object.keys(tokens).length > 0) {
+                    process.stderr.write(
+                        `[${label}] usage: in=${numberForLog(tokens.input)} out=${numberForLog(tokens.output)}\n`,
+                    )
+                }
+                if (!timedOut && !aborted) {
+                    invocations.observe(openCodeObservation(event, opts))
+                }
+                return
+            }
+            if (type === "text") {
+                const part = event.part as Record<string, unknown> | undefined
+                if (part && typeof part.text === "string") {
+                    assistantText = assistantText
+                        ? `${assistantText}\n${part.text}`
+                        : part.text
+                }
+                return
+            }
+            // Real opencode emits `tool_use`; `tool_call` is the legacy
+            // paired-shape fallback. Log either.
+            if (type === "tool_use" || type === "tool_call") {
+                if (safeEvaluator) evaluatorToolUseSeen = true
+                const part = event.part as Record<string, unknown> | undefined
+                const tool =
+                    typeof part?.tool === "string"
+                        ? part.tool.slice(0, 120)
+                        : "?"
+                process.stderr.write(`[${label}] tool: ${tool}\n`)
+            }
+        }
+
         proc.stdout!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => {
+            refreshProcessTree()
             stdoutBuffer += chunk
             let nl: number
             while ((nl = stdoutBuffer.indexOf("\n")) >= 0) {
-                const line = stdoutBuffer.slice(0, nl).trim()
+                const line = stdoutBuffer.slice(0, nl)
                 stdoutBuffer = stdoutBuffer.slice(nl + 1)
-                if (!line) continue
-                let event: Record<string, unknown>
-                try {
-                    event = JSON.parse(line) as Record<string, unknown>
-                } catch {
-                    continue
-                }
-                const type = typeof event.type === "string" ? event.type : ""
-                if (type) eventTypesSeen.push(type)
-
-                if (type === "step_finish") {
-                    const part = record(event.part)
-                    const tokens = record(part.tokens)
-                    if (Object.keys(tokens).length > 0) {
-                        process.stderr.write(
-                            `[${label}] usage: in=${numberForLog(tokens.input)} out=${numberForLog(tokens.output)}\n`,
-                        )
-                    }
-                    if (!timedOut && !aborted) {
-                        invocations.observe(openCodeObservation(event, opts))
-                    }
-                    continue
-                }
-                if (type === "text") {
-                    const part = event.part as Record<string, unknown> | undefined
-                    if (part && typeof part.text === "string") {
-                        assistantText = assistantText
-                            ? `${assistantText}\n${part.text}`
-                            : part.text
-                    }
-                    continue
-                }
-                // Real opencode emits `tool_use`; `tool_call` is the
-                // legacy paired-shape fallback. Log either.
-                if (type === "tool_use" || type === "tool_call") {
-                    if (safeEvaluator) evaluatorToolUseSeen = true
-                    const part = event.part as Record<string, unknown> | undefined
-                    const tool =
-                        typeof part?.tool === "string"
-                            ? part.tool.slice(0, 120)
-                            : "?"
-                    process.stderr.write(`[${label}] tool: ${tool}\n`)
-                    continue
-                }
+                processLine(line)
             }
+        })
+        proc.stdout!.on("end", () => {
+            if (stdoutBuffer.length === 0) return
+            processLine(stdoutBuffer)
+            stdoutBuffer = ""
         })
 
         proc.stderr!.setEncoding("utf8")
         proc.stderr!.on("data", (chunk: string) => {
+            refreshProcessTree()
             const trimmed = chunk.trimEnd()
             if (trimmed) {
                 process.stderr.write(`[${label}/stderr] ${trimmed}\n`)
@@ -248,31 +255,18 @@ export async function runOpenCodeOneShot(
         })
 
         proc.on("error", (err) => {
-            if (terminationRequested && proc.pid !== undefined) {
-                if (!timedOut && !aborted) forcedError ??= err
-                // A started process emits exit after its runtime error. Keep
-                // the tree escalation alive and settle through that path.
-                return
-            }
-            clearTimers()
-            if (
-                !invocations.finish(
-                    unknownOpenCodeObservation(
-                        timedOut || aborted ? "timed_out" : "failed",
-                        Date.now() - startedAt,
-                        opts,
-                    ),
-                )
-            ) {
-                return
-            }
-            reject(aborted ? abortError() : err)
+            if (!timedOut && !aborted) forcedError ??= err
+            if (proc.pid === undefined) processTree.markRootClosed()
+            else processTree.terminate("SIGTERM")
+            finalizeAbnormalAfterTree()
         })
 
         const finalizeExit = (
             code: number | null,
             signal: NodeJS.Signals | null,
         ): void => {
+            if (finalized) return
+            finalized = true
             clearTimers()
             const elapsedMs = Date.now() - startedAt
 
@@ -379,29 +373,18 @@ export async function runOpenCodeOneShot(
                 ),
             )
         }
-        const finishDeferredExit = (): void => {
-            const exit = deferredExit
-            if (!exit) return
-            deferredExit = null
-            finalizeExit(exit.code, exit.signal)
-        }
 
         proc.on("exit", (code, signal) => {
-            if (
-                terminationRequested &&
-                !escalated &&
-                anyProcessAlive(signalledPids)
-            ) {
-                deferredExit = { code, signal }
-                // The direct CLI may exit on TERM while a provider child
-                // ignores it. Keep the promise (and Node process) alive until
-                // the descendant exits or the SIGKILL grace expires.
-                pollTimer = setInterval(() => {
-                    if (!anyProcessAlive(signalledPids)) finishDeferredExit()
-                }, 25)
-                return
-            }
-            finalizeExit(code, signal)
+            rootExit = { code, signal }
+            processTree.markRootClosed()
+        })
+        proc.on("close", (code, signal) => {
+            rootExit ??= { code, signal }
+            processTree.markRootClosed()
+            const terminal = rootExit
+            void processTree.done.then(() =>
+                finalizeExit(terminal.code, terminal.signal),
+            )
         })
 
         if (safeEvaluator) {

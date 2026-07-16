@@ -143,7 +143,8 @@ async fn run(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn orchestrator: {}", e))?;
-    let mut process_tree = ProcessTreeGuard::new(child.id());
+    let mut process_tree = ProcessTreeGuard::attach(&mut child)
+        .map_err(|e| format!("failed to supervise orchestrator process tree: {}", e))?;
 
     let stdout = child
         .stdout
@@ -247,7 +248,9 @@ async fn run(
         .wait()
         .await
         .map_err(|e| format!("orchestrator wait failed: {}", e))?;
-    process_tree.disarm();
+    // Exit status covers only the direct Node process. Kill any residual
+    // provider group before draining inherited pipes, including on exit 0.
+    process_tree.terminate();
 
     // Be explicit about the security boundary: the context file remains
     // addressable while the child is alive and is unlinked immediately after
@@ -259,7 +262,6 @@ async fn run(
     stdin_task.abort();
     let _ = stdout_task.await;
     let _ = stderr_task.await;
-
     if !status.success() {
         return Err(format!(
             "orchestrator exited with code {}",

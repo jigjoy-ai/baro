@@ -9,15 +9,19 @@ import {
 } from "@mozaik-ai/core"
 
 import { knownMetric, unknownMetric } from "../../src/model-telemetry.js"
+import { AgentTurnProjector } from "../../src/participants/agent-turn-projector.js"
 import { CriticOpenAI } from "../../src/participants/critic-openai.js"
+import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import {
     AgentResult,
     AgentTargetedMessage,
     AgentTurnCompleted,
     Critique,
     ModelInvocationMeasured,
+    StoryQualityReverificationRequested,
+    WorkLeaseGranted,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source } from "./helpers.js"
+import { captureEnv, joinWithCapture, source } from "./helpers.js"
 
 describe("CriticOpenAI", () => {
     it("emits critiques while bounding corrective messages", async () => {
@@ -207,6 +211,155 @@ describe("CriticOpenAI", () => {
             item.cost.customerUsd,
             unknownMetric("pending_gateway_meter"),
         )
+    })
+
+    it("preserves projector-authoritative lease correlation in reverification billing telemetry", async () => {
+        const runId = "run-openai-reverification"
+        const storyId = "agent-a"
+        const broker = source("broker")
+        const gate = source("acceptance-gate")
+        const worker = source(storyId)
+        const attacker = source("agent-turn-projector")
+        const correlation = {
+            runId,
+            storyId,
+            leaseId: "lease-reverification",
+            generation: 7,
+        }
+        const outcomeAuthority = new StoryOutcomeAuthority(runId)
+        outcomeAuthority.registerResultAuthority(correlation, worker)
+
+        const projector = new AgentTurnProjector({ outcomeAuthority })
+        projector.setLeaseAuthority(broker)
+        projector.setReverificationAuthority(gate)
+        const env = captureEnv()
+        projector.join(env)
+
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseGranted.create({
+                runId,
+                offerId: "offer-reverification",
+                leaseId: correlation.leaseId,
+                workerId: "worker-1",
+                generation: correlation.generation,
+                request: {
+                    storyId,
+                    prompt: "implement the candidate",
+                    model: "standard",
+                    retries: 0,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+        env.deliverSemanticEvent(
+            worker,
+            AgentResult.create({
+                agentId: storyId,
+                terminalId: "candidate-terminal-1",
+                subtype: "success",
+                sessionId: null,
+                isError: false,
+                resultText: "candidate bytes",
+                usage: null,
+                totalCostUsd: null,
+                numTurns: 1,
+                durationMs: 1,
+            }),
+        )
+
+        const critic = new CriticOpenAI({
+            targets: new Map([[storyId, ["must include tests"]]]),
+            model: "fake-openai-model",
+            runId,
+            outcomeAuthority,
+            terminalProjectorAuthority: projector,
+        })
+        let billedCorrelation: {
+            runId: string
+            storyId: string
+            leaseId: string
+            generation: number
+        } | null = null
+        Object.defineProperty(critic, "runRound", {
+            value: async (
+                _context: unknown,
+                _agentId: string,
+                _turn: number,
+                resolved: typeof billedCorrelation,
+            ) => {
+                billedCorrelation = resolved
+                return {
+                    items: [
+                        ModelMessageItem.rehydrate({
+                            text: JSON.stringify({
+                                verdict: "pass",
+                                reasoning: "criteria satisfied",
+                                violated_criteria: [],
+                            }),
+                        }),
+                    ],
+                    usage: undefined,
+                }
+            },
+        })
+        critic.join(env)
+
+        // A source that merely claims to be the projector cannot obtain
+        // correlation or trigger evaluation.
+        env.deliverSemanticEvent(
+            attacker,
+            AgentTurnCompleted.create({
+                agentId: storyId,
+                terminalId: "forged-reverification",
+                backend: "codex",
+                isError: false,
+                resultText: "forged bytes",
+                canContinue: false,
+            }),
+        )
+        await critic.idle()
+        assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)
+
+        env.deliverSemanticEvent(
+            gate,
+            StoryQualityReverificationRequested.create({
+                runId,
+                requestId: "reverify-billing-1",
+                previousEvaluationId: "quality-1",
+                evaluationId: "quality-2",
+                storyId,
+                leaseId: correlation.leaseId,
+                generation: correlation.generation,
+                targetTurn: 1,
+                terminalId: "candidate-terminal-1",
+                attempt: 1,
+                reason: "critic unavailable",
+            }),
+        )
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        await critic.idle()
+
+        const replay = env.events
+            .filter(AgentTurnCompleted.is)
+            .find((event) => event.data.terminalId?.startsWith("reverification:"))
+        assert.ok(replay)
+        assert.deepEqual(
+            projector.terminalCorrelationFor(
+                storyId,
+                replay.data.terminalId,
+            ),
+            correlation,
+        )
+        assert.deepEqual(billedCorrelation, correlation)
+
+        const measured = env.events.filter(ModelInvocationMeasured.is)
+        assert.equal(measured.length, 1)
+        assert.equal(measured[0]!.data.runId, runId)
+        assert.equal(measured[0]!.data.storyId, storyId)
+        assert.equal(measured[0]!.data.leaseId, correlation.leaseId)
+        assert.equal(measured[0]!.data.generation, correlation.generation)
+        assert.equal(env.events.filter(Critique.is).length, 1)
     })
 
     it("keeps successful telemetry when OpenAI returns a malformed verdict", async () => {

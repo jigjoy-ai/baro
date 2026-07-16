@@ -10,6 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
+#[cfg(windows)]
+mod windows_job;
+
 /// Captured output of a successful subprocess run. stderr and the log
 /// path aren't fields — no caller reads them on the success path; the log
 /// path only matters when a run FAILS, where it rides on `ProcessRunError`.
@@ -58,7 +61,10 @@ pub async fn spawn_and_capture_streaming(
         message: format!("failed to spawn {}: {}", log_tag, e),
         log_path: None,
     })?;
-    let mut process_tree = ProcessTreeGuard::new(child.id());
+    let mut process_tree = ProcessTreeGuard::attach(&mut child).map_err(|e| ProcessRunError {
+        message: format!("failed to supervise {} process tree: {}", log_tag, e),
+        log_path: None,
+    })?;
 
     let stdout_pipe = child.stdout.take().expect("stdout piped above");
     let stderr_pipe = child.stderr.take().expect("stderr piped above");
@@ -72,17 +78,35 @@ pub async fn spawn_and_capture_streaming(
 
     let mut stderr_acc = String::new();
     let mut lines = BufReader::new(stderr_pipe).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        on_line(&line);
-        stderr_acc.push_str(&line);
-        stderr_acc.push('\n');
+    let mut stderr_open = true;
+    let mut status = None;
+    let mut wait = Box::pin(child.wait());
+    while status.is_none() || stderr_open {
+        tokio::select! {
+            wait_result = &mut wait, if status.is_none() => {
+                let observed = wait_result.map_err(|e| ProcessRunError {
+                    message: format!("{} process error: {}", log_tag, e),
+                    log_path: None,
+                })?;
+                // A completed supervised phase must not leave provider
+                // descendants behind, even on exit 0. Terminate the residual
+                // group before waiting for inherited pipes to reach EOF.
+                process_tree.terminate();
+                status = Some(observed);
+            }
+            line_result = lines.next_line(), if stderr_open => {
+                match line_result {
+                    Ok(Some(line)) => {
+                        on_line(&line);
+                        stderr_acc.push_str(&line);
+                        stderr_acc.push('\n');
+                    }
+                    Ok(None) | Err(_) => stderr_open = false,
+                }
+            }
+        }
     }
-
-    let status = child.wait().await.map_err(|e| ProcessRunError {
-        message: format!("{} process error: {}", log_tag, e),
-        log_path: None,
-    })?;
-    process_tree.disarm();
+    let status = status.expect("child wait branch must complete");
 
     let stdout_bytes = stdout_task.await.unwrap_or_default();
     let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
@@ -125,7 +149,10 @@ pub async fn spawn_and_stream_events(
         message: format!("failed to spawn {}: {}", log_tag, e),
         log_path: None,
     })?;
-    let mut process_tree = ProcessTreeGuard::new(child.id());
+    let mut process_tree = ProcessTreeGuard::attach(&mut child).map_err(|e| ProcessRunError {
+        message: format!("failed to supervise {} process tree: {}", log_tag, e),
+        log_path: None,
+    })?;
 
     let stdout_pipe = child.stdout.take().expect("stdout piped above");
     let stderr_pipe = child.stderr.take().expect("stderr piped above");
@@ -144,21 +171,37 @@ pub async fn spawn_and_stream_events(
 
     let mut stdout_acc = String::new();
     let mut lines = BufReader::new(stdout_pipe).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    let mut stdout_open = true;
+    let mut status = None;
+    let mut wait = Box::pin(child.wait());
+    while status.is_none() || stdout_open {
+        tokio::select! {
+            wait_result = &mut wait, if status.is_none() => {
+                let observed = wait_result.map_err(|e| ProcessRunError {
+                    message: format!("{} process error: {}", log_tag, e),
+                    log_path: None,
+                })?;
+                // Exit status describes only the direct root. Always clean its
+                // residual provider group before waiting for stdout EOF.
+                process_tree.terminate();
+                status = Some(observed);
+            }
+            line_result = lines.next_line(), if stdout_open => {
+                match line_result {
+                    Ok(Some(line)) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            on_event(trimmed);
+                            stdout_acc.push_str(&line);
+                            stdout_acc.push('\n');
+                        }
+                    }
+                    Ok(None) | Err(_) => stdout_open = false,
+                }
+            }
         }
-        on_event(trimmed);
-        stdout_acc.push_str(&line);
-        stdout_acc.push('\n');
     }
-
-    let status = child.wait().await.map_err(|e| ProcessRunError {
-        message: format!("{} process error: {}", log_tag, e),
-        log_path: None,
-    })?;
-    process_tree.disarm();
+    let status = status.expect("child wait branch must complete");
 
     let stderr_acc = stderr_task.await.unwrap_or_default();
     let log_path = persist_log(log_tag, &stdout_acc, &stderr_acc);
@@ -179,67 +222,92 @@ pub async fn spawn_and_stream_events(
     Ok(log_path)
 }
 
-/// Put each supervised command at the root of its own process group. On Unix,
-/// descendants inherit that group, so cancelling the Rust future can terminate
-/// Node and any provider CLI it has already spawned as one unit. `kill_on_drop`
-/// remains enabled as a direct-child fallback.
+/// Configure the platform containment primitive before spawn. Unix descendants
+/// inherit a dedicated process group. Windows starts the root suspended so it
+/// can be assigned to a kill-on-close Job Object before any provider code runs.
+/// `kill_on_drop` remains enabled as a direct-child fallback.
 pub(crate) fn configure_process_tree(cmd: &mut Command) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.as_std_mut().process_group(0);
     }
+
+    #[cfg(windows)]
+    windows_job::configure(cmd);
 }
 
 /// Cancellation guard for the complete process tree rooted at a supervised
-/// child. A normal `wait()` disarms it; dropping the future first does not.
+/// child. Completion and cancellation both terminate any remaining descendants:
+/// a successful direct root is not permission to leave a paid provider running.
+/// Unix process groups and Windows Job Objects both remain addressable after the
+/// direct root exits.
 pub(crate) struct ProcessTreeGuard {
+    #[cfg(not(windows))]
     pid: Option<u32>,
+    #[cfg(windows)]
+    job: Option<windows_job::WindowsJob>,
 }
 
 impl ProcessTreeGuard {
-    pub(crate) fn new(pid: Option<u32>) -> Self {
-        Self { pid }
+    pub(crate) fn attach(child: &mut tokio::process::Child) -> std::io::Result<Self> {
+        #[cfg(windows)]
+        {
+            let job = windows_job::WindowsJob::attach_and_resume(child)?;
+            Ok(Self { job: Some(job) })
+        }
+
+        #[cfg(not(windows))]
+        {
+            Ok(Self { pid: child.id() })
+        }
     }
 
-    pub(crate) fn disarm(&mut self) {
-        self.pid = None;
+    pub(crate) fn terminate(&mut self) {
+        #[cfg(not(windows))]
+        if let Some(pid) = self.pid.take() {
+            terminate_process_tree(pid);
+        }
+
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            job.terminate();
+        }
     }
 }
 
 impl Drop for ProcessTreeGuard {
     fn drop(&mut self) {
-        let Some(pid) = self.pid.take() else {
-            return;
-        };
-
-        #[cfg(unix)]
+        #[cfg(not(windows))]
         {
-            // SAFETY: POSIX `kill` accepts a negative pid to address a process
-            // group. The child was made leader of group `pid` before spawn.
-            unsafe extern "C" {
-                fn kill(pid: i32, signal: i32) -> i32;
-            }
-            const SIGKILL: i32 = 9;
-            if let Ok(group) = i32::try_from(pid) {
-                // Ignore ESRCH: the process tree may already have exited while
-                // cancellation was propagating.
-                let _ = unsafe { kill(-group, SIGKILL) };
-            }
+            let Some(pid) = self.pid.take() else {
+                return;
+            };
+
+            terminate_process_tree(pid);
         }
 
         #[cfg(windows)]
-        {
-            // `Child::kill_on_drop` only terminates the direct process on
-            // Windows. `taskkill /T` is the platform-provided tree equivalent;
-            // run it synchronously so the root cannot disappear before its
-            // descendants are discovered.
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
+        if let Some(job) = self.job.take() {
+            job.terminate();
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn terminate_process_tree(pid: u32) {
+    #[cfg(unix)]
+    {
+        // SAFETY: POSIX `kill` accepts a negative pid to address a process
+        // group. The child was made leader of group `pid` before spawn.
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        const SIGKILL: i32 = 9;
+        if let Ok(group) = i32::try_from(pid) {
+            // Ignore ESRCH: the process tree may already have exited while
+            // cancellation was propagating.
+            let _ = unsafe { kill(-group, SIGKILL) };
         }
     }
 }
@@ -285,6 +353,9 @@ fn persist_log(tag: &str, stdout: &str, stderr: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[cfg(unix)]
+    static PROCESS_TREE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[tokio::test]
     async fn streaming_captures_stdout_intact_and_sees_stderr_lines() {
@@ -345,20 +416,147 @@ mod tests {
         assert!(err.message.contains("kaboom"), "got: {}", err.message);
     }
 
-    #[cfg(unix)]
+    #[cfg(windows)]
     #[tokio::test]
+    async fn successful_root_reap_still_terminates_windows_job_descendants() {
+        let directory = tempfile::tempdir().unwrap();
+        let descendant_pid = directory.path().join("descendant-pid");
+        let root_script = directory.path().join("root.ps1");
+        let escaped_pid_path = descendant_pid.to_string_lossy().replace('\'', "''");
+        std::fs::write(
+            &root_script,
+            format!(
+                r#"$child = Start-Process -FilePath "powershell.exe" `
+    -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Start-Sleep -Seconds 60") `
+    -PassThru -NoNewWindow
+[System.IO.File]::WriteAllText('{escaped_pid_path}', [string]$child.Id)
+Write-Output '{{"fixture":"root-exiting"}}'
+exit 0
+"#,
+            ),
+        )
+        .unwrap();
+
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&root_script);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            spawn_and_stream_events(cmd, "windows-job-root-reap", |_| {}),
+        )
+        .await
+        .expect("post-reap Job termination must close inherited pipes")
+        .expect("root fixture should exit successfully");
+
+        let pid: u32 = std::fs::read_to_string(&descendant_pid)
+            .expect("root fixture did not record its descendant")
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while windows_process_exists(pid) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !windows_process_exists(pid),
+            "a descendant remained alive after its direct root was reaped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn nonzero_exit_terminates_inherited_pipe_descendants() {
+        let _serial = PROCESS_TREE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::tempdir().unwrap();
+        let descendant_pid = directory.path().join("descendant-pid");
+        let mut cmd = Command::new("sh");
+        cmd.env("BARO_TEST_DESCENDANT_PID", &descendant_pid)
+            .arg("-c")
+            .arg(
+                "(trap '' TERM; sleep 10) \
+                 & \
+                 echo \"$!\" > \"$BARO_TEST_DESCENDANT_PID\"; exit 7",
+            );
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            spawn_and_stream_events(cmd, "nonzero-tree-test", |_| {}),
+        )
+        .await
+        .expect("nonzero root must be observed before inherited pipe EOF")
+        .expect_err("nonzero fixture must fail");
+        let descendant_pid = std::fs::read_to_string(&descendant_pid)
+            .unwrap()
+            .trim()
+            .to_string();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while unix_process_exists(&descendant_pid) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !unix_process_exists(&descendant_pid),
+            "nonzero command left a descendant alive after its root exited"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn successful_exit_terminates_ignored_stdio_descendants() {
+        let _serial = PROCESS_TREE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::tempdir().unwrap();
+        let descendant_pid = directory.path().join("descendant-pid");
+        let mut cmd = Command::new("sh");
+        cmd.env("BARO_TEST_DESCENDANT_PID", &descendant_pid)
+            .arg("-c")
+            .arg(
+                "(trap '' TERM; sleep 10) \
+                 </dev/null >/dev/null 2>&1 & \
+                 echo \"$!\" > \"$BARO_TEST_DESCENDANT_PID\"; exit 0",
+            );
+
+        spawn_and_stream_events(cmd, "success-tree-test", |_| {})
+            .await
+            .expect("successful direct root should still clean descendants");
+        let descendant_pid = std::fs::read_to_string(&descendant_pid)
+            .unwrap()
+            .trim()
+            .to_string();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while unix_process_exists(&descendant_pid) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !unix_process_exists(&descendant_pid),
+            "successful command left an ignored-stdio descendant alive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
     async fn cancelling_stream_supervision_kills_the_process_tree_on_drop() {
+        let _serial = PROCESS_TREE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let directory = tempfile::tempdir().unwrap();
         let started = directory.path().join("started");
-        let escaped = directory.path().join("escaped");
         let descendant_pid = directory.path().join("descendant-pid");
         let mut cmd = Command::new("sh");
         cmd.env("BARO_TEST_STARTED", &started)
-            .env("BARO_TEST_ESCAPED", &escaped)
             .env("BARO_TEST_DESCENDANT_PID", &descendant_pid)
             .arg("-c")
             .arg(
-                "(trap '' TERM; sleep 10; touch \"$BARO_TEST_ESCAPED\") & \
+                "(trap '' TERM; sleep 10) & \
                  echo \"$!\" > \"$BARO_TEST_DESCENDANT_PID\"; \
                  touch \"$BARO_TEST_STARTED\"; wait",
             );
@@ -387,10 +585,6 @@ mod tests {
             !unix_process_exists(&descendant_pid),
             "a descendant remained alive after its supervisor was dropped"
         );
-        assert!(
-            !escaped.exists(),
-            "a descendant escaped after its supervisor was dropped"
-        );
     }
 
     #[cfg(unix)]
@@ -402,5 +596,25 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(windows)]
+    fn windows_process_exists(pid: u32) -> bool {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+
+        let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if raw.is_null() {
+            return false;
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw as RawHandle) };
+        match unsafe { WaitForSingleObject(handle.as_raw_handle() as _, 0) } {
+            WAIT_TIMEOUT => true,
+            WAIT_OBJECT_0 => false,
+            _ => false,
+        }
     }
 }

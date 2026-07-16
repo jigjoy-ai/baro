@@ -394,7 +394,7 @@ describe("CollectiveBoard", () => {
         })
     })
 
-    it("retries an inconclusive evaluator without invoking Surgeon or healing", async () => {
+    it("preserves an exhausted inconclusive candidate without a new implementation wave", async () => {
         await withTempDir("collective-quality-inconclusive-", async (dir) => {
             const runId = "run-quality-inconclusive"
             const prdPath = join(dir, "prd.json")
@@ -450,6 +450,7 @@ describe("CollectiveBoard", () => {
                 }),
             )
             const cleanup = await waitFor(env.events, WorkspaceCleanupRequested.is)
+            assert.equal(cleanup.data.preserveForRecovery, true)
             env.deliverSemanticEvent(
                 source("repo"),
                 WorkspaceCleanupCompleted.create({
@@ -457,11 +458,9 @@ describe("CollectiveBoard", () => {
                     preservedBranch: `${runId}/recovery/S1/evaluator`,
                 }),
             )
-            await waitFor(env.events, RecoveryStarted.is)
-            await provideContext(env, runId, 2)
-            const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
-            assert.equal(retry.data.request.recovery?.kind, "verification")
-            assert.deepEqual(retry.data.excludedRouteIds ?? [], [])
+            await flush()
+            assert.equal(env.events.filter(WorkOffered.is).length, 1)
+            assert.equal(env.events.filter(RecoveryStarted.is).length, 0)
             assert.equal(env.events.filter(RecoveryEvaluationStarted.is).length, 0)
             assert.equal(
                 env.events

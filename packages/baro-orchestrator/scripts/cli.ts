@@ -15,10 +15,7 @@ import {
     type OrchestrateConfig,
 } from "../src/orchestrate.js"
 import { resolveGatewayBillingForRoutes } from "../src/billing/index.js"
-import { ClaudeCliParticipant } from "../src/participants/claude-cli-participant.js"
-import { CodexCliParticipant } from "../src/participants/codex-cli-participant.js"
-import { OpenCodeCliParticipant } from "../src/participants/opencode-cli-participant.js"
-import { PiCliParticipant } from "../src/participants/pi-cli-participant.js"
+import { signalAllProcessTrees } from "../src/process-tree.js"
 import type { Operator } from "../src/participants/operator.js"
 import type { PlanningFeed } from "../src/participants/planning-feed.js"
 import { handleStdinCommand } from "../src/stdin-commands.js"
@@ -820,16 +817,16 @@ async function main(): Promise<void> {
             if (result.summary.abortReason) {
                 process.stderr.write(`[cli] stopped: ${result.summary.abortReason}\n`)
             }
-            process.exit(1)
+            exitAfterTreeCleanup(1)
         }
         // Explicit exit — open handles (ONNX model, Mozaik timers) prevent
         // natural Node exit after orchestrate() resolves.
-        process.exit(0)
+        exitAfterTreeCleanup(0)
     } catch (e) {
         process.stderr.write(
             `[cli] fatal: ${(e as Error)?.stack ?? String(e)}\n`,
         )
-        process.exit(1)
+        exitAfterTreeCleanup(1)
     }
 }
 
@@ -857,14 +854,12 @@ function parseDialogueBackend(
 process.on("unhandledRejection", (reason) => {
     const stack = (reason as Error)?.stack ?? String(reason)
     process.stderr.write(`[cli] unhandledRejection: ${stack}\n`)
-    ClaudeCliParticipant.killAll("SIGTERM")
-    process.exit(1)
+    exitAfterTreeCleanup(1)
 })
 process.on("uncaughtException", (err) => {
     const stack = err?.stack ?? String(err)
     process.stderr.write(`[cli] uncaughtException: ${stack}\n`)
-    ClaudeCliParticipant.killAll("SIGTERM")
-    process.exit(1)
+    exitAfterTreeCleanup(1)
 })
 
 // Forward SIGINT/SIGTERM to every active child so a killed baro doesn't
@@ -875,18 +870,12 @@ function shutdown(signal: NodeJS.Signals): void {
     if (shuttingDown) return
     shuttingDown = true
     process.stderr.write(`[cli] received ${signal}, killing in-flight children...\n`)
-    ClaudeCliParticipant.killAll("SIGTERM")
-    CodexCliParticipant.killAll("SIGTERM")
-    OpenCodeCliParticipant.killAll("SIGTERM")
-    PiCliParticipant.killAll("SIGTERM")
+    signalAllProcessTrees("SIGTERM")
     // Give children a moment to die cleanly, then escalate.
     setTimeout(() => {
-        ClaudeCliParticipant.killAll("SIGKILL")
-        CodexCliParticipant.killAll("SIGKILL")
-        OpenCodeCliParticipant.killAll("SIGKILL")
-        PiCliParticipant.killAll("SIGKILL")
+        signalAllProcessTrees("SIGKILL")
         process.exit(signal === "SIGINT" ? 130 : 143)
-    }, 1500).unref()
+    }, 1500)
 }
 process.on("SIGINT", () => shutdown("SIGINT"))
 process.on("SIGTERM", () => shutdown("SIGTERM"))
@@ -908,12 +897,11 @@ orphanWatchdog.unref()
 
 main().catch((e: unknown) => {
     process.stderr.write(`[cli] unhandled: ${(e as Error)?.stack ?? String(e)}\n`)
-    // process.exit() gives no grace window for SIGTERM to land, so SIGKILL
-    // directly — otherwise a crash orphans live agent subprocesses that keep
-    // burning quota and holding worktrees.
-    ClaudeCliParticipant.killAll("SIGKILL")
-    CodexCliParticipant.killAll("SIGKILL")
-    OpenCodeCliParticipant.killAll("SIGKILL")
-    PiCliParticipant.killAll("SIGKILL")
-    process.exit(1)
+    exitAfterTreeCleanup(1)
 })
+
+/** Synchronous SIGKILL delivery must precede every explicit runtime exit. */
+function exitAfterTreeCleanup(code: number): never {
+    signalAllProcessTrees("SIGKILL")
+    process.exit(code)
+}
