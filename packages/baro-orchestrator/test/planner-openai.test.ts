@@ -56,9 +56,13 @@ const RAW_TAIL_STORY = {
     model: "standard",
 }
 
-const PUBLISHED_STORY = {
+const FINAL_PRD_PUBLISHED_STORY = {
     ...(JSON.parse(VALID_PRD) as { userStories: Array<Record<string, unknown>> })
         .userStories[0]!,
+}
+
+const PUBLISHED_STORY = {
+    ...FINAL_PRD_PUBLISHED_STORY,
     passes: false,
     completedAt: null,
     durationSecs: null,
@@ -120,7 +124,13 @@ describe("PlannerOpenAI progressive fragments", () => {
         const tool = fakeTool(async () => "file contents")
         const sequence = fakeSequence(
             [
-                [publishFragmentCall("publish-1", "foundation", [PUBLISHED_STORY])],
+                [
+                    publishFragmentCall(
+                        "publish-1",
+                        "foundation",
+                        [FINAL_PRD_PUBLISHED_STORY],
+                    ),
+                ],
                 [message(FINAL_WITH_TAIL)],
             ],
             tool,
@@ -159,6 +169,14 @@ describe("PlannerOpenAI progressive fragments", () => {
         assert.match(
             JSON.stringify(sequence.contexts[0]!.toJSON()),
             /immutable.*exact, same-order.*prefix/is,
+        )
+        assert.match(
+            JSON.stringify(sequence.contexts[0]!.toJSON()),
+            /moment.*safe to execute.*immediately.*do not wait for the full DAG/is,
+        )
+        assert.match(
+            JSON.stringify(sequence.contexts[0]!.toJSON()),
+            /Output ONLY JSON.*only.*terminal response/is,
         )
     })
 
@@ -288,6 +306,10 @@ describe("PlannerOpenAI progressive fragments", () => {
 
         assert.equal(result, VALID_PRD)
         assert.deepEqual(published, [])
+        assert.match(
+            JSON.stringify(sequence.contexts[0]!.toJSON()),
+            /never force an unsafe or provisional split.*if no dependency-closed prefix becomes safe.*do not publish/is,
+        )
     })
 })
 

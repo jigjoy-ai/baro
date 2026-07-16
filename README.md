@@ -87,15 +87,16 @@ key plumbing for the subscription backends.
 
 ```bash
 baro --llm claude    "Your goal"   # default — Claude Code on Anthropic Max subscription
-baro --llm codex     "Your goal"   # Codex CLI; implicit Critic is disabled safely
+baro --llm codex     "Your goal"   # Codex CLI for every phase, including isolated evidence review
 baro --llm codex --critic-llm claude "Your goal" # Codex execution + tool-less Claude review
 baro --llm openai    "Your goal"   # Mozaik-native OpenAI (per-call API billing)
 baro --llm opencode  "Your goal"   # OpenCode CLI — multi-provider agent shell (any model)
 baro --llm hybrid    "Your goal"   # Claude on Architect/Planner/Critic/Surgeon, Codex on Story
 ```
 
-`--llm hybrid` is the recommendation for serious runs — Claude for planning, safe
-tool-less review, and recovery; Codex for parallel story work. Each phase
+`--llm hybrid` is the recommendation for serious runs — Claude for planning,
+tool-less review, and recovery; Codex for parallel story work. A pure Codex run
+reviews only Baro-captured evidence in an isolated least-privilege process. Each phase
 also has its own override flag if you want to mix it yourself:
 
 ```bash

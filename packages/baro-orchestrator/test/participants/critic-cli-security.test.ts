@@ -85,34 +85,66 @@ const safe = tools >= 0 && args[tools + 1] === "" &&
         })
     })
 
-    it("never launches Codex because its CLI has no tool-less mode", async () => {
+    it("runs Codex evidence-only with an isolated deny-workspace profile", async () => {
         await withTempDir("baro-critic-codex-security-", async (fixture) => {
             const capture = join(fixture, "capture.json")
+            const environmentCapture = join(fixture, "environment.json")
             const sentinel = join(fixture, "sentinel")
             const bin = writeNodeBin(
                 fixture,
                 "fake-codex.mjs",
-                `
-import fs from "node:fs";
-fs.writeFileSync(${JSON.stringify(sentinel)}, "unsafe tool execution");
-fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify(process.argv));
-`,
-            )
-
-            const env = await exercise(
-                new CriticCodex({
-                    targets: target(),
-                    codexBin: bin,
-                    timeoutMs: 60_000,
+                captureProgram({
+                    capture,
+                    environmentCapture,
+                    sentinel,
+                    safeExpression: `
+const disable = args.indexOf("--disable");
+const configs = args.filter((value, index) => args[index - 1] === "--config");
+const safe = args[0] === "exec" && args[1] === "--json" &&
+  args.includes("--skip-git-repo-check") &&
+  args.at(-1) === "-" &&
+  args.includes("--ephemeral") &&
+  args.includes("--ignore-user-config") &&
+  args.includes("--ignore-rules") &&
+  disable >= 0 && args[disable + 1] === "hooks" &&
+  args.includes("--strict-config") &&
+  !args.includes("--sandbox") &&
+  !args.includes("--dangerously-bypass-approvals-and-sandbox") &&
+  configs.includes('default_permissions="baro_dialogue"') &&
+  configs.includes('permissions.baro_dialogue.filesystem={":minimal"="read",":workspace_roots"={"."="deny"}}') &&
+  configs.includes('approval_policy="never"') &&
+  configs.includes('web_search="disabled"') &&
+  configs.includes('shell_environment_policy.inherit="none"') &&
+  configs.includes("allow_login_shell=false") &&
+  configs.includes("project_doc_max_bytes=0");`,
+                    output: JSON.stringify({
+                        type: "item.completed",
+                        item: { type: "agent_message", text: verdict() },
+                    }),
                 }),
             )
 
-            assert.equal(existsSync(capture), false, "Codex process was launched")
-            assert.equal(existsSync(sentinel), false, "Codex fake tool executed")
-            const critiques = env.events.filter(Critique.is)
-            assert.equal(critiques.length, 1)
-            assert.equal(critiques[0]!.data.verdict, "fail")
-            assert.match(critiques[0]!.data.reasoning, /no tool-less inference mode/)
+            let env: Awaited<ReturnType<typeof exercise>>
+            await withInjectedJigJoyEnvironment(async () => {
+                env = await exercise(
+                    new CriticCodex({
+                        targets: target(),
+                        codexBin: bin,
+                        timeoutMs: 60_000,
+                        evidence: largeEvidence(fixture),
+                    }),
+                )
+            })
+
+            assertSecureCapture(capture, sentinel)
+            assertHarnessEnvironmentWasSanitized(environmentCapture)
+            const item = JSON.parse(readFileSync(capture, "utf8")) as Capture
+            assertLargePromptUsedStdin(item)
+            assert.match(item.stdin, /strict acceptance-criteria evaluator/)
+            assert.match(item.stdin, /## Acceptance criteria/)
+            assert.match(item.stdin, /## Baro-captured command\/test evidence/)
+            assert.match(item.stdin, /## Baro-captured repository evidence/)
+            assertPass(env!.events)
         })
     })
 

@@ -73,11 +73,11 @@ baro --cwd ~/projects/myapp "Add REST API"
 `--llm` picks how every agent in the run talks to its model:
 
 - `--llm claude` (default) — every agent shells out to the Claude Code CLI in headless mode. Bills against your Claude Max subscription.
-- `--llm codex` — every agent shells out to OpenAI's Codex CLI (`codex exec --json`). Bills against ChatGPT Pro/Plus subscription. ~3–11× cheaper per equivalent run than Claude.
+- `--llm codex` — every agent shells out to OpenAI's Codex CLI (`codex exec --json`), with Critic evaluation isolated from the checkout and limited to Baro-captured evidence. Bills against ChatGPT Pro/Plus subscription. ~3–11× cheaper per equivalent run than Claude.
 - `--llm openai` — Mozaik-native OpenAI Responses API. Bills per token retail.
 - `--llm opencode` — shells out to OpenCode (`opencode run --format json`), using the provider and model configured in OpenCode.
 - `--llm pi` — shells out to Pi (`pi --mode json -p`), using the provider and model configured in Pi.
-- `--llm hybrid` — Claude on Architect/Planner/Surgeon (where the upstream plan matters), Codex on Story/Critic (the parallel work that dominates the budget). Recommended for serious runs.
+- `--llm hybrid` — Claude on Architect/Planner/Critic/Surgeon (where upstream decisions and review matter), Codex on Story (the parallel work that dominates the budget). Recommended for serious runs.
 
 Per-phase overrides exist (`--architect-llm`, `--planner-llm`, `--story-llm`, `--critic-llm`, `--surgeon-llm`) if you want to mix anything yourself.
 

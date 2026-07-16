@@ -36,21 +36,76 @@ export interface PlannerProgressivePublisher {
 }
 
 export const PROGRESSIVE_PLANNING_INSTRUCTION = `\
-Progressive planning is enabled. While repository tools are open, you may call
-publish_plan_fragment when one or more implementation stories are fully decided and safe to
-execute early. Every published story must include the complete PrdStory fields, including
-passes=false, completedAt=null, and durationSecs=null. A published fragment is closed: each
-dependency must already have been published or be present in that same fragment. Never publish a
-provisional forward reference. Published stories are immutable and become an exact, same-order
-prefix of the final PRD userStories array. The final PRD must repeat every published title,
-description, priority, dependency, retry count, acceptance criterion, test, and model unchanged;
-it may only append additional stories after that prefix. Publishing is optional: if no prefix is
-safe, continue exploring and return the complete final PRD normally.`
+PROGRESSIVE PLANNING — act as soon as the evidence is sufficient:
+While repository tools are open, the moment one or more implementation stories form a fully
+specified, dependency-closed prefix that is safe to execute, call publish_plan_fragment
+immediately. Do not wait for the full DAG or terminal PRD before publishing a safe prefix.
+
+Every published story uses exactly the final-PRD story fields: id, priority, title, description,
+dependsOn, retries, acceptance, tests, and model. A published fragment is closed: each dependency
+must already have been published or be present in that same fragment. Published stories are
+immutable and become an exact, same-order prefix of the final PRD userStories array. The final PRD
+must repeat every published title, description, priority, dependency, retry count, acceptance
+criterion, test, and model unchanged; it may only append additional stories after that prefix.
+
+This directive is conditional on safety. Never force an unsafe or provisional split merely to
+publish early. If a story, dependency, write surface, or acceptance contract is still provisional,
+keep exploring. If no dependency-closed prefix becomes safe before finalization, do not publish a
+fragment; return the complete final PRD normally. The shared "Output ONLY JSON" rule applies only
+to the terminal response; publish_plan_fragment tool calls are allowed during exploration.`
 
 export const PUBLISH_PLAN_FRAGMENT_DESCRIPTION =
     "Publish one closed, immutable batch of fully specified stories for early execution. " +
     "Every dependency must already be published or appear in this batch. Published stories " +
     "must remain the exact same-order prefix of the final PRD."
+
+const FINAL_PRD_STORY_INPUT_SCHEMA: Record<string, unknown> = {
+    type: "object",
+    properties: {
+        id: { type: "string" },
+        priority: {
+            type: "integer",
+            minimum: -2_147_483_648,
+            maximum: 2_147_483_647,
+        },
+        title: { type: "string" },
+        description: { type: "string" },
+        dependsOn: {
+            type: "array",
+            items: { type: "string" },
+            uniqueItems: true,
+        },
+        retries: { type: "integer", minimum: 0, maximum: 5 },
+        acceptance: {
+            type: "array",
+            minItems: 1,
+            items: { type: "string" },
+            uniqueItems: true,
+        },
+        tests: {
+            type: "array",
+            minItems: 1,
+            items: { type: "string" },
+            uniqueItems: true,
+        },
+        model: {
+            type: "string",
+            enum: ["light", "standard", "heavy"],
+        },
+    },
+    required: [
+        "id",
+        "priority",
+        "title",
+        "description",
+        "dependsOn",
+        "retries",
+        "acceptance",
+        "tests",
+        "model",
+    ],
+    additionalProperties: false,
+}
 
 export const PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA: Record<string, unknown> = {
     type: "object",
@@ -62,59 +117,10 @@ export const PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA: Record<string, unknown> = {
         stories: {
             type: "array",
             minItems: 1,
-            items: {
-                type: "object",
-                properties: {
-                    id: { type: "string" },
-                    priority: {
-                        type: "integer",
-                        minimum: -2_147_483_648,
-                        maximum: 2_147_483_647,
-                    },
-                    title: { type: "string" },
-                    description: { type: "string" },
-                    dependsOn: {
-                        type: "array",
-                        items: { type: "string" },
-                        uniqueItems: true,
-                    },
-                    retries: { type: "integer", minimum: 0, maximum: 5 },
-                    acceptance: {
-                        type: "array",
-                        minItems: 1,
-                        items: { type: "string" },
-                        uniqueItems: true,
-                    },
-                    tests: {
-                        type: "array",
-                        minItems: 1,
-                        items: { type: "string" },
-                        uniqueItems: true,
-                    },
-                    passes: { type: "boolean", const: false },
-                    completedAt: { type: "null" },
-                    durationSecs: { type: "null" },
-                    model: {
-                        type: "string",
-                        enum: ["light", "standard", "heavy"],
-                    },
-                },
-                required: [
-                    "id",
-                    "priority",
-                    "title",
-                    "description",
-                    "dependsOn",
-                    "retries",
-                    "acceptance",
-                    "tests",
-                    "passes",
-                    "completedAt",
-                    "durationSecs",
-                    "model",
-                ],
-                additionalProperties: false,
-            },
+            // Advertise one unambiguous shape to strict tool-schema clients.
+            // The publisher normalizes this final-PRD shape and still accepts
+            // the former execution-neutral shape for wire compatibility.
+            items: FINAL_PRD_STORY_INPUT_SCHEMA,
         },
     },
     required: ["fragmentId", "stories"],
@@ -162,7 +168,7 @@ export function createPlannerProgressivePublisher(
                 planningSessionId: config.planningId,
                 fragmentId: args.fragmentId,
                 ordinal: remembered?.ordinal ?? session.nextOrdinal,
-                stories: args.stories,
+                stories: normalizePublishedStories(args.stories),
             })
             const admission = session.admit(fragment)
             const event: PlannerOpenAIPlanFragmentEvent = {
@@ -244,6 +250,51 @@ function progressiveFinalPrd(candidate: string): { userStories: PrdStory[] } {
             model: story.model as string,
         })),
     }
+}
+
+const FINAL_PRD_STORY_KEYS = [
+    "id",
+    "priority",
+    "title",
+    "description",
+    "dependsOn",
+    "retries",
+    "acceptance",
+    "tests",
+    "model",
+] as const
+
+/**
+ * The durable progressive contract deliberately remains execution-neutral,
+ * while planners should not need to invent fields that do not exist in their
+ * terminal PRD. Normalize only the exact final-PRD shape; malformed, partial,
+ * or extended records flow unchanged into the existing strict validator.
+ */
+function normalizePublishedStories(value: unknown): unknown {
+    if (!Array.isArray(value)) return value
+    return value.map((story) => {
+        if (!isFinalPrdStoryRecord(story)) return story
+        return {
+            ...story,
+            passes: false,
+            completedAt: null,
+            durationSecs: null,
+        }
+    })
+}
+
+function isFinalPrdStoryRecord(
+    value: unknown,
+): value is Record<string, unknown> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) return false
+    const keys = Object.keys(value)
+    const expected = new Set<string>(FINAL_PRD_STORY_KEYS)
+    return (
+        FINAL_PRD_STORY_KEYS.every((key) => keys.includes(key)) &&
+        keys.every((key) => expected.has(key))
+    )
 }
 
 function snapshotPlannerStory(story: PrdStory): PrdStory {

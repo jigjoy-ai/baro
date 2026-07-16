@@ -16,6 +16,7 @@ import {
 } from "node:net"
 import { StringDecoder } from "node:string_decoder"
 
+import { ProgressivePlanContractError } from "./progressive-plan.js"
 import {
     createPlannerProgressivePublisher,
     PUBLISH_PLAN_FRAGMENT_DESCRIPTION,
@@ -46,7 +47,21 @@ export interface PlannerMcpServerCommand {
 export interface PlannerHarnessProgressiveConfig
     extends PlannerOpenAIProgressiveConfig {
     mcpServer: PlannerMcpServerCommand
+    /** Run-local lifecycle telemetry. Events intentionally carry no tool
+     * arguments, story content, relay coordinates, or authentication data. */
+    onStatus?: PlannerProgressiveMcpStatusObserver
 }
+
+export type PlannerProgressiveMcpStatus =
+    | "mcp-initialized"
+    | "tools-listed"
+    | "publish-attempt"
+    | "validation-failure"
+    | "admission-receipt"
+
+export type PlannerProgressiveMcpStatusObserver = (
+    status: PlannerProgressiveMcpStatus,
+) => void
 
 export interface PlannerHarnessMcpConnection {
     command: string
@@ -82,7 +97,10 @@ export async function createPlannerHarnessProgressiveSupport(
     if (!config) return NO_HARNESS_PROGRESSIVE_SUPPORT
     validateMcpServerCommand(config.mcpServer)
     const publisher = createPlannerProgressivePublisher(config)
-    const relay = new ProgressivePlannerRelay(publisher)
+    const relay = new ProgressivePlannerRelay(
+        publisher,
+        statusReporter(config.onStatus),
+    )
     const connection = await relay.open(config.mcpServer)
     return {
         systemInstruction: PROGRESSIVE_PLANNING_INSTRUCTION,
@@ -120,7 +138,10 @@ class ProgressivePlannerRelay {
     private closeTask: Promise<void> | null = null
     private operationTail: Promise<void> = Promise.resolve()
 
-    constructor(private readonly publisher: PlannerProgressivePublisher) {}
+    constructor(
+        private readonly publisher: PlannerProgressivePublisher,
+        private readonly reportStatus: PlannerProgressiveMcpStatusObserver,
+    ) {}
 
     async open(
         command: PlannerMcpServerCommand,
@@ -257,7 +278,17 @@ class ProgressivePlannerRelay {
     ): Promise<unknown> {
         if (request.type === "initialize") {
             this.initialized = true
+            this.reportStatus("mcp-initialized")
             return { initialized: true }
+        }
+        if (request.type === "tools-listed") {
+            if (!this.initialized) {
+                throw new Error(
+                    "progressive planner MCP must initialize before listing tools",
+                )
+            }
+            this.reportStatus("tools-listed")
+            return { listed: true }
         }
         if (request.type === "publish") {
             if (!this.initialized) {
@@ -265,7 +296,17 @@ class ProgressivePlannerRelay {
                     "progressive planner MCP must initialize before publishing",
                 )
             }
-            return await this.publisher.publish(request.args)
+            this.reportStatus("publish-attempt")
+            try {
+                const receipt = await this.publisher.publish(request.args)
+                this.reportStatus("admission-receipt")
+                return receipt
+            } catch (error) {
+                if (isPublishValidationFailure(error)) {
+                    this.reportStatus("validation-failure")
+                }
+                throw error
+            }
         }
         throw new Error("progressive planner relay request has an unknown type")
     }
@@ -434,6 +475,7 @@ async function handleMcpLine(
                 writeJsonRpc(output, jsonRpcResult(id, {}))
                 return
             case "tools/list":
+                await callRelay(connection, { type: "tools-listed" })
                 writeJsonRpc(
                     output,
                     jsonRpcResult(id, {
@@ -589,4 +631,26 @@ function messageOf(value: unknown): string {
     if (value instanceof Error) return value.message
     if (typeof value === "string" && value.trim()) return value
     return String(value)
+}
+
+function statusReporter(
+    observer: PlannerProgressiveMcpStatusObserver | undefined,
+): PlannerProgressiveMcpStatusObserver {
+    return (status) => {
+        try {
+            if (observer) observer(status)
+            else process.stderr.write(`[planner-progressive] ${status}\n`)
+        } catch {
+            // Telemetry must never change planner or admission behavior.
+        }
+    }
+}
+
+function isPublishValidationFailure(error: unknown): boolean {
+    return (
+        error instanceof ProgressivePlanContractError ||
+        messageOf(error).startsWith(
+            "publish_plan_fragment requires exact fragmentId and stories fields",
+        )
+    )
 }

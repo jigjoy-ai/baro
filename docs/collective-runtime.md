@@ -150,11 +150,12 @@ the planning latch as failed. The runtime may let already in-flight admitted
 stories settle, but it cannot report the run successfully verified. This is
 the fail-closed boundary that makes early execution safe to evaluate.
 
-Native OpenAI-compatible planning currently exposes the strict
-`publish_plan_fragment` tool. That includes GLM when it is reached through the
-native OpenAI-compatible route. Claude Code, Codex, OpenCode and Pi Planner
-backends do not yet publish early fragments: under the progressive host
-lifecycle they produce the complete PRD, which is admitted at
+Native OpenAI-compatible planning exposes the strict `publish_plan_fragment`
+tool. That includes GLM when it is reached through the native OpenAI-compatible
+route. Claude Code and Codex expose the same run-scoped capability through an
+isolated stdio MCP server whose calls are validated and relayed by the parent
+Planner process. OpenCode and Pi Planner backends remain final-only: under the
+progressive host lifecycle they produce the complete PRD, which is admitted at
 `plan_complete`. Their story-execution capabilities are separate from this
 Planner limitation.
 

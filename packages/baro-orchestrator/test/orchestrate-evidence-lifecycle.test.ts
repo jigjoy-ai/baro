@@ -3,21 +3,11 @@ import { setImmediate as setImmediatePromise } from "node:timers/promises"
 import { describe, it } from "node:test"
 
 import {
-    assertSupportedCriticBackend,
     resolveCriticRepositoryTarget,
     withCriticEvidenceBarrier,
 } from "../src/orchestrate.js"
 
 describe("orchestrate Critic evidence lifecycle", () => {
-    it("fails fast when the enabled Critic is routed to unsafe Codex CLI inference", () => {
-        assert.throws(
-            () => assertSupportedCriticBackend(true, "codex"),
-            /--critic-llm claude\|openai\|opencode\|pi.*--no-critic/,
-        )
-        assert.doesNotThrow(() => assertSupportedCriticBackend(false, "codex"))
-        assert.doesNotThrow(() => assertSupportedCriticBackend(true, "openai"))
-    })
-
     it("does not attribute the shared run tree to a story without an active worktree", () => {
         assert.equal(resolveCriticRepositoryTarget(null, "S1"), null)
         assert.equal(

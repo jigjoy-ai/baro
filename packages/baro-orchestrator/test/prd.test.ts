@@ -454,6 +454,11 @@ describe("buildDefaultStoryPrompt", () => {
         assert.ok(
             prompt.includes("TEST COMMANDS:\n- npm test -- prd.test.ts\n- npm run build"),
         )
+        assert.match(prompt, /smallest focused regression test/)
+        assert.match(prompt, /SEMANTIC SELF-REVIEW \(mandatory before commit\)/)
+        assert.match(prompt, /changed test can pass while asserting the wrong/)
+        assert.match(prompt, /operation-first, control-first, original errors/)
+        assert.match(prompt, /cleanup side effects/)
         assert.ok(prompt.includes(BARO_COAUTHOR_TRAILER))
     })
 })

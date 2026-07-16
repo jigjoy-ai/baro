@@ -134,40 +134,6 @@ fn reconcile_jigjoy_phase_overrides(
     }
 }
 
-fn unsupported_critic_backend(enabled: bool, provider: app::LlmProvider) -> Option<&'static str> {
-    (enabled && provider == app::LlmProvider::Codex).then_some(
-        "Critic cannot use the Codex CLI safely because it has no tool-less inference mode. Use --critic-llm claude|openai|opencode|pi or --no-critic.",
-    )
-}
-
-const CODEX_CRITIC_AUTO_DISABLED_WARNING: &str =
-    "Critic was disabled because the Codex CLI has no safe tool-less inference mode. \
-     Architect, Planner, Story, and Surgeon still use Codex. To enable review, route only \
-     Critic through --critic-llm claude|openai|opencode|pi.";
-
-/// Disable only the *implicit* Codex Critic default.
-///
-/// Codex remains valid for the agentic phases, but Critic consumes untrusted
-/// repository evidence and therefore requires a tool-less backend. An explicit
-/// request must fail closed later through `unsupported_critic_backend`; silently
-/// overriding it would hide a configuration error from the operator.
-fn disable_implicit_codex_critic(
-    app: &mut App,
-    critic_explicitly_requested: bool,
-    critic_backend_explicitly_set: bool,
-) -> bool {
-    if app.with_critic
-        && app.critic_llm == app::LlmProvider::Codex
-        && !critic_explicitly_requested
-        && !critic_backend_explicitly_set
-    {
-        app.with_critic = false;
-        true
-    } else {
-        false
-    }
-}
-
 /// Apply an interactive primary-provider choice without clobbering a
 /// deliberate per-phase Critic route.
 fn apply_primary_provider_choice(
@@ -724,7 +690,6 @@ async fn run_app(
     cli: cli::cli::Cli,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let headless = cli.headless;
-    let critic_explicitly_requested = cli.with_critic;
     let critic_backend_explicitly_set = cli.critic_llm.is_some();
     let mut app = App::new();
     let cwd = std::fs::canonicalize(&cli.cwd)?;
@@ -864,9 +829,9 @@ async fn run_app(
             app.architect_llm = app::LlmProvider::Claude;
             app.planner_llm = app::LlmProvider::Claude;
             app.story_llm = app::LlmProvider::Codex;
-            // Codex CLI has no tool-less inference mode, so it cannot safely
-            // inspect untrusted repository evidence as a Critic. Keep review
-            // on Claude while Codex executes stories.
+            // Hybrid intentionally keeps review on Claude's native tool-less
+            // evaluator. A pure Codex preset instead uses Baro's isolated,
+            // evidence-only Codex Critic while Codex executes stories.
             app.critic_llm = app::LlmProvider::Claude;
             app.surgeon_llm = app::LlmProvider::Claude;
         }
@@ -1051,19 +1016,6 @@ async fn run_app(
             cli.surgeon_model.is_some(),
             cli.tier_map.is_some(),
         );
-    }
-
-    if disable_implicit_codex_critic(
-        &mut app,
-        critic_explicitly_requested,
-        critic_backend_explicitly_set,
-    ) {
-        eprintln!("[baro] WARNING: {CODEX_CRITIC_AUTO_DISABLED_WARNING}");
-    }
-
-    if let Some(message) = unsupported_critic_backend(app.with_critic, app.critic_llm) {
-        eprintln!("[baro] error: {}", message);
-        std::process::exit(2);
     }
 
     // A global `--model` hits EVERY phase, but the Claude CLI only
@@ -1777,18 +1729,6 @@ async fn run_app(
                                 chosen,
                                 critic_backend_explicitly_set,
                             );
-                            if disable_implicit_codex_critic(
-                                &mut app,
-                                critic_explicitly_requested,
-                                critic_backend_explicitly_set,
-                            ) {
-                                eprintln!("[baro] WARNING: {CODEX_CRITIC_AUTO_DISABLED_WARNING}");
-                            }
-                            if let Some(message) =
-                                unsupported_critic_backend(app.with_critic, app.critic_llm)
-                            {
-                                return Err(message.into());
-                            }
                             // OpenAI needs an API key — detour if missing
                             if chosen == app::LlmProvider::OpenAI && app.openai_api_key.is_none() {
                                 app.api_key_input.clear();
@@ -3633,11 +3573,10 @@ mod tests {
 
     use super::{
         apply_primary_provider_choice, coordination_has_runtime_dialogue, delete_prev_word,
-        disable_implicit_codex_critic, fixed_mode_contract, headless_failure_reason,
-        message_command_line, preferred_jigjoy_gateway_key, preferred_jigjoy_gateway_url,
-        reconcile_jigjoy_phase_overrides, resolve_parallel_limit, unsupported_critic_backend, App,
-        JIGJOY_CHEAP_STORY_MODEL, JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL,
-        JIGJOY_STRONG_MODEL,
+        fixed_mode_contract, headless_failure_reason, message_command_line,
+        preferred_jigjoy_gateway_key, preferred_jigjoy_gateway_url,
+        reconcile_jigjoy_phase_overrides, resolve_parallel_limit, App, JIGJOY_CHEAP_STORY_MODEL,
+        JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL, JIGJOY_STRONG_MODEL,
     };
 
     fn deleted(input: &str) -> String {
@@ -3782,62 +3721,33 @@ mod tests {
     }
 
     #[test]
-    fn enabled_codex_critic_is_rejected_before_planning() {
-        assert!(
-            unsupported_critic_backend(true, crate::app::LlmProvider::Codex,)
-                .unwrap()
-                .contains("--critic-llm")
-        );
-        assert!(unsupported_critic_backend(false, crate::app::LlmProvider::Codex,).is_none());
-        assert!(unsupported_critic_backend(true, crate::app::LlmProvider::OpenAI,).is_none());
-    }
-
-    #[test]
-    fn implicit_codex_critic_is_disabled_without_rerouting_other_phases() {
+    fn primary_codex_choice_keeps_semantic_review_enabled() {
         let mut app = App::new();
         apply_primary_provider_choice(&mut app, crate::app::LlmProvider::Codex, false);
 
-        assert!(disable_implicit_codex_critic(&mut app, false, false));
-        assert!(!app.with_critic);
+        assert!(app.with_critic);
         assert_eq!(app.architect_llm, crate::app::LlmProvider::Codex);
         assert_eq!(app.planner_llm, crate::app::LlmProvider::Codex);
         assert_eq!(app.story_llm, crate::app::LlmProvider::Codex);
+        assert_eq!(app.critic_llm, crate::app::LlmProvider::Codex);
         assert_eq!(app.surgeon_llm, crate::app::LlmProvider::Codex);
-        assert!(unsupported_critic_backend(app.with_critic, app.critic_llm).is_none());
     }
 
     #[test]
-    fn explicit_codex_critic_requests_stay_enabled_and_fail_closed() {
-        for (critic_requested, backend_explicit) in [(true, false), (false, true)] {
-            let mut app = App::new();
-            apply_primary_provider_choice(&mut app, crate::app::LlmProvider::Codex, false);
-
-            assert!(!disable_implicit_codex_critic(
-                &mut app,
-                critic_requested,
-                backend_explicit,
-            ));
-            assert!(app.with_critic);
-            assert!(unsupported_critic_backend(app.with_critic, app.critic_llm).is_some());
-        }
-    }
-
-    #[test]
-    fn picker_preserves_an_explicit_safe_critic_backend() {
-        for safe_backend in [
+    fn picker_preserves_an_explicit_critic_backend() {
+        for critic_backend in [
             crate::app::LlmProvider::Claude,
             crate::app::LlmProvider::OpenAI,
+            crate::app::LlmProvider::Codex,
             crate::app::LlmProvider::OpenCode,
             crate::app::LlmProvider::Pi,
         ] {
             let mut app = App::new();
-            app.critic_llm = safe_backend;
+            app.critic_llm = critic_backend;
             apply_primary_provider_choice(&mut app, crate::app::LlmProvider::Codex, true);
 
-            assert!(!disable_implicit_codex_critic(&mut app, false, true));
             assert!(app.with_critic);
-            assert_eq!(app.critic_llm, safe_backend);
-            assert!(unsupported_critic_backend(app.with_critic, app.critic_llm).is_none());
+            assert_eq!(app.critic_llm, critic_backend);
         }
     }
 

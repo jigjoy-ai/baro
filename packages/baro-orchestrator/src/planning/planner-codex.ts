@@ -62,7 +62,7 @@ export async function runPlannerCodex(
     )
     try {
         const prompt = progressive.systemInstruction
-            ? `${PLANNER_SYSTEM_PROMPT}\n\n${progressive.systemInstruction}\n\n${userMessage}`
+            ? `${PLANNER_SYSTEM_PROMPT}\n\n${userMessage}\n\n${progressive.systemInstruction}`
             : `${PLANNER_SYSTEM_PROMPT}\n\n${userMessage}`
 
         const text = await runCodexOneShot({

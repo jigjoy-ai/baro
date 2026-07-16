@@ -15,7 +15,10 @@ import {
     runPlannerCodex,
 } from "../../src/planning/planner-codex.js"
 import { PROGRESSIVE_PLANNER_MCP_MODE } from "../../src/planning/planner-harness-progressive.js"
-import type { PlannerOpenAIPlanFragmentEvent } from "../../src/planning/planner-openai-progressive.js"
+import {
+    PROGRESSIVE_PLANNING_INSTRUCTION,
+    type PlannerOpenAIPlanFragmentEvent,
+} from "../../src/planning/planner-openai-progressive.js"
 import type { ModeContract } from "../../src/planning/planner-prompts.js"
 import { withTempDir } from "../participants/helpers.js"
 
@@ -214,6 +217,21 @@ describe("subscription planner progressive harness adapters", () => {
                         argv.includes(
                             'shell_environment_policy.exclude=["BARO_PROGRESSIVE_PLANNER_RELAY_TOKEN"]',
                         ),
+                    )
+                    const prompt = argv.at(-1)
+                    assert.equal(typeof prompt, "string")
+                    assert.ok(
+                        prompt!.endsWith(PROGRESSIVE_PLANNING_INSTRUCTION),
+                        "Codex progressive reminder must be the final prompt block",
+                    )
+                    assert.ok(
+                        prompt!.indexOf(
+                            "Prove that a safe story can start before planning completes.",
+                        ) < prompt!.lastIndexOf(PROGRESSIVE_PLANNING_INSTRUCTION),
+                    )
+                    assert.match(
+                        prompt!,
+                        /do not wait for the full DAG.*Output ONLY JSON.*terminal response/is,
                     )
                 }
             })

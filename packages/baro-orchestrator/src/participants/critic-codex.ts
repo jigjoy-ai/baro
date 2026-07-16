@@ -1,23 +1,36 @@
 /**
- * CriticCodex — fail-closed adapter for Codex CLI Critic configuration.
+ * CriticCodex — live acceptance-criteria evaluator via `codex exec --json`.
  *
- * Same bus contract as the Claude variant: observes AgentResultItem
- * events, evaluates the agent's output against acceptance criteria,
- * publishes a CritiqueItem (audit trail), and emits an
- * AgentTargetedMessageItem corrective when the verdict is "fail" (up
- * to maxEmissionsPerAgent). Codex CLI currently has no tool-less inference
- * mode, so this adapter refuses to pass untrusted evidence to its agentic
- * harness. Use CriticOpenAI for direct, tool-less OpenAI inference.
+ * Codex CLI is an agentic harness rather than a tool-less inference API, so
+ * this adapter gives it an evidence-only turn in a fresh directory with a
+ * deny-workspace permission profile, no inherited tool environment, no web,
+ * and no ambient configuration. The bounded evidence is piped over stdin and
+ * is never exposed as repository state or command-line arguments.
  *
- * Library-grade: no imports from prd.ts, story-agent.ts, or
- * conductor.ts.
+ * Library-grade: no imports from prd.ts, story-agent.ts, or conductor.ts.
  */
 
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
-import { AgentTargetedMessage, Critique } from "../semantic-events.js"
-import { buildCorrectiveMessage } from "./critic.js"
-import type { CriticEvidenceSource } from "./critic-evidence.js"
+import { runCodexOneShot } from "../codex-one-shot.js"
+import { runnerMeasurement } from "../runner-measurement.js"
+import type { RunnerInvocationObserver } from "../runner-invocation.js"
+import {
+    AgentTargetedMessage,
+    Critique,
+    ModelInvocationMeasured,
+} from "../semantic-events.js"
+import {
+    VERDICT_SYSTEM_PROMPT,
+    buildCorrectiveMessage,
+    extractVerdictJson,
+} from "./critic.js"
+import {
+    inconclusiveEvidenceVerdict,
+    prepareCriticEvaluation,
+    type CriticEvidenceSource,
+} from "./critic-evidence.js"
+import { withIsolatedCriticCwd } from "./critic-cli-isolation.js"
 import { criticInput, criticReplayKey } from "./critic-input.js"
 import { drainCriticPending } from "./critic-pending.js"
 import {
@@ -110,7 +123,34 @@ export class CriticCodex extends BaseObserver {
         this.turnCount.set(agentId, turn)
 
         const work = (async () => {
-            const evaluation = await this.evaluate()
+            let evaluation: {
+                status?: "evaluated" | "inconclusive"
+                verdict: "pass" | "fail"
+                reasoning: string
+                violatedCriteria: string[]
+            }
+            try {
+                const preparation = await prepareCriticEvaluation(
+                    criteria,
+                    resultText,
+                    agentId,
+                    this.opts.evidence,
+                )
+                evaluation = preparation.status === "ready"
+                    ? await this.evaluate(preparation.prompt, agentId, turn)
+                    : inconclusiveEvidenceVerdict(preparation.issues)
+            } catch (error) {
+                evaluation = {
+                    status: "inconclusive",
+                    verdict: "fail",
+                    reasoning:
+                        "CriticCodex could not prepare bounded acceptance " +
+                        `evidence: ${String((error as Error)?.message ?? error)}`,
+                    violatedCriteria: [
+                        "[critic evidence preparation failed]",
+                    ],
+                }
+            }
             const { verdict, reasoning, violatedCriteria } = evaluation
             const status = evaluation.status ?? "evaluated"
 
@@ -150,30 +190,131 @@ export class CriticCodex extends BaseObserver {
         })()
 
         this.pending.add(work)
-        work.finally(() => {
-            this.pending.delete(work)
-        })
+        void work.then(
+            () => this.pending.delete(work),
+            () => this.pending.delete(work),
+        )
 
         await work
     }
 
-    private async evaluate(): Promise<{
+    private async evaluate(
+        userPrompt: string,
+        agentId: string,
+        turn: number,
+    ): Promise<{
         status?: "evaluated" | "inconclusive"
         verdict: "pass" | "fail"
         reasoning: string
         violatedCriteria: string[]
     }> {
-        return {
-            status: "inconclusive",
-            verdict: "fail",
-            reasoning:
-                "CriticCodex is disabled: refusing to send untrusted Critic " +
-                "evidence to Codex CLI because it exposes no tool-less " +
-                "inference mode. Configure the direct OpenAI Critic backend " +
-                "or another tool-less Critic backend instead.",
-            violatedCriteria: [
-                "[critic backend unavailable — tool-less evaluation required]",
-            ],
+        try {
+            const text = await withIsolatedCriticCwd((cwd) =>
+                runCodexOneShot({
+                    prompt: `${VERDICT_SYSTEM_PROMPT}\n\n${userPrompt}`,
+                    promptViaStdin: true,
+                    cwd,
+                    model: this.opts.model,
+                    codexBin: this.opts.codexBin,
+                    timeoutMs: this.opts.timeoutMs,
+                    label: "codex-critic",
+                    // Critic receives every fact through the bounded prompt.
+                    // Its Codex harness may authenticate, but spawned tools
+                    // cannot see a checkout, inherited secrets, or the web.
+                    bypassSandbox: false,
+                    isolateToolFilesystem: true,
+                    ephemeral: true,
+                    ignoreUserConfig: true,
+                    ignoreRules: true,
+                    disableHooks: true,
+                    neverApprove: true,
+                    disableWebSearch: true,
+                    disableProjectDocs: true,
+                    skipGitRepoCheck: true,
+                    onInvocation: this.invocationObserver(agentId, turn),
+                }),
+            )
+
+            const verdictJson = extractVerdictJson(text.trim())
+            const parsed: unknown = JSON.parse(verdictJson)
+            if (!isCodexVerdict(parsed)) {
+                throw new Error("Codex critic returned an invalid verdict object")
+            }
+
+            return {
+                status: "evaluated",
+                verdict: parsed.verdict,
+                reasoning: parsed.reasoning,
+                violatedCriteria: [...parsed.violated_criteria],
+            }
+        } catch (err) {
+            return {
+                status: "inconclusive",
+                verdict: "fail",
+                reasoning: `CriticCodex LLM call failed: ${String((err as Error)?.message ?? err)}`,
+                violatedCriteria: ["[critic error — could not evaluate]"],
+            }
         }
     }
+
+    private invocationObserver(agentId: string, turn: number): RunnerInvocationObserver {
+        return (observation) => {
+            const event = ModelInvocationMeasured.create(
+                runnerMeasurement(
+                    {
+                        invocationBaseId: `${this.opts.runId ?? "local"}:critic:${agentId}:${turn}`,
+                        runId: this.opts.runId ?? null,
+                        phase: "critic",
+                        storyId: agentId,
+                        turn,
+                        backend: "codex",
+                        requestedModel: this.opts.model ?? null,
+                    },
+                    observation,
+                ),
+            )
+            for (const env of this.getEnvironments()) {
+                env.deliverSemanticEvent(this, event)
+            }
+        }
+    }
+}
+
+interface CodexVerdict {
+    verdict: "pass" | "fail"
+    reasoning: string
+    violated_criteria: string[]
+}
+
+function isCodexVerdict(value: unknown): value is CodexVerdict {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return false
+    }
+    const candidate = value as Record<string, unknown>
+    const keys = Object.keys(candidate).sort()
+    const exactKeys = ["reasoning", "verdict", "violated_criteria"]
+    if (
+        keys.length !== exactKeys.length ||
+        keys.some((key, index) => key !== exactKeys[index])
+    ) {
+        return false
+    }
+    const violatedCriteria = candidate.violated_criteria
+    if (
+        !Array.isArray(violatedCriteria) ||
+        violatedCriteria.some(
+            (criterion) =>
+                typeof criterion !== "string" || !criterion.trim(),
+        )
+    ) {
+        return false
+    }
+    return (
+        (candidate.verdict === "pass" || candidate.verdict === "fail") &&
+        typeof candidate.reasoning === "string" &&
+        Boolean(candidate.reasoning.trim()) &&
+        (candidate.verdict === "pass"
+            ? violatedCriteria.length === 0
+            : violatedCriteria.length > 0)
+    )
 }

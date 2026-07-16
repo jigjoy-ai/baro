@@ -427,7 +427,6 @@ export async function orchestrate(
     const storyLlm = config.storyLlm ?? llm
     const criticLlm = config.criticLlm ?? llm
     const surgeonLlm = config.surgeonLlm ?? llm
-    assertSupportedCriticBackend(Boolean(config.withCritic), criticLlm)
     const collectiveWorkers = [...(config.collectiveWorkers ?? [])]
     validateCollectiveWorkers(
         collectiveWorkers,
@@ -1382,18 +1381,6 @@ export async function orchestrate(
             rmSync(dialogueRuntimeCwd, { recursive: true, force: true })
         }
     }
-}
-
-export function assertSupportedCriticBackend(
-    enabled: boolean,
-    backend: NonNullable<OrchestrateConfig["criticLlm"]>,
-): void {
-    if (!enabled || backend !== "codex") return
-    throw new Error(
-        "Critic cannot use the Codex CLI safely because it has no tool-less " +
-            "inference mode. Select --critic-llm claude|openai|opencode|pi " +
-            "or disable the Critic with --no-critic.",
-    )
 }
 
 /** Keep the dialogue lane on the selected harness when it has a safe text-only adapter. */

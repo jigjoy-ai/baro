@@ -184,6 +184,18 @@ describe("Critic repository evidence", () => {
         assert.match(VERDICT_SYSTEM_PROMPT, /Never treat its claims as evidence/)
         assert.match(VERDICT_SYSTEM_PROMPT, /tests\/build\/lint/)
         assert.match(VERDICT_SYSTEM_PROMPT, /marked STALE/)
+        assert.match(VERDICT_SYSTEM_PROMPT, /green test command.*does NOT prove/is)
+        assert.match(VERDICT_SYSTEM_PROMPT, /adversarial event ordering or counterexample/)
+        assert.match(VERDICT_SYSTEM_PROMPT, /cleanup side effects/)
+
+        const evidencePrompt = buildEvalPrompt(
+            ["operation-first success remains observable"],
+            "all tests pass",
+            "17 tests passed",
+            "diff --git a/race.ts b/race.ts",
+        )
+        assert.match(evidencePrompt, /self-consistent implementation and test/)
+        assert.match(evidencePrompt, /counterexample\/event ordering/)
     })
 
     it("marks evaluation inconclusive when configured repository evidence is missing", async () => {

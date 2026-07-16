@@ -16,6 +16,7 @@ import {
     PROGRESSIVE_PLANNER_MCP_MODE,
     PROGRESSIVE_PLANNER_MCP_TOOL_NAME,
     runProgressivePlannerMcpServer,
+    type PlannerProgressiveMcpStatus,
 } from "../../src/planning/planner-harness-progressive.js"
 
 interface JsonRpcResponse {
@@ -198,6 +199,7 @@ describe("progressive planner harness MCP", () => {
     it("relays a complete deterministic MCP session through the run-planner child", { timeout: 30_000 }, async () => {
         const published: PlannerOpenAIPlanFragmentEvent[] = []
         const firstPublishOrder: string[] = []
+        const statuses: PlannerProgressiveMcpStatus[] = []
         const runPlanner = fileURLToPath(
             new URL("../../scripts/run-planner.ts", import.meta.url),
         )
@@ -208,6 +210,7 @@ describe("progressive planner harness MCP", () => {
                 if (published.length === 0) firstPublishOrder.push("parent-publish")
                 published.push(event)
             },
+            onStatus: (status) => statuses.push(status),
             mcpServer: {
                 command: process.execPath,
                 args: ["--import", "tsx", runPlanner, PROGRESSIVE_PLANNER_MCP_MODE],
@@ -259,11 +262,44 @@ describe("progressive planner harness MCP", () => {
                 listedTool.inputSchema,
                 PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA,
             )
+            const storiesSchema = record(
+                record(
+                    listedTool.inputSchema,
+                    "tool input schema is required",
+                ).properties,
+                "tool input properties are required",
+            ).stories
+            const storyItems = record(
+                record(storiesSchema, "stories schema is required").items,
+                "story items schema is required",
+            )
+            assert.equal(storyItems.type, "object")
+            assert.deepEqual(storyItems.required, [
+                "id",
+                "priority",
+                "title",
+                "description",
+                "dependsOn",
+                "retries",
+                "acceptance",
+                "tests",
+                "model",
+            ])
+            assert.equal(storyItems.additionalProperties, false)
 
             const s1 = story("S1")
+            const {
+                passes: _passes,
+                completedAt: _completedAt,
+                durationSecs: _durationSecs,
+                ...finalPrdS1
+            } = s1
             const publishedResponse = await client.request("tools/call", {
                 name: PROGRESSIVE_PLANNER_MCP_TOOL_NAME,
-                arguments: { fragmentId: "foundation", stories: [s1] },
+                arguments: {
+                    fragmentId: "foundation",
+                    stories: [finalPrdS1],
+                },
             })
             const firstPayload = toolPayload(publishedResponse)
             assert.equal(firstPayload.result.isError, false)
@@ -320,6 +356,20 @@ describe("progressive planner harness MCP", () => {
                 /depends on unknown provisional story 'S99'/u,
             )
             assert.equal(published.length, 2)
+            assert.deepEqual(statuses, [
+                "mcp-initialized",
+                "tools-listed",
+                "publish-attempt",
+                "admission-receipt",
+                "publish-attempt",
+                "admission-receipt",
+                "publish-attempt",
+                "validation-failure",
+            ])
+            assert.doesNotMatch(
+                statuses.join(" "),
+                /foundation|S1|S99|token|secret/u,
+            )
 
             const s2 = story("S2", ["S1"])
             const final = JSON.stringify(finalPrd([s1, s2]))
