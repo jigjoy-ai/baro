@@ -18,6 +18,12 @@ import { runPlannerCodex } from "../src/planning/planner-codex.js"
 import { runPlannerOpenAI } from "../src/planning/planner-openai.js"
 import { runPlannerOpenCode } from "../src/planning/planner-opencode.js"
 import { runPlannerPi } from "../src/planning/planner-pi.js"
+import {
+    currentPlannerMcpServerCommand,
+    parseProgressivePlannerMcpInvocation,
+    runProgressivePlannerMcpServer,
+    type PlannerHarnessProgressiveConfig,
+} from "../src/planning/planner-harness-progressive.js"
 import { parseRequiredModeContract, type ModeContract } from "../src/planning/planner-prompts.js"
 import { enforceModeContract } from "../src/planning/mode-enforcement.js"
 import { assertRunnablePlannerPrdJson } from "../src/planning/planner-validation.js"
@@ -34,10 +40,6 @@ import { emit } from "../src/tui-protocol.js"
 interface Args {
     goal: string
     cwd: string
-    /**
-     * "codex" is accepted at the boundary but currently routes through the
-     * Claude planner path — codex-planner.ts is a v2 follow-up.
-     */
     llm: "claude" | "openai" | "codex" | "opencode" | "pi"
     model?: string
     effort?: string
@@ -187,6 +189,15 @@ async function main(): Promise<void> {
         : undefined
     progressive?.open()
     activeProgressiveLifecycle = progressive
+    const harnessProgressive: PlannerHarnessProgressiveConfig | undefined =
+        progressive && (args.llm === "claude" || args.llm === "codex")
+            ? {
+                  runId: progressive.config.runId,
+                  planningId: progressive.config.planningId,
+                  publish: (event) => progressive.publish(event),
+                  mcpServer: currentPlannerMcpServerCommand(),
+              }
+            : undefined
     let bootstrapMetadata: ProgressiveBootstrapMetadata | undefined
     if (progressiveConfig) {
         try {
@@ -276,10 +287,18 @@ async function main(): Promise<void> {
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,
+                effort: args.effort as
+                    | "low"
+                    | "medium"
+                    | "high"
+                    | "xhigh"
+                    | "max"
+                    | undefined,
                 projectContext,
                 decisionDocument,
                 quick: args.quick,
                 modeContract,
+                progressive: harnessProgressive,
             })
         } else if (args.llm === "opencode") {
             prdJson = await runPlannerOpenCode({
@@ -311,6 +330,7 @@ async function main(): Promise<void> {
                 decisionDocument,
                 quick: args.quick,
                 modeContract,
+                progressive: harnessProgressive,
             })
         }
     } catch (e) {
@@ -391,7 +411,18 @@ function emitProgressiveFailure(
     }
 }
 
-main().catch((e) => {
+async function runEntry(): Promise<void> {
+    const mcpInvocation = parseProgressivePlannerMcpInvocation(
+        process.argv.slice(2),
+    )
+    if (mcpInvocation) {
+        await runProgressivePlannerMcpServer(mcpInvocation)
+        return
+    }
+    await main()
+}
+
+runEntry().catch((e) => {
     emitProgressiveFailure(
         activeProgressiveLifecycle,
         "planner_crashed",

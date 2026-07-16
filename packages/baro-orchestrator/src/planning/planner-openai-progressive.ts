@@ -29,7 +29,13 @@ export interface PlannerOpenAIProgressiveSupport {
     hasEarlyPlan(): boolean
 }
 
-const PROGRESSIVE_PLANNING_INSTRUCTION = `\
+export interface PlannerProgressivePublisher {
+    publish(args: unknown): Promise<Record<string, unknown>>
+    reconcileFinalCandidate(candidate: string): void
+    hasEarlyPlan(): boolean
+}
+
+export const PROGRESSIVE_PLANNING_INSTRUCTION = `\
 Progressive planning is enabled. While repository tools are open, you may call
 publish_plan_fragment when one or more implementation stories are fully decided and safe to
 execute early. Every published story must include the complete PrdStory fields, including
@@ -40,6 +46,80 @@ prefix of the final PRD userStories array. The final PRD must repeat every publi
 description, priority, dependency, retry count, acceptance criterion, test, and model unchanged;
 it may only append additional stories after that prefix. Publishing is optional: if no prefix is
 safe, continue exploring and return the complete final PRD normally.`
+
+export const PUBLISH_PLAN_FRAGMENT_DESCRIPTION =
+    "Publish one closed, immutable batch of fully specified stories for early execution. " +
+    "Every dependency must already be published or appear in this batch. Published stories " +
+    "must remain the exact same-order prefix of the final PRD."
+
+export const PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA: Record<string, unknown> = {
+    type: "object",
+    properties: {
+        fragmentId: {
+            type: "string",
+            description: "Stable unique ID for this fragment; reuse only for exact replay.",
+        },
+        stories: {
+            type: "array",
+            minItems: 1,
+            items: {
+                type: "object",
+                properties: {
+                    id: { type: "string" },
+                    priority: {
+                        type: "integer",
+                        minimum: -2_147_483_648,
+                        maximum: 2_147_483_647,
+                    },
+                    title: { type: "string" },
+                    description: { type: "string" },
+                    dependsOn: {
+                        type: "array",
+                        items: { type: "string" },
+                        uniqueItems: true,
+                    },
+                    retries: { type: "integer", minimum: 0, maximum: 5 },
+                    acceptance: {
+                        type: "array",
+                        minItems: 1,
+                        items: { type: "string" },
+                        uniqueItems: true,
+                    },
+                    tests: {
+                        type: "array",
+                        minItems: 1,
+                        items: { type: "string" },
+                        uniqueItems: true,
+                    },
+                    passes: { type: "boolean", const: false },
+                    completedAt: { type: "null" },
+                    durationSecs: { type: "null" },
+                    model: {
+                        type: "string",
+                        enum: ["light", "standard", "heavy"],
+                    },
+                },
+                required: [
+                    "id",
+                    "priority",
+                    "title",
+                    "description",
+                    "dependsOn",
+                    "retries",
+                    "acceptance",
+                    "tests",
+                    "passes",
+                    "completedAt",
+                    "durationSecs",
+                    "model",
+                ],
+                additionalProperties: false,
+            },
+        },
+    },
+    required: ["fragmentId", "stories"],
+    additionalProperties: false,
+}
 
 const NO_PROGRESSIVE_SUPPORT: PlannerOpenAIProgressiveSupport = Object.freeze({
     extraTools: Object.freeze([]) as readonly Tool[],
@@ -52,116 +132,23 @@ export function createPlannerOpenAIProgressiveSupport(
     config: PlannerOpenAIProgressiveConfig | undefined,
 ): PlannerOpenAIProgressiveSupport {
     if (!config) return NO_PROGRESSIVE_SUPPORT
+    const publisher = createPlannerProgressivePublisher(config)
+    return {
+        extraTools: [createPublishPlanFragmentTool(publisher)],
+        systemInstruction: PROGRESSIVE_PLANNING_INSTRUCTION,
+        reconcileFinalCandidate: (candidate) =>
+            publisher.reconcileFinalCandidate(candidate),
+        hasEarlyPlan: () => publisher.hasEarlyPlan(),
+    }
+}
+
+/** Provider-neutral state machine behind native and harness-backed tools. */
+export function createPlannerProgressivePublisher(
+    config: PlannerOpenAIProgressiveConfig,
+): PlannerProgressivePublisher {
     const session = openPlannerProgressiveSession(config)
     return {
-        extraTools: [createPublishPlanFragmentTool(config, session)],
-        systemInstruction: PROGRESSIVE_PLANNING_INSTRUCTION,
-        reconcileFinalCandidate: (candidate) => {
-            session.reconcile(progressiveFinalPrd(candidate))
-        },
-        hasEarlyPlan: () => session.snapshot().stories.length > 0,
-    }
-}
-
-function openPlannerProgressiveSession(
-    config: PlannerOpenAIProgressiveConfig,
-): ProgressivePlanSession {
-    if (!safeControlId(config.runId)) {
-        throw new Error("PlannerOpenAI: progressive runId must be safe non-empty text")
-    }
-    if (!safeControlId(config.planningId)) {
-        throw new Error("PlannerOpenAI: progressive planningId must be safe non-empty text")
-    }
-    if (typeof config.publish !== "function") {
-        throw new Error("PlannerOpenAI: progressive publish callback is required")
-    }
-    return openProgressivePlanSession({
-        schemaVersion: 1,
-        planningSessionId: config.planningId,
-    })
-}
-
-function createPublishPlanFragmentTool(
-    config: PlannerOpenAIProgressiveConfig,
-    session: ProgressivePlanSession,
-): Tool {
-    return {
-        type: "function",
-        name: "publish_plan_fragment",
-        description:
-            "Publish one closed, immutable batch of fully specified stories for early execution. " +
-            "Every dependency must already be published or appear in this batch. Published stories " +
-            "must remain the exact same-order prefix of the final PRD.",
-        strict: true,
-        parameters: {
-            type: "object",
-            properties: {
-                fragmentId: {
-                    type: "string",
-                    description: "Stable unique ID for this fragment; reuse only for exact replay.",
-                },
-                stories: {
-                    type: "array",
-                    minItems: 1,
-                    items: {
-                        type: "object",
-                        properties: {
-                            id: { type: "string" },
-                            priority: {
-                                type: "integer",
-                                minimum: -2_147_483_648,
-                                maximum: 2_147_483_647,
-                            },
-                            title: { type: "string" },
-                            description: { type: "string" },
-                            dependsOn: {
-                                type: "array",
-                                items: { type: "string" },
-                                uniqueItems: true,
-                            },
-                            retries: { type: "integer", minimum: 0, maximum: 5 },
-                            acceptance: {
-                                type: "array",
-                                minItems: 1,
-                                items: { type: "string" },
-                                uniqueItems: true,
-                            },
-                            tests: {
-                                type: "array",
-                                minItems: 1,
-                                items: { type: "string" },
-                                uniqueItems: true,
-                            },
-                            passes: { type: "boolean", const: false },
-                            completedAt: { type: "null" },
-                            durationSecs: { type: "null" },
-                            model: {
-                                type: "string",
-                                enum: ["light", "standard", "heavy"],
-                            },
-                        },
-                        required: [
-                            "id",
-                            "priority",
-                            "title",
-                            "description",
-                            "dependsOn",
-                            "retries",
-                            "acceptance",
-                            "tests",
-                            "passes",
-                            "completedAt",
-                            "durationSecs",
-                            "model",
-                        ],
-                        additionalProperties: false,
-                    },
-                },
-            },
-            required: ["fragmentId", "stories"],
-            additionalProperties: false,
-        },
-        async invoke(args: unknown) {
+        async publish(args: unknown) {
             if (!isExactToolArgs(args)) {
                 throw new Error(
                     "publish_plan_fragment requires exact fragmentId and stories fields",
@@ -187,7 +174,7 @@ function createPublishPlanFragmentTool(
                 stories: fragment.stories.map(snapshotPlannerStory),
             }
             await config.publish(event)
-            return JSON.stringify({
+            return {
                 ok: true,
                 disposition: admission.disposition,
                 fragmentId: admission.fragmentId,
@@ -195,7 +182,46 @@ function createPublishPlanFragmentTool(
                 fingerprint: admission.fingerprint,
                 storyIds: admission.admittedStoryIds,
                 nextOrdinal: admission.nextOrdinal,
-            })
+            }
+        },
+        reconcileFinalCandidate(candidate: string) {
+            session.reconcile(progressiveFinalPrd(candidate))
+        },
+        hasEarlyPlan() {
+            return session.snapshot().stories.length > 0
+        },
+    }
+}
+
+function openPlannerProgressiveSession(
+    config: PlannerOpenAIProgressiveConfig,
+): ProgressivePlanSession {
+    if (!safeControlId(config.runId)) {
+        throw new Error("PlannerOpenAI: progressive runId must be safe non-empty text")
+    }
+    if (!safeControlId(config.planningId)) {
+        throw new Error("PlannerOpenAI: progressive planningId must be safe non-empty text")
+    }
+    if (typeof config.publish !== "function") {
+        throw new Error("PlannerOpenAI: progressive publish callback is required")
+    }
+    return openProgressivePlanSession({
+        schemaVersion: 1,
+        planningSessionId: config.planningId,
+    })
+}
+
+function createPublishPlanFragmentTool(
+    publisher: PlannerProgressivePublisher,
+): Tool {
+    return {
+        type: "function",
+        name: "publish_plan_fragment",
+        description: PUBLISH_PLAN_FRAGMENT_DESCRIPTION,
+        strict: true,
+        parameters: PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA,
+        async invoke(args: unknown) {
+            return JSON.stringify(await publisher.publish(args))
         },
     }
 }

@@ -375,6 +375,88 @@ describe("runCodexOneShot exit contract", () => {
         })
     })
 
+    it("injects one required run-scoped MCP server with Windows-safe TOML", async () => {
+        await withTempDir("baro-codex-mcp-", async (dir) => {
+            const argvFile = join(dir, "argv.json")
+            const bin = writeFakeCodex(dir, { texts: ["safe"], argvFile })
+
+            await runCodexOneShot({
+                prompt: "plan progressively",
+                cwd: dir,
+                codexBin: bin,
+                ignoreUserConfig: true,
+                reasoningEffort: "high",
+                additionalEnvironment: {
+                    BARO_PROGRESSIVE_PLANNER_RELAY_TOKEN: "deadbeef",
+                },
+                mcpServer: {
+                    name: "baro_planning",
+                    command: "C:\\Program Files\\node.exe",
+                    args: [
+                        "C:\\Baro App\\run-planner.mjs",
+                    ],
+                    envVars: ["BARO_PROGRESSIVE_PLANNER_RELAY_TOKEN"],
+                    enabledTools: ["publish_plan_fragment"],
+                },
+            })
+
+            const argv = JSON.parse(readFileSync(argvFile, "utf8")) as string[]
+            assert.equal(argv.includes("--ignore-user-config"), true)
+            assert.equal(argv.includes('model_reasoning_effort="high"'), true)
+            assert.equal(
+                argv.filter((value) => value === "--strict-config").length,
+                1,
+            )
+            const config = argv.find((value) => value.startsWith("mcp_servers="))
+            assert.ok(config)
+            assert.equal(JSON.stringify(argv).includes("deadbeef"), false)
+            assert.match(config!, /command="C:\\\\Program Files\\\\node\.exe"/)
+            assert.match(
+                config!,
+                /env_vars=\["BARO_PROGRESSIVE_PLANNER_RELAY_TOKEN"\]/,
+            )
+            assert.match(config!, /enabled_tools=\["publish_plan_fragment"\]/)
+            assert.match(config!, /required=true/)
+            assert.match(config!, /default_tools_approval_mode="prompt"/)
+            assert.match(
+                config!,
+                /tools=\{"publish_plan_fragment"=\{approval_mode="approve"\}\}/,
+            )
+            assert.ok(
+                argv.includes(
+                    'shell_environment_policy.exclude=["BARO_PROGRESSIVE_PLANNER_RELAY_TOKEN"]',
+                ),
+            )
+        })
+    })
+
+    it("rejects unsafe run-scoped MCP configuration before launch", async () => {
+        await assert.rejects(
+            runCodexOneShot({
+                prompt: "invalid MCP",
+                cwd: process.cwd(),
+                mcpServer: {
+                    name: "bad.name",
+                    command: process.execPath,
+                    args: ["server.mjs"],
+                    enabledTools: ["publish_plan_fragment"],
+                },
+            }),
+            /MCP server name is not a safe TOML key/,
+        )
+    })
+
+    it("rejects an unsupported reasoning effort before launch", async () => {
+        await assert.rejects(
+            runCodexOneShot({
+                prompt: "invalid effort",
+                cwd: process.cwd(),
+                reasoningEffort: "extreme" as "high",
+            }),
+            /unsupported reasoning effort/,
+        )
+    })
+
     it("rejects an isolated profile combined with the legacy sandbox", async () => {
         await assert.rejects(
             runCodexOneShot({

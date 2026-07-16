@@ -36,6 +36,16 @@ export interface RunCodexOneShotOptions {
     cwd: string
     /** Model identifier. Defaults to Codex's own pick (gpt-5.5 on Plus+). */
     model?: string
+    /** Explicit Codex reasoning effort; useful when user config is isolated. */
+    reasoningEffort?:
+        | "none"
+        | "minimal"
+        | "low"
+        | "medium"
+        | "high"
+        | "xhigh"
+        | "max"
+        | "ultra"
     /** Bypass Codex's sandbox + approval prompts. Default: true. */
     bypassSandbox?: boolean
     /** Sandbox used when bypassSandbox=false. Conversation/intake calls use
@@ -50,12 +60,35 @@ export interface RunCodexOneShotOptions {
     ignoreUserConfig?: boolean
     /** Ignore user/project exec-policy rules for this isolated call. */
     ignoreRules?: boolean
+    /** Disable user/project/plugin hooks for this isolated call. */
+    disableHooks?: boolean
+    /** Never ask interactively; denied actions fail instead. */
+    neverApprove?: boolean
+    /** Keep planner exploration repository-local. */
+    disableWebSearch?: boolean
+    /** Mark this canonical checkout path untrusted so project `.codex/`
+     * configuration, hooks, and rules are not loaded. */
+    untrustedProjectPath?: string
+    /** Extra variables for the Codex process itself. Secret values used by an
+     * MCP child belong here and must be referenced by name through envVars so
+     * they never appear in Codex argv. */
+    additionalEnvironment?: Readonly<Record<string, string>>
     /** Disable automatic AGENTS.md/project-document prompt injection. The
      * CLI is run with strict config so an older Codex fails closed instead of
      * silently losing this trust boundary. */
     disableProjectDocs?: boolean
     /** Native final-response JSON Schema file, owned by the caller. */
     outputSchemaFile?: string
+    /** Exact run-scoped STDIO MCP surface. Callers that need to exclude
+     * ambient user servers must also set ignoreUserConfig=true. */
+    mcpServer?: {
+        name: string
+        command: string
+        args: readonly string[]
+        /** Names inherited from the Codex process by this MCP child. */
+        envVars?: readonly string[]
+        enabledTools: readonly string[]
+    }
     /** Skip the "must be inside a git repo" check. Default: false. */
     skipGitRepoCheck?: boolean
     /** Path to the `codex` binary. Default: "codex". */
@@ -79,6 +112,17 @@ export async function runCodexOneShot(
     if (opts.signal?.aborted) {
         throw new Error("runCodexOneShot: aborted before launch")
     }
+    if (
+        opts.reasoningEffort !== undefined &&
+        !CODEX_REASONING_EFFORTS.has(opts.reasoningEffort)
+    ) {
+        throw new TypeError(
+            `runCodexOneShot: unsupported reasoning effort ${JSON.stringify(opts.reasoningEffort)}`,
+        )
+    }
+    const additionalEnvironment = validateAdditionalEnvironment(
+        opts.additionalEnvironment,
+    )
     const label = opts.label ?? "codex"
     const args = ["exec", "--json"]
     if (opts.skipGitRepoCheck) args.push("--skip-git-repo-check")
@@ -118,11 +162,52 @@ export async function runCodexOneShot(
     if (opts.ephemeral) args.push("--ephemeral")
     if (opts.ignoreUserConfig) args.push("--ignore-user-config")
     if (opts.ignoreRules) args.push("--ignore-rules")
+    if (opts.disableHooks) args.push("--disable", "hooks")
+    if (opts.neverApprove) {
+        if (!args.includes("--strict-config")) args.push("--strict-config")
+        args.push("--config", 'approval_policy="never"')
+    }
+    if (opts.disableWebSearch) {
+        if (!args.includes("--strict-config")) args.push("--strict-config")
+        args.push("--config", 'web_search="disabled"')
+    }
+    if (opts.untrustedProjectPath) {
+        if (!safeMcpText(opts.untrustedProjectPath)) {
+            throw new TypeError(
+                "runCodexOneShot: untrustedProjectPath must be safe non-empty text",
+            )
+        }
+        if (!args.includes("--strict-config")) args.push("--strict-config")
+        args.push(
+            "--config",
+            `projects.${tomlString(opts.untrustedProjectPath)}.trust_level="untrusted"`,
+        )
+    }
     if (opts.disableProjectDocs) {
         if (!args.includes("--strict-config")) args.push("--strict-config")
         args.push("--config", "project_doc_max_bytes=0")
     }
+    if (opts.mcpServer) {
+        if (!args.includes("--strict-config")) args.push("--strict-config")
+        args.push(
+            "--config",
+            codexMcpServersOverride(opts.mcpServer),
+        )
+        if (opts.mcpServer.envVars?.length) {
+            args.push(
+                "--config",
+                `shell_environment_policy.exclude=${tomlEnvironmentNames(opts.mcpServer.envVars)}`,
+            )
+        }
+    }
     if (opts.outputSchemaFile) args.push("--output-schema", opts.outputSchemaFile)
+    if (opts.reasoningEffort) {
+        if (!args.includes("--strict-config")) args.push("--strict-config")
+        args.push(
+            "--config",
+            `model_reasoning_effort=${tomlString(opts.reasoningEffort)}`,
+        )
+    }
     if (opts.model) args.push("--model", opts.model)
     args.push(opts.promptViaStdin ? "-" : opts.prompt)
 
@@ -139,7 +224,10 @@ export async function runCodexOneShot(
         try {
             proc = spawn(opts.codexBin ?? "codex", args, {
                 cwd: opts.cwd,
-                env: harnessChildEnvironment(),
+                env: {
+                    ...harnessChildEnvironment(),
+                    ...additionalEnvironment,
+                },
                 stdio: [opts.promptViaStdin ? "pipe" : "ignore", "pipe", "pipe"],
             })
         } catch (e) {
@@ -415,6 +503,114 @@ export async function runCodexOneShot(
             }
         }
     })
+}
+
+const CODEX_REASONING_EFFORTS = new Set<string>([
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+])
+
+function codexMcpServersOverride(
+    server: NonNullable<RunCodexOneShotOptions["mcpServer"]>,
+): string {
+    if (!/^[A-Za-z0-9_-]+$/u.test(server.name)) {
+        throw new TypeError("runCodexOneShot: MCP server name is not a safe TOML key")
+    }
+    if (!safeMcpText(server.command)) {
+        throw new TypeError("runCodexOneShot: MCP command must be safe non-empty text")
+    }
+    if (
+        !Array.isArray(server.args) ||
+        server.args.some((value) => !safeMcpText(value))
+    ) {
+        throw new TypeError("runCodexOneShot: MCP args must be safe non-empty text")
+    }
+    if (
+        !Array.isArray(server.enabledTools) ||
+        server.enabledTools.length === 0 ||
+        server.enabledTools.some((value) => !/^[A-Za-z0-9_.:-]+$/u.test(value))
+    ) {
+        throw new TypeError("runCodexOneShot: MCP enabledTools are invalid")
+    }
+    const command = tomlString(server.command)
+    const childArgs = tomlStringArray(server.args)
+    const enabledTools = tomlStringArray(server.enabledTools)
+    const environmentNames = tomlEnvironmentNames(server.envVars ?? [])
+    const toolApprovals = tomlToolApprovals(server.enabledTools)
+    return (
+        `mcp_servers={` +
+        `${server.name}={` +
+        `command=${command},` +
+        `args=${childArgs},` +
+        `env_vars=${environmentNames},` +
+        `required=true,` +
+        `enabled=true,` +
+        `enabled_tools=${enabledTools},` +
+        `default_tools_approval_mode="prompt",` +
+        `tools=${toolApprovals},` +
+        `startup_timeout_sec=15.0,` +
+        `tool_timeout_sec=120.0` +
+        `}}`
+    )
+}
+
+function safeMcpText(value: unknown): value is string {
+    return (
+        typeof value === "string" &&
+        value.length > 0 &&
+        value.length <= 64 * 1024 &&
+        !/[\u0000\r\n]/u.test(value)
+    )
+}
+
+function tomlString(value: string): string {
+    // JSON basic strings are a strict subset of TOML basic strings for the
+    // path/argument text admitted above, including escaped Windows slashes.
+    return JSON.stringify(value)
+}
+
+function tomlStringArray(values: readonly string[]): string {
+    return `[${values.map(tomlString).join(",")}]`
+}
+
+function tomlEnvironmentNames(values: readonly string[]): string {
+    if (
+        !Array.isArray(values) ||
+        new Set(values).size !== values.length ||
+        values.some((value) => !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(value))
+    ) {
+        throw new TypeError("runCodexOneShot: MCP environment names are invalid")
+    }
+    return tomlStringArray([...values].sort((left, right) => left.localeCompare(right)))
+}
+
+function validateAdditionalEnvironment(
+    values: Readonly<Record<string, string>> | undefined,
+): Readonly<Record<string, string>> {
+    if (!values) return {}
+    const entries = Object.entries(values)
+    if (
+        entries.some(
+            ([key, value]) =>
+                !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) || !safeMcpText(value),
+        )
+    ) {
+        throw new TypeError("runCodexOneShot: additional environment is invalid")
+    }
+    return Object.fromEntries(entries)
+}
+
+function tomlToolApprovals(tools: readonly string[]): string {
+    return `{${[...tools]
+        .sort((left, right) => left.localeCompare(right))
+        .map((tool) => `${tomlString(tool)}={approval_mode="approve"}`)
+        .join(",")}}`
 }
 
 function codexObservation(

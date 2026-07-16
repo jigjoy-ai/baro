@@ -146,6 +146,52 @@ describe("progressive planner lifecycle wire", () => {
         ])
     })
 
+    it("reconciles the execution-neutral fields omitted by real planner JSON", () => {
+        const events: ProgressivePlannerWireEvent[] = []
+        const lifecycle = new ProgressivePlannerLifecycle(
+            {
+                runId: "run-1",
+                planningId: "planning-1",
+                bootstrapFile: "/tmp/bootstrap.json",
+            },
+            (event) => events.push(event),
+        )
+        lifecycle.open()
+        lifecycle.publish({
+            type: "plan_fragment",
+            run_id: "run-1",
+            planning_id: "planning-1",
+            fragment_id: "fragment-1",
+            ordinal: 1,
+            stories: [STORY_S1],
+        })
+
+        lifecycle.complete({
+            project: "trusted",
+            branchName: "baro/trusted",
+            description: "trusted",
+            userStories: [
+                {
+                    id: STORY_S1.id,
+                    priority: STORY_S1.priority,
+                    title: STORY_S1.title,
+                    description: STORY_S1.description,
+                    dependsOn: STORY_S1.dependsOn,
+                    retries: STORY_S1.retries,
+                    acceptance: STORY_S1.acceptance,
+                    tests: STORY_S1.tests,
+                    model: STORY_S1.model,
+                },
+            ],
+        })
+
+        assert.deepEqual(events.map((event) => event.type), [
+            "planning_open",
+            "plan_fragment",
+            "plan_complete",
+        ])
+    })
+
     it("can publish only one failure when persistence never completed", () => {
         const events: ProgressivePlannerWireEvent[] = []
         const lifecycle = new ProgressivePlannerLifecycle(

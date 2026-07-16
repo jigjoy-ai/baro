@@ -162,7 +162,16 @@ export class ProgressivePlannerLifecycle {
         if (this.failedPublished) {
             throw new Error("progressive planning stream is already failed")
         }
-        this.planSession.reconcile(finalPrd)
+        // Planner JSON intentionally omits execution-owned fields
+        // (passes/completedAt/durationSecs). Reconcile the same canonical
+        // projection the Board loads, otherwise every real provider fragment
+        // would succeed in-adapter and then fail again at result persistence.
+        this.planSession.reconcile(
+            normalizePrd(
+                finalPrd as Partial<PrdFile>,
+                "progressive planner final candidate",
+            ),
+        )
     }
 
     complete(finalPrd: unknown): void {
