@@ -343,13 +343,21 @@ mod tests {
         entry: ScriptEntry,
         events: &Mutex<Vec<String>>,
     ) -> Result<ArchitectOutcomeTransportV1, ProcessRunError> {
+        run_fake_with_context(entry, events, "project context").await
+    }
+
+    async fn run_fake_with_context(
+        entry: ScriptEntry,
+        events: &Mutex<Vec<String>>,
+        context: &str,
+    ) -> Result<ArchitectOutcomeTransportV1, ProcessRunError> {
         run_architect_outcome_with_entry(
             entry,
             "Implement it",
             Path::new("."),
             LlmProvider::Claude,
             None,
-            Some("project context"),
+            Some(context),
             Some(r#"{"schemaVersion":1}"#),
             None,
             None,
@@ -397,6 +405,52 @@ process.stdout.write('{"type":"agent_status","status":"working"}\n');
         let outcome = run_fake(entry, &events).await.unwrap();
         assert_eq!(outcome.outcome.kind, ArchitectOutcomeKindV1::NeedsInput);
         assert_eq!(events.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn repository_brief_deep_evidence_reaches_the_architect_context_file() {
+        let raw = format!(
+            r#"{{"schemaVersion":1,"sessionId":"session-1","requestId":"goal-1","repositoryBrief":{{"schemaVersion":1,"snapshotId":"sha256:{}","summary":"The deep abort coordinator was inspected.","facts":[{{"statement":"The coordinator contains baro-sidecar-deep-evidence.","evidencePath":"src/runtime/cancellation/abort-coordinator.ts","line":1,"confidence":"high"}}],"relevantPaths":["src/runtime/cancellation/abort-coordinator.ts"],"unknowns":[],"truncated":false}}}}"#,
+            "a".repeat(64),
+        );
+        let brief = crate::repository_brief::parse_repository_brief_sidecar(
+            &raw,
+            "session-1",
+            "goal-1",
+        )
+        .unwrap();
+        let context = brief.render_architect_context().unwrap();
+        let (_directory, entry) = fake_node_script(
+            r#"
+import { readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const get = (flag) => args[args.indexOf(flag) + 1];
+const context = readFileSync(get("--context-file"), "utf8");
+if (!context.includes("src/runtime/cancellation/abort-coordinator.ts") ||
+    !context.includes("baro-sidecar-deep-evidence")) {
+  process.exit(9);
+}
+writeFileSync(get("--outcome-file"), JSON.stringify({
+  schemaVersion: 1,
+  sessionId: get("--conversation-session-id"),
+  goalRequestId: get("--goal-request-id"),
+  architectRequestId: get("--architect-request-id"),
+  outcome: {
+    schemaVersion: 1,
+    kind: "needsInput",
+    message: "Choose the public API.",
+    questions: [{id: "q1", text: "Which API?"}],
+    evidence: [{path: "src/runtime/cancellation/abort-coordinator.ts", line: 1, fact: "Two APIs exist."}],
+    decisionDocument: null
+  }
+}));
+"#,
+        );
+        let events = Mutex::new(Vec::new());
+
+        let outcome = run_fake_with_context(entry, &events, &context).await.unwrap();
+
+        assert_eq!(outcome.outcome.kind, ArchitectOutcomeKindV1::NeedsInput);
     }
 
     #[tokio::test]

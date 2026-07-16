@@ -25,7 +25,7 @@ const MANIFEST_FILES: &[&str] = &[
 const MAX_INSTRUCTION_BYTES: u64 = 4 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_MANIFEST_EXCERPT_BYTES: usize = 1024;
-const MAX_CONTEXT_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_CONTEXT_BYTES: usize = 8 * 1024;
 const MAX_ROOT_ENTRIES: usize = 256;
 
 #[derive(Debug)]

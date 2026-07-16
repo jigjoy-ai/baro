@@ -77,6 +77,14 @@ describe("ArchitectOutcomeV1", () => {
     it("keeps the shared prompt aligned with the strict native schema", () => {
         assert.match(ARCHITECT_OUTCOME_SYSTEM_PROMPT, /reason field is required/)
         assert.doesNotMatch(ARCHITECT_OUTCOME_SYSTEM_PROMPT, /optional reason/)
+        assert.match(
+            ARCHITECT_OUTCOME_SYSTEM_PROMPT,
+            /direct read-only access to the selected\s+checkout/u,
+        )
+        assert.match(
+            ARCHITECT_OUTCOME_SYSTEM_PROMPT,
+            /not a\s+valid reason for needsInput/u,
+        )
     })
 
     it("rejects prose, unknown keys, discriminator violations and unsafe evidence", () => {

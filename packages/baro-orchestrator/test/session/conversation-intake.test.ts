@@ -40,6 +40,10 @@ describe("ConversationIntake", () => {
             assert.equal("cwd" in (observed as unknown as Record<string, unknown>), false)
             assert.equal("tools" in (observed as unknown as Record<string, unknown>), false)
             assert.match(observed!.systemPrompt, /must not request,\s*read, or modify repository files/)
+            assert.match(
+                observed!.systemPrompt,
+                /Never ask the user to\s+provide repository read access/u,
+            )
         })
     }
 

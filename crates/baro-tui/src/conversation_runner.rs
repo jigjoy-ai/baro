@@ -16,6 +16,9 @@ use crate::conversation::{
     ConversationError, ConversationSession, ConversationWireResponse, TranscriptRole,
 };
 use crate::discovery::{self, ScriptEntry};
+use crate::repository_brief::{
+    parse_repository_brief_sidecar, RepositoryBriefV1, MAX_REPOSITORY_BRIEF_SIDECAR_BYTES,
+};
 use crate::subprocess::{self, ProcessRunError};
 
 const SCRIPT_REL_PATH: &str = "packages/baro-orchestrator/scripts/run-conversation.ts";
@@ -62,12 +65,34 @@ pub struct ConversationRunOptions<'a> {
     pub openai_base_url: Option<&'a str>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ConversationTurnResult {
+    pub(crate) response: ConversationWireResponse,
+    pub(crate) repository_brief: RepositoryBriefV1,
+}
+
 /// Run the exact pending request in a fresh provider subprocess.
-pub async fn run_conversation_turn(
+pub(crate) async fn run_conversation_turn(
     session: &ConversationSession,
     intent: ConversationIntent,
     options: ConversationRunOptions<'_>,
-) -> Result<ConversationWireResponse, ProcessRunError> {
+) -> Result<ConversationTurnResult, ProcessRunError> {
+    let entry =
+        discovery::locate_script(options.cwd, SCRIPT_REL_PATH, BUNDLE_NAME).map_err(|message| {
+            ProcessRunError {
+                message,
+                log_path: None,
+            }
+        })?;
+    run_conversation_turn_with_entry(session, intent, options, entry).await
+}
+
+async fn run_conversation_turn_with_entry(
+    session: &ConversationSession,
+    intent: ConversationIntent,
+    options: ConversationRunOptions<'_>,
+    entry: ScriptEntry,
+) -> Result<ConversationTurnResult, ProcessRunError> {
     let request_id = session
         .pending_request_id()
         .ok_or_else(|| ProcessRunError {
@@ -79,13 +104,6 @@ pub async fn run_conversation_turn(
         log_path: None,
     })?;
     let llm = conversation_backend(options.llm);
-    let entry =
-        discovery::locate_script(options.cwd, SCRIPT_REL_PATH, BUNDLE_NAME).map_err(|message| {
-            ProcessRunError {
-                message,
-                log_path: None,
-            }
-        })?;
 
     let input = TurnInput {
         schema_version: 1,
@@ -111,6 +129,11 @@ pub async fn run_conversation_turn(
         message: format!("could not create conversation result: {error}"),
         log_path: None,
     })?;
+    let repository_brief_file =
+        tempfile::NamedTempFile::new().map_err(|error| ProcessRunError {
+            message: format!("could not create repository brief sidecar: {error}"),
+            log_path: None,
+        })?;
 
     let mut command = match entry {
         ScriptEntry::Tsx { tsx, script } => {
@@ -129,6 +152,8 @@ pub async fn run_conversation_turn(
         .arg(input_file.path())
         .arg("--result-file")
         .arg(result_file.path())
+        .arg("--repository-brief-file")
+        .arg(repository_brief_file.path())
         .arg("--cwd")
         .arg(options.cwd)
         .arg("--llm")
@@ -177,7 +202,54 @@ pub async fn run_conversation_turn(
         message: format!("could not read conversation result: {error}"),
         log_path: None,
     })?;
-    ConversationWireResponse::from_json(&raw).map_err(conversation_error)
+    let response = ConversationWireResponse::from_json(&raw).map_err(conversation_error)?;
+    if response.session_id != session.session_id() {
+        return Err(ProcessRunError {
+            message: "conversation response sessionId correlation mismatch".to_string(),
+            log_path: None,
+        });
+    }
+    if response.request_id != request_id {
+        return Err(ProcessRunError {
+            message: "conversation response requestId correlation mismatch".to_string(),
+            log_path: None,
+        });
+    }
+    let sidecar_len = repository_brief_file
+        .as_file()
+        .metadata()
+        .map_err(|error| ProcessRunError {
+            message: format!("could not inspect repository brief sidecar: {error}"),
+            log_path: None,
+        })?
+        .len();
+    if sidecar_len > MAX_REPOSITORY_BRIEF_SIDECAR_BYTES {
+        return Err(ProcessRunError {
+            message: format!(
+                "repository brief sidecar is {sidecar_len} bytes; limit is {MAX_REPOSITORY_BRIEF_SIDECAR_BYTES}"
+            ),
+            log_path: None,
+        });
+    }
+    let sidecar = std::fs::read_to_string(repository_brief_file.path()).map_err(|error| {
+        ProcessRunError {
+            message: format!("could not read repository brief sidecar: {error}"),
+            log_path: None,
+        }
+    })?;
+    let repository_brief = parse_repository_brief_sidecar(
+        &sidecar,
+        session.session_id(),
+        request_id,
+    )
+    .map_err(|message| ProcessRunError {
+        message,
+        log_path: None,
+    })?;
+    Ok(ConversationTurnResult {
+        response,
+        repository_brief,
+    })
 }
 
 fn pending_user_text<'a>(session: &'a ConversationSession, request_id: &str) -> Option<&'a str> {
@@ -248,6 +320,8 @@ fn conversation_backend(provider: LlmProvider) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::conversation::{
         ApplyOutcome, ConversationKind, ConversationWireResponse, GoalEnvelope,
@@ -372,6 +446,135 @@ mod tests {
         assert_eq!(conversation_backend(LlmProvider::Codex), "codex");
         assert_eq!(conversation_backend(LlmProvider::OpenCode), "opencode");
         assert_eq!(conversation_backend(LlmProvider::Pi), "pi");
+    }
+
+    #[tokio::test]
+    async fn process_bridge_returns_the_public_response_and_correlated_deep_brief() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("fake-conversation.mjs");
+        fs::write(
+            &script,
+            format!(
+                r#"
+import {{ readFileSync, writeFileSync }} from "node:fs";
+const args = process.argv.slice(2);
+const get = (flag) => args[args.indexOf(flag) + 1];
+const input = JSON.parse(readFileSync(get("--input-file"), "utf8"));
+writeFileSync(get("--repository-brief-file"), JSON.stringify({{
+  schemaVersion: 1,
+  sessionId: input.sessionId,
+  requestId: input.requestId,
+  repositoryBrief: {{
+    schemaVersion: 1,
+    snapshotId: "sha256:{}",
+    summary: "A deep cancellation coordinator was inspected.",
+    facts: [{{
+      statement: "The coordinator contains baro-process-sidecar-evidence.",
+      evidencePath: "src/runtime/cancellation/abort-coordinator.ts",
+      line: 1,
+      confidence: "high"
+    }}],
+    relevantPaths: ["src/runtime/cancellation/abort-coordinator.ts"],
+    unknowns: [],
+    truncated: false
+  }}
+}}));
+writeFileSync(get("--result-file"), JSON.stringify({{
+  schemaVersion: 1,
+  sessionId: input.sessionId,
+  requestId: input.requestId,
+  kind: "ready",
+  message: "The goal is ready.",
+  questions: [],
+  goalEnvelope: {{
+    objective: "Implement cancellation.",
+    constraints: [],
+    acceptanceCriteria: ["Focused tests pass."],
+    nonGoals: [],
+    assumptions: []
+  }}
+}}));
+"#,
+                "a".repeat(64),
+            ),
+        )
+        .unwrap();
+        let mut session = ConversationSession::new("session-process-bridge").unwrap();
+        session
+            .begin_request("request-process-bridge", "Implement cancellation.")
+            .unwrap();
+
+        let result = run_conversation_turn_with_entry(
+            &session,
+            ConversationIntent::Goal,
+            ConversationRunOptions {
+                cwd: directory.path(),
+                llm: LlmProvider::Claude,
+                model: None,
+                timeout_ms: 5_000,
+                provider_timeout_ms: 1_000,
+                openai_api_key: None,
+                openai_base_url: None,
+            },
+            ScriptEntry::NodeJs(script),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.response.kind, ConversationKind::Ready);
+        let public = serde_json::to_value(&result.response).unwrap();
+        assert_eq!(public.as_object().unwrap().len(), 7);
+        let context = result.repository_brief.render_architect_context().unwrap();
+        assert!(context.contains("src/runtime/cancellation/abort-coordinator.ts"));
+        assert!(context.contains("baro-process-sidecar-evidence"));
+    }
+
+    #[tokio::test]
+    async fn process_bridge_fails_closed_when_the_repository_sidecar_is_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("fake-missing-sidecar.mjs");
+        fs::write(
+            &script,
+            r#"
+import { readFileSync, writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const get = (flag) => args[args.indexOf(flag) + 1];
+const input = JSON.parse(readFileSync(get("--input-file"), "utf8"));
+writeFileSync(get("--result-file"), JSON.stringify({
+  schemaVersion: 1,
+  sessionId: input.sessionId,
+  requestId: input.requestId,
+  kind: "answer",
+  message: "No context sidecar was written.",
+  questions: [],
+  goalEnvelope: null
+}));
+"#,
+        )
+        .unwrap();
+        let mut session = ConversationSession::new("session-missing-sidecar").unwrap();
+        session
+            .begin_request("request-missing-sidecar", "Inspect the repository.")
+            .unwrap();
+
+        let error = run_conversation_turn_with_entry(
+            &session,
+            ConversationIntent::Goal,
+            ConversationRunOptions {
+                cwd: directory.path(),
+                llm: LlmProvider::Claude,
+                model: None,
+                timeout_ms: 5_000,
+                provider_timeout_ms: 1_000,
+                openai_api_key: None,
+                openai_base_url: None,
+            },
+            ScriptEntry::NodeJs(script),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.message.contains("repository brief sidecar"));
     }
 
     fn complete_ready_cycle(session: &mut ConversationSession, request_id: &str, text: &str) {

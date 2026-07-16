@@ -37,12 +37,20 @@ import {
     AutonomousRepositoryScanner,
     type RepositoryScoutResponder,
 } from "../src/session/autonomous-repository-scout.js"
-import { DeterministicRepositoryScanner } from "../src/session/repository-scanner.js"
+import {
+    validateRepositoryBriefV1,
+    type RepositoryBriefV1,
+} from "../src/session/repository-brief.js"
+import {
+    DeterministicRepositoryScanner,
+    type RepositoryContextScanner,
+} from "../src/session/repository-scanner.js"
 import { trustedFrontDoorBillingRunId } from "../src/session/frontdoor-billing.js"
 
 interface Args {
     inputFile: string
     resultFile: string
+    repositoryBriefFile: string
     cwd: string
     llm: DialogueBackend
     model?: string
@@ -83,6 +91,7 @@ function parseArgs(argv: readonly string[]): Args {
     const allowed = new Set([
         "--input-file",
         "--result-file",
+        "--repository-brief-file",
         "--cwd",
         "--llm",
         "--model",
@@ -132,6 +141,7 @@ function parseArgs(argv: readonly string[]): Args {
     return {
         inputFile,
         resultFile,
+        repositoryBriefFile: required(values, "--repository-brief-file"),
         cwd,
         llm,
         model: values.get("--model"),
@@ -271,10 +281,33 @@ async function main(): Promise<void> {
             initialHistory: input.history,
         })
         const bootstrapScanner = new DeterministicRepositoryScanner(args.cwd)
-        const scanner = new AutonomousRepositoryScanner(args.cwd, {
+        const autonomousScanner = new AutonomousRepositoryScanner(args.cwd, {
             responder: scoutResponder,
             bootstrapScanner,
         })
+        let repositoryBrief: RepositoryBriefV1 | undefined
+        let repositoryBriefCaptureStarted = false
+        const scanner: RepositoryContextScanner = {
+            async scan(request, signal) {
+                const correlation = request.correlation
+                if (
+                    !correlation ||
+                    correlation.sessionId !== input.sessionId ||
+                    correlation.requestId !== input.requestId
+                ) {
+                    throw new Error(
+                        "repository brief capture correlation does not match the conversation turn",
+                    )
+                }
+                if (repositoryBriefCaptureStarted) {
+                    throw new Error("repository brief capture was attempted more than once")
+                }
+                repositoryBriefCaptureStarted = true
+                const candidate = await autonomousScanner.scan(request, signal)
+                repositoryBrief = validateRepositoryBriefV1(candidate)
+                return repositoryBrief
+            },
+        }
         const response = await runFrontDoorConversationTurn({
             sessionId: input.sessionId,
             intake,
@@ -288,6 +321,15 @@ async function main(): Promise<void> {
                 intent: input.intent,
             },
         })
+        if (!repositoryBrief) {
+            throw new Error("successful conversation turn produced no repository brief")
+        }
+        writeFileSync(args.repositoryBriefFile, JSON.stringify({
+            schemaVersion: 1,
+            sessionId: input.sessionId,
+            requestId: input.requestId,
+            repositoryBrief,
+        }))
         writeFileSync(args.resultFile, JSON.stringify(response))
     } finally {
         intake?.close()

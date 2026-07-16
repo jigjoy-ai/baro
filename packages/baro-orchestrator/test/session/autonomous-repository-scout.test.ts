@@ -97,6 +97,113 @@ describe("AutonomousRepositoryScanner", () => {
         })
     })
 
+    it("repairs a shallow truncated-bootstrap finish before handing context to Conversation", async () => {
+        await withRepository(async (root) => {
+            const shallowPaths = [
+                "package.json",
+                "README.md",
+                "Cargo.toml",
+                "Cargo.lock",
+                "AGENTS.md",
+                "CLAUDE.md",
+                "yarn.lock",
+                "eslint.config.js",
+            ]
+            const focusedPath = "src/runtime/cancellation.ts"
+            const bootstrap = {
+                schemaVersion: 1 as const,
+                snapshotId: `sha256:${"a".repeat(64)}`,
+                summary: "A ranked cancellation bootstrap whose bounded output was truncated.",
+                facts: [{
+                    statement: "The leading source path matched cancellation terms.",
+                    evidencePath: focusedPath,
+                    confidence: "high" as const,
+                }],
+                relevantPaths: [...shallowPaths, focusedPath, "tests/cancellation.test.ts"],
+                unknowns: ["Additional ranked paths were omitted."],
+                truncated: true,
+            }
+            const calls: RepositoryScoutResponderInput[] = []
+            const scanner = new AutonomousRepositoryScanner(root, {
+                bootstrapScanner: { async scan() { return bootstrap } },
+                tools: fakeResearchTools({
+                    read_file: "export const cooperativeCancellation = true\n",
+                }),
+                responder: {
+                    backend: "codex",
+                    async respond(input) {
+                        calls.push(input)
+                        if (input.step === 1) {
+                            return JSON.stringify(decision(input, {
+                                action: "read",
+                                path: "package.json",
+                            }))
+                        }
+                        if (input.step === 2 && input.attempt === 1) {
+                            return JSON.stringify(decision(input, {
+                                action: "finish",
+                                summary: "Only package metadata was inspected.",
+                                facts: [{
+                                    statement: "The package manifest was read.",
+                                    evidencePath: "package.json",
+                                    line: 1,
+                                    confidence: "high",
+                                }],
+                                relevantPaths: ["package.json"],
+                                unknowns: ["Source details remain unknown."],
+                                truncated: true,
+                            }))
+                        }
+                        if (input.step === 2) {
+                            return JSON.stringify(decision(input, {
+                                action: "read",
+                                path: focusedPath,
+                            }))
+                        }
+                        return JSON.stringify(decision(input, {
+                            action: "finish",
+                            summary: "A leading cancellation source path was inspected.",
+                            facts: [{
+                                statement: "The leading source exposes cancellation behavior.",
+                                evidencePath: focusedPath,
+                                line: 1,
+                                confidence: "high",
+                            }],
+                            relevantPaths: [focusedPath],
+                            unknowns: [],
+                            truncated: false,
+                        }))
+                    },
+                },
+            })
+
+            const brief = await scanner.scan(
+                scanRequest(),
+                new AbortController().signal,
+            )
+
+            assert.deepEqual(
+                calls.map((call) => [call.step, call.attempt]),
+                [[1, 1], [2, 1], [2, 2], [3, 1]],
+            )
+            assert.match(
+                calls[2]!.userPrompt,
+                /must ground one of the explicit FOCUSED BOOTSTRAP PATHS/u,
+            )
+            assert.match(
+                calls[0]!.userPrompt,
+                /FOCUSED BOOTSTRAP PATHS: \["src\/runtime\/cancellation\.ts","tests\/cancellation\.test\.ts"\]/u,
+            )
+            assert.equal(brief.facts[0]?.evidencePath, focusedPath)
+            assert.ok(brief.relevantPaths.includes("package.json"))
+            assert.ok(brief.relevantPaths.includes("tests/cancellation.test.ts"))
+            assert.equal(
+                brief.summary,
+                "A leading cancellation source path was inspected.",
+            )
+        })
+    })
+
     it("binds the success snapshot to ordered model-visible observations", async () => {
         await withRepository(async (root) => {
             writeFileSync(join(root, "README.md"), "stable bootstrap content\n")

@@ -25,6 +25,7 @@ mod planner_runner;
 mod planner_stream_bridge;
 mod preaccept_context;
 mod progressive_planning;
+mod repository_brief;
 mod resume;
 mod review_refiner;
 mod screens;
@@ -234,7 +235,7 @@ enum AppEvent {
     Key(crossterm::event::KeyEvent),
     ContextReady(String),
     ContextError(String),
-    ConversationResponse(ConversationWireResponse),
+    ConversationResponse(conversation_runner::ConversationTurnResult),
     /// A conversation `ready` response is only a candidate until the
     /// repository-aware Architect validates it. The durable session keeps one
     /// pending response slot: either this candidate or an Architect-authored
@@ -1272,7 +1273,11 @@ async fn run_app(
                     }
                 }
             }
-            Some(AppEvent::ConversationResponse(response)) => {
+            Some(AppEvent::ConversationResponse(turn)) => {
+                let conversation_runner::ConversationTurnResult {
+                    response,
+                    repository_brief,
+                } = turn;
                 if response.kind == ConversationKind::Ready
                     && !app.quick
                     && supports_preaccept_architect_outcome(app.architect_llm)
@@ -1283,6 +1288,7 @@ async fn run_app(
                         &cwd,
                         tx.clone(),
                         response,
+                        repository_brief,
                         headless,
                     ) {
                         let close_result = close_failed_initial_request(

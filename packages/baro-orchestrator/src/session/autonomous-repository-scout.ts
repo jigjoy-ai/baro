@@ -33,6 +33,7 @@ const DEFAULT_MAX_OBSERVATION_BYTES = 12 * 1024
 const DEFAULT_MAX_TRANSCRIPT_BYTES = 48 * 1024
 const DEFAULT_MAX_TOTAL_OBSERVATION_BYTES = 512 * 1024
 const DEFAULT_MAX_DECISION_REPAIRS = 2
+const FOCUSED_BOOTSTRAP_PATH_LIMIT = 8
 const MAX_MODEL_RESPONSE_BYTES = 64 * 1024
 const MAX_SUMMARY_LENGTH = 8_000
 const MIN_STABLE_RESEARCH_PREFIX_BYTES = 2 * 1024
@@ -69,6 +70,11 @@ Use only paths actually present in BOOTSTRAP EVIDENCE or successful TOOL OBSERVA
 is insufficient, record that as an unknown instead of guessing. An optional fact line is allowed
 only when that exact line was visibly returned by a successful read or search. Glob establishes
 path presence only and cannot support a fact by itself.
+
+When BOOTSTRAP EVIDENCE is marked truncated or clipped, do not finish from manifests, directory
+names, or bootstrap ranking alone. The trusted prompt metadata supplies FOCUSED BOOTSTRAP PATHS,
+preferring relevant source and test files over manifests and documentation. Ground at least one
+listed path with a read or search observation, then include a fact for it in the finishing brief.
 
 Return exactly one JSON object, without markdown, using one of these exact shapes:
 {"schemaVersion":1,"sessionId":"echo","requestId":"echo","contextRequestId":"echo","step":1,"action":"read","path":"src/file.ts"}
@@ -345,6 +351,13 @@ export class AutonomousRepositoryScanner implements RepositoryContextScanner {
                                 prompt.omittedObservationCount,
                                 [...brokerSafetyUnknowns],
                             )
+                            assertFocusedResearchCoverage(
+                                bootstrap,
+                                finished,
+                                visibleEvidence,
+                                !prompt.stablePrefix.bootstrapClipped,
+                                focusedBootstrapPaths(bootstrap),
+                            )
                             if (!await this.observationsRemainStable(
                                 visibleObservations,
                                 signal,
@@ -498,6 +511,73 @@ export class AutonomousRepositoryScanner implements RepositoryContextScanner {
             }),
         })
     }
+}
+
+/**
+ * A truncated deterministic bootstrap is a ranked index, not enough semantic
+ * evidence for a model to collapse a clear implementation goal to manifests
+ * and directory names. Require one focused read/search before accepting the
+ * autonomous replacement. Bounded repair lets the model take that action on
+ * the same step; exhaustion retains the richer deterministic fallback.
+ */
+function assertFocusedResearchCoverage(
+    bootstrap: RepositoryBriefV1,
+    finished: RepositoryBriefV1,
+    evidence: ReadonlyMap<string, RepositoryEvidenceProvenance>,
+    bootstrapFullyProjected: boolean,
+    focusedPaths: readonly string[],
+): void {
+    if (
+        (!bootstrap.truncated && bootstrapFullyProjected) ||
+        focusedPaths.length === 0
+    ) return
+    const detailedPaths = new Set(
+        finished.facts
+            .map((fact) => fact.evidencePath)
+            .filter((path) => {
+                const provenance = evidence.get(path)
+                return Boolean(provenance?.read || provenance?.search)
+            }),
+    )
+    const focused = new Set(focusedPaths)
+    if (![...detailedPaths].some((path) => focused.has(path))) {
+        throw new TypeError(
+            "truncated or clipped repository research must ground one of the explicit FOCUSED BOOTSTRAP PATHS with read or search before finish",
+        )
+    }
+}
+
+function focusedBootstrapPaths(bootstrap: RepositoryBriefV1): string[] {
+    const preferred = bootstrap.relevantPaths.filter(isFocusedResearchPath)
+    if (preferred.length > 0) {
+        return uniqueBounded(preferred, FOCUSED_BOOTSTRAP_PATH_LIMIT)
+    }
+    const nonShallow = bootstrap.relevantPaths.filter(
+        (path) => !isShallowRepositoryPath(path),
+    )
+    return uniqueBounded(
+        nonShallow.length > 0 ? nonShallow : bootstrap.relevantPaths,
+        FOCUSED_BOOTSTRAP_PATH_LIMIT,
+    )
+}
+
+function isFocusedResearchPath(path: string): boolean {
+    if (isShallowRepositoryPath(path)) return false
+    const lower = path.toLocaleLowerCase("en")
+    const segments = lower.split("/")
+    const sourceDirectory = segments.some((segment) =>
+        ["src", "lib", "app", "test", "tests", "spec", "crates", "packages"]
+            .includes(segment),
+    )
+    const sourceExtension = /\.(?:[cm]?[jt]sx?|rs|py|go|java|kt|kts|swift|cs|c|cc|cpp|h|hpp|rb|php|vue|svelte|sql)$/u
+        .test(lower)
+    return sourceDirectory || sourceExtension
+}
+
+function isShallowRepositoryPath(path: string): boolean {
+    const basename = path.split("/").at(-1)!.toLocaleLowerCase("en")
+    return /^(?:readme(?:\..*)?|agents\.md|claude\.md|package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|cargo\.toml|cargo\.lock|go\.mod|go\.sum|pyproject\.toml|requirements(?:-[^.]+)?\.txt|makefile)$/u
+        .test(basename) || /(?:^|\.)config\.[cm]?[jt]s$/u.test(basename)
 }
 
 function assertResearchDecisionUsesObservedPaths(
@@ -683,7 +763,7 @@ function finishBrief(
         ...candidate.unknowns,
         ...bootstrap.unknowns,
     ]).size
-    return validateRepositoryBriefV1({
+    const boundedCandidate = validateRepositoryBriefV1({
         ...candidate,
         unknowns: mergedUnknowns,
         truncated:
@@ -693,6 +773,82 @@ function finishBrief(
             brokerSafetyUnknowns.length > 0 ||
             lostUnknown,
     })
+    return mergeVisibleBootstrapEvidence(
+        boundedCandidate,
+        bootstrap,
+        evidence,
+    )
+}
+
+/**
+ * Autonomous findings lead, but a concise model response must not erase the
+ * deterministic evidence that was visible in the finishing prompt. Add that
+ * evidence candidate-first under the same strict count and 64-KiB contract.
+ */
+function mergeVisibleBootstrapEvidence(
+    candidate: RepositoryBriefV1,
+    bootstrap: RepositoryBriefV1,
+    evidence: ReadonlyMap<string, RepositoryEvidenceProvenance>,
+): RepositoryBriefV1 {
+    let merged = candidate
+    let facts = [...candidate.facts]
+    let relevantPaths = [...candidate.relevantPaths]
+    const factKeys = new Set(facts.map(repositoryFactKey))
+    const pathSet = new Set(relevantPaths)
+    let omitted = false
+
+    for (const fact of bootstrap.facts) {
+        if (!evidence.get(fact.evidencePath)?.bootstrap) continue
+        const key = repositoryFactKey(fact)
+        if (factKeys.has(key)) continue
+        const needsPath = !pathSet.has(fact.evidencePath)
+        if (facts.length >= 32 || (needsPath && relevantPaths.length >= 48)) {
+            omitted = true
+            continue
+        }
+        const nextFacts = [...facts, fact]
+        const nextPaths = needsPath
+            ? [...relevantPaths, fact.evidencePath]
+            : relevantPaths
+        try {
+            merged = validateRepositoryBriefV1({
+                ...merged,
+                facts: nextFacts,
+                relevantPaths: nextPaths,
+            })
+            facts = nextFacts
+            relevantPaths = nextPaths
+            factKeys.add(key)
+            pathSet.add(fact.evidencePath)
+        } catch {
+            omitted = true
+        }
+    }
+    for (const path of bootstrap.relevantPaths) {
+        if (!evidence.get(path)?.bootstrap || pathSet.has(path)) continue
+        if (relevantPaths.length >= 48) {
+            omitted = true
+            continue
+        }
+        const nextPaths = [...relevantPaths, path]
+        try {
+            merged = validateRepositoryBriefV1({
+                ...merged,
+                relevantPaths: nextPaths,
+            })
+            relevantPaths = nextPaths
+            pathSet.add(path)
+        } catch {
+            omitted = true
+        }
+    }
+    return omitted && !merged.truncated
+        ? validateRepositoryBriefV1({ ...merged, truncated: true })
+        : merged
+}
+
+function repositoryFactKey(fact: RepositoryBriefV1["facts"][number]): string {
+    return JSON.stringify([fact.statement, fact.evidencePath, fact.line ?? null])
 }
 
 function fallbackBrief(
@@ -819,6 +975,7 @@ function researchStablePromptInput(
             `REQUEST ID: ${request.correlation?.requestId ?? "unknown"}`,
             `CONTEXT REQUEST ID: ${request.correlation?.contextRequestId ?? "unknown"}`,
             `REQUEST INTENT: ${request.intent}`,
+            `FOCUSED BOOTSTRAP PATHS: ${JSON.stringify(focusedBootstrapPaths(bootstrap))}`,
         ],
         userGoal: request.query,
         bootstrapEvidence: JSON.stringify(bootstrap),

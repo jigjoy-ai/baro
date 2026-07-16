@@ -98,6 +98,30 @@ describe("run-conversation isolated turn", () => {
 
             assert.equal(run.code, 0, run.stderr)
             assert.equal((readResult(dir) as { kind: string }).kind, "ready")
+            const sidecar = readRepositoryBriefSidecar(dir)
+            assert.deepEqual(Object.keys(sidecar).sort(), [
+                "repositoryBrief",
+                "requestId",
+                "schemaVersion",
+                "sessionId",
+            ])
+            assert.equal(sidecar.schemaVersion, 1)
+            assert.equal(sidecar.sessionId, input.sessionId)
+            assert.equal(sidecar.requestId, input.requestId)
+            assert.equal(
+                sidecar.repositoryBrief.summary,
+                "Autonomous scout inspected the deep cancellation coordinator.",
+            )
+            assert.equal(
+                sidecar.repositoryBrief.relevantPaths[0],
+                "src/runtime/cancellation/abort-coordinator.ts",
+            )
+            assert.ok(sidecar.repositoryBrief.relevantPaths.includes("README.md"))
+            assert.ok(sidecar.repositoryBrief.relevantPaths.includes("package.json"))
+            assert.equal(
+                sidecar.repositoryBrief.facts[0]?.evidencePath,
+                "src/runtime/cancellation/abort-coordinator.ts",
+            )
             const calls = readJson<Array<{
                 backend: string
                 role: string
@@ -126,15 +150,18 @@ describe("run-conversation isolated turn", () => {
             assert.match(calls[0]!.prompt, /CURRENT STEP: 1/)
             assert.match(calls[0]!.prompt, /CURRENT ATTEMPT: 1/)
             assert.match(calls[1]!.prompt, /CURRENT STEP: 2/)
-            assert.match(calls[1]!.prompt, /README\.md/)
+            assert.match(
+                calls[1]!.prompt,
+                /src\/runtime\/cancellation\/abort-coordinator\.ts/u,
+            )
             assert.match(calls[2]!.prompt, /CURRENT STEP: 3/)
             assert.match(
                 calls[2]!.prompt,
-                /Conversation boundary and durable repository planning fixture/,
+                /baro-sidecar-deep-evidence/u,
             )
             assert.match(
                 calls[3]!.prompt,
-                /Autonomous scout inspected the durable repository entry point\./,
+                /Autonomous scout inspected the deep cancellation coordinator\./u,
             )
         })
     })
@@ -170,6 +197,18 @@ describe("run-conversation isolated turn", () => {
                 "schemaVersion",
                 "sessionId",
             ])
+            const sidecar = readRepositoryBriefSidecar(dir)
+            assert.deepEqual(Object.keys(sidecar.repositoryBrief).sort(), [
+                "facts",
+                "relevantPaths",
+                "schemaVersion",
+                "snapshotId",
+                "summary",
+                "truncated",
+                "unknowns",
+            ])
+            assert.equal(sidecar.sessionId, input.sessionId)
+            assert.equal(sidecar.requestId, input.requestId)
 
             const argv = readJson<string[]>(capture)
             const harnessCwd = readFileSync(`${capture}.cwd`, "utf8")
@@ -339,6 +378,11 @@ describe("run-conversation isolated turn", () => {
                     existsSync(join(dir, "result.json")),
                     false,
                     "a rejected provider response must not create a result",
+                )
+                assert.equal(
+                    existsSync(join(dir, "repository-brief.json")),
+                    false,
+                    "a rejected provider response must not create a repository brief sidecar",
                 )
             })
         }
@@ -557,8 +601,10 @@ async function runConversation(
 ): Promise<ScriptResult> {
     const inputFile = join(dir, "input.json")
     const resultFile = join(dir, "result.json")
+    const repositoryBriefFile = join(dir, "repository-brief.json")
     const project = join(dir, "project")
     mkdirSync(project, { recursive: true })
+    mkdirSync(join(project, "src/runtime/cancellation"), { recursive: true })
     writeFileSync(
         join(project, "README.md"),
         "Conversation boundary and durable repository planning fixture.\n",
@@ -567,6 +613,10 @@ async function runConversation(
         join(project, "package.json"),
         JSON.stringify({ name: "conversation-fixture", private: true }),
     )
+    writeFileSync(
+        join(project, "src/runtime/cancellation/abort-coordinator.ts"),
+        'export const abortCoordinatorSentinel = "baro-sidecar-deep-evidence"\n',
+    )
     writeFileSync(inputFile, JSON.stringify(input))
     return await runProcess(TSX, [
         RUN_CONVERSATION,
@@ -574,6 +624,8 @@ async function runConversation(
         inputFile,
         "--result-file",
         resultFile,
+        "--repository-brief-file",
+        repositoryBriefFile,
         "--cwd",
         project,
         "--timeout-ms",
@@ -638,21 +690,29 @@ if (scout) {
     };
     const scoutCalls = previous.filter((call) => call.role === "repository-scout").length;
     if (scoutCalls === 0) {
-        response = { ...base, action: "glob", pattern: "README.md" };
+        response = {
+            ...base,
+            action: "glob",
+            pattern: "src/runtime/cancellation/abort-coordinator.ts",
+        };
     } else if (scoutCalls === 1) {
-        response = { ...base, action: "read", path: "README.md" };
+        response = {
+            ...base,
+            action: "read",
+            path: "src/runtime/cancellation/abort-coordinator.ts",
+        };
     } else {
         response = {
             ...base,
             action: "finish",
-            summary: "Autonomous scout inspected the durable repository entry point.",
+            summary: "Autonomous scout inspected the deep cancellation coordinator.",
             facts: [{
-                statement: "README describes the durable repository planning fixture.",
-                evidencePath: "README.md",
+                statement: "The coordinator contains the baro-sidecar-deep-evidence sentinel.",
+                evidencePath: "src/runtime/cancellation/abort-coordinator.ts",
                 line: 1,
                 confidence: "high",
             }],
-            relevantPaths: ["README.md"],
+            relevantPaths: ["src/runtime/cancellation/abort-coordinator.ts"],
             unknowns: [],
             truncated: false,
         };
@@ -814,6 +874,23 @@ process.stdin.on("end", () => {
 
 function readResult(dir: string): unknown {
     return readJson(join(dir, "result.json"))
+}
+
+function readRepositoryBriefSidecar(dir: string): {
+    schemaVersion: number
+    sessionId: string
+    requestId: string
+    repositoryBrief: {
+        schemaVersion: number
+        snapshotId: string
+        summary: string
+        facts: Array<{ evidencePath: string }>
+        relevantPaths: string[]
+        unknowns: string[]
+        truncated: boolean
+    }
+} {
+    return readJson(join(dir, "repository-brief.json"))
 }
 
 function readJson<T = unknown>(path: string): T {
