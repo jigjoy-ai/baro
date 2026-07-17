@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::conversation::ConversationContextSnapshot;
 use crate::discovery::{self, ScriptEntry};
@@ -86,9 +86,10 @@ pub fn spawn_orchestrator(
     cfg: OrchestratorConfig,
     tx: mpsc::Sender<BaroEvent>,
     stdin_rx: mpsc::Receiver<String>,
-) {
+) -> oneshot::Sender<()> {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
     tokio::spawn(async move {
-        let result = run(cfg, &tx, stdin_rx).await;
+        let result = run(cfg, &tx, stdin_rx, shutdown_rx).await;
         let (code, reason) = match result {
             Ok(()) => (Some(0), None),
             Err(err) => {
@@ -109,12 +110,14 @@ pub fn spawn_orchestrator(
             .send(BaroEvent::OrchestratorExited { code, reason })
             .await;
     });
+    shutdown_tx
 }
 
 async fn run(
     cfg: OrchestratorConfig,
     tx: &mpsc::Sender<BaroEvent>,
     mut stdin_rx: mpsc::Receiver<String>,
+    shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), String> {
     let entry = discovery::locate_script(
         &cfg.cwd,
@@ -244,10 +247,7 @@ async fn run(
         }
     });
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("orchestrator wait failed: {}", e))?;
+    let status = wait_for_child_or_shutdown(&mut child, &mut process_tree, shutdown_rx).await?;
     // Exit status covers only the direct Node process. Kill any residual
     // provider group before draining inherited pipes, including on exit 0.
     process_tree.terminate();
@@ -269,6 +269,30 @@ async fn run(
         ));
     }
     Ok(())
+}
+
+/// Wait for the direct orchestrator root or an explicit host shutdown. The
+/// latter must terminate the containment primitive before Baro itself exits:
+/// on Unix the orchestrator lives in a separate process group, so a terminal
+/// SIGINT delivered to Baro does not reach it automatically.
+async fn wait_for_child_or_shutdown(
+    child: &mut tokio::process::Child,
+    process_tree: &mut ProcessTreeGuard,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) -> Result<std::process::ExitStatus, String> {
+    let mut wait = Box::pin(child.wait());
+    let shutdown_requested = tokio::select! {
+        status = &mut wait => {
+            return status.map_err(|e| format!("orchestrator wait failed: {}", e));
+        }
+        request = &mut shutdown_rx => request.is_ok(),
+    };
+
+    if shutdown_requested {
+        process_tree.terminate();
+    }
+    wait.await
+        .map_err(|e| format!("orchestrator wait failed: {}", e))
 }
 
 struct EphemeralConversationContextFile {
@@ -425,7 +449,10 @@ fn build_command(
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{build_command, EphemeralConversationContextFile, OrchestratorConfig};
+    use super::{
+        build_command, wait_for_child_or_shutdown, EphemeralConversationContextFile,
+        OrchestratorConfig,
+    };
     use crate::conversation::{
         ConversationKind, ConversationPhase, ConversationSession, ConversationWireResponse,
         GoalEnvelope,
@@ -594,5 +621,74 @@ mod tests {
 
         drop(file);
         assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_shutdown_reaps_the_orchestrator_process_group() {
+        use crate::subprocess::{configure_process_tree, ProcessTreeGuard};
+
+        let directory = tempfile::tempdir().unwrap();
+        let started = directory.path().join("started");
+        let descendant_pid_path = directory.path().join("descendant-pid");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .kill_on_drop(true)
+            .env("BARO_TEST_STARTED", &started)
+            .env("BARO_TEST_DESCENDANT_PID", &descendant_pid_path)
+            .arg("-c")
+            .arg(
+                "(trap '' TERM; sleep 30) & \
+                 echo \"$!\" > \"$BARO_TEST_DESCENDANT_PID\"; \
+                 touch \"$BARO_TEST_STARTED\"; wait",
+            );
+        configure_process_tree(&mut command);
+        let mut child = command.spawn().expect("spawn process-tree fixture");
+        let mut process_tree = ProcessTreeGuard::attach(&mut child).unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let trigger = tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !started.exists() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(started.exists(), "fixture root never became ready");
+            shutdown_tx
+                .send(())
+                .expect("shutdown receiver must be live");
+        });
+
+        let _status = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            wait_for_child_or_shutdown(&mut child, &mut process_tree, shutdown_rx),
+        )
+        .await
+        .expect("structured shutdown must not hang")
+        .expect("orchestrator wait should succeed");
+        trigger.await.unwrap();
+
+        let descendant_pid = std::fs::read_to_string(&descendant_pid_path)
+            .expect("fixture did not record its descendant")
+            .trim()
+            .to_string();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while unix_process_exists(&descendant_pid) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !unix_process_exists(&descendant_pid),
+            "headless shutdown left an orchestrator descendant alive"
+        );
+    }
+
+    #[cfg(unix)]
+    fn unix_process_exists(pid: &str) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     }
 }

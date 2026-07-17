@@ -26,7 +26,7 @@ const MAX_UNTRACKED_CHARS = 8_000
 const MAX_UNTRACKED_FILES = 20
 const MAX_COMMANDS_PER_AGENT = 16
 const MAX_COMMAND_CHARS = 1_000
-const MAX_COMMAND_OUTPUT_CHARS = 3_000
+const MAX_COMMAND_OUTPUT_CHARS = 1_800
 const MAX_COMMAND_EVIDENCE_CHARS = 12_000
 const MAX_CRITERION_CHARS = 2_000
 const MAX_CRITERIA_CHARS = 8_000
@@ -234,6 +234,8 @@ export class CriticCommandEvidenceCollector extends BaseObserver {
                   ? "completed; output indicates failure"
                   : "completed; consult captured output for the result"
             return {
+                chronologicalIndex: index,
+                command: entry.command,
                 readiness: {
                     terminal: output !== null,
                     freshness: freshness.state,
@@ -256,14 +258,23 @@ export class CriticCommandEvidenceCollector extends BaseObserver {
                 ].join("\n"),
             }
         })
-        const rendered = captured.map((entry) => entry.rendered)
-            .reverse()
+        const rendered = [...captured]
+            .sort((left, right) => {
+                const priority = commandPromptPriority(
+                    left.command,
+                    left.readiness,
+                ) - commandPromptPriority(right.command, right.readiness)
+                return priority !== 0
+                    ? priority
+                    : right.chronologicalIndex - left.chronologicalIndex
+            })
+            .map((entry) => entry.rendered)
             .join("\n\n")
-        const text = boundText(
+        const text = boundPrioritizedCommandText(
             [
                 "Freshness compares the exact changed-file content captured after each command with the live story workspace. Git metadata-only operations such as add/commit remain fresh; any changed path, type, mode, symlink target, or file bytes make earlier evidence stale.",
                 "STALE/UNVERIFIABLE evidence cannot prove the current workspace.",
-                "Commands are shown newest-first so the final fresh verification receives the highest prompt priority.",
+                "Fresh terminal verification commands are shown first, then remaining commands newest-first. This keeps real test/build/typecheck/lint output visible when later diagnostics exceed the evidence bound.",
                 "",
                 rendered,
             ].join("\n"),
@@ -1388,6 +1399,81 @@ function commandOutputLooksFailed(output: string): boolean {
     )
 }
 
+function commandPromptPriority(
+    command: string,
+    readiness: CriticCommandEvidenceEntry,
+): number {
+    const usable = readiness.terminal &&
+        readiness.freshness === "fresh" &&
+        !readiness.sandboxBlocked
+    if (!usable) return 2
+    if (isTestExecutionCommand(command)) return 0
+    return isVerificationExecutionCommand(command) ? 1 : 2
+}
+
+/**
+ * Prioritization is only a bounded-display hint derived from shell commands
+ * Baro actually observed. It does not prove a segment ran or succeeded:
+ * terminal, freshness, sandbox authority, and the exact command/output remain
+ * visible to the Critic from the structured ledger.
+ */
+function isTestExecutionCommand(command: string): boolean {
+    return shellCommandSegments(command).some((segment) =>
+        /^(?:npm|pnpm|yarn|bun)(?:\s+--?[^\s]+)*\s+(?:(?:run|run-script)\s+)?test(?:[:\s]|$)/iu.test(
+            segment,
+        ) ||
+        /^(?:(?:npx|bunx)|(?:npm|pnpm|yarn|bun)\s+(?:exec|dlx))(?:\s+--?[^\s]+)*\s+(?:rstest|jest|vitest|mocha|ava|tap)\b/iu.test(
+            segment,
+        ) ||
+        /^(?:rstest|jest|vitest|mocha|ava|tap|pytest|tox|nose2|rspec)\b/iu.test(
+            segment,
+        ) ||
+        /^(?:python(?:3)?\s+-m\s+pytest|node\s+--test|deno\s+test|cargo\s+(?:test|nextest\s+run)|go\s+test|dotnet\s+test)\b/iu.test(
+            segment,
+        ) ||
+        /^(?:\.\/)?(?:mvnw?|gradlew?)(?:\s+[^\s]+)*\s+test\b/iu.test(
+            segment,
+        )
+    )
+}
+
+function isVerificationExecutionCommand(command: string): boolean {
+    return shellCommandSegments(command).some((segment) =>
+        /^(?:npm|pnpm|yarn|bun)(?:\s+--?[^\s]+)*\s+(?:(?:run|run-script)\s+)?(?:build|typecheck|lint|check|format)(?:[:\s]|$)/iu.test(
+            segment,
+        ) ||
+        /^(?:(?:npx|bunx)|(?:npm|pnpm|yarn|bun)\s+(?:exec|dlx))(?:\s+--?[^\s]+)*\s+(?:tsc|eslint|prettier)\b/iu.test(
+            segment,
+        ) ||
+        /^(?:tsc|eslint|cargo\s+(?:build|check|clippy|fmt)|go\s+(?:build|vet)|dotnet\s+(?:build|format))\b/iu.test(
+            segment,
+        ) ||
+        /^prettier\b[\s\S]*\s--check(?:\s|$)/iu.test(segment)
+    )
+}
+
+function shellCommandSegments(command: string): string[] {
+    const trimmed = command.trim()
+    const wrapper = /^(?:\S*\/)?(?:ba|z|da|fi)?sh\s+-[a-z]*c[a-z]*\s+([\s\S]+)$/iu.exec(
+        trimmed,
+    )
+    const wrapped = wrapper?.[1]?.trim() ?? trimmed
+    const quote = wrapped[0]
+    const body = wrapped.length >= 2 &&
+        (quote === "'" || quote === '"') &&
+        wrapped.at(-1) === quote
+        ? wrapped.slice(1, -1)
+        : wrapped
+    return body
+        .split(/(?:&&|\|\||;|\r?\n)/u)
+        .map((segment) =>
+            segment
+                .trim()
+                .replace(/^\(+\s*/u, "")
+                .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)+/u, ""),
+        )
+}
+
 function outputLooksSandboxBlocked(output: string): boolean {
     return /sandbox-exec|operation not permitted|permission denied|seatbelt|denied by sandbox/i.test(
         output,
@@ -1405,6 +1491,15 @@ function boundText(text: string, maxChars: number): string {
     const head = Math.ceil(available * 0.7)
     const tail = available - head
     return `${text.slice(0, head)}${marker}${tail > 0 ? text.slice(-tail) : ""}`
+}
+
+/** Command blocks were already sorted by evidence value. Preserve that order
+ * instead of reserving the generic tail budget for oldest diagnostic noise. */
+function boundPrioritizedCommandText(text: string, maxChars: number): string {
+    if (text.length <= maxChars) return text
+    const marker = `\n[… ${text.length - maxChars} lower-priority characters omitted by Critic command-evidence bound …]`
+    const available = Math.max(0, maxChars - marker.length)
+    return `${text.slice(0, available)}${marker}`
 }
 
 function errorMessage(error: unknown): string {

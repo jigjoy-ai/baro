@@ -658,6 +658,93 @@ describe("Critic repository evidence", () => {
         })
     })
 
+    it("keeps fresh verification visible when later noisy diagnostics exceed the prompt bound", async () => {
+        await withTempDir("baro-critic-verification-priority-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            writeFileSync(join(repo, "feature.ts"), "export const value = 2\n")
+
+            const collector = new CriticCommandEvidenceCollector({
+                resolveRepositoryTarget: () => ({ cwd: repo, baseSha }),
+            })
+            const recordCommand = async (
+                callId: string,
+                command: string,
+                output: string,
+            ): Promise<void> => {
+                collector.onExternalFunctionCall(
+                    source("agent-a"),
+                    FunctionCallItem.rehydrate({
+                        callId,
+                        name: "shell",
+                        args: JSON.stringify({ command }),
+                    }),
+                )
+                collector.onExternalFunctionCallOutput(
+                    source("agent-a"),
+                    FunctionCallOutputItem.create(callId, output),
+                )
+                await collector.snapshotForEvaluation("agent-a")
+            }
+            const noisyOutput = (label: string) =>
+                `${label}\n${"diagnostic output ".repeat(400)}`
+
+            await recordCommand(
+                "before",
+                "git status --short # before",
+                noisyOutput("before"),
+            )
+            const verificationOutput = (label: string) =>
+                `${label} started\n${"verification detail ".repeat(400)}\n${label} passed`
+            await recordCommand(
+                "full-suite",
+                "/bin/zsh -lc 'npm test'",
+                verificationOutput("Tests 167/167"),
+            )
+            await recordCommand(
+                "focused-suite",
+                "/bin/zsh -lc 'npx rstest run tests/application/cancellation.test.ts'",
+                verificationOutput("Focused tests 12/12"),
+            )
+            await recordCommand(
+                "build",
+                "/bin/zsh -lc 'npm run build'",
+                verificationOutput("Build"),
+            )
+            await recordCommand(
+                "typecheck",
+                "/bin/zsh -lc 'npm run typecheck'",
+                verificationOutput("Typecheck"),
+            )
+            await recordCommand(
+                "lint",
+                "/bin/zsh -lc 'npm run lint'",
+                verificationOutput("Lint"),
+            )
+            for (let index = 0; index < 10; index += 1) {
+                await recordCommand(
+                    `after-${index}`,
+                    `git status --short # after ${index}`,
+                    noisyOutput(`after ${index}`),
+                )
+            }
+
+            const snapshot = await collector.snapshotForEvaluation("agent-a")
+            assert.ok(snapshot)
+            assert.ok(snapshot.text.length <= 12_000)
+            assert.match(snapshot.text, /command: \/bin\/zsh -lc 'npm test'/)
+            assert.match(snapshot.text, /Tests 167\/167 passed/)
+            assert.match(snapshot.text, /Focused tests 12\/12 passed/)
+            assert.match(snapshot.text, /command: \/bin\/zsh -lc 'npm run build'/)
+            assert.match(snapshot.text, /Build passed/)
+            assert.match(snapshot.text, /Typecheck passed/)
+            assert.match(snapshot.text, /Lint passed/)
+            assert.ok(
+                snapshot.text.indexOf("npm test") <
+                    snapshot.text.indexOf("git status --short # after"),
+            )
+        })
+    })
+
     it("never marks pre-edit tests fresh when workspace activity races fingerprint capture", async () => {
         await withTempDir("baro-critic-fingerprint-race-", async (repo) => {
             git(repo, "init", "--quiet")

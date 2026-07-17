@@ -285,6 +285,10 @@ enum AppEvent {
     /// arrives once per spawn, replacing any stale handle from a
     /// previous run.
     OrchestratorStdin(mpsc::Sender<String>),
+    /// One-shot structured shutdown for the live orchestrator process tree.
+    OrchestratorShutdown(tokio::sync::oneshot::Sender<()>),
+    /// OS Ctrl-C observed by the headless host.
+    Interrupt,
     Tick,
 }
 
@@ -328,7 +332,17 @@ struct ModeContractView {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::process::ExitCode {
+    match run_main().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     // `baro connect [--token …] [--workspace …]` — run as a baro-cloud runner.
     // Handled before clap / the session lock so it bypasses the TUI entirely.
     let raw_args: Vec<String> = std::env::args().collect();
@@ -385,12 +399,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Headless: no terminal / alternate screen. Drive the run and stream
     // the orchestrator's event JSON to stdout (CI / automation / remote runner).
     if cli.headless {
-        let result = run_app(None, cli).await;
-        if let Err(err) = result {
-            eprintln!("Error: {}", err);
-            std::process::exit(1);
-        }
-        return Ok(());
+        // Returning lets the Tokio runtime drop every supervised phase before
+        // the process terminates. `process::exit` would bypass the
+        // ProcessTreeGuard destructors and can orphan paid CLI workers.
+        return run_app(None, cli).await;
     }
 
     let mut writer = open_terminal_writer()?;
@@ -415,12 +427,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // _lock is dropped here, removing baro.lock
 
-    if let Err(err) = result {
-        eprintln!("Error: {}", err);
-        std::process::exit(1);
-    }
-
-    Ok(())
+    result
 }
 
 /// True if version `a` is older than `b` (numeric, per dotted segment).
@@ -1058,6 +1065,17 @@ async fn run_app(
     let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
     let mut next_refine_generation = 0_u64;
     let mut active_refine_generation: Option<u64> = None;
+    let mut orchestrator_shutdown: Option<tokio::sync::oneshot::Sender<()>> = None;
+    let mut interrupted = false;
+
+    if headless {
+        let interrupt_tx = tx.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = interrupt_tx.send(AppEvent::Interrupt).await;
+            }
+        });
+    }
 
     // Resume detection: the PRD in the initial checkout supplies only the
     // branch hint. Establish that branch and reload its own PRD before showing
@@ -1234,6 +1252,12 @@ async fn run_app(
                 }
                 let is_done = matches!(ev, BaroEvent::Done { .. });
                 let is_exit = matches!(ev, BaroEvent::OrchestratorExited { .. });
+                if is_exit {
+                    // The sender belongs only to the runtime that produced
+                    // this terminal event. Keeping it would make a later
+                    // Ctrl-C wait for an exit that already happened.
+                    orchestrator_shutdown = None;
+                }
                 let is_runtime_conversation = matches!(
                     ev,
                     BaroEvent::ConversationRequest { .. }
@@ -2549,6 +2573,32 @@ async fn run_app(
                 }
                 app.orchestrator_stdin = Some(sender);
             }
+            Some(AppEvent::OrchestratorShutdown(sender)) => {
+                // Replacing an authoritative runtime means the old one must
+                // not remain detached in the background.
+                if let Some(previous) = orchestrator_shutdown.replace(sender) {
+                    let _ = previous.send(());
+                }
+            }
+            Some(AppEvent::Interrupt) => {
+                interrupted = true;
+                app.orchestrator_stdin = None;
+                if let Some(shutdown) = orchestrator_shutdown.take() {
+                    // Keep the event loop alive until OrchestratorExited so
+                    // its process group / Job Object is known to be empty.
+                    if shutdown.send(()).is_err() {
+                        // A naturally exited runtime can race its registration
+                        // event. There is then no future exit to wait for; drop
+                        // the remaining supervised phase tasks immediately.
+                        break;
+                    }
+                } else {
+                    // Conversation, Architect, and Planner subprocess futures
+                    // are supervised by kill-on-drop guards. Returning allows
+                    // Tokio to drop those detached phase tasks cleanly.
+                    break;
+                }
+            }
             Some(AppEvent::Tick) => {
                 app.tick_count += 1;
             }
@@ -2559,6 +2609,9 @@ async fn run_app(
     // process can exit cleanly after emitting `success:false`; automation must
     // still receive a non-zero baro exit code instead of mistaking that for a
     // successful run.
+    if interrupted {
+        return Err("interrupted by Ctrl-C".into());
+    }
     if headless {
         if let Some(reason) = headless_failure_reason(&app) {
             return Err(reason.into());
@@ -3493,7 +3546,13 @@ fn spawn_executor(
         conversation_context: config.conversation_context,
         echo_raw,
     };
-    orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx, stdin_rx);
+    let shutdown = orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx, stdin_rx);
+    tokio::spawn(async move {
+        // Do not lose the authoritative shutdown handle when the UI event
+        // queue is temporarily full. If the host is already gone, dropping
+        // the sender still lets runtime teardown close the process-tree guard.
+        let _ = tx.send(AppEvent::OrchestratorShutdown(shutdown)).await;
+    });
     stdin_tx
 }
 
