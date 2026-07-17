@@ -161,6 +161,7 @@ export class DagForwarder extends BaseObserver {
             ordinal: item.ordinal,
             passed: [...item.passed],
             failed: [...item.failed],
+            ...(item.blocked ? { blocked: [...item.blocked] } : {}),
         })
     }
 

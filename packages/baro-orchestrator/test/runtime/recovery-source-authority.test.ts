@@ -4,6 +4,7 @@ import { describe, it } from "node:test"
 import {
     StoryQualityCompleted,
     StoryResult,
+    WorkBlockAccepted,
     WorkLeaseGranted,
     WorkLeaseReleased,
 } from "../../src/semantic-events.js"
@@ -103,10 +104,13 @@ describe("RecoverySourceAuthority", () => {
         const policy = new RecoverySourceAuthority()
         const broker = source("broker")
         const gate = source("gate")
+        const board = source("board")
         policy.setLeaseAuthority(broker)
         policy.setLeaseAuthority(broker)
         policy.setQualityAuthority(gate)
         policy.setQualityAuthority(gate)
+        policy.setBlockAuthority(board)
+        policy.setBlockAuthority(board)
 
         assert.throws(
             () => policy.setLeaseAuthority(source("other-broker")),
@@ -116,5 +120,82 @@ describe("RecoverySourceAuthority", () => {
             () => policy.setQualityAuthority(source("other-gate")),
             /already bound/,
         )
+        assert.throws(
+            () => policy.setBlockAuthority(source("other-board")),
+            /already bound/,
+        )
+    })
+
+    it("suppresses Surgeon recovery for an authoritatively blocked lease", () => {
+        const runId = "run-blocked-recovery"
+        const broker = source("broker")
+        const board = source("board")
+        const attacker = source("attacker")
+        const worker = source("worker")
+        const policy = new RecoverySourceAuthority()
+        policy.setLeaseAuthority(broker)
+        policy.setBlockAuthority(board)
+        const leases = new ActiveLeaseRegistry()
+        const grant = WorkLeaseGranted.create({
+            runId,
+            offerId: "offer-S6",
+            leaseId: "lease-S6",
+            workerId: "worker",
+            generation: 2,
+            request: {
+                storyId: "S6",
+                prompt: "provider",
+                model: "standard",
+                retries: 0,
+                timeoutSecs: 60,
+            },
+        })
+        policy.observeLease(broker, grant, leases, runId)
+        const accepted = WorkBlockAccepted.create({
+            runId,
+            blockId: "block-S6-S11",
+            storyId: "S6",
+            leaseId: "lease-S6",
+            generation: 2,
+            requiredStoryIds: ["S11"],
+            reason: "shared iterator helper is not integrated",
+            graphVersion: 5,
+        })
+        const result = StoryResult.create({
+            storyId: "S6",
+            success: false,
+            attempts: 1,
+            durationSecs: 2,
+            error: "cooperative suspension",
+            runId,
+            leaseId: "lease-S6",
+            generation: 2,
+            suspension: {
+                kind: "dependency",
+                blockId: "block-S6-S11",
+            },
+        })
+
+        policy.observeLease(attacker, accepted, leases, runId)
+        assert.equal(policy.accepts(worker, result), true)
+        policy.observeLease(board, accepted, leases, runId)
+        assert.equal(policy.accepts(worker, result), false)
+
+        // Release can race ahead of the terminal result on a replaying bus;
+        // retain the exact tombstone until RunCompleted.
+        policy.observeLease(
+            broker,
+            WorkLeaseReleased.create({
+                runId,
+                offerId: "offer-S6",
+                leaseId: "lease-S6",
+                storyId: "S6",
+                workerId: "worker",
+                reason: "dependency_blocked",
+            }),
+            leases,
+            runId,
+        )
+        assert.equal(policy.accepts(worker, result), false)
     })
 })

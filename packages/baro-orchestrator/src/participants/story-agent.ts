@@ -21,6 +21,7 @@ import {
     type AgentPhase,
     type AgentResultData,
     type StoryFailureData,
+    type StoryResultData,
 } from "../semantic-events.js"
 import {
     classifyProviderFailure,
@@ -78,7 +79,10 @@ export interface StoryOutcome {
     finalSummary: ClaudeRunSummary | null
     error: string | null
     failure?: StoryFailureData
+    suspension?: StorySuspension
 }
+
+export type StorySuspension = NonNullable<StoryResultData["suspension"]>
 
 export class StoryAgent extends BaseObserver {
     private readonly spec: Required<
@@ -106,6 +110,11 @@ export class StoryAgent extends BaseObserver {
     private startedAt: number | null = null
     /** Rejected capacity frame for the currently executing CLI attempt. */
     private currentProviderCapacitySignal: unknown | undefined
+    private stopRequested = false
+    /** Lifecycle signal also closes the tiny transition→timer lost-wake window. */
+    private readonly retryDelayController = new AbortController()
+    private suspension: StorySuspension | null = null
+    private processQuiescence: Promise<boolean> | null = null
     private resolveDone!: (outcome: StoryOutcome) => void
     public readonly done: Promise<StoryOutcome>
 
@@ -237,8 +246,24 @@ export class StoryAgent extends BaseObserver {
     }
 
     abort(): void {
-        this.currentClaude?.abort()
+        this.stopRequested = true
+        this.wakeRetryDelay()
+        this.quiesceCurrentClaude()
         this.transition("aborted", "external abort")
+    }
+
+    async suspend(blockId: string): Promise<StoryOutcome> {
+        this.recordSuspension(blockId)
+        this.stopRequested = true
+        this.wakeRetryDelay()
+        this.transition("aborted", `dependency suspension ${blockId}`)
+        const quiesced = await this.quiesceCurrentClaude()
+        if (!quiesced) {
+            throw new Error(
+                `story ${this.spec.id} process group quiescence could not be certified`,
+            )
+        }
+        return this.done
     }
 
     private async executeAllAttempts(): Promise<void> {
@@ -253,25 +278,37 @@ export class StoryAgent extends BaseObserver {
             this.spec.hardTimeoutSecs > 0
                 ? setTimeout(() => {
                       hardTimedOut = true
-                      this.currentClaude?.abort()
+                      this.wakeRetryDelay()
+                      this.quiesceCurrentClaude()
                   }, this.spec.hardTimeoutSecs * 1000)
                 : null
 
         try {
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                if (this.stopRequested) break
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                    lastFailure = {
+                        kind: "infrastructure",
+                        code: "command_timeout",
+                    }
                     break
                 }
 
                 if (attempt > 1) {
+                    if (this.stopRequested) break
                     this.transition(
                         "waiting",
                         `retrying (attempt ${attempt}/${maxAttempts})`,
                     )
-                    await setTimeoutPromise(this.spec.retryDelayMs)
+                    await this.waitForRetryDelay()
+                    if (this.stopRequested) break
                     if (hardTimedOut) {
                         lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                        lastFailure = {
+                            kind: "infrastructure",
+                            code: "command_timeout",
+                        }
                         break
                     }
                 }
@@ -282,6 +319,7 @@ export class StoryAgent extends BaseObserver {
                 lastError = result.error
                 lastFailure = result.failure
 
+                if (this.stopRequested) break
                 if (result.success) {
                     const durationSecs = Math.round(
                         (Date.now() - (this.startedAt ?? Date.now())) / 1000,
@@ -307,6 +345,10 @@ export class StoryAgent extends BaseObserver {
 
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                    lastFailure = {
+                        kind: "infrastructure",
+                        code: "command_timeout",
+                    }
                     break
                 }
             }
@@ -314,17 +356,36 @@ export class StoryAgent extends BaseObserver {
             if (hardTimer !== null) clearTimeout(hardTimer)
         }
 
+        await this.processQuiescence
+
+        if (this.suspension) {
+            lastError = null
+            lastFailure = undefined
+        } else if (this.stopRequested) {
+            lastError = "story execution aborted externally"
+            lastFailure = undefined
+        }
+
         const durationSecs = Math.round(
             (Date.now() - (this.startedAt ?? Date.now())) / 1000,
         )
-        this.transition(
-            "failed",
-            lastFailure?.kind === "provider_capacity"
-                ? `provider capacity unavailable after ${attempts} attempt(s)`
-                : boardOwnsRecovery(lastFailure)
-                  ? `operational failure after ${attempts} attempt(s)`
-                  : `exhausted ${attempts}/${maxAttempts} attempts`,
-        )
+        if (this.stopRequested) {
+            this.transition(
+                "aborted",
+                this.suspension
+                    ? `suspended on dependency block ${this.suspension.blockId}`
+                    : "external abort settled",
+            )
+        } else {
+            this.transition(
+                "failed",
+                lastFailure?.kind === "provider_capacity"
+                    ? `provider capacity unavailable after ${attempts} attempt(s)`
+                    : boardOwnsRecovery(lastFailure)
+                      ? `operational failure after ${attempts} attempt(s)`
+                      : `exhausted ${attempts}/${maxAttempts} attempts`,
+            )
+        }
         this.emitStoryResult(
             false,
             attempts,
@@ -340,6 +401,7 @@ export class StoryAgent extends BaseObserver {
             finalSummary: lastSummary,
             error: lastError,
             ...(lastFailure ? { failure: lastFailure } : {}),
+            ...(this.suspension ? { suspension: this.suspension } : {}),
         })
     }
 
@@ -355,6 +417,7 @@ export class StoryAgent extends BaseObserver {
             return { success: false, summary: null, error: "no environment" }
         }
 
+        this.processQuiescence = null
         this.transition("running", `attempt ${attempt}`)
         // Capacity evidence is scoped to one CLI process. Never let a late
         // failure from an earlier retry taint a fresh attempt.
@@ -385,7 +448,7 @@ export class StoryAgent extends BaseObserver {
             claude.sendUserMessage(this.spec.prompt)
         } catch (e) {
             const error = e instanceof Error ? e.message : String(e)
-            claude.abort()
+            await this.quiesceCurrentClaude()
             claude.leave(this.envRef)
             this.currentClaude = null
             return {
@@ -411,14 +474,8 @@ export class StoryAgent extends BaseObserver {
         } catch (e) {
             multiTurn.cancel()
             if (this.turnLifecycle === multiTurn) this.turnLifecycle = null
-            claude.abort()
+            await this.quiesceCurrentClaude()
             const error = e instanceof Error ? e.message : String(e)
-            // Wait for the kill to land so subsequent attempts get a clean slate.
-            try {
-                await claude.done
-            } catch {
-                // ignore
-            }
             claude.leave(this.envRef)
             this.currentClaude = null
             const failure = e instanceof StoryAttemptTimeoutError
@@ -435,6 +492,10 @@ export class StoryAgent extends BaseObserver {
             }
         }
 
+        // Normal `done` already owns tree cleanup. The close-drain watchdog
+        // intentionally resolves it early, so confirm quiescence through the
+        // stronger participant boundary before releasing this attempt.
+        await this.quiesceCurrentClaude()
         multiTurn.cancel()
         if (this.turnLifecycle === multiTurn) this.turnLifecycle = null
         claude.leave(this.envRef)
@@ -518,9 +579,47 @@ export class StoryAgent extends BaseObserver {
                 durationSecs,
                 error,
                 ...(failure ? { failure } : {}),
+                ...(this.suspension ? { suspension: this.suspension } : {}),
                 ...correlationOf(this.spec),
             }),
         )
+    }
+
+    private recordSuspension(blockId: string): void {
+        if (typeof blockId !== "string" || blockId.trim() !== blockId || !blockId) {
+            throw new TypeError("suspension blockId must be a non-empty trimmed string")
+        }
+        if (this.suspension && this.suspension.blockId !== blockId) {
+            throw new Error(
+                `story ${this.spec.id} is already suspending for block ${this.suspension.blockId}`,
+            )
+        }
+        this.suspension ??= { kind: "dependency", blockId }
+    }
+
+    private quiesceCurrentClaude(): Promise<boolean> {
+        const claude = this.currentClaude
+        if (!claude) return this.processQuiescence ?? Promise.resolve(true)
+        if (!this.processQuiescence) {
+            this.processQuiescence = claude.abortAndWait()
+        }
+        return this.processQuiescence
+    }
+
+    private async waitForRetryDelay(): Promise<void> {
+        try {
+            await setTimeoutPromise(this.spec.retryDelayMs, undefined, {
+                signal: this.retryDelayController.signal,
+            })
+        } catch (error) {
+            // Loop flags remain authoritative. Aborting this timer only wakes
+            // the loop so it can settle without launching another attempt.
+            if (!this.retryDelayController.signal.aborted) throw error
+        }
+    }
+
+    private wakeRetryDelay(): void {
+        this.retryDelayController.abort()
     }
 
     private transition(next: AgentPhase, detail?: string): void {

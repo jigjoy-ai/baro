@@ -18,7 +18,16 @@ const snap: PrdSnapshot = {
     project: "demo",
     description: "d",
     stories: [
-        { id: "S1", title: "broad story", description: "does a lot", dependsOn: [], passes: false, model: "sonnet" },
+        {
+            id: "S1",
+            title: "broad story",
+            description: "does a lot",
+            acceptance: ["The shared capability is available."],
+            tests: ["npm test -- shared-capability"],
+            dependsOn: [],
+            passes: false,
+            model: "sonnet",
+        },
     ],
 }
 
@@ -98,6 +107,108 @@ describe("buildSurgeonPrompt — Critic verdicts feed the replan decision", () =
     it("omits the section when there are no critiques", () => {
         const p = buildSurgeonPrompt(snap, failure, undefined, undefined, [])
         assert.doesNotMatch(p, /Critic verdicts/)
+    })
+})
+
+describe("buildSurgeonPrompt — dependent-aware rewiring", () => {
+    it("snapshots each direct dependent's semantic and capability context", () => {
+        const dependentSnapshot: PrdSnapshot = {
+            ...snap,
+            stories: [
+                ...snap.stories,
+                {
+                    id: "S2",
+                    title: "HTTP cancellation consumer",
+                    description: "Forwards cooperative cancellation to providers.",
+                    acceptance: [
+                        "An aborted request reaches the active provider signal.",
+                    ],
+                    tests: ["npm test -- provider-cancellation"],
+                    dependsOn: ["S1", "S-existing"],
+                    passes: false,
+                    model: "heavy",
+                },
+                {
+                    id: "S3",
+                    title: "Event cancellation consumer",
+                    description: "Publishes the terminal cancellation event.",
+                    acceptance: ["Exactly one terminal cancellation event is emitted."],
+                    tests: ["npm test -- cancellation-events"],
+                    dependsOn: ["S1"],
+                    passes: false,
+                    model: "standard",
+                },
+                {
+                    id: "S4",
+                    title: "Indirect consumer",
+                    description: "Depends on S2 rather than directly on S1.",
+                    acceptance: ["Indirect work stays ordered."],
+                    tests: ["npm test -- indirect"],
+                    dependsOn: ["S2"],
+                    passes: false,
+                },
+            ],
+        }
+        const prompt = buildSurgeonPrompt(
+            dependentSnapshot,
+            failure,
+            (model) => model ? `codex:${model}` : null,
+        )
+        const section = prompt
+            .split("# Direct dependents of S1\n", 2)[1]!
+            .split("\n# Failure", 1)[0]!
+        const snapshots = section
+            .split("\n")
+            .filter((line) => line.startsWith("  - {"))
+            .map((line) => JSON.parse(line.slice(4)) as Record<string, unknown>)
+
+        assert.deepEqual(snapshots, [
+            {
+                id: "S2",
+                title: "HTTP cancellation consumer",
+                description: "Forwards cooperative cancellation to providers.",
+                dependsOn: ["S1", "S-existing"],
+                acceptance: [
+                    "An aborted request reaches the active provider signal.",
+                ],
+                tests: ["npm test -- provider-cancellation"],
+                modelTier: "heavy",
+                actualModel: "codex:heavy",
+            },
+            {
+                id: "S3",
+                title: "Event cancellation consumer",
+                description: "Publishes the terminal cancellation event.",
+                dependsOn: ["S1"],
+                acceptance: ["Exactly one terminal cancellation event is emitted."],
+                tests: ["npm test -- cancellation-events"],
+                modelTier: "standard",
+                actualModel: "codex:standard",
+            },
+        ])
+        assert.match(section, /every story below.*separate rewire obligation/is)
+        assert.match(section, /terminal replacement\(s\).*concrete acceptance/is)
+        assert.match(section, /do not default all of them to the first added story/is)
+        assert.match(prompt, /Acceptance: \["The shared capability is available\."\]/)
+        assert.match(
+            prompt,
+            /Verification commands: \["npm test -- shared-capability"\]/,
+        )
+    })
+
+    it("requires per-dependent terminal replacement mappings", () => {
+        assert.match(
+            SURGEON_SYSTEM_PROMPT,
+            /EVERY direct dependent that remains in the graph must[\s\S]*its own "modifiedDeps" entry/,
+        )
+        assert.match(
+            SURGEON_SYSTEM_PROMPT,
+            /terminal added replacement story or stories[\s\S]*concrete behavior that dependent consumes/,
+        )
+        assert.match(
+            SURGEON_SYSTEM_PROMPT,
+            /Do not blindly point all dependents at the first item in[\s\S]*"added"/,
+        )
     })
 })
 

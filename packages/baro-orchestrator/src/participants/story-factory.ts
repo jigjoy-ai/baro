@@ -28,11 +28,13 @@ import {
     StorySpawnFailed,
     StorySpawnRequest,
     StorySpawned,
+    WorkBlockAccepted,
     WorkClaimed,
     WorkBid,
     WorkLeaseGranted,
     WorkLeaseReleased,
     WorkOffered,
+    WorkSuspended,
     WorkerCapabilityAdvertised,
     type StorySpawnRequestData,
     type WorkOfferedData,
@@ -44,6 +46,7 @@ import {
     LocalStoryExecutor,
     type StoryExecution,
     type StoryExecutor,
+    type StorySuspensionSummary,
 } from "./story-executor.js"
 import { RouteLearner } from "./route-learning.js"
 import {
@@ -173,10 +176,29 @@ export class StoryFactory extends BaseObserver {
     /** The bus environment, wired in before any spawn; passed to the executor. */
     private envRef: AgenticEnvironment | null = null
     private readonly active: Map<string, StoryExecution> = new Map()
+    /** Disposed terminal executions retained only until their exact lease is
+     * released, so a delayed block decision can still prove quiescence. */
+    private readonly settledExecutions = new Map<string, StoryExecution>()
+    /** One in-flight cooperative drain per exact accepted block. */
+    private readonly suspensions = new Map<
+        string,
+        {
+            blockId: string
+            leaseId: string
+            generation: number
+            execution: StoryExecution | undefined
+            drain: Promise<void>
+            quiesced: boolean
+        }
+    >()
     /** Story ids whose spawn is in progress (closes the await-create window). */
     private readonly spawning = new Set<string>()
+    /** Exact drains for async worktree creation/executor construction. */
+    private readonly spawnDrains = new Map<string, Promise<void>>()
     /** Terminal results delivered synchronously from inside executor.start(). */
     private readonly settledWhileSpawning = new Set<string>()
+    /** One-way stop boundary set before repository cleanup. */
+    private shuttingDown = false
     private readonly leases = new Map<string, WorkLeaseGrantedData>()
     /** Retained until run completion so delayed authoritative billing for a
      * released lease cannot be attributed to a newer retry. */
@@ -407,6 +429,22 @@ export class StoryFactory extends BaseObserver {
 
         if (
             this.opts.coordinationMode === "collective" &&
+            WorkBlockAccepted.is(event) &&
+            event.data.runId === this.runId() &&
+            source === this.opts.runtimeReplanDecisionAuthority
+        ) {
+            const lease = this.leases.get(event.data.storyId)
+            if (
+                lease?.leaseId === event.data.leaseId &&
+                lease.generation === event.data.generation
+            ) {
+                this.beginDependencySuspension(event.data)
+            }
+            return
+        }
+
+        if (
+            this.opts.coordinationMode === "collective" &&
             WorkLeaseReleased.is(event) &&
             event.data.runId === this.runId() &&
             source === this.opts.leaseAuthority
@@ -428,6 +466,8 @@ export class StoryFactory extends BaseObserver {
                     this.active.delete(event.data.storyId)
                 }
                 this.leases.delete(event.data.storyId)
+                this.suspensions.delete(event.data.storyId)
+                this.settledExecutions.delete(event.data.storyId)
                 this.routeLearner?.forgetLease(
                     event.data.storyId,
                     event.data.leaseId,
@@ -479,6 +519,9 @@ export class StoryFactory extends BaseObserver {
             if (exec && this.envRef) {
                 exec.dispose(this.envRef)
                 this.active.delete(event.data.storyId)
+                if (this.opts.coordinationMode === "collective") {
+                    this.settledExecutions.set(event.data.storyId, exec)
+                }
             } else if (this.spawning.has(event.data.storyId)) {
                 this.settledWhileSpawning.add(event.data.storyId)
             }
@@ -496,6 +539,9 @@ export class StoryFactory extends BaseObserver {
                     workerId: this.workerId(),
                     backend: route.backend,
                     model: route.model ?? "default",
+                    ...(this.supportsCooperativeSuspend(route)
+                        ? { supportsCooperativeSuspend: true }
+                        : {}),
                 }),
             )
         } catch (error) {
@@ -526,6 +572,9 @@ export class StoryFactory extends BaseObserver {
                 workerId: this.workerId(),
                 route: configured.descriptor,
                 estimate: this.routeLearner!.currentEstimate(),
+                ...(this.supportsCooperativeSuspend(configured.route)
+                    ? { supportsCooperativeSuspend: true }
+                    : {}),
             }),
         )
     }
@@ -557,8 +606,173 @@ export class StoryFactory extends BaseObserver {
         return true
     }
 
+    /** Quiesced dependency work is not durable until Broker/Board/repository
+     * have consumed its ACK and released the exact lease. */
+    unreleasedSuspensionStoryIds(): readonly string[] {
+        return [...this.suspensions.keys()]
+    }
+
+    /** Best-effort shutdown barrier used before repository cleanup. Any story
+     * returned here lacks a certified cooperative drain, so its worktree must
+     * remain intact even though the run is ending. */
+    async quiesceForShutdown(timeoutMs = 5_000): Promise<readonly string[]> {
+        if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+            throw new RangeError("shutdown quiescence timeout must be non-negative")
+        }
+        this.shuttingDown = true
+        // An abort callback may synchronously emit StoryResult and move its
+        // execution out of `active`. Retain that pre-abort identity unless a
+        // cooperative suspension below supplies the stronger certificate.
+        const initiallyUnsafe = new Set([
+            ...this.active.keys(),
+            ...this.suspensions.keys(),
+        ])
+        const abortActive = (): void => {
+            const candidates = new Set([
+                ...this.active.keys(),
+                ...this.suspensions.keys(),
+            ])
+            for (const storyId of candidates) {
+                const execution =
+                    this.active.get(storyId) ??
+                    this.suspensions.get(storyId)?.execution
+                try {
+                    execution?.abort?.()
+                } catch (error) {
+                    process.stderr.write(
+                        `[story-factory] ${storyId} shutdown abort failed: ${String(error)}\n`,
+                    )
+                }
+            }
+        }
+        abortActive()
+
+        const deadline = Date.now() + timeoutMs
+        await settleWithin(
+            [...this.spawnDrains.values()],
+            Math.max(0, deadline - Date.now()),
+        )
+
+        const drains = [...this.suspensions.values()].map(
+            (suspension) => suspension.drain,
+        )
+        if (drains.length > 0) {
+            await settleWithin(drains, Math.max(0, deadline - Date.now()))
+        }
+
+        const candidates = new Set([
+            ...initiallyUnsafe,
+            ...this.active.keys(),
+            ...this.suspensions.keys(),
+            ...this.spawning,
+        ])
+
+        const retained: string[] = []
+        for (const storyId of candidates) {
+            const suspension = this.suspensions.get(storyId)
+            if (!suspension?.quiesced) {
+                retained.push(storyId)
+                continue
+            }
+            const active = this.active.get(storyId)
+            if (active && this.envRef) {
+                active.dispose(this.envRef)
+                this.active.delete(storyId)
+                this.settledExecutions.set(storyId, active)
+            }
+        }
+        return retained
+    }
+
+    private beginDependencySuspension(data: {
+        blockId: string
+        storyId: string
+        leaseId: string
+        generation: number
+    }): void {
+        const existing = this.suspensions.get(data.storyId)
+        if (
+            existing?.blockId === data.blockId &&
+            existing.leaseId === data.leaseId &&
+            existing.generation === data.generation
+        ) return
+
+        const exec =
+            this.active.get(data.storyId) ??
+            this.settledExecutions.get(data.storyId)
+        // The accepted Board decision itself is a retention boundary. Record
+        // it before invoking optional/untrusted executor code so a missing or
+        // synchronously-throwing suspend implementation cannot disappear from
+        // the final shutdown safety sweep.
+        const suspension = {
+            blockId: data.blockId,
+            leaseId: data.leaseId,
+            generation: data.generation,
+            execution: exec,
+            drain: Promise.resolve(),
+            quiesced: false,
+        }
+        this.suspensions.set(data.storyId, suspension)
+        if (!exec?.suspend) {
+            process.stderr.write(
+                `[story-factory] ${data.storyId} accepted dependency suspension ` +
+                    "without a cooperative executor; waiting for the Broker watchdog\n",
+            )
+            return
+        }
+        let suspensionPromise: Promise<StorySuspensionSummary>
+        try {
+            suspensionPromise = exec.suspend(data.blockId)
+        } catch (error) {
+            process.stderr.write(
+                `[story-factory] ${data.storyId} cooperative suspension threw: ` +
+                    `${(error as Error)?.message ?? String(error)}\n`,
+            )
+            return
+        }
+        const drain = suspensionPromise.then(
+            (summary) => {
+                if (!validSuspensionSummary(summary)) {
+                    process.stderr.write(
+                        `[story-factory] ${data.storyId} cooperative suspension ` +
+                            "returned an invalid quiescence summary\n",
+                    )
+                    return
+                }
+                suspension.quiesced = true
+                const current = this.suspensions.get(data.storyId)
+                const lease = this.leases.get(data.storyId)
+                if (
+                    current?.blockId !== data.blockId ||
+                    current.leaseId !== data.leaseId ||
+                    current.generation !== data.generation ||
+                    lease?.leaseId !== data.leaseId ||
+                    lease.generation !== data.generation
+                ) return
+                this.emitBus(
+                    WorkSuspended.create({
+                        runId: this.runId(),
+                        blockId: data.blockId,
+                        storyId: data.storyId,
+                        leaseId: data.leaseId,
+                        generation: data.generation,
+                        attempts: summary.attempts,
+                        durationSecs: summary.durationSecs,
+                    }),
+                )
+            },
+            (error) => {
+                process.stderr.write(
+                    `[story-factory] ${data.storyId} cooperative suspension failed: ` +
+                        `${(error as Error)?.message ?? String(error)}\n`,
+                )
+            },
+        )
+        suspension.drain = drain
+    }
+
     private async spawn(req: StorySpawnRequestData): Promise<void> {
-        if (!this.envRef) return
+        if (!this.envRef || this.shuttingDown) return
         // Idempotent across both the settled set and the in-progress set:
         // spawn awaits worktree creation, so a duplicate request must not slip
         // through that window and create a second worktree + agent. The
@@ -566,6 +780,11 @@ export class StoryFactory extends BaseObserver {
         // so a later recovery respawn of this story isn't blocked forever.
         if (this.active.has(req.storyId) || this.spawning.has(req.storyId)) return
         this.spawning.add(req.storyId)
+        let resolveDrain!: () => void
+        const spawnDrain = new Promise<void>((resolve) => {
+            resolveDrain = resolve
+        })
+        this.spawnDrains.set(req.storyId, spawnDrain)
         try {
             await this.buildAndLaunch(req)
         } catch (error) {
@@ -577,6 +796,7 @@ export class StoryFactory extends BaseObserver {
                     : "process_spawn_failed" as const,
             }
             process.stderr.write(`[story-factory] ${req.storyId} spawn failed: ${message}\n`)
+            if (this.shuttingDown) return
             this.emitBus(
                 StorySpawnFailed.create({
                     runId: this.runId(),
@@ -608,12 +828,16 @@ export class StoryFactory extends BaseObserver {
             }
         } finally {
             this.spawning.delete(req.storyId)
+            if (this.spawnDrains.get(req.storyId) === spawnDrain) {
+                this.spawnDrains.delete(req.storyId)
+            }
+            resolveDrain()
             this.settledWhileSpawning.delete(req.storyId)
         }
     }
 
     private async buildAndLaunch(req: StorySpawnRequestData): Promise<void> {
-        if (!this.envRef) return
+        if (!this.envRef || this.shuttingDown) return
 
         // Resolve which backend + model THIS story runs on. The route
         // can come from the story's own `model` field (a bare tier name
@@ -631,6 +855,8 @@ export class StoryFactory extends BaseObserver {
                           req.leaseId,
                           req.graphVersion,
                           route.backend !== "openai",
+                          this.opts.worktrees !== undefined &&
+                              this.supportsCooperativeSuspend(route),
                       )}`,
                   }
                 : req
@@ -663,6 +889,10 @@ export class StoryFactory extends BaseObserver {
         const createdWorktree = this.opts.worktrees
             ? await this.opts.worktrees.create(req.storyId)
             : null
+        // The run may have completed while git worktree creation was queued.
+        // Leave any already-created path registered for cleanup, but never
+        // launch a provider process across the shutdown boundary.
+        if (this.shuttingDown) return
         if (this.opts.worktrees && !createdWorktree && this.opts.requireWorktree) {
             throw new Error(`isolated worktree unavailable for ${req.storyId}`)
         }
@@ -741,6 +971,9 @@ export class StoryFactory extends BaseObserver {
 
         if (this.settledWhileSpawning.delete(req.storyId)) {
             exec.dispose(this.envRef)
+            if (this.opts.coordinationMode === "collective") {
+                this.settledExecutions.set(req.storyId, exec)
+            }
         } else {
             this.active.set(req.storyId, exec)
         }
@@ -763,6 +996,10 @@ export class StoryFactory extends BaseObserver {
             endpoints: this.opts.endpoints,
             defaultApiKey: this.opts.defaultApiKey,
         })
+    }
+
+    private supportsCooperativeSuspend(route: StoryRoute): boolean {
+        return this.executor.supportsCooperativeSuspend?.(route) === true
     }
 
     private resultCorrelation(
@@ -862,6 +1099,7 @@ export class StoryFactory extends BaseObserver {
         leaseId: string,
         graphVersion?: number,
         includeCliDagMutationCommands = true,
+        includeDependencySuspendCommand = false,
     ): string {
         const collaboration = this.opts.collaboration!
         const command = `node ${JSON.stringify(collaboration.commandPath)}`
@@ -875,6 +1113,12 @@ export class StoryFactory extends BaseObserver {
             `- Message a peer: ${command} emit --session ${session} --lease ${lease} --kind message --to S2 --text ${JSON.stringify("YOUR MESSAGE")} (queued if that peer starts in a later wave)`,
             `- Share a finding: ${command} emit --session ${session} --lease ${lease} --kind note --text ${JSON.stringify("YOUR FINDING")} (retained in later agents' launch context)`,
             `- Read peer messages: ${command} inbox --session ${session} --agent ${JSON.stringify(storyId)}`,
+            ...(includeDependencySuspendCommand
+                ? [
+                      `- If an EXISTING, not-yet-integrated story is a hard prerequisite and continuing would require temporary/stale code, cooperatively suspend this story: ${command} emit --session ${session} --lease ${lease} --kind block --requires-json ${JSON.stringify('["S2"]')} --reason ${JSON.stringify("WHY THIS STORY CANNOT HONESTLY COMPLETE FIRST")} --wait-ms 30000`,
+                      "  Use block only for a concrete dependency, not for ordinary uncertainty or failing tests. If the Board accepts it, stop work and end the session without claiming completion; Baro preserves this worktree and resumes the logical story after the prerequisite integrates.",
+                  ]
+                : []),
             ...(includeCliDagMutationCommands
                 ? [
                       ...(graphVersion !== undefined
@@ -920,5 +1164,34 @@ function sameRouteDescriptor(
         left.routeId === right.routeId &&
         left.backend === right.backend &&
         left.model === right.model
+    )
+}
+
+async function settleWithin(
+    promises: readonly Promise<unknown>[],
+    timeoutMs: number,
+): Promise<void> {
+    if (promises.length === 0) return
+    let timer: ReturnType<typeof setTimeout> | null = null
+    try {
+        await Promise.race([
+            Promise.allSettled(promises),
+            new Promise<void>((resolve) => {
+                timer = setTimeout(resolve, timeoutMs)
+            }),
+        ])
+    } finally {
+        if (timer) clearTimeout(timer)
+    }
+}
+
+function validSuspensionSummary(
+    summary: StorySuspensionSummary,
+): boolean {
+    return (
+        Number.isSafeInteger(summary?.attempts) &&
+        summary.attempts >= 0 &&
+        Number.isFinite(summary?.durationSecs) &&
+        summary.durationSecs >= 0
     )
 }

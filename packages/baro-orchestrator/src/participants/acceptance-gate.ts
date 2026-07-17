@@ -150,6 +150,9 @@ export class AcceptanceGate extends SerializedObserver {
                     event.data,
                 )
             ) return
+            // A dependency suspension only proves that the worker quiesced.
+            // It is neither an implementation candidate nor a quality result.
+            if (event.data.suspension) return
             this.onStoryResult(event.data)
             return
         }

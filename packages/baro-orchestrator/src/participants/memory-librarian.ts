@@ -306,7 +306,9 @@ export class MemoryLibrarian extends BaseObserver {
         }
         if (StoryResult.is(event)) {
             this.inFlight.delete(event.data.storyId)
-            log(`Story ${event.data.storyId} done (${this.inFlight.size} active)`)
+            log(event.data.suspension
+                ? `Story ${event.data.storyId} suspended for dependency block ${event.data.suspension.blockId} (${this.inFlight.size} active)`
+                : `Story ${event.data.storyId} done (${this.inFlight.size} active)`)
             if (this.inFlight.size === 0) logStats()
         }
     }

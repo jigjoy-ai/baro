@@ -94,6 +94,10 @@ export interface PrdSnapshot {
         id: string
         title: string
         description: string
+        /** Observable behavior the story must preserve for its consumers. */
+        acceptance?: readonly string[]
+        /** Executable checks that expose the story's capability surface. */
+        tests?: readonly string[]
         dependsOn: readonly string[]
         passes: boolean
         /** Current routing tier ("light" | "standard" | "heavy", legacy haiku/sonnet/opus, or backend:model). */
@@ -150,7 +154,8 @@ export const SURGEON_SYSTEM_PROMPT = `\
 You are the Surgeon — an autonomous planner that adapts a software-project
 DAG when stories fail. Given:
 1. A snapshot of the current PRD (project, story list with dependencies +
-   pass/fail state).
+   pass/fail state), plus description, acceptance, verification, and routing
+   context for every direct dependent of the failed story.
 2. The id, title, description, and FAILURE REASON of the story that just
    exhausted its retry budget.
 
@@ -200,6 +205,14 @@ Rules:
   criterion and at least one executable test command; neither may be blank.
 - "modifiedDeps" rewires a story's dependsOn — use to repoint dependents
   of a removed story to a replacement.
+- If you remove a story, EVERY direct dependent that remains in the graph must
+  have its own "modifiedDeps" entry. Preserve its unrelated dependencies and
+  replace the removed id with the terminal added replacement story or stories
+  whose acceptance criteria cover the concrete behavior that dependent consumes.
+  A terminal replacement is an added recovery story that no other added recovery
+  story depends on. Do not blindly point all dependents at the first item in
+  "added"; that item may only be a prerequisite, and different dependents may
+  consume different acceptance subsets.
 - "abort" → empty added/removed/modifiedDeps arrays.
 - MODEL: LEAVE "model" UNSET on stories you add unless you deliberately use
   the EXACT escalation selector printed below. Do not invent a tier or route:
@@ -263,6 +276,10 @@ export class Surgeon extends BaseObserver {
 
     setQualityAuthority(authority: Participant): void {
         this.sources.setQualityAuthority(authority)
+    }
+
+    setBlockAuthority(authority: Participant): void {
+        this.sources.setBlockAuthority(authority)
     }
 
     override async onExternalEvent(
@@ -731,6 +748,21 @@ export function buildSurgeonPrompt(
         )
         .join("\n")
     const failureStory = snap.stories.find((s) => s.id === failure.storyId)
+    const directDependentLines = snap.stories
+        .filter((story) => story.dependsOn.includes(failure.storyId))
+        .map((story) => {
+            const actualModel = resolveRoute ? resolveRoute(story.model) : null
+            return `  - ${JSON.stringify({
+                id: story.id,
+                title: story.title,
+                description: story.description,
+                dependsOn: story.dependsOn,
+                acceptance: story.acceptance ?? [],
+                tests: story.tests ?? [],
+                modelTier: story.model ?? "(default)",
+                ...(actualModel ? { actualModel } : {}),
+            })}`
+        })
     // The PRD `model` is the planner's blast-radius TIER, which a
     // `--story-model`/`--story-llm`/tier-map override can replace at spawn
     // time. Surface the model that actually ran so the reason doesn't
@@ -743,10 +775,21 @@ export function buildSurgeonPrompt(
         `# Current PRD`,
         storyLines,
         "",
+        `# Direct dependents of ${failure.storyId}`,
+        `If ${failure.storyId} is removed, every story below that remains in the graph ` +
+            `is a separate rewire obligation. Replace ${failure.storyId} with the ` +
+            `terminal replacement(s) that cover the dependent's concrete acceptance ` +
+            `and capability subset; do not default all of them to the first added story.`,
+        ...(directDependentLines.length
+            ? directDependentLines
+            : [`  - (none)`]),
+        "",
         `# Failure`,
         `Story id: ${failure.storyId}`,
         `Title: ${failureStory?.title ?? "(unknown)"}`,
         `Description: ${failureStory?.description ?? "(unknown)"}`,
+        `Acceptance: ${JSON.stringify(failureStory?.acceptance ?? [])}`,
+        `Verification commands: ${JSON.stringify(failureStory?.tests ?? [])}`,
         `Tier that just failed: ${failureStory?.model ?? "(default)"}`,
         ...(ranOn
             ? [

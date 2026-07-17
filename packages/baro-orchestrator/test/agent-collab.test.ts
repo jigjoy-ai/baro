@@ -83,7 +83,7 @@ describe("agent-collab runtime replan transport", () => {
                 }
                 assert.match(
                     record.proposalId,
-                    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+                    /^replan-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
                 )
                 assert.equal(record.leaseId, "lease-S1")
                 assert.equal(record.kind, "replan")
@@ -346,6 +346,79 @@ describe("agent-collab runtime replan transport", () => {
                     return true
                 },
             )
+        })
+    })
+
+    it("queues a dependency block and waits for the Board decision", async () => {
+        await withTempDir("agent-collab-block-", async (dir) => {
+            const outbox = join(dir, "outbox")
+            const decisions = join(dir, "decisions")
+            mkdirSync(outbox, { recursive: true })
+            mkdirSync(decisions, { recursive: true })
+            const child = spawn(process.execPath, [
+                SCRIPT,
+                "emit",
+                "--session",
+                dir,
+                "--lease",
+                "lease-S6",
+                "--kind",
+                "block",
+                "--requires-json",
+                JSON.stringify(["S11"]),
+                "--reason",
+                "iterateWithAbort must integrate first",
+                "--wait-ms",
+                "2000",
+            ])
+            let stdout = ""
+            let stderr = ""
+            child.stdout.setEncoding("utf8")
+            child.stderr.setEncoding("utf8")
+            child.stdout.on("data", (chunk: string) => { stdout += chunk })
+            child.stderr.on("data", (chunk: string) => { stderr += chunk })
+
+            try {
+                const recordPath = await waitForOutboxRecord(outbox)
+                const record = JSON.parse(readFileSync(recordPath, "utf8")) as {
+                    blockId: string
+                    leaseId: string
+                    kind: string
+                    requiredStoryIds: string[]
+                    reason: string
+                }
+                assert.match(record.blockId, /^block-[0-9a-f-]{36}$/)
+                assert.equal(record.leaseId, "lease-S6")
+                assert.equal(record.kind, "block")
+                assert.deepEqual(record.requiredStoryIds, ["S11"])
+                assert.equal(record.reason, "iterateWithAbort must integrate first")
+
+                const decision = {
+                    status: "accepted",
+                    runId: "run-test",
+                    blockId: record.blockId,
+                    storyId: "S6",
+                    leaseId: "lease-S6",
+                    generation: 2,
+                    requiredStoryIds: ["S11"],
+                    reason: record.reason,
+                    graphVersion: 5,
+                }
+                writeFileSync(
+                    join(decisions, `${record.blockId}.json`),
+                    JSON.stringify(decision),
+                    { mode: 0o600 },
+                )
+                const code = await new Promise<number | null>((resolve, reject) => {
+                    child.once("error", reject)
+                    child.once("close", resolve)
+                })
+                assert.equal(code, 0)
+                assert.equal(stderr, "")
+                assert.deepEqual(JSON.parse(stdout), decision)
+            } finally {
+                if (child.exitCode === null) child.kill("SIGKILL")
+            }
         })
     })
 

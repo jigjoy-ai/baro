@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from "fs"
 import { homedir, hostname, tmpdir } from "os"
 import { dirname, join } from "path"
 import { fileURLToPath } from "url"
+import { randomUUID } from "node:crypto"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
 
@@ -172,6 +173,11 @@ export interface OrchestrateConfig {
     gatewayBilling?: GatewayBillingConfig
     /** Optional collective repository-integration watchdog. */
     collectiveIntegrationTimeoutMs?: number
+    /** Bound for an accepted dependency suspension to certify quiescence. */
+    collectiveSuspensionTimeoutMs?: number
+    /** Final bounded drain before repository cleanup; unresolved story
+     * worktrees are retained instead of racing live processes. */
+    collectiveShutdownQuiescenceTimeoutMs?: number
     /** Optional whole-run objective verification watchdog. */
     collectiveVerificationTimeoutMs?: number
     /** Optional per-story Critic evidence watchdog. Default: 240 seconds. */
@@ -589,6 +595,9 @@ export async function orchestrate(
     let gatewayBillingReconciled = false
     let dialogueRuntimeCwd: string | null = null
     let cleanupDialogue: (() => void) | null = null
+    let shutdownStoryFactories: StoryFactory[] = []
+    let shutdownWorktrees: WorktreeManager | null = null
+    let workerShutdownDrained = false
     const reconcileGatewayBilling = async (): Promise<void> => {
         if (!gatewayBillingCoordinator || gatewayBillingReconciled) return
         gatewayBillingReconciled = true
@@ -639,6 +648,7 @@ export async function orchestrate(
                       emitTui && emit({ type: "story_log", id: "_git", line }),
               })
             : null
+    shutdownWorktrees = worktrees
     // Owns merge-back/push/cleanup and reports StoryMerged/StoryMergeFailed
     // on the bus. Non-worktree pushes run off the Conductor's critical path;
     // worktree merge-backs stay LOCAL and push once in finish() — a per-story
@@ -708,12 +718,18 @@ export async function orchestrate(
     const developmentCollaborationCommand = fileURLToPath(
         new URL("../scripts/agent-collab.mjs", import.meta.url),
     )
+    const collaborationEpoch = randomUUID()
     const collaborationConfig = coordinationMode === "collective"
         ? {
               commandPath: existsSync(bundledCollaborationCommand)
                   ? bundledCollaborationCommand
                   : developmentCollaborationCommand,
-              sessionDir: join(sessionsDir, runId, "collective"),
+              sessionDir: join(
+                  sessionsDir,
+                  runId,
+                  "collective",
+                  collaborationEpoch,
+              ),
           }
         : undefined
     const collaborationBridge = collaborationConfig
@@ -740,6 +756,8 @@ export async function orchestrate(
                     id: s.id,
                     title: s.title,
                     description: s.description,
+                    acceptance: s.acceptance,
+                    tests: s.tests,
                     dependsOn: s.dependsOn,
                     passes: s.passes,
                     model: s.model,
@@ -1047,6 +1065,7 @@ export async function orchestrate(
             intraLevelDelaySecs: config.intraLevelDelaySecs ?? 10,
             leaseTimeoutMs: config.collectiveLeaseTimeoutMs,
             integrationTimeoutMs: config.collectiveIntegrationTimeoutMs,
+            suspensionTimeoutMs: config.collectiveSuspensionTimeoutMs,
             outcomeAuthority,
             ...(collectiveWorkers.length > 0
                 ? {
@@ -1093,6 +1112,10 @@ export async function orchestrate(
             verifierAuthority: runVerifier,
             recoveryAuthority: surgeon ?? undefined,
             discoveryAuthority: collaborationBridge ?? undefined,
+            dependencyAuthority: collaborationBridge ?? undefined,
+            // Partial work may be checkpointed only when every story owns an
+            // isolated worktree. Shared-tree/non-git runs reject suspension.
+            dependencySuspensionEnabled: worktrees !== null,
             runtimeReplanAuthority: collaborationBridge ?? undefined,
             progressivePlanningId: config.progressivePlanningId,
             planningAuthority: planningFeed ?? undefined,
@@ -1112,6 +1135,7 @@ export async function orchestrate(
         acceptanceGate?.setCompletionAuthority(board)
         finalizer?.setCoordinationAuthority(board)
         leaseBroker.setOfferAuthority(board)
+        leaseBroker.setBlockAuthority(board)
         gitCoordinator?.setEventAuthority(board)
         gitCoordinator?.setLeaseAuthority(leaseBroker)
         localRepositoryAgent?.setRequestAuthority(board)
@@ -1121,6 +1145,7 @@ export async function orchestrate(
         criticTargetRegistry?.setRuntimeReplanAuthority(board)
         dagForwarder?.setRuntimeReplanAuthority(board)
         surgeon?.setLeaseAuthority(leaseBroker)
+        surgeon?.setBlockAuthority(board)
         if (acceptanceGate) surgeon?.setQualityAuthority(acceptanceGate)
         leaseBroker.join(env)
         board.join(env)
@@ -1176,6 +1201,7 @@ export async function orchestrate(
                   }),
           )
         : [new StoryFactory(factoryBase)]
+    shutdownStoryFactories = storyFactories
     for (const storyFactory of storyFactories) {
         storyFactory.setEnvironment(env)
         storyFactory.join(env)
@@ -1300,11 +1326,44 @@ export async function orchestrate(
         await gitCoordinator.finish()
     }
 
+    // A fail-closed coordinator stop can leave an execution whose process tree
+    // never certified quiescence. Abort and wait once more, then retain those
+    // exact worktrees rather than deleting a cwd that may still be live.
+    const retainedLiveWorktrees = new Set<string>()
+    worktrees?.beginShutdown()
+    const shutdownQuiescence = await Promise.all(
+        storyFactories.map((factory) =>
+            factory.quiesceForShutdown(
+                config.collectiveShutdownQuiescenceTimeoutMs ?? 5_000,
+            ),
+        ),
+    )
+    for (const storyIds of shutdownQuiescence) {
+        for (const storyId of storyIds) retainedLiveWorktrees.add(storyId)
+    }
+
+    // A quiescence ACK is only safe to snapshot, not proof that its partial
+    // work has already reached the recovery branch. Drain the exact Mozaik
+    // chain to a repository boundary before the final sweep. On an abnormal
+    // RunCompleted ordering the Broker may already be stopped; the Factory's
+    // still-correlated suspension is then retained as a live worktree below.
+    if (leaseBroker) await leaseBroker.idle()
+    if (collectiveBoard) await collectiveBoard.idle()
+    if (gitCoordinator) await gitCoordinator.idle()
+    if (collectiveBoard) await collectiveBoard.idle()
+    if (leaseBroker) await leaseBroker.idle()
+    for (const factory of storyFactories) {
+        for (const storyId of factory.unreleasedSuspensionStoryIds()) {
+            retainedLiveWorktrees.add(storyId)
+        }
+    }
+    workerShutdownDrained = true
+
     // Critic may still be reading a story worktree after its terminal result.
     // Drain it before the backstop sweep releases any remaining repository
     // targets, then continue draining the other asynchronous observers.
     await withCriticEvidenceBarrier(critic, async () => {
-        await worktrees?.cleanupAll()
+        await worktrees?.cleanupAll({ retainStoryIds: retainedLiveWorktrees })
     })
 
     // Drain in-flight async observers so their side effects land in the
@@ -1390,6 +1449,16 @@ export async function orchestrate(
         // Exceptions during setup, coordination, verification, or finalization
         // must not strand a correlated provider call without a final pull.
         cleanupDialogue?.()
+        shutdownWorktrees?.beginShutdown()
+        if (!workerShutdownDrained && shutdownStoryFactories.length > 0) {
+            await Promise.allSettled(
+                shutdownStoryFactories.map((factory) =>
+                    factory.quiesceForShutdown(
+                        config.collectiveShutdownQuiescenceTimeoutMs ?? 5_000,
+                    ),
+                ),
+            )
+        }
         await reconcileGatewayBilling()
         if (dialogueRuntimeCwd) {
             rmSync(dialogueRuntimeCwd, { recursive: true, force: true })

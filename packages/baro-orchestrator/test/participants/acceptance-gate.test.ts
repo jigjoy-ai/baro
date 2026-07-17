@@ -81,6 +81,40 @@ describe("AcceptanceGate", () => {
         assert.equal(quality.data.status, "passed")
     })
 
+    it("does not open quality evaluation for a dependency suspension", async () => {
+        const gate = targetedGate("run-suspended", 0)
+        const env = joinWithCapture(gate)
+        grantLease(env, "run-suspended", "S1", "lease-1", 1)
+        env.deliverSemanticEvent(
+            source("worker"),
+            StoryResult.create({
+                storyId: "S1",
+                // Even a malformed producer cannot turn suspension into an
+                // acceptance candidate merely by setting success=true.
+                success: true,
+                attempts: 1,
+                durationSecs: 1,
+                error: null,
+                runId: "run-suspended",
+                leaseId: "lease-1",
+                generation: 1,
+                suspension: {
+                    kind: "dependency",
+                    blockId: "block-S1-S0",
+                },
+            }),
+        )
+        await gate.idle()
+
+        const state = gate as unknown as { pending: Map<string, unknown> }
+        assert.equal(state.pending.size, 0)
+        assert.equal(env.events.filter(StoryQualityCompleted.is).length, 0)
+        assert.equal(
+            env.events.filter(StoryQualityReverificationRequested.is).length,
+            0,
+        )
+    })
+
     it("resolves a passing critique that arrives after the successful result", async () => {
         const gate = targetedGate("run-after", 200)
         const env = joinWithCapture(gate)

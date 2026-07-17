@@ -635,9 +635,25 @@ export class Conductor extends BaseObserver {
 
         // Apply ReplanItem-s buffered during this level.
         let replannedThisLevel = false
-        let healingHalt: string | null = null
         if (this.pendingReplans.length > 0 && this.prd) {
+            // A safe level boundary is one logical recovery cycle. Check the
+            // cycle budget before draining anything, then finish every sibling
+            // proposal against the latest persisted graph. A per-item check
+            // can spend the budget after the first mutation and lose the
+            // unvisited tail because the queue has already been drained.
+            const hasActionableReplan = this.pendingReplans.some(
+                (proposal) => validateLegacyReplan(this.prd!, proposal).ok,
+            )
+            if (hasActionableReplan) {
+                const halt = this.healingHaltReason()
+                if (halt) {
+                    this.terminateRun(false, halt)
+                    return
+                }
+            }
+
             const drained = this.pendingReplans.splice(0)
+            let appliedReplans = 0
             for (const proposal of drained) {
                 const validated = validateLegacyReplan(this.prd, proposal)
                 if (!validated.ok) {
@@ -660,8 +676,6 @@ export class Conductor extends BaseObserver {
                     )
                     continue
                 }
-                healingHalt = this.healingHaltReason()
-                if (healingHalt) break
                 const effectiveReplan = validated.applied
                 // The applied event is authoritative for progress, DAG, and
                 // Critic targeting. Publish it only after the mutated plan is
@@ -678,7 +692,7 @@ export class Conductor extends BaseObserver {
                 this.prd = validated.prd
                 this.emit(ReplanApplied.create(effectiveReplan))
                 this.appliedReplans += 1
-                this.noteHealingAction(lvl.ordinal)
+                appliedReplans += 1
                 replannedThisLevel = true
                 // Track stories that were removed without a replacement.
                 // If the replan only removes (no addedStories), it's a
@@ -714,11 +728,12 @@ export class Conductor extends BaseObserver {
                     }),
                 )
             }
-        }
-
-        if (healingHalt) {
-            this.terminateRun(false, healingHalt)
-            return
+            if (appliedReplans > 0) {
+                // Count the safe boundary, not each sibling symptom. Do not
+                // halt after this increment: replacement work must get a
+                // chance to pass and reset the no-progress counter.
+                this.noteHealingAction(lvl.ordinal)
+            }
         }
 
         // If every story in the level failed terminally AND no replan

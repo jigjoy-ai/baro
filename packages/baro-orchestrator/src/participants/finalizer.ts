@@ -244,7 +244,9 @@ export class Finalizer extends BaseObserver {
                 attempts: 0,
                 levelOrdinal: null,
             }
-            existing.success = d.success
+            // Suspension is a quiesced, resumable lease outcome. Keep the
+            // story unclassified until a later execution settles it.
+            existing.success = d.suspension ? null : d.success
             existing.durationSecs = d.durationSecs
             existing.attempts = d.attempts
             this.stories.set(d.storyId, existing)

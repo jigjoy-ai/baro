@@ -108,6 +108,7 @@ describe("DagForwarder", () => {
                     ordinal: 1,
                     passed: ["S1"],
                     failed: ["S2"],
+                    blocked: ["S3"],
                 }),
             )
             await forwarder.onExternalEvent(
@@ -118,7 +119,13 @@ describe("DagForwarder", () => {
 
         assert.deepEqual(events, [
             { type: "level_started", ordinal: 1, story_ids: ["S1", "S2"] },
-            { type: "level_completed", ordinal: 1, passed: ["S1"], failed: ["S2"] },
+            {
+                type: "level_completed",
+                ordinal: 1,
+                passed: ["S1"],
+                failed: ["S2"],
+                blocked: ["S3"],
+            },
             { type: "recovery_started", attempt: 1, story_ids: ["S2"] },
         ])
     })

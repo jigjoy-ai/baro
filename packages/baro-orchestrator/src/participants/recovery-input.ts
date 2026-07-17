@@ -16,7 +16,8 @@ export function recoveryInput(
     event: SemanticEvent<unknown>,
 ): StoryResultData | null {
     if (StoryResult.is(event)) {
-        return event.data.success ||
+        return event.data.suspension !== undefined ||
+            event.data.success ||
             isProviderCapacityFailure(event.data) ||
             (event.data.failure !== undefined &&
                 !isSemanticWorkFailure(event.data))

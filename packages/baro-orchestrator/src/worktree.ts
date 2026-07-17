@@ -76,6 +76,9 @@ export class WorktreeManager {
     private readonly resolveConflictsWithTheirs: boolean
     private readonly log: (line: string) => void
     private depExcludesReady = false
+    /** One-way run shutdown latch. No worktree may appear after the final
+     * cleanup sweep has begun. */
+    private shutdownStarted = false
 
     constructor(
         private readonly repoRoot: string,
@@ -118,16 +121,24 @@ export class WorktreeManager {
         return join(this.baseDir, sanitize(storyId))
     }
 
+    /** Seal the manager before factories drain. An already-running create
+     * remains serialized by GitGate; queued/future creates stop at the gate. */
+    beginShutdown(): void {
+        this.shutdownStarted = true
+    }
+
     /**
      * Create a story's worktree off the current run-branch HEAD. Returns
      * its path, or null on any failure so the caller can fall back to the
      * shared repo cwd instead of failing the story.
      */
     async create(storyId: string): Promise<string | null> {
+        if (this.shutdownStarted) return null
         const release = await this.gate.acquire()
         const branch = this.branchOf(storyId)
         const path = this.pathOf(storyId)
         try {
+            if (this.shutdownStarted) return null
             // Registration is transactional: observers must not be able to
             // resolve a story target until every setup step has completed.
             // Clear any prior logical state before removing stale git state.
@@ -462,11 +473,23 @@ export class WorktreeManager {
      * EXCEPT preserved ones (unresolvable merge-back), whose ref is kept so
      * the commits stay recoverable after the run.
      */
-    async cleanupAll(): Promise<void> {
+    async cleanupAll(options: {
+        /** Stories whose execution quiescence could not be certified. Their
+         * worktree path and branch must remain untouched for safety. */
+        retainStoryIds?: ReadonlySet<string>
+    } = {}): Promise<void> {
         const release = await this.gate.acquire()
         let keptDirtyRecovery = false
         try {
             for (const [storyId, path] of this.paths) {
+                if (options.retainStoryIds?.has(storyId)) {
+                    keptDirtyRecovery = true
+                    this.log(
+                        `kept unquiesced worktree for story ${storyId} at ${path}; ` +
+                            `branch ${this.branchOf(storyId)} remains inspectable`,
+                    )
+                    continue
+                }
                 if (this.preserved.has(storyId) && existsSync(path)) {
                     let status = ""
                     try {

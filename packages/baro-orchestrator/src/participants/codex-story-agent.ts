@@ -27,7 +27,7 @@ import {
     CodexCliParticipant,
     CodexRunSummary,
 } from "./codex-cli-participant.js"
-import { correlationOf } from "./story-agent.js"
+import { correlationOf, type StorySuspension } from "./story-agent.js"
 
 export interface CodexStorySpec {
     /** Story ID, used as agentId for observer attribution. */
@@ -69,6 +69,7 @@ export interface CodexStoryOutcome {
     finalSummary: CodexRunSummary | null
     error: string | null
     failure?: StoryFailureData
+    suspension?: StorySuspension
 }
 
 export class CodexStoryAgent extends BaseObserver {
@@ -93,6 +94,11 @@ export class CodexStoryAgent extends BaseObserver {
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
     private currentFailureSignals: unknown[] = []
+    private stopRequested = false
+    /** Lifecycle signal also closes the tiny transition→timer lost-wake window. */
+    private readonly retryDelayController = new AbortController()
+    private suspension: StorySuspension | null = null
+    private processQuiescence: Promise<boolean> | null = null
     private resolveDone!: (outcome: CodexStoryOutcome) => void
     public readonly done: Promise<CodexStoryOutcome>
 
@@ -171,8 +177,24 @@ export class CodexStoryAgent extends BaseObserver {
     }
 
     abort(): void {
-        this.currentCodex?.abort()
+        this.stopRequested = true
+        this.wakeRetryDelay()
+        this.quiesceCurrentCodex()
         this.transition("aborted", "external abort")
+    }
+
+    async suspend(blockId: string): Promise<CodexStoryOutcome> {
+        this.recordSuspension(blockId)
+        this.stopRequested = true
+        this.wakeRetryDelay()
+        this.transition("aborted", `dependency suspension ${blockId}`)
+        const quiesced = await this.quiesceCurrentCodex()
+        if (!quiesced) {
+            throw new Error(
+                `story ${this.spec.id} process group quiescence could not be certified`,
+            )
+        }
+        return this.done
     }
 
     private async executeAllAttempts(): Promise<void> {
@@ -187,12 +209,14 @@ export class CodexStoryAgent extends BaseObserver {
             this.spec.hardTimeoutSecs > 0
                 ? setTimeout(() => {
                       hardTimedOut = true
-                      this.currentCodex?.abort()
+                      this.wakeRetryDelay()
+                      this.quiesceCurrentCodex()
                   }, this.spec.hardTimeoutSecs * 1000)
                 : null
 
         try {
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                if (this.stopRequested) break
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
                     lastFailure = {
@@ -203,11 +227,13 @@ export class CodexStoryAgent extends BaseObserver {
                 }
 
                 if (attempt > 1) {
+                    if (this.stopRequested) break
                     this.transition(
                         "waiting",
                         `retrying (attempt ${attempt}/${maxAttempts})`,
                     )
-                    await setTimeoutPromise(this.spec.retryDelayMs)
+                    await this.waitForRetryDelay()
+                    if (this.stopRequested) break
                     if (hardTimedOut) {
                         lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
                         lastFailure = {
@@ -224,6 +250,7 @@ export class CodexStoryAgent extends BaseObserver {
                 lastError = result.error
                 lastFailure = result.failure
 
+                if (this.stopRequested) break
                 if (result.success) {
                     const durationSecs = Math.round(
                         (Date.now() - (this.startedAt ?? Date.now())) / 1000,
@@ -255,15 +282,34 @@ export class CodexStoryAgent extends BaseObserver {
             if (hardTimer !== null) clearTimeout(hardTimer)
         }
 
+        await this.processQuiescence
+
+        if (this.suspension) {
+            lastError = null
+            lastFailure = undefined
+        } else if (this.stopRequested) {
+            lastError = "story execution aborted externally"
+            lastFailure = undefined
+        }
+
         const durationSecs = Math.round(
             (Date.now() - (this.startedAt ?? Date.now())) / 1000,
         )
-        this.transition(
-            "failed",
-            boardOwnsCliRecovery(lastFailure)
-                ? `operational failure after ${attempts} attempt(s)`
-                : `exhausted ${attempts}/${maxAttempts} attempts`,
-        )
+        if (this.stopRequested) {
+            this.transition(
+                "aborted",
+                this.suspension
+                    ? `suspended on dependency block ${this.suspension.blockId}`
+                    : "external abort settled",
+            )
+        } else {
+            this.transition(
+                "failed",
+                boardOwnsCliRecovery(lastFailure)
+                    ? `operational failure after ${attempts} attempt(s)`
+                    : `exhausted ${attempts}/${maxAttempts} attempts`,
+            )
+        }
         this.emitStoryResult(
             false,
             attempts,
@@ -279,6 +325,7 @@ export class CodexStoryAgent extends BaseObserver {
             finalSummary: lastSummary,
             error: lastError,
             ...(lastFailure ? { failure: lastFailure } : {}),
+            ...(this.suspension ? { suspension: this.suspension } : {}),
         })
     }
 
@@ -301,6 +348,7 @@ export class CodexStoryAgent extends BaseObserver {
             }
         }
 
+        this.processQuiescence = null
         this.transition("running", `attempt ${attempt}`)
         this.currentFailureSignals = []
 
@@ -325,7 +373,7 @@ export class CodexStoryAgent extends BaseObserver {
                 `attempt ${attempt} timeout after ${this.spec.timeoutSecs}s`,
             )
         } catch (e) {
-            codex.abort()
+            await this.quiesceCurrentCodex()
             const error = e instanceof Error ? e.message : String(e)
             let stderrTail: string | null = null
             try {
@@ -346,6 +394,7 @@ export class CodexStoryAgent extends BaseObserver {
             }
         }
 
+        await this.quiesceCurrentCodex()
         codex.leave(this.envRef)
         this.currentCodex = null
 
@@ -403,9 +452,45 @@ export class CodexStoryAgent extends BaseObserver {
                 durationSecs,
                 error,
                 ...(failure ? { failure } : {}),
+                ...(this.suspension ? { suspension: this.suspension } : {}),
                 ...correlationOf(this.spec),
             }),
         )
+    }
+
+    private recordSuspension(blockId: string): void {
+        if (typeof blockId !== "string" || blockId.trim() !== blockId || !blockId) {
+            throw new TypeError("suspension blockId must be a non-empty trimmed string")
+        }
+        if (this.suspension && this.suspension.blockId !== blockId) {
+            throw new Error(
+                `story ${this.spec.id} is already suspending for block ${this.suspension.blockId}`,
+            )
+        }
+        this.suspension ??= { kind: "dependency", blockId }
+    }
+
+    private quiesceCurrentCodex(): Promise<boolean> {
+        const codex = this.currentCodex
+        if (!codex) return this.processQuiescence ?? Promise.resolve(true)
+        if (!this.processQuiescence) {
+            this.processQuiescence = codex.abortAndWait()
+        }
+        return this.processQuiescence
+    }
+
+    private async waitForRetryDelay(): Promise<void> {
+        try {
+            await setTimeoutPromise(this.spec.retryDelayMs, undefined, {
+                signal: this.retryDelayController.signal,
+            })
+        } catch (error) {
+            if (!this.retryDelayController.signal.aborted) throw error
+        }
+    }
+
+    private wakeRetryDelay(): void {
+        this.retryDelayController.abort()
     }
 
     private transition(next: AgentPhase, detail?: string): void {

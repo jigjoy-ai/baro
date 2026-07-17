@@ -19,7 +19,10 @@ import {
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
 import { harnessChildEnvironment } from "../harness-environment.js"
-import { ManagedProcessTree } from "../process-tree.js"
+import {
+    ManagedProcessTree,
+    POSIX_PROCESS_GROUPS_SUPPORTED,
+} from "../process-tree.js"
 import {
     AgentState,
     AgentTargetedMessage,
@@ -249,6 +252,7 @@ export class PiCliParticipant extends BaseObserver {
                 cwd: this.options.cwd,
                 env: harnessChildEnvironment(),
                 stdio: ["ignore", "pipe", "pipe"],
+                detached: POSIX_PROCESS_GROUPS_SUPPORTED,
             })
         } catch (e) {
             this.spawnError = e instanceof Error ? e : new Error(String(e))
@@ -267,7 +271,9 @@ export class PiCliParticipant extends BaseObserver {
         }
 
         this.proc = proc
-        this.processTree = new ManagedProcessTree(proc)
+        this.processTree = new ManagedProcessTree(proc, {
+            ownsProcessGroup: POSIX_PROCESS_GROUPS_SUPPORTED,
+        })
         PiCliParticipant.active.add(this)
         this.transition("starting")
 
@@ -342,6 +348,18 @@ export class PiCliParticipant extends BaseObserver {
     abort(signal: NodeJS.Signals = "SIGTERM"): void {
         if (!this.doneSettled) this.transition("aborted")
         this.processTree?.terminate(signal)
+    }
+
+    /** True only when the owned POSIX group is authoritatively absent. */
+    async abortAndWait(
+        signal: NodeJS.Signals = "SIGTERM",
+    ): Promise<boolean> {
+        const processTree = this.processTree
+        if (processTree === null) {
+            this.abort(signal)
+            return false
+        }
+        return processTree.terminateAndWait(signal)
     }
 
     override async onExternalEvent(

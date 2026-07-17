@@ -68,17 +68,18 @@ console.log("ready");
                 dir,
                 `
 import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 const descendantSource = ${JSON.stringify(`
 import { writeFileSync } from "node:fs";
-writeFileSync(process.env.BARO_TEST_STARTED, "yes");
 process.on("SIGTERM", () => {});
 setTimeout(() => writeFileSync(process.env.BARO_TEST_ESCAPED, "yes"), 2_000);
 setInterval(() => {}, 10_000);
 `)};
-spawn(process.execPath, ["--input-type=module", "-e", descendantSource], {
+const descendant = spawn(process.execPath, ["--input-type=module", "-e", descendantSource], {
     env: process.env,
     stdio: ["ignore", "inherit", "inherit"],
 });
+writeFileSync(process.env.BARO_TEST_STARTED, String(descendant.pid));
 setInterval(() => {}, 10_000);
 `,
             )
@@ -100,7 +101,7 @@ setInterval(() => {}, 10_000);
                 },
             )
 
-            assert.equal(existsSync(started), true, "descendant never started")
+            assert.equal(existsSync(started), true, "descendant was never spawned")
             await delay(2_050)
             assert.equal(
                 existsSync(escaped),

@@ -56,6 +56,7 @@ export type BaroEvent =
     | { type: "decision_document"; document: string }
     | { type: "dag"; levels: DagNodeInfo[][] }
     | { type: "story_start"; id: string; title: string }
+    | { type: "story_suspended"; id: string; block_id: string }
     | { type: "story_log"; id: string; line: string }
     | {
           type: "story_complete"
@@ -142,7 +143,13 @@ export type BaroEvent =
     | { type: "story_merged"; id: string; mode: "worktree" | "shared-tree" }
     | { type: "merge_failed"; id: string; error: string }
     | { type: "level_started"; ordinal: number; story_ids: string[] }
-    | { type: "level_completed"; ordinal: number; passed: string[]; failed: string[] }
+    | {
+          type: "level_completed"
+          ordinal: number
+          passed: string[]
+          failed: string[]
+          blocked?: string[]
+      }
     | { type: "recovery_started"; attempt: number; story_ids: string[] }
     | { type: "routed"; id: string; backend: string; model: string }
     | {

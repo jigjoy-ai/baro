@@ -17,7 +17,8 @@ if (command === "emit") {
     const leaseId = required("lease")
     const kind = required("kind")
     let decisionWaitMs = null
-    if (!["message", "help", "note", "discover", "replan"].includes(kind)) {
+    let decisionId = null
+    if (!["message", "help", "note", "discover", "replan", "block"].includes(kind)) {
         fail(`unsupported kind '${kind}'`)
     }
     const record = { leaseId, kind }
@@ -41,11 +42,27 @@ if (command === "emit") {
                 "--replan-json must be an object with addedStories, removedStoryIds, and modifiedDeps",
             )
         }
-        record.proposalId = randomUUID()
+        record.proposalId = `replan-${randomUUID()}`
+        decisionId = record.proposalId
         record.baseGraphVersion = positiveInteger("base-version")
         decisionWaitMs = boundedWaitMs()
         record.reason = flags.get("reason")?.trim() ||
             "worker proposed a runtime DAG adaptation"
+    } else if (kind === "block") {
+        const raw = required("requires-json")
+        try {
+            record.requiredStoryIds = JSON.parse(raw)
+        } catch {
+            fail("--requires-json must be valid JSON")
+        }
+        if (!validRequiredStoryIds(record.requiredStoryIds)) {
+            fail("--requires-json must be a non-empty array of unique story ids")
+        }
+        record.blockId = `block-${randomUUID()}`
+        decisionId = record.blockId
+        decisionWaitMs = boundedWaitMs()
+        record.reason = flags.get("reason")?.trim() ||
+            "worker is blocked on prerequisite work"
     } else {
         record.text = required("text")
         if (record.text.length > 8_000) fail("--text exceeds 8000 characters")
@@ -69,14 +86,13 @@ if (command === "emit") {
         try { unlinkSync(pending) } catch {}
         throw error
     }
-    if (kind === "replan") {
-        const proposalId = record.proposalId
+    if (decisionId !== null) {
         const decision = await waitForDecision(
-            decisionPath(sessionDir, proposalId),
+            decisionPath(sessionDir, decisionId),
             decisionWaitMs,
         )
         if (decision === null) {
-            writeOutcomeUnknown(proposalId, decisionWaitMs)
+            writeOutcomeUnknown(decisionId, decisionWaitMs, kind)
         } else {
             process.stdout.write(JSON.stringify(decision) + "\n")
         }
@@ -114,6 +130,7 @@ if (command === "emit") {
         "  agent-collab.mjs emit --session DIR --lease ID --kind note --text TEXT",
         "  agent-collab.mjs emit --session DIR --lease ID --kind discover --story-json JSON [--reason TEXT]",
         "  agent-collab.mjs emit --session DIR --lease ID --kind replan --base-version N --replan-json JSON [--reason TEXT] [--wait-ms N]",
+        "  agent-collab.mjs emit --session DIR --lease ID --kind block --requires-json JSON [--reason TEXT] [--wait-ms N]",
         "  agent-collab.mjs decision --session DIR --proposal ID [--wait-ms N]",
         "  agent-collab.mjs inbox --session DIR --agent AGENT",
         "",
@@ -209,6 +226,21 @@ function validReplanMutation(value) {
     )
 }
 
+function validRequiredStoryIds(value) {
+    return Boolean(
+        Array.isArray(value) &&
+        value.length > 0 &&
+        value.length <= 32 &&
+        value.every((item) =>
+            typeof item === "string" &&
+            item.length > 0 &&
+            item.length <= 128 &&
+            item.trim() === item,
+        ) &&
+        new Set(value).size === value.length,
+    )
+}
+
 function hasOnlyKeys(value, allowed) {
     const keys = new Set(allowed)
     return Object.keys(value).every((key) => keys.has(key))
@@ -230,13 +262,16 @@ async function waitForDecision(path, waitMs) {
     return null
 }
 
-function writeOutcomeUnknown(proposalId, waitMs) {
+function writeOutcomeUnknown(proposalId, waitMs, kind = "decision") {
+    const reason = kind === "replan"
+        ? "No authoritative runtime replan decision was observed before the local wait expired. Do not assume the proposal was applied or rejected; query the same proposal with the decision command."
+        : `No authoritative ${kind} decision was observed before the local wait expired. Do not assume the request was accepted or rejected; query the same id with the decision command.`
     process.stdout.write(JSON.stringify({
         ok: false,
         status: "outcome_unknown",
         proposalId,
         waitMs,
-        reason: "No authoritative runtime replan decision was observed before the local wait expired. Do not assume the proposal was applied or rejected; query the same proposal with the decision command.",
+        reason,
     }) + "\n")
     process.exitCode = 3
 }

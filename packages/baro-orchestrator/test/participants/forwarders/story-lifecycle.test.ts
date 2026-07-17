@@ -106,6 +106,50 @@ describe("StoryLifecycleForwarder", () => {
         ])
     })
 
+    it("projects dependency suspension neutrally and starts the resumed lease anew", async () => {
+        const forwarder = new StoryLifecycleForwarder()
+        const agent = source("S2")
+
+        const events = parseEvents(await captureStdout(async () => {
+            await forwarder.onExternalEvent(
+                agent,
+                AgentState.create({ agentId: "S2", phase: "running" }),
+            )
+            await forwarder.onExternalFunctionCall(
+                agent,
+                call("Edit", { file_path: "partial.ts", old: "a", new: "b" }),
+            )
+            await forwarder.onExternalEvent(
+                agent,
+                StoryResult.create({
+                    storyId: "S2",
+                    success: false,
+                    attempts: 1,
+                    durationSecs: 3,
+                    error: null,
+                    suspension: {
+                        kind: "dependency",
+                        blockId: "block-S2-S1",
+                    },
+                }),
+            )
+            await forwarder.onExternalEvent(
+                agent,
+                AgentState.create({ agentId: "S2", phase: "running" }),
+            )
+        }))
+
+        assert.deepEqual(events, [
+            { type: "story_start", id: "S2", title: "S2" },
+            {
+                type: "story_suspended",
+                id: "S2",
+                block_id: "block-S2-S1",
+            },
+            { type: "story_start", id: "S2", title: "S2" },
+        ])
+    })
+
     it("waits for repository integration before completing a collective story", async () => {
         const forwarder = new StoryLifecycleForwarder()
         const events = parseEvents(await captureStdout(async () => {

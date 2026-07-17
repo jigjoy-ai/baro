@@ -1,4 +1,5 @@
 import type { Participant, SemanticEvent } from "@mozaik-ai/core"
+import { randomUUID } from "node:crypto"
 
 import {
     RunCompleted,
@@ -7,12 +8,14 @@ import {
     StoryMerged,
     StoryResult,
     StorySpawnFailed,
+    WorkBlockAccepted,
     WorkBid,
     WorkBidWindowClosed,
     WorkClaimed,
     WorkLeaseGranted,
     WorkLeaseExpired,
     WorkLeaseReleased,
+    WorkSuspended,
     WorkOfferExpired,
     WorkOffered,
     WorkerCapabilityAdvertised,
@@ -49,6 +52,9 @@ export interface LeaseBrokerOptions {
     leaseTimeoutMs?: number
     /** Optional cap after successful execution while repository integration runs. */
     integrationTimeoutMs?: number
+    /** Bound for a worker to stop retries and prove full process/tool-tree
+     * quiescence after the Board accepts a dependency suspension. */
+    suspensionTimeoutMs?: number
     /** Opt-in deterministic bid market. Absent preserves first-claim behavior. */
     market?: {
         bidWindowMs?: number
@@ -94,15 +100,19 @@ export class LeaseBroker extends SerializedObserver {
         string,
         LeaseCompletionState
     >()
+    private readonly dependencyBlocks = new Map<
+        string,
+        { leaseId: string; generation: number; blockId: string }
+    >()
     private readonly unavailableRouteIds = new Set<string>()
     private readonly unavailableWorkerIds = new Set<string>()
-    private nextLease = 1
     private nextGrantAt = 0
     private grantTimer: ReturnType<typeof setTimeout> | null = null
     private stopped = false
     private offerAuthority: Participant | null
     private integrationAuthority: Participant | null
     private qualityAuthority: Participant | null = null
+    private blockAuthority: Participant | null = null
 
     constructor(opts: LeaseBrokerOptions) {
         super()
@@ -147,10 +157,18 @@ export class LeaseBroker extends SerializedObserver {
         this.qualityAuthority = authority
     }
 
+    /** Bind the only Board allowed to suspend a lease on a dependency. */
+    setBlockAuthority(authority: Participant): void {
+        if (this.blockAuthority && this.blockAuthority !== authority) {
+            throw new Error("lease broker block authority is already bound")
+        }
+        this.blockAuthority = authority
+    }
+
     protected override handleEvent(context: SerializedEventContext): void {
         const { event } = context
         if (WorkerCapabilityAdvertised.is(event)) {
-            if (this.opts.market) this.onCapability(event.data, context.source)
+            this.onCapability(event.data, context.source)
             return
         }
         if (WorkOffered.is(event)) {
@@ -175,7 +193,64 @@ export class LeaseBroker extends SerializedObserver {
             // In market mode only the Broker's selected bid may claim work.
             // The selected claim is accepted directly and its bus copy is
             // visibility/audit only, so every external claim is a bypass.
-            if (!this.opts.market) this.onClaim(event.data)
+            if (!this.opts.market) this.onClaim(event.data, context.source)
+            return
+        }
+        if (WorkBlockAccepted.is(event)) {
+            const lease = this.activeByStory.get(event.data.storyId)
+            if (
+                this.blockAuthority === null ||
+                context.source !== this.blockAuthority ||
+                lease?.supportsCooperativeSuspend !== true ||
+                !this.workers.has(lease.workerId) ||
+                !this.matchesLeaseGeneration(
+                    event.data.storyId,
+                    event.data.runId,
+                    event.data.leaseId,
+                    event.data.generation,
+                )
+            ) return
+            const existing = this.dependencyBlocks.get(event.data.storyId)
+            if (
+                existing?.leaseId === event.data.leaseId &&
+                existing.generation === event.data.generation &&
+                existing.blockId === event.data.blockId
+            ) return
+            this.dependencyBlocks.set(event.data.storyId, {
+                leaseId: event.data.leaseId,
+                generation: event.data.generation,
+                blockId: event.data.blockId,
+            })
+            // Execution expiry is no longer meaningful once a durable block
+            // was accepted. Replace it with a bounded drain watchdog; expiry
+            // remains fail-closed and never releases/cleans a live worktree.
+            this.clearLeaseTimer(event.data.leaseId)
+            this.armLeaseTimer(
+                lease,
+                this.opts.suspensionTimeoutMs ?? 60_000,
+                "suspension",
+            )
+            return
+        }
+        if (WorkSuspended.is(event)) {
+            const lease = this.activeByStory.get(event.data.storyId)
+            const block = this.dependencyBlocks.get(event.data.storyId)
+            const worker = lease ? this.workers.get(lease.workerId) : undefined
+            if (
+                !lease ||
+                !block ||
+                worker?.source !== context.source ||
+                lease.supportsCooperativeSuspend !== true ||
+                event.data.runId !== this.opts.runId ||
+                event.data.leaseId !== lease.leaseId ||
+                event.data.generation !== lease.generation ||
+                event.data.blockId !== block.blockId ||
+                !validSuspensionSummary(event.data.attempts, event.data.durationSecs)
+            ) return
+            this.release(event.data.storyId, "dependency_blocked", {
+                attempts: event.data.attempts,
+                durationSecs: event.data.durationSecs,
+            })
             return
         }
         if (StoryMerged.is(event)) {
@@ -223,6 +298,10 @@ export class LeaseBroker extends SerializedObserver {
                 event.data.leaseId !== lease.leaseId ||
                 event.data.generation !== lease.generation
             ) return
+            // A terminal result is not proof that descendants/tool promises
+            // have drained. Only the exact worker's WorkSuspended ACK may
+            // release an accepted dependency block.
+            if (this.dependencyBlocks.has(event.data.storyId)) return
             if (event.data.success) {
                 const completion = this.completionByLeaseId.get(lease.leaseId)
                 if (!completion || completion.executionSucceeded) return
@@ -283,6 +362,12 @@ export class LeaseBroker extends SerializedObserver {
             context.internal &&
             this.matchesLease(event.data.storyId, event.data.runId, event.data.leaseId)
         ) {
+            if (this.dependencyBlocks.has(event.data.storyId)) {
+                // Accepted suspension already asked the harness to abort.
+                // Never release/clean its worktree until the exact worker's
+                // WorkSuspended ACK proves that the process actually quiesced.
+                return
+            }
             this.release(event.data.storyId, "expired")
             return
         }
@@ -428,6 +513,9 @@ export class LeaseBroker extends SerializedObserver {
             model: winner.route.model,
             bidId: winner.bidId,
             route: { ...winner.route },
+            ...(winner.supportsCooperativeSuspend === true
+                ? { supportsCooperativeSuspend: true }
+                : {}),
         }
         this.emit(WorkClaimed.create(claim))
         this.acceptClaim(offer, claim, candidates)
@@ -495,11 +583,15 @@ export class LeaseBroker extends SerializedObserver {
         if (!byId.has(bid.bidId)) byId.set(bid.bidId, snapshotBid(bid))
     }
 
-    private onClaim(claim: WorkClaimedData): void {
+    private onClaim(claim: WorkClaimedData, source?: Participant): void {
         if (
             this.stopped ||
             claim.runId !== this.opts.runId
         ) return
+        if (claim.supportsCooperativeSuspend === true) {
+            const worker = this.workers.get(claim.workerId)
+            if (!worker || (source !== undefined && worker.source !== source)) return
+        }
         const offer = this.offers.get(claim.offerId)
         if (!offer) {
             if (
@@ -578,12 +670,18 @@ export class LeaseBroker extends SerializedObserver {
         const lease: WorkLeaseGrantedData = {
             runId: this.opts.runId,
             offerId: offer.offerId,
-            leaseId: `${this.opts.runId}:lease:${this.nextLease++}`,
+            // The collaboration ingress treats this as a per-lease bearer.
+            // Keep it unguessable so one sandboxed worker cannot claim a
+            // sibling's authority by predicting a counter.
+            leaseId: `${this.opts.runId}:lease:${randomUUID()}`,
             workerId: claim.workerId,
             generation: offer.generation,
             request: offer.request,
             ...(claim.bidId ? { bidId: claim.bidId } : {}),
             ...(claim.route ? { route: { ...claim.route } } : {}),
+            ...(claim.supportsCooperativeSuspend === true
+                ? { supportsCooperativeSuspend: true }
+                : {}),
         }
         this.activeByStory.set(offer.request.storyId, lease)
         this.activeLeaseIds.add(lease.leaseId)
@@ -674,11 +772,13 @@ export class LeaseBroker extends SerializedObserver {
 
     private release(
         storyId: string,
-        reason: "integrated" | "execution_failed" | "operational_failed" | "quality_failed" | "quality_inconclusive" | "integration_failed" | "spawn_failed" | "aborted" | "expired",
+        reason: "integrated" | "execution_failed" | "operational_failed" | "quality_failed" | "quality_inconclusive" | "integration_failed" | "spawn_failed" | "dependency_blocked" | "aborted" | "expired",
+        suspension?: { attempts: number; durationSecs: number },
     ): void {
         const lease = this.activeByStory.get(storyId)
         if (!lease || !this.activeLeaseIds.delete(lease.leaseId)) return
         this.activeByStory.delete(storyId)
+        this.dependencyBlocks.delete(storyId)
         this.clearLeaseTimer(lease.leaseId)
         this.completionByLeaseId.delete(lease.leaseId)
         this.emit(
@@ -689,6 +789,7 @@ export class LeaseBroker extends SerializedObserver {
                 storyId,
                 workerId: lease.workerId,
                 reason,
+                ...(suspension ? { ...suspension } : {}),
             }),
         )
         this.pump()
@@ -750,7 +851,7 @@ export class LeaseBroker extends SerializedObserver {
     private armLeaseTimer(
         lease: WorkLeaseGrantedData,
         timeoutMs: number,
-        phase: "execution" | "integration",
+        phase: "execution" | "integration" | "suspension",
     ): void {
         const previous = this.leaseTimers.get(lease.leaseId)
         if (previous) clearTimeout(previous)
@@ -780,6 +881,7 @@ export class LeaseBroker extends SerializedObserver {
         this.offerTimers.clear()
         this.leaseTimers.clear()
         this.completionByLeaseId.clear()
+        this.dependencyBlocks.clear()
         this.offers.clear()
         this.earlyClaims.clear()
         this.workers.clear()
@@ -800,6 +902,15 @@ export class LeaseBroker extends SerializedObserver {
 
 function isPermanentCapacityFailure(code: unknown): boolean {
     return code === "session_limit" || code === "quota_exhausted"
+}
+
+function validSuspensionSummary(attempts: number, durationSecs: number): boolean {
+    return (
+        Number.isSafeInteger(attempts) &&
+        attempts >= 0 &&
+        Number.isFinite(durationSecs) &&
+        durationSecs >= 0
+    )
 }
 
 function isSemanticWorkFailure(failure: StoryFailureData): boolean {
@@ -892,6 +1003,9 @@ function claimFromBid(
         model: winner.route.model,
         bidId: winner.bidId,
         route: { ...winner.route },
+        ...(winner.supportsCooperativeSuspend === true
+            ? { supportsCooperativeSuspend: true }
+            : {}),
     }
 }
 

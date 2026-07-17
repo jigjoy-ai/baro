@@ -94,6 +94,11 @@ pub enum BaroEvent {
     #[serde(rename = "story_start")]
     StoryStart { id: String, title: String },
 
+    /// A worker quiesced because an accepted dependency block made its
+    /// current lease temporarily unrunnable. This is not a failure.
+    #[serde(rename = "story_suspended")]
+    StorySuspended { id: String, block_id: String },
+
     #[serde(rename = "story_log")]
     StoryLog { id: String, line: String },
 
@@ -291,6 +296,10 @@ pub enum BaroEvent {
         passed: Vec<String>,
         #[serde(default)]
         failed: Vec<String>,
+        // Contract field; suspended stories remain pending for a later wave.
+        #[allow(dead_code)]
+        #[serde(default)]
+        blocked: Vec<String>,
     },
 
     #[serde(rename = "recovery_started")]
@@ -405,6 +414,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_dependency_suspension_as_its_own_event() {
+        match parse(r#"{"type":"story_suspended","id":"S2","block_id":"block-S2-S1"}"#) {
+            BaroEvent::StorySuspended { id, block_id } => {
+                assert_eq!(id, "S2");
+                assert_eq!(block_id, "block-S2-S1");
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
     fn parses_level_and_recovery_events() {
         match parse(r#"{"type":"level_started","ordinal":2,"story_ids":["S3","S4"]}"#) {
             BaroEvent::LevelStarted { ordinal, story_ids } => {
@@ -413,10 +433,18 @@ mod tests {
             }
             other => panic!("wrong variant: {:?}", other),
         }
-        match parse(r#"{"type":"level_completed","ordinal":2,"passed":["S3"],"failed":["S4"]}"#) {
-            BaroEvent::LevelCompleted { passed, failed, .. } => {
+        match parse(
+            r#"{"type":"level_completed","ordinal":2,"passed":["S3"],"failed":["S4"],"blocked":["S5"]}"#,
+        ) {
+            BaroEvent::LevelCompleted {
+                passed,
+                failed,
+                blocked,
+                ..
+            } => {
                 assert_eq!(passed, vec!["S3"]);
                 assert_eq!(failed, vec!["S4"]);
+                assert_eq!(blocked, vec!["S5"]);
             }
             other => panic!("wrong variant: {:?}", other),
         }

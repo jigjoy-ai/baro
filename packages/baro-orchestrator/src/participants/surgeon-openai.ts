@@ -173,6 +173,10 @@ export class SurgeonOpenAI extends BaseObserver {
         this.sources.setQualityAuthority(authority)
     }
 
+    setBlockAuthority(authority: Participant): void {
+        this.sources.setBlockAuthority(authority)
+    }
+
     override async onExternalEvent(
         source: Participant,
         event: SemanticEvent<unknown>,

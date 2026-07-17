@@ -21,11 +21,15 @@ import {
     RuntimeReplanApplied,
     RuntimeReplanProposed,
     RuntimeReplanRejected,
+    WorkBlockAccepted,
+    WorkBlocked,
+    WorkBlockRejected,
     WorkDiscovered,
     WorkLeaseGranted,
     WorkLeaseReleased,
     type DiscoveredWork,
     type RuntimeReplanMutation,
+    type WorkBlockedData,
 } from "../semantic-events.js"
 import { snapshotRuntimeReplanMutation } from "../runtime-replan.js"
 import {
@@ -52,6 +56,8 @@ interface OutboxRecord {
     proposalId?: string
     baseGraphVersion?: number
     mutation?: RuntimeReplanMutation
+    blockId?: string
+    requiredStoryIds?: string[]
 }
 
 interface ActiveLeaseCorrelation {
@@ -70,6 +76,8 @@ interface PendingReplanCorrelation {
     baseGraphVersion: number
 }
 
+type PendingBlockCorrelation = WorkBlockedData
+
 const MAX_PENDING_MESSAGES_PER_AGENT = 32
 
 export class CollaborationBridge extends SerializedObserver {
@@ -84,6 +92,7 @@ export class CollaborationBridge extends SerializedObserver {
     private readonly activeAgents = new Set<string>()
     private readonly pendingInbox = new Map<string, unknown[]>()
     private readonly pendingReplans = new Map<string, PendingReplanCorrelation>()
+    private readonly pendingBlocks = new Map<string, PendingBlockCorrelation>()
     private readonly resolvedDecisionWrites = new Map<
         string,
         Readonly<Record<string, unknown>>
@@ -198,6 +207,17 @@ export class CollaborationBridge extends SerializedObserver {
             this.onRuntimeReplanDecision(event)
             return
         }
+        if (
+            (WorkBlockAccepted.is(event) || WorkBlockRejected.is(event)) &&
+            event.data.runId === this.opts.runId
+        ) {
+            if (
+                context.source !== this.decisionAuthority &&
+                this.opts.unsafeAllowUnboundAuthorities !== true
+            ) return
+            this.onWorkBlockDecision(event)
+            return
+        }
         if (AgentTargetedMessage.is(event)) {
             this.deliverOrQueueInbox(event.data.recipientId, {
                 type: event.type,
@@ -231,8 +251,25 @@ export class CollaborationBridge extends SerializedObserver {
             this.activeLeaseByStory.clear()
             this.activeAgents.clear()
             this.pendingInbox.clear()
-            this.pendingReplans.clear()
             this.runCompleted = true
+            for (const pending of this.pendingReplans.values()) {
+                if (this.resolvedDecisionWrites.has(pending.proposalId)) continue
+                this.resolvedDecisionWrites.set(pending.proposalId, {
+                    status: "rejected",
+                    code: "run_completed",
+                    proposalId: pending.proposalId,
+                    reason: "the collective run completed before the proposal was decided",
+                })
+            }
+            for (const pending of this.pendingBlocks.values()) {
+                if (this.resolvedDecisionWrites.has(pending.blockId)) continue
+                this.resolvedDecisionWrites.set(pending.blockId, {
+                    status: "rejected",
+                    code: "run_completed",
+                    blockId: pending.blockId,
+                    reason: "the collective run completed before the dependency block was decided",
+                })
+            }
             for (const proposalId of [
                 ...this.resolvedDecisionWrites.keys(),
             ]) {
@@ -304,6 +341,16 @@ export class CollaborationBridge extends SerializedObserver {
                         proposalId: record.proposalId,
                         reason: "runtime replan lease is unknown or no longer attributable",
                     })
+                } else if (
+                    record.kind === "block" &&
+                    validProposalId(record.blockId)
+                ) {
+                    this.queueDecision(record.blockId, {
+                        status: "rejected",
+                        code: "stale_lease",
+                        blockId: record.blockId,
+                        reason: "dependency block lease is unknown or no longer attributable",
+                    })
                 }
                 return
             }
@@ -351,6 +398,8 @@ export class CollaborationBridge extends SerializedObserver {
                 }
             } else if (record.kind === "replan") {
                 this.publishRuntimeReplan(record, agentId)
+            } else if (record.kind === "block") {
+                this.publishWorkBlocked(record, agentId)
             }
         } catch (error) {
             process.stderr.write(
@@ -457,6 +506,59 @@ export class CollaborationBridge extends SerializedObserver {
         )
     }
 
+    private publishWorkBlocked(record: OutboxRecord, agentId: string): void {
+        const blockId = validProposalId(record.blockId) ? record.blockId : null
+        if (!blockId) return
+
+        const active = record.leaseId
+            ? this.activeLeases.get(record.leaseId)
+            : undefined
+        const currentLeaseId = this.activeLeaseByStory.get(agentId)
+        if (
+            !active ||
+            active.storyId !== agentId ||
+            currentLeaseId !== active.leaseId
+        ) {
+            this.queueDecision(blockId, {
+                status: "rejected",
+                code: "stale_lease",
+                blockId,
+                reason: "dependency block requires the source story's current lease",
+            })
+            return
+        }
+        if (!validRequiredStoryIds(record.requiredStoryIds)) {
+            this.queueDecision(blockId, {
+                status: "rejected",
+                code: "invalid_request",
+                blockId,
+                reason: "dependency block requires one or more unique story ids",
+            })
+            return
+        }
+
+        const correlation: PendingBlockCorrelation = {
+            runId: this.opts.runId,
+            blockId,
+            storyId: active.storyId,
+            leaseId: active.leaseId,
+            generation: active.generation,
+            requiredStoryIds: [...record.requiredStoryIds],
+            reason:
+                typeof record.reason === "string" && record.reason.trim()
+                    ? record.reason.trim()
+                    : "worker is blocked on prerequisite work",
+        }
+        if (this.resolvedDecisionWrites.has(blockId)) {
+            this.flushResolvedDecision(blockId)
+            return
+        }
+        if (!this.pendingBlocks.has(blockId)) {
+            this.pendingBlocks.set(blockId, correlation)
+        }
+        this.publish(WorkBlocked.create(correlation))
+    }
+
     private onRuntimeReplanDecision(
         event:
             | ReturnType<typeof RuntimeReplanApplied.create>
@@ -469,6 +571,20 @@ export class CollaborationBridge extends SerializedObserver {
             ...event.data,
         })
         this.flushResolvedDecision(event.data.proposalId)
+    }
+
+    private onWorkBlockDecision(
+        event:
+            | ReturnType<typeof WorkBlockAccepted.create>
+            | ReturnType<typeof WorkBlockRejected.create>,
+    ): void {
+        const pending = this.pendingBlocks.get(event.data.blockId)
+        if (!pending || !sameBlockCorrelation(pending, event.data)) return
+        this.resolvedDecisionWrites.set(event.data.blockId, {
+            status: WorkBlockAccepted.is(event) ? "accepted" : "rejected",
+            ...event.data,
+        })
+        this.flushResolvedDecision(event.data.blockId)
     }
 
     private queueDecision(
@@ -485,6 +601,7 @@ export class CollaborationBridge extends SerializedObserver {
         this.writeDecision(proposalId, decision)
         this.resolvedDecisionWrites.delete(proposalId)
         this.pendingReplans.delete(proposalId)
+        this.pendingBlocks.delete(proposalId)
         if (this.runCompleted && this.resolvedDecisionWrites.size === 0) {
             this.stop()
         }
@@ -618,6 +735,51 @@ function sameCorrelation(
         actual.leaseId === expected.leaseId &&
         actual.generation === expected.generation &&
         actual.baseGraphVersion === expected.baseGraphVersion
+    )
+}
+
+function sameBlockCorrelation(
+    expected: PendingBlockCorrelation,
+    actual: WorkBlockedData | {
+        runId: string
+        blockId: string
+        storyId: string
+        leaseId: string
+        generation: number
+        requiredStoryIds: readonly string[]
+        requestReason: string
+    },
+): boolean {
+    const actualReason = "requestReason" in actual
+        ? actual.requestReason
+        : actual.reason
+    return (
+        actual.runId === expected.runId &&
+        actual.blockId === expected.blockId &&
+        actual.storyId === expected.storyId &&
+        actual.leaseId === expected.leaseId &&
+        actual.generation === expected.generation &&
+        actualReason === expected.reason &&
+        actual.requiredStoryIds.length === expected.requiredStoryIds.length &&
+        actual.requiredStoryIds.every(
+            (storyId, index) => storyId === expected.requiredStoryIds[index],
+        )
+    )
+}
+
+function validRequiredStoryIds(value: unknown): value is string[] {
+    return (
+        Array.isArray(value) &&
+        value.length > 0 &&
+        value.length <= 32 &&
+        value.every(
+            (item) =>
+                typeof item === "string" &&
+                item.length > 0 &&
+                item.length <= 128 &&
+                item.trim() === item,
+        ) &&
+        new Set(value).size === value.length
     )
 }
 

@@ -119,6 +119,9 @@ export class RouteLearner {
             ledger.completed = true
             this.applyLedgerCost(ledger)
         }
+        // dependency_blocked is deliberately quality-neutral. Its measured
+        // latency/cost still improve route estimates, but it must not alter
+        // the success/failure prior.
         if (reason === "integrated") this.learning.verifiedSuccesses += 1
         else if (reason === "execution_failed" || reason === "quality_failed") {
             this.learning.workFailures += 1

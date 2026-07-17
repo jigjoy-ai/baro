@@ -1,8 +1,10 @@
 import type { Participant, SemanticEvent } from "@mozaik-ai/core"
 
 import {
+    RunCompleted,
     StoryQualityCompleted,
     StoryResult,
+    WorkBlockAccepted,
     WorkLeaseGranted,
     WorkLeaseReleased,
 } from "../semantic-events.js"
@@ -19,6 +21,8 @@ import type { StoryOutcomeAuthority } from "./story-outcome-authority.js"
 export class RecoverySourceAuthority {
     private leaseAuthority: Participant | null = null
     private qualityAuthority: Participant | null = null
+    private blockAuthority: Participant | null = null
+    private readonly blockedLeases = new Map<string, string>()
 
     constructor(
         private readonly outcomeAuthority?: StoryOutcomeAuthority,
@@ -38,6 +42,13 @@ export class RecoverySourceAuthority {
         this.qualityAuthority = authority
     }
 
+    setBlockAuthority(authority: Participant): void {
+        if (this.blockAuthority && this.blockAuthority !== authority) {
+            throw new Error("recovery block authority is already bound")
+        }
+        this.blockAuthority = authority
+    }
+
     /** Consume every lease lifecycle event, applying it only from the Broker. */
     observeLease(
         source: Participant,
@@ -45,6 +56,32 @@ export class RecoverySourceAuthority {
         leases: ActiveLeaseRegistry,
         runId: string | undefined,
     ): boolean {
+        if (WorkBlockAccepted.is(event)) {
+            if (
+                this.blockAuthority &&
+                source === this.blockAuthority &&
+                (!runId || event.data.runId === runId)
+            ) {
+                this.blockedLeases.set(
+                    blockKey(
+                        event.data.runId,
+                        event.data.storyId,
+                        event.data.leaseId,
+                        event.data.generation,
+                    ),
+                    event.data.blockId,
+                )
+            }
+            return true
+        }
+        if (RunCompleted.is(event)) {
+            if (
+                this.blockAuthority &&
+                source === this.blockAuthority &&
+                (!runId || !event.data.runId || event.data.runId === runId)
+            ) this.blockedLeases.clear()
+            return true
+        }
         if (!WorkLeaseGranted.is(event) && !WorkLeaseReleased.is(event)) {
             return false
         }
@@ -57,6 +94,20 @@ export class RecoverySourceAuthority {
     /** Validate the source of an event that may trigger recovery policy. */
     accepts(source: Participant, event: SemanticEvent<unknown>): boolean {
         if (StoryResult.is(event)) {
+            if (
+                event.data.runId &&
+                event.data.leaseId &&
+                event.data.generation !== undefined &&
+                event.data.suspension?.kind === "dependency" &&
+                this.blockedLeases.get(
+                    blockKey(
+                        event.data.runId,
+                        event.data.storyId,
+                        event.data.leaseId,
+                        event.data.generation,
+                    ),
+                ) === event.data.suspension.blockId
+            ) return false
             return !this.outcomeAuthority ||
                 this.outcomeAuthority.matchesResult(source, event.data)
         }
@@ -65,4 +116,13 @@ export class RecoverySourceAuthority {
         }
         return true
     }
+}
+
+function blockKey(
+    runId: string,
+    storyId: string,
+    leaseId: string,
+    generation: number,
+): string {
+    return `${runId}\u0000${leaseId}\u0000${storyId}\u0000${generation}`
 }

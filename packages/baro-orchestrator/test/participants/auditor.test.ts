@@ -1,11 +1,16 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 
 import { ModelMessageItem } from "@mozaik-ai/core"
 
-import { AgentState, ClaudeStreamChunk } from "../../src/semantic-events.js"
+import {
+    AgentState,
+    ClaudeStreamChunk,
+    WorkLeaseGranted,
+    WorkLeaseReleased,
+} from "../../src/semantic-events.js"
 import { Auditor } from "../../src/participants/auditor.js"
 import { source, withTempDir } from "./helpers.js"
 
@@ -59,6 +64,51 @@ describe("Auditor", () => {
             )
 
             assert.equal(existsSync(logPath), false)
+        })
+    })
+
+    it("fingerprints lease bearers consistently and keeps the log private", async () => {
+        await withTempDir("baro-auditor-lease-", async (dir) => {
+            const logPath = join(dir, "audit.jsonl")
+            const auditor = new Auditor({ path: logPath })
+            const rawLease = "run:lease:raw-secret-bearer"
+
+            await auditor.onExternalEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId: "run",
+                    offerId: "offer-S1",
+                    leaseId: rawLease,
+                    workerId: "worker",
+                    generation: 1,
+                    request: {
+                        storyId: "S1",
+                        prompt: `node helper emit --lease "${rawLease}" --kind note`,
+                        retries: 0,
+                        timeoutSecs: 30,
+                    },
+                }),
+            )
+            await auditor.onExternalEvent(
+                source("broker"),
+                WorkLeaseReleased.create({
+                    runId: "run",
+                    offerId: "offer-S1",
+                    leaseId: rawLease,
+                    storyId: "S1",
+                    workerId: "worker",
+                    reason: "aborted",
+                }),
+            )
+
+            const raw = readFileSync(logPath, "utf8")
+            assert.doesNotMatch(raw, new RegExp(rawLease))
+            const fingerprints = raw.match(/audit-lease:[a-f0-9]{24}/g) ?? []
+            assert.ok(fingerprints.length >= 3)
+            assert.equal(new Set(fingerprints).size, 1)
+            if (process.platform !== "win32") {
+                assert.equal(statSync(logPath).mode & 0o777, 0o600)
+            }
         })
     })
 

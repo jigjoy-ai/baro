@@ -638,8 +638,9 @@ export class DialogueAgent extends SerializedObserver {
         if (LevelStarted.is(event)) {
             this.pushObservation(`level ${event.data.ordinal} started: ${event.data.storyIds.join(", ")}`)
         } else if (LevelCompleted.is(event)) {
+            const blocked = event.data.blocked?.join(",") || "none"
             this.pushObservation(
-                `level ${event.data.ordinal} completed: passed=${event.data.passed.join(",") || "none"}; failed=${event.data.failed.join(",") || "none"}`,
+                `level ${event.data.ordinal} completed: passed=${event.data.passed.join(",") || "none"}; failed=${event.data.failed.join(",") || "none"}; blocked=${blocked}`,
             )
         } else if (StoryRouted.is(event)) {
             const active = this.activeLeases.get(event.data.storyId)
@@ -679,9 +680,9 @@ export class DialogueAgent extends SerializedObserver {
         } else if (StoryMergeFailed.is(event) && event.data.runId === this.opts.runId) {
             this.pushObservation(`${event.data.storyId} integration failed: ${event.data.error}`)
         } else if (StoryResult.is(event) && event.data.runId === this.opts.runId) {
-            this.pushObservation(
-                `${event.data.storyId} execution ${event.data.success ? "succeeded" : "failed"}`,
-            )
+            this.pushObservation(event.data.suspension
+                ? `${event.data.storyId} execution suspended for dependency block ${event.data.suspension.blockId}`
+                : `${event.data.storyId} execution ${event.data.success ? "succeeded" : "failed"}`)
         } else if (CollaborationNote.is(event) && event.data.runId === this.opts.runId) {
             this.pushObservation(`${event.data.sourceAgentId} note: ${event.data.text}`)
         } else if (RunVerificationCompleted.is(event) && event.data.runId === this.opts.runId) {

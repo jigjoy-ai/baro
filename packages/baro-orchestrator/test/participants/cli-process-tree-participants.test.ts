@@ -177,7 +177,7 @@ describe("CLI participant process-tree lifecycle", () => {
     )
 
     it(
-        "fails all four harnesses when an unobserved child holds inherited stdio",
+        "contains all four unobserved children which inherit provider stdio",
         { skip: process.platform === "win32" },
         async () => {
             await withTempDir("baro-cli-close-watchdog-", async (dir) => {
@@ -242,44 +242,31 @@ describe("CLI participant process-tree lifecycle", () => {
                         Number(readFileSync(fixtures[name].pidPath, "utf8")),
                     )
 
-                    const summaries = await withDeadline(
+                    await withDeadline(
                         Promise.all(
                             participants.map((participant) => participant.done),
                         ),
                         2_000,
-                        () => "close/drain watchdog did not settle every harness",
+                        () =>
+                            "owned process groups did not contain every unobserved child",
                     )
 
-                    assert.ok(
-                        summaries.every((summary) =>
-                            summary.error?.message.includes(
-                                "streams remained open",
-                            ),
+                    const certifications = await Promise.all(
+                        participants.map((participant) =>
+                            participant.abortAndWait("SIGKILL"),
                         ),
                     )
                     assert.ok(
-                        participants.every(
-                            (participant) => participant.getPhase() === "failed",
-                        ),
+                        certifications.every(Boolean),
+                        "every owned group must have an affirmative certificate",
                     )
                     assert.ok(
-                        descendantPids.every(isAlive),
-                        "fixture descendants must evade tree discovery",
+                        descendantPids.every((pid) => !isAlive(pid)),
+                        "group containment must kill children which escaped PID discovery",
                     )
-
-                    for (const pid of descendantPids) process.kill(pid, "SIGKILL")
-                    await waitUntil(
-                        () => descendantPids.every((pid) => !isAlive(pid)),
-                        2_000,
-                    )
-                    await new Promise((resolve) => setTimeout(resolve, 50))
-                    assert.ok(
-                        participants.every(
-                            (participant) => participant.getPhase() === "failed",
-                        ),
-                        "late close must not overwrite watchdog failure",
-                    )
+                    assert.equal(activeProcessTreeCount(), 0)
                 } finally {
+                    signalAllProcessTrees("SIGKILL")
                     for (const pid of descendantPids) {
                         try {
                             process.kill(pid, "SIGKILL")
@@ -373,24 +360,31 @@ describe("CLI participant process-tree lifecycle", () => {
                         4,
                         "tree ownership must survive bounded participant.done",
                     )
-                    ClaudeCliParticipant.killAll("SIGTERM")
-                    CodexCliParticipant.killAll("SIGTERM")
-                    OpenCodeCliParticipant.killAll("SIGTERM")
-                    PiCliParticipant.killAll("SIGTERM")
+                    const quiescence = Promise.all(
+                        participants.map((participant) =>
+                            participant.abortAndWait("SIGKILL"),
+                        ),
+                    )
                     assert.ok(
                         participants.every(
                             (participant) => participant.getPhase() === "failed",
                         ),
-                        "late killAll must preserve the terminal failed phase",
+                        "late abortAndWait must preserve the terminal failed phase",
                     )
 
-                    signalAllProcessTrees("SIGKILL")
-                    await waitUntil(
-                        () =>
-                            activeProcessTreeCount() === 0 &&
-                            descendantPids.every((pid) => !isAlive(pid)),
+                    const certifications = await withDeadline(
+                        quiescence,
                         2_000,
+                        () =>
+                            "abortAndWait did not confirm watchdog tree quiescence " +
+                            JSON.stringify({
+                                active: activeProcessTreeCount(),
+                                alive: descendantPids.map(isAlive),
+                            }),
                     )
+                    assert.ok(certifications.every(Boolean))
+                    assert.equal(activeProcessTreeCount(), 0)
+                    assert.ok(descendantPids.every((pid) => !isAlive(pid)))
                     await new Promise((resolve) => setTimeout(resolve, 50))
                     assert.ok(
                         participants.every(

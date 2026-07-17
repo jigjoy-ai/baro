@@ -8,6 +8,7 @@ const BOOTSTRAP_OBSERVATION_MS = 200
 const TERMINATION_OBSERVATION_FLOOR_MS = 100
 const STEADY_OBSERVATION_MS = 2_000
 const BOOTSTRAP_WINDOW_MS = 2_000
+const DEFAULT_QUIESCENCE_TIMEOUT_MS = 2_250
 
 let observationTimer: ReturnType<typeof setTimeout> | null = null
 let observationDueAt = Number.POSITIVE_INFINITY
@@ -19,6 +20,9 @@ let observationActiveScans = 0
 let observationMaxConcurrentScans = 0
 
 type LinuxProcessTableBackend = "proc" | "ps"
+
+export const POSIX_PROCESS_GROUPS_SUPPORTED =
+    process.platform === "linux" || process.platform === "darwin"
 
 // `/proc` start time is boot-relative clock ticks, while `ps lstart` is a
 // wall-clock string. They must never be mixed for identity comparison. The
@@ -33,15 +37,18 @@ let escalationFlush: ReturnType<typeof setImmediate> | null = null
  * Platform guarantees exposed for diagnostics.
  *
  * Windows `taskkill /T` can terminate a tree only while its root PID still
- * exists. On every platform, a child which has already been re-parented before
- * any process-table snapshot is inherently undiscoverable from the old root
- * PID. Closing that last race requires owning an OS process group or Job
- * Object; this module deliberately does not claim otherwise.
+ * exists. POSIX callers which spawn the root as a detached process-group
+ * leader can close the re-parent-before-observation race without pretending
+ * that the descendant was discovered. Windows needs a Job Object before it
+ * can offer the same containment/certification guarantee.
  */
 export const PROCESS_TREE_CAPABILITIES = Object.freeze({
     liveRootTreeTermination: true,
     postRootCloseTrackedTermination: process.platform !== "win32",
     postRootCloseUnobservedDescendantDiscovery: false,
+    ownedProcessGroupTermination: POSIX_PROCESS_GROUPS_SUPPORTED,
+    ownedProcessGroupQuiescenceCertification:
+        POSIX_PROCESS_GROUPS_SUPPORTED,
     processIdentityValidation:
         process.platform === "linux" || process.platform === "darwin",
 })
@@ -53,6 +60,7 @@ export interface ProcessIdentitySnapshot {
 
 export interface ProcessStateSnapshot extends ProcessIdentitySnapshot {
     parentPid: number
+    processGroupId: number
     state: string
 }
 
@@ -66,6 +74,18 @@ export interface ManagedProcessTreeOptions {
     terminationGraceMs?: number
     /** Requested shared liveness cadence, subject to the process-wide floor. */
     pollIntervalMs?: number
+    /**
+     * The child was spawned as the leader of a new POSIX process group.
+     * Ignored on platforms where negative-PID group signals are unsupported.
+     */
+    ownsProcessGroup?: boolean
+    /** Maximum post-SIGKILL wait for a positive process-table certificate. */
+    quiescenceTimeoutMs?: number
+    /** @internal Deterministic process-table failure seam for tests. */
+    processGroupObservation?: (
+        processGroupId: number,
+        records: Iterable<ProcessStateSnapshot> | null,
+    ) => boolean | null
 }
 
 export interface ProcessTreeObserverStats {
@@ -96,17 +116,30 @@ export function processTreeObserverStats(): ProcessTreeObserverStats {
 export class ManagedProcessTree {
     private readonly terminationGraceMs: number
     private readonly pollIntervalMs: number
+    private readonly quiescenceTimeoutMs: number
+    private readonly processGroupObservation: NonNullable<
+        ManagedProcessTreeOptions["processGroupObservation"]
+    >
     private readonly capturedPids = new Set<number>()
     private readonly identities = new Map<number, ProcessIdentitySnapshot>()
     private readonly rootPid: number | undefined
+    private readonly ownedProcessGroupId: number | null
     private readonly createdAt = Date.now()
     private terminating = false
     private rootClosed = false
     private settled = false
     private escalationTimer: ReturnType<typeof setTimeout> | null = null
+    private quiescenceTimer: ReturnType<typeof setTimeout> | null = null
     private resolveDone!: () => void
+    private resolveQuiescence!: (certified: boolean) => void
 
     readonly done: Promise<void>
+    /**
+     * Resolves true only after an authoritative process-table snapshot finds
+     * no live member of this tree's owned POSIX process group. Legacy trees,
+     * Windows trees, and unsupported platforms resolve false when they settle.
+     */
+    readonly quiescence: Promise<boolean>
 
     constructor(
         private readonly child: ChildProcess,
@@ -114,6 +147,10 @@ export class ManagedProcessTree {
     ) {
         this.terminationGraceMs = options.terminationGraceMs ?? 5_000
         this.pollIntervalMs = options.pollIntervalMs ?? 100
+        this.quiescenceTimeoutMs =
+            options.quiescenceTimeoutMs ?? DEFAULT_QUIESCENCE_TIMEOUT_MS
+        this.processGroupObservation =
+            options.processGroupObservation ?? observedProcessGroupIsAlive
         if (
             !Number.isFinite(this.terminationGraceMs) ||
             this.terminationGraceMs < 1
@@ -127,11 +164,30 @@ export class ManagedProcessTree {
                 "ManagedProcessTree pollIntervalMs must be positive",
             )
         }
+        if (
+            !Number.isFinite(this.quiescenceTimeoutMs) ||
+            this.quiescenceTimeoutMs < 1
+        ) {
+            throw new RangeError(
+                "ManagedProcessTree quiescenceTimeoutMs must be positive",
+            )
+        }
 
         this.done = new Promise<void>((resolve) => {
             this.resolveDone = resolve
         })
         this.rootPid = child.pid
+        this.ownedProcessGroupId =
+            options.ownsProcessGroup === true &&
+            POSIX_PROCESS_GROUPS_SUPPORTED &&
+            this.rootPid !== undefined &&
+            Number.isSafeInteger(this.rootPid) &&
+            this.rootPid > 0
+                ? this.rootPid
+                : null
+        this.quiescence = new Promise<boolean>((resolve) => {
+            this.resolveQuiescence = resolve
+        })
         activeProcessTrees.add(this)
 
         // All trees entering during the same turn share this scan. `ps` runs
@@ -156,6 +212,20 @@ export class ManagedProcessTree {
         this[TERMINATE_WITH_TABLE](signal, readProcessTableSync())
     }
 
+    /** Signal the tree and await a truthful OS-level quiescence verdict. */
+    terminateAndWait(
+        signal: NodeJS.Signals = "SIGTERM",
+    ): Promise<boolean> {
+        this.terminate(signal)
+        // Unsupported/unowned trees cannot earn a positive certificate, but
+        // `AndWait` must preserve the legacy drain barrier before returning
+        // false (not let a timeout/retry race the still-closing child).
+        if (this.ownedProcessGroupId === null) {
+            return this.done.then(() => false)
+        }
+        return this.quiescence
+    }
+
     [TERMINATE_WITH_TABLE](
         signal: NodeJS.Signals,
         table: ProcessTable | null,
@@ -171,6 +241,7 @@ export class ManagedProcessTree {
 
         if (signal === "SIGKILL") {
             this.clearEscalationTimer()
+            this.startQuiescenceDeadline()
         } else if (this.escalationTimer === null) {
             this.escalationTimer = setTimeout(() => {
                 this.escalationTimer = null
@@ -248,6 +319,33 @@ export class ManagedProcessTree {
         if (this.settled) return
         this.observe(table)
 
+        if (this.ownedProcessGroupId !== null) {
+            const groupAlive = this.observeOwnedProcessGroup(table)
+
+            // Unknown is deliberately not absence. Keep ownership and retry;
+            // neither `done` nor the positive certification may settle from a
+            // failed/restricted process-table read.
+            if (groupAlive === null) {
+                // Root close proves the provider leader is gone, so group
+                // signalling is safe even though enumeration failed. This
+                // also starts the bounded TERM/KILL fail-closed deadline.
+                if (this.rootClosed && !this.terminating) {
+                    this.terminate("SIGTERM")
+                }
+                return
+            }
+
+            if (this.terminating) {
+                if (!groupAlive) this.settle(true)
+                return
+            }
+
+            if (!this.rootClosed) return
+            if (groupAlive) this.terminate("SIGTERM")
+            else this.settle(true)
+            return
+        }
+
         if (this.terminating) {
             if (!this.hasTrackedProcessAlive(table)) this.settle()
             return
@@ -297,6 +395,17 @@ export class ManagedProcessTree {
         signal: NodeJS.Signals,
         table: ProcessTable | null,
     ): void {
+        if (this.ownedProcessGroupId !== null) {
+            try {
+                process.kill(-this.ownedProcessGroupId, signal)
+            } catch {
+                // ESRCH is expected when the group exits between observation
+                // and delivery. Absence is certified by a later table, never
+                // inferred from this best-effort signal call.
+            }
+            return
+        }
+
         if (process.platform === "win32") {
             // `taskkill /T` is rooted at the raw PID. Once ChildProcess close
             // has confirmed that root is gone, the PID may belong to an
@@ -425,10 +534,54 @@ export class ManagedProcessTree {
         this.escalationTimer = null
     }
 
-    private settle(): void {
+    private observeOwnedProcessGroup(
+        table: ProcessTable | null,
+    ): boolean | null {
+        if (this.ownedProcessGroupId === null) return null
+        try {
+            return this.processGroupObservation(
+                this.ownedProcessGroupId,
+                table === null ? null : table.records.values(),
+            )
+        } catch {
+            return null
+        }
+    }
+
+    private startQuiescenceDeadline(): void {
+        if (
+            this.ownedProcessGroupId === null ||
+            this.quiescenceTimer !== null ||
+            this.settled
+        ) {
+            return
+        }
+        this.quiescenceTimer = setTimeout(() => {
+            this.quiescenceTimer = null
+            if (this.settled) return
+
+            // Observers have had a bounded post-KILL window. A final unknown
+            // or still-live result is an explicit negative verdict, never a
+            // fabricated certificate. Settling also releases all ref'ed
+            // observer/timer resources.
+            const table = readProcessTableSync()
+            this.observe(table)
+            const groupAlive = this.observeOwnedProcessGroup(table)
+            this.settle(groupAlive === false)
+        }, this.quiescenceTimeoutMs)
+    }
+
+    private clearQuiescenceTimer(): void {
+        if (this.quiescenceTimer === null) return
+        clearTimeout(this.quiescenceTimer)
+        this.quiescenceTimer = null
+    }
+
+    private settle(quiescenceCertified = false): void {
         if (this.settled) return
         this.settled = true
         this.clearEscalationTimer()
+        this.clearQuiescenceTimer()
         pendingEscalations.delete(this)
         if (pendingEscalations.size === 0 && escalationFlush !== null) {
             clearImmediate(escalationFlush)
@@ -436,6 +589,7 @@ export class ManagedProcessTree {
         }
         activeProcessTrees.delete(this)
         rescheduleSharedObservation()
+        this.resolveQuiescence(quiescenceCertified)
         this.resolveDone()
     }
 }
@@ -675,6 +829,27 @@ export function observedProcessIsAlive(
 }
 
 /**
+ * Tri-state process-group liveness from one authoritative snapshot.
+ * `null` is intentionally preserved so callers can never turn an observation
+ * failure into a positive quiescence certificate.
+ */
+export function observedProcessGroupIsAlive(
+    processGroupId: number,
+    observed: Iterable<ProcessStateSnapshot> | null,
+): boolean | null {
+    if (observed === null) return null
+    for (const record of observed) {
+        if (
+            record.processGroupId === processGroupId &&
+            !isZombie(record.state)
+        ) {
+            return true
+        }
+    }
+    return false
+}
+
+/**
  * Exceptional per-PID fallback used only when the shared table source failed.
  * It reads the same sticky identity representation which originally captured
  * the process, so a backend failure cannot degrade into raw-PID signalling.
@@ -794,7 +969,7 @@ function readLinuxProcProcessTable(): ProcessTable | null {
         const record = readLinuxProcessRecord(Number(entry))
         if (record !== null) records.push(record)
     }
-    return buildProcessTable(records)
+    return records.length === 0 ? null : buildProcessTable(records)
 }
 
 async function readLinuxProcProcessTableAsync(): Promise<ProcessTable | null> {
@@ -817,11 +992,10 @@ async function readLinuxProcProcessTableAsync(): Promise<ProcessTable | null> {
             }
         }),
     )
-    return buildProcessTable(
-        records.filter(
-            (record): record is ProcessStateSnapshot => record !== null,
-        ),
+    const observed = records.filter(
+        (record): record is ProcessStateSnapshot => record !== null,
     )
+    return observed.length === 0 ? null : buildProcessTable(observed)
 }
 
 function readLinuxProcessRecord(pid: number): ProcessStateSnapshot | null {
@@ -840,6 +1014,7 @@ export function parseLinuxProcStat(value: string): ProcessStateSnapshot | null {
     const pid = Number(value.slice(0, open).trim())
     const fields = value.slice(close + 1).trim().split(/\s+/)
     const parentPid = Number(fields[1])
+    const processGroupId = Number(fields[2])
     const state = fields[0]
     const startTime = fields[19]
     if (
@@ -847,6 +1022,8 @@ export function parseLinuxProcStat(value: string): ProcessStateSnapshot | null {
         pid < 1 ||
         !Number.isSafeInteger(parentPid) ||
         parentPid < 0 ||
+        !Number.isSafeInteger(processGroupId) ||
+        processGroupId < 1 ||
         typeof state !== "string" ||
         state.length === 0 ||
         typeof startTime !== "string" ||
@@ -854,14 +1031,14 @@ export function parseLinuxProcStat(value: string): ProcessStateSnapshot | null {
     ) {
         return null
     }
-    return { pid, parentPid, state, startTime }
+    return { pid, parentPid, processGroupId, state, startTime }
 }
 
 async function readPsProcessTableAsync(): Promise<ProcessTable | null> {
     return new Promise((resolve) => {
         execFile(
             "ps",
-            ["-A", "-o", "pid=,ppid=,state=,lstart="],
+            ["-A", "-o", "pid=,ppid=,pgid=,state=,lstart="],
             {
                 encoding: "utf8",
                 timeout: 2_000,
@@ -883,7 +1060,7 @@ function readPsProcessTableSync(): ProcessTable | null {
     try {
         output = execFileSync(
             "ps",
-            ["-A", "-o", "pid=,ppid=,state=,lstart="],
+            ["-A", "-o", "pid=,ppid=,pgid=,state=,lstart="],
             {
                 encoding: "utf8",
                 stdio: ["ignore", "pipe", "ignore"],
@@ -902,7 +1079,12 @@ function readPsProcessRecordSync(pid: number): ProcessStateSnapshot | null {
     try {
         output = execFileSync(
             "ps",
-            ["-p", String(pid), "-o", "pid=,ppid=,state=,lstart="],
+            [
+                "-p",
+                String(pid),
+                "-o",
+                "pid=,ppid=,pgid=,state=,lstart=",
+            ],
             {
                 encoding: "utf8",
                 stdio: ["ignore", "pipe", "ignore"],
@@ -916,23 +1098,27 @@ function readPsProcessRecordSync(pid: number): ProcessStateSnapshot | null {
     return parsePsProcessRecord(output.trim())
 }
 
-function parsePsProcessTable(output: string): ProcessTable {
+function parsePsProcessTable(output: string): ProcessTable | null {
     const records: ProcessStateSnapshot[] = []
     for (const line of output.split("\n")) {
+        if (line.trim().length === 0) continue
         const record = parsePsProcessRecord(line)
-        if (record !== null) records.push(record)
+        if (record === null) return null
+        records.push(record)
     }
-    return buildProcessTable(records)
+    return records.length === 0 ? null : buildProcessTable(records)
 }
 
 function parsePsProcessRecord(line: string): ProcessStateSnapshot | null {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(line)
+    const match =
+        /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(line)
     if (!match) return null
     return {
         pid: Number(match[1]),
         parentPid: Number(match[2]),
-        state: match[3],
-        startTime: match[4],
+        processGroupId: Number(match[3]),
+        state: match[4],
+        startTime: match[5],
     }
 }
 

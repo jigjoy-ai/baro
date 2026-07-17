@@ -3,7 +3,8 @@
  * file for replay and post-mortem debugging.
  */
 
-import { appendFileSync, mkdirSync } from "fs"
+import { createHmac, randomBytes } from "node:crypto"
+import { appendFileSync, chmodSync, existsSync, mkdirSync } from "fs"
 import { dirname } from "path"
 
 import {
@@ -44,6 +45,9 @@ export class Auditor extends BaseObserver {
     private readonly path: string
     private readonly skipStreamChunks: boolean
     private readonly filter?: (source: Participant, event: AuditableItem) => boolean
+    /** Per-log one-way correlation key. Raw lease bearers must never become a
+     * credential oracle for unsandboxed sibling workers. */
+    private readonly leaseFingerprintKey = randomBytes(32)
     /**
      * Set on the first write failure (e.g. EACCES from a sudo-installed
      * `~/.baro/runs/`); later events drop silently — losing the audit log
@@ -58,6 +62,7 @@ export class Auditor extends BaseObserver {
         this.filter = opts.filter
         try {
             mkdirSync(dirname(this.path), { recursive: true })
+            if (existsSync(this.path)) chmodSync(this.path, 0o600)
         } catch (e) {
             this.disable(`mkdir failed: ${(e as Error)?.message ?? String(e)}`)
         }
@@ -105,10 +110,34 @@ export class Auditor extends BaseObserver {
             item,
         }
         try {
-            appendFileSync(this.path, JSON.stringify(entry) + "\n")
+            appendFileSync(this.path, this.serialize(entry) + "\n", {
+                encoding: "utf8",
+                mode: 0o600,
+            })
         } catch (e) {
             this.disable(`append failed: ${(e as Error)?.message ?? String(e)}`)
         }
+    }
+
+    private serialize(entry: Record<string, unknown>): string {
+        return JSON.stringify(entry, (key, value: unknown) => {
+            if (key === "leaseId" && typeof value === "string") {
+                return this.leaseFingerprint(value)
+            }
+            return typeof value === "string"
+                ? redactEmbeddedLeaseBearers(
+                      value,
+                      (leaseId) => this.leaseFingerprint(leaseId),
+                  )
+                : value
+        })
+    }
+
+    private leaseFingerprint(leaseId: string): string {
+        return `audit-lease:${createHmac("sha256", this.leaseFingerprintKey)
+            .update(leaseId)
+            .digest("hex")
+            .slice(0, 24)}`
     }
 
     private disable(reason: string): void {
@@ -124,4 +153,31 @@ export class Auditor extends BaseObserver {
         const idCandidate = (source as unknown as { agentId?: string }).agentId
         return typeof idCandidate === "string" ? `${ctor}:${idCandidate}` : ctor
     }
+}
+
+function redactEmbeddedLeaseBearers(
+    value: string,
+    fingerprint: (leaseId: string) => string,
+): string {
+    return value
+        .replace(
+            /(--lease\s+)"([^"\r\n]+)"/g,
+            (_match, prefix: string, leaseId: string) =>
+                `${prefix}"${fingerprint(leaseId)}"`,
+        )
+        .replace(
+            /(--lease\s+)\\"([^"\\\r\n]+)\\"/g,
+            (_match, prefix: string, leaseId: string) =>
+                `${prefix}\\"${fingerprint(leaseId)}\\"`,
+        )
+        .replace(
+            /("leaseId"\s*:\s*")([^"]+)(")/g,
+            (_match, prefix: string, leaseId: string, suffix: string) =>
+                `${prefix}${fingerprint(leaseId)}${suffix}`,
+        )
+        .replace(
+            /(\\"leaseId\\"\s*:\s*\\")([^"\\]+)(\\")/g,
+            (_match, prefix: string, leaseId: string, suffix: string) =>
+                `${prefix}${fingerprint(leaseId)}${suffix}`,
+        )
 }

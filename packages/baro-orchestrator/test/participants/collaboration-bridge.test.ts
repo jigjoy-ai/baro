@@ -11,6 +11,8 @@ import {
     RuntimeReplanApplied,
     RuntimeReplanProposed,
     RuntimeReplanRejected,
+    WorkBlockAccepted,
+    WorkBlocked,
     WorkDiscovered,
     WorkLeaseGranted,
     WorkLeaseReleased,
@@ -581,6 +583,165 @@ describe("CollaborationBridge", () => {
                 },
             )
             assert.equal(env.events.some(RuntimeReplanProposed.is), false)
+        })
+    })
+
+    it("correlates a dependency block with the active lease and Board decision", async () => {
+        await withTempDir("collaboration-bridge-block-", async (dir) => {
+            const runId = "run-block"
+            const broker = source("broker")
+            const board = source("board")
+            const attacker = source("attacker")
+            const bridge = new CollaborationBridge({
+                runId,
+                sessionDir: dir,
+                pollMs: 5,
+            })
+            bridge.setLeaseAuthority(broker)
+            bridge.setDecisionAuthority(board)
+            const env = joinWithCapture(bridge)
+            env.deliverSemanticEvent(
+                broker,
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: "offer-S6",
+                    leaseId: "lease-S6",
+                    workerId: "worker",
+                    generation: 2,
+                    request: {
+                        storyId: "S6",
+                        prompt: "provider",
+                        model: "standard",
+                        retries: 0,
+                        timeoutSecs: 60,
+                        graphVersion: 4,
+                    },
+                }),
+            )
+            await bridge.idle()
+            writeFileSync(
+                join(dir, "outbox", "block.json"),
+                JSON.stringify({
+                    leaseId: "lease-S6",
+                    kind: "block",
+                    blockId: "block-S6-S11",
+                    requiredStoryIds: ["S11"],
+                    reason: "iterateWithAbort must integrate first",
+                }),
+            )
+
+            const blocked = await waitFor(env.events, WorkBlocked.is)
+            assert.deepEqual(blocked.data, {
+                runId,
+                blockId: "block-S6-S11",
+                storyId: "S6",
+                leaseId: "lease-S6",
+                generation: 2,
+                requiredStoryIds: ["S11"],
+                reason: "iterateWithAbort must integrate first",
+            })
+            const accepted = WorkBlockAccepted.create({
+                ...blocked.data,
+                graphVersion: 5,
+            })
+            env.deliverSemanticEvent(attacker, accepted)
+            await bridge.idle()
+            const decisionPath = join(dir, "decisions", "block-S6-S11.json")
+            assert.equal(existsSync(decisionPath), false)
+
+            env.deliverSemanticEvent(board, accepted)
+            await waitForPath(decisionPath)
+            assert.deepEqual(JSON.parse(readFileSync(decisionPath, "utf8")), {
+                status: "accepted",
+                ...accepted.data,
+            })
+        })
+    })
+
+    it("closes pending block and replan waits when the run completes", async () => {
+        await withTempDir("collaboration-bridge-complete-pending-", async (dir) => {
+            const runId = "run-complete-pending"
+            const broker = source("broker")
+            const board = source("board")
+            const bridge = new CollaborationBridge({
+                runId,
+                sessionDir: dir,
+                pollMs: 5,
+            })
+            bridge.setLeaseAuthority(broker)
+            bridge.setDecisionAuthority(board)
+            const env = joinWithCapture(bridge)
+            env.deliverSemanticEvent(
+                broker,
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: "offer-S1",
+                    leaseId: "lease-secret-S1",
+                    workerId: "worker",
+                    generation: 1,
+                    request: {
+                        storyId: "S1",
+                        prompt: "work",
+                        model: "standard",
+                        retries: 0,
+                        timeoutSecs: 60,
+                        graphVersion: 2,
+                    },
+                }),
+            )
+            await bridge.idle()
+            writeFileSync(
+                join(dir, "outbox", "block-pending.json"),
+                JSON.stringify({
+                    leaseId: "lease-secret-S1",
+                    kind: "block",
+                    blockId: "block-pending",
+                    requiredStoryIds: ["S2"],
+                    reason: "S2 is required",
+                }),
+            )
+            writeFileSync(
+                join(dir, "outbox", "replan-pending.json"),
+                JSON.stringify({
+                    leaseId: "lease-secret-S1",
+                    kind: "replan",
+                    proposalId: "replan-pending",
+                    baseGraphVersion: 2,
+                    mutation: {
+                        addedStories: [],
+                        removedStoryIds: [],
+                        modifiedDeps: { S1: ["S2"] },
+                    },
+                    reason: "rewire pending work",
+                }),
+            )
+            await waitFor(env.events, WorkBlocked.is)
+            await waitFor(env.events, RuntimeReplanProposed.is)
+
+            env.deliverSemanticEvent(
+                board,
+                RunCompleted.create({
+                    runId,
+                    success: false,
+                    completedStories: [],
+                    failedStories: ["S1"],
+                    totalDurationSecs: 1,
+                    totalAttempts: 1,
+                    abortReason: "test completion",
+                }),
+            )
+            const blockDecision = join(dir, "decisions", "block-pending.json")
+            const replanDecision = join(dir, "decisions", "replan-pending.json")
+            await waitForPath(blockDecision)
+            await waitForPath(replanDecision)
+            assert.equal(
+                JSON.parse(readFileSync(blockDecision, "utf8")).code,
+                "run_completed",
+            )
+            assert.equal(
+                JSON.parse(readFileSync(replanDecision, "utf8")).code,
+                "run_completed",
+            )
         })
     })
 })

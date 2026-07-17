@@ -26,7 +26,7 @@ import {
     OpenCodeCliParticipant,
     type OpenCodeRunSummary,
 } from "./opencode-cli-participant.js"
-import { correlationOf } from "./story-agent.js"
+import { correlationOf, type StorySuspension } from "./story-agent.js"
 
 export interface OpenCodeStorySpec {
     /** Story ID, used as agentId for observer attribution. */
@@ -61,6 +61,7 @@ export interface OpenCodeStoryOutcome {
     finalSummary: OpenCodeRunSummary | null
     error: string | null
     failure?: StoryFailureData
+    suspension?: StorySuspension
 }
 
 export class OpenCodeStoryAgent extends BaseObserver {
@@ -84,6 +85,11 @@ export class OpenCodeStoryAgent extends BaseObserver {
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
     private currentFailureSignals: unknown[] = []
+    private stopRequested = false
+    /** Lifecycle signal also closes the tiny transition→timer lost-wake window. */
+    private readonly retryDelayController = new AbortController()
+    private suspension: StorySuspension | null = null
+    private processQuiescence: Promise<boolean> | null = null
     private resolveDone!: (outcome: OpenCodeStoryOutcome) => void
     public readonly done: Promise<OpenCodeStoryOutcome>
 
@@ -161,8 +167,24 @@ export class OpenCodeStoryAgent extends BaseObserver {
     }
 
     abort(): void {
-        this.currentOpenCode?.abort()
+        this.stopRequested = true
+        this.wakeRetryDelay()
+        this.quiesceCurrentOpenCode()
         this.transition("aborted", "external abort")
+    }
+
+    async suspend(blockId: string): Promise<OpenCodeStoryOutcome> {
+        this.recordSuspension(blockId)
+        this.stopRequested = true
+        this.wakeRetryDelay()
+        this.transition("aborted", `dependency suspension ${blockId}`)
+        const quiesced = await this.quiesceCurrentOpenCode()
+        if (!quiesced) {
+            throw new Error(
+                `story ${this.spec.id} process group quiescence could not be certified`,
+            )
+        }
+        return this.done
     }
 
     private async executeAllAttempts(): Promise<void> {
@@ -177,12 +199,14 @@ export class OpenCodeStoryAgent extends BaseObserver {
             this.spec.hardTimeoutSecs > 0
                 ? setTimeout(() => {
                       hardTimedOut = true
-                      this.currentOpenCode?.abort()
+                      this.wakeRetryDelay()
+                      this.quiesceCurrentOpenCode()
                   }, this.spec.hardTimeoutSecs * 1000)
                 : null
 
         try {
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                if (this.stopRequested) break
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
                     lastFailure = {
@@ -193,11 +217,13 @@ export class OpenCodeStoryAgent extends BaseObserver {
                 }
 
                 if (attempt > 1) {
+                    if (this.stopRequested) break
                     this.transition(
                         "waiting",
                         `retrying (attempt ${attempt}/${maxAttempts})`,
                     )
-                    await setTimeoutPromise(this.spec.retryDelayMs)
+                    await this.waitForRetryDelay()
+                    if (this.stopRequested) break
                     if (hardTimedOut) {
                         lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
                         lastFailure = {
@@ -214,6 +240,7 @@ export class OpenCodeStoryAgent extends BaseObserver {
                 lastError = result.error
                 lastFailure = result.failure
 
+                if (this.stopRequested) break
                 if (result.success) {
                     const durationSecs = Math.round(
                         (Date.now() - (this.startedAt ?? Date.now())) / 1000,
@@ -245,15 +272,34 @@ export class OpenCodeStoryAgent extends BaseObserver {
             if (hardTimer !== null) clearTimeout(hardTimer)
         }
 
+        await this.processQuiescence
+
+        if (this.suspension) {
+            lastError = null
+            lastFailure = undefined
+        } else if (this.stopRequested) {
+            lastError = "story execution aborted externally"
+            lastFailure = undefined
+        }
+
         const durationSecs = Math.round(
             (Date.now() - (this.startedAt ?? Date.now())) / 1000,
         )
-        this.transition(
-            "failed",
-            boardOwnsCliRecovery(lastFailure)
-                ? `operational failure after ${attempts} attempt(s)`
-                : `exhausted ${attempts}/${maxAttempts} attempts`,
-        )
+        if (this.stopRequested) {
+            this.transition(
+                "aborted",
+                this.suspension
+                    ? `suspended on dependency block ${this.suspension.blockId}`
+                    : "external abort settled",
+            )
+        } else {
+            this.transition(
+                "failed",
+                boardOwnsCliRecovery(lastFailure)
+                    ? `operational failure after ${attempts} attempt(s)`
+                    : `exhausted ${attempts}/${maxAttempts} attempts`,
+            )
+        }
         this.emitStoryResult(
             false,
             attempts,
@@ -269,6 +315,7 @@ export class OpenCodeStoryAgent extends BaseObserver {
             finalSummary: lastSummary,
             error: lastError,
             ...(lastFailure ? { failure: lastFailure } : {}),
+            ...(this.suspension ? { suspension: this.suspension } : {}),
         })
     }
 
@@ -291,6 +338,7 @@ export class OpenCodeStoryAgent extends BaseObserver {
             }
         }
 
+        this.processQuiescence = null
         this.transition("running", `attempt ${attempt}`)
         this.currentFailureSignals = []
 
@@ -314,7 +362,7 @@ export class OpenCodeStoryAgent extends BaseObserver {
                 `attempt ${attempt} timeout after ${this.spec.timeoutSecs}s`,
             )
         } catch (e) {
-            opencode.abort()
+            await this.quiesceCurrentOpenCode()
             const error = e instanceof Error ? e.message : String(e)
             let stderrTail: string | null = null
             try {
@@ -335,6 +383,7 @@ export class OpenCodeStoryAgent extends BaseObserver {
             }
         }
 
+        await this.quiesceCurrentOpenCode()
         opencode.leave(this.envRef)
         this.currentOpenCode = null
 
@@ -415,9 +464,45 @@ export class OpenCodeStoryAgent extends BaseObserver {
                 durationSecs,
                 error,
                 ...(failure ? { failure } : {}),
+                ...(this.suspension ? { suspension: this.suspension } : {}),
                 ...correlationOf(this.spec),
             }),
         )
+    }
+
+    private recordSuspension(blockId: string): void {
+        if (typeof blockId !== "string" || blockId.trim() !== blockId || !blockId) {
+            throw new TypeError("suspension blockId must be a non-empty trimmed string")
+        }
+        if (this.suspension && this.suspension.blockId !== blockId) {
+            throw new Error(
+                `story ${this.spec.id} is already suspending for block ${this.suspension.blockId}`,
+            )
+        }
+        this.suspension ??= { kind: "dependency", blockId }
+    }
+
+    private quiesceCurrentOpenCode(): Promise<boolean> {
+        const opencode = this.currentOpenCode
+        if (!opencode) return this.processQuiescence ?? Promise.resolve(true)
+        if (!this.processQuiescence) {
+            this.processQuiescence = opencode.abortAndWait()
+        }
+        return this.processQuiescence
+    }
+
+    private async waitForRetryDelay(): Promise<void> {
+        try {
+            await setTimeoutPromise(this.spec.retryDelayMs, undefined, {
+                signal: this.retryDelayController.signal,
+            })
+        } catch (error) {
+            if (!this.retryDelayController.signal.aborted) throw error
+        }
+    }
+
+    private wakeRetryDelay(): void {
+        this.retryDelayController.abort()
     }
 
     private transition(next: AgentPhase, detail?: string): void {

@@ -8,6 +8,7 @@ import {
     StoryMergeFailed,
     StoryQualityCompleted,
     StoryMerged,
+    WorkBlockAccepted,
     WorkBid,
     WorkBidWindowClosed,
     WorkClaimed,
@@ -16,6 +17,7 @@ import {
     WorkLeaseReleased,
     WorkOfferExpired,
     WorkOffered,
+    WorkSuspended,
     WorkerCapabilityAdvertised,
     type StoryFailureData,
     type WorkRouteDescriptor,
@@ -950,6 +952,100 @@ describe("LeaseBroker", () => {
 
         await waitFor(() => env.events.some(WorkOfferExpired.is))
         assert.equal(env.events.filter(WorkLeaseGranted.is).length, 0)
+    })
+
+    it("waits for terminal process quiescence before releasing a blocked lease", async () => {
+        const runId = "run-dependency-block"
+        const board = source("board")
+        const worker = source("worker")
+        const broker = new LeaseBroker({
+            runId,
+            parallel: 1,
+            intraLevelDelaySecs: 0,
+        })
+        broker.setOfferAuthority(board)
+        broker.setBlockAuthority(board)
+        const env = joinWithCapture(broker)
+        env.deliverSemanticEvent(
+            worker,
+            WorkerCapabilityAdvertised.create({
+                runId,
+                workerId: "worker",
+                capabilities: {
+                    backends: ["codex"],
+                    supportsAbort: true,
+                    supportsLiveFeedback: true,
+                    supportsPeerMessages: true,
+                },
+            }),
+        )
+        env.deliverSemanticEvent(
+            board,
+            WorkOffered.create(offer(runId, "offer-S6", "S6", 1)),
+        )
+        env.deliverSemanticEvent(
+            worker,
+            WorkClaimed.create({
+                runId,
+                offerId: "offer-S6",
+                storyId: "S6",
+                workerId: "worker",
+                backend: "codex",
+                model: "gpt-5.6",
+                supportsCooperativeSuspend: true,
+            }),
+        )
+        await waitFor(() => env.events.some(WorkLeaseGranted.is))
+        const lease = env.events.find(WorkLeaseGranted.is)!
+        const accepted = WorkBlockAccepted.create({
+            runId,
+            blockId: "block-S6-S11",
+            storyId: "S6",
+            leaseId: lease.data.leaseId,
+            generation: lease.data.generation,
+            requiredStoryIds: ["S11"],
+            reason: "iterateWithAbort must integrate first",
+            graphVersion: 2,
+        })
+        env.deliverSemanticEvent(source("attacker"), accepted)
+        env.deliverSemanticEvent(board, accepted)
+        await flush()
+        assert.equal(env.events.some(WorkLeaseReleased.is), false)
+
+        env.deliverSemanticEvent(
+            source("S6-agent"),
+            StoryResult.create({
+                storyId: "S6",
+                success: false,
+                attempts: 1,
+                durationSecs: 4,
+                error: "cooperative dependency suspension",
+                runId,
+                leaseId: lease.data.leaseId,
+                generation: lease.data.generation,
+            }),
+        )
+        await flush()
+        assert.equal(env.events.some(WorkLeaseReleased.is), false)
+
+        const suspended = WorkSuspended.create({
+            runId,
+            blockId: "block-S6-S11",
+            storyId: "S6",
+            leaseId: lease.data.leaseId,
+            generation: lease.data.generation,
+            attempts: 1,
+            durationSecs: 4,
+        })
+        env.deliverSemanticEvent(source("attacker"), suspended)
+        await flush()
+        assert.equal(env.events.some(WorkLeaseReleased.is), false)
+        env.deliverSemanticEvent(worker, suspended)
+        await waitFor(() => env.events.some(WorkLeaseReleased.is))
+        const release = env.events.find(WorkLeaseReleased.is)!
+        assert.equal(release.data.reason, "dependency_blocked")
+        assert.equal(release.data.attempts, 1)
+        assert.equal(release.data.durationSecs, 4)
     })
 })
 

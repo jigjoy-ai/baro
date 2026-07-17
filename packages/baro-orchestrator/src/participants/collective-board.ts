@@ -41,8 +41,12 @@ import {
     StoryQualityCompleted,
     StoryResult,
     StorySpawnFailed,
+    WorkBlockAccepted,
+    WorkBlocked,
+    WorkBlockRejected,
     WorkLeaseGranted,
     WorkLeaseExpired,
+    WorkLeaseReleased,
     WorkDiscovered,
     WorkContextProvided,
     WorkContextRequested,
@@ -52,12 +56,15 @@ import {
     WorkspaceCleanupFailed,
     WorkspaceCleanupRequested,
     type ReplanData,
+    type RuntimeReplanRejectionCode,
     type RuntimeReplanProposedData,
     type RunVerificationCompletedData,
     type RunVerificationEvidence,
     type StoryFailureData,
     type StoryResultData,
     type WorkDiscoveredData,
+    type WorkBlockedData,
+    type WorkBlockRejectionCode,
 } from "../semantic-events.js"
 import type { ConductorRunSummary } from "./conductor.js"
 import {
@@ -115,6 +122,13 @@ export interface CollectiveBoardOptions {
     recoveryAuthority?: Participant
     /** Object-identity CollaborationBridge authority allowed to discover work. */
     discoveryAuthority?: Participant
+    /** Object-identity CollaborationBridge authority allowed to request a
+     * cooperative dependency suspension for its current lease. */
+    dependencyAuthority?: Participant
+    /** Explicit feature gate for worker-requested dependency suspension.
+     * Disabled by default so custom collective compositions cannot opt in by
+     * merely wiring a bridge without also auditing executor quiescence. */
+    dependencySuspensionEnabled?: boolean
     /** Object-identity bridge authority allowed to relay CLI runtime replans.
      * Native story participants are authorized through `outcomeAuthority`. */
     runtimeReplanAuthority?: Participant
@@ -126,6 +140,8 @@ export interface CollectiveBoardOptions {
     unsafeAllowUnboundPlanningAuthority?: boolean
     /** Explicitly unsafe unit-test seam. Never enable in a real run. */
     unsafeAllowUnboundRuntimeReplanAuthority?: boolean
+    /** Explicitly unsafe unit-test seam. Never enable in a real run. */
+    unsafeAllowUnboundDependencyAuthority?: boolean
     /** Object-identity WorkContextProvider allowed to answer context requests. */
     contextAuthority?: Participant
     /** Dynamic execution capabilities for terminal result/spawn-failure sources. */
@@ -138,7 +154,22 @@ interface WaveState {
     pending: Set<string>
     passed: string[]
     failed: string[]
+    blocked: string[]
     recovery: boolean
+}
+
+interface PendingDependencyBlock {
+    request: WorkBlockedData
+    nextDependsOn: string[]
+}
+
+type WorkBlockDecisionEvent =
+    | ReturnType<typeof WorkBlockAccepted.create>
+    | ReturnType<typeof WorkBlockRejected.create>
+
+interface RememberedWorkBlockDecision {
+    fingerprint: string
+    event: WorkBlockDecisionEvent
 }
 
 type BoardPhase = "idle" | "preparing" | "running" | "verifying" | "pushing" | "done"
@@ -158,6 +189,18 @@ export class CollectiveBoard extends SerializedObserver {
     private readonly completed: string[] = []
     private readonly failed = new Set<string>()
     private readonly dropped = new Set<string>()
+    private readonly pendingDependencyBlocks = new Map<
+        string,
+        PendingDependencyBlock
+    >()
+    /** Run-local decision ledger. RuntimeReplanCoordinator durably protects
+     * the graph mutation; this ledger makes duplicate bridge delivery replay
+     * the exact user-facing block decision instead of changing its truth after
+     * the lease settles. */
+    private readonly dependencyBlockDecisions = new Map<
+        string,
+        RememberedWorkBlockDecision
+    >()
     private readonly leases = new Map<
         string,
         {
@@ -165,11 +208,16 @@ export class CollectiveBoard extends SerializedObserver {
             generation: number
             workerId: string
             route?: { routeId: string; backend: string; model: string }
+            supportsCooperativeSuspend: boolean
         }
     >()
     private readonly settledLeaseResults = new Set<string>()
     private readonly pendingQuality = new Map<string, StoryResultData>()
     private readonly durations = new Map<string, number>()
+    private readonly dependencySuspensionDurationSecs = new Map<
+        string,
+        number
+    >()
     private readonly recoveryAttempts = new Map<string, number>()
     private readonly capacityRerouteAttempts = new Map<string, number>()
     private readonly recoveryContext = new Map<
@@ -181,6 +229,7 @@ export class CollectiveBoard extends SerializedObserver {
                 | "transport"
                 | "infrastructure"
                 | "verification"
+                | "dependency"
             reason: string
             branch?: string
         }
@@ -290,9 +339,7 @@ export class CollectiveBoard extends SerializedObserver {
                     })
                     if (outcome.applied && RuntimeReplanApplied.is(outcome.event)) {
                         this.prd = outcome.applied.prd
-                        for (const storyId of outcome.applied.addedStoryIds) {
-                            this.runtimeAdaptiveStoryIds.add(storyId)
-                        }
+                        this.trackRuntimeAdaptiveStories(outcome.applied)
                     }
                     return outcome
                 },
@@ -364,7 +411,27 @@ export class CollectiveBoard extends SerializedObserver {
                 generation: event.data.generation,
                 workerId: event.data.workerId,
                 ...(event.data.route ? { route: { ...event.data.route } } : {}),
+                supportsCooperativeSuspend:
+                    event.data.supportsCooperativeSuspend === true,
             })
+            return
+        }
+        if (WorkBlocked.is(event) && event.data.runId === this.opts.runId) {
+            if (
+                context.source !== this.opts.dependencyAuthority &&
+                this.opts.unsafeAllowUnboundDependencyAuthority !== true
+            ) return
+            this.onWorkBlocked(event.data)
+            return
+        }
+        if (
+            WorkLeaseReleased.is(event) &&
+            event.data.runId === this.opts.runId &&
+            event.data.reason === "dependency_blocked" &&
+            (!this.opts.leaseAuthority ||
+                context.source === this.opts.leaseAuthority)
+        ) {
+            this.onDependencyLeaseReleased(event.data)
             return
         }
         if (
@@ -484,6 +551,22 @@ export class CollectiveBoard extends SerializedObserver {
             (!this.opts.leaseAuthority || context.source === this.opts.leaseAuthority) &&
             this.matchesLease(event.data.storyId, event.data.leaseId)
         ) {
+            const pendingBlock = this.pendingDependencyBlocks.get(
+                event.data.storyId,
+            )
+            if (pendingBlock?.request.leaseId === event.data.leaseId) {
+                // A suspension timeout is not an execution failure: there is
+                // no proof that the worker/process tree is quiescent, so the
+                // ordinary cleanup/recovery path could race live writes or
+                // start a second generation beside the first. Stop this run
+                // fail-closed and leave the isolated worktree untouched.
+                this.terminate(
+                    false,
+                    `dependency suspension for ${event.data.storyId} expired ` +
+                        `before worker quiescence; stopped without workspace cleanup`,
+                )
+                return
+            }
             const failure: StoryFailureData = {
                 kind: "infrastructure",
                 code: "command_timeout",
@@ -537,6 +620,18 @@ export class CollectiveBoard extends SerializedObserver {
                 pending.generation !== event.data.generation
             ) return
             this.pendingCleanup.delete(event.data.cleanupId)
+            const dependencyResume =
+                this.recoveryContext.get(event.data.storyId)?.kind ===
+                "dependency"
+            if (dependencyResume) {
+                this.failed.add(event.data.storyId)
+                if (this.wave) {
+                    this.wave.blocked = this.wave.blocked.filter(
+                        (storyId) => storyId !== event.data.storyId,
+                    )
+                    addUnique(this.wave.failed, event.data.storyId)
+                }
+            }
             this.unmergeable.add(event.data.storyId)
             this.recoveryAborted.add(event.data.storyId)
             this.capacityRecoveryPending.delete(event.data.storyId)
@@ -755,10 +850,316 @@ export class CollectiveBoard extends SerializedObserver {
         )
     }
 
+    private onWorkBlocked(request: WorkBlockedData): void {
+        if (this.replayWorkBlockDecision(request)) return
+        if (this.opts.dependencySuspensionEnabled !== true) {
+            this.rejectWorkBlock(
+                request,
+                "invalid_request",
+                "dependency suspension is disabled for this collective run",
+            )
+            return
+        }
+        if (this.phase !== "running" || !this.prd || !this.wave) {
+            this.rejectWorkBlock(
+                request,
+                "run_not_active",
+                "dependency suspension is available only during an active wave",
+            )
+            return
+        }
+        const lease = this.leases.get(request.storyId)
+        if (
+            !lease ||
+            lease.leaseId !== request.leaseId ||
+            lease.generation !== request.generation
+        ) {
+            this.rejectWorkBlock(
+                request,
+                "stale_lease",
+                "dependency suspension requires the story's current lease",
+            )
+            return
+        }
+        if (!lease.supportsCooperativeSuspend) {
+            this.rejectWorkBlock(
+                request,
+                "invalid_request",
+                `worker ${lease.workerId} cannot prove cooperative suspension quiescence`,
+            )
+            return
+        }
+        if (
+            this.settledLeaseResults.has(request.leaseId) ||
+            !this.wave.pending.has(request.storyId) ||
+            this.pendingDependencyBlocks.has(request.storyId)
+        ) {
+            this.rejectWorkBlock(
+                request,
+                "already_settled",
+                "the story lease is already settling",
+            )
+            return
+        }
+        if (!validDependencyBlock(request)) {
+            this.rejectWorkBlock(
+                request,
+                "invalid_request",
+                "dependency suspension requires a reason and unique story ids",
+            )
+            return
+        }
+
+        const story = this.prd.userStories.find(
+            (candidate) => candidate.id === request.storyId,
+        )
+        if (!story) {
+            this.rejectWorkBlock(
+                request,
+                "stale_lease",
+                "the leased story no longer exists in the runtime graph",
+            )
+            return
+        }
+        const storyById = new Map(
+            this.prd.userStories.map((candidate) => [candidate.id, candidate]),
+        )
+        const unknown = request.requiredStoryIds.find(
+            (storyId) => !storyById.has(storyId),
+        )
+        if (unknown) {
+            this.rejectWorkBlock(
+                request,
+                "unknown_dependency",
+                `required story ${unknown} does not exist in the runtime graph`,
+            )
+            return
+        }
+        if (
+            request.requiredStoryIds.includes(request.storyId) ||
+            request.requiredStoryIds.some(
+                (storyId) => storyById.get(storyId)?.passes,
+            )
+        ) {
+            this.rejectWorkBlock(
+                request,
+                request.requiredStoryIds.includes(request.storyId)
+                    ? "dependency_cycle"
+                    : "dependency_already_satisfied",
+                request.requiredStoryIds.includes(request.storyId)
+                    ? "a story cannot block on itself"
+                    : "a requested prerequisite is already integrated",
+            )
+            return
+        }
+
+        const nextDependsOn = [
+            ...story.dependsOn,
+            ...request.requiredStoryIds.filter(
+                (storyId) => !story.dependsOn.includes(storyId),
+            ),
+        ]
+        if (nextDependsOn.length === story.dependsOn.length) {
+            this.rejectWorkBlock(
+                request,
+                "dependency_already_satisfied",
+                "the story already declares every requested prerequisite",
+            )
+            return
+        }
+
+        const immutable = this.runtimeImmutableStoryIds()
+        // Cooperative suspension is the one transition allowed to rewrite
+        // its own active node. Every other leased/started node stays immutable.
+        immutable.delete(request.storyId)
+        const proposal: RuntimeReplanProposedData = {
+            runId: this.opts.runId,
+            proposalId: `${this.opts.runId}:dependency-block:${request.blockId}`,
+            sourceStoryId: request.storyId,
+            leaseId: request.leaseId,
+            generation: request.generation,
+            baseGraphVersion: this.runtimeReplans.graphVersion,
+            reason: request.reason,
+            mutation: {
+                addedStories: [],
+                removedStoryIds: [],
+                modifiedDeps: { [request.storyId]: nextDependsOn },
+            },
+        }
+        const outcome = this.runtimeReplans.decide(proposal, {
+            active: true,
+            prd: this.prd,
+            immutableStoryIds: immutable,
+            activeLease: {
+                leaseId: request.leaseId,
+                generation: request.generation,
+            },
+            adaptationsSinceProgress: this.runtimeAdaptationsSinceProgress,
+            storyAccounting: "policy",
+            maxAddedStories: 0,
+        })
+        if (!outcome.applied || !RuntimeReplanApplied.is(outcome.event)) {
+            this.emit(outcome.event)
+            const code = RuntimeReplanRejected.is(outcome.event)
+                ? blockRejectionCode(outcome.event.data.code)
+                : "invalid_request"
+            const reason = RuntimeReplanRejected.is(outcome.event)
+                ? outcome.event.data.reason
+                : "dependency graph mutation was not applied"
+            this.rejectWorkBlock(request, code, reason)
+            return
+        }
+
+        this.prd = outcome.applied.prd
+        this.trackRuntimeAdaptiveStories(outcome.applied)
+        this.settledLeaseResults.add(request.leaseId)
+        this.pendingDependencyBlocks.set(request.storyId, {
+            request: {
+                ...request,
+                requiredStoryIds: [...request.requiredStoryIds],
+            },
+            nextDependsOn,
+        })
+        this.emit(outcome.event)
+        const accepted = WorkBlockAccepted.create({
+            ...request,
+            requiredStoryIds: [...request.requiredStoryIds],
+            graphVersion: outcome.event.data.graphVersion,
+        })
+        this.rememberWorkBlockDecision(request, accepted)
+        this.emit(accepted)
+        this.emit(
+            ConductorState.create({
+                phase: "running_level",
+                detail:
+                    `${request.storyId} suspended on ` +
+                    request.requiredStoryIds.join(", "),
+                currentLevel: this.wave.ordinal,
+                storyIds: this.wave.storyIds,
+            }),
+        )
+    }
+
+    private onDependencyLeaseReleased(release: {
+        storyId: string
+        leaseId: string
+        attempts?: unknown
+        durationSecs?: unknown
+    }): void {
+        const { storyId, leaseId } = release
+        const block = this.pendingDependencyBlocks.get(storyId)
+        const lease = this.leases.get(storyId)
+        if (
+            !block ||
+            !lease ||
+            block.request.leaseId !== leaseId ||
+            lease.leaseId !== leaseId ||
+            !this.wave?.pending.has(storyId)
+        ) return
+
+        const attempts = nonNegativeSafeInteger(release.attempts)
+        if (attempts !== null) this.totalAttempts += attempts
+        const durationSecs = nonNegativeFinite(release.durationSecs)
+        if (durationSecs !== null) {
+            this.dependencySuspensionDurationSecs.set(
+                storyId,
+                (this.dependencySuspensionDurationSecs.get(storyId) ?? 0) +
+                    durationSecs,
+            )
+        }
+
+        this.pendingDependencyBlocks.delete(storyId)
+        this.wave.pending.delete(storyId)
+        addUnique(this.wave.blocked, storyId)
+        this.leases.delete(storyId)
+        this.pendingQuality.delete(storyId)
+        this.pendingRecovery.delete(storyId)
+        this.recoveryDecided.delete(storyId)
+        this.recoveryContext.set(storyId, {
+            kind: "dependency",
+            reason:
+                `blocked on ${block.request.requiredStoryIds.join(", ")}: ` +
+                block.request.reason,
+        })
+
+        const cleanupId =
+            `${this.opts.runId}:cleanup:${++this.cleanupSequence}:${storyId}`
+        this.pendingCleanup.set(cleanupId, {
+            storyId,
+            leaseId,
+            generation: block.request.generation,
+        })
+        this.emit(
+            WorkspaceCleanupRequested.create({
+                runId: this.opts.runId,
+                cleanupId,
+                storyId,
+                leaseId,
+                generation: block.request.generation,
+                preserveForRecovery: true,
+            }),
+        )
+        this.maybeCompleteWave()
+    }
+
+    private rejectWorkBlock(
+        request: WorkBlockedData,
+        code: WorkBlockRejectionCode,
+        reason: string,
+        remember = true,
+    ): void {
+        const rejected = WorkBlockRejected.create({
+            runId: request.runId,
+            blockId: request.blockId,
+            storyId: request.storyId,
+            leaseId: request.leaseId,
+            generation: request.generation,
+            requiredStoryIds: [...request.requiredStoryIds],
+            requestReason: request.reason,
+            code,
+            reason,
+        })
+        if (remember) this.rememberWorkBlockDecision(request, rejected)
+        this.emit(rejected)
+    }
+
+    private replayWorkBlockDecision(request: WorkBlockedData): boolean {
+        const remembered = this.dependencyBlockDecisions.get(request.blockId)
+        if (!remembered) return false
+        if (remembered.fingerprint === workBlockFingerprint(request)) {
+            this.emit(remembered.event)
+            return true
+        }
+        this.rejectWorkBlock(
+            request,
+            "invalid_request",
+            `block id ${request.blockId || "(missing)"} was already used with different content`,
+            false,
+        )
+        return true
+    }
+
+    private rememberWorkBlockDecision(
+        request: WorkBlockedData,
+        event: WorkBlockDecisionEvent,
+    ): void {
+        if (!request.blockId || this.dependencyBlockDecisions.has(request.blockId)) {
+            return
+        }
+        this.dependencyBlockDecisions.set(request.blockId, {
+            fingerprint: workBlockFingerprint(request),
+            event,
+        })
+    }
+
     private onStoryResult(result: StoryResultData): void {
         if (this.phase !== "running" || !this.wave?.pending.has(result.storyId)) return
         this.totalAttempts += result.attempts
-        this.durations.set(result.storyId, result.durationSecs)
+        this.durations.set(
+            result.storyId,
+            (this.dependencySuspensionDurationSecs.get(result.storyId) ?? 0) +
+                result.durationSecs,
+        )
 
         if (result.success) {
             if (this.opts.expectQualityDecisions) {
@@ -890,6 +1291,7 @@ export class CollectiveBoard extends SerializedObserver {
         const duration = this.durations.get(storyId) ?? 0
         this.prd = markStoryPassed(this.prd, storyId, duration)
         savePrdAtomic(this.opts.prdPath, this.prd)
+        this.dependencySuspensionDurationSecs.delete(storyId)
         this.wave.pending.delete(storyId)
         addUnique(this.wave.passed, storyId)
         addUnique(this.completed, storyId)
@@ -1056,6 +1458,9 @@ export class CollectiveBoard extends SerializedObserver {
                 ordinal: wave.ordinal,
                 passed: wave.passed,
                 failed: wave.failed,
+                ...(wave.blocked.length > 0
+                    ? { blocked: wave.blocked }
+                    : {}),
             }),
         )
         this.emit(
@@ -1082,7 +1487,24 @@ export class CollectiveBoard extends SerializedObserver {
             this.pendingReplans.length = 0
             return null
         }
+
+        // A safe wave boundary is one logical healing cycle. Check its budget
+        // before draining anything, then finish the whole compatible sequence
+        // against the latest committed graph. Checking between sibling
+        // proposals both amplifies one shared failure into N healing actions
+        // and loses the unvisited tail because the queue was already drained.
+        const hasActionableReplan = this.pendingReplans.some(
+            (replan) =>
+                replan.removedStoryIds.length === 0 ||
+                replan.addedStories.length > 0,
+        )
+        if (hasActionableReplan) {
+            const halt = this.healingHaltReason()
+            if (halt) return halt
+        }
+
         const replans = this.pendingReplans.splice(0)
+        let appliedReplans = 0
         for (const replan of replans) {
             if (replan.removedStoryIds.length > 0 && replan.addedStories.length === 0) {
                 this.emit(
@@ -1093,10 +1515,6 @@ export class CollectiveBoard extends SerializedObserver {
                     }),
                 )
                 continue
-            }
-            const halt = this.healingHaltReason()
-            if (halt) {
-                return halt
             }
             const recovery = replan.recovery
             const proposal: RuntimeReplanProposedData = {
@@ -1149,10 +1567,11 @@ export class CollectiveBoard extends SerializedObserver {
                 continue
             }
             this.prd = outcome.applied.prd
+            this.trackRuntimeAdaptiveStories(outcome.applied)
             // Raw Surgeon Replan is a proposal in collective mode. Stateful
             // observers consume only this authoritative, persisted decision.
             this.emit(outcome.event)
-            this.noteHealingAction(currentLevel)
+            appliedReplans += 1
             if (replan.addedStories.length > 0) {
                 for (const id of replan.removedStoryIds) {
                     this.failed.delete(id)
@@ -1170,6 +1589,13 @@ export class CollectiveBoard extends SerializedObserver {
                     currentLevel,
                 }),
             )
+        }
+        if (appliedReplans > 0) {
+            // Count the boundary, not each sibling symptom. Deliberately do
+            // not halt after this increment: scheduleNextWave must first give
+            // a newly unlocked prerequisite a chance to integrate and reset
+            // the no-progress counter.
+            this.noteHealingAction(currentLevel)
         }
         return null
     }
@@ -1261,15 +1687,7 @@ export class CollectiveBoard extends SerializedObserver {
             // The coordinator has already crossed the durable commit boundary;
             // swap the Board snapshot before any observer can react to Applied.
             this.prd = outcome.applied.prd
-            for (const storyId of outcome.applied.removedStoryIds) {
-                this.runtimeAdaptiveStoryIds.delete(storyId)
-            }
-            for (const storyId of [
-                ...outcome.applied.addedStoryIds,
-                ...outcome.applied.modifiedStoryIds,
-            ]) {
-                this.runtimeAdaptiveStoryIds.add(storyId)
-            }
+            this.trackRuntimeAdaptiveStories(outcome.applied)
             this.emit(outcome.event)
             this.noteRuntimeAdaptation(this.wave?.ordinal ?? this.waveOrdinal)
             this.emit(
@@ -1301,6 +1719,22 @@ export class CollectiveBoard extends SerializedObserver {
                 storyIds: this.wave?.storyIds,
             }),
         )
+    }
+
+    private trackRuntimeAdaptiveStories(change: {
+        readonly removedStoryIds: readonly string[]
+        readonly addedStoryIds: readonly string[]
+        readonly modifiedStoryIds: readonly string[]
+    }): void {
+        for (const storyId of change.removedStoryIds) {
+            this.runtimeAdaptiveStoryIds.delete(storyId)
+        }
+        for (const storyId of [
+            ...change.addedStoryIds,
+            ...change.modifiedStoryIds,
+        ]) {
+            this.runtimeAdaptiveStoryIds.add(storyId)
+        }
     }
 
     private runtimeImmutableStoryIds(): Set<string> {
@@ -1581,6 +2015,7 @@ export class CollectiveBoard extends SerializedObserver {
             pending: new Set(storyIds),
             passed: [],
             failed: [],
+            blocked: [],
             recovery,
         }
         if (recovery) {
@@ -1639,14 +2074,20 @@ export class CollectiveBoard extends SerializedObserver {
     private offerStory(story: PrdStory, context: string | null): void {
         const offerId = `${this.opts.runId}:offer:${++this.offerSequence}:${story.id}`
         const basePrompt = this.storyPrompt(story)
-        const recovery = this.wave?.recovery
-            ? this.recoveryContext.get(story.id)
-            : undefined
+        const rememberedRecovery = this.recoveryContext.get(story.id)
+        const recovery =
+            this.wave?.recovery || rememberedRecovery?.kind === "dependency"
+                ? rememberedRecovery
+                : undefined
         const recoveryPrompt = recovery
             ? [
-                  "## Recovery attempt",
+                  recovery.kind === "dependency"
+                      ? "## Resumed after dependency integration"
+                      : "## Recovery attempt",
                   "",
-                  `The previous ${recovery.kind} attempt failed: ${recovery.reason}`,
+                  recovery.kind === "dependency"
+                      ? `The previous attempt cooperatively paused: ${recovery.reason}`
+                      : `The previous ${recovery.kind} attempt failed: ${recovery.reason}`,
                   recovery.branch
                       ? `This fresh worktree starts at the latest integrated run branch. The rejected attempt is preserved at ${recovery.branch}. Inspect \`git diff HEAD...${recovery.branch}\` and \`git show ${recovery.branch}\`, then reapply its intent while preserving already-integrated work. Do not merge or cherry-pick the backup wholesale. Run the required checks and commit the reconciled result.`
                       : "Re-run the story from the current integrated repository state, address the failure, run the required checks, and commit the corrected work.",
@@ -1966,6 +2407,75 @@ export class CollectiveBoard extends SerializedObserver {
 
 function addUnique(values: string[], value: string): void {
     if (!values.includes(value)) values.push(value)
+}
+
+function workBlockFingerprint(request: WorkBlockedData): string {
+    return JSON.stringify([
+        request.runId,
+        request.blockId,
+        request.storyId,
+        request.leaseId,
+        request.generation,
+        [...request.requiredStoryIds],
+        request.reason,
+    ])
+}
+
+function nonNegativeSafeInteger(value: unknown): number | null {
+    return typeof value === "number" &&
+        Number.isSafeInteger(value) &&
+        value >= 0
+        ? value
+        : null
+}
+
+function nonNegativeFinite(value: unknown): number | null {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0
+        ? value
+        : null
+}
+
+function validDependencyBlock(request: WorkBlockedData): boolean {
+    return (
+        request.blockId.trim().length > 0 &&
+        request.blockId.length <= 200 &&
+        request.reason.trim().length > 0 &&
+        request.reason.length <= 8_000 &&
+        request.requiredStoryIds.length > 0 &&
+        request.requiredStoryIds.length <= 32 &&
+        request.requiredStoryIds.every(
+            (storyId) =>
+                storyId.trim().length > 0 &&
+                storyId.trim() === storyId &&
+                storyId.length <= 128,
+        ) &&
+        new Set(request.requiredStoryIds).size ===
+            request.requiredStoryIds.length
+    )
+}
+
+function blockRejectionCode(
+    code: RuntimeReplanRejectionCode,
+): WorkBlockRejectionCode {
+    switch (code) {
+        case "run_not_active":
+            return "run_not_active"
+        case "inactive_source":
+        case "stale_graph_version":
+            return "stale_lease"
+        case "immutable_story":
+            return "already_settled"
+        case "unknown_dependency":
+        case "unknown_story":
+            return "unknown_dependency"
+        case "self_dependency":
+        case "dependency_cycle":
+            return "dependency_cycle"
+        case "no_op":
+            return "dependency_already_satisfied"
+        default:
+            return "invalid_request"
+    }
 }
 
 function messageOf(error: unknown): string {

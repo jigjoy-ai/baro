@@ -31,8 +31,8 @@ const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "NotebookEdit", "edit_file"])
  *
  * Subscribes to: AgentState, StoryResult, StoryRouted, StoryMerged,
  * StoryMergeFailed, and per-agent function calls.
- * Emits: story_start, story_complete, story_error, story_retry, routed,
- * story_merged, merge_failed.
+ * Emits: story_start, story_suspended, story_complete, story_error,
+ * story_retry, routed, story_merged, merge_failed.
  */
 export class StoryLifecycleForwarder extends BaseObserver {
     private startedStories = new Set<string>()
@@ -186,6 +186,20 @@ export class StoryLifecycleForwarder extends BaseObserver {
     }
 
     private handleStoryResult(item: StoryResultData): void {
+        if (item.suspension) {
+            const key = integrationKey(item.runId, item.leaseId)
+            if (key) this.pendingIntegration.delete(key)
+            // The next lease is a real new execution interval and must be
+            // visible as another story_start rather than remaining "running".
+            this.startedStories.delete(item.storyId)
+            this.filesByStory.delete(item.storyId)
+            emit({
+                type: "story_suspended",
+                id: item.storyId,
+                block_id: item.suspension.blockId,
+            })
+            return
+        }
         if (item.success) {
             if (item.runId && item.leaseId && item.generation != null) {
                 this.pendingIntegration.set(

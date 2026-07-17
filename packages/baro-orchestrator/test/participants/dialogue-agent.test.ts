@@ -24,10 +24,12 @@ import {
     ConversationRequested,
     ConversationResponded,
     ModelInvocationMeasured,
+    LevelCompleted,
     RunCompleted,
     RunStarted,
     RuntimeReplanApplied,
     StoryRouted,
+    StoryResult,
     WorkLeaseGranted,
     WorkLeaseReleased,
 } from "../../src/semantic-events.js"
@@ -38,6 +40,64 @@ import {
 } from "./helpers.js"
 
 describe("DialogueAgent", () => {
+    it("describes dependency suspension as blocked work rather than execution failure", async () => {
+        const operator = source("operator")
+        const dialogue = new DialogueAgent({
+            runId: "run-suspended-dialogue",
+            operatorAuthority: operator,
+            responder: async (input) => {
+                assert.match(
+                    input.userPrompt,
+                    /S1 execution suspended for dependency block block-S1-S0/,
+                )
+                assert.match(input.userPrompt, /blocked=S1/)
+                assert.doesNotMatch(input.userPrompt, /S1 execution failed/)
+                return JSON.stringify({
+                    message: "S1 is waiting for its dependency.",
+                    messages: [],
+                    delegation: null,
+                })
+            },
+        })
+        const env = joinWithCapture(dialogue)
+        env.deliverSemanticEvent(
+            source("worker"),
+            StoryResult.create({
+                storyId: "S1",
+                success: false,
+                attempts: 1,
+                durationSecs: 2,
+                error: null,
+                runId: "run-suspended-dialogue",
+                suspension: {
+                    kind: "dependency",
+                    blockId: "block-S1-S0",
+                },
+            }),
+        )
+        env.deliverSemanticEvent(
+            source("board"),
+            LevelCompleted.create({
+                ordinal: 1,
+                passed: [],
+                failed: [],
+                blocked: ["S1"],
+            }),
+        )
+        env.deliverSemanticEvent(
+            operator,
+            ConversationRequested.create({
+                runId: "run-suspended-dialogue",
+                messageId: "message-suspended",
+                text: "What is happening?",
+                source: "user",
+            }),
+        )
+
+        await dialogue.idle()
+        assert.equal(env.events.filter(ConversationResponded.is).length, 1)
+    })
+
     it("continues bounded front-door context without promoting transcript text or granting authority", async () => {
         const operator = source("operator")
         const context: ConversationContextSnapshot = {

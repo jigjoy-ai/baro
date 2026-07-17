@@ -11,6 +11,7 @@ import { AgenticEnvironment, type Participant } from "@mozaik-ai/core"
 import type { GatewayBillingCoordinator } from "../billing/index.js"
 import type { StorySpawnRequestData } from "../semantic-events.js"
 import type { StoryRoute } from "../routing.js"
+import { PROCESS_TREE_CAPABILITIES } from "../process-tree.js"
 import { CodexStoryAgent } from "./codex-story-agent.js"
 import { OpenAIStoryAgent } from "./openai-story-agent.js"
 import { OpenCodeStoryAgent } from "./opencode-story-agent.js"
@@ -63,9 +64,19 @@ export interface StoryExecution {
      * Optional so custom executors need not implement it.
      */
     abort?(): void
+    /** Stop local retries, terminate the complete process/tool tree, and
+     * resolve only after it is safe to snapshot the story worktree. */
+    suspend?(blockId: string): Promise<StorySuspensionSummary>
+}
+
+export interface StorySuspensionSummary {
+    attempts: number
+    durationSecs: number
 }
 
 export interface StoryExecutor {
+    /** Route-specific capability used before Board accepts WorkBlocked. */
+    supportsCooperativeSuspend?(route: StoryRoute): boolean
     start(
         req: StorySpawnRequestData,
         route: StoryRoute,
@@ -90,6 +101,17 @@ interface TerminalSourceRegistrant {
 
 /** In-process executor: builds the backend agent for the resolved route. */
 export class LocalStoryExecutor implements StoryExecutor {
+    supportsCooperativeSuspend(route: StoryRoute): boolean {
+        // Native OpenAI tools currently cannot prove that an underlying tool
+        // promise stopped writing after AbortSignal wins its outer race.
+        // CLI routes additionally require an OS-owned process group; Windows
+        // needs a Job Object before it can advertise the same guarantee.
+        return (
+            route.backend !== "openai" &&
+            PROCESS_TREE_CAPABILITIES.ownedProcessGroupQuiescenceCertification
+        )
+    }
+
     start(
         req: StorySpawnRequestData,
         route: StoryRoute,
@@ -200,6 +222,15 @@ export class LocalStoryExecutor implements StoryExecutor {
         return {
             dispose: (e: AgenticEnvironment) => agent.leave(e),
             abort: () => (agent as { abort?: () => void }).abort?.(),
+            ...("suspend" in agent && typeof agent.suspend === "function"
+                ? {
+                      suspend: (blockId: string) =>
+                          agent.suspend(blockId).then((outcome) => ({
+                              attempts: outcome.attempts,
+                              durationSecs: outcome.durationSecs,
+                          })),
+                  }
+                : {}),
         }
     }
 }

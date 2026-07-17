@@ -237,6 +237,101 @@ describe("Conductor", () => {
         })
     })
 
+    it("applies a safe-boundary sibling replan batch as one recovery cycle", async () => {
+        await withTempDir("conductor-test-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            const prd = oneStoryPrd()
+            prd.userStories.push({
+                ...prd.userStories[0]!,
+                id: "S2",
+                title: "Implement sibling coverage",
+            })
+            writeFileSync(prdPath, JSON.stringify(prd, null, 2) + "\n")
+
+            const conductor = new Conductor({
+                prdPath,
+                cwd: dir,
+                parallel: 2,
+                timeoutSecs: 45,
+                defaultModel: "sonnet",
+                intraLevelDelaySecs: 0,
+                replanProgressBudget: 1,
+            })
+            const env = joinWithCapture(conductor)
+
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "unit test" }),
+            )
+            const initialSpawns = await waitForEvents(
+                env.events,
+                StorySpawnRequest.is,
+                2,
+            )
+            assert.deepEqual(
+                initialSpawns.map((event) => event.data.storyId),
+                ["S1", "S2"],
+            )
+
+            // Both failures belong to the same safe boundary. With the old
+            // per-item halt, applying S1's replacement exhausted the budget,
+            // discarded S2's already-drained sibling proposal, and stopped.
+            env.deliverSemanticEvent(
+                source("surgeon-S1"),
+                replanEvent("S1", [storyAdd("S1-replacement")]),
+            )
+            env.deliverSemanticEvent(
+                source("surgeon-S2"),
+                replanEvent("S2", [storyAdd("S2-replacement")]),
+            )
+            env.deliverSemanticEvent(source("S1"), failResult("S1"))
+            env.deliverSemanticEvent(source("S2"), failResult("S2"))
+
+            const applied = await waitForEvents(env.events, ReplanApplied.is, 2)
+            assert.deepEqual(
+                applied.map((event) => event.data.addedStories[0]?.id),
+                ["S1-replacement", "S2-replacement"],
+            )
+            assert.equal(
+                env.events
+                    .filter(ConductorState.is)
+                    .filter(
+                        (event) =>
+                            event.data.detail === "replan 1/1 without progress",
+                    ).length,
+                1,
+            )
+
+            const persisted = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
+            assert.deepEqual(
+                persisted.userStories.map((story) => story.id),
+                ["S1-replacement", "S2-replacement"],
+            )
+
+            const replacementSpawns = await waitForEvents(
+                env.events,
+                StorySpawnRequest.is,
+                4,
+            )
+            assert.deepEqual(
+                replacementSpawns.slice(2).map((event) => event.data.storyId),
+                ["S1-replacement", "S2-replacement"],
+            )
+            env.deliverSemanticEvent(
+                source("S1-replacement"),
+                passResult("S1-replacement"),
+            )
+            env.deliverSemanticEvent(
+                source("S2-replacement"),
+                passResult("S2-replacement"),
+            )
+
+            const completed = await waitForEvent(env.events, RunCompleted.is)
+            assert.equal(completed.data.success, true)
+            assert.equal(completed.data.abortReason, null)
+        })
+    })
+
     it("terminates gracefully when the progress budget is exhausted, without recovery", async () => {
         await withTempDir("conductor-test-", async (dir) => {
             const prdPath = join(dir, "prd.json")

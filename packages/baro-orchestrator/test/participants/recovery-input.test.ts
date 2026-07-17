@@ -33,6 +33,22 @@ describe("recoveryInput", () => {
         assert.equal(recoveryInput(event), null)
     })
 
+    it("keeps dependency suspension out of every Surgeon backend", () => {
+        const event = StoryResult.create({
+            storyId: "S1",
+            success: false,
+            attempts: 1,
+            durationSecs: 2,
+            error: null,
+            suspension: {
+                kind: "dependency",
+                blockId: "block-S1-S0",
+            },
+        })
+
+        assert.equal(recoveryInput(event), null)
+    })
+
     it("keeps operational incidents and inconclusive quality out of Surgeon policy", () => {
         for (const kind of ["transport", "infrastructure", "verification"] as const) {
             const event = StoryResult.create({

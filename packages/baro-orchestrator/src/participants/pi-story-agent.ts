@@ -27,7 +27,7 @@ import {
     PiCliParticipant,
     type PiRunSummary,
 } from "./pi-cli-participant.js"
-import { correlationOf } from "./story-agent.js"
+import { correlationOf, type StorySuspension } from "./story-agent.js"
 
 export interface PiStorySpec {
     /** Story ID, used as agentId for observer attribution. */
@@ -59,6 +59,7 @@ export interface PiStoryOutcome {
     finalSummary: PiRunSummary | null
     error: string | null
     failure?: StoryFailureData
+    suspension?: StorySuspension
 }
 
 export class PiStoryAgent extends BaseObserver {
@@ -81,6 +82,11 @@ export class PiStoryAgent extends BaseObserver {
     private currentPhase: AgentPhase = "idle"
     private startedAt: number | null = null
     private currentFailureSignals: unknown[] = []
+    private stopRequested = false
+    /** Lifecycle signal also closes the tiny transition→timer lost-wake window. */
+    private readonly retryDelayController = new AbortController()
+    private suspension: StorySuspension | null = null
+    private processQuiescence: Promise<boolean> | null = null
     private resolveDone!: (outcome: PiStoryOutcome) => void
     public readonly done: Promise<PiStoryOutcome>
 
@@ -162,14 +168,25 @@ export class PiStoryAgent extends BaseObserver {
         }
     }
 
-    /**
-     * Kills the in-flight Pi child but does NOT settle `done` — that happens
-     * via the attempt's normal exit/timeout path in `executeAllAttempts`.
-     * The "aborted" transition is cosmetic and doesn't short-circuit it.
-     */
     abort(): void {
-        this.currentPi?.abort()
+        this.stopRequested = true
+        this.wakeRetryDelay()
+        this.quiesceCurrentPi()
         this.transition("aborted", "external abort")
+    }
+
+    async suspend(blockId: string): Promise<PiStoryOutcome> {
+        this.recordSuspension(blockId)
+        this.stopRequested = true
+        this.wakeRetryDelay()
+        this.transition("aborted", `dependency suspension ${blockId}`)
+        const quiesced = await this.quiesceCurrentPi()
+        if (!quiesced) {
+            throw new Error(
+                `story ${this.spec.id} process group quiescence could not be certified`,
+            )
+        }
+        return this.done
     }
 
     private async executeAllAttempts(): Promise<void> {
@@ -184,12 +201,14 @@ export class PiStoryAgent extends BaseObserver {
             this.spec.hardTimeoutSecs > 0
                 ? setTimeout(() => {
                       hardTimedOut = true
-                      this.currentPi?.abort()
+                      this.wakeRetryDelay()
+                      this.quiesceCurrentPi()
                   }, this.spec.hardTimeoutSecs * 1000)
                 : null
 
         try {
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                if (this.stopRequested) break
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
                     lastFailure = {
@@ -200,11 +219,13 @@ export class PiStoryAgent extends BaseObserver {
                 }
 
                 if (attempt > 1) {
+                    if (this.stopRequested) break
                     this.transition(
                         "waiting",
                         `retrying (attempt ${attempt}/${maxAttempts})`,
                     )
-                    await setTimeoutPromise(this.spec.retryDelayMs)
+                    await this.waitForRetryDelay()
+                    if (this.stopRequested) break
                     if (hardTimedOut) {
                         lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
                         lastFailure = {
@@ -221,6 +242,7 @@ export class PiStoryAgent extends BaseObserver {
                 lastError = result.error
                 lastFailure = result.failure
 
+                if (this.stopRequested) break
                 if (result.success) {
                     const durationSecs = Math.round(
                         (Date.now() - (this.startedAt ?? Date.now())) / 1000,
@@ -252,15 +274,34 @@ export class PiStoryAgent extends BaseObserver {
             if (hardTimer !== null) clearTimeout(hardTimer)
         }
 
+        await this.processQuiescence
+
+        if (this.suspension) {
+            lastError = null
+            lastFailure = undefined
+        } else if (this.stopRequested) {
+            lastError = "story execution aborted externally"
+            lastFailure = undefined
+        }
+
         const durationSecs = Math.round(
             (Date.now() - (this.startedAt ?? Date.now())) / 1000,
         )
-        this.transition(
-            "failed",
-            boardOwnsCliRecovery(lastFailure)
-                ? `operational failure after ${attempts} attempt(s)`
-                : `exhausted ${attempts}/${maxAttempts} attempts`,
-        )
+        if (this.stopRequested) {
+            this.transition(
+                "aborted",
+                this.suspension
+                    ? `suspended on dependency block ${this.suspension.blockId}`
+                    : "external abort settled",
+            )
+        } else {
+            this.transition(
+                "failed",
+                boardOwnsCliRecovery(lastFailure)
+                    ? `operational failure after ${attempts} attempt(s)`
+                    : `exhausted ${attempts}/${maxAttempts} attempts`,
+            )
+        }
         this.emitStoryResult(
             false,
             attempts,
@@ -276,6 +317,7 @@ export class PiStoryAgent extends BaseObserver {
             finalSummary: lastSummary,
             error: lastError,
             ...(lastFailure ? { failure: lastFailure } : {}),
+            ...(this.suspension ? { suspension: this.suspension } : {}),
         })
     }
 
@@ -298,6 +340,7 @@ export class PiStoryAgent extends BaseObserver {
             }
         }
 
+        this.processQuiescence = null
         this.transition("running", `attempt ${attempt}`)
         this.currentFailureSignals = []
 
@@ -321,7 +364,7 @@ export class PiStoryAgent extends BaseObserver {
                 `attempt ${attempt} timeout after ${this.spec.timeoutSecs}s`,
             )
         } catch (e) {
-            pi.abort()
+            await this.quiesceCurrentPi()
             const error = e instanceof Error ? e.message : String(e)
             let stderrTail: string | null = null
             try {
@@ -342,6 +385,7 @@ export class PiStoryAgent extends BaseObserver {
             }
         }
 
+        await this.quiesceCurrentPi()
         pi.leave(this.envRef)
         this.currentPi = null
 
@@ -423,9 +467,45 @@ export class PiStoryAgent extends BaseObserver {
                 durationSecs,
                 error,
                 ...(failure ? { failure } : {}),
+                ...(this.suspension ? { suspension: this.suspension } : {}),
                 ...correlationOf(this.spec),
             }),
         )
+    }
+
+    private recordSuspension(blockId: string): void {
+        if (typeof blockId !== "string" || blockId.trim() !== blockId || !blockId) {
+            throw new TypeError("suspension blockId must be a non-empty trimmed string")
+        }
+        if (this.suspension && this.suspension.blockId !== blockId) {
+            throw new Error(
+                `story ${this.spec.id} is already suspending for block ${this.suspension.blockId}`,
+            )
+        }
+        this.suspension ??= { kind: "dependency", blockId }
+    }
+
+    private quiesceCurrentPi(): Promise<boolean> {
+        const pi = this.currentPi
+        if (!pi) return this.processQuiescence ?? Promise.resolve(true)
+        if (!this.processQuiescence) {
+            this.processQuiescence = pi.abortAndWait()
+        }
+        return this.processQuiescence
+    }
+
+    private async waitForRetryDelay(): Promise<void> {
+        try {
+            await setTimeoutPromise(this.spec.retryDelayMs, undefined, {
+                signal: this.retryDelayController.signal,
+            })
+        } catch (error) {
+            if (!this.retryDelayController.signal.aborted) throw error
+        }
+    }
+
+    private wakeRetryDelay(): void {
+        this.retryDelayController.abort()
     }
 
     private transition(next: AgentPhase, detail?: string): void {

@@ -737,6 +737,9 @@ export interface WorkBidData {
     workerId: string
     route: WorkRouteDescriptor
     estimate: WorkBidEstimateData
+    /** This concrete route/executor can stop retries and prove process/tool
+     * quiescence before its worktree is snapshotted. */
+    supportsCooperativeSuspend?: boolean
 }
 export const WorkBid = defineSemanticEvent<WorkBidData>("work_bid")
 
@@ -773,6 +776,7 @@ export interface WorkClaimedData {
     model: string
     bidId?: string
     route?: WorkRouteDescriptor
+    supportsCooperativeSuspend?: boolean
 }
 export const WorkClaimed = defineSemanticEvent<WorkClaimedData>("work_claimed")
 
@@ -785,6 +789,7 @@ export interface WorkLeaseGrantedData {
     request: StorySpawnRequestData
     bidId?: string
     route?: WorkRouteDescriptor
+    supportsCooperativeSuspend?: boolean
 }
 export const WorkLeaseGranted =
     defineSemanticEvent<WorkLeaseGrantedData>("work_lease_granted")
@@ -795,7 +800,11 @@ export interface WorkLeaseReleasedData {
     leaseId: string
     storyId: string
     workerId: string
-    reason: "integrated" | "execution_failed" | "operational_failed" | "quality_failed" | "quality_inconclusive" | "integration_failed" | "spawn_failed" | "aborted" | "expired"
+    reason: "integrated" | "execution_failed" | "operational_failed" | "quality_failed" | "quality_inconclusive" | "integration_failed" | "spawn_failed" | "dependency_blocked" | "aborted" | "expired"
+    /** Present for a cooperative dependency suspension so retry/cost metrics
+     * remain lossless even though no terminal execution result is settled. */
+    attempts?: number
+    durationSecs?: number
 }
 export const WorkLeaseReleased =
     defineSemanticEvent<WorkLeaseReleasedData>("work_lease_released")
@@ -977,6 +986,65 @@ export interface WorkDiscoveredData {
 export const WorkDiscovered =
     defineSemanticEvent<WorkDiscoveredData>("work_discovered")
 
+/**
+ * A leased worker has discovered that its story cannot make honest progress
+ * until already-planned prerequisite work integrates. This is a cooperative
+ * suspension request, not a terminal execution failure. The Board validates
+ * the dependency mutation and remains the only authority that may accept it.
+ */
+export interface WorkBlockedData {
+    runId: string
+    blockId: string
+    storyId: string
+    leaseId: string
+    generation: number
+    requiredStoryIds: readonly string[]
+    reason: string
+}
+export const WorkBlocked =
+    defineSemanticEvent<WorkBlockedData>("work_blocked")
+
+export interface WorkBlockAcceptedData extends WorkBlockedData {
+    /** Durable graph version that already contains the dependency rewire. */
+    graphVersion: number
+}
+export const WorkBlockAccepted =
+    defineSemanticEvent<WorkBlockAcceptedData>("work_block_accepted")
+
+export type WorkBlockRejectionCode =
+    | "invalid_request"
+    | "run_not_active"
+    | "stale_lease"
+    | "already_settled"
+    | "unknown_dependency"
+    | "dependency_already_satisfied"
+    | "dependency_cycle"
+
+export interface WorkBlockRejectedData
+    extends Omit<WorkBlockedData, "reason"> {
+    /** Original worker rationale, kept separate from the policy rejection. */
+    requestReason: string
+    code: WorkBlockRejectionCode
+    reason: string
+}
+export const WorkBlockRejected =
+    defineSemanticEvent<WorkBlockRejectedData>("work_block_rejected")
+
+/** Exact worker-side acknowledgement that retries stopped and the complete
+ * process/tool tree is quiescent. Broker may release a dependency-blocked
+ * lease only after this event matches the accepted block correlation. */
+export interface WorkSuspendedData {
+    runId: string
+    blockId: string
+    storyId: string
+    leaseId: string
+    generation: number
+    attempts: number
+    durationSecs: number
+}
+export const WorkSuspended =
+    defineSemanticEvent<WorkSuspendedData>("work_suspended")
+
 export interface RecoveryEvaluationStartedData {
     runId: string
     storyId: string
@@ -1029,6 +1097,8 @@ export interface LevelCompletedData {
     ordinal: number
     passed: readonly string[]
     failed: readonly string[]
+    /** Cooperative suspensions are neither passes nor execution failures. */
+    blocked?: readonly string[]
 }
 export const LevelCompleted =
     defineSemanticEvent<LevelCompletedData>("level_completed")
@@ -1066,6 +1136,7 @@ export interface StorySpawnRequestData {
             | "transport"
             | "infrastructure"
             | "verification"
+            | "dependency"
         reason: string
         branch?: string
     }
@@ -1258,6 +1329,12 @@ export interface StoryResultData {
     runId?: string
     leaseId?: string
     generation?: number
+    /** Neutral terminal result produced while quiescing an accepted
+     * dependency suspension. It must not be interpreted as work failure. */
+    suspension?: {
+        kind: "dependency"
+        blockId: string
+    }
 }
 export const StoryResult = defineSemanticEvent<StoryResultData>("story_result")
 

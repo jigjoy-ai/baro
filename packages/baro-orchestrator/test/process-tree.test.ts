@@ -6,6 +6,7 @@ import {
     activeProcessTreeCount,
     descendantsFromParentPairs,
     ManagedProcessTree,
+    observedProcessGroupIsAlive,
     observedProcessIsAlive,
     parseLinuxProcStat,
     PROCESS_TREE_CAPABILITIES,
@@ -42,6 +43,7 @@ describe("process-tree discovery", () => {
             observedProcessIsAlive(identity, {
                 pid: 42,
                 parentPid: 1,
+                processGroupId: 42,
                 state: "Z",
                 startTime: "100",
             }),
@@ -51,6 +53,7 @@ describe("process-tree discovery", () => {
             observedProcessIsAlive(identity, {
                 pid: 42,
                 parentPid: 1,
+                processGroupId: 42,
                 state: "S",
                 startTime: "101",
             }),
@@ -60,6 +63,7 @@ describe("process-tree discovery", () => {
             observedProcessIsAlive(identity, {
                 pid: 42,
                 parentPid: 1,
+                processGroupId: 42,
                 state: "S",
                 startTime: "100",
             }),
@@ -69,22 +73,52 @@ describe("process-tree discovery", () => {
         const fields = Array.from({ length: 20 }, () => "0")
         fields[0] = "Z"
         fields[1] = "1"
+        fields[2] = "42"
         fields[19] = "9001"
         assert.deepEqual(
             parseLinuxProcStat(`42 (provider helper) ${fields.join(" ")}`),
             {
                 pid: 42,
                 parentPid: 1,
+                processGroupId: 42,
                 state: "Z",
                 startTime: "9001",
             },
         )
     })
 
+    it("keeps an unknown process-table result fail-closed", () => {
+        const member = {
+            pid: 43,
+            parentPid: 1,
+            processGroupId: 42,
+            state: "S",
+            startTime: "100",
+        }
+        assert.equal(observedProcessGroupIsAlive(42, null), null)
+        assert.equal(observedProcessGroupIsAlive(42, [member]), true)
+        assert.equal(
+            observedProcessGroupIsAlive(42, [
+                { ...member, state: "Z" },
+            ]),
+            false,
+        )
+        assert.equal(observedProcessGroupIsAlive(42, []), false)
+    })
+
     it("reports the Windows post-reap limitation explicitly", () => {
         assert.equal(
             PROCESS_TREE_CAPABILITIES.postRootCloseTrackedTermination,
             process.platform !== "win32",
+        )
+        assert.equal(
+            PROCESS_TREE_CAPABILITIES.ownedProcessGroupTermination,
+            process.platform === "linux" || process.platform === "darwin",
+        )
+        assert.equal(
+            PROCESS_TREE_CAPABILITIES
+                .ownedProcessGroupQuiescenceCertification,
+            process.platform === "linux" || process.platform === "darwin",
         )
         assert.equal(
             PROCESS_TREE_CAPABILITIES
@@ -133,6 +167,100 @@ describe("process-tree discovery", () => {
             }
         },
     )
+
+    it(
+        "certifies an owned POSIX group only after it disappears",
+        {
+            skip:
+                process.platform !== "linux" &&
+                process.platform !== "darwin",
+        },
+        async () => {
+            const child = spawn(
+                process.execPath,
+                ["-e", "setInterval(() => {}, 1000)"],
+                { detached: true, stdio: "ignore" },
+            )
+            const tree = new ManagedProcessTree(child, {
+                ownsProcessGroup: true,
+                terminationGraceMs: 50,
+                pollIntervalMs: 10,
+            })
+            child.once("close", () => tree.markRootClosed())
+
+            try {
+                assert.equal(await tree.terminateAndWait("SIGKILL"), true)
+                assert.equal(isAlive(child.pid!), false)
+            } finally {
+                tree.terminate("SIGKILL")
+                try {
+                    child.kill("SIGKILL")
+                } catch {
+                    // already exited
+                }
+            }
+        },
+    )
+
+    it(
+        "returns false after a bounded permanently-unknown group observation",
+        {
+            skip:
+                process.platform !== "linux" &&
+                process.platform !== "darwin",
+        },
+        async () => {
+            const child = spawn(
+                process.execPath,
+                ["-e", "setInterval(() => {}, 1000)"],
+                { detached: true, stdio: "ignore" },
+            )
+            const tree = new ManagedProcessTree(child, {
+                ownsProcessGroup: true,
+                terminationGraceMs: 25,
+                pollIntervalMs: 10,
+                quiescenceTimeoutMs: 50,
+                processGroupObservation: () => null,
+            })
+            child.once("close", () => tree.markRootClosed())
+
+            try {
+                assert.equal(await tree.terminateAndWait("SIGKILL"), false)
+                await tree.done
+            } finally {
+                try {
+                    process.kill(-child.pid!, "SIGKILL")
+                } catch {
+                    // already exited
+                }
+            }
+        },
+    )
+
+    it("returns false for a tree without OS-level group ownership", async () => {
+        const child = spawn(
+            process.execPath,
+            ["-e", "setInterval(() => {}, 1000)"],
+            { stdio: "ignore" },
+        )
+        const tree = new ManagedProcessTree(child, {
+            terminationGraceMs: 50,
+            pollIntervalMs: 10,
+        })
+        child.once("close", () => tree.markRootClosed())
+
+        try {
+            assert.equal(await tree.terminateAndWait("SIGKILL"), false)
+            await tree.done
+        } finally {
+            tree.terminate("SIGKILL")
+            try {
+                child.kill("SIGKILL")
+            } catch {
+                // already exited
+            }
+        }
+    })
 
     it(
         "uses one canonical Linux identity across async capture and sync signals",

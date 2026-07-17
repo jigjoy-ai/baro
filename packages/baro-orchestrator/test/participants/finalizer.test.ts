@@ -90,6 +90,22 @@ describe("Finalizer", () => {
             })
             await finalizer.onExternalEvent(attacker, storyResult)
             assert.equal(state.stories.get("S1")?.success, null)
+            await finalizer.onExternalEvent(
+                worker,
+                StoryResult.create({
+                    storyId: "S1",
+                    success: false,
+                    attempts: 1,
+                    durationSecs: 1,
+                    error: null,
+                    suspension: {
+                        kind: "dependency",
+                        blockId: "block-S1-S0",
+                    },
+                    ...correlation,
+                }),
+            )
+            assert.equal(state.stories.get("S1")?.success, null)
             await finalizer.onExternalEvent(worker, storyResult)
             assert.equal(state.stories.get("S1")?.success, true)
 

@@ -100,4 +100,38 @@ describe("Librarian", () => {
         assert.equal(librarian.getKnowledge().length, 1)
         assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
     })
+
+    it("stops broadcasting to a quiesced dependency-suspended worker", async () => {
+        const librarian = new Librarian()
+        const env = joinWithCapture(librarian)
+
+        await librarian.onExternalEvent(source("board"), StorySpawned.create({ storyId: "S2" }))
+        await librarian.onExternalEvent(
+            source("S2"),
+            StoryResult.create({
+                storyId: "S2",
+                success: false,
+                attempts: 1,
+                durationSecs: 2,
+                error: null,
+                suspension: {
+                    kind: "dependency",
+                    blockId: "block-S2-S1",
+                },
+            }),
+        )
+        await librarian.onExternalFunctionCall(
+            source("S1"),
+            call("read-suspended", "Read", { file_path: "src/auth.ts" }),
+        )
+        await librarian.onExternalFunctionCallOutput(
+            source("S1"),
+            FunctionCallOutputItem.create(
+                "read-suspended",
+                "export const token = 'abc'",
+            ),
+        )
+
+        assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
+    })
 })

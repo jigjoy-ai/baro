@@ -57,4 +57,31 @@ describe("MemoryLibrarian", () => {
         assert.deepEqual(env.events, [])
         assert.equal(await librarian.gatherContext("S3", ["auth"]), null)
     })
+
+    it("removes a dependency-suspended worker from the in-flight set", async () => {
+        const librarian = new MemoryLibrarian({ disabled: true })
+        const state = librarian as unknown as { inFlight: Set<string> }
+
+        await librarian.onExternalEvent(
+            source("board"),
+            StorySpawned.create({ storyId: "S2" }),
+        )
+        assert.equal(state.inFlight.has("S2"), true)
+        await librarian.onExternalEvent(
+            source("S2"),
+            StoryResult.create({
+                storyId: "S2",
+                success: false,
+                attempts: 1,
+                durationSecs: 2,
+                error: null,
+                suspension: {
+                    kind: "dependency",
+                    blockId: "block-S2-S1",
+                },
+            }),
+        )
+
+        assert.equal(state.inFlight.has("S2"), false)
+    })
 })

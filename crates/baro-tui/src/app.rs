@@ -1270,6 +1270,18 @@ impl App {
                 );
             }
 
+            BaroEvent::StorySuspended { id, block_id: _ } => {
+                if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
+                    story.status = StoryStatus::Pending;
+                    story.error = None;
+                }
+                self.active_stories.remove(&id);
+                let count = self.active_stories.len();
+                if count > 0 && self.selected_log_index >= count {
+                    self.selected_log_index = count - 1;
+                }
+            }
+
             BaroEvent::StoryLog { id, line } => {
                 if let Some(active) = self.active_stories.get_mut(&id) {
                     active.logs.push(line);
@@ -1628,6 +1640,7 @@ impl App {
                 ordinal,
                 passed: _,
                 failed,
+                blocked: _,
             } => {
                 self.level_states.insert(
                     ordinal,
@@ -1877,6 +1890,22 @@ mod tests {
             r#"{"type":"merge_failed","id":"S2","error":"conflict"}"#,
         );
         assert_eq!(app.story("S2").merge, Some(false));
+    }
+
+    #[test]
+    fn dependency_suspension_returns_a_running_story_to_pending() {
+        let mut app = app_with_run();
+        assert_eq!(app.story("S1").status, StoryStatus::Running);
+        assert!(app.active_stories.contains_key("S1"));
+
+        feed(
+            &mut app,
+            r#"{"type":"story_suspended","id":"S1","block_id":"block-S1-S0"}"#,
+        );
+
+        assert_eq!(app.story("S1").status, StoryStatus::Pending);
+        assert_eq!(app.story("S1").error, None);
+        assert!(!app.active_stories.contains_key("S1"));
     }
 
     #[test]

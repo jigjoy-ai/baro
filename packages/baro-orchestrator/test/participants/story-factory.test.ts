@@ -28,10 +28,12 @@ import {
     StorySpawnRequest,
     StorySpawned,
     StorySpawnFailed,
+    WorkBlockAccepted,
     WorkBid,
     WorkLeaseGranted,
     WorkLeaseReleased,
     WorkOffered,
+    WorkSuspended,
     WorkerCapabilityAdvertised,
     type StorySpawnRequestData,
 } from "../../src/semantic-events.js"
@@ -353,6 +355,87 @@ describe("StoryFactory", () => {
 
             assert.equal(executor.calls.length, 1)
             assert.equal(executor.calls[0].cwd, join(dir, "S3-worktree"))
+        })
+    })
+
+    it("does not launch an executor after shutdown begins during worktree creation", async () => {
+        await withTempDir("story-factory-shutdown-spawn-", async (dir) => {
+            const executor = new CapturingExecutor()
+            let releaseCreate!: (path: string | null) => void
+            const worktrees = {
+                create: () => new Promise<string | null>((resolve) => {
+                    releaseCreate = resolve
+                }),
+            } as unknown as WorktreeManager
+            const factory = new StoryFactory({
+                cwd: dir,
+                executor,
+                llm: "claude",
+                worktrees,
+            })
+            joinWithCapture(factory)
+            const pendingSpawn = factory.onExternalEvent(
+                source("conductor"),
+                StorySpawnRequest.create({
+                    storyId: "S-shutdown",
+                    prompt: "Never launch after the run ends",
+                    model: "sonnet",
+                    retries: 0,
+                    timeoutSecs: 30,
+                }),
+            )
+            await Promise.resolve()
+
+            assert.deepEqual(
+                await factory.quiesceForShutdown(0),
+                ["S-shutdown"],
+            )
+            releaseCreate(join(dir, "S-shutdown-worktree"))
+            await pendingSpawn
+
+            assert.equal(executor.calls.length, 0)
+            assert.deepEqual(await factory.quiesceForShutdown(0), [])
+        })
+    })
+
+    it("retains an execution that reports a terminal result synchronously from shutdown abort", async () => {
+        await withTempDir("story-factory-shutdown-result-", async (dir) => {
+            const resultSource = source("sync-abort-result")
+            const executor: StoryExecutor = {
+                start: (req, _route, _cwd, env) => ({
+                    abort: () => {
+                        env.deliverSemanticEvent(
+                            resultSource,
+                            StoryResult.create({
+                                storyId: req.storyId,
+                                success: false,
+                                attempts: 1,
+                                durationSecs: 0,
+                                error: "aborted",
+                            }),
+                        )
+                    },
+                    dispose: () => {},
+                }),
+            }
+            const factory = new StoryFactory({ cwd: dir, executor })
+            const env = joinWithCapture(factory)
+            await factory.onExternalEvent(
+                source("conductor"),
+                StorySpawnRequest.create({
+                    storyId: "S-sync-abort",
+                    prompt: "Stop safely",
+                    model: "sonnet",
+                    retries: 0,
+                    timeoutSecs: 30,
+                }),
+            )
+
+            assert.deepEqual(
+                await factory.quiesceForShutdown(0),
+                ["S-sync-abort"],
+            )
+            assert.equal(env.events.filter(StoryResult.is).length, 1)
         })
     })
 
@@ -1240,6 +1323,189 @@ describe("StoryFactory", () => {
                 active: Map<string, StoryExecution>
             }).active
             assert.equal(active.size, 0)
+        })
+    })
+
+    it("retains an accepted block when the advertised executor lacks suspend", async () => {
+        await withTempDir("story-factory-missing-suspend-", async (dir) => {
+            const runId = "run-missing-suspend"
+            const broker = source("broker")
+            const board = source("board")
+            const outcomeAuthority = new StoryOutcomeAuthority(runId)
+            const executor: StoryExecutor = {
+                supportsCooperativeSuspend: () => true,
+                start: (_req, _route, _cwd, _env, opts) => {
+                    opts.registerResultAuthority?.(source("result-source"))
+                    return { dispose: () => {} }
+                },
+            }
+            const factory = new StoryFactory({
+                cwd: dir,
+                coordinationMode: "collective",
+                runId,
+                workerId: "worker",
+                leaseAuthority: broker,
+                offerAuthority: board,
+                runtimeReplanDecisionAuthority: board,
+                outcomeAuthority,
+                executor,
+            })
+            joinWithCapture(factory)
+            await factory.onExternalEvent(
+                broker,
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: "offer-S7",
+                    leaseId: "lease-S7",
+                    workerId: "worker",
+                    generation: 1,
+                    request: {
+                        storyId: "S7",
+                        prompt: "Implement S7",
+                        model: "codex:gpt-5.6",
+                        retries: 0,
+                        timeoutSecs: 60,
+                    },
+                }),
+            )
+            await flushBus()
+            await factory.onExternalEvent(
+                board,
+                WorkBlockAccepted.create({
+                    runId,
+                    blockId: "block-S7-S8",
+                    storyId: "S7",
+                    leaseId: "lease-S7",
+                    generation: 1,
+                    requiredStoryIds: ["S8"],
+                    reason: "S8 is required",
+                    graphVersion: 2,
+                }),
+            )
+
+            assert.deepEqual(factory.unreleasedSuspensionStoryIds(), ["S7"])
+            assert.deepEqual(await factory.quiesceForShutdown(0), ["S7"])
+        })
+    })
+
+    it("emits WorkSuspended only after the cooperative executor proves quiescence", async () => {
+        await withTempDir("story-factory-block-", async (dir) => {
+            const runId = "run-block"
+            const broker = source("broker")
+            const board = source("board")
+            const resultSource = source("S6-result")
+            const outcomeAuthority = new StoryOutcomeAuthority(runId)
+            let suspends = 0
+            let aborts = 0
+            let disposals = 0
+            let finishSuspend!: (summary: {
+                attempts: number
+                durationSecs: number
+            }) => void
+            const executor: StoryExecutor = {
+                supportsCooperativeSuspend: () => true,
+                start: (_req, _route, _cwd, _env, opts) => {
+                    opts.registerResultAuthority?.(resultSource)
+                    return {
+                        abort: () => { aborts += 1 },
+                        suspend: () => {
+                            suspends += 1
+                            return new Promise((resolve) => {
+                                finishSuspend = resolve
+                            })
+                        },
+                        dispose: () => { disposals += 1 },
+                    }
+                },
+            }
+            const factory = new StoryFactory({
+                cwd: dir,
+                coordinationMode: "collective",
+                runId,
+                workerId: "worker",
+                leaseAuthority: broker,
+                offerAuthority: board,
+                runtimeReplanDecisionAuthority: board,
+                outcomeAuthority,
+                executor,
+            })
+            const env = joinWithCapture(factory)
+            await factory.onExternalEvent(
+                broker,
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: "offer-S6",
+                    leaseId: "lease-S6",
+                    workerId: "worker",
+                    generation: 2,
+                    request: {
+                        storyId: "S6",
+                        prompt: "Implement provider cancellation",
+                        model: "codex:gpt-5.6",
+                        retries: 0,
+                        timeoutSecs: 60,
+                    },
+                }),
+            )
+            await flushBus()
+            const accepted = WorkBlockAccepted.create({
+                runId,
+                blockId: "block-S6-S11",
+                storyId: "S6",
+                leaseId: "lease-S6",
+                generation: 2,
+                requiredStoryIds: ["S11"],
+                reason: "iterateWithAbort must integrate first",
+                graphVersion: 5,
+            })
+            await factory.onExternalEvent(source("attacker"), accepted)
+            assert.equal(suspends, 0)
+            await factory.onExternalEvent(board, accepted)
+            assert.equal(suspends, 1)
+            assert.equal(disposals, 0)
+            assert.equal(env.events.some(WorkSuspended.is), false)
+            assert.deepEqual(await factory.quiesceForShutdown(0), ["S6"])
+            assert.equal(aborts, 1)
+
+            // Duplicate decisions are idempotent and cannot start a second
+            // process-tree drain.
+            await factory.onExternalEvent(board, accepted)
+            assert.equal(suspends, 1)
+
+            finishSuspend({ attempts: 1, durationSecs: 2 })
+            await flushBus()
+            const suspended = env.events.find(WorkSuspended.is)
+            assert.ok(suspended)
+            assert.deepEqual(suspended.data, {
+                runId,
+                blockId: "block-S6-S11",
+                storyId: "S6",
+                leaseId: "lease-S6",
+                generation: 2,
+                attempts: 1,
+                durationSecs: 2,
+            })
+            assert.deepEqual(await factory.quiesceForShutdown(0), [])
+            assert.equal(disposals, 1)
+
+            await factory.onExternalEvent(
+                resultSource,
+                StoryResult.create({
+                    storyId: "S6",
+                    success: false,
+                    attempts: 1,
+                    durationSecs: 2,
+                    error: "cooperative suspension",
+                    runId,
+                    leaseId: "lease-S6",
+                    generation: 2,
+                    suspension: {
+                        kind: "dependency",
+                        blockId: "block-S6-S11",
+                    },
+                }),
+            )
+            assert.equal(disposals, 1)
         })
     })
 })

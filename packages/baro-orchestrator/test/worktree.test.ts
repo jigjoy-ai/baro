@@ -444,6 +444,17 @@ describe("WorktreeManager — fallback", () => {
 })
 
 describe("WorktreeManager — cleanup", () => {
+    it("refuses a worktree create after the shutdown boundary", async () => {
+        mgr.beginShutdown()
+
+        assert.equal(await mgr.create("S-late"), null)
+        assert.equal(mgr.activePath("S-late"), null)
+        assert.equal(
+            git(repo, "branch", "--list", `baro-wt/${runId}/S-late`),
+            "",
+        )
+    })
+
     it("cleanupAll removes every worktree + branch", async () => {
         await mgr.create("S1")
         await mgr.create("S2")
@@ -457,6 +468,28 @@ describe("WorktreeManager — cleanup", () => {
             "",
             "no baro-wt branches remain",
         )
+    })
+
+    it("retains an explicitly unquiesced worktree while cleaning its siblings", async () => {
+        const livePath = (await mgr.create("S-live"))!
+        const settledPath = (await mgr.create("S-settled"))!
+        writeFileSync(join(livePath, "partial.txt"), "still being written\n")
+
+        await mgr.cleanupAll({
+            retainStoryIds: new Set(["S-live"]),
+        })
+
+        assert.equal(existsSync(livePath), true)
+        assert.equal(mgr.activePath("S-live"), livePath)
+        assert.notEqual(
+            git(repo, "branch", "--list", `baro-wt/${runId}/S-live`),
+            "",
+        )
+        assert.equal(existsSync(settledPath), false)
+        assert.equal(mgr.activePath("S-settled"), null)
+        assert.match(logs.join("\n"), /kept unquiesced worktree for story S-live/)
+
+        await mgr.cleanup("S-live")
     })
 
     it("cleanupStaleOnStart removes leftover baro-wt branches under the run id", async () => {
