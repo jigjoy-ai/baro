@@ -575,8 +575,9 @@ process.stdin.on("end", () => {
         )
     })
 
-    it("keeps Conversation and repository scout billing phases distinct", async () => {
+    it("keeps front-door roles distinct and accepts an explicit runtime phase", async () => {
         const phases: string[] = []
+        const attempts: Array<number | null> = []
         const billing = new GatewayBillingCoordinator({
             runId: "session-front-door-billing",
             gatewayBaseUrl: "https://gateway.example/v1",
@@ -596,6 +597,7 @@ process.stdin.on("end", () => {
                 billingCoordinator: billing,
                 openaiRunRound: async (_context, _model, options) => {
                     phases.push(options.billing?.context.phase ?? "missing")
+                    attempts.push(options.billing?.context.attempt ?? null)
                     return {
                         items: [{
                             type: "message",
@@ -626,7 +628,26 @@ process.stdin.on("end", () => {
                     new AbortController().signal,
                 )
             }
-            assert.deepEqual(phases, ["dialogue", "intake"])
+            for (const billingAttempt of [1, 2]) {
+                await responder(
+                    {
+                        runId: "runtime-goal-review",
+                        messageId: `message-goal-review-${billingAttempt}`,
+                        billingPhase: "verifier",
+                        billingAttempt,
+                        systemPrompt: "system",
+                        userPrompt: "review",
+                    },
+                    new AbortController().signal,
+                )
+            }
+            assert.deepEqual(phases, [
+                "dialogue",
+                "intake",
+                "verifier",
+                "verifier",
+            ])
+            assert.deepEqual(attempts, [null, null, 1, 2])
         } finally {
             billing.close()
         }

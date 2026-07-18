@@ -223,6 +223,113 @@ describe("CollectiveBoard", () => {
         })
     })
 
+    it("invalidates a persisted aggregate PASS after the Board is reconstructed", async () => {
+        await withTempDir("collective-verification-epoch-", async (dir) => {
+            const runId = "run-verification-epoch"
+            const prdPath = join(dir, "prd.json")
+
+            const requestFromFreshBoard = async (): Promise<string> => {
+                writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+                const board = new CollectiveBoard({
+                    runId,
+                    prdPath,
+                    cwd: dir,
+                    timeoutSecs: 60,
+                    verifyBeforePush: true,
+                })
+                const env = joinWithCapture(board)
+                const request = await integrateSingleStory(env, runId)
+                env.deliverSemanticEvent(
+                    source("verifier"),
+                    RunVerificationCompleted.create({
+                        runId,
+                        verificationId: request.data.verificationId,
+                        status: "passed",
+                        commands: [{
+                            command: "npm run test",
+                            status: "passed",
+                            durationMs: 1,
+                        }],
+                        durationMs: 1,
+                    }),
+                )
+                await waitFor(env.events, RunPushRequested.is)
+                env.deliverSemanticEvent(
+                    source("repo"),
+                    RunPushed.create({ runId, pushed: false }),
+                )
+                await board.done
+                return request.data.verificationId
+            }
+
+            const priorVerificationId = await requestFromFreshBoard()
+            const resumedVerificationId = await requestFromFreshBoard()
+            assert.notEqual(resumedVerificationId, priorVerificationId)
+
+            const contract = deriveGoalContract({
+                objective: "Keep completion evidence fresh across restart.",
+                constraints: [],
+                acceptanceCriteria: ["The integrated behavior remains verified."],
+                nonGoals: [],
+                assumptions: [],
+            })!
+            const invariantId = contract.invariants[0]!.id
+            const storyIds = ["S1"]
+            const ledger = new GoalInvariantLedger(contract, [{
+                storyId: "S1",
+                invariantIds: [invariantId],
+            }])
+            ledger.recordIntegration({ storyId: "S1", leaseId: "lease-S1" })
+            ledger.recordQuality({
+                storyId: "S1",
+                leaseId: "lease-S1",
+                evaluationId: "quality-S1",
+                status: "passed",
+                independentlyPassed: true,
+            })
+            const priorBasis = ledger.aggregateReviewBasis(
+                storyIds,
+                priorVerificationId,
+            )
+            ledger.recordAggregateReview({
+                reviewId: `goal-review:${priorBasis.fingerprint}`,
+                basisFingerprint: priorBasis.fingerprint,
+                verificationId: priorBasis.verificationId,
+                repositoryFingerprint: "a".repeat(64),
+                status: "passed",
+                attempts: 1,
+                modelUsed: "fake-reviewer",
+                invariants: [{
+                    invariantId,
+                    status: "passed",
+                    reason: "the prior merged run satisfied the invariant",
+                }],
+            })
+
+            const restored = new GoalInvariantLedger(
+                contract,
+                undefined,
+                ledger.snapshot(1),
+            )
+            const resumedBasis = restored.aggregateReviewBasis(
+                storyIds,
+                resumedVerificationId,
+            )
+            assert.notEqual(resumedBasis.fingerprint, priorBasis.fingerprint)
+            assert.equal(
+                restored.aggregateReviewForBasis(
+                    resumedBasis.fingerprint,
+                    resumedBasis.verificationId,
+                ),
+                undefined,
+            )
+            assert.equal(
+                restored.assess(storyIds, true, resumedBasis).status,
+                "incomplete",
+            )
+        })
+    })
+
     it("cannot report success when objective run verification fails", async () => {
         await withTempDir("collective-verify-fail-", async (dir) => {
             const prdPath = join(dir, "prd.json")

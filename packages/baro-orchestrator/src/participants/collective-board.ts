@@ -280,6 +280,15 @@ export class CollectiveBoard extends SerializedObserver {
     private contextSequence = 0
     private cleanupSequence = 0
     private verificationSequence = 0
+    /**
+     * A Board can be reconstructed with the same run id while persisted goal
+     * evidence survives. Sequence numbers restart at one, so they cannot by
+     * themselves distinguish a fresh verifier invocation from one issued by
+     * the previous coordinator instance. Keep a cryptographically fresh
+     * instance epoch in every verification identity so an old aggregate PASS
+     * can never match the new completion basis.
+     */
+    private readonly verificationEpoch = randomUUID()
     private goalCheckSequence = 0
     private discoverySequence = 0
     private totalAttempts = 0
@@ -3081,7 +3090,7 @@ export class CollectiveBoard extends SerializedObserver {
         }
         if (this.phase !== "running") return
         const verificationId =
-            `${this.opts.runId}:verification:${++this.verificationSequence}`
+            `${this.opts.runId}:verification:${this.verificationEpoch}:${++this.verificationSequence}`
         this.pendingVerificationId = verificationId
         this.phase = "verifying"
         const timeoutMs =

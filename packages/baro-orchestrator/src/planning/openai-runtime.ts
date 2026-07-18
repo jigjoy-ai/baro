@@ -66,6 +66,13 @@ export function providerCallTimeoutError(timeoutMs: number): Error {
     return error
 }
 
+/** True only for Baro's typed inference-timeout abort reason. */
+export function isProviderCallTimeout(reason: unknown): boolean {
+    return typeof reason === "object"
+        && reason !== null
+        && (reason as { code?: unknown }).code === PROVIDER_CALL_TIMEOUT_CODE
+}
+
 /**
  * Structurally matches Mozaik's (non-exported) `OpenAICompatibleConfig`.
  * When omitted, the SDK reads `OPENAI_API_KEY` / `OPENAI_BASE_URL`.
@@ -234,6 +241,12 @@ export async function runInferenceRound(
                       dispatch !== null,
                       options.signal,
                   )
+        // An adapter may fulfil after ignoring an abort. The abort winner is
+        // authoritative: never publish success after its caller's watchdog
+        // has already expired or cancelled the provider request.
+        if (options.signal?.aborted) {
+            throw options.signal.reason ?? new Error("inference provider call aborted")
+        }
         if (dispatch && options.billing) {
             await options.billing.coordinator.observeRunner(dispatch, {
                 status: "succeeded",
@@ -464,11 +477,6 @@ function inferenceFailureReason(error: unknown): UnknownMetricReason {
     return "not_reported"
 }
 
-function isProviderCallTimeout(reason: unknown): boolean {
-    return typeof reason === "object"
-        && reason !== null
-        && (reason as { code?: unknown }).code === PROVIDER_CALL_TIMEOUT_CODE
-}
 
 export class UsageAccumulator {
     private input = 0

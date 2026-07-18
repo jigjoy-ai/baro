@@ -387,6 +387,12 @@ function normalizeGoalCompletion(
             !stringArrayValue(item.mappedStoryIds) ||
             !stringArrayValue(item.integratedStoryIds) ||
             !stringArrayValue(item.independentlyReviewedStoryIds) ||
+            (item.aggregateReviewId !== undefined &&
+                !nonBlank(item.aggregateReviewId)) ||
+            (item.aggregateReviewStatus !== undefined &&
+                item.aggregateReviewStatus !== "passed" &&
+                item.aggregateReviewStatus !== "failed" &&
+                item.aggregateReviewStatus !== "inconclusive") ||
             !nonBlank(item.reason)
         ) {
             throw new Error(`PRD at ${source} has malformed goal completion evidence`)
@@ -399,6 +405,12 @@ function normalizeGoalCompletion(
             independentlyReviewedStoryIds: [
                 ...item.independentlyReviewedStoryIds,
             ],
+            ...(item.aggregateReviewId
+                ? { aggregateReviewId: item.aggregateReviewId }
+                : {}),
+            ...(item.aggregateReviewStatus
+                ? { aggregateReviewStatus: item.aggregateReviewStatus }
+                : {}),
             reason: item.reason,
         }
     })

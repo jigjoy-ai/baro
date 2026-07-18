@@ -25,6 +25,7 @@ mod planner_runner;
 mod planner_stream_bridge;
 mod preaccept_context;
 mod progressive_planning;
+mod provider_ownership;
 mod repository_brief;
 mod resume;
 mod review_refiner;
@@ -2585,7 +2586,7 @@ async fn run_app(
                 app.orchestrator_stdin = None;
                 if let Some(shutdown) = orchestrator_shutdown.take() {
                     // Keep the event loop alive until OrchestratorExited so
-                    // its process group / Job Object is known to be empty.
+                    // graceful provider cleanup and the hard fallback finish.
                     if shutdown.send(()).is_err() {
                         // A naturally exited runtime can race its registration
                         // event. There is then no future exit to wait for; drop

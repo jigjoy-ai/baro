@@ -6,6 +6,40 @@ import {
     RuntimeReplanApplied,
 } from "../semantic-events.js"
 
+interface CriticTargetStory {
+    id: string
+    acceptance?: readonly string[]
+    goalInvariantIds?: readonly string[]
+}
+
+export function buildCriticTargets(
+    stories: readonly CriticTargetStory[],
+    goalInvariantText: ReadonlyMap<string, string> = new Map(),
+): Map<string, readonly string[]> {
+    return new Map(
+        stories
+            .filter((story) => (story.acceptance?.length ?? 0) > 0)
+            .map((story) => [
+                story.id,
+                criticCriteriaForStory(story, goalInvariantText),
+            ] as const),
+    )
+}
+
+function criticCriteriaForStory(
+    story: Pick<CriticTargetStory, "acceptance" | "goalInvariantIds">,
+    goalInvariantText: ReadonlyMap<string, string>,
+): readonly string[] {
+    return [
+        ...new Set([
+            ...(story.acceptance ?? []),
+            ...(story.goalInvariantIds ?? [])
+                .map((id) => goalInvariantText.get(id))
+                .filter((item): item is string => item !== undefined),
+        ]),
+    ]
+}
+
 export class CriticTargetRegistry extends BaseObserver {
     private legacyReplanAuthority: Participant | null = null
     private runtimeReplanAuthority: Participant | null = null
@@ -90,13 +124,6 @@ export class CriticTargetRegistry extends BaseObserver {
         acceptance?: readonly string[]
         goalInvariantIds?: readonly string[]
     }): readonly string[] {
-        return [
-            ...new Set([
-                ...(story.acceptance ?? []),
-                ...(story.goalInvariantIds ?? [])
-                    .map((id) => this.goalInvariantText.get(id))
-                    .filter((item): item is string => item !== undefined),
-            ]),
-        ]
+        return criticCriteriaForStory(story, this.goalInvariantText)
     }
 }

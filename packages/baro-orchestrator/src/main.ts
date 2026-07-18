@@ -47,6 +47,8 @@ export {
     GoalLedgerProjectionUpdated,
     GoalLedgerProjectionPersisted,
     GoalCompletionCheckRequested,
+    GoalAggregateReviewRequested,
+    GoalAggregateReviewCompleted,
     GoalCompletionAttested,
     type GoalStoryInvariantMappedData,
     type GoalInvariantChallengeRaisedData,
@@ -56,6 +58,8 @@ export {
     type GoalLedgerProjectionUpdatedData,
     type GoalLedgerProjectionPersistedData,
     type GoalCompletionCheckRequestedData,
+    type GoalAggregateReviewRequestedData,
+    type GoalAggregateReviewCompletedData,
     type GoalCompletionAttestedData,
 } from "./semantic-events.js"
 
@@ -64,6 +68,12 @@ export {
     CollectiveGoalLedger,
     type GoalGuardianOptions,
 } from "./participants/goal-guardian.js"
+
+export {
+    GoalInvariantReviewer,
+    GOAL_AGGREGATE_REVIEW_SYSTEM_PROMPT,
+    type GoalInvariantReviewerOptions,
+} from "./participants/goal-invariant-reviewer.js"
 
 export {
     GOAL_CONTRACT_SCHEMA_VERSION,
@@ -86,6 +96,16 @@ export {
     type DisplacedGoalRemediation,
     type GoalProtocolIssue,
 } from "./runtime/goal-contract.js"
+
+export {
+    createGoalAggregateReviewBasis,
+    normalizeGoalAggregateReviewEvidence,
+    type GoalAggregateInvariantBasis,
+    type GoalAggregateInvariantReview,
+    type GoalAggregateReviewBasis,
+    type GoalAggregateReviewEvidence,
+    type GoalAggregateReviewStatus,
+} from "./runtime/goal-aggregate-review.js"
 
 export {
     DialogueAgent,

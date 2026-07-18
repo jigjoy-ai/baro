@@ -1,7 +1,10 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { CriticTargetRegistry } from "../../src/participants/critic-target-registry.js"
+import {
+    CriticTargetRegistry,
+    buildCriticTargets,
+} from "../../src/participants/critic-target-registry.js"
 import {
     Replan,
     ReplanApplied,
@@ -10,9 +13,62 @@ import {
 import { source } from "./helpers.js"
 
 describe("CriticTargetRegistry runtime replans", () => {
+    it("keeps collective targets local while legacy retains goal invariants", () => {
+        const crossProviderInvariantId = "G-A6"
+        const stories = [
+            {
+                id: "S-openai-responses",
+                acceptance: ["OpenAI Responses receives the exact AbortSignal"],
+                goalInvariantIds: [crossProviderInvariantId],
+            },
+            {
+                id: "S-openai-chat",
+                acceptance: ["Chat Completions receives the exact AbortSignal"],
+                goalInvariantIds: [crossProviderInvariantId],
+            },
+            {
+                id: "S-anthropic",
+                acceptance: ["Anthropic Messages receives the exact AbortSignal"],
+                goalInvariantIds: [crossProviderInvariantId],
+            },
+            {
+                id: "S-gemini",
+                acceptance: ["Gemini config preserves fields and adds abortSignal"],
+                goalInvariantIds: [crossProviderInvariantId],
+            },
+        ]
+
+        const collectiveTargets = buildCriticTargets(stories)
+        const invariantText = `[${crossProviderInvariantId}] Every provider preserves cancellation`
+        const legacyTargets = buildCriticTargets(
+            stories,
+            new Map([[crossProviderInvariantId, invariantText]]),
+        )
+
+        for (const story of stories) {
+            assert.deepEqual(collectiveTargets.get(story.id), story.acceptance)
+            assert.equal(
+                collectiveTargets.get(story.id)?.some((criterion) =>
+                    criterion.includes(crossProviderInvariantId),
+                ),
+                false,
+            )
+            assert.deepEqual(legacyTargets.get(story.id), [
+                ...story.acceptance,
+                invariantText,
+            ])
+            assert.deepEqual(story.goalInvariantIds, [crossProviderInvariantId])
+        }
+    })
+
     it("projects only the Conductor's effective persisted legacy delta", async () => {
         const targets = new Map<string, readonly string[]>([["S-old", ["old"]]])
-        const registry = new CriticTargetRegistry(targets)
+        const invariantText =
+            "[G-CROSS-STORY] Every legacy contribution preserves the goal"
+        const registry = new CriticTargetRegistry(
+            targets,
+            new Map([["G-CROSS-STORY", invariantText]]),
+        )
         const conductor = source("conductor")
         registry.setLegacyReplanAuthority(conductor)
         const mutation = {
@@ -27,6 +83,7 @@ describe("CriticTargetRegistry runtime replans", () => {
                     dependsOn: [],
                     acceptance: ["new criterion"],
                     tests: ["npm test"],
+                    goalInvariantIds: ["G-CROSS-STORY"],
                 },
                 {
                     id: "S-old",
@@ -64,7 +121,10 @@ describe("CriticTargetRegistry runtime replans", () => {
             ReplanApplied.create(effective),
         )
         assert.deepEqual(targets.get("S-old"), ["old"])
-        assert.deepEqual(targets.get("S-new"), ["new criterion"])
+        assert.deepEqual(targets.get("S-new"), [
+            "new criterion",
+            invariantText,
+        ])
     })
 
     it("updates acceptance targets only after an authoritative Applied event", async () => {
@@ -117,6 +177,7 @@ describe("CriticTargetRegistry runtime replans", () => {
                         dependsOn: ["S1"],
                         acceptance: ["new criterion"],
                         tests: ["npm test"],
+                        goalInvariantIds: ["G-CROSS-STORY"],
                     },
                 ],
                 removedStoryIds: ["S-old"],

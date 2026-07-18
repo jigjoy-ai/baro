@@ -58,7 +58,10 @@ import {
     type CriticRepositoryTarget,
     type CriticEvidenceSource,
 } from "./participants/critic-evidence.js"
-import { CriticTargetRegistry } from "./participants/critic-target-registry.js"
+import {
+    CriticTargetRegistry,
+    buildCriticTargets,
+} from "./participants/critic-target-registry.js"
 import { CriticCodex } from "./participants/critic-codex.js"
 import { CriticOpenAI } from "./participants/critic-openai.js"
 import { CriticOpenCode } from "./participants/critic-opencode.js"
@@ -73,6 +76,7 @@ import {
 } from "./participants/dialogue-responder.js"
 import { Finalizer } from "./participants/finalizer.js"
 import { GitCoordinator } from "./participants/git-coordinator.js"
+import { GoalInvariantReviewer } from "./participants/goal-invariant-reviewer.js"
 import { DialogueForwarder } from "./participants/forwarders/dialogue.js"
 import { joinBaroEventForwarders } from "./participants/forwarders/index.js"
 import { Librarian } from "./participants/librarian.js"
@@ -191,6 +195,12 @@ export interface OrchestrateConfig {
     /** Bounded same-candidate Critic rechecks after an inconclusive verdict.
      * Default: 2. No implementation worker is launched by these rechecks. */
     collectiveAcceptanceReverificationAttempts?: number
+    /** Per-attempt timeout for the strict merged-run semantic review. */
+    collectiveGoalReviewTimeoutMs?: number
+    /** Settled provider/protocol retries for that one batched review. */
+    collectiveGoalReviewMaxAttempts?: number
+    /** Test/embedding seam for the read-only merged-run evaluator. */
+    goalReviewResponder?: DialogueResponder
     /** Optional communication-only conversational participant. Collective only. */
     withDialogue?: boolean
     /** Text-only backing model for DialogueAgent. Defaults to a compatible run backend. */
@@ -620,11 +630,14 @@ export async function orchestrate(
         : null
     let gatewayBillingReconciled = false
     let dialogueRuntimeCwd: string | null = null
+    let goalReviewRuntimeCwd: string | null = null
+    let goalInvariantReviewer: GoalInvariantReviewer | null = null
     let cleanupDialogue: (() => void) | null = null
     let shutdownStoryFactories: StoryFactory[] = []
     let shutdownWorktrees: WorktreeManager | null = null
     let shutdownCollaborationBridge: CollaborationBridge | null = null
     let workerShutdownDrained = false
+    let goalReviewProviderSettled = true
     const reconcileGatewayBilling = async (): Promise<void> => {
         if (!gatewayBillingCoordinator || gatewayBillingReconciled) return
         gatewayBillingReconciled = true
@@ -921,32 +934,21 @@ export async function orchestrate(
                 commandEvidence.snapshotForEvaluation(storyId),
         }
         const prd = loadPrd(config.prdPath)
-        const goalContract = deriveGoalContract(prd.goalEnvelope)
-        const goalInvariantText = new Map(
-            goalContract?.invariants.map((invariant) => [
-                invariant.id,
-                `[${invariant.id}] ${invariant.text}`,
-            ]) ?? [],
+        const legacyGoalInvariantText = new Map(
+            coordinationMode === "legacy"
+                ? deriveGoalContract(prd.goalEnvelope)?.invariants.map((invariant) => [
+                      invariant.id,
+                      `[${invariant.id}] ${invariant.text}`,
+                  ] as const) ?? []
+                : [],
         )
-        criticTargets = new Map<string, readonly string[]>(
-            prd.userStories
-                .filter((s) => s.acceptance && s.acceptance.length > 0)
-                .map((s) => {
-                    const criteria = [
-                        ...s.acceptance,
-                        ...(s.goalInvariantIds ?? [])
-                            .map((id) => goalInvariantText.get(id))
-                            .filter((item): item is string => item !== undefined),
-                    ]
-                    return [
-                        s.id,
-                        [...new Set(criteria)],
-                    ] as [string, readonly string[]]
-                }),
+        criticTargets = buildCriticTargets(
+            prd.userStories,
+            legacyGoalInvariantText,
         )
         criticTargetRegistry = new CriticTargetRegistry(
             criticTargets,
-            goalInvariantText,
+            legacyGoalInvariantText,
         )
         criticTargetRegistry.join(env)
         // Bus contract is identical across providers, so observers never
@@ -1171,6 +1173,41 @@ export async function orchestrate(
         }
         if (acceptanceGate) leaseBroker.setQualityAuthority(acceptanceGate)
         const collectivePrd = loadPrd(config.prdPath)
+        const goalReviewTimeoutMs = config.collectiveGoalReviewTimeoutMs ?? 120_000
+        const goalReviewMaxAttempts =
+            config.collectiveGoalReviewMaxAttempts ?? 2
+        if (acceptanceGate) {
+            let responder = config.goalReviewResponder
+            if (!responder) {
+                goalReviewRuntimeCwd = mkdtempSync(
+                    join(tmpdir(), "baro-goal-review-runtime-"),
+                )
+                responder = createDialogueResponder({
+                    backend: criticLlm,
+                    cwd: goalReviewRuntimeCwd,
+                    model: config.criticModel,
+                    // The adapter owns TERM/KILL settlement. Its watchdog must
+                    // win before the outer reviewer watchdog so the latter is
+                    // only a hard safety backstop, never the normal timeout.
+                    timeoutMs: goalReviewProviderTimeoutMs(goalReviewTimeoutMs),
+                    terminationGraceMs:
+                        goalReviewTerminationGraceMs(goalReviewTimeoutMs),
+                    safeReadOnlyEvaluator: true,
+                    codexSkipGitRepoCheck: true,
+                    billingCoordinator: gatewayBillingCoordinator ?? undefined,
+                })
+            }
+            goalInvariantReviewer = new GoalInvariantReviewer({
+                runId,
+                cwd: config.cwd,
+                responder,
+                modelUsed: goalReviewModelName(criticLlm, config.criticModel),
+                timeoutMs: goalReviewTimeoutMs,
+                maxAttempts: goalReviewMaxAttempts,
+            })
+            goalInvariantReviewer.setVerificationAuthority(runVerifier)
+            goalInvariantReviewer.setRepositoryAuthority(repositoryAuthority)
+        }
         goalGuardian = new GoalGuardian({
             runId,
             goalEnvelope: collectivePrd.goalEnvelope,
@@ -1189,9 +1226,14 @@ export async function orchestrate(
             // persisted independent evidence can satisfy the contract. A
             // pre-protocol passed story must be re-run/reviewed, never guessed.
             requireIndependentQuality: acceptanceGate !== null,
+            requireAggregateReview: goalInvariantReviewer !== null,
         })
         goalGuardian.setIntegrationAuthority(repositoryAuthority)
         if (acceptanceGate) goalGuardian.setQualityAuthority(acceptanceGate)
+        if (goalInvariantReviewer) {
+            goalInvariantReviewer.setRequestAuthority(goalGuardian)
+            goalGuardian.setAggregateReviewAuthority(goalInvariantReviewer)
+        }
         if (collaborationBridge) {
             goalGuardian.setChallengeAuthority(collaborationBridge)
         }
@@ -1226,11 +1268,21 @@ export async function orchestrate(
             verificationTimeoutMs:
                 config.collectiveVerificationTimeoutMs ??
                 recommendedMergedVerifyTimeoutMs(verifyPlan),
+            goalCompletionTimeoutMs: goalInvariantReviewer
+                ? aggregateReviewBudgetMs(
+                      goalReviewTimeoutMs,
+                      goalReviewMaxAttempts,
+                  )
+                : undefined,
         })
         runVerifier.setRequestAuthority(board)
         // Bind before join so even an asynchronously firing extra participant
         // cannot pre-seed a predictable verification id during setup.
         runVerifier.join(env)
+        if (goalInvariantReviewer) {
+            goalInvariantReviewer.setCompletionAuthority(board)
+            goalInvariantReviewer.join(env)
+        }
         goalGuardian.setRequestAuthority(board)
         acceptanceGate?.setCompletionAuthority(board)
         finalizer?.setCoordinationAuthority(board)
@@ -1506,6 +1558,14 @@ export async function orchestrate(
     // A verifier timeout cancels its child process through a semantic event.
     // Do not return while that cancellation/cleanup task is still settling.
     if (runVerifier) await runVerifier.idle()
+    if (goalInvariantReviewer) {
+        goalReviewProviderSettled = await goalInvariantReviewer.shutdown()
+        if (!goalReviewProviderSettled) {
+            throw new Error(
+                "aggregate goal reviewer could not certify provider settlement",
+            )
+        }
+    }
 
     // Drain detached pushes + the single worktree merge-back push: after
     // conductor.done so the network can't stall the run, before the
@@ -1647,10 +1707,29 @@ export async function orchestrate(
                 ),
             )
         }
-        await reconcileGatewayBilling()
+        if (goalInvariantReviewer) {
+            goalReviewProviderSettled =
+                (await goalInvariantReviewer.shutdown()) &&
+                goalReviewProviderSettled
+        }
+        if (goalReviewProviderSettled) {
+            await reconcileGatewayBilling()
+        } else if (gatewayBillingCoordinator) {
+            process.stderr.write(
+                "[billing] final reconciliation withheld because the aggregate reviewer provider did not certify settlement\n",
+            )
+        }
         await shutdownCollaborationBridge?.shutdown()
         if (dialogueRuntimeCwd) {
             rmSync(dialogueRuntimeCwd, { recursive: true, force: true })
+        }
+        if (goalReviewRuntimeCwd && goalReviewProviderSettled) {
+            rmSync(goalReviewRuntimeCwd, { recursive: true, force: true })
+        }
+        if (!goalReviewProviderSettled) {
+            throw new Error(
+                "aggregate goal reviewer provider remained unsettled; retained its isolated runtime directory",
+            )
         }
     }
 }
@@ -1662,6 +1741,41 @@ export function resolveDialogueBackend(
 ): DialogueBackend {
     if (configured !== undefined) return configured
     return runBackend
+}
+
+function goalReviewModelName(
+    backend: NonNullable<OrchestrateConfig["criticLlm"]>,
+    configured: string | undefined,
+): string {
+    if (configured) return configured
+    if (backend === "openai") return "gpt-5.4-mini"
+    if (backend === "claude") return "haiku"
+    return `${backend}-default`
+}
+
+function aggregateReviewBudgetMs(
+    perAttemptTimeoutMs: number,
+    maxAttempts: number,
+): number {
+    // One exact quality-only basis refresh is allowed. Include both complete
+    // review rounds plus abort-to-settlement slack in the Board watchdog.
+    return Math.min(
+        2_147_483_647,
+        2 * perAttemptTimeoutMs * maxAttempts + 2 * 10_000 + 30_000,
+    )
+}
+
+function goalReviewProviderTimeoutMs(reviewerTimeoutMs: number): number {
+    if (reviewerTimeoutMs <= 1) return 1
+    const margin = Math.min(
+        15_000,
+        Math.max(1, Math.floor(reviewerTimeoutMs / 2)),
+    )
+    return reviewerTimeoutMs - margin
+}
+
+function goalReviewTerminationGraceMs(reviewerTimeoutMs: number): number {
+    return Math.max(1, Math.min(2_000, Math.floor(reviewerTimeoutMs / 10)))
 }
 
 export function resolveDefaultStorySelector(args: {

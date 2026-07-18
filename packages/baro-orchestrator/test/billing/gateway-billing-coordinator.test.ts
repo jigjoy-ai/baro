@@ -18,6 +18,7 @@ import {
 } from "../../src/billing/index.js"
 import {
     GenericOpenAIModel,
+    providerCallTimeoutError,
     runInferenceRound,
 } from "../../src/planning/openai-runtime.js"
 import { runArchitectOpenAI } from "../../src/planning/architect-openai.js"
@@ -445,6 +446,90 @@ describe("GatewayBillingCoordinator", () => {
         assert.deepEqual(measurements, [{
             status: "cancelled",
             totalReason: "not_reported",
+        }])
+        gateway.close()
+    })
+
+    it("attributes a typed caller watchdog abort as a billed timeout", async () => {
+        let announceStarted!: () => void
+        const providerStarted = new Promise<void>((resolve) => {
+            announceStarted = resolve
+        })
+        let announceClosed!: () => void
+        const providerClosed = new Promise<void>((resolve) => {
+            announceClosed = resolve
+        })
+        const measurements: Array<{
+            status: string
+            totalReason: string | null
+        }> = []
+        const baseUrl = await listen(async (request, response) => {
+            if (request.method === "POST") {
+                response.once("close", announceClosed)
+                await readBody(request)
+                announceStarted()
+                return
+            }
+            json(response, 200, page("unused", [], "cursor-empty"))
+        })
+        const gateway = new GatewayBillingCoordinator({
+            runId: "run-provider-timeout",
+            gatewayBaseUrl: `${baseUrl}/v1`,
+            apiKey: "tenant-a",
+            publishMeasurement: (measurement) => {
+                measurements.push({
+                    status: measurement.status,
+                    totalReason:
+                        measurement.tokens.total.state === "unknown"
+                            ? measurement.tokens.total.reason
+                            : null,
+                })
+            },
+            drainTimeoutMs: 0,
+        })
+        const model = new GenericOpenAIModel("deepseek-v4-flash", {
+            baseURL: `${baseUrl}/v1`,
+            apiKey: "tenant-a",
+        })
+        model.setTools([])
+        const controller = new AbortController()
+        const pending = runInferenceRound(
+            ModelContext.create("provider-timeout"),
+            model,
+            {
+                signal: controller.signal,
+                billing: {
+                    coordinator: gateway,
+                    context: {
+                        runId: "run-provider-timeout",
+                        phase: "verifier",
+                        storyId: null,
+                        leaseId: null,
+                        generation: null,
+                        attempt: 1,
+                        turn: 1,
+                        round: 1,
+                    },
+                },
+            },
+        )
+
+        await providerStarted
+        controller.abort(providerCallTimeoutError(5))
+        await assert.rejects(pending, /abort|timed out/i)
+        await Promise.race([
+            providerClosed,
+            new Promise<never>((_resolve, reject) =>
+                setTimeout(
+                    () => reject(new Error("timed-out provider connection was not closed")),
+                    2_000,
+                ),
+            ),
+        ])
+
+        assert.deepEqual(measurements, [{
+            status: "timed_out",
+            totalReason: "timed_out",
         }])
         gateway.close()
     })

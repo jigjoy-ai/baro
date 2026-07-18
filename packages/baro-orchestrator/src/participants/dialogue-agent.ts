@@ -39,6 +39,7 @@ import {
     type ConversationDelegatedStory,
 } from "../semantic-events.js"
 import {
+    type ModelInvocationPhase,
     type ModelInvocationStatus,
     type UnknownMetricReason,
 } from "../model-telemetry.js"
@@ -89,6 +90,10 @@ export interface DialogueResponderInput {
     messageId: string
     /** Optional pre-PRD attribution; ordinary runtime dialogue omits it. */
     billingRole?: FrontDoorBillingRole
+    /** Runtime callers may supply their actual telemetry phase directly. */
+    billingPhase?: ModelInvocationPhase
+    /** Trusted one-based provider attempt within the caller's semantic action. */
+    billingAttempt?: number
     systemPrompt: string
     userPrompt: string
 }
@@ -140,6 +145,14 @@ export class DialogueResponderInvocationError extends Error {
         super(message)
         this.name = "DialogueResponderInvocationError"
         this.invocation = invocation
+    }
+}
+
+/** The local harness failed before any model/provider dispatch occurred. */
+export class DialogueResponderNotDispatchedError extends Error {
+    constructor(message: string) {
+        super(message)
+        this.name = "DialogueResponderNotDispatchedError"
     }
 }
 

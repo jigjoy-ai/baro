@@ -2,6 +2,8 @@ import { BaseObserver, type Participant, type SemanticEvent } from "@mozaik-ai/c
 import { createHash } from "node:crypto"
 
 import {
+    GoalAggregateReviewCompleted,
+    GoalAggregateReviewRequested,
     GoalCompletionAttested,
     GoalCompletionCheckRequested,
     GoalInvariantChallengeRaised,
@@ -17,15 +19,19 @@ import {
     StoryQualityCompleted,
     type GoalCompletionAttestedData,
     type GoalCompletionCheckRequestedData,
+    type GoalAggregateReviewCompletedData,
 } from "../semantic-events.js"
 import {
     deriveGoalContract,
     GoalInvariantLedger,
     type DisplacedGoalRemediation,
     type GoalContract,
+    type GoalAggregateReviewBasis,
+    type GoalIntegrationEvidence,
     type GoalLedgerProjection,
     type GoalStoryInvariantMapping,
 } from "../runtime/goal-contract.js"
+import { goalAggregateStableBasisFingerprint } from "../runtime/goal-aggregate-review.js"
 import type { GoalEnvelope } from "../session/conversation-contract.js"
 
 export interface GoalGuardianOptions {
@@ -40,6 +46,8 @@ export interface GoalGuardianOptions {
     projection?: GoalLedgerProjection
     /** Collective quality mode fails open evidence without a passed Critic verdict. */
     requireIndependentQuality?: boolean
+    /** Collective strict mode also requires one review of the merged run. */
+    requireAggregateReview?: boolean
     /** Progressive planning starts from an intentionally empty graph. */
     deferCoverageUntilPlanningClosed?: boolean
 }
@@ -47,6 +55,15 @@ export interface GoalGuardianOptions {
 interface CachedAttestation {
     requestKey: string
     data: GoalCompletionAttestedData
+}
+
+interface PendingAggregateReview {
+    requestKey: string
+    request: GoalCompletionCheckRequestedData
+    basis: GoalAggregateReviewBasis
+    reviewId: string
+    goalRevision: number
+    refreshCount: number
 }
 
 /**
@@ -62,7 +79,12 @@ export class GoalGuardian extends BaseObserver {
 
     private readonly ledger: GoalInvariantLedger | null
     private readonly requireIndependentQuality: boolean
+    private readonly requireAggregateReview: boolean
     private readonly completed = new Map<string, CachedAttestation>()
+    private readonly pendingAggregateReviews = new Map<
+        string,
+        PendingAggregateReview
+    >()
     private readonly mappingEvents = new Map<string, string>()
     private readonly emittedRemediationProposals = new Set<string>()
     private projectionRevision = 0
@@ -72,10 +94,17 @@ export class GoalGuardian extends BaseObserver {
     private integrationAuthority: Participant | null = null
     private qualityAuthority: Participant | null = null
     private challengeAuthority: Participant | null = null
+    private aggregateReviewAuthority: Participant | null = null
 
     constructor(private readonly opts: GoalGuardianOptions) {
         super()
         this.requireIndependentQuality = opts.requireIndependentQuality ?? false
+        this.requireAggregateReview = opts.requireAggregateReview ?? false
+        if (this.requireAggregateReview && !this.requireIndependentQuality) {
+            throw new Error(
+                "aggregate goal review requires independent story quality",
+            )
+        }
         this.contract = deriveGoalContract(opts.goalEnvelope)
         this.ledger = this.contract
             ? new GoalInvariantLedger(
@@ -93,6 +122,7 @@ export class GoalGuardian extends BaseObserver {
                     remediation.challengeId,
                     remediation.invariantId,
                     remediation.previousProposalId,
+                    remediation.revalidates,
                 )
             }
         }
@@ -110,6 +140,7 @@ export class GoalGuardian extends BaseObserver {
                         remediation.challengeId,
                         remediation.invariantId,
                         remediation.previousProposalId,
+                        remediation.revalidates,
                     )
                 }
             }
@@ -163,6 +194,14 @@ export class GoalGuardian extends BaseObserver {
         )
     }
 
+    setAggregateReviewAuthority(authority: Participant): void {
+        this.aggregateReviewAuthority = bindAuthority(
+            this.aggregateReviewAuthority,
+            authority,
+            "goal guardian aggregate review authority",
+        )
+    }
+
     override onExternalEvent(
         source: Participant,
         event: SemanticEvent<unknown>,
@@ -202,6 +241,7 @@ export class GoalGuardian extends BaseObserver {
                     remediation.challengeId,
                     remediation.invariantId,
                     remediation.previousProposalId,
+                    remediation.revalidates,
                 )
             }
             for (const story of event.data.mutation.addedStories) {
@@ -326,6 +366,15 @@ export class GoalGuardian extends BaseObserver {
         }
 
         if (
+            GoalAggregateReviewCompleted.is(event) &&
+            event.data.runId === this.opts.runId
+        ) {
+            if (source !== this.aggregateReviewAuthority || !this.ledger) return
+            this.onAggregateReviewCompleted(event.data)
+            return
+        }
+
+        if (
             RunPreparationRequested.is(event) &&
             event.data.runId === this.opts.runId &&
             this.isRequestAuthority(source)
@@ -374,6 +423,7 @@ export class GoalGuardian extends BaseObserver {
         challengeId: string,
         invariantId: string,
         retryOf?: string,
+        revalidates?: readonly GoalIntegrationEvidence[],
     ): void {
         if (!this.contract || !this.ledger) return
         if (!this.contract.invariants.some(({ id }) => id === invariantId)) return
@@ -387,6 +437,9 @@ export class GoalGuardian extends BaseObserver {
             proposalId: `goal-remediation-${digest.slice(0, 24)}`,
             storyId: `GREM-${digest.slice(0, 12)}`,
             status: "requested",
+            ...(revalidates && revalidates.length > 0
+                ? { revalidates }
+                : {}),
         })
     }
 
@@ -414,6 +467,7 @@ export class GoalGuardian extends BaseObserver {
                 invariantId,
                 `Previously integrated work for ${invariantId} has no ` +
                     `durable passing independent critique: ${invariant.text}`,
+                this.ledger.qualityRevalidationTargets(invariantId),
             )
         }
     }
@@ -422,6 +476,7 @@ export class GoalGuardian extends BaseObserver {
         kind: "coverage" | "revalidation",
         invariantId: string,
         reason: string,
+        revalidates?: readonly GoalIntegrationEvidence[],
     ): void {
         if (!this.contract || !this.ledger) return
         if (this.ledger.hasOpenChallenge(invariantId)) return
@@ -441,7 +496,12 @@ export class GoalGuardian extends BaseObserver {
             raisedBy: "goal-guardian",
             reason,
         })
-        this.bindRemediation(challengeId, invariantId)
+        this.bindRemediation(
+            challengeId,
+            invariantId,
+            undefined,
+            revalidates,
+        )
     }
 
     private emitPendingRemediations(): void {
@@ -533,6 +593,36 @@ export class GoalGuardian extends BaseObserver {
             return
         }
 
+        if (
+            this.requireAggregateReview &&
+            this.contract &&
+            this.ledger &&
+            request.contractId === this.contract.contractId
+        ) {
+            const localAssessment = this.ledger.assess(
+                request.storyIds,
+                this.requireIndependentQuality,
+            )
+            if (localAssessment.status === "satisfied") {
+                const basis = this.ledger.aggregateReviewBasis(
+                    request.storyIds,
+                    request.verificationId,
+                )
+                if (!this.ledger.aggregateReviewForBasis(
+                    basis.fingerprint,
+                    basis.verificationId,
+                )) {
+                    this.requestAggregateReview(requestKey, request, basis)
+                    return
+                }
+                this.publishProjection(true)
+                const data = this.attest(request, basis)
+                this.completed.set(request.checkId, { requestKey, data })
+                this.emit(GoalCompletionAttested.create(data))
+                return
+            }
+        }
+
         // Publish the complete source-of-truth projection immediately before
         // its derived decision. The serialized Board therefore persists the
         // evidence before it can persist or act on the attestation.
@@ -542,8 +632,123 @@ export class GoalGuardian extends BaseObserver {
         this.emit(GoalCompletionAttested.create(data))
     }
 
+    private requestAggregateReview(
+        requestKey: string,
+        request: GoalCompletionCheckRequestedData,
+        basis: GoalAggregateReviewBasis,
+        refreshCount = 0,
+    ): void {
+        const reviewId = `goal-review:${basis.fingerprint}`
+        const pending = this.pendingAggregateReviews.get(reviewId)
+        if (pending) {
+            if (pending.requestKey === requestKey) {
+                this.emit(
+                    GoalAggregateReviewRequested.create({
+                        runId: this.opts.runId,
+                        reviewId,
+                        checkId: request.checkId,
+                        goalRevision: pending.goalRevision,
+                        basis,
+                    }),
+                )
+            }
+            return
+        }
+        this.publishProjection(true)
+        const goalRevision = this.projectionRevision
+        this.pendingAggregateReviews.set(reviewId, {
+            requestKey,
+            request: structuredClone(request),
+            basis,
+            reviewId,
+            goalRevision,
+            refreshCount,
+        })
+        this.emit(
+            GoalAggregateReviewRequested.create({
+                runId: this.opts.runId,
+                reviewId,
+                checkId: request.checkId,
+                goalRevision,
+                basis,
+            }),
+        )
+    }
+
+    private onAggregateReviewCompleted(
+        review: GoalAggregateReviewCompletedData,
+    ): void {
+        if (!this.ledger || !this.contract) return
+        const pending = this.pendingAggregateReviews.get(review.reviewId)
+        if (!pending) return
+        if (
+            review.checkId !== pending.request.checkId ||
+            review.contractId !== this.contract.contractId ||
+            review.goalRevision !== pending.goalRevision ||
+            review.basisFingerprint !== pending.basis.fingerprint ||
+            review.verificationId !== pending.basis.verificationId
+        ) return
+
+        const currentBasis = this.ledger.aggregateReviewBasis(
+            pending.request.storyIds,
+            pending.request.verificationId,
+        )
+        this.pendingAggregateReviews.delete(review.reviewId)
+        if (currentBasis.fingerprint !== pending.basis.fingerprint) {
+            const localAssessment = this.ledger.assess(
+                pending.request.storyIds,
+                this.requireIndependentQuality,
+            )
+            const qualityOnlyChange =
+                goalAggregateStableBasisFingerprint(currentBasis) ===
+                    goalAggregateStableBasisFingerprint(pending.basis)
+            if (
+                pending.refreshCount < 1 &&
+                localAssessment.status === "satisfied" &&
+                qualityOnlyChange
+            ) {
+                this.requestAggregateReview(
+                    pending.requestKey,
+                    pending.request,
+                    currentBasis,
+                    pending.refreshCount + 1,
+                )
+                return
+            }
+            this.publishProjection(true)
+            const data = this.attest(pending.request, currentBasis)
+            this.completed.set(pending.request.checkId, {
+                requestKey: pending.requestKey,
+                data,
+            })
+            this.emit(GoalCompletionAttested.create(data))
+            return
+        }
+
+        try {
+            this.ledger.recordAggregateReview(review)
+        } catch {
+            this.publishProjection(true)
+            const data = this.attest(pending.request, currentBasis)
+            this.completed.set(pending.request.checkId, {
+                requestKey: pending.requestKey,
+                data,
+            })
+            this.emit(GoalCompletionAttested.create(data))
+            return
+        }
+        this.publishProjection(true)
+        const data = this.attest(pending.request, currentBasis)
+        this.completed.set(pending.request.checkId, {
+            requestKey: pending.requestKey,
+            data,
+        })
+        this.emit(GoalCompletionAttested.create(data))
+    }
+
     private attest(
         request: GoalCompletionCheckRequestedData,
+        aggregateBasis?: GoalAggregateReviewBasis,
     ): GoalCompletionAttestedData {
         if (!this.contract || !this.ledger) {
             if (request.contractId !== null) {
@@ -603,6 +808,7 @@ export class GoalGuardian extends BaseObserver {
         const assessment = this.ledger.assess(
             request.storyIds,
             this.requireIndependentQuality,
+            aggregateBasis,
         )
         return {
             runId: this.opts.runId,

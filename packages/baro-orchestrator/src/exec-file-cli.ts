@@ -32,11 +32,53 @@ export interface ExecFileCliOptions {
     input?: string
 }
 
-export function execFileCli(
+export interface ExecFileCliBufferResult {
+    stdout: Buffer
+    stderr: Buffer
+}
+
+export async function execFileCli(
     command: string,
     args: readonly string[],
     options: ExecFileCliOptions = {},
 ): Promise<{ stdout: string; stderr: string }> {
+    try {
+        const result = await execFileCliRaw(command, args, options)
+        return {
+            stdout: result.stdout.toString("utf8"),
+            stderr: result.stderr.toString("utf8"),
+        }
+    } catch (error) {
+        if (error instanceof Error) {
+            const failure = error as Error & {
+                stdout?: unknown
+                stderr?: unknown
+            }
+            if (Buffer.isBuffer(failure.stdout)) {
+                failure.stdout = failure.stdout.toString("utf8")
+            }
+            if (Buffer.isBuffer(failure.stderr)) {
+                failure.stderr = failure.stderr.toString("utf8")
+            }
+        }
+        throw error
+    }
+}
+
+/** Exact byte-preserving variant used when repository evidence is hashed/rendered. */
+export function execFileCliBuffer(
+    command: string,
+    args: readonly string[],
+    options: ExecFileCliOptions = {},
+): Promise<ExecFileCliBufferResult> {
+    return execFileCliRaw(command, args, options)
+}
+
+function execFileCliRaw(
+    command: string,
+    args: readonly string[],
+    options: ExecFileCliOptions = {},
+): Promise<ExecFileCliBufferResult> {
     const maxBuffer = options.maxBuffer ?? 1024 * 1024
     const terminationGraceMs = options.terminationGraceMs ?? 5_000
     if (!Number.isFinite(terminationGraceMs) || terminationGraceMs < 1) {
@@ -60,8 +102,8 @@ export function execFileCli(
             ownsProcessGroup: POSIX_PROCESS_GROUPS_SUPPORTED,
         })
 
-        let stdout = ""
-        let stderr = ""
+        const stdoutChunks: Buffer[] = []
+        const stderrChunks: Buffer[] = []
         let stdoutBytes = 0
         let stderrBytes = 0
         let stdoutCapped = false
@@ -120,7 +162,9 @@ export function execFileCli(
             refreshProcessTree()
             if (stdoutCapped) return
             const remaining = Math.max(0, maxBuffer - stdoutBytes)
-            if (remaining > 0) stdout += d.subarray(0, remaining).toString()
+            if (remaining > 0) {
+                stdoutChunks.push(Buffer.from(d.subarray(0, remaining)))
+            }
             stdoutBytes += Math.min(d.length, remaining)
             if (d.length > remaining) {
                 stdoutCapped = true
@@ -131,7 +175,9 @@ export function execFileCli(
             refreshProcessTree()
             if (stderrCapped) return
             const remaining = Math.max(0, maxBuffer - stderrBytes)
-            if (remaining > 0) stderr += d.subarray(0, remaining).toString()
+            if (remaining > 0) {
+                stderrChunks.push(Buffer.from(d.subarray(0, remaining)))
+            }
             stderrBytes += Math.min(d.length, remaining)
             if (d.length > remaining) {
                 stderrCapped = true
@@ -157,13 +203,15 @@ export function execFileCli(
             }
             void processTree.done.then(() => {
                 finish(() => {
+                    const stdout = Buffer.concat(stdoutChunks, stdoutBytes)
+                    const stderr = Buffer.concat(stderrChunks, stderrBytes)
                     if (code === 0) {
                         resolve({ stdout, stderr })
                         return
                     }
                     const err = new Error(
-                        `${command} exited with code ${code}\n${stderr}`,
-                    ) as Error & { code: number | null; stdout: string; stderr: string }
+                        `${command} exited with code ${code}\n${stderr.toString("utf8")}`,
+                    ) as Error & { code: number | null; stdout: Buffer; stderr: Buffer }
                     err.code = code
                     err.stdout = stdout
                     err.stderr = stderr

@@ -1806,6 +1806,144 @@ describe("orchestrate collective mode", () => {
         })
     })
 
+    it("reviews compositional goal shards against local story criteria", async () => {
+        await withTempDir("collective-compositional-quality-e2e-", async (dir) => {
+            git(dir, ["init", "-b", "main"])
+            git(dir, ["config", "user.name", "Quality Test"])
+            git(dir, ["config", "user.email", "quality@test.invalid"])
+            writeFileSync(join(dir, "README.md"), "base\n")
+            writePassingVerifyManifest(dir)
+            git(dir, ["add", "README.md", "package.json"])
+            git(dir, ["commit", "-m", "base"])
+
+            const globalCriterion =
+                "All four provider shards jointly preserve cooperative cancellation."
+            const storyIds = ["S5", "S6", "S7", "S8"]
+            const input = testPrd()
+            input.goalEnvelope = {
+                objective: "Propagate cooperative cancellation through every provider.",
+                constraints: [],
+                acceptanceCriteria: [globalCriterion],
+                nonGoals: [],
+                assumptions: [],
+            }
+            input.userStories = storyIds.map((id, index) => ({
+                ...story(id, []),
+                priority: index + 1,
+                acceptance: [`${id} provider shard forwards the exact signal.`],
+                goalInvariantIds: ["G-A1"],
+            }))
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            // Production TUI audit lives outside the repository. Keep this
+            // self-growing runtime artifact under .git so the aggregate
+            // reviewer sees only the implementation delta, never its own log.
+            const auditPath = join(dir, ".git", "audit.jsonl")
+            const criteriaLog = join(dir, "critic-criteria.log")
+            const fakeBin = join(dir, "claude")
+            writeFileSync(
+                fakeBin,
+                [
+                    "#!/usr/bin/env node",
+                    'const { appendFileSync } = require("node:fs")',
+                    'let input = ""',
+                    'process.stdin.setEncoding("utf8")',
+                    'process.stdin.on("data", (chunk) => { input += chunk })',
+                    'process.stdin.on("end", () => {',
+                    '  const start = input.indexOf("## Acceptance criteria")',
+                    '  const end = input.indexOf("## Baro-captured command/test evidence")',
+                    '  const criteria = input.slice(start, end)',
+                    `  appendFileSync(${JSON.stringify(criteriaLog)}, criteria + "\\n---\\n")`,
+                    `  const polluted = criteria.includes(${JSON.stringify(globalCriterion)})`,
+                    '  const verdict = polluted',
+                    '    ? { verdict: "fail", reasoning: "global sibling work leaked into local review", violated_criteria: ["global"] }',
+                    '    : { verdict: "pass", reasoning: "local criteria satisfied", violated_criteria: [] }',
+                    '  process.stdout.write(JSON.stringify({ result: JSON.stringify(verdict) }))',
+                    "})",
+                    "",
+                ].join("\n"),
+            )
+            chmodSync(fakeBin, 0o755)
+            const oldPath = process.env.PATH
+            process.env.PATH = `${dir}:${oldPath ?? ""}`
+            try {
+                const goalReviewPrompts: string[] = []
+                const result = await orchestrate({
+                    prdPath,
+                    cwd: dir,
+                    coordinationMode: "collective",
+                    publishRemote: false,
+                    withGit: true,
+                    emitTuiEvents: false,
+                    withLibrarian: false,
+                    withMemory: false,
+                    withSentry: false,
+                    withCritic: true,
+                    criticLlm: "claude",
+                    withSurgeon: false,
+                    withSupervisor: false,
+                    collectiveAcceptanceTimeoutMs: 90_000,
+                    goalReviewResponder: async (input) => {
+                        goalReviewPrompts.push(input.userPrompt)
+                        return JSON.stringify({
+                            verdict: "pass",
+                            reasoning: "the merged provider shards compose",
+                            violated_criteria: [],
+                        })
+                    },
+                    intraLevelDelaySecs: 0,
+                    executor: new CritiquedWritingExecutor(),
+                    auditLogPath: auditPath,
+                })
+
+                assert.equal(
+                    result.summary.success,
+                    true,
+                    `${JSON.stringify(result.summary)}\n${readFileSync(auditPath, "utf8")}`,
+                )
+                assert.deepEqual(
+                    [...result.summary.completedStories].sort(),
+                    storyIds,
+                )
+                const criteria = readFileSync(criteriaLog, "utf8")
+                assert.equal(criteria.includes(globalCriterion), false)
+                for (const id of storyIds) {
+                    assert.equal(
+                        criteria.includes(
+                            `${id} provider shard forwards the exact signal`,
+                        ),
+                        true,
+                    )
+                }
+                assert.equal(goalReviewPrompts.length, 1)
+                assert.equal(
+                    goalReviewPrompts[0]!.includes(globalCriterion),
+                    true,
+                )
+                for (const id of storyIds) {
+                    assert.equal(goalReviewPrompts[0]!.includes(id), true)
+                }
+                const audit = readFileSync(auditPath, "utf8")
+                assert.match(audit, /"type":"goal_aggregate_review_requested"/)
+                assert.match(audit, /"type":"goal_aggregate_review_completed"/)
+                const persisted = JSON.parse(
+                    readFileSync(prdPath, "utf8"),
+                ) as PrdFile
+                assert.equal(
+                    persisted.runtimeGraph?.protocol?.goal.aggregateReviews.length,
+                    1,
+                )
+                assert.equal(
+                    persisted.runtimeGraph?.protocol?.completion
+                        ?.invariants[0]?.aggregateReviewStatus,
+                    "passed",
+                )
+            } finally {
+                process.env.PATH = oldPath
+            }
+        })
+    })
+
     it("cannot finish green when the integrated target fails its real test command", async () => {
         await withTempDir("collective-verify-e2e-", async (dir) => {
             const prdPath = join(dir, "prd.json")

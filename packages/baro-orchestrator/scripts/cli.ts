@@ -16,6 +16,7 @@ import {
 } from "../src/orchestrate.js"
 import { resolveGatewayBillingForRoutes } from "../src/billing/index.js"
 import { signalAllProcessTrees } from "../src/process-tree.js"
+import { configureProviderOwnershipManifest } from "../src/provider-ownership-manifest.js"
 import type { Operator } from "../src/participants/operator.js"
 import type { PlanningFeed } from "../src/participants/planning-feed.js"
 import { handleStdinCommand } from "../src/stdin-commands.js"
@@ -31,6 +32,11 @@ import {
     type StoryRoute,
     type TierMap,
 } from "../src/routing.js"
+
+const ownershipManifestPath = process.env.BARO_INTERNAL_PROVIDER_OWNERSHIP_MANIFEST
+const ownershipManifestToken = process.env.BARO_INTERNAL_PROVIDER_OWNERSHIP_TOKEN
+delete process.env.BARO_INTERNAL_PROVIDER_OWNERSHIP_MANIFEST
+delete process.env.BARO_INTERNAL_PROVIDER_OWNERSHIP_TOKEN
 
 interface CliArgs {
     prd: string
@@ -411,6 +417,16 @@ async function main(): Promise<void> {
     if (args.help) {
         printHelp()
         return
+    }
+
+    if ((ownershipManifestPath === undefined) !== (ownershipManifestToken === undefined)) {
+        throw new Error("provider ownership manifest path and token must be paired")
+    }
+    if (ownershipManifestPath !== undefined && ownershipManifestToken !== undefined) {
+        configureProviderOwnershipManifest(
+            ownershipManifestPath,
+            ownershipManifestToken,
+        )
     }
 
     const envCoordination = process.env.BARO_COORDINATION

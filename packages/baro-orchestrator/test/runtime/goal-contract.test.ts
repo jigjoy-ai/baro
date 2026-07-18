@@ -3,7 +3,9 @@ import { describe, it } from "node:test"
 
 import {
     deriveGoalContract,
+    GOAL_AGGREGATE_REVIEW_RETENTION,
     GoalInvariantLedger,
+    normalizeGoalLedgerProjection,
     renderGoalContractPrompt,
 } from "../../src/runtime/goal-contract.js"
 import { goalEnvelopeFingerprint } from "../../src/session/conversation-contract.js"
@@ -121,6 +123,419 @@ describe("GoalInvariantLedger", () => {
         assert.deepEqual(staleDAG.openInvariantIds, [ids[2]])
     })
 
+    it("composes shared invariant evidence across every selected provider story", () => {
+        const contract = deriveGoalContract({
+            objective: "Propagate cancellation through every provider.",
+            constraints: [],
+            acceptanceCriteria: [
+                "Every provider forwards the shared AbortSignal.",
+            ],
+            nonGoals: [],
+            assumptions: [],
+        })!
+        const invariantId = contract.invariants[0]!.id
+        const providerStories = ["S5", "S6", "S7", "S8"]
+        const ledger = new GoalInvariantLedger(
+            contract,
+            providerStories.map((storyId) => ({
+                storyId,
+                invariantIds: [invariantId],
+            })),
+        )
+
+        ledger.recordIntegration({ storyId: "S5", leaseId: "lease-S5" })
+        ledger.recordQuality({
+            storyId: "S5",
+            leaseId: "lease-S5",
+            evaluationId: "quality-S5",
+            status: "passed",
+            independentlyPassed: true,
+        })
+
+        const partial = ledger.assess(providerStories, true)
+        assert.deepEqual(partial.openInvariantIds, [invariantId])
+        assert.deepEqual(partial.satisfiedInvariantIds, [])
+        assert.deepEqual(partial.invariants[0], {
+            invariantId,
+            status: "open",
+            mappedStoryIds: providerStories,
+            integratedStoryIds: ["S5"],
+            independentlyReviewedStoryIds: ["S5"],
+            reason: "1/4 mapped story contributions have integrated evidence",
+        })
+
+        for (const storyId of providerStories.slice(1)) {
+            ledger.recordIntegration({
+                storyId,
+                leaseId: `lease-${storyId}`,
+            })
+        }
+        assert.equal(
+            ledger.assess(providerStories, false).status,
+            "satisfied",
+            "all mapped integrations compose without requiring quality",
+        )
+
+        const partiallyReviewed = ledger.assess(providerStories, true)
+        assert.deepEqual(partiallyReviewed.openInvariantIds, [invariantId])
+        assert.match(
+            partiallyReviewed.invariants[0]!.reason,
+            /1\/4 integrated mapped contributions/,
+        )
+        assert.deepEqual(
+            ledger.invariantsNeedingIndependentQuality(),
+            [invariantId],
+        )
+
+        for (const storyId of providerStories.slice(1)) {
+            ledger.recordQuality({
+                storyId,
+                leaseId: `lease-${storyId}`,
+                evaluationId: `quality-${storyId}`,
+                status: "passed",
+                independentlyPassed: true,
+            })
+        }
+        const complete = ledger.assess(providerStories, true)
+        assert.equal(complete.status, "satisfied")
+        assert.deepEqual(complete.satisfiedInvariantIds, [invariantId])
+        assert.deepEqual(
+            ledger.invariantsNeedingIndependentQuality(),
+            [],
+        )
+    })
+
+    it("requires one persisted semantic review for the exact shared completion basis", () => {
+        const contract = deriveGoalContract({
+            objective: "Propagate cancellation through every provider.",
+            constraints: [],
+            acceptanceCriteria: [
+                "All four provider shards jointly preserve cooperative cancellation.",
+            ],
+            nonGoals: [],
+            assumptions: [],
+        })!
+        const storyIds = ["S5", "S6", "S7", "S8"]
+        const invariantId = contract.invariants[0]!.id
+        const ledger = new GoalInvariantLedger(
+            contract,
+            storyIds.map((storyId) => ({
+                storyId,
+                invariantIds: [invariantId],
+            })),
+        )
+        for (const storyId of storyIds) {
+            ledger.recordIntegration({ storyId, leaseId: `lease-${storyId}` })
+            ledger.recordQuality({
+                storyId,
+                leaseId: `lease-${storyId}`,
+                evaluationId: `quality-${storyId}`,
+                status: "passed",
+                independentlyPassed: true,
+            })
+        }
+
+        const basis = ledger.aggregateReviewBasis(storyIds, "verification-1")
+        const missing = ledger.assess(storyIds, true, basis)
+        assert.equal(missing.status, "incomplete")
+        assert.match(missing.invariants[0]!.reason, /run-level semantic review/)
+
+        ledger.recordAggregateReview({
+            reviewId: `goal-review:${basis.fingerprint}`,
+            basisFingerprint: basis.fingerprint,
+            verificationId: basis.verificationId,
+            repositoryFingerprint: "a".repeat(64),
+            status: "passed",
+            attempts: 1,
+            modelUsed: "fake-reviewer",
+            invariants: [{
+                invariantId,
+                status: "passed",
+                reason: "the merged provider composition preserves cancellation",
+            }],
+        })
+        assert.equal(ledger.assess(storyIds, true, basis).status, "satisfied")
+
+        const restored = new GoalInvariantLedger(
+            contract,
+            undefined,
+            ledger.snapshot(7),
+        )
+        assert.equal(restored.assess(storyIds, true, basis).status, "satisfied")
+
+        restored.recordIntegration({ storyId: "S8", leaseId: "lease-S8-new" })
+        const changedIntegration = restored.aggregateReviewBasis(
+            storyIds,
+            "verification-1",
+        )
+        assert.notEqual(changedIntegration.fingerprint, basis.fingerprint)
+        assert.equal(
+            restored.assess(storyIds, true, changedIntegration).status,
+            "incomplete",
+        )
+
+        const laterVerification = restored.aggregateReviewBasis(
+            storyIds,
+            "verification-2",
+        )
+        assert.notEqual(laterVerification.fingerprint, basis.fingerprint)
+        assert.equal(
+            restored.assess(storyIds, true, laterVerification).status,
+            "incomplete",
+        )
+    })
+
+    it("fails closed on negative and inconclusive aggregate reviews", () => {
+        for (const status of ["failed", "inconclusive"] as const) {
+            const contract = deriveGoalContract({
+                objective: "Compose providers.",
+                constraints: [],
+                acceptanceCriteria: ["Every provider shares one cancellation signal."],
+                nonGoals: [],
+                assumptions: [],
+            })!
+            const invariantId = contract.invariants[0]!.id
+            const ledger = new GoalInvariantLedger(contract, [{
+                storyId: "S5",
+                invariantIds: [invariantId],
+            }])
+            ledger.recordIntegration({ storyId: "S5", leaseId: "lease-S5" })
+            ledger.recordQuality({
+                storyId: "S5",
+                leaseId: "lease-S5",
+                evaluationId: "quality-S5",
+                status: "passed",
+                independentlyPassed: true,
+            })
+            const basis = ledger.aggregateReviewBasis(["S5"], "verification-1")
+            ledger.recordAggregateReview({
+                reviewId: `goal-review:${basis.fingerprint}`,
+                basisFingerprint: basis.fingerprint,
+                verificationId: basis.verificationId,
+                repositoryFingerprint: "a".repeat(64),
+                status,
+                attempts: 2,
+                modelUsed: "fake-reviewer",
+                invariants: [{
+                    invariantId,
+                    status,
+                    reason: `${status} aggregate evidence`,
+                }],
+            })
+            const assessment = ledger.assess(["S5"], true, basis)
+            assert.equal(assessment.status, "incomplete")
+            assert.deepEqual(
+                status === "failed"
+                    ? assessment.rejectedInvariantIds
+                    : assessment.openInvariantIds,
+                [invariantId],
+            )
+        }
+    })
+
+    it("bounds persisted aggregate-review retention and preserves the newest exact basis across restore", () => {
+        const contract = deriveGoalContract({
+            objective: "Keep aggregate evidence bounded.",
+            constraints: [],
+            acceptanceCriteria: ["The newest exact basis remains replayable."],
+            nonGoals: [],
+            assumptions: [],
+        })!
+        const invariantId = contract.invariants[0]!.id
+        const ledger = new GoalInvariantLedger(contract)
+        const total = GOAL_AGGREGATE_REVIEW_RETENTION + 7
+        for (let index = 0; index < total; index += 1) {
+            ledger.recordAggregateReview({
+                reviewId: `goal-review:basis-${index}`,
+                basisFingerprint: `basis-${index}`,
+                verificationId: `verification-${index}`,
+                repositoryFingerprint: "a".repeat(64),
+                status: "passed",
+                attempts: 1,
+                modelUsed: "fake-reviewer",
+                invariants: [{
+                    invariantId,
+                    status: "passed",
+                    reason: `basis ${index} passed`,
+                }],
+            })
+        }
+
+        const snapshot = ledger.snapshot(1)
+        assert.equal(
+            snapshot.aggregateReviews.length,
+            GOAL_AGGREGATE_REVIEW_RETENTION,
+        )
+        assert.equal(
+            ledger.aggregateReviewForBasis(`basis-${total - 1}`)?.verificationId,
+            `verification-${total - 1}`,
+        )
+        assert.equal(ledger.aggregateReviewForBasis("basis-0"), undefined)
+
+        const restored = new GoalInvariantLedger(contract, undefined, snapshot)
+        assert.equal(
+            restored.snapshot(2).aggregateReviews.length,
+            GOAL_AGGREGATE_REVIEW_RETENTION,
+        )
+        assert.equal(
+            restored.aggregateReviewForBasis(`basis-${total - 1}`)?.reviewId,
+            `goal-review:basis-${total - 1}`,
+        )
+    })
+
+    it("lets lease-bound remediation revalidate only the integration gaps it captured", () => {
+        const contract = deriveGoalContract({
+            objective: "Restore strict quality evidence.",
+            constraints: [],
+            acceptanceCriteria: ["Cancellation remains lossless."],
+            nonGoals: [],
+            assumptions: [],
+        })!
+        const invariantId = contract.invariants[0]!.id
+        const ledger = new GoalInvariantLedger(contract, [
+            { storyId: "S1", invariantIds: [invariantId] },
+        ])
+        ledger.recordIntegration({ storyId: "S1" })
+        const targets = ledger.qualityRevalidationTargets(invariantId)
+        assert.deepEqual(targets, [{ storyId: "S1" }])
+
+        ledger.raiseChallenge({
+            challengeId: "revalidation-G-A1",
+            invariantId,
+            raisedBy: "goal-guardian",
+            reason: "restored integration lacks correlated quality",
+        })
+        ledger.bindChallengeRemediation("revalidation-G-A1", {
+            proposalId: "proposal-R1",
+            storyId: "R1",
+            status: "requested",
+            revalidates: targets,
+        })
+        ledger.admitChallengeRemediation(
+            "revalidation-G-A1",
+            "proposal-R1",
+            "R1",
+            2,
+        )
+        ledger.mapStory({ storyId: "R1", invariantIds: [invariantId] })
+        ledger.recordIntegration({ storyId: "R1", leaseId: "lease-R1" })
+        ledger.recordQuality({
+            storyId: "R1",
+            leaseId: "lease-R1",
+            evaluationId: "quality-R1",
+            status: "passed",
+            independentlyPassed: true,
+        })
+        assert.equal(ledger.resolveSatisfiedRemediations(true).length, 1)
+
+        const restored = new GoalInvariantLedger(
+            contract,
+            undefined,
+            ledger.snapshot(4),
+        )
+        assert.equal(restored.assess(["S1", "R1"], true).status, "satisfied")
+        assert.deepEqual(restored.invariantsNeedingIndependentQuality(), [])
+
+        restored.recordIntegration({ storyId: "S1", leaseId: "lease-new" })
+        const replaced = restored.assess(["S1", "R1"], true)
+        assert.equal(replaced.status, "incomplete")
+        assert.deepEqual(replaced.openInvariantIds, [invariantId])
+        assert.deepEqual(
+            restored.qualityRevalidationTargets(invariantId),
+            [{ storyId: "S1", leaseId: "lease-new" }],
+            "a remediation for a PRD-only integration cannot cover a later lease",
+        )
+    })
+
+    it("fails closed when newer target quality contradicts a remediation witness", () => {
+        const contract = deriveGoalContract({
+            objective: "Preserve cancellation.",
+            constraints: [],
+            acceptanceCriteria: ["Cancellation remains lossless."],
+            nonGoals: [],
+            assumptions: [],
+        })!
+        const invariantId = contract.invariants[0]!.id
+        const ledger = new GoalInvariantLedger(contract, [
+            { storyId: "S1", invariantIds: [invariantId] },
+        ])
+        ledger.recordIntegration({ storyId: "S1", leaseId: "lease-S1" })
+        ledger.raiseChallenge({
+            challengeId: "revalidation-G-A1",
+            invariantId,
+            raisedBy: "goal-guardian",
+            reason: "S1 lacks quality evidence",
+        })
+        ledger.bindChallengeRemediation("revalidation-G-A1", {
+            proposalId: "proposal-R1",
+            storyId: "R1",
+            status: "requested",
+            revalidates: ledger.qualityRevalidationTargets(invariantId),
+        })
+        ledger.admitChallengeRemediation(
+            "revalidation-G-A1",
+            "proposal-R1",
+            "R1",
+            2,
+        )
+        ledger.mapStory({ storyId: "R1", invariantIds: [invariantId] })
+        ledger.recordIntegration({ storyId: "R1", leaseId: "lease-R1" })
+        ledger.recordQuality({
+            storyId: "R1",
+            leaseId: "lease-R1",
+            evaluationId: "quality-R1",
+            status: "passed",
+            independentlyPassed: true,
+        })
+        ledger.resolveSatisfiedRemediations(true)
+        assert.equal(ledger.assess(["S1", "R1"], true).status, "satisfied")
+
+        ledger.recordQuality({
+            storyId: "S1",
+            leaseId: "lease-S1",
+            evaluationId: "late-quality-S1",
+            status: "failed",
+            independentlyPassed: false,
+        })
+        assert.deepEqual(
+            ledger.assess(["S1", "R1"], true).rejectedInvariantIds,
+            [invariantId],
+        )
+    })
+
+    it("fails closed when any integrated contribution has failed or inconclusive quality", () => {
+        const contract = deriveGoalContract(envelope)!
+        const invariantId = contract.invariants[0]!.id
+
+        for (const status of ["failed", "inconclusive"] as const) {
+            const ledger = new GoalInvariantLedger(contract, [
+                { storyId: "S5", invariantIds: [invariantId] },
+                { storyId: "S6", invariantIds: [invariantId] },
+            ])
+            for (const storyId of ["S5", "S6"]) {
+                ledger.recordIntegration({
+                    storyId,
+                    leaseId: `lease-${storyId}`,
+                })
+                ledger.recordQuality({
+                    storyId,
+                    leaseId: `lease-${storyId}`,
+                    evaluationId: `quality-${storyId}`,
+                    status: storyId === "S5" ? "passed" : status,
+                    independentlyPassed: storyId === "S5",
+                })
+            }
+
+            const assessment = ledger.assess(["S5", "S6"], true)
+            assert.deepEqual(
+                assessment.rejectedInvariantIds,
+                [invariantId],
+                `${status} evidence rejects the aggregate invariant`,
+            )
+            assert.deepEqual(assessment.satisfiedInvariantIds, [])
+        }
+    })
+
     it("rejects failed quality and never attests around open or upheld challenges", () => {
         const contract = deriveGoalContract(envelope)!
         const invariantId = contract.invariants[0]!.id
@@ -233,6 +648,71 @@ describe("GoalInvariantLedger", () => {
         const assessment = ledger.assess(["S1"], false)
         assert.equal(assessment.status, "incomplete")
         assert.equal(assessment.protocolIssues.length, 1)
+    })
+
+    it("binds remediation identity to its canonical integration witness set", () => {
+        const contract = deriveGoalContract(envelope)!
+        const invariantId = contract.invariants[0]!.id
+        const ledger = new GoalInvariantLedger(contract)
+        ledger.raiseChallenge({
+            challengeId: "challenge-witness-identity",
+            invariantId,
+            raisedBy: "goal-guardian",
+            reason: "quality evidence must be restored",
+        })
+        const first = {
+            proposalId: "proposal-witness",
+            storyId: "GREM-witness",
+            status: "requested" as const,
+            revalidates: [
+                { storyId: "S1", leaseId: "lease-2" },
+                { storyId: "S1", leaseId: "lease-1" },
+            ],
+        }
+        ledger.bindChallengeRemediation(
+            "challenge-witness-identity",
+            first,
+        )
+        ledger.bindChallengeRemediation("challenge-witness-identity", {
+            ...first,
+            revalidates: [...first.revalidates].reverse(),
+        })
+        const canonical = ledger.snapshot(1)
+        assert.deepEqual(canonical.protocolIssues, [])
+        assert.deepEqual(
+            canonical.challenges[0]?.remediation?.revalidates,
+            [
+                { storyId: "S1", leaseId: "lease-1" },
+                { storyId: "S1", leaseId: "lease-2" },
+            ],
+        )
+
+        ledger.bindChallengeRemediation("challenge-witness-identity", {
+            ...first,
+            revalidates: [{ storyId: "S1", leaseId: "lease-1" }],
+        })
+        assert.match(
+            ledger.snapshot(2).protocolIssues[0]?.reason ?? "",
+            /bound to conflicting remediation work/,
+        )
+
+        const challenge = canonical.challenges[0]!
+        assert.throws(
+            () => normalizeGoalLedgerProjection({
+                ...canonical,
+                challenges: [{
+                    ...challenge,
+                    remediation: {
+                        ...challenge.remediation!,
+                        revalidates: [
+                            { storyId: "S1", leaseId: "lease-1" },
+                            { storyId: "S1", leaseId: "lease-1" },
+                        ],
+                    },
+                }],
+            }, contract),
+            /revalidation target contains duplicate keys/,
+        )
     })
 
     it("reconciles restored mappings and evidence to the exact admitted graph", () => {

@@ -1,6 +1,6 @@
 import { basename } from "node:path"
 
-import { execFileCli } from "./exec-file-cli.js"
+import { execFileCli, execFileCliBuffer } from "./exec-file-cli.js"
 
 /**
  * Repository commands should normally finish in seconds, but large worktrees
@@ -31,6 +31,12 @@ export type RepositoryCommand = (
     options: RepositoryCommandOptions,
 ) => Promise<{ stdout: string; stderr: string }>
 
+export type RepositoryBufferCommand = (
+    command: string,
+    args: readonly string[],
+    options: RepositoryCommandOptions,
+) => Promise<{ stdout: Buffer; stderr: Buffer }>
+
 export class RepositoryCommandError extends Error {
     readonly command: string
     readonly operation: string
@@ -41,6 +47,9 @@ export class RepositoryCommandError extends Error {
     readonly code: number | string | null | undefined
     readonly stdout: string
     readonly stderr: string
+    /** Exact captured bytes when the byte-preserving command path was used. */
+    readonly stdoutBuffer: Buffer | null
+    readonly stderrBuffer: Buffer | null
 
     constructor(
         command: string,
@@ -71,7 +80,18 @@ export class RepositoryCommandError extends Error {
         this.code = source.code
         this.stdout = source.stdout
         this.stderr = source.stderr
+        this.stdoutBuffer = rawFailureBuffer(cause, "stdout")
+        this.stderrBuffer = rawFailureBuffer(cause, "stderr")
     }
+}
+
+function rawFailureBuffer(
+    error: unknown,
+    field: "stdout" | "stderr",
+): Buffer | null {
+    if (!(error instanceof Error)) return null
+    const value = (error as Error & Record<typeof field, unknown>)[field]
+    return Buffer.isBuffer(value) ? Buffer.from(value) : null
 }
 
 /**
@@ -94,6 +114,39 @@ export const runRepositoryCommand: RepositoryCommand = async (
     )
     try {
         return await execFileCli(command, args, {
+            cwd: options.cwd,
+            env: options.env,
+            signal: options.signal,
+            timeout: timeoutMs,
+            maxBuffer,
+            terminationGraceMs: options.terminationGraceMs,
+        })
+    } catch (error) {
+        throw new RepositoryCommandError(
+            command,
+            args,
+            { cwd: options.cwd, timeoutMs, maxBuffer },
+            error,
+        )
+    }
+}
+
+/** Byte-preserving repository command for exact diff/status evidence. */
+export const runRepositoryCommandBuffer: RepositoryBufferCommand = async (
+    command,
+    args,
+    options,
+) => {
+    const timeoutMs = normalizePositiveInteger(
+        options.timeoutMs ?? repositoryCommandTimeoutMs(),
+        "repository command timeoutMs",
+    )
+    const maxBuffer = normalizePositiveInteger(
+        options.maxBuffer ?? DEFAULT_REPOSITORY_COMMAND_MAX_BUFFER,
+        "repository command maxBuffer",
+    )
+    try {
+        return await execFileCliBuffer(command, args, {
             cwd: options.cwd,
             env: options.env,
             signal: options.signal,
@@ -169,7 +222,15 @@ function asCommandFailure(error: unknown): {
         message: failure.message,
         killed: failure.killed,
         code: failure.code,
-        stdout: typeof failure.stdout === "string" ? failure.stdout : "",
-        stderr: typeof failure.stderr === "string" ? failure.stderr : "",
+        stdout: typeof failure.stdout === "string"
+            ? failure.stdout
+            : Buffer.isBuffer(failure.stdout)
+            ? failure.stdout.toString("utf8")
+            : "",
+        stderr: typeof failure.stderr === "string"
+            ? failure.stderr
+            : Buffer.isBuffer(failure.stderr)
+            ? failure.stderr.toString("utf8")
+            : "",
     }
 }

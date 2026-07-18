@@ -237,11 +237,9 @@ pub(crate) fn configure_process_tree(cmd: &mut Command) {
     windows_job::configure(cmd);
 }
 
-/// Cancellation guard for the complete process tree rooted at a supervised
-/// child. Completion and cancellation both terminate any remaining descendants:
-/// a successful direct root is not permission to leave a paid provider running.
-/// Unix process groups and Windows Job Objects both remain addressable after the
-/// direct root exits.
+/// Cancellation guard for the contained process tree rooted at a supervised
+/// child. Completion and cancellation terminate remaining group/job members;
+/// the containment handle survives direct-root exit.
 pub(crate) struct ProcessTreeGuard {
     #[cfg(not(windows))]
     pid: Option<u32>,
@@ -274,6 +272,19 @@ impl ProcessTreeGuard {
             job.terminate();
         }
     }
+
+    /// Ask a live root to run its own shutdown handlers without surrendering
+    /// the hard-cleanup handle. Detached groups are owned through the private
+    /// Node-to-Rust manifest rather than inferred from a process-table walk.
+    pub(crate) fn request_graceful_shutdown(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            signal_process_group(pid, SIGTERM);
+        }
+
+        #[cfg(not(unix))]
+        self.terminate();
+    }
 }
 
 impl Drop for ProcessTreeGuard {
@@ -297,18 +308,24 @@ impl Drop for ProcessTreeGuard {
 #[cfg(not(windows))]
 fn terminate_process_tree(pid: u32) {
     #[cfg(unix)]
-    {
-        // SAFETY: POSIX `kill` accepts a negative pid to address a process
-        // group. The child was made leader of group `pid` before spawn.
-        unsafe extern "C" {
-            fn kill(pid: i32, signal: i32) -> i32;
-        }
-        const SIGKILL: i32 = 9;
-        if let Ok(group) = i32::try_from(pid) {
-            // Ignore ESRCH: the process tree may already have exited while
-            // cancellation was propagating.
-            let _ = unsafe { kill(-group, SIGKILL) };
-        }
+    signal_process_group(pid, SIGKILL);
+}
+
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+#[cfg(unix)]
+const SIGTERM: i32 = 15;
+
+#[cfg(unix)]
+fn signal_process_group(pid: u32, signal: i32) {
+    // SAFETY: POSIX `kill` accepts a negative pid to address a process group.
+    // The child was made leader of group `pid` before spawn.
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    if let Ok(group) = i32::try_from(pid) {
+        // Ignore ESRCH: shutdown may have won the race before signal delivery.
+        let _ = unsafe { kill(-group, signal) };
     }
 }
 

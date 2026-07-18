@@ -25,6 +25,7 @@ import { runOpenCodeOneShot } from "../opencode-one-shot.js"
 import { runPiOneShot } from "../pi-one-shot.js"
 import {
     GenericOpenAIModel,
+    isProviderCallTimeout,
     providerCallTimeoutError,
     runInferenceRound,
     type OpenAIConnection,
@@ -44,6 +45,7 @@ import type { RunnerInvocationObservation } from "../runner-invocation.js"
 import { frontDoorBillingPhase } from "../session/frontdoor-billing.js"
 import {
     DialogueResponderInvocationError,
+    DialogueResponderNotDispatchedError,
     type DialogueResponder,
     type DialogueResponderInvocation,
     type DialogueResponderTelemetry,
@@ -69,6 +71,8 @@ export interface CreateDialogueResponderOptions {
     piBin?: string
     /** Allow an explicitly isolated caller to run Codex outside a git checkout. */
     codexSkipGitRepoCheck?: boolean
+    /** Harden a prompt-only runtime evaluator beyond ordinary dialogue isolation. */
+    safeReadOnlyEvaluator?: boolean
     openaiConnection?: OpenAIConnection
     /** Trusted Gateway receipt correlation for OpenAI dialogue calls. */
     billingCoordinator?: GatewayBillingCoordinator
@@ -129,7 +133,9 @@ function createOpenCodeResponder(
             }
         } catch (error) {
             if (isProcessLaunchFailure(error)) {
-                throw new Error("OpenCode dialogue process could not start")
+                throw new DialogueResponderNotDispatchedError(
+                    "OpenCode dialogue process could not start",
+                )
             }
             const failure = dialogueFailureAttribution(error, signal)
             throw new DialogueResponderInvocationError(
@@ -190,7 +196,9 @@ function createPiResponder(
             }
         } catch (error) {
             if (isProcessLaunchFailure(error)) {
-                throw new Error("Pi dialogue process could not start")
+                throw new DialogueResponderNotDispatchedError(
+                    "Pi dialogue process could not start",
+                )
             }
             const failure = dialogueFailureAttribution(error, signal)
             throw new DialogueResponderInvocationError(
@@ -239,6 +247,9 @@ function createCodexResponder(
                 ignoreUserConfig: true,
                 ignoreRules: true,
                 disableProjectDocs: true,
+                disableHooks: opts.safeReadOnlyEvaluator,
+                neverApprove: opts.safeReadOnlyEvaluator,
+                disableWebSearch: opts.safeReadOnlyEvaluator,
                 skipGitRepoCheck: opts.codexSkipGitRepoCheck,
                 signal,
                 onInvocation: (item) => {
@@ -257,8 +268,13 @@ function createCodexResponder(
                 ),
             }
         } catch (error) {
-            if (!observation && isProcessLaunchFailure(error)) {
-                throw new Error("Codex dialogue process could not start")
+            // The runner may emit a synthetic failed-process observation for
+            // async ENOENT before rejecting. No provider/model was dispatched,
+            // so launch failure still takes precedence over that observation.
+            if (isProcessLaunchFailure(error)) {
+                throw new DialogueResponderNotDispatchedError(
+                    "Codex dialogue process could not start",
+                )
             }
             const failure = dialogueFailureAttribution(error, signal)
             throw new DialogueResponderInvocationError(
@@ -310,7 +326,9 @@ function createClaudeResponder(
             // A missing/non-executable harness never reached a model provider,
             // so it must not be counted as an invocation.
             if (isProcessLaunchFailure(error)) {
-                throw new Error("Claude dialogue process could not start")
+                throw new DialogueResponderNotDispatchedError(
+                    "Claude dialogue process could not start",
+                )
             }
             const failure = dialogueFailureAttribution(error, signal)
             throw new DialogueResponderInvocationError(
@@ -374,9 +392,8 @@ function createOpenAIResponder(
     )
     const responder: DialogueResponder = async (input, signal) => {
         if (signal.aborted) {
-            throw new DialogueResponderInvocationError(
-                "OpenAI dialogue provider cancelled",
-                telemetry.failureInvocation("cancelled", "not_reported"),
+            throw new DialogueResponderNotDispatchedError(
+                "OpenAI dialogue was cancelled before provider dispatch",
             )
         }
         const context = ModelContext.create(`dialogue:${input.messageId}`)
@@ -398,13 +415,13 @@ function createOpenAIResponder(
                               coordinator: opts.billingCoordinator,
                               context: {
                                   runId: input.runId,
-                                  phase: frontDoorBillingPhase(
-                                      input.billingRole,
-                                  ),
+                                  phase:
+                                      input.billingPhase ??
+                                      frontDoorBillingPhase(input.billingRole),
                                   storyId: null,
                                   leaseId: null,
                                   generation: null,
-                                  attempt: null,
+                                  attempt: input.billingAttempt ?? null,
                                   turn: 1,
                                   round: 1,
                               },
@@ -898,7 +915,9 @@ function dialogueFailureAttribution(
     providerTimedOut = false,
 ): { status: DialogueFailureStatus; reason: UnknownMetricReason } {
     if (callerSignal.aborted) {
-        return { status: "cancelled", reason: "not_reported" }
+        return isProviderCallTimeout(callerSignal.reason)
+            ? { status: "timed_out", reason: "timed_out" }
+            : { status: "cancelled", reason: "not_reported" }
     }
     if (providerTimedOut || isTimeout(error)) {
         return { status: "timed_out", reason: "timed_out" }

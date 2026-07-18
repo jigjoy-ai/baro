@@ -7,6 +7,18 @@ import {
 } from "../src/harness-environment.js"
 
 describe("subscription harness environment isolation", () => {
+    it("never forwards the private provider ownership bootstrap", () => {
+        const child = harnessChildEnvironment({
+            PATH: "/usr/bin",
+            BARO_INTERNAL_PROVIDER_OWNERSHIP_MANIFEST: "/private/run/ownership.json",
+            BARO_INTERNAL_PROVIDER_OWNERSHIP_TOKEN: "private-run-token",
+        })
+
+        assert.equal(child.BARO_INTERNAL_PROVIDER_OWNERSHIP_MANIFEST, undefined)
+        assert.equal(child.BARO_INTERNAL_PROVIDER_OWNERSHIP_TOKEN, undefined)
+        assert.equal(child.PATH, "/usr/bin")
+    })
+
     it("removes only Baro-injected JigJoy routing and credentials", () => {
         const parentOpenAiKey = process.env.OPENAI_API_KEY
         const child = harnessChildEnvironment({

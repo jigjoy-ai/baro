@@ -605,9 +605,16 @@ describe("GoalGuardian", () => {
         )
     })
 
-    it("revalidates a passed PRD story when its restored projection lacks Critic evidence", () => {
+    it("completes after a lease-bound remediation revalidates restored PRD evidence", () => {
         const runId = "run-revalidate-passed"
-        const contract = deriveGoalContract(envelope)!
+        const revalidationEnvelope = {
+            objective: "Keep cancellation lossless.",
+            constraints: [],
+            acceptanceCriteria: ["All provider paths abort before returning."],
+            nonGoals: [],
+            assumptions: [],
+        } as const
+        const contract = deriveGoalContract(revalidationEnvelope)!
         const mappings = [{
             storyId: "S1",
             invariantIds: contract.invariants.map(({ id }) => id),
@@ -617,15 +624,19 @@ describe("GoalGuardian", () => {
             mappings,
         ).snapshot(2)
         const board = source("board")
+        const repository = source("repository")
+        const acceptanceGate = source("acceptance-gate")
         const guardian = new GoalGuardian({
             runId,
-            goalEnvelope: envelope,
+            goalEnvelope: revalidationEnvelope,
             storyMappings: mappings,
             integratedStoryIds: ["S1"],
             projection: staleProjection,
             requireIndependentQuality: true,
         })
         guardian.setRequestAuthority(board)
+        guardian.setIntegrationAuthority(repository)
+        guardian.setQualityAuthority(acceptanceGate)
         const env = joinWithCapture(guardian)
 
         env.deliverSemanticEvent(
@@ -633,22 +644,114 @@ describe("GoalGuardian", () => {
             RunPreparationRequested.create({ runId }),
         )
         const proposals = env.events.filter(GoalInvariantRemediationProposed.is)
-        assert.equal(proposals.length, contract.invariants.length)
-        assert.equal(
-            proposals.every(({ data }) =>
-                data.challengeId.startsWith("revalidation-")
-            ),
-            true,
-        )
-        const projection = env.events
+        assert.equal(proposals.length, 1)
+        const proposal = proposals[0]!
+        assert.match(proposal.data.challengeId, /^revalidation-/u)
+        const requestedProjection = env.events
             .filter(GoalLedgerProjectionUpdated.is)
             .at(-1)?.data.projection
         assert.deepEqual(
-            projection?.integrations.map(({ storyId }) => storyId),
+            requestedProjection?.integrations.map(({ storyId }) => storyId),
             ["S1"],
             "PRD pass truth closes the crash window without inventing quality",
         )
-        assert.deepEqual(projection?.qualities, [])
+        assert.deepEqual(requestedProjection?.qualities, [])
+        assert.deepEqual(
+            requestedProjection?.challenges[0]?.remediation?.revalidates,
+            [{ storyId: "S1" }],
+        )
+
+        env.deliverSemanticEvent(
+            board,
+            GoalInvariantRemediationAdmitted.create({
+                runId,
+                contractId: contract.contractId,
+                challengeId: proposal.data.challengeId,
+                invariantId: proposal.data.invariantId,
+                proposalId: proposal.data.proposalId,
+                storyId: proposal.data.story.id,
+                graphVersion: 2,
+                disposition: "applied",
+            }),
+        )
+        env.deliverSemanticEvent(
+            board,
+            GoalStoryInvariantMapped.create({
+                runId,
+                mappingId: "mapping-revalidation",
+                storyId: proposal.data.story.id,
+                invariantIds: [proposal.data.invariantId],
+            }),
+        )
+        env.deliverSemanticEvent(
+            repository,
+            StoryMerged.create({
+                runId,
+                storyId: proposal.data.story.id,
+                leaseId: "lease-remediation",
+                mode: "worktree",
+            }),
+        )
+        env.deliverSemanticEvent(
+            acceptanceGate,
+            passedQuality(
+                runId,
+                proposal.data.story.id,
+                "lease-remediation",
+            ),
+        )
+        assert.equal(
+            env.events.filter(GoalInvariantChallengeResolved.is).at(-1)?.data
+                .challengeId,
+            proposal.data.challengeId,
+        )
+
+        const storyIds = ["S1", proposal.data.story.id]
+        env.deliverSemanticEvent(
+            board,
+            completionRequest(
+                runId,
+                "check-revalidated",
+                contract.contractId,
+                storyIds,
+            ),
+        )
+        assert.equal(
+            env.events.filter(GoalCompletionAttested.is).at(-1)?.data.status,
+            "satisfied",
+        )
+        const completedProjection = env.events
+            .filter(GoalLedgerProjectionUpdated.is)
+            .at(-1)?.data.projection
+        assert.deepEqual(
+            completedProjection?.qualities.map(({ storyId }) => storyId),
+            [proposal.data.story.id],
+            "the remediation does not forge quality evidence for S1",
+        )
+
+        env.deliverSemanticEvent(
+            repository,
+            StoryMerged.create({
+                runId,
+                storyId: "S1",
+                leaseId: "lease-new-S1",
+                mode: "worktree",
+            }),
+        )
+        env.deliverSemanticEvent(
+            board,
+            completionRequest(
+                runId,
+                "check-replaced-integration",
+                contract.contractId,
+                storyIds,
+            ),
+        )
+        assert.equal(
+            env.events.filter(GoalCompletionAttested.is).at(-1)?.data.status,
+            "incomplete",
+            "the remediation cannot cover a later, unreviewed S1 lease",
+        )
     })
 
     it("reconciles a removed remediation after restart with a fresh proposal identity", () => {

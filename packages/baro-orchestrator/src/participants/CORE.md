@@ -76,9 +76,19 @@ Source: [goal-guardian.ts](./goal-guardian.ts)
 GoalGuardian is the independent semantic authority for the accepted
 `GoalContract`. It projects exact story-to-invariant mappings, source-bound
 challenges, durable integrations, and Critic quality tied to the exact lease.
-It may request bounded corrective work and attest goal completion, but cannot
-schedule, grant leases, mutate the graph, integrate code, or verify the run.
-Its projection crosses the PRD persistence boundary before Board can accept a
+In strict collective runs, locally passing story shards are necessary but not
+sufficient: after final verification it requests one batched, read-only
+GoalInvariantReviewer evaluation of every invariant against the complete
+integration and verification basis. A pass is reusable only for that exact
+basis fingerprint; changed quality, integration, remediation, protocol, or
+verification evidence requires a new review. Every reconstructed Board uses a
+fresh cryptographic verification epoch, so a persisted review from an older
+coordinator instance cannot match the resumed completion basis. Failed or
+inconclusive aggregate review currently fails the final goal closed rather
+than reopening the graph or scheduling remediation. GoalGuardian may request
+bounded corrective work and attest goal completion, but cannot schedule,
+grant leases, mutate the graph, integrate code, or verify the run. Its
+projection crosses the PRD persistence boundary before Board can accept a
 completion attestation; restart replay cannot infer a green result from an old
 or uncorrelated quality verdict.
 
@@ -103,6 +113,9 @@ and backend-specific `critic-*` files.
 Critic evaluates a terminal candidate only when repository and command
 evidence are ready. AcceptanceGate correlates that verdict with the exact
 lease, generation, and terminal identity before permitting integration.
+Those verdicts remain intentionally story-local; the strict collective
+GoalInvariantReviewer is the separate run-level composition check and does not
+change legacy or non-strict Critic behavior.
 Missing, stale, sandbox-blocked, or evaluator-unavailable evidence is
 inconclusive. AcceptanceGate first asks AgentTurnProjector for a bounded replay
 of the exact active lease/candidate, without another WorkOffer. Exhaustion

@@ -15,6 +15,10 @@ import { SemanticEvent } from "@mozaik-ai/core"
 import type { WorkBidEstimate } from "./work-market.js"
 
 import type { ModelInvocationMeasuredData } from "./model-telemetry.js"
+import type {
+    GoalAggregateReviewBasis,
+    GoalAggregateReviewEvidence,
+} from "./runtime/goal-aggregate-review.js"
 
 import type { ConversationResponse } from "./session/conversation-contract.js"
 import type { ConversationRequestIntent } from "./session/conversation-intake.js"
@@ -1395,6 +1399,32 @@ export const GoalCompletionCheckRequested =
         "goal_completion_check_requested",
     )
 
+/** Guardian-authored request for one semantic review of the exact run basis. */
+export interface GoalAggregateReviewRequestedData {
+    runId: string
+    reviewId: string
+    checkId: string
+    goalRevision: number
+    basis: GoalAggregateReviewBasis
+}
+export const GoalAggregateReviewRequested =
+    defineSemanticEvent<GoalAggregateReviewRequestedData>(
+        "goal_aggregate_review_requested",
+    )
+
+/** Read-only review evidence correlated to the immutable requested basis. */
+export interface GoalAggregateReviewCompletedData
+    extends GoalAggregateReviewEvidence {
+    runId: string
+    checkId: string
+    contractId: string
+    goalRevision: number
+}
+export const GoalAggregateReviewCompleted =
+    defineSemanticEvent<GoalAggregateReviewCompletedData>(
+        "goal_aggregate_review_completed",
+    )
+
 export type GoalInvariantAttestationStatus =
     | "satisfied"
     | "open"
@@ -1406,6 +1436,8 @@ export interface GoalInvariantAttestationEvidence {
     mappedStoryIds: readonly string[]
     integratedStoryIds: readonly string[]
     independentlyReviewedStoryIds: readonly string[]
+    aggregateReviewId?: string
+    aggregateReviewStatus?: import("./runtime/goal-aggregate-review.js").GoalAggregateReviewStatus
     reason: string
 }
 

@@ -4,6 +4,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -12,7 +13,11 @@ use tokio::sync::{mpsc, oneshot};
 use crate::conversation::ConversationContextSnapshot;
 use crate::discovery::{self, ScriptEntry};
 use crate::events::BaroEvent;
+use crate::provider_ownership::ProviderOwnershipManifest;
 use crate::subprocess::{configure_process_tree, ProcessTreeGuard};
+
+const ORCHESTRATOR_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+const ORCHESTRATOR_HARD_REAP_GRACE: Duration = Duration::from_secs(1);
 
 pub struct OrchestratorConfig {
     /// Accepted-goal conversation continuity for the run-local DialogueAgent.
@@ -129,17 +134,19 @@ async fn run(
         .as_ref()
         .map(EphemeralConversationContextFile::create)
         .transpose()?;
+    let provider_ownership = ProviderOwnershipManifest::create()?;
     let mut cmd = build_command(
         &entry,
         &cfg,
         conversation_context_file.as_ref().map(|file| file.path()),
     );
+    provider_ownership.configure_command(&mut cmd);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     cmd.stdin(std::process::Stdio::piped());
-    // If the Rust process dies uncleanly, SIGKILL the child via tokio's
-    // Drop rather than orphaning it; the orchestrator's ppid watchdog
-    // is the backup if we miss this.
+    // Abnormal future loss remains fail-safe: Tokio hard-kills the direct root
+    // and ProcessTreeGuard hard-kills its group. Explicit host shutdown takes
+    // the bounded graceful path below instead.
     cmd.kill_on_drop(true);
     configure_process_tree(&mut cmd);
 
@@ -247,15 +254,19 @@ async fn run(
         }
     });
 
-    let status = wait_for_child_or_shutdown(&mut child, &mut process_tree, shutdown_rx).await?;
-    // Exit status covers only the direct Node process. Kill any residual
-    // provider group before draining inherited pipes, including on exit 0.
-    process_tree.terminate();
+    let status = wait_for_child_or_shutdown(
+        &mut child,
+        &mut process_tree,
+        &provider_ownership,
+        shutdown_rx,
+    )
+    .await?;
 
     // Be explicit about the security boundary: the context file remains
     // addressable while the child is alive and is unlinked immediately after
     // it exits, before this run reports completion.
     drop(conversation_context_file);
+    drop(provider_ownership);
 
     // The writer may be parked on recv() forever (the app keeps its
     // sender alive across runs) — abort rather than await.
@@ -271,28 +282,80 @@ async fn run(
     Ok(())
 }
 
-/// Wait for the direct orchestrator root or an explicit host shutdown. The
-/// latter must terminate the containment primitive before Baro itself exits:
-/// on Unix the orchestrator lives in a separate process group, so a terminal
-/// SIGINT delivered to Baro does not reach it automatically.
+/// Wait for the direct orchestrator root or an explicit host shutdown. On Unix,
+/// SIGTERM first lets Node reap its separately-grouped providers; a bounded
+/// grace is followed by an outer-group kill. Every terminal root path then
+/// performs identity-validated manifest cleanup. Drop remains fail-safe for the
+/// outer containment primitive.
 async fn wait_for_child_or_shutdown(
     child: &mut tokio::process::Child,
     process_tree: &mut ProcessTreeGuard,
-    mut shutdown_rx: oneshot::Receiver<()>,
+    provider_ownership: &ProviderOwnershipManifest,
+    shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<std::process::ExitStatus, String> {
+    wait_for_child_or_shutdown_with_grace(
+        child,
+        process_tree,
+        provider_ownership,
+        shutdown_rx,
+        ORCHESTRATOR_SHUTDOWN_GRACE,
+    )
+    .await
+}
+
+async fn wait_for_child_or_shutdown_with_grace(
+    child: &mut tokio::process::Child,
+    process_tree: &mut ProcessTreeGuard,
+    provider_ownership: &ProviderOwnershipManifest,
+    mut shutdown_rx: oneshot::Receiver<()>,
+    grace: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    let outer_group = child.id();
     let mut wait = Box::pin(child.wait());
-    let shutdown_requested = tokio::select! {
+    let status = tokio::select! {
         status = &mut wait => {
-            return status.map_err(|e| format!("orchestrator wait failed: {}", e));
+            status.map_err(|e| format!("orchestrator wait failed: {}", e))
         }
-        request = &mut shutdown_rx => request.is_ok(),
+        request = &mut shutdown_rx => {
+            if request.is_err() {
+                wait.await
+                    .map_err(|e| format!("orchestrator wait failed: {}", e))
+            } else {
+                process_tree.request_graceful_shutdown();
+                match tokio::time::timeout(grace, &mut wait).await {
+                    Ok(status) => status
+                        .map_err(|e| format!("orchestrator wait failed: {}", e)),
+                    Err(_) => {
+                        // Stop the only process that can create another provider
+                        // before consuming its last atomically published manifest.
+                        process_tree.terminate();
+                        provider_ownership
+                            .terminate_validated_groups(outer_group)
+                            .await;
+                        match tokio::time::timeout(ORCHESTRATOR_HARD_REAP_GRACE, &mut wait).await {
+                            Ok(status) => status
+                                .map_err(|e| format!("orchestrator wait failed: {}", e)),
+                            Err(_) => Err(format!(
+                                "orchestrator did not reap within {}ms after SIGKILL",
+                                ORCHESTRATOR_HARD_REAP_GRACE.as_millis()
+                            )),
+                        }
+                    }
+                }
+            }
+        }
     };
 
-    if shutdown_requested {
-        process_tree.terminate();
-    }
-    wait.await
-        .map_err(|e| format!("orchestrator wait failed: {}", e))
+    // Root exit is not a provider-cleanup certificate: a crash, OOM, SIGKILL,
+    // or an explicit process.exit can bypass Node's asynchronous registry
+    // drain. First retire residual members of the outer group, then kill only
+    // detached groups whose live PID/start-time/PGID identity still matches the
+    // private manifest. This is safe and idempotent after a graceful exit too.
+    process_tree.terminate();
+    provider_ownership
+        .terminate_validated_groups(outer_group)
+        .await;
+    status
 }
 
 struct EphemeralConversationContextFile {
@@ -448,16 +511,18 @@ fn build_command(
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+    use std::time::Duration;
 
     use super::{
-        build_command, wait_for_child_or_shutdown, EphemeralConversationContextFile,
-        OrchestratorConfig,
+        build_command, wait_for_child_or_shutdown, wait_for_child_or_shutdown_with_grace,
+        EphemeralConversationContextFile, OrchestratorConfig,
     };
     use crate::conversation::{
         ConversationKind, ConversationPhase, ConversationSession, ConversationWireResponse,
         GoalEnvelope,
     };
     use crate::discovery::ScriptEntry;
+    use crate::provider_ownership::ProviderOwnershipManifest;
 
     fn config(with_surgeon: bool, surgeon_use_llm: bool) -> OrchestratorConfig {
         OrchestratorConfig {
@@ -625,60 +690,516 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
-    async fn explicit_shutdown_reaps_the_orchestrator_process_group() {
+    async fn explicit_shutdown_lets_outer_handler_reap_detached_provider_group() {
         use crate::subprocess::{configure_process_tree, ProcessTreeGuard};
 
         let directory = tempfile::tempdir().unwrap();
         let started = directory.path().join("started");
-        let descendant_pid_path = directory.path().join("descendant-pid");
-        let mut command = tokio::process::Command::new("sh");
+        let term_seen = directory.path().join("term-seen");
+        let provider_pid_path = directory.path().join("provider-pid");
+        let mut command = tokio::process::Command::new("node");
         command
             .kill_on_drop(true)
             .env("BARO_TEST_STARTED", &started)
-            .env("BARO_TEST_DESCENDANT_PID", &descendant_pid_path)
-            .arg("-c")
+            .env("BARO_TEST_TERM_SEEN", &term_seen)
+            .env("BARO_TEST_PROVIDER_PID", &provider_pid_path)
+            .arg("-e")
             .arg(
-                "(trap '' TERM; sleep 30) & \
-                 echo \"$!\" > \"$BARO_TEST_DESCENDANT_PID\"; \
-                 touch \"$BARO_TEST_STARTED\"; wait",
+                r#"
+const fs = require("node:fs")
+const { spawn } = require("node:child_process")
+const provider = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+  detached: true,
+  stdio: "ignore",
+})
+provider.unref()
+fs.writeFileSync(process.env.BARO_TEST_PROVIDER_PID, String(provider.pid))
+let stopping = false
+process.on("SIGTERM", () => {
+  if (stopping) return
+  stopping = true
+  fs.writeFileSync(process.env.BARO_TEST_TERM_SEEN, "yes")
+  try { process.kill(-provider.pid, "SIGKILL") } catch (error) {
+    if (error.code !== "ESRCH") throw error
+  }
+  process.exit(143)
+})
+fs.writeFileSync(process.env.BARO_TEST_STARTED, "yes")
+setInterval(() => {}, 1000)
+"#,
             );
         configure_process_tree(&mut command);
         let mut child = command.spawn().expect("spawn process-tree fixture");
+        let root_pid = child.id().expect("fixture root pid");
         let mut process_tree = ProcessTreeGuard::attach(&mut child).unwrap();
+        let provider_ownership = ProviderOwnershipManifest::create().unwrap();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-        let trigger = tokio::spawn(async move {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-            while !started.exists() && tokio::time::Instant::now() < deadline {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            assert!(started.exists(), "fixture root never became ready");
-            shutdown_tx
-                .send(())
-                .expect("shutdown receiver must be live");
-        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !started.exists() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(started.exists(), "fixture root never became ready");
+        let provider_pid = std::fs::read_to_string(&provider_pid_path)
+            .expect("fixture did not record its provider")
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert_ne!(
+            unix_process_group(root_pid),
+            unix_process_group(provider_pid),
+            "provider fixture must own an independent process group"
+        );
+        shutdown_tx
+            .send(())
+            .expect("shutdown receiver must be live");
 
         let _status = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            wait_for_child_or_shutdown(&mut child, &mut process_tree, shutdown_rx),
+            Duration::from_secs(2),
+            wait_for_child_or_shutdown(
+                &mut child,
+                &mut process_tree,
+                &provider_ownership,
+                shutdown_rx,
+            ),
         )
         .await
         .expect("structured shutdown must not hang")
         .expect("orchestrator wait should succeed");
-        trigger.await.unwrap();
+        assert!(term_seen.exists(), "outer TERM handler was bypassed");
 
-        let descendant_pid = std::fs::read_to_string(&descendant_pid_path)
-            .expect("fixture did not record its descendant")
-            .trim()
-            .to_string();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while unix_process_exists(&descendant_pid) && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while unix_process_exists(&provider_pid.to_string())
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(
-            !unix_process_exists(&descendant_pid),
-            "headless shutdown left an orchestrator descendant alive"
+            !unix_process_exists(&provider_pid.to_string()),
+            "outer TERM handler left its detached provider alive"
         );
+        assert!(
+            !unix_process_exists(&root_pid.to_string()),
+            "orchestrator root remained alive after graceful shutdown"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn abrupt_root_exit_reaps_a_registered_detached_provider_group() {
+        use crate::subprocess::{configure_process_tree, ProcessTreeGuard};
+
+        let directory = tempfile::tempdir().unwrap();
+        let provider_pid_path = directory.path().join("provider-pid");
+        let provider_ownership = ProviderOwnershipManifest::create().unwrap();
+        let mut command = ownership_fixture_command(
+            "abrupt",
+            &provider_ownership,
+            directory.path(),
+        );
+        configure_process_tree(&mut command);
+        let mut child = command.spawn().expect("spawn abrupt-root fixture");
+        let root_pid = child.id().expect("fixture root pid");
+        let mut process_tree = ProcessTreeGuard::attach(&mut child).unwrap();
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        wait_for_file(&provider_pid_path, Duration::from_secs(5)).await;
+        let provider_pid = std::fs::read_to_string(&provider_pid_path)
+            .expect("fixture did not record its provider")
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let mut cleanup = UnixGroupCleanup(Some(provider_pid));
+
+        let status = tokio::time::timeout(
+            Duration::from_secs(3),
+            wait_for_child_or_shutdown_with_grace(
+                &mut child,
+                &mut process_tree,
+                &provider_ownership,
+                shutdown_rx,
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("abrupt-root cleanup must stay bounded")
+        .expect("orchestrator wait should succeed");
+        assert_eq!(status.code(), Some(17));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while unix_process_exists(&provider_pid.to_string())
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !unix_process_exists(&provider_pid.to_string()),
+            "abrupt root exit left its registered provider alive"
+        );
+        assert!(
+            !unix_process_exists(&root_pid.to_string()),
+            "abrupt orchestrator root remained alive"
+        );
+        cleanup.0 = None;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn abrupt_root_exit_reaps_provider_from_an_immediate_shim_handoff() {
+        use crate::subprocess::{configure_process_tree, ProcessTreeGuard};
+
+        let directory = tempfile::tempdir().unwrap();
+        let provider_pid_path = directory.path().join("provider-pid");
+        let group_pid_path = directory.path().join("group-pid");
+        let provider_ownership = ProviderOwnershipManifest::create().unwrap();
+        let mut command = ownership_fixture_command(
+            "immediate-shim-abrupt",
+            &provider_ownership,
+            directory.path(),
+        );
+        configure_process_tree(&mut command);
+        let mut child = command
+            .spawn()
+            .expect("spawn immediate-shim abrupt fixture");
+        let root_pid = child.id().expect("fixture root pid");
+        let mut process_tree = ProcessTreeGuard::attach(&mut child).unwrap();
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        wait_for_file(&provider_pid_path, Duration::from_secs(5)).await;
+        wait_for_file(&group_pid_path, Duration::from_secs(5)).await;
+        let provider_pid = std::fs::read_to_string(&provider_pid_path)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let provider_group = std::fs::read_to_string(&group_pid_path)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let mut cleanup = UnixGroupCleanup(Some(provider_group));
+        assert_eq!(
+            unix_process_group(provider_pid),
+            i32::try_from(provider_group).ok(),
+            "immediate provider must inherit the shim's owned group"
+        );
+
+        let status = tokio::time::timeout(
+            Duration::from_secs(3),
+            wait_for_child_or_shutdown_with_grace(
+                &mut child,
+                &mut process_tree,
+                &provider_ownership,
+                shutdown_rx,
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("immediate-shim crash cleanup must stay bounded")
+        .expect("orchestrator wait should succeed");
+        assert_eq!(status.code(), Some(17));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while unix_process_exists(&provider_pid.to_string())
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !unix_process_exists(&provider_pid.to_string()),
+            "immediate shim handoff leaked its provider after host crash"
+        );
+        assert!(
+            !unix_process_exists(&root_pid.to_string()),
+            "abrupt orchestrator root remained alive"
+        );
+        cleanup.0 = None;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn hard_fallback_uses_a_live_group_member_after_its_shim_exits() {
+        use crate::subprocess::{configure_process_tree, ProcessTreeGuard};
+
+        let directory = tempfile::tempdir().unwrap();
+        let started = directory.path().join("started");
+        let provider_pid_path = directory.path().join("provider-pid");
+        let group_pid_path = directory.path().join("group-pid");
+        let env_clean = directory.path().join("env-clean");
+        let provider_ownership = ProviderOwnershipManifest::create().unwrap();
+        let mut command = ownership_fixture_command(
+            "shim-exit",
+            &provider_ownership,
+            directory.path(),
+        );
+        configure_process_tree(&mut command);
+        let mut child = command.spawn().expect("spawn TERM-ignoring fixture");
+        let root_pid = child.id().expect("fixture root pid");
+        let mut process_tree = ProcessTreeGuard::attach(&mut child).unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !started.exists() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(started.exists(), "TERM-ignoring fixture never became ready");
+        assert!(env_clean.exists(), "provider inherited the private bootstrap");
+        let provider_pid = std::fs::read_to_string(&provider_pid_path)
+            .expect("fixture did not record its provider")
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let provider_group = std::fs::read_to_string(&group_pid_path)
+            .expect("fixture did not record its provider group")
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let mut cleanup = UnixGroupCleanup(Some(provider_group));
+        assert_eq!(
+            unix_process_group(provider_pid),
+            i32::try_from(provider_group).ok(),
+            "surviving provider must remain in the exited shim's group"
+        );
+        assert!(
+            !unix_process_exists(&provider_group.to_string()),
+            "fixture shim must exit before Rust validates a surviving member"
+        );
+        shutdown_tx
+            .send(())
+            .expect("shutdown receiver must be live");
+
+        let fallback_started = tokio::time::Instant::now();
+        let _status = tokio::time::timeout(
+            Duration::from_secs(3),
+            wait_for_child_or_shutdown_with_grace(
+                &mut child,
+                &mut process_tree,
+                &provider_ownership,
+                shutdown_rx,
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("hard fallback must remain bounded")
+        .expect("orchestrator wait should succeed");
+        assert!(
+            fallback_started.elapsed() >= Duration::from_millis(80),
+            "TERM-ignoring fixture exited before the configured grace elapsed"
+        );
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while unix_process_exists(&provider_pid.to_string())
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !unix_process_exists(&provider_pid.to_string()),
+            "hard fallback left a detached provider alive"
+        );
+        assert!(
+            !unix_process_exists(&root_pid.to_string()),
+            "hard fallback left the orchestrator root alive"
+        );
+        cleanup.0 = None;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn hard_fallback_reads_a_provider_registered_after_term() {
+        use crate::subprocess::{configure_process_tree, ProcessTreeGuard};
+
+        let directory = tempfile::tempdir().unwrap();
+        let started = directory.path().join("started");
+        let provider_pid_path = directory.path().join("provider-pid");
+        let env_clean = directory.path().join("env-clean");
+        let provider_ownership = ProviderOwnershipManifest::create().unwrap();
+        let mut command = ownership_fixture_command("late", &provider_ownership, directory.path());
+        configure_process_tree(&mut command);
+        let mut child = command.spawn().expect("spawn late-provider fixture");
+        let root_pid = child.id().unwrap();
+        let mut process_tree = ProcessTreeGuard::attach(&mut child).unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        wait_for_file(&started, Duration::from_secs(5)).await;
+        shutdown_tx.send(()).unwrap();
+        let _status = tokio::time::timeout(
+            Duration::from_secs(4),
+            wait_for_child_or_shutdown_with_grace(
+                &mut child,
+                &mut process_tree,
+                &provider_ownership,
+                shutdown_rx,
+                Duration::from_millis(750),
+            ),
+        )
+        .await
+        .expect("late-provider shutdown must stay bounded")
+        .expect("orchestrator wait should succeed");
+
+        assert!(provider_pid_path.exists(), "TERM handler never spawned its provider");
+        assert!(env_clean.exists(), "late provider inherited the private bootstrap");
+        let provider_pid = std::fs::read_to_string(&provider_pid_path)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert!(!unix_process_exists(&provider_pid.to_string()));
+        assert!(!unix_process_exists(&root_pid.to_string()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn identity_mismatch_never_signals_an_unowned_provider_group() {
+        use crate::subprocess::{configure_process_tree, ProcessTreeGuard};
+
+        let directory = tempfile::tempdir().unwrap();
+        let started = directory.path().join("started");
+        let provider_pid_path = directory.path().join("provider-pid");
+        let mut command = tokio::process::Command::new("node");
+        command
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .env("BARO_TEST_STARTED", &started)
+            .env("BARO_TEST_PROVIDER_PID", &provider_pid_path)
+            .arg("-e")
+            .arg(
+                r#"
+const fs = require("node:fs")
+const { spawn } = require("node:child_process")
+process.on("SIGTERM", () => {})
+const provider = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" })
+fs.writeFileSync(process.env.BARO_TEST_PROVIDER_PID, String(provider.pid))
+fs.writeFileSync(process.env.BARO_TEST_STARTED, "yes")
+setInterval(() => {}, 1000)
+"#,
+            );
+        configure_process_tree(&mut command);
+        let mut child = command.spawn().unwrap();
+        let mut process_tree = ProcessTreeGuard::attach(&mut child).unwrap();
+        let provider_ownership = ProviderOwnershipManifest::create().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        wait_for_file(&started, Duration::from_secs(2)).await;
+        let provider_pid = std::fs::read_to_string(&provider_pid_path)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let provider_group = u32::try_from(unix_process_group(provider_pid).unwrap()).unwrap();
+        let mut cleanup = UnixGroupCleanup(Some(provider_group));
+        let identity_source = if cfg!(target_os = "linux") {
+            "linux-proc-stat-v1"
+        } else {
+            "posix-ps-lstart-v1"
+        };
+        std::fs::write(
+            provider_ownership.path(),
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "runToken": provider_ownership.run_token(),
+                "generation": 1,
+                "providers": [{
+                    "processGroupId": provider_group,
+                    "identitySource": identity_source,
+                    "members": [{ "pid": provider_pid, "startTime": "identity-mismatch" }],
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        shutdown_tx.send(()).unwrap();
+        let _status = tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_child_or_shutdown_with_grace(
+                &mut child,
+                &mut process_tree,
+                &provider_ownership,
+                shutdown_rx,
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("identity mismatch must not block shutdown")
+        .expect("orchestrator wait should succeed");
+        assert!(
+            unix_process_exists(&provider_pid.to_string()),
+            "Rust signalled a group whose only identity proof mismatched"
+        );
+        cleanup.0 = None;
+        signal_unix_group(provider_group, 9);
+    }
+
+    #[cfg(unix)]
+    fn ownership_fixture_command(
+        mode: &str,
+        manifest: &ProviderOwnershipManifest,
+        directory: &std::path::Path,
+    ) -> tokio::process::Command {
+        let package = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/baro-orchestrator");
+        let mut command = tokio::process::Command::new("node");
+        command
+            .kill_on_drop(true)
+            .current_dir(package)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .args([
+                "--import",
+                "tsx",
+                "test/fixtures/provider-ownership-host.ts",
+                mode,
+            ])
+            .env("BARO_TEST_STARTED", directory.join("started"))
+            .env("BARO_TEST_PROVIDER_PID", directory.join("provider-pid"))
+            .env("BARO_TEST_GROUP_PID", directory.join("group-pid"))
+            .env("BARO_TEST_RELEASE", directory.join("release"))
+            .env("BARO_TEST_ENV_CLEAN", directory.join("env-clean"));
+        manifest.configure_command(&mut command);
+        command
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_file(path: &std::path::Path, timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while !path.exists() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(path.exists(), "fixture file never appeared: {}", path.display());
+    }
+
+    #[cfg(unix)]
+    struct UnixGroupCleanup(Option<u32>);
+
+    #[cfg(unix)]
+    impl Drop for UnixGroupCleanup {
+        fn drop(&mut self) {
+            if let Some(group) = self.0 {
+                signal_unix_group(group, 9);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn signal_unix_group(group: u32, signal: i32) {
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        if let Ok(group) = i32::try_from(group) {
+            let _ = unsafe { kill(-group, signal) };
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_process_group(pid: u32) -> Option<i32> {
+        unsafe extern "C" {
+            fn getpgid(pid: i32) -> i32;
+        }
+        let pid = i32::try_from(pid).ok()?;
+        // SAFETY: getpgid is read-only and `pid` names a fixture we just spawned.
+        let group = unsafe { getpgid(pid) };
+        (group >= 0).then_some(group)
     }
 
     #[cfg(unix)]

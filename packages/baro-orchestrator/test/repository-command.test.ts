@@ -68,6 +68,15 @@ async function within<T>(promise: Promise<T>, timeoutMs = 5_000): Promise<T> {
     }
 }
 
+function processIsAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0)
+        return true
+    } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "EPERM"
+    }
+}
+
 describe("repository command liveness", () => {
     it("retains command_timeout classification through rollback cause chains", () => {
         const repositoryTimeout = Object.assign(
@@ -90,7 +99,6 @@ describe("repository command liveness", () => {
     it("kills a TERM-resistant process tree before the caller releases GitGate", async () => {
         await withTempDir("baro-repository-command-", async (dir) => {
             const descendantStarted = join(dir, "descendant-started")
-            const descendantEscaped = join(dir, "descendant-escaped")
             const cli = writeCli(
                 dir,
                 "fake-repository-command.mjs",
@@ -99,9 +107,7 @@ import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 process.on("SIGTERM", () => {});
 const descendantSource = ${JSON.stringify(`
-import { writeFileSync } from "node:fs";
 process.on("SIGTERM", () => {});
-setTimeout(() => writeFileSync(process.env.BARO_TEST_ESCAPED, "yes"), 1_500);
 setInterval(() => {}, 10_000);
 `)};
 const descendant = spawn(process.execPath, ["--input-type=module", "-e", descendantSource], {
@@ -115,22 +121,36 @@ setInterval(() => {}, 10_000);
             const gate = new GitGate()
             const releaseFirst = await gate.acquire()
             let commandSettled = false
+            let descendantPidAtSettlement: number | null = null
+            let descendantAliveAtSettlement: boolean | null = null
             const timedCommand = (async () => {
+                let failure: unknown
                 try {
                     await runRepositoryCommand(cli, [], {
                         cwd: dir,
                         env: {
                             ...process.env,
                             BARO_TEST_STARTED: descendantStarted,
-                            BARO_TEST_ESCAPED: descendantEscaped,
                         },
-                        timeoutMs: 500,
+                        timeoutMs: 2_000,
                         terminationGraceMs: 50,
                     })
+                } catch (error) {
+                    failure = error
                 } finally {
+                    if (existsSync(descendantStarted)) {
+                        const pid = Number(
+                            readFileSync(descendantStarted, "utf8").trim(),
+                        )
+                        if (Number.isSafeInteger(pid) && pid > 0) {
+                            descendantPidAtSettlement = pid
+                            descendantAliveAtSettlement = processIsAlive(pid)
+                        }
+                    }
                     commandSettled = true
                     releaseFirst()
                 }
+                return failure
             })()
             const contender = (async () => {
                 const release = await gate.acquire()
@@ -142,29 +162,22 @@ setInterval(() => {}, 10_000);
                 return release
             })()
 
-            await assert.rejects(
-                within(timedCommand),
-                (error: unknown) => {
-                    assert.ok(error instanceof RepositoryCommandError)
-                    assert.equal(error.timedOut, true)
-                    assert.equal(error.killed, true)
-                    assert.match(error.message, /timed out after 500ms/u)
-                    return true
-                },
-            )
+            const error = await within(timedCommand, 10_000)
+            assert.ok(error instanceof RepositoryCommandError)
+            assert.equal(error.timedOut, true)
+            assert.equal(error.killed, true)
+            assert.match(error.message, /timed out after 2000ms/u)
             const releaseSecond = await within(contender)
             releaseSecond()
 
-            assert.equal(
-                existsSync(descendantStarted),
-                true,
+            assert.ok(
+                descendantPidAtSettlement,
                 "fixture never created the descendant",
             )
-            await delay(1_100)
             assert.equal(
-                existsSync(descendantEscaped),
+                descendantAliveAtSettlement,
                 false,
-                "repository command descendant survived timeout settlement",
+                "repository command settled before its descendant exited",
             )
         })
     })

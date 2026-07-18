@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises"
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import { execFileCli } from "../src/exec-file-cli.js"
+import { execFileCli, execFileCliBuffer } from "../src/exec-file-cli.js"
 import { withTempDir } from "./participants/helpers.js"
 
 function writeCli(dir: string, source: string): string {
@@ -30,6 +30,20 @@ describe("execFileCli process supervision", () => {
             const bin = writeCli(dir, 'console.log("ready")')
             const result = await execFileCli(bin, [])
             assert.equal(result.stdout, "ready\n")
+        })
+    })
+
+    it("preserves exact UTF-8 bytes split across stdout chunks", async () => {
+        await withTempDir("baro-exec-cli-utf8-", async (dir) => {
+            const bin = writeCli(dir, `
+process.stdout.write(Buffer.from([0xe2]));
+setTimeout(() => process.stdout.write(Buffer.from([0x82, 0xac])), 25);
+`)
+            const bytes = await execFileCliBuffer(bin, [])
+            assert.deepEqual(bytes.stdout, Buffer.from("€", "utf8"))
+
+            const text = await execFileCli(bin, [])
+            assert.equal(text.stdout, "€")
         })
     })
 
