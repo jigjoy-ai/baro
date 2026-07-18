@@ -155,6 +155,51 @@ process.stdout.write(events.map((event) => JSON.stringify(event)).join("\\n"));
         })
     })
 
+    it("discards an entire oversized stdout line before parsing later NDJSON", async () => {
+        await withTempDir("baro-opencode-stdout-bound-", async (dir) => {
+            const bin = join(dir, "oversized-opencode.mjs")
+            writeFileSync(
+                bin,
+                `#!/usr/bin/env node
+process.stdout.write("x".repeat(1025));
+await new Promise((resolve) => setTimeout(resolve, 25));
+process.stdout.write(JSON.stringify({
+    type: "step_finish",
+    part: { tokens: { input: 99, output: 1, total: 100 } },
+}));
+await new Promise((resolve) => setTimeout(resolve, 25));
+process.stdout.write("\\n");
+process.stdout.write("\\u3000".repeat(342) + JSON.stringify({
+    type: "step_finish",
+    part: { tokens: { input: 199, output: 1, total: 200 } },
+}) + "\\n");
+console.log(JSON.stringify({
+    type: "text",
+    part: { text: "recovered after oversized fragment" },
+}));
+`,
+            )
+            chmodSync(bin, 0o755)
+            const observations: RunnerInvocationObservation[] = []
+
+            const result = await runOpenCodeOneShot({
+                prompt: "goal",
+                cwd: dir,
+                opencodeBin: bin,
+                maxStdoutBufferBytes: 1024,
+                onInvocation: (item) => observations.push(item),
+            })
+
+            assert.equal(result, "recovered after oversized fragment")
+            assert.equal(observations.length, 1)
+            assert.equal(observations[0]!.status, "succeeded")
+            assert.deepEqual(
+                observations[0]!.tokens.total,
+                unknownMetric("not_reported"),
+            )
+        })
+    })
+
     it("emits one failed unknown observation when no step finishes", async () => {
         await withTempDir("baro-opencode-failure-", async (dir) => {
             const bin = writeFakeOpenCode(
@@ -203,7 +248,7 @@ process.stdout.write(events.map((event) => JSON.stringify(event)).join("\\n"));
         })
     })
 
-    it("aborts the child and records a timed-out terminal observation", async () => {
+    it("aborts the child and records a cancelled terminal observation", async () => {
         await withTempDir("baro-opencode-abort-", async (dir) => {
             const bin = join(dir, "slow-opencode.mjs")
             writeFileSync(bin, `#!/usr/bin/env node
@@ -223,6 +268,35 @@ setInterval(() => {}, 1000);
             setTimeout(() => controller.abort(), 100)
 
             await assert.rejects(result, { name: "AbortError" })
+            assert.equal(observations.length, 1)
+            assert.equal(observations[0]!.status, "cancelled")
+            assert.deepEqual(
+                observations[0]!.tokens.total,
+                unknownMetric("not_reported"),
+            )
+        })
+    })
+
+    it("keeps a wall-clock timeout distinct from caller cancellation", async () => {
+        await withTempDir("baro-opencode-timeout-", async (dir) => {
+            const bin = join(dir, "slow-opencode.mjs")
+            writeFileSync(bin, `#!/usr/bin/env node
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 1000);
+`)
+            chmodSync(bin, 0o755)
+            const observations: RunnerInvocationObservation[] = []
+
+            await assert.rejects(
+                runOpenCodeOneShot({
+                    prompt: "goal",
+                    cwd: dir,
+                    opencodeBin: bin,
+                    timeoutMs: 100,
+                    onInvocation: (item) => observations.push(item),
+                }),
+                /terminated abnormally.*timedOut=true/,
+            )
             assert.equal(observations.length, 1)
             assert.equal(observations[0]!.status, "timed_out")
             assert.deepEqual(

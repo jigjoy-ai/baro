@@ -28,6 +28,51 @@ const CORRELATION = Object.freeze({
 })
 
 describe("AutonomousRepositoryScanner", () => {
+    it("propagates cancellation during responder and tool execution", async () => {
+        await withRepository(async (root) => {
+            writeFileSync(join(root, "README.md"), "# Cancellation fixture\n")
+
+            const responderController = new AbortController()
+            const responderScanner = new AutonomousRepositoryScanner(root, {
+                responder: {
+                    backend: "codex",
+                    async respond() {
+                        responderController.abort()
+                        throw new Error("provider stopped after cancellation")
+                    },
+                },
+            })
+            await assert.rejects(
+                responderScanner.scan(scanRequest(), responderController.signal),
+                (error: unknown) =>
+                    error instanceof Error &&
+                    error.message === "provider stopped after cancellation",
+            )
+
+            const toolController = new AbortController()
+            const calls: RepositoryScoutResponderInput[] = []
+            const toolScanner = new AutonomousRepositoryScanner(root, {
+                responder: scriptedResponder(calls, [
+                    (input) => decision(input, {
+                        action: "read",
+                        path: "README.md",
+                    }),
+                ]),
+                tools: fakeResearchTools({
+                    read_file: () => {
+                        toolController.abort()
+                        return "# Cancellation fixture"
+                    },
+                }),
+            })
+            await assert.rejects(
+                toolScanner.scan(scanRequest(), toolController.signal),
+                (error: unknown) =>
+                    error instanceof Error && error.name === "AbortError",
+            )
+        })
+    })
+
     it("runs a correlated multi-step read/search/glob loop and grounds the final brief", async () => {
         await withRepository(async (root) => {
             mkdirSync(join(root, "src"))

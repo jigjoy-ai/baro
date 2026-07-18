@@ -139,6 +139,52 @@ process.stdout.write(JSON.stringify({
         })
     })
 
+    it("discards an entire oversized stdout line before parsing later NDJSON", async () => {
+        await withTempDir("baro-pi-stdout-bound-", async (dir) => {
+            const bin = join(dir, "oversized-pi.mjs")
+            writeFileSync(
+                bin,
+                `#!/usr/bin/env node
+process.stdout.write("x".repeat(1025));
+await new Promise((resolve) => setTimeout(resolve, 25));
+process.stdout.write(JSON.stringify({
+    type: "message_end",
+    message: {
+        role: "assistant",
+        content: [{ type: "text", text: "must remain discarded" }],
+    },
+}));
+await new Promise((resolve) => setTimeout(resolve, 25));
+process.stdout.write("\\n");
+process.stdout.write("\\u3000".repeat(342) + JSON.stringify({
+    type: "message_end",
+    message: {
+        role: "assistant",
+        content: [{ type: "text", text: "same-write poison must remain discarded" }],
+    },
+}) + "\\n");
+console.log(JSON.stringify({
+    type: "message_end",
+    message: {
+        role: "assistant",
+        content: [{ type: "text", text: "recovered after oversized fragment" }],
+    },
+}));
+`,
+            )
+            chmodSync(bin, 0o755)
+
+            const result = await runPiOneShot({
+                prompt: "goal",
+                cwd: dir,
+                piBin: bin,
+                maxStdoutBufferBytes: 1024,
+            })
+
+            assert.equal(result, "recovered after oversized fragment")
+        })
+    })
+
     it("emits one failed unknown observation when no assistant message ends", async () => {
         await withTempDir("baro-pi-failure-", async (dir) => {
             const bin = writeFakePi(
@@ -199,7 +245,7 @@ process.stdout.write(JSON.stringify({
         })
     })
 
-    it("aborts the child and records a timed-out terminal observation", async () => {
+    it("aborts the child and records a cancelled terminal observation", async () => {
         await withTempDir("baro-pi-abort-", async (dir) => {
             const bin = join(dir, "slow-pi.mjs")
             writeFileSync(bin, `#!/usr/bin/env node
@@ -219,6 +265,35 @@ setInterval(() => {}, 1000);
             setTimeout(() => controller.abort(), 100)
 
             await assert.rejects(result, { name: "AbortError" })
+            assert.equal(observations.length, 1)
+            assert.equal(observations[0]!.status, "cancelled")
+            assert.deepEqual(
+                observations[0]!.tokens.total,
+                unknownMetric("not_reported"),
+            )
+        })
+    })
+
+    it("keeps a wall-clock timeout distinct from caller cancellation", async () => {
+        await withTempDir("baro-pi-timeout-", async (dir) => {
+            const bin = join(dir, "slow-pi.mjs")
+            writeFileSync(bin, `#!/usr/bin/env node
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 1000);
+`)
+            chmodSync(bin, 0o755)
+            const observations: RunnerInvocationObservation[] = []
+
+            await assert.rejects(
+                runPiOneShot({
+                    prompt: "goal",
+                    cwd: dir,
+                    piBin: bin,
+                    timeoutMs: 100,
+                    onInvocation: (item) => observations.push(item),
+                }),
+                /terminated abnormally.*timedOut=true/,
+            )
             assert.equal(observations.length, 1)
             assert.equal(observations[0]!.status, "timed_out")
             assert.deepEqual(

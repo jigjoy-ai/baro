@@ -100,6 +100,9 @@ export interface RunCodexOneShotOptions {
     timeoutMs?: number
     /** Grace after SIGTERM before SIGKILL. Default: 5_000ms; injectable for tests. */
     terminationGraceMs?: number
+    /** Maximum accepted UTF-8 bytes in one stdout line. Defaults to 16 MiB and
+     * may only be lowered, primarily for constrained runtimes and tests. */
+    maxStdoutBufferBytes?: number
     /** Per-phase prefix for the live stderr stream. Default: "codex". */
     label?: string
     /** Optional invocation telemetry sink. It cannot alter runner success. */
@@ -113,7 +116,7 @@ export async function runCodexOneShot(
     opts: RunCodexOneShotOptions,
 ): Promise<string> {
     if (opts.signal?.aborted) {
-        throw new Error("runCodexOneShot: aborted before launch")
+        throw abortError()
     }
     if (
         opts.reasoningEffort !== undefined &&
@@ -223,6 +226,10 @@ export async function runCodexOneShot(
     if (!Number.isFinite(terminationGraceMs) || terminationGraceMs < 1) {
         throw new RangeError("runCodexOneShot: terminationGraceMs must be positive")
     }
+    const maxStdoutBufferBytes = stdoutBufferLimit(
+        opts.maxStdoutBufferBytes,
+        "runCodexOneShot",
+    )
 
     return await new Promise<string>((resolve, reject) => {
         const startedAt = Date.now()
@@ -253,6 +260,8 @@ export async function runCodexOneShot(
 
         let agentMessage = ""
         let stdoutBuffer = ""
+        let stdoutBufferBytes = 0
+        let discardingOversizedStdoutLine = false
         const eventTypesSeen: string[] = []
         const itemTypesSeen: string[] = []
         let timedOut = false
@@ -317,12 +326,20 @@ export async function runCodexOneShot(
                 if (
                     !invocations.finish(
                         unknownCodexObservation(
-                            timedOut ? "timed_out" : "failed",
+                            aborted
+                                ? "cancelled"
+                                : timedOut
+                                  ? "timed_out"
+                                  : "failed",
                             elapsedMs,
                             opts,
                         ),
                     )
                 ) {
+                    return
+                }
+                if (aborted) {
+                    reject(abortError())
                     return
                 }
                 reject(
@@ -380,13 +397,13 @@ export async function runCodexOneShot(
             finalizeAbnormalAfterTree()
         }
         const onAbort = (): void => {
-            if (aborted) return
+            if (aborted || timedOut || finalized) return
             aborted = true
             terminate()
         }
 
         const timer = setTimeout(() => {
-            if (timedOut) return
+            if (timedOut || aborted || finalized) return
             timedOut = true
             terminate()
         }, timeoutMs)
@@ -417,7 +434,7 @@ export async function runCodexOneShot(
                 // A thread id identifies the Codex harness session, not
                 // an upstream model request, so it must never populate
                 // providerRequestId.
-                if (!timedOut) {
+                if (!timedOut && !aborted) {
                     invocations.observe(
                         codexObservation(
                             event,
@@ -451,21 +468,69 @@ export async function runCodexOneShot(
             }
         }
 
+        const discardOversizedStdoutLine = (): void => {
+            process.stderr.write(
+                `[${label}] stdout line exceeded ${maxStdoutBufferBytes} bytes — discarding line\n`,
+            )
+            stdoutBuffer = ""
+            stdoutBufferBytes = 0
+        }
+        const consumeStdout = (chunk: string): void => {
+            let remaining = chunk
+            while (remaining.length > 0) {
+                if (discardingOversizedStdoutLine) {
+                    const newline = remaining.indexOf("\n")
+                    if (newline < 0) return
+                    discardingOversizedStdoutLine = false
+                    remaining = remaining.slice(newline + 1)
+                    continue
+                }
+
+                const newline = remaining.indexOf("\n")
+                if (newline >= 0) {
+                    const fragment = remaining.slice(0, newline)
+                    const fragmentBytes = Buffer.byteLength(fragment, "utf8")
+                    if (
+                        stdoutBufferBytes + fragmentBytes >
+                        maxStdoutBufferBytes
+                    ) {
+                        discardOversizedStdoutLine()
+                    } else {
+                        processLine(stdoutBuffer + fragment)
+                        stdoutBuffer = ""
+                        stdoutBufferBytes = 0
+                    }
+                    remaining = remaining.slice(newline + 1)
+                    continue
+                }
+
+                const remainingBytes = Buffer.byteLength(remaining, "utf8")
+                if (stdoutBufferBytes + remainingBytes > maxStdoutBufferBytes) {
+                    discardOversizedStdoutLine()
+                    discardingOversizedStdoutLine = true
+                } else {
+                    stdoutBuffer += remaining
+                    stdoutBufferBytes += remainingBytes
+                }
+                return
+            }
+        }
+
         proc.stdout!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => {
             refreshProcessTree()
-            stdoutBuffer += chunk
-            let nl: number
-            while ((nl = stdoutBuffer.indexOf("\n")) >= 0) {
-                const line = stdoutBuffer.slice(0, nl)
-                stdoutBuffer = stdoutBuffer.slice(nl + 1)
-                processLine(line)
-            }
+            consumeStdout(chunk)
         })
         proc.stdout!.on("end", () => {
+            if (discardingOversizedStdoutLine) {
+                stdoutBuffer = ""
+                stdoutBufferBytes = 0
+                return
+            }
             if (stdoutBuffer.length === 0) return
             processLine(stdoutBuffer)
             stdoutBuffer = ""
+            stdoutBufferBytes = 0
         })
 
         proc.stderr!.setEncoding("utf8")
@@ -478,7 +543,7 @@ export async function runCodexOneShot(
         })
 
         proc.on("error", (err) => {
-            processError ??= err
+            if (!timedOut && !aborted) processError ??= err
             if (proc.pid === undefined) processTree.markRootClosed()
             else processTree.terminate("SIGTERM")
             finalizeAbnormalAfterTree()
@@ -502,6 +567,7 @@ export async function runCodexOneShot(
                 terminate()
             } else {
                 proc.stdin.on("error", (error) => {
+                    if (timedOut || aborted) return
                     stdinError = error
                     terminate()
                 })
@@ -509,6 +575,28 @@ export async function runCodexOneShot(
             }
         }
     })
+}
+
+const DEFAULT_MAX_STDOUT_BUFFER_BYTES = 16 * 1024 * 1024
+
+function stdoutBufferLimit(value: number | undefined, caller: string): number {
+    const limit = value ?? DEFAULT_MAX_STDOUT_BUFFER_BYTES
+    if (
+        !Number.isSafeInteger(limit) ||
+        limit < 1 ||
+        limit > DEFAULT_MAX_STDOUT_BUFFER_BYTES
+    ) {
+        throw new RangeError(
+            `${caller}: maxStdoutBufferBytes must be an integer between 1 and ${DEFAULT_MAX_STDOUT_BUFFER_BYTES}`,
+        )
+    }
+    return limit
+}
+
+function abortError(): Error {
+    const error = new Error("Codex one-shot aborted")
+    error.name = "AbortError"
+    return error
 }
 
 const CODEX_REASONING_EFFORTS = new Set<string>([

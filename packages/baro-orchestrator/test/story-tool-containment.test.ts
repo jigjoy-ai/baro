@@ -95,6 +95,20 @@ async function withProjectAndSibling(
     }
 }
 
+async function withPortableShellGuard<T>(fn: () => Promise<T>): Promise<T> {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")
+    assert.ok(platform)
+    Object.defineProperty(process, "platform", {
+        ...platform,
+        value: "linux",
+    })
+    try {
+        return await fn()
+    } finally {
+        Object.defineProperty(process, "platform", platform)
+    }
+}
+
 async function withManagerDependencyLink(
     fn: (fixture: {
         origin: string
@@ -560,29 +574,117 @@ setInterval(() => {}, 10_000);
         })
     })
 
-    it("rejects node -e/-p inline code without a process write sandbox", {
-        skip: process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec"),
-    }, async () => {
-        await withProjectAndSibling(async (project) => {
-            const bash = namedTool(createStoryTools(project), "bash")
-            const commands = [
-                `${JSON.stringify(process.execPath)} -e ${JSON.stringify("console.log('no')")}`,
-                `${JSON.stringify(process.execPath)} -p ${JSON.stringify("1 + 1")}`,
-                `${JSON.stringify(process.execPath)} -e${JSON.stringify("x=../opaque")}`,
-                `${JSON.stringify(process.execPath)} -p${JSON.stringify("x=../opaque")}`,
-                `${JSON.stringify(process.execPath)} -pe ${JSON.stringify("x=../opaque")}`,
-                `${JSON.stringify(process.execPath)} -pe${JSON.stringify("x=../opaque")}`,
-                `${JSON.stringify(process.execPath)} -ep ${JSON.stringify("x=../opaque")}`,
-                `${JSON.stringify(process.execPath)} -ep${JSON.stringify("x=../opaque")}`,
-                `${JSON.stringify(process.execPath)} --eval=${JSON.stringify("console.log('no')")}`,
-                `${JSON.stringify(process.execPath)} --print=${JSON.stringify("1 + 1")}`,
-            ]
+    it("rejects node -e/-p inline code without a process write sandbox", async () => {
+        await withPortableShellGuard(async () => {
+            await withProjectAndSibling(async (project) => {
+                const bash = namedTool(createStoryTools(project), "bash")
+                const commands = [
+                    `${JSON.stringify(process.execPath)} -e ${JSON.stringify("console.log('no')")}`,
+                    `${JSON.stringify(process.execPath)} -p ${JSON.stringify("1 + 1")}`,
+                    `${JSON.stringify(process.execPath)} -e${JSON.stringify("x=../opaque")}`,
+                    `${JSON.stringify(process.execPath)} -p${JSON.stringify("x=../opaque")}`,
+                    `${JSON.stringify(process.execPath)} -pe ${JSON.stringify("x=../opaque")}`,
+                    `${JSON.stringify(process.execPath)} -pe${JSON.stringify("x=../opaque")}`,
+                    `${JSON.stringify(process.execPath)} -ep ${JSON.stringify("x=../opaque")}`,
+                    `${JSON.stringify(process.execPath)} -ep${JSON.stringify("x=../opaque")}`,
+                    `${JSON.stringify(process.execPath)} --eval=${JSON.stringify("console.log('no')")}`,
+                    `${JSON.stringify(process.execPath)} --print=${JSON.stringify("1 + 1")}`,
+                ]
 
-            for (const command of commands) {
-                const result = await invoke(bash, { command })
-                assert.match(result, /rejected by project containment guard/)
-                assert.match(result, /require the macOS write sandbox/)
-            }
+                for (const command of commands) {
+                    const result = await invoke(bash, { command })
+                    assert.match(result, /rejected by project containment guard/)
+                    assert.match(result, /node inline code flags require the macOS write sandbox/)
+                }
+            })
+        })
+    })
+
+    it("rejects opaque Python, Perl, and Ruby evaluators without banning normal interpreter commands", async () => {
+        await withPortableShellGuard(async () => {
+            await withProjectAndSibling(async (project) => {
+                const bash = namedTool(createStoryTools(project), "bash")
+                const rejected: Array<readonly [string, RegExp]> = [
+                    [`python -c ${JSON.stringify("print('../escape')")}`, /python/],
+                    [`python3 -c${JSON.stringify("print('../escape')")}`, /python/],
+                    [`python3.12 -Bc ${JSON.stringify("print('../escape')")}`, /python/],
+                    [`python3 -xc ${JSON.stringify("print('../escape')")}`, /python/],
+                    [`pypy3 -c ${JSON.stringify("print('../escape')")}`, /python/],
+                    [`py -c ${JSON.stringify("print('../escape')")}`, /python/],
+                    [`perl -e ${JSON.stringify("print '../escape'")}`, /perl/],
+                    [`perl -e${JSON.stringify("print '../escape'")}`, /perl/],
+                    [`perl -we ${JSON.stringify("print '../escape'")}`, /perl/],
+                    [`perl -se ${JSON.stringify("print '../escape'")}`, /perl/],
+                    [`perl -0e ${JSON.stringify("print '../escape'")}`, /perl/],
+                    [`perl -0777e ${JSON.stringify("print '../escape'")}`, /perl/],
+                    [`perl -de ${JSON.stringify("print '../escape'")}`, /perl/],
+                    [`perl -Ve ${JSON.stringify("print '../escape'")}`, /perl/],
+                    [`perl -E ${JSON.stringify("say '../escape'")}`, /perl/],
+                    [`ruby -e ${JSON.stringify("puts '../escape'")}`, /ruby/],
+                    [`ruby -e${JSON.stringify("puts '../escape'")}`, /ruby/],
+                    [`ruby -we ${JSON.stringify("puts '../escape'")}`, /ruby/],
+                    [`ruby -ve ${JSON.stringify("puts '../escape'")}`, /ruby/],
+                    [`ruby -0e ${JSON.stringify("puts '../escape'")}`, /ruby/],
+                    [`ruby -0777e ${JSON.stringify("puts '../escape'")}`, /ruby/],
+                    [`ruby -We ${JSON.stringify("puts '../escape'")}`, /ruby/],
+                    [`ruby -W0e ${JSON.stringify("puts '../escape'")}`, /ruby/],
+                    [`ruby -Kue ${JSON.stringify("puts '../escape'")}`, /ruby/],
+                    [`ruby -K-e ${JSON.stringify("puts '../escape'")}`, /ruby/],
+                    [`ruby -T0e ${JSON.stringify("puts '../escape'")}`, /ruby/],
+                ]
+
+                for (const [command, interpreter] of rejected) {
+                    const result = await invoke(bash, { command })
+                    assert.match(result, /rejected by project containment guard/, command)
+                    assert.match(result, interpreter, command)
+                    assert.match(result, /require the macOS write sandbox/, command)
+                }
+
+                for (const command of [
+                    "python3 --version",
+                    "python3 -Wonce --version",
+                    "python3 -Xtracemalloc --version",
+                    "perl --version",
+                    "perl -Ivendor --version",
+                    "perl -MDevel::Peek --version",
+                    "perl -0x0A --version",
+                    "perl -d:Trace --version",
+                    "perl -V:version",
+                    "perl -Ce --version",
+                    "ruby --version",
+                    "ruby -Ivendor --version",
+                    "ruby -rset --version",
+                    "ruby -W:error --version",
+                    "ruby -Ke --version",
+                    "ruby -Eutf-8 --version",
+                ]) {
+                    const result = await invoke(bash, { command })
+                    assert.doesNotMatch(result, /project containment guard/, command)
+                }
+            })
+        })
+    })
+
+    it("rejects shell wrappers that can hide an opaque evaluator", async () => {
+        await withPortableShellGuard(async () => {
+            await withProjectAndSibling(async (project) => {
+                const bash = namedTool(createStoryTools(project), "bash")
+                const inline = JSON.stringify("print('../escape')")
+                const commands = [
+                    `command python3 -c ${inline}`,
+                    `builtin command python3 -c ${inline}`,
+                    `nohup python3 -c ${inline}`,
+                    `nice python3 -c ${inline}`,
+                    `time python3 -c ${inline}`,
+                    `printf x | xargs -n1 python3 -c ${inline}`,
+                ]
+
+                for (const command of commands) {
+                    const result = await invoke(bash, { command })
+                    assert.match(result, /rejected by project containment guard/, command)
+                    assert.match(result, /indirect shell command/, command)
+                }
+            })
         })
     })
 

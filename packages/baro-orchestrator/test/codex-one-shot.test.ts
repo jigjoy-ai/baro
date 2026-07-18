@@ -228,6 +228,51 @@ process.stdout.write(events.map((event) => JSON.stringify(event)).join("\\n"));
         })
     })
 
+    it("discards an entire oversized stdout line before parsing later NDJSON", async () => {
+        await withTempDir("baro-codex-stdout-bound-", async (dir) => {
+            const bin = join(dir, "oversized-codex.mjs")
+            writeFileSync(
+                bin,
+                `#!/usr/bin/env node
+process.stdout.write("x".repeat(1025));
+await new Promise((resolve) => setTimeout(resolve, 25));
+process.stdout.write(JSON.stringify({
+    type: "turn.completed",
+    usage: { input_tokens: 99, output_tokens: 1 },
+}));
+await new Promise((resolve) => setTimeout(resolve, 25));
+process.stdout.write("\\n");
+process.stdout.write("\\u3000".repeat(342) + JSON.stringify({
+    type: "turn.completed",
+    usage: { input_tokens: 199, output_tokens: 1 },
+}) + "\\n");
+console.log(JSON.stringify({
+    type: "item.completed",
+    item: { type: "agent_message", text: "recovered after oversized fragment" },
+}));
+`,
+            )
+            chmodSync(bin, 0o755)
+            const observations: RunnerInvocationObservation[] = []
+
+            const result = await runCodexOneShot({
+                prompt: "goal",
+                cwd: dir,
+                codexBin: bin,
+                maxStdoutBufferBytes: 1024,
+                onInvocation: (item) => observations.push(item),
+            })
+
+            assert.equal(result, "recovered after oversized fragment")
+            assert.equal(observations.length, 1)
+            assert.equal(observations[0]!.status, "succeeded")
+            assert.deepEqual(
+                observations[0]!.tokens.total,
+                unknownMetric("not_reported"),
+            )
+        })
+    })
+
     it("rejects on a non-zero exit instead of returning the partial output", async () => {
         // Codex streams part of the answer, then crashes. The partial text
         // must not come back as success — a truncated PRD parses as a
@@ -282,6 +327,34 @@ process.stdout.write(events.map((event) => JSON.stringify(event)).join("\\n"));
             assert.deepEqual(
                 observations[0]!.tokens.inputTotal,
                 unknownMetric("timed_out"),
+            )
+        })
+    })
+
+    it("rejects caller cancellation as AbortError and records it as cancelled", async () => {
+        await withTempDir("baro-codex-abort-", async (dir) => {
+            const bin = writeFakeCodex(dir, {
+                texts: ["partial…"],
+                hangMs: 30_000,
+            })
+            const controller = new AbortController()
+            const observations: RunnerInvocationObservation[] = []
+            const pending = runCodexOneShot({
+                prompt: "goal",
+                cwd: dir,
+                codexBin: bin,
+                timeoutMs: 30_000,
+                signal: controller.signal,
+                onInvocation: (item) => observations.push(item),
+            })
+            setTimeout(() => controller.abort(), 100)
+
+            await assert.rejects(pending, { name: "AbortError" })
+            assert.equal(observations.length, 1)
+            assert.equal(observations[0]!.status, "cancelled")
+            assert.deepEqual(
+                observations[0]!.tokens.total,
+                unknownMetric("not_reported"),
             )
         })
     })
@@ -341,7 +414,7 @@ process.stdout.write(events.map((event) => JSON.stringify(event)).join("\\n"));
                 controller.abort()
                 await assert.rejects(
                     pending,
-                    /terminated abnormally.*aborted=true/,
+                    { name: "AbortError" },
                 )
             } finally {
                 controller.abort()
@@ -400,7 +473,7 @@ process.exit(0);
             const abortedAt = Date.now()
             controller.abort()
 
-            await assert.rejects(pending, /aborted=true/)
+            await assert.rejects(pending, { name: "AbortError" })
             assert.ok(
                 Date.now() - abortedAt < 2_500,
                 "late abort exceeded the bounded cleanup window",
@@ -621,7 +694,7 @@ process.exit(0);
             })
             setTimeout(() => controller.abort(), 100)
 
-            await assert.rejects(pending, /terminated abnormally.*aborted=true/)
+            await assert.rejects(pending, { name: "AbortError" })
         })
     })
 })

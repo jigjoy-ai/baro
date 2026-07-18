@@ -988,7 +988,7 @@ function bashContainmentRejection(
     let cdAwaitingPath = false
     let shellMayTakeCommandString = false
     let opaqueArgumentPending = false
-    let nodeCommand = false
+    let opaqueInterpreter: OpaqueInterpreter | null = null
     let collaborationInvocation = false
     const canSandboxOpaqueCode = hasMacosWriteSandbox()
 
@@ -1012,7 +1012,7 @@ function bashContainmentRejection(
             cdAwaitingPath = false
             shellMayTakeCommandString = false
             opaqueArgumentPending = false
-            nodeCommand = false
+            opaqueInterpreter = null
             collaborationInvocation = false
             continue
         }
@@ -1056,15 +1056,21 @@ function bashContainmentRejection(
 
             if (
                 [
+                    "builtin",
+                    "command",
                     "declare",
                     "env",
                     "eval",
                     "exec",
                     "export",
+                    "nice",
+                    "nohup",
                     "printenv",
                     "set",
                     "source",
+                    "time",
                     "typeset",
+                    "xargs",
                     ".",
                 ].includes(commandName)
             ) {
@@ -1073,7 +1079,7 @@ function bashContainmentRejection(
             shellMayTakeCommandString = ["bash", "sh", "zsh", "dash", "ksh"].includes(
                 commandName,
             )
-            nodeCommand = isNodeCommandName(commandName)
+            opaqueInterpreter = classifyOpaqueInterpreter(commandName)
             cdAwaitingPath = commandName === "cd"
             continue
         }
@@ -1083,18 +1089,21 @@ function bashContainmentRejection(
             continue
         }
 
-        const nodeInlineCode = nodeCommand
-            ? classifyNodeInlineCodeFlag(word)
-            : null
-        if (nodeInlineCode) {
-            if (!canSandboxOpaqueCode) {
-                return (
-                    "node inline code flags (-e/--eval/-p/--print) require " +
-                    "the macOS write sandbox"
-                )
+        if (opaqueInterpreter) {
+            const opaqueInlineCode = classifyOpaqueInlineCodeFlag(
+                opaqueInterpreter,
+                word,
+            )
+            if (opaqueInlineCode) {
+                if (!canSandboxOpaqueCode) {
+                    return (
+                        `${opaqueInterpreter.label} inline code flags ` +
+                        "require the macOS write sandbox"
+                    )
+                }
+                opaqueArgumentPending = opaqueInlineCode === "next-argument"
+                continue
             }
-            opaqueArgumentPending = nodeInlineCode === "next-argument"
-            continue
         }
 
         if (commandName === "git" && isGitMessageFlag(word)) {
@@ -1103,7 +1112,7 @@ function bashContainmentRejection(
         }
 
         if (
-            nodeCommand &&
+            opaqueInterpreter?.kind === "node" &&
             !collaborationInvocation &&
             matchesTrustedFile(word, access.collaboration)
         ) {
@@ -1219,13 +1228,53 @@ function rejectPathOperand(
     return null
 }
 
-function isNodeCommandName(commandName: string): boolean {
-    return commandName === "node" || commandName === path.basename(process.execPath)
+type OpaqueInterpreter = Readonly<{
+    kind: "node" | "python" | "perl" | "ruby"
+    label: string
+}>
+
+type OpaqueInlineCodeFlag = "next-argument" | "attached-code"
+
+/**
+ * Inline evaluator source is an opaque, model-authored program rather than a
+ * path the portable guard can validate. Seatbelt can safely contain it on
+ * macOS; without an equivalent process write sandbox we must fail closed.
+ * Versioned interpreter names are included because package managers commonly
+ * expose only `python3`, `python3.12`, or versioned Perl/Ruby shims.
+ */
+function classifyOpaqueInterpreter(commandName: string): OpaqueInterpreter | null {
+    if (commandName === "node" || commandName === path.basename(process.execPath)) {
+        return { kind: "node", label: "node" }
+    }
+    if (/^(?:python|pypy)(?:\d+(?:\.\d+)*)?(?:\.exe)?$/iu.test(commandName) || /^py(?:\.exe)?$/iu.test(commandName)) {
+        return { kind: "python", label: "python" }
+    }
+    if (/^perl(?:\d+(?:\.\d+)*)?(?:\.exe)?$/iu.test(commandName)) {
+        return { kind: "perl", label: "perl" }
+    }
+    if (/^ruby(?:\d+(?:\.\d+)*)?(?:\.exe)?$/iu.test(commandName)) {
+        return { kind: "ruby", label: "ruby" }
+    }
+    return null
 }
 
-function classifyNodeInlineCodeFlag(
+function classifyOpaqueInlineCodeFlag(
+    interpreter: OpaqueInterpreter,
     word: string,
-): "next-argument" | "attached-code" | null {
+): OpaqueInlineCodeFlag | null {
+    switch (interpreter.kind) {
+        case "node":
+            return classifyNodeInlineCodeFlag(word)
+        case "python":
+            return classifyPythonInlineCodeFlag(word)
+        case "perl":
+            return classifyPerlInlineCodeFlag(word)
+        case "ruby":
+            return classifyRubyInlineCodeFlag(word)
+    }
+}
+
+function classifyNodeInlineCodeFlag(word: string): OpaqueInlineCodeFlag | null {
     if (
         word === "-e" ||
         word === "-p" ||
@@ -1244,6 +1293,109 @@ function classifyNodeInlineCodeFlag(
     // versions/wrappers: `-eCODE`, `-pCODE`, `-peCODE`, and `-epCODE`.
     // The exact `-pe`/`-ep` cases above consume the following code argument.
     if (/^-(?:e|p|ep|pe).+/.test(word)) return "attached-code"
+    return null
+}
+
+/**
+ * Python's -W/-X/-Q/-m switches own the remainder of their token. Every other
+ * ordinary short switch can be bundled before -c, so continue scanning it.
+ */
+function classifyPythonInlineCodeFlag(word: string): OpaqueInlineCodeFlag | null {
+    if (!word.startsWith("-") || word.startsWith("--")) return null
+    const option = word.slice(1)
+    for (let index = 0; index < option.length; index += 1) {
+        const character = option[index]!
+        if (character === "c") {
+            return index + 1 === option.length
+                ? "next-argument"
+                : "attached-code"
+        }
+        if ("mQWX".includes(character)) return null
+        if (!/[A-Za-z0-9]/u.test(character)) return null
+    }
+    return null
+}
+
+/**
+ * Perl has both arbitrary-rest operands and constrained optional operands.
+ * `-Ivendor`/`-MModule` own their complete remainder, but `-0`, `-d`, and `-V`
+ * consume only octal/colon-prefixed data. Continuing after that constrained
+ * data is essential: real Perl parses `-0777e`, `-de`, and `-Ve` as -e.
+ */
+function classifyPerlInlineCodeFlag(word: string): OpaqueInlineCodeFlag | null {
+    if (!word.startsWith("-") || word.startsWith("--")) return null
+    const option = word.slice(1)
+    for (let index = 0; index < option.length; index += 1) {
+        const character = option[index]!
+        if (character === "e" || character === "E") {
+            return index + 1 === option.length
+                ? "next-argument"
+                : "attached-code"
+        }
+
+        // These switches accept an arbitrary attached operand. Any e/E in the
+        // remainder belongs to that operand rather than an evaluator bundle.
+        if ("FIMimx".includes(character)) return null
+
+        if (character === "0") {
+            if (option[index + 1] === "x") {
+                index += 1
+                while (/[0-9A-Fa-f]/u.test(option[index + 1] ?? "")) index += 1
+            } else {
+                while (/[0-7]/u.test(option[index + 1] ?? "")) index += 1
+            }
+            continue
+        }
+        if (character === "d" || character === "V") {
+            if (option[index + 1] === ":") return null
+            continue
+        }
+
+        // -C's Unicode stream-selection list legitimately contains e/E; -D's
+        // diagnostic list is similarly an attached option language.
+        if (character === "C" || character === "D") return null
+        if (!/[A-Za-z0-9]/u.test(character)) return null
+    }
+    return null
+}
+
+/**
+ * Ruby's -0/-T/-W/-K operands are constrained rather than arbitrary. Consume
+ * only their valid prefix, then keep scanning so -e cannot hide behind them.
+ * For example Ruby executes all of `-0e`, `-W0e`, and `-Kue` as inline code.
+ */
+function classifyRubyInlineCodeFlag(word: string): OpaqueInlineCodeFlag | null {
+    if (!word.startsWith("-") || word.startsWith("--")) return null
+    const option = word.slice(1)
+    for (let index = 0; index < option.length; index += 1) {
+        const character = option[index]!
+        if (character === "e") {
+            return index + 1 === option.length
+                ? "next-argument"
+                : "attached-code"
+        }
+
+        // Directory, encoding, pattern, extension, load-path, and require
+        // options own their arbitrary attached remainder.
+        if ("CEFIirx".includes(character)) return null
+
+        if (character === "0" || character === "T") {
+            while (/[0-7]/u.test(option[index + 1] ?? "")) index += 1
+            continue
+        }
+        if (character === "K") {
+            // Legacy -K consumes exactly one attached kcode character. Ruby
+            // accepts punctuation here too: `-K-e` is -K(-) followed by -e.
+            if (option[index + 1] !== undefined) index += 1
+            continue
+        }
+        if (character === "W") {
+            if (option[index + 1] === ":") return null
+            if (/^[0-2]$/u.test(option[index + 1] ?? "")) index += 1
+            continue
+        }
+        if (!/[A-Za-z0-9]/u.test(character)) return null
+    }
     return null
 }
 

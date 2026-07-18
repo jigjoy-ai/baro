@@ -2142,9 +2142,12 @@ async fn run_app(
                                             };
                                             let branch_cwd = cwd.clone();
                                             let branch_name_clone = planned_full_branch.clone();
-                                            app.branch_name = continuation_branch
-                                                .clone()
-                                                .unwrap_or(planned_full_branch);
+                                            // A continuation branch is established authority. A
+                                            // fresh branch is not authoritative until git creates
+                                            // and the post-create guard verifies its suffixed name.
+                                            if let Some(branch) = continuation_branch.as_ref() {
+                                                app.branch_name = branch.clone();
+                                            }
                                             if let Err(error) =
                                                 begin_conversation_execution(&mut app, &cwd)
                                             {
@@ -2210,6 +2213,18 @@ async fn run_app(
                                                         }
                                                     }
                                                 };
+                                                if let Err(error) =
+                                                    branch_authority::verify_execution_branch(
+                                                        &exec_cwd,
+                                                        &actual_full_branch,
+                                                    )
+                                                    .await
+                                                {
+                                                    let _ = err_tx
+                                                        .send(AppEvent::BranchError(error))
+                                                        .await;
+                                                    return;
+                                                }
                                                 // Persist the FULL "baro/<slug>-<suffix>" name to
                                                 // prd.json — the TS orchestrator reads prd.branchName
                                                 // verbatim, and a stripped name once made it commit
@@ -2230,22 +2245,6 @@ async fn run_app(
                                                         actual_full_branch.clone(),
                                                     ))
                                                     .await;
-                                                match git::get_current_branch(&exec_cwd).await {
-                                                    Ok(ref actual)
-                                                        if actual == &actual_full_branch => {}
-                                                    Ok(actual) => {
-                                                        let _ = err_tx.send(AppEvent::BranchError(
-                                                    format!("Branch verification failed: expected '{}', got '{}'. Cannot proceed on main branch.", actual_full_branch, actual)
-                                                )).await;
-                                                        return;
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = err_tx.send(AppEvent::BranchError(
-                                                    format!("Branch verification failed: {}. Cannot proceed on main branch.", e)
-                                                )).await;
-                                                        return;
-                                                    }
-                                                }
                                                 spawn_executor(
                                                     exec_prd, exec_cwd, branch_tx, cfg, false, None,
                                                 );
@@ -3254,9 +3253,12 @@ fn confirm_and_execute(
     } else {
         None
     };
-    app.branch_name = continuation_branch
-        .clone()
-        .unwrap_or_else(|| planned_full_branch.clone());
+    // Keep a fresh planner suggestion provisional until BranchReady carries
+    // the verified, suffixed checkout. An existing continuation is already
+    // durable branch authority and can be shown immediately.
+    if let Some(branch) = continuation_branch.as_ref() {
+        app.branch_name = branch.clone();
+    }
     if let Err(error) = begin_conversation_execution(app, cwd) {
         let _ = tx.try_send(AppEvent::BranchError(error));
         return;
@@ -3312,6 +3314,12 @@ fn confirm_and_execute(
                 }
             }
         };
+        if let Err(error) =
+            branch_authority::verify_execution_branch(&exec_cwd, &actual_full_branch).await
+        {
+            let _ = tx.send(AppEvent::BranchError(error)).await;
+            return;
+        }
         let mut exec_prd = prd;
         exec_prd.branch_name = actual_full_branch.clone();
         if let Err(e) = executor::write_prd(&exec_prd, &exec_cwd) {
@@ -3378,6 +3386,7 @@ async fn begin_progressive_execution(
     let actual_branch = git::create_fresh_branch(cwd, &bootstrap.branch_name)
         .await
         .map_err(|error| format!("progressive branch creation failed: {error}"))?;
+    branch_authority::verify_execution_branch(cwd, &actual_branch).await?;
     bootstrap.branch_name = actual_branch.clone();
     executor::write_prd(&bootstrap, cwd)
         .map_err(|error| format!("could not persist progressive bootstrap PRD: {error}"))?;

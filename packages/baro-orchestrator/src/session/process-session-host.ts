@@ -60,7 +60,11 @@ export interface HostedRunResult extends ProcessRunOutcome {
 export class ProcessSessionHost {
     readonly lifecycle: SessionLifecycle
     private readonly usedRunIds = new Set<string>()
-    private active: { run: ProcessIsolatedRun; controller: AbortController } | null = null
+    private active: {
+        run: ProcessIsolatedRun
+        controller: AbortController
+        dispose: () => Promise<void>
+    } | null = null
 
     constructor(private readonly options: ProcessSessionHostOptions) {
         this.lifecycle = new SessionLifecycle(options.sessionId)
@@ -89,32 +93,46 @@ export class ProcessSessionHost {
             return { runId: "unavailable", success: false, error: messageOf(error) }
         }
         if (run.isolation !== "process") {
-            await Promise.resolve(run.dispose()).catch(() => undefined)
-            this.lifecycle.fail("run adapter did not provide process isolation")
+            const error = withCleanupFailure(
+                "run adapter did not provide process isolation",
+                await rejectedRunCleanupFailure(run),
+            )
+            this.lifecycle.fail(error)
             this.emitChanges()
             return {
                 runId: run.runId,
                 success: false,
-                error: "run adapter did not provide process isolation",
+                error,
             }
         }
         try {
             assertCorrelationId(run.runId, "runId")
         } catch (error) {
-            await Promise.resolve(run.dispose()).catch(() => undefined)
-            this.lifecycle.fail(`isolated run returned an invalid runId: ${messageOf(error)}`)
+            const failure = withCleanupFailure(
+                `isolated run returned an invalid runId: ${messageOf(error)}`,
+                await rejectedRunCleanupFailure(run),
+            )
+            this.lifecycle.fail(failure)
             this.emitChanges()
-            return { runId: String(run.runId), success: false, error: messageOf(error) }
+            return { runId: String(run.runId), success: false, error: failure }
         }
         if (this.usedRunIds.has(run.runId)) {
-            await Promise.resolve(run.dispose()).catch(() => undefined)
-            this.lifecycle.fail("runId was reused across session runs")
+            const error = withCleanupFailure(
+                "runId was reused across session runs",
+                await rejectedRunCleanupFailure(run),
+            )
+            this.lifecycle.fail(error)
             this.emitChanges()
-            return { runId: run.runId, success: false, error: "runId was reused" }
+            return { runId: run.runId, success: false, error }
         }
         this.usedRunIds.add(run.runId)
         const controller = new AbortController()
-        this.active = { run, controller }
+        let disposePromise: Promise<void> | null = null
+        const dispose = (): Promise<void> => {
+            disposePromise ??= Promise.resolve().then(() => run.dispose())
+            return disposePromise
+        }
+        this.active = { run, controller, dispose }
         this.lifecycle.startRun(run.runId)
         this.emitChanges()
 
@@ -135,19 +153,28 @@ export class ProcessSessionHost {
             outcome = { success: false, error: messageOf(error) }
         } finally {
             try {
-                await run.dispose()
+                await dispose()
             } catch (error) {
                 disposeError = messageOf(error)
             }
             this.active = null
         }
 
-        if (controller.signal.aborted) {
+        if (disposeError) {
+            const aborted = controller.signal.aborted
+            this.lifecycle.fail(
+                `isolated run cleanup failed${aborted ? " after abort" : ""}: ${disposeError}`,
+                run.runId,
+            )
+            outcome = {
+                success: false,
+                error: aborted
+                    ? `run aborted; cleanup failed: ${disposeError}`
+                    : `cleanup failed: ${disposeError}`,
+            }
+        } else if (controller.signal.aborted) {
             this.lifecycle.fail("isolated run was aborted", run.runId)
             outcome = { success: false, error: "run aborted" }
-        } else if (disposeError) {
-            this.lifecycle.fail(`isolated run cleanup failed: ${disposeError}`, run.runId)
-            outcome = { success: false, error: `cleanup failed: ${disposeError}` }
         } else if (!outcome.success) {
             this.lifecycle.fail(outcome.error || "isolated run failed", run.runId)
         } else if (this.lifecycle.phase !== "verifying") {
@@ -167,7 +194,13 @@ export class ProcessSessionHost {
     }
 
     abort(): void {
-        this.active?.controller.abort()
+        const active = this.active
+        if (!active) return
+        active.controller.abort()
+        // A non-cooperative child may ignore the signal and keep execute()
+        // pending. Disposal owns process-tree termination, so start it now;
+        // runReadyResponse awaits the same idempotent promise in its finally.
+        void active.dispose().catch(() => undefined)
     }
 
     beginFollowUp(): void {
@@ -196,6 +229,21 @@ export class ProcessSessionHost {
 
 function messageOf(error: unknown): string {
     return error instanceof Error ? error.message : String(error)
+}
+
+async function rejectedRunCleanupFailure(
+    run: ProcessIsolatedRun,
+): Promise<string | null> {
+    try {
+        await run.dispose()
+        return null
+    } catch (error) {
+        return messageOf(error)
+    }
+}
+
+function withCleanupFailure(reason: string, cleanupError: string | null): string {
+    return cleanupError ? `${reason}; cleanup failed: ${cleanupError}` : reason
 }
 
 /** Compile-time guard that keeps the host phase vocabulary caller-owned. */

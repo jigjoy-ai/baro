@@ -42,6 +42,9 @@ export interface RunPiOneShotOptions {
     timeoutMs?: number
     /** Grace after SIGTERM before SIGKILL. Default: 5_000ms. */
     terminationGraceMs?: number
+    /** Maximum accepted UTF-8 bytes in one stdout line. Defaults to 16 MiB and
+     * may only be lowered, primarily for constrained runtimes and tests. */
+    maxStdoutBufferBytes?: number
     /** Per-phase prefix for the live stderr stream. Default: "pi". */
     label?: string
     /** Optional invocation telemetry sink. It cannot alter runner success. */
@@ -88,6 +91,10 @@ export async function runPiOneShot(
     if (!Number.isFinite(terminationGraceMs) || terminationGraceMs < 1) {
         throw new RangeError("runPiOneShot: terminationGraceMs must be positive")
     }
+    const maxStdoutBufferBytes = stdoutBufferLimit(
+        opts.maxStdoutBufferBytes,
+        "runPiOneShot",
+    )
 
     return await new Promise<string>((resolve, reject) => {
         const startedAt = Date.now()
@@ -114,6 +121,8 @@ export async function runPiOneShot(
         })
         let assistantText = ""
         let stdoutBuffer = ""
+        let stdoutBufferBytes = 0
+        let discardingOversizedStdoutLine = false
         const eventTypesSeen: string[] = []
         let evaluatorToolUseSeen = false
         let timedOut = false
@@ -153,11 +162,12 @@ export async function runPiOneShot(
             finalizeAbnormalAfterTree()
         }
         const onAbort = (): void => {
-            if (aborted) return
+            if (aborted || timedOut || finalized) return
             aborted = true
             terminate()
         }
         timer = setTimeout(() => {
+            if (timedOut || aborted || finalized) return
             timedOut = true
             terminate()
         }, timeoutMs)
@@ -165,8 +175,6 @@ export async function runPiOneShot(
         opts.signal?.addEventListener("abort", onAbort, { once: true })
         // Close the race between the pre-spawn check and listener install.
         if (opts.signal?.aborted) onAbort()
-
-        const maxBufferBytes = 16 * 1024 * 1024
 
         // Shared with the stream-`end` flush so a final line without a
         // trailing newline still parses.
@@ -252,31 +260,71 @@ export async function runPiOneShot(
                 }
         }
 
+        const discardOversizedStdoutLine = (): void => {
+            process.stderr.write(
+                `[${label}] stdout line exceeded ${maxStdoutBufferBytes} bytes — discarding line\n`,
+            )
+            stdoutBuffer = ""
+            stdoutBufferBytes = 0
+        }
+        const consumeStdout = (chunk: string): void => {
+            let remaining = chunk
+            while (remaining.length > 0) {
+                if (discardingOversizedStdoutLine) {
+                    const newline = remaining.indexOf("\n")
+                    if (newline < 0) return
+                    discardingOversizedStdoutLine = false
+                    remaining = remaining.slice(newline + 1)
+                    continue
+                }
+
+                const newline = remaining.indexOf("\n")
+                if (newline >= 0) {
+                    const fragment = remaining.slice(0, newline)
+                    const fragmentBytes = Buffer.byteLength(fragment, "utf8")
+                    if (
+                        stdoutBufferBytes + fragmentBytes >
+                        maxStdoutBufferBytes
+                    ) {
+                        discardOversizedStdoutLine()
+                    } else {
+                        processLine(stdoutBuffer + fragment)
+                        stdoutBuffer = ""
+                        stdoutBufferBytes = 0
+                    }
+                    remaining = remaining.slice(newline + 1)
+                    continue
+                }
+
+                const remainingBytes = Buffer.byteLength(remaining, "utf8")
+                if (stdoutBufferBytes + remainingBytes > maxStdoutBufferBytes) {
+                    discardOversizedStdoutLine()
+                    discardingOversizedStdoutLine = true
+                } else {
+                    stdoutBuffer += remaining
+                    stdoutBufferBytes += remainingBytes
+                }
+                return
+            }
+        }
+
         proc.stdout!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => {
             refreshProcessTree()
-            stdoutBuffer += chunk
-            let nl: number
-            while ((nl = stdoutBuffer.indexOf("\n")) >= 0) {
-                const line = stdoutBuffer.slice(0, nl)
-                stdoutBuffer = stdoutBuffer.slice(nl + 1)
-                processLine(line)
-            }
-            // A newline-less stream (wedged Pi, one enormous line) would grow
-            // unbounded; drop the partial — later well-formed lines still parse.
-            if (stdoutBuffer.length > maxBufferBytes) {
-                process.stderr.write(
-                    `[${label}] stdout buffer exceeded ${maxBufferBytes} bytes without a newline — discarding partial line\n`,
-                )
-                stdoutBuffer = ""
-            }
+            consumeStdout(chunk)
         })
         // Flush a final newline-less line — dropping it would lose message_end
         // and fail a successful run. 'end' fires after the last 'data', before 'exit'.
         proc.stdout!.on("end", () => {
+            if (discardingOversizedStdoutLine) {
+                stdoutBuffer = ""
+                stdoutBufferBytes = 0
+                return
+            }
             if (stdoutBuffer.length > 0) {
                 processLine(stdoutBuffer)
                 stdoutBuffer = ""
+                stdoutBufferBytes = 0
             }
         })
 
@@ -343,7 +391,11 @@ export async function runPiOneShot(
                 if (
                     !invocations.finish(
                         unknownPiObservation(
-                            timedOut || aborted ? "timed_out" : "failed",
+                            aborted
+                                ? "cancelled"
+                                : timedOut
+                                  ? "timed_out"
+                                  : "failed",
                             elapsedMs,
                             opts,
                         ),
@@ -443,6 +495,22 @@ export async function runPiOneShot(
             proc.stdin.end(opts.prompt)
         }
     })
+}
+
+const DEFAULT_MAX_STDOUT_BUFFER_BYTES = 16 * 1024 * 1024
+
+function stdoutBufferLimit(value: number | undefined, caller: string): number {
+    const limit = value ?? DEFAULT_MAX_STDOUT_BUFFER_BYTES
+    if (
+        !Number.isSafeInteger(limit) ||
+        limit < 1 ||
+        limit > DEFAULT_MAX_STDOUT_BUFFER_BYTES
+    ) {
+        throw new RangeError(
+            `${caller}: maxStdoutBufferBytes must be an integer between 1 and ${DEFAULT_MAX_STDOUT_BUFFER_BYTES}`,
+        )
+    }
+    return limit
 }
 
 function abortError(): Error {

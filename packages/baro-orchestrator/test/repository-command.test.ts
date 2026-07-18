@@ -284,7 +284,7 @@ if (args[0] === "rev-parse" && args[1] === "HEAD") {
                 assert.equal(failure.data.leaseId, "lease-timeout")
                 assert.match(
                     failure.data.error,
-                    /repository command "git rev-parse" timed out/u,
+                    /repository command "git (?:rev-parse|worktree)" timed out/u,
                 )
                 assert.deepEqual(failure.data.failure, {
                     kind: "infrastructure",
