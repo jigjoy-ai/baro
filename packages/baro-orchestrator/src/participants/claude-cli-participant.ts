@@ -30,6 +30,7 @@ import {
     type AgentResultData,
 } from "../semantic-events.js"
 import { mapClaudeEvent } from "../stream-json-mapper.js"
+import { acceptsTargetedMessage } from "../runtime/targeted-message-authority.js"
 
 export interface ClaudeCliParticipantOptions {
     cwd: string
@@ -56,6 +57,16 @@ export interface ClaudeCliParticipantOptions {
      * ignored because the owning StoryAgent consumes correlated Critique
      * events directly. */
     ignoredTargetedMessageAuthority?: Participant
+    /** Exact Bridge and lease capability required in collective execution. */
+    targetedMessageAuthority?: Participant
+    targetedMessageCorrelation?: Readonly<{
+        runId?: string
+        leaseId?: string
+        generation?: number
+    }>
+    /** Reviewed workers consume Critique directly; ignore its correlated
+     * targeted compatibility twin. */
+    ignoreCorrelatedTerminalFeedback?: boolean
 }
 
 export interface ClaudeRunSummary {
@@ -364,8 +375,19 @@ export class ClaudeCliParticipant extends BaseObserver {
         // also write to stdin (double-delivery).
         if (
             AgentTargetedMessage.is(event) &&
-            event.data.recipientId === this.agentId &&
-            source !== this.options.ignoredTargetedMessageAuthority
+            acceptsTargetedMessage(
+                source,
+                event.data,
+                this.agentId,
+                this.options.targetedMessageAuthority,
+                this.options.targetedMessageCorrelation ?? {},
+            ) &&
+            source !== this.options.ignoredTargetedMessageAuthority &&
+            !(
+                this.options.ignoreCorrelatedTerminalFeedback === true &&
+                source === this.options.targetedMessageAuthority &&
+                typeof event.data.metadata.terminalId === "string"
+            )
         ) {
             if (!this.proc?.stdin) return
             this.sendUserMessage(event.data.text)

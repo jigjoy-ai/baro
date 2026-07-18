@@ -7,7 +7,6 @@
  * only its private index and need no serialization.
  */
 
-import { execFile } from "child_process"
 import { createHash } from "crypto"
 import {
     appendFileSync,
@@ -20,11 +19,12 @@ import {
 } from "fs"
 import { tmpdir } from "os"
 import { join, resolve } from "path"
-import { promisify } from "util"
 
 import { GitGate } from "./git.js"
-
-const exec = promisify(execFile)
+import {
+    isRepositoryCommandTimeout,
+    runRepositoryCommand as exec,
+} from "./repository-command.js"
 
 // A fresh worktree has no installed dependency artifacts, so dep dirs are
 // symlinked to one shared location: one story's `npm install` (pip/composer/…)
@@ -190,8 +190,20 @@ export class WorktreeManager {
                 throw new Error(
                     `worktree setup failed for ${storyId}: ${errMsg(e)}; ` +
                         `rollback failed: ${errMsg(rollbackError)}`,
+                    {
+                        // Preserve whichever timeout made repository state
+                        // unknowable. The story classifier follows this
+                        // bounded cause chain and emits command_timeout.
+                        cause: isRepositoryCommandTimeout(e)
+                            ? e
+                            : rollbackError,
+                    },
                 )
             }
+            // Shared-tree fallback is safe for ordinary setup incompatibility,
+            // but never after a command deadline: the timed-out repository
+            // mutation was killed and this attempt must end terminally.
+            if (isRepositoryCommandTimeout(e)) throw e
             if (!this.allowSharedFallback) throw e
             return null
         } finally {
@@ -398,9 +410,23 @@ export class WorktreeManager {
                     cwd: this.repoRoot,
                 })
                 return true
-            } catch {
-                const conflicts = await this.conflictedPaths()
+            } catch (error) {
+                if (isRepositoryCommandTimeout(error)) {
+                    this.preserved.add(storyId)
+                }
+                let conflicts: string[]
+                try {
+                    conflicts = await this.conflictedPaths()
+                } catch (inspectionError) {
+                    this.preserved.add(storyId)
+                    await this.abortMerge(storyId)
+                    throw inspectionError
+                }
                 await this.abortMerge(storyId)
+                if (isRepositoryCommandTimeout(error)) {
+                    this.preserved.add(storyId)
+                    throw error
+                }
                 if (!this.resolveConflictsWithTheirs) {
                     this.preserved.add(storyId)
                     throw new Error(
@@ -421,15 +447,24 @@ export class WorktreeManager {
                     )
                     return true
                 } catch (e) {
+                    this.preserved.add(storyId)
                     await this.abortMerge(storyId)
                     // Keep the branch out of the cleanup sweep so the
                     // commits stay recoverable after the run.
-                    this.preserved.add(storyId)
+                    if (isRepositoryCommandTimeout(e)) throw e
                     throw new Error(
                         `could not merge story ${storyId} even with -X theirs: ${errMsg(e)}`,
                     )
                 }
             }
+        } catch (error) {
+            if (isRepositoryCommandTimeout(error)) {
+                // A timed-out inspection/auto-commit/merge leaves repository
+                // state unsuitable for generic cleanup. Retain the exact
+                // story branch/worktree for terminal diagnosis.
+                this.preserved.add(storyId)
+            }
+            throw error
         } finally {
             release()
         }
@@ -447,6 +482,7 @@ export class WorktreeManager {
                 `WARNING: 'git merge --abort' failed after story ${storyId} ` +
                     `(${errMsg(e)}); run branch may have a lingering MERGE_HEAD`,
             )
+            if (isRepositoryCommandTimeout(e)) throw e
         }
     }
 
@@ -498,7 +534,8 @@ export class WorktreeManager {
                             ["status", "--porcelain"],
                             { cwd: path },
                         ))
-                    } catch {
+                    } catch (error) {
+                        if (isRepositoryCommandTimeout(error)) throw error
                         // If cleanliness cannot be proven, preserve the path.
                         status = "?? <status-unavailable>"
                     }
@@ -552,7 +589,8 @@ export class WorktreeManager {
                     { cwd: this.repoRoot },
                 )
                 branches = stdout.split("\n").map((l) => l.trim()).filter(Boolean)
-            } catch {
+            } catch (error) {
+                if (isRepositoryCommandTimeout(error)) throw error
                 /* no matching branches */
             }
             for (const branch of branches) {
@@ -680,7 +718,8 @@ export class WorktreeManager {
                 cwd: worktreePath,
             })
             dirty = stdout.trim().length > 0
-        } catch {
+        } catch (error) {
+            if (isRepositoryCommandTimeout(error)) throw error
             return
         }
         if (!dirty) return
@@ -691,6 +730,7 @@ export class WorktreeManager {
         try {
             await exec("git", ["add", "-A"], { cwd: worktreePath })
         } catch (e) {
+            if (isRepositoryCommandTimeout(e)) throw e
             this.log(
                 `WARNING: failed to stage story ${storyId}'s leftover work ` +
                     `(${errMsg(e)}); it will not be included in the merge`,
@@ -710,6 +750,7 @@ export class WorktreeManager {
             })
             staged = stdout.split("\n").map((l) => l.trim()).filter(Boolean)
         } catch (e) {
+            if (isRepositoryCommandTimeout(e)) throw e
             // Don't treat an unreadable index as "nothing staged" — that would
             // silently skip the commit and drop the work. Warn and commit
             // whatever is staged instead (dep dirs were already reset above).
@@ -746,6 +787,7 @@ export class WorktreeManager {
                 { cwd: worktreePath },
             )
         } catch (e) {
+            if (isRepositoryCommandTimeout(e)) throw e
             // Surface a real commit failure: the work would otherwise be
             // silently dropped (the branch merges without it).
             this.log(
@@ -831,6 +873,7 @@ export class WorktreeManager {
                 })
                 return backup
             } catch (error) {
+                if (isRepositoryCommandTimeout(error)) throw error
                 const { stdout: existing } = await exec(
                     "git",
                     ["branch", "--list", backup, "--format=%(refname:short)"],
@@ -888,7 +931,8 @@ export class WorktreeManager {
                 { cwd: this.repoRoot },
             )
             return stdout.split("\n").map((l) => l.trim()).filter(Boolean)
-        } catch {
+        } catch (error) {
+            if (isRepositoryCommandTimeout(error)) throw error
             return []
         }
     }
@@ -972,7 +1016,11 @@ async function execQuiet(
 ): Promise<void> {
     try {
         await exec(cmd, args, { cwd })
-    } catch {
+    } catch (error) {
+        // A normal non-zero result is intentionally best-effort at these
+        // cleanup sites. A timeout is different: treating it as success could
+        // release logical state after an unproven repository mutation.
+        if (isRepositoryCommandTimeout(error)) throw error
         /* best-effort */
     }
 }

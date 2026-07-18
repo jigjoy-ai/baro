@@ -39,6 +39,7 @@ const VALID_PRD = JSON.stringify({
             retries: 2,
             acceptance: ["The exact signal reaches providers."],
             tests: ["npm test"],
+            goalInvariantIds: [],
             model: "heavy",
         },
     ],
@@ -53,6 +54,7 @@ const RAW_TAIL_STORY = {
     retries: 2,
     acceptance: ["Cancellation remains observable after integration."],
     tests: ["npm test -- cancellation"],
+    goalInvariantIds: [],
     model: "standard",
 }
 

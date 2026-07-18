@@ -31,7 +31,10 @@ Critic verdicts are evidence-gated. Repository evidence and observed command
 evidence are captured immediately before evaluation. Missing repository
 evidence, stale or unverifiable command evidence, an unfinished command, or a
 sandbox-blocked check produces `inconclusive`; it does not invoke an evaluator
-model and does not send corrective prose to the worker.
+model and does not send corrective prose to the worker. Critic Git evidence,
+Architect/Planner Bash tools, and final verification all use bounded,
+process-group-aware launchers that drain the complete command tree before the
+owning participant can settle.
 
 AcceptanceGate keeps that lease and isolated worktree intact and requests up
 to two neutral terminal replays through `AgentTurnProjector`. Each replay gives
@@ -86,8 +89,17 @@ out, so an earlier subscriber cannot rewrite a later participant's mailbox:
 - `RuntimeReplanCoordinator` validates authorization, graph-version CAS,
   idempotency, cycles, mutability, and durability before publishing an applied
   decision;
-- the Board projects durable run state and schedules newly-ready work;
+- `GoalGuardian` independently projects the accepted `GoalContract`, exact
+  story-to-invariant mappings, source-bound challenges, integration and
+  lease-correlated Critic evidence. It proposes remediation work and attests
+  completion, but cannot schedule or mutate the graph. Board may persist that
+  projection but cannot manufacture its semantic contents;
+- the Board projects durable run state, schedules newly-ready work, and remains
+  the deterministic graph-transaction arbiter;
 - the Broker auctions work among credential-free route advertisements;
+  each worker id is bound by topology to one concrete StoryFactory before its
+  capability advertisement or claim is accepted, so a bus participant cannot
+  win a lease by inventing or impersonating a worker id;
 - Critic owns acceptance evaluation, Repository owns integration, and the
   run verifier owns the final objective check;
 - Dialogue may address a currently leased continuation-capable worker and may
@@ -96,13 +108,114 @@ out, so an earlier subscriber cannot rewrite a later participant's mailbox:
   same runtime coordinator; Dialogue cannot apply it, offer work, grant a
   lease, select a route, merge code, verify, or complete the run.
 
+Collective worker messages are capabilities, not recipient labels. Operator,
+the tag-based Librarian, and Dialogue may submit uncorrelated message intents;
+the exact run-local `CollaborationBridge` is the only participant that may bind
+one to the recipient's current run/lease/generation. Every story backend then
+accepts the delivery only from that exact Bridge and correlation. Critic's
+legacy compatibility message is deliberately outside this producer set, as
+its authoritative path is `Critique`. A worker receives only a loopback
+endpoint and opaque token for its exact lease; the Bridge's manager-private
+session path is never rendered into a prompt or executor request. Any retained
+compatibility/test mailbox names use reversible base64url encoding, so
+distinct story ids cannot alias manager-owned state.
+
+The same rule applies to observations that can transitively affect work.
+Supervisor and both Librarian implementations learn active attempts only from
+the exact Broker and accept tool/agent evidence only from the dynamic result
+authority registered for that lease. Dialogue source-binds Board, Broker,
+Repository, Critic, AcceptanceGate, Verifier, Bridge, and worker observations
+before putting them into its prompt. Its output therefore does not turn an
+ambient same-label bus event into a trusted worker message or graph proposal.
+
 Native workers expose `propose_replan` inside their live inference loop. CLI
-workers use the `agent-collab.mjs` bridge and wait for the same correlated bus
-decision. The mechanism is therefore backend-specific at the edge and one
-semantic protocol in the runtime. A discovered story carries the originating
+workers use `agent-collab.mjs` with that lease's endpoint/token and wait for
+the same correlated bus decision. Claude and native OpenAI use live targeted
+delivery; one-shot Codex, OpenCode and Pi consume a broker inbox. Messages
+queued before any worker acquires its capability enter its initial prompt
+exactly once. Poll output is written before acknowledgement, so a lost ACK may
+repeat the same stable delivery id instead of silently losing the message. The
+mechanism is therefore backend-specific at the edge and one semantic protocol
+in the runtime. A discovered story carries the originating
 lease and generation: the bridge publishes it only while that lease is active,
-and the Board checks the correlation again. A retained final note may still be
-useful context after release, but it cannot mutate the DAG.
+and the Board checks the correlation again. The HTTP ingress re-authenticates
+the capability after reading each bounded request body, closing a release race;
+release then revokes its attribution. Messages, help, notes, discoveries, and
+replans submitted after the release boundary are stale and cannot influence
+Dialogue or another worker.
+Durably handed-off goal challenges remain replayable until their persisted
+Guardian projection acknowledges them. Before persistence, the Bridge also
+checks the challenge invariant against the exact derived GoalContract allowlist;
+unknown G-A/G-C ids are rejected instead of becoming immortal replay records.
+
+The runtime is distributed, but it is not leaderless. Board serializes
+scheduling and durable graph commits; it does not call a model, decide goal
+meaning, select a route, grant its own lease, evaluate quality, merge code, or
+verify the run. Those authorities remain separate participants. This boundary
+is intentional: Baro decentralizes semantic and operational authority while
+retaining one deterministic transaction order for a shared repository.
+
+A runtime mutation may change a planned sibling immediately. If the target is
+already offered but not leased, Board first sends an exact, correlated offer
+retraction request. Broker serializes it against bids, claims and lease grants,
+tombstones a successfully retracted offer, and returns an ACK. Only that ACK
+allows Board to commit the graph mutation. A `leased` response makes the story
+immutable; a missing or conflicting ACK rejects the proposal fail-closed.
+Leased, integrating, quality/recovery and cleanup work always remains
+immutable. Thus adaptation does not race a worker that may already be writing.
+
+Any source-bound participant may raise a goal-invariant challenge through the
+lease-validating bridge. Guardian turns an unresolved challenge into bounded,
+goal-mapped corrective work; Board admits it through the same durable graph CAS
+lane. Completion requires the Guardian projection to cross the PRD persistence
+boundary before its attestation is accepted. In strict quality mode, a Critic
+verdict must match the exact integrated lease. A PRD-only restored integration
+without that correlation is revalidated rather than inferred green.
+
+The soft run deadline is an actual timer, not only a scheduler poll. It ends a
+run waiting on an empty open planning stream, prevents dispatch of another
+wave after expiry, and fails directly if repository preparation never
+completed; already leased work is still allowed to settle through its normal
+fenced lifecycle. Final
+goal attestation has its own exact check/contract/verification correlation and
+a 30-second fail-closed default (`BARO_GOAL_COMPLETION_TIMEOUT_SECS`), so a
+silent or stale Guardian response cannot leave finalization open forever.
+
+Collective completion is strict about objective evidence: only a coherent
+`passed` verifier result can proceed to GoalGuardian. A `skipped` result means
+the objective gate is unknown/incomplete—even when no applicable command was
+discovered—so the run retains its integrated work as an unsuccessful
+checkpoint rather than reporting green. A passing payload that contains a
+failed/skipped command, or no passing command at all, is normalized
+fail-closed at the Board boundary.
+
+At each verification request, RunVerifier rereads the final PRD and combines
+its current `userStories[].tests` with the frozen pre-run automatic gates.
+Runtime-added tests therefore enter the gate and runtime-removed tests leave
+it, while baseline package-manager authority and executable gates remain
+frozen. PRD command strings never enter a shell: the translator admits only
+conventional npm/pnpm/Yarn `build`, `typecheck`, `test`, or `lint` scripts;
+narrow Cargo build/check/test/clippy/fmt checks; contained `node --check` or
+`node --test` paths; and exact `git diff --check`. Custom package scripts,
+missing scripts/tools, unsupported flags, quoting, response files, and lexical
+or symlink path escapes become explicit incomplete evidence. Eight unique PRD
+commands and eight final-plan executable additions are the bounded defaults;
+raw schema inspection is additionally capped at 256 stories/64 requirements.
+Any overflow becomes incomplete evidence, and the Board watchdog reserves a
+full per-command timeout plus process-tree settlement grace for every admitted
+slot. Conventional script names are the current trust policy; their bodies are
+not yet pinned to a baseline hash, so extending the allowlist to arbitrary
+custom script names requires an additional authority design rather than a
+string-parser exception.
+
+Git/worktree and final publishing commands also have a production-safe
+10-minute per-command ceiling, configurable with
+`BARO_REPOSITORY_COMMAND_TIMEOUT_SECS`. Reaching it terminates and drains the
+complete process tree before `GitGate` is released. A timed-out repository
+mutation is classified as infrastructure `command_timeout`; it is not allowed
+to fall back to the shared tree or masquerade as a provider timeout, and an
+affected isolated branch/worktree is retained whenever its state cannot be
+proven safe.
 
 Three budgets are accounted independently:
 
@@ -198,6 +311,17 @@ node --import tsx --test \
   test/planning/progressive-plan.test.ts \
   test/planning/progressive-planner-protocol.test.ts \
   test/participants/progressive-planning-board.test.ts \
+  test/participants/runtime-replan-board.test.ts \
+  test/participants/lease-broker.test.ts \
+  test/participants/collaboration-bridge.test.ts \
+  test/participants/librarian.test.ts \
+  test/participants/memory-librarian.test.ts \
+  test/participants/dialogue-agent.test.ts \
+  test/participants/goal-guardian.test.ts \
+  test/participants/goal-remediation-board.test.ts \
+  test/runtime/targeted-message-authority.test.ts \
+  test/declared-verification.test.ts \
+  test/collective-orchestrate.test.ts \
   test/progressive-orchestrate.test.ts \
   test/progressive-cli-smoke.test.ts \
   test/stdin-commands.test.ts \
@@ -220,19 +344,25 @@ route's quality estimate.
 
 The estimate uses configured values as fixed-weight pseudo-priors and publishes
 `RouteEstimateUpdated` before later auctions use the historical estimate. A
-lease ledger remains available until `RunCompleted`, so a later authoritative
-measurement can update the correct old lease without being attached to a new
-retry. This is a supported ingestion seam, not a claim that production billing
-is already connected.
+lease ledger remains available through final billing reconciliation, so a late
+authoritative receipt updates the correct old lease rather than a newer retry.
 
-Known runner-reported equivalent cost can update an estimate today. Native
-OpenAI provider/customer cost remains `pending_gateway_meter`: Baro Gateway and
-Baro Cloud do not yet publish a correlated measurement into this collector.
-Unknown cost is never converted to zero and cannot support a claim that
-Collective is cheaper. Selection is currently deterministic and greedy after
-policy constraints; there is no uncertainty-driven route exploration yet, so
-configured priors still matter. Learning is advisory and run-local; durable,
-cross-run calibration belongs to repeated externally verified trials.
+Billing authority is explicit and route-bound. `BARO_GATEWAY_BILLING_URL`
+opts in one trusted Gateway origin; the matching API key authenticates the
+cursor feed, while locally allocated opaque invocation identities bind each
+receipt to Baro-owned run/phase/story correlation. The backend performs the
+actual billing and returns canonical receipts; Baro validates and deduplicates
+them, publishes the resulting measurement, and only then advances the feed
+cursor. Generic OpenAI-compatible endpoints, Claude Code, Codex, OpenCode and
+Pi never become billing authorities implicitly. Missing or late receipts stay
+unknown instead of becoming zero-cost observations.
+
+Selection is currently deterministic and greedy after policy constraints;
+there is no uncertainty-driven route exploration yet, so configured priors
+still matter. Learning is advisory and run-local; durable, cross-run
+calibration belongs to repeated externally verified trials. Consequently this
+wiring makes cost evidence lossless, but does not by itself prove that
+Collective is cheaper or better than a single-agent harness.
 
 ## Conversation and TUI boundary
 

@@ -20,7 +20,13 @@ import {
     StoryResult,
     StorySpawnRequest,
     StorySpawned,
+    WorkLeaseGranted,
+    WorkLeaseReleased,
 } from "../semantic-events.js"
+import type {
+    StoryOutcomeAuthority,
+    StoryResultAuthorityCorrelation,
+} from "../runtime/story-outcome-authority.js"
 
 /** Tools whose results are worth capturing for cross-agent reuse. */
 const EXPLORATION_TOOLS = new Set([
@@ -42,6 +48,7 @@ const BROADCAST_TOOLS = new Set(["Read", "Grep", "Glob", "LSP"])
 
 interface PendingCall {
     agentId: string
+    correlation: StoryResultAuthorityCorrelation | null
     tool: string
     args: Record<string, unknown>
     tags: string[]
@@ -66,17 +73,34 @@ export interface LibrarianOptions {
      * Librarian can't drown a single agent in injected text. Default: 50000.
      */
     maxBroadcastBytesPerStory?: number
+    /** Enables exact-source, active-lease filtering for collective tool
+     * evidence before it can become a worker message. */
+    collective?: {
+        runId: string
+        outcomeAuthority: StoryOutcomeAuthority
+    }
 }
 
 export class Librarian extends BaseObserver {
-    private readonly opts: Required<LibrarianOptions>
-    private readonly pending = new Map<string, PendingCall>()
+    private readonly opts: Required<Omit<LibrarianOptions, "collective">> &
+        Pick<LibrarianOptions, "collective">
+    /** Tool protocols scope call ids to one producer. Preserve that namespace
+     * explicitly so two parallel participants may reuse the same call id. */
+    private readonly pending = new Map<
+        Participant,
+        Map<string, PendingCall>
+    >()
     private readonly knowledge: IndexedKnowledge[] = []
 
     // Mid-flight bookkeeping
     private readonly inFlight = new Set<string>()
     private readonly storyHints = new Map<string, string[]>()
     private readonly broadcastBytes = new Map<string, number>()
+    private readonly activeLeases = new Map<
+        string,
+        StoryResultAuthorityCorrelation
+    >()
+    private leaseAuthority: Participant | null = null
 
     constructor(opts: LibrarianOptions = {}) {
         super()
@@ -84,7 +108,21 @@ export class Librarian extends BaseObserver {
             maxContentChars: opts.maxContentChars ?? 4000,
             maxInjectedChars: opts.maxInjectedChars ?? 20000,
             maxBroadcastBytesPerStory: opts.maxBroadcastBytesPerStory ?? 50000,
+            collective: opts.collective,
         }
+        if (
+            opts.collective &&
+            opts.collective.outcomeAuthority.runId !== opts.collective.runId
+        ) {
+            throw new Error("Librarian collective authority runId mismatch")
+        }
+    }
+
+    setLeaseAuthority(authority: Participant): void {
+        if (this.leaseAuthority && this.leaseAuthority !== authority) {
+            throw new Error("Librarian lease authority is already bound")
+        }
+        this.leaseAuthority = authority
     }
 
     /** All indexed knowledge entries, in order discovered. */
@@ -152,9 +190,53 @@ export class Librarian extends BaseObserver {
     }
 
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
+        const collective = this.opts.collective
+        if (collective && WorkLeaseGranted.is(event)) {
+            if (
+                source !== this.leaseAuthority ||
+                event.data.runId !== collective.runId
+            ) return
+            const storyId = event.data.request.storyId
+            const current = this.activeLeases.get(storyId)
+            if (
+                current &&
+                (event.data.generation < current.generation ||
+                    (event.data.generation === current.generation &&
+                        event.data.leaseId !== current.leaseId))
+            ) return
+            if (
+                current &&
+                event.data.generation === current.generation &&
+                event.data.leaseId === current.leaseId
+            ) return
+            if (current) this.dropPendingForCorrelation(current)
+            this.activeLeases.set(storyId, {
+                runId: collective.runId,
+                storyId,
+                leaseId: event.data.leaseId,
+                generation: event.data.generation,
+            })
+            this.storyHints.set(storyId, tokenizeHints(event.data.request.prompt))
+            this.inFlight.add(storyId)
+            return
+        }
+        if (collective && WorkLeaseReleased.is(event)) {
+            if (
+                source !== this.leaseAuthority ||
+                event.data.runId !== collective.runId
+            ) return
+            const current = this.activeLeases.get(event.data.storyId)
+            if (current?.leaseId !== event.data.leaseId) return
+            this.dropPendingForCorrelation(current)
+            this.activeLeases.delete(event.data.storyId)
+            this.inFlight.delete(event.data.storyId)
+            this.storyHints.delete(event.data.storyId)
+            return
+        }
+        if (collective) return
         if (StorySpawnRequest.is(event)) {
             this.storyHints.set(
                 event.data.storyId,
@@ -175,6 +257,10 @@ export class Librarian extends BaseObserver {
         if (!EXPLORATION_TOOLS.has(item.name)) return
         const agentId = (source as unknown as { agentId?: string }).agentId
         if (typeof agentId !== "string") return
+        const correlation = this.opts.collective
+            ? this.collectiveCorrelation(source, agentId)
+            : null
+        if (this.opts.collective && !correlation) return
         let parsedArgs: Record<string, unknown> = {}
         try {
             parsedArgs = JSON.parse(item.args) as Record<string, unknown>
@@ -182,8 +268,14 @@ export class Librarian extends BaseObserver {
             // ignore malformed arg JSON; we'll still record summary
         }
         const { tags, summary } = describeCall(item.name, parsedArgs)
-        this.pending.set(item.callId, {
+        let sourcePending = this.pending.get(source)
+        if (!sourcePending) {
+            sourcePending = new Map()
+            this.pending.set(source, sourcePending)
+        }
+        sourcePending.set(item.callId, {
             agentId,
+            correlation,
             tool: item.name,
             args: parsedArgs,
             tags,
@@ -199,9 +291,19 @@ export class Librarian extends BaseObserver {
             call_id: string
             output: Array<{ text: string }>
         }
-        const pending = this.pending.get(json.call_id)
+        const pending = this.pending.get(source)?.get(json.call_id)
         if (!pending) return
-        this.pending.delete(json.call_id)
+        if (
+            pending.correlation &&
+            !sameCorrelation(
+                pending.correlation,
+                this.collectiveCorrelation(source, pending.agentId),
+            )
+        ) {
+            this.deletePending(source, json.call_id)
+            return
+        }
+        this.deletePending(source, json.call_id)
 
         const fullOutput = json.output.map((b) => b.text).join("\n")
         const content =
@@ -297,6 +399,55 @@ export class Librarian extends BaseObserver {
             }
         }
     }
+
+    private collectiveCorrelation(
+        source: Participant,
+        storyId: string,
+    ): StoryResultAuthorityCorrelation | null {
+        const collective = this.opts.collective
+        if (!collective) return null
+        const active = this.activeLeases.get(storyId)
+        const authenticated =
+            collective.outcomeAuthority.terminalCorrelationForSource(
+                source,
+                storyId,
+            )
+        return sameCorrelation(active ?? null, authenticated) ? active! : null
+    }
+
+    private dropPendingForCorrelation(
+        correlation: StoryResultAuthorityCorrelation,
+    ): void {
+        for (const [source, calls] of this.pending) {
+            for (const [callId, pending] of calls) {
+                if (sameCorrelation(pending.correlation, correlation)) {
+                    calls.delete(callId)
+                }
+            }
+            if (calls.size === 0) this.pending.delete(source)
+        }
+    }
+
+    private deletePending(source: Participant, callId: string): void {
+        const calls = this.pending.get(source)
+        if (!calls) return
+        calls.delete(callId)
+        if (calls.size === 0) this.pending.delete(source)
+    }
+}
+
+function sameCorrelation(
+    left: StoryResultAuthorityCorrelation | null,
+    right: StoryResultAuthorityCorrelation | null,
+): boolean {
+    return (
+        left !== null &&
+        right !== null &&
+        left.runId === right.runId &&
+        left.storyId === right.storyId &&
+        left.leaseId === right.leaseId &&
+        left.generation === right.generation
+    )
 }
 
 function describeCall(

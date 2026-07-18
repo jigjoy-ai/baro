@@ -52,6 +52,15 @@ requires it. Before finalizing, compare criteria across stories and remove any
 contradiction (for example one story preserving an old call shape while another
 requires it to change unconditionally).
 
+When the user goal contains a confirmed "Goal envelope", its ordered lists are
+the run-wide contract. Assign stable ids G-A1, G-A2, ... to Acceptance criteria
+and G-C1, G-C2, ... to Constraints, preserving their displayed order. Every
+story MUST include a \`goalInvariantIds\` array containing exactly the contract
+items that its implementation and acceptance evidence address. Every G-A/G-C id
+must be assigned to at least one story; do not claim an id merely because a
+nearby story sounds related. For goals without a confirmed Goal envelope, use
+an empty \`goalInvariantIds\` array.
+
 For every run, do NOT create a final verification-only story whose job is to
 run tests, typecheck, build, or lint after the
 implementation stories. Baro's deterministic RunVerifier executes those gates
@@ -104,6 +113,7 @@ Output ONLY valid JSON matching this exact schema (no markdown, no explanation, 
       "retries": 2,
       "acceptance": ["testable criterion"],
       "tests": ["npm test"],
+      "goalInvariantIds": ["G-A1", "G-C1"],
       "model": "heavy"
     }
   ]
@@ -146,6 +156,8 @@ Rules:
 - Every explicit user/ADR requirement is covered by a story description AND an
   observable acceptance criterion; shared abstractions cover all built-in callers
 - Acceptance arrays and tests arrays must be non-empty and contain no blank entries
+- goalInvariantIds contains only stable G-A/G-C ids from the confirmed Goal envelope;
+  cover every envelope acceptance criterion and constraint at least once
 - Acceptance criteria across stories must not contradict each other
 - No circular dependencies
 - Start with foundational stories, build up
@@ -396,9 +408,10 @@ export function buildPlannerUserMessage(args: {
 
     if (args.decisionDocument && args.decisionDocument.trim().length > 0) {
         sections.push(
-            "AUTHORITATIVE DESIGN SPEC (already decided by the Architect — every " +
-            "story you produce must implement THESE specific file paths, names, and " +
-            "shapes; do NOT invent alternatives):",
+            "CURRENT SHARED DESIGN SPEC (the Architect's best evidence-backed " +
+            "decision so far — preserve these paths, names, and shapes unless repository " +
+            "evidence proves one conflicts with the confirmed goal; if so, make the " +
+            "required amendment explicit in a story instead of silently diverging):",
         )
         sections.push("")
         sections.push(args.decisionDocument.trim())

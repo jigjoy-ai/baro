@@ -82,6 +82,28 @@ export function assertRunnablePlannerPrdJson(json: string): string {
         const dependsOn = requireStringArray(story, id, "dependsOn", true)
         requireStringArray(story, id, "acceptance", false)
         requireStringArray(story, id, "tests", false)
+        if (story.goalInvariantIds !== undefined) {
+            const goalInvariantIds = requireStringArray(
+                story,
+                id,
+                "goalInvariantIds",
+                true,
+            )
+            if (
+                goalInvariantIds.some(
+                    (invariantId) => !/^G-[AC][1-9]\d*$/.test(invariantId),
+                )
+            ) {
+                throw new Error(
+                    `final PRD story ${id} contains an invalid goalInvariantIds entry`,
+                )
+            }
+            if (new Set(goalInvariantIds).size !== goalInvariantIds.length) {
+                throw new Error(
+                    `final PRD story ${id} has duplicate goalInvariantIds`,
+                )
+            }
+        }
         if (new Set(dependsOn).size !== dependsOn.length) {
             throw new Error(`invalid planner DAG: story '${id}' has duplicate dependencies`)
         }
@@ -112,7 +134,7 @@ function requireNonEmptyString(value: unknown, error: string): string {
 function requireStringArray(
     story: Record<string, unknown>,
     id: string,
-    field: "dependsOn" | "acceptance" | "tests",
+    field: "dependsOn" | "acceptance" | "tests" | "goalInvariantIds",
     allowEmpty: boolean,
 ): string[] {
     const value = story[field]

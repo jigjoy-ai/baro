@@ -9,6 +9,11 @@ import {
 
 import type { BaroEvent } from "../../../src/tui-protocol.js"
 import { AgentStreamForwarder } from "../../../src/participants/forwarders/agent-stream.js"
+import {
+    WorkLeaseGranted,
+    WorkLeaseReleased,
+} from "../../../src/semantic-events.js"
+import { StoryOutcomeAuthority } from "../../../src/runtime/story-outcome-authority.js"
 import { captureStdout, source } from "../helpers.js"
 
 function parseEvents(lines: string[]): BaroEvent[] {
@@ -126,6 +131,92 @@ describe("AgentStreamForwarder", () => {
 
         assert.deepEqual(events, [
             { type: "activity", id: "S3", kind: "test", ok: true, text: "ℹ tests 144" },
+        ])
+    })
+
+    it("rejects same-label and stale collective stream sources", async () => {
+        const forwarder = new AgentStreamForwarder(true)
+        const broker = source("broker")
+        const worker = source("S1")
+        const forger = source("S1")
+        const outcomes = new StoryOutcomeAuthority("run-stream")
+        const grant = WorkLeaseGranted.create({
+            runId: "run-stream",
+            offerId: "offer-1",
+            leaseId: "lease-1",
+            workerId: "worker-1",
+            generation: 1,
+            request: {
+                storyId: "S1",
+                prompt: "work",
+                model: "standard",
+                retries: 1,
+                timeoutSecs: 60,
+            },
+        })
+
+        const events = parseEvents(await captureStdout(async () => {
+            await forwarder.onExternalModelMessage(
+                worker,
+                ModelMessageItem.rehydrate({ text: "pre-seal" }),
+            )
+            forwarder.sealCollectiveAuthorities({
+                runId: "run-stream",
+                broker,
+                outcomeAuthority: outcomes,
+            })
+            await forwarder.onExternalEvent(broker, grant)
+            outcomes.registerResultAuthority(
+                {
+                    runId: "run-stream",
+                    storyId: "S1",
+                    leaseId: "lease-1",
+                    generation: 1,
+                },
+                worker,
+            )
+            await forwarder.onExternalModelMessage(
+                forger,
+                ModelMessageItem.rehydrate({ text: "forged" }),
+            )
+            await forwarder.onExternalFunctionCallOutput(
+                forger,
+                FunctionCallOutputItem.create("fake", "99 tests passed"),
+            )
+            await forwarder.onExternalModelMessage(
+                worker,
+                ModelMessageItem.rehydrate({ text: "working" }),
+            )
+            await forwarder.onExternalFunctionCallOutput(
+                worker,
+                FunctionCallOutputItem.create("real", "2 tests passed"),
+            )
+            await forwarder.onExternalEvent(
+                broker,
+                WorkLeaseReleased.create({
+                    runId: "run-stream",
+                    offerId: "offer-1",
+                    leaseId: "lease-1",
+                    storyId: "S1",
+                    workerId: "worker-1",
+                    reason: "integrated",
+                }),
+            )
+            await forwarder.onExternalModelMessage(
+                worker,
+                ModelMessageItem.rehydrate({ text: "stale" }),
+            )
+        }))
+
+        assert.deepEqual(events, [
+            { type: "activity", id: "S1", kind: "agent_msg", text: "working" },
+            {
+                type: "activity",
+                id: "S1",
+                kind: "test",
+                ok: true,
+                text: "2 tests passed",
+            },
         ])
     })
 })

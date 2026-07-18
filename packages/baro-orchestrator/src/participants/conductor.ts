@@ -372,7 +372,13 @@ export class Conductor extends BaseObserver {
                 !failedIds.has(s.id) &&
                 !blockedStoryIds.has(s.id),
         )
-        const levels = buildDag(runnableStories)
+        const runnableIds = new Set(runnableStories.map((story) => story.id))
+        const levels = buildDag(
+            this.prd.userStories.filter(
+                (story) => story.passes || runnableIds.has(story.id),
+            ),
+            { onlyIncomplete: true },
+        )
 
         if (levels.length === 0) {
             // Run is "successful" only when every story currently in

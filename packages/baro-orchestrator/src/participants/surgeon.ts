@@ -98,6 +98,8 @@ export interface PrdSnapshot {
         acceptance?: readonly string[]
         /** Executable checks that expose the story's capability surface. */
         tests?: readonly string[]
+        /** Global GoalContract evidence owned by this story. */
+        goalInvariantIds?: readonly string[]
         dependsOn: readonly string[]
         passes: boolean
         /** Current routing tier ("light" | "standard" | "heavy", legacy haiku/sonnet/opus, or backend:model). */
@@ -194,7 +196,7 @@ exactly this shape:
  "reason":"…",
  "added":[ { "id":"S?","priority":N,"title":"…","description":"…",
              "dependsOn":["…"], "acceptance":["…"], "tests":["…"],
-             "model":"…" } ],
+             "goalInvariantIds":["G-A1"], "model":"…" } ],
  "removed":["S?"],
  "modifiedDeps":[{"id":"S?","newDependsOn":["…"]}]}
 
@@ -203,6 +205,9 @@ Rules:
 - Story ids you REMOVE must currently exist and not yet have passes=true.
 - Every added story must have at least one concrete, observable acceptance
   criterion and at least one executable test command; neither may be blank.
+- When replacing or splitting a story, distribute every one of its
+  goalInvariantIds across the replacement stories that will produce that
+  evidence. Never drop a global invariant during recovery.
 - "modifiedDeps" rewires a story's dependsOn — use to repoint dependents
   of a removed story to a replacement.
 - If you remove a story, EVERY direct dependent that remains in the graph must
@@ -282,13 +287,17 @@ export class Surgeon extends BaseObserver {
         this.sources.setBlockAuthority(authority)
     }
 
+    setCriticAuthority(authority: Participant): void {
+        this.sources.setCriticAuthority(authority)
+    }
+
     override async onExternalEvent(
         source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        this.critiques.record(event)
         if (this.sources.observeLease(source, event, this.leases, this.opts.runId)) return
         if (!this.sources.accepts(source, event)) return
+        this.critiques.record(event)
         const failure = recoveryInput(event)
         if (!failure) return
         if (
@@ -759,6 +768,7 @@ export function buildSurgeonPrompt(
                 dependsOn: story.dependsOn,
                 acceptance: story.acceptance ?? [],
                 tests: story.tests ?? [],
+                goalInvariantIds: story.goalInvariantIds ?? [],
                 modelTier: story.model ?? "(default)",
                 ...(actualModel ? { actualModel } : {}),
             })}`
@@ -790,6 +800,7 @@ export function buildSurgeonPrompt(
         `Description: ${failureStory?.description ?? "(unknown)"}`,
         `Acceptance: ${JSON.stringify(failureStory?.acceptance ?? [])}`,
         `Verification commands: ${JSON.stringify(failureStory?.tests ?? [])}`,
+        `Global invariant ids: ${JSON.stringify(failureStory?.goalInvariantIds ?? [])}`,
         `Tier that just failed: ${failureStory?.model ?? "(default)"}`,
         ...(ranOn
             ? [

@@ -115,6 +115,54 @@ describe("CollectiveBoard policy replan batching", () => {
                 }),
             )
 
+            // Continuous scheduling admits S11 as soon as S10 integrates;
+            // unrelated failing siblings no longer impose a wave barrier.
+            const prerequisiteContext = (
+                await waitForCount(env.events, WorkContextRequested.is, 6)
+            )[5]!
+            assert.equal(prerequisiteContext.data.storyId, "S11")
+            provideContext(env, runId, prerequisiteContext)
+            const prerequisiteOffer = (
+                await waitForCount(env.events, WorkOffered.is, 6)
+            )[5]!
+            assert.equal(prerequisiteOffer.data.request.storyId, "S11")
+            env.deliverSemanticEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: prerequisiteOffer.data.offerId,
+                    leaseId: "lease-S11",
+                    workerId: "worker-S11",
+                    generation: prerequisiteOffer.data.generation,
+                    request: prerequisiteOffer.data.request,
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("worker-S11"),
+                result(
+                    runId,
+                    "S11",
+                    "lease-S11",
+                    prerequisiteOffer.data.generation,
+                    true,
+                ),
+            )
+            const integrations = await waitForCount(
+                env.events,
+                StoryIntegrationRequested.is,
+                2,
+            )
+            assert.equal(integrations[1]?.data.storyId, "S11")
+            env.deliverSemanticEvent(
+                source("repo"),
+                StoryMerged.create({
+                    runId,
+                    storyId: "S11",
+                    leaseId: "lease-S11",
+                    mode: "worktree",
+                }),
+            )
+
             for (const [index, storyId] of siblingIds.entries()) {
                 const offer = offersByStory.get(storyId)!
                 const leaseId = `lease-${storyId}`
@@ -189,19 +237,10 @@ describe("CollectiveBoard policy replan batching", () => {
             const healingEvents = env.events
                 .filter(ConductorState.is)
                 .filter((event) => /healing action/.test(event.data.detail ?? ""))
-            assert.equal(healingEvents.length, 1)
+            assert.equal(healingEvents.length, 2)
             assert.match(healingEvents[0]?.data.detail ?? "", /1\/3/)
+            assert.match(healingEvents[1]?.data.detail ?? "", /2\/3/)
             assert.equal(env.events.some(RunPushRequested.is), false)
-
-            const prerequisiteContext = (
-                await waitForCount(env.events, WorkContextRequested.is, 6)
-            )[5]!
-            assert.equal(prerequisiteContext.data.storyId, "S11")
-            provideContext(env, runId, prerequisiteContext)
-            const prerequisiteOffer = (
-                await waitForCount(env.events, WorkOffered.is, 6)
-            )[5]!
-            assert.equal(prerequisiteOffer.data.request.storyId, "S11")
         })
     })
 

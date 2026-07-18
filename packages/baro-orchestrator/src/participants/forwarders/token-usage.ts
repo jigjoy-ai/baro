@@ -4,12 +4,17 @@ import {
     ClaudeStreamChunk,
     type ClaudeStreamChunkData,
     ModelInvocationMeasured,
+    WorkLeaseGranted,
+    WorkLeaseReleased,
 } from "../../semantic-events.js"
 import type {
     Metric,
+    ModelInvocationPhase,
     ModelInvocationMeasuredData,
 } from "../../model-telemetry.js"
 import { emit } from "../../tui-protocol.js"
+import { ActiveLeaseRegistry } from "../../runtime/active-lease-registry.js"
+import type { StoryOutcomeAuthority } from "../../runtime/story-outcome-authority.js"
 
 // Don't flood the event stream with sub-turn progress: at most one
 // token_progress per agent per this interval (the dashboard polls ~2s anyway).
@@ -35,16 +40,66 @@ export class TokenUsageForwarder extends BaseObserver {
         string,
         { committedOut: number; curOut: number; lastEmit: number }
     >()
+    private readonly seenMeasurementIds = new Set<string>()
+    private readonly leases = new ActiveLeaseRegistry()
+    private collectiveAuthorities: Readonly<CollectiveTokenUsageAuthorities> | null = null
+
+    constructor(private readonly collectiveFailClosed = false) {
+        super()
+    }
+
+    sealCollectiveAuthorities(
+        authorities: CollectiveTokenUsageAuthorities,
+    ): void {
+        if (this.collectiveAuthorities) {
+            throw new Error(
+                "token usage forwarder collective authorities are already sealed",
+            )
+        }
+        this.collectiveAuthorities = Object.freeze({
+            ...authorities,
+            measurementAuthorities: Object.freeze(
+                authorities.measurementAuthorities.map((item) =>
+                    Object.freeze({
+                        source: item.source,
+                        phases: Object.freeze([...item.phases]),
+                    }),
+                ),
+            ),
+        })
+    }
 
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
+        if (WorkLeaseGranted.is(event) || WorkLeaseReleased.is(event)) {
+            const authorities = this.collectiveAuthorities
+            if (
+                !authorities ||
+                source !== authorities.broker ||
+                event.data.runId !== authorities.runId
+            ) return
+            if (
+                WorkLeaseReleased.is(event) &&
+                !this.leases.matchesLease(
+                    event.data.storyId,
+                    event.data.runId,
+                    event.data.leaseId,
+                )
+            ) return
+            this.leases.observe(event, authorities.runId)
+            return
+        }
         if (ModelInvocationMeasured.is(event)) {
+            if (!this.acceptsMeasurement(source, event.data)) return
+            if (this.seenMeasurementIds.has(event.data.measurementId)) return
+            this.seenMeasurementIds.add(event.data.measurementId)
             this.handleMeasurement(event.data)
             return
         }
         if (ClaudeStreamChunk.is(event)) {
+            if (!this.acceptsStreamSource(source, event.data.agentId)) return
             this.handleStreamChunk(event.data)
             return
         }
@@ -107,6 +162,62 @@ export class TokenUsageForwarder extends BaseObserver {
             cost_usd: equivalentCost ?? providerCost ?? undefined,
         })
     }
+
+    private acceptsMeasurement(
+        source: Participant,
+        item: ModelInvocationMeasuredData,
+    ): boolean {
+        const isCollective =
+            this.collectiveFailClosed || this.collectiveAuthorities !== null
+        if (!isCollective) return true
+        const authorities = this.collectiveAuthorities
+        if (!authorities || item.runId !== authorities.runId) return false
+        return authorities.measurementAuthorities.some(
+            (authority) =>
+                authority.source === source &&
+                authority.phases.includes(item.phase),
+        )
+    }
+
+    private acceptsStreamSource(
+        source: Participant,
+        storyId: string,
+    ): boolean {
+        const isCollective =
+            this.collectiveFailClosed || this.collectiveAuthorities !== null
+        if (!isCollective) return true
+        const authorities = this.collectiveAuthorities
+        if (!authorities) return false
+        const correlation =
+            authorities.outcomeAuthority.terminalCorrelationForSource(
+                source,
+                storyId,
+            )
+        if (!correlation) return false
+        return this.leases.matches(
+            {
+                storyId: correlation.storyId,
+                success: false,
+                attempts: 0,
+                durationSecs: 0,
+                error: null,
+                runId: correlation.runId,
+                leaseId: correlation.leaseId,
+                generation: correlation.generation,
+            },
+            authorities.runId,
+        )
+    }
+}
+
+export interface CollectiveTokenUsageAuthorities {
+    runId: string
+    broker: Participant
+    outcomeAuthority: StoryOutcomeAuthority
+    measurementAuthorities: readonly {
+        source: Participant
+        phases: readonly ModelInvocationPhase[]
+    }[]
 }
 
 function knownValue(metric: Metric): number | null {

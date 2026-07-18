@@ -42,7 +42,7 @@ specified, dependency-closed prefix that is safe to execute, call publish_plan_f
 immediately. Do not wait for the full DAG or terminal PRD before publishing a safe prefix.
 
 Every published story uses exactly the final-PRD story fields: id, priority, title, description,
-dependsOn, retries, acceptance, tests, and model. A published fragment is closed: each dependency
+dependsOn, retries, acceptance, tests, goalInvariantIds, and model. A published fragment is closed: each dependency
 must already have been published or be present in that same fragment. Published stories are
 immutable and become an exact, same-order prefix of the final PRD userStories array. The final PRD
 must repeat every published title, description, priority, dependency, retry count, acceptance
@@ -88,6 +88,11 @@ const FINAL_PRD_STORY_INPUT_SCHEMA: Record<string, unknown> = {
             items: { type: "string" },
             uniqueItems: true,
         },
+        goalInvariantIds: {
+            type: "array",
+            items: { type: "string", pattern: "^G-[AC][1-9][0-9]*$" },
+            uniqueItems: true,
+        },
         model: {
             type: "string",
             enum: ["light", "standard", "heavy"],
@@ -102,6 +107,7 @@ const FINAL_PRD_STORY_INPUT_SCHEMA: Record<string, unknown> = {
         "retries",
         "acceptance",
         "tests",
+        "goalInvariantIds",
         "model",
     ],
     additionalProperties: false,
@@ -244,6 +250,9 @@ function progressiveFinalPrd(candidate: string): { userStories: PrdStory[] } {
             retries: story.retries as number,
             acceptance: [...(story.acceptance as string[])],
             tests: [...(story.tests as string[])],
+            goalInvariantIds: [
+                ...((story.goalInvariantIds as string[] | undefined) ?? []),
+            ],
             passes: false,
             completedAt: null,
             durationSecs: null,
@@ -261,6 +270,7 @@ const FINAL_PRD_STORY_KEYS = [
     "retries",
     "acceptance",
     "tests",
+    "goalInvariantIds",
     "model",
 ] as const
 
@@ -307,6 +317,7 @@ function snapshotPlannerStory(story: PrdStory): PrdStory {
         retries: story.retries,
         acceptance: [...story.acceptance],
         tests: [...story.tests],
+        goalInvariantIds: [...(story.goalInvariantIds ?? [])],
         passes: false,
         completedAt: null,
         durationSecs: null,

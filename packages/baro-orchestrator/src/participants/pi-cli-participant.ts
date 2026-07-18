@@ -30,6 +30,7 @@ import {
     type AgentPhase,
 } from "../semantic-events.js"
 import { mapPiEvent } from "../pi-stream-mapper.js"
+import { acceptsTargetedMessage } from "../runtime/targeted-message-authority.js"
 import { appendCliDiagnosticTail } from "./cli-story-failure.js"
 
 export interface PiCliParticipantOptions {
@@ -41,6 +42,12 @@ export interface PiCliParticipantOptions {
     piBin?: string
     /** Bound inherited-stdio drain after the direct CLI root exits. */
     closeDrainTimeoutMs?: number
+    targetedMessageAuthority?: Participant
+    targetedMessageCorrelation?: Readonly<{
+        runId?: string
+        leaseId?: string
+        generation?: number
+    }>
 }
 
 export interface PiRunSummary {
@@ -363,14 +370,20 @@ export class PiCliParticipant extends BaseObserver {
     }
 
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         // Pi `-p` is one-shot — no stdin channel; targeted messages are
         // logged and dropped.
         if (
             AgentTargetedMessage.is(event) &&
-            event.data.recipientId === this.agentId
+            acceptsTargetedMessage(
+                source,
+                event.data,
+                this.agentId,
+                this.options.targetedMessageAuthority,
+                this.options.targetedMessageCorrelation ?? {},
+            )
         ) {
             process.stderr.write(
                 `[pi:${this.agentId}] received AgentTargetedMessage but Pi run is one-shot — dropped\n`,

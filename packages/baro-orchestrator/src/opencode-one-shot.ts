@@ -12,7 +12,10 @@ import { join } from "node:path"
 import spawn from "cross-spawn"
 
 import { harnessChildEnvironment } from "./harness-environment.js"
-import { ManagedProcessTree } from "./process-tree.js"
+import {
+    ManagedProcessTree,
+    POSIX_PROCESS_GROUPS_SUPPORTED,
+} from "./process-tree.js"
 
 import {
     knownMetric,
@@ -110,6 +113,7 @@ export async function runOpenCodeOneShot(
                       }
                     : childEnvironment,
                 stdio: [safeEvaluator ? "pipe" : "ignore", "pipe", "pipe"],
+                detached: POSIX_PROCESS_GROUPS_SUPPORTED,
             })
         } catch (e) {
             invocations.finish(
@@ -125,6 +129,7 @@ export async function runOpenCodeOneShot(
         const processTree = new ManagedProcessTree(proc, {
             terminationGraceMs,
             pollIntervalMs: 25,
+            ownsProcessGroup: POSIX_PROCESS_GROUPS_SUPPORTED,
         })
 
         let assistantText = ""

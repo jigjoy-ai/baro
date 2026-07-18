@@ -3,6 +3,7 @@ import { describe, it } from "node:test"
 
 import {
     ConductorState,
+    Critique,
     LevelCompleted,
     Replan,
     ReplanApplied,
@@ -10,6 +11,9 @@ import {
     RuntimeReplanApplied,
     RuntimeReplanRejected,
     StoryMerged,
+    StoryQualityCompleted,
+    WorkLeaseGranted,
+    WorkLeaseReleased,
 } from "../../../src/semantic-events.js"
 import type { BaroEvent } from "../../../src/tui-protocol.js"
 import { ProgressForwarder } from "../../../src/participants/forwarders/progress.js"
@@ -348,5 +352,200 @@ describe("ProgressForwarder", () => {
                 text: "Replanned (agent:active@graph-v5): +1/-0 — split validation from implementation",
             },
         ])
+    })
+
+    it("seals collective critique, merge correlation, and graph ordering", async () => {
+        const forwarder = new ProgressForwarder(true)
+        const board = source("board")
+        const broker = source("broker")
+        const repository = source("repository")
+        const critic = source("critic")
+        const gate = source("acceptance-gate")
+        const forger = source("critic")
+
+        const lines = await captureStdout(async () => {
+            await forwarder.onExternalEvent(
+                board,
+                RunStarted.create({
+                    project: "pre-seal",
+                    storyCount: 99,
+                    coordinationMode: "collective",
+                }),
+            )
+            forwarder.sealCollectiveAuthorities({
+                runId: "run-1",
+                board,
+                broker,
+                repository,
+                quality: gate,
+            })
+            await forwarder.onExternalEvent(
+                board,
+                RunStarted.create({
+                    project: "p",
+                    storyCount: 1,
+                    storyIds: ["S1"],
+                    coordinationMode: "collective",
+                }),
+            )
+            const critique = Critique.create({
+                agentId: "S1",
+                status: "evaluated",
+                verdict: "pass",
+                reasoning: "looks good",
+                violatedCriteria: [],
+                turn: 1,
+                modelUsed: "critic",
+            })
+            await forwarder.onExternalEvent(forger, critique)
+            await forwarder.onExternalEvent(critic, critique)
+
+            const grant = WorkLeaseGranted.create({
+                runId: "run-1",
+                offerId: "offer-1",
+                leaseId: "lease-1",
+                workerId: "worker-1",
+                generation: 1,
+                request: {
+                    storyId: "S1",
+                    prompt: "work",
+                    model: "standard",
+                    retries: 1,
+                    timeoutSecs: 60,
+                },
+            })
+            await forwarder.onExternalEvent(forger, grant)
+            await forwarder.onExternalEvent(
+                repository,
+                StoryMerged.create({
+                    storyId: "S1",
+                    mode: "worktree",
+                    runId: "run-1",
+                    leaseId: "lease-1",
+                }),
+            )
+            await forwarder.onExternalEvent(broker, grant)
+            const quality = (
+                evaluationId: string,
+                overrides: Partial<{
+                    runId: string
+                    leaseId: string
+                    generation: number
+                }> = {},
+            ) => StoryQualityCompleted.create({
+                runId: overrides.runId ?? "run-1",
+                evaluationId,
+                storyId: "S1",
+                leaseId: overrides.leaseId ?? "lease-1",
+                generation: overrides.generation ?? 1,
+                status: "passed",
+                targetTurn: 1,
+                reason: "looks good",
+                critique: {
+                    status: "evaluated",
+                    verdict: "pass",
+                    reasoning: "looks good",
+                    violatedCriteria: [],
+                    turn: 1,
+                    modelUsed: "critic",
+                },
+            })
+            await forwarder.onExternalEvent(forger, quality("forged"))
+            await forwarder.onExternalEvent(
+                gate,
+                quality("wrong-run", { runId: "other-run" }),
+            )
+            await forwarder.onExternalEvent(
+                gate,
+                quality("wrong-generation", { generation: 2 }),
+            )
+            await forwarder.onExternalEvent(gate, quality("accepted"))
+            await forwarder.onExternalEvent(gate, quality("accepted"))
+            await forwarder.onExternalEvent(
+                repository,
+                StoryMerged.create({
+                    storyId: "S1",
+                    mode: "worktree",
+                    runId: "run-1",
+                    leaseId: "stale",
+                }),
+            )
+            await forwarder.onExternalEvent(
+                repository,
+                StoryMerged.create({
+                    storyId: "S1",
+                    mode: "worktree",
+                    runId: "run-1",
+                    leaseId: "lease-1",
+                }),
+            )
+            await forwarder.onExternalEvent(
+                broker,
+                WorkLeaseReleased.create({
+                    runId: "run-1",
+                    storyId: "S1",
+                    leaseId: "lease-1",
+                    workerId: "worker-1",
+                    reason: "integrated",
+                }),
+            )
+            await forwarder.onExternalEvent(gate, quality("after-release"))
+
+            const applied = (version: number, id: string) =>
+                RuntimeReplanApplied.create({
+                    runId: "run-1",
+                    proposalId: id,
+                    sourceStoryId: "S1",
+                    leaseId: "lease-1",
+                    generation: 1,
+                    baseGraphVersion: version - 1,
+                    previousGraphVersion: version - 1,
+                    graphVersion: version,
+                    currentGraphVersion: version,
+                    reason: `graph ${version}`,
+                    mutation: {
+                        addedStories: [{
+                            id: `S${version}`,
+                            priority: 1,
+                            title: "new",
+                            description: "new",
+                            dependsOn: ["S1"],
+                            acceptance: ["works"],
+                            tests: ["npm test"],
+                        }],
+                        removedStoryIds: [],
+                        modifiedDeps: {},
+                    },
+                })
+            await forwarder.onExternalEvent(board, applied(3, "newer"))
+            await forwarder.onExternalEvent(board, applied(2, "historical"))
+        })
+
+        const events = lines.map((line) => JSON.parse(line) as BaroEvent)
+        assert.equal(
+            events.filter(
+                (event) =>
+                    event.type === "activity" &&
+                    event.kind === "verdict",
+            ).length,
+            1,
+        )
+        assert.deepEqual(
+            events.filter((event) => event.type === "progress"),
+            [
+                { type: "progress", completed: 0, total: 1, percentage: 0 },
+                { type: "progress", completed: 1, total: 1, percentage: 100 },
+                { type: "progress", completed: 1, total: 2, percentage: 50 },
+            ],
+        )
+        assert.equal(
+            events.filter(
+                (event) =>
+                    event.type === "activity" &&
+                    event.kind === "warn" &&
+                    event.text.includes("Replanned"),
+            ).length,
+            1,
+        )
     })
 })

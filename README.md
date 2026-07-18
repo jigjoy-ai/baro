@@ -251,19 +251,28 @@ executions whose activity is projected onto typed events. CLI routes use subproc
 local bridge, while native OpenAI-compatible routes run in-process. Architect and Planner run
 before this execution environment. The default `collective` engine splits
 allocation, leases, integration and completion across participants and lets workers publish peer
-messages and propose versioned changes to the not-yet-started DAG. The Board validates and
-persists the complete candidate before it reports the change as applied; active stories remain
-fenced until a correlated revocation lifecycle exists. `legacy` remains as the explicit
+messages and propose versioned changes to planned future work. The Board validates and
+persists the complete candidate before it reports the change as applied. Offered-but-unleased
+work can move only after the Broker atomically retracts the exact offer; leased, integrating,
+reviewing, recovery and cleanup work remains fenced. `legacy` remains as the explicit
 Conductor compatibility path for old-run comparison and rollback.
+
+Collective messages also carry execution authority: trusted participants submit
+intents to the run-local Bridge, which binds them to the recipient's current
+run/lease/generation. All Claude Code, Codex, OpenCode, Pi, and native OpenAI
+story adapters reject direct or stale deliveries. Supervisor, Librarian, and
+Dialogue observations are likewise tied to exact Broker/worker/control-plane
+sources, so a same-label bus participant cannot transitively steer a worker.
 
 Fresh headless Collective runs also have an experimental progressive-planning
 path. With `BARO_PROGRESSIVE_PLANNING=1`, a native OpenAI-compatible Planner
 (including GLM on that route) may publish dependency-closed, add-only story
 fragments through Mozaik while it continues planning. The Board validates and
 durably admits each fragment before it can execute, and the final PRD must keep
-the admitted stories as an exact prefix. CLI Planner backends currently retain
-the complete-plan barrier. Resume and follow-up runs are not eligible for this
-version; interactive and `legacy` runs are unchanged. See
+the admitted stories as an exact prefix. Claude Code and Codex Planners expose
+the same fragment capability through an isolated run-scoped stdio MCP bridge;
+OpenCode and Pi Planners remain final-only. Resume and follow-up runs are not
+eligible for this version; interactive and `legacy` runs are unchanged. See
 [Collective runtime architecture](docs/collective-runtime.md#progressive-planning-experimental-opt-in)
 for the fail-closed lifecycle, limitations and provider-free checks. This
 opt-in is an evaluation surface, not a production-readiness or benchmark claim.
@@ -313,7 +322,7 @@ flowchart LR
         C --> A2[Agent 2]
         C --> A3[Agent N]
     end
-    subgraph B["baro on Mozaik"]
+    subgraph B["baro domain authorities on Mozaik"]
         direction TB
         Bus[(shared event bus)]
         P1[Conductor or Board + Broker] -.-> Bus
@@ -330,12 +339,15 @@ flowchart LR
 | **Conversation session** | Durable first contact and sole user-facing intake authority: clarifies intent, persists a repository-scoped correlated transcript across pre-PRD restarts, and hands exactly one accepted GoalEnvelope to planning |
 | **RepoScout** | Source-bound autonomous researcher in the short-lived pre-PRD Mozaik lane. It iteratively chooses from Baro-owned read/search/glob capabilities and returns a frozen 64 KiB evidence brief; deterministic retrieval remains its bootstrap and fail-safe. It cannot plan, route work, mutate the DAG, run code, use the network, or write the checkout |
 | **Conductor** | Explicit `legacy` compatibility state machine that drives DAG levels by reacting to bus events |
-| **Board + Broker** | Default collective policy: projects run state, collects worker bids, grants correlated leases, atomically validates versioned future-DAG proposals and never treats process exit as proof of success |
-| **DialogueAgent** | Automatic collective participant that continues the bounded conversation during a run and may message active workers or submit Board-validated add-only proposals, but has no control-plane authority |
+| **Board + Broker** | Default collective policy: Board remains the deterministic scheduler and durable graph-transaction arbiter; Broker independently auctions and grants correlated leases. Offered work requires a Broker retraction ACK before reorganization, and process exit is never proof of success |
+| **GoalGuardian** | Independent goal-semantic authority: projects the accepted GoalContract, accepts source-bound invariant challenges, proposes corrective stories, and attests completion from durable integration plus exact lease-correlated quality evidence. It cannot schedule, lease, merge or mutate the DAG |
+| **DialogueAgent** | Automatic collective participant that continues the bounded conversation during a run and may submit Bridge-routed messages or Board-validated add-only proposals from an exact source-bound observation set, but has no control-plane authority |
 | **StoryAgent** | One isolated worker per story and git worktree. Native OpenAI runs in-process through Mozaik; Claude Code is a multi-turn CLI worker, while Codex, OpenCode and Pi story workers are currently one-shot CLI processes |
 | **Critic + AcceptanceGate** | Evaluates terminal output against acceptance criteria. Live backends can consume corrective turns; one-shot backends produce a blocking verdict that triggers recovery instead of a message to a dead process |
 | **Sentry** | Flags overlapping Edit/Write tool calls across concurrent stories |
-| **Librarian** | Indexes one agent's Read/Grep findings so siblings don't redo the exploration |
+| **CollaborationBridge** | Issues an opaque loopback endpoint/token capability for one exact run/story/lease/generation, routes trusted peer events, and revokes all ordinary influence at lease release; no worker sees its manager-private session state |
+| **Librarian** | Indexes exact active-worker Read/Grep findings so siblings don't redo the exploration; forged or stale tool output cannot enter shared context |
+| **Supervisor** | Independently detects non-converging active workers and may request only an exact lease-correlated abort; it does not schedule recovery |
 | **Surgeon** | On execution, integration or acceptance failure, proposes a bounded replan (split / prerequisite / rewire / escalation) |
 | **RunVerifier / Finalizer** | Produces correlated build/test evidence for collective completion; optional publishing reuses that evidence when opening the PR |
 
@@ -343,7 +355,10 @@ In collective mode, an active leased worker may propose an atomic change to
 the not-yet-started part of the story DAG. Native OpenAI receives a
 closed-schema `propose_replan` tool inside its Mozaik inference loop; CLI
 workers use the same correlated semantic events through the local
-`agent-collab.mjs` bridge. The Board remains the only mutation authority and
+`agent-collab.mjs` helper and a short-lived loopback capability. Claude and
+native OpenAI receive messages live; messages known before launch enter every
+backend's initial prompt exactly once, while later messages for one-shot Codex,
+OpenCode and Pi workers are consumed through their capability inbox. The Board remains the only mutation authority and
 emits `runtime_replan_applied` only after the new graph and version are
 durable. See [the local collective experiment guide](docs/collective-experiment.md#runtime-dag-adaptation)
 for the safety and replay contract.
@@ -361,13 +376,12 @@ on disk. Other agents query this shared memory mid-flight, so siblings don't red
 exploration — roughly 50% fewer findings injected, because only semantically relevant ones surface.
 
 ```
-Orchestrator                         Story Agents (parallel)
-────────────                         ──────────────────────
-intercepts Read/Grep/Bash outputs    $ baro-memory query "auth"
-  → embeds via ONNX MiniLM            → reads Vectra index from disk
-  → stores in Vectra LocalIndex        → returns relevant findings
-  → caches file content              $ baro-memory cache get src/auth.ts
-                                       → returns cached content (no disk read)
+Collective manager                   Story Agents (parallel)
+──────────────────                   ──────────────────────
+intercepts authenticated tool output  receive relevant context at launch
+  → embeds via ONNX MiniLM             → share explicit notes through their
+  → indexes in manager-private memory     lease-bound collaboration capability
+  → injects only relevant findings      → never receive an index/session path
 ```
 
 ```bash
@@ -379,8 +393,10 @@ BARO_DEBUG=memory baro ... # debug logging to stderr + ~/.baro/runs/memory-*.log
 **Helps most:** large codebases (20+ files) with overlapping exploration, staggered DAGs where
 later stories benefit from earlier ones, runs with 5+ stories touching the same subsystems.
 **Adds slight overhead with no benefit:** small codebases (1–3 files), fully parallel DAGs with no
-dependencies, quick single-story tasks (`--quick`). It adds ~1s startup (ONNX model load) and is
-session-scoped — data lives in `~/.baro/sessions/run-<timestamp>/memory/` and is discarded after the run.
+dependencies, quick single-story tasks (`--quick`). It adds ~1s startup (ONNX model load).
+Collective memory is run-local and manager-private. Legacy mode may persist its index under an
+explicit run-scoped `~/.baro/sessions/.../memory/` path for the legacy CLI; Baro never installs that
+path into the process-global `BARO_MEMORY_PATH` environment.
 
 ## Try it
 

@@ -10,19 +10,30 @@
  * Semantics that must NOT false-fail:
  *   - ran=false  when nothing could be verified (no manifest, no build/test
  *                script, or the tool is missing/ENOENT). "Couldn't verify" is
- *                not "failed" — it must not force a checkpoint.
+ *                not a command failure, but run-level policy treats it as an
+ *                incomplete gate rather than a verified pass.
  *   - ok=false   only when a build/test that ACTUALLY RAN returned non-zero.
  */
 
-import { execFile } from "node:child_process"
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
-import { promisify } from "node:util"
 
-const execFileAsync = promisify(execFile)
+import { execFileCli } from "./exec-file-cli.js"
+import {
+    MAX_DECLARED_VERIFY_COMMANDS,
+    revalidateContainedPaths,
+    translateDeclaredTests,
+} from "./declared-verification.js"
+
+export { MAX_DECLARED_VERIFY_COMMANDS } from "./declared-verification.js"
 
 const TIMEOUT_MS = 5 * 60_000
+const COMMAND_SETTLEMENT_GRACE_MS = 5_000
+const COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS = 3_000
+const MAX_DECLARED_TRANSLATION_INPUTS = 64
 const TAIL_BYTES = 1500
+/** Includes conventional commands added at runtime as well as PRD declarations. */
+export const MAX_FINAL_ADDED_VERIFY_COMMANDS = 8
 
 export interface VerifyResult {
     ran: boolean
@@ -47,6 +58,33 @@ export interface VerifyCommandSpec {
     cwd?: string
     /** A deterministic discovery/configuration failure, executed as evidence. */
     preflightFailure?: string
+    /** A declared requirement that could not be translated without a shell. */
+    incompleteReason?: string
+    /** Canonical identity for duplicate incomplete PRD requirements. */
+    declaredRequirementKey?: string
+    /** Paths that must still resolve beneath command cwd immediately pre-spawn. */
+    containedPaths?: readonly VerifyContainedPath[]
+}
+
+export interface VerifyContainedPath {
+    readonly path: string
+    readonly requireFile: boolean
+    /** Focus arguments may name not-yet-created contained paths. */
+    readonly allowMissing?: boolean
+}
+
+export interface DeclaredTestRequirement {
+    /** PRD story that owns this requirement; used only in evidence. */
+    readonly storyId: string
+    /** Human-authored PRD command. It is parsed, never passed to a shell. */
+    readonly command: string
+    /** Raw-schema defect that must remain explicit instead of normalizing away. */
+    readonly declarationError?: string
+}
+
+export interface VerifyPlanOptions {
+    /** Authoritative tests from the PRD snapshot being verified. */
+    readonly declaredTests?: readonly DeclaredTestRequirement[]
 }
 
 export interface VerifyPlan {
@@ -149,6 +187,7 @@ function packageManagerCommand(
     pm: JavaScriptPackageManager,
     declared: DeclaredPackageManager | null,
     script: string,
+    trailingArgs: readonly string[] = [],
 ): Pick<VerifyCommandSpec, "tool" | "args"> {
     // Yarn 2+ intentionally relies on Corepack. Calling a bare `yarn` binary
     // can otherwise execute an unrelated global Yarn 1 installation.
@@ -156,9 +195,12 @@ function packageManagerCommand(
         ? Number.parseInt(declared.version.match(/^\d+/)?.[0] ?? "", 10)
         : Number.NaN
     if (pm === "yarn" && yarnMajor >= 2) {
-        return { tool: "corepack", args: ["yarn", "run", script] }
+        return {
+            tool: "corepack",
+            args: ["yarn", "run", script, ...trailingArgs],
+        }
     }
-    return { tool: pm, args: ["run", script] }
+    return { tool: pm, args: ["run", script, ...trailingArgs] }
 }
 
 function readPackageManifest(path: string): PackageManifest | null {
@@ -398,11 +440,77 @@ function detectCommands(cwd: string): DetectedVerifyPlan {
     return { commands: cmds, javascriptPackageManagers }
 }
 
+function dedupeVerifyCommands(
+    commands: readonly VerifyCommandSpec[],
+): VerifyCommandSpec[] {
+    const deduped: VerifyCommandSpec[] = []
+    const seen = new Set<string>()
+    for (const command of commands) {
+        const identity = verifyCommandIdentity(command)
+        if (seen.has(identity)) continue
+        seen.add(identity)
+        deduped.push(command)
+    }
+    return deduped
+}
+
+function boundedDeclaredCommands(
+    automatic: readonly VerifyCommandSpec[],
+    declared: readonly VerifyCommandSpec[],
+): VerifyCommandSpec[] {
+    const commands = dedupeVerifyCommands(automatic)
+    const seen = new Set(commands.map(verifyCommandIdentity))
+    let admitted = 0
+    let omitted = 0
+    for (const command of declared) {
+        const identity = verifyCommandIdentity(command)
+        if (seen.has(identity)) continue
+        seen.add(identity)
+        if (admitted >= MAX_DECLARED_VERIFY_COMMANDS) {
+            omitted += 1
+            continue
+        }
+        admitted += 1
+        commands.push(command)
+    }
+    if (omitted > 0) {
+        commands.push({
+            label: "PRD verification requirements beyond bounded budget",
+            tool: "node",
+            args: [],
+            incompleteReason:
+                `${omitted} unique PRD test requirement(s) were not admitted; ` +
+                `the safe limit is ${MAX_DECLARED_VERIFY_COMMANDS}`,
+        })
+    }
+    return commands
+}
+
 /** Freeze command discovery before workers can edit manifests or remove scripts. */
-export function createVerifyPlan(cwd: string): VerifyPlan {
+export function createVerifyPlan(
+    cwd: string,
+    options: VerifyPlanOptions = {},
+): VerifyPlan {
     const detected = detectCommands(cwd)
+    const declaredInputs = options.declaredTests ?? []
+    const declaredCommands = translateDeclaredTests(
+        cwd,
+        declaredInputs.slice(0, MAX_DECLARED_TRANSLATION_INPUTS),
+        detected.javascriptPackageManagers,
+    )
+    if (declaredInputs.length > MAX_DECLARED_TRANSLATION_INPUTS) {
+        declaredCommands.unshift({
+            label: "PRD verification input beyond translation budget",
+            tool: "node",
+            args: [],
+            incompleteReason:
+                `${declaredInputs.length - MAX_DECLARED_TRANSLATION_INPUTS} ` +
+                "declared test input(s) were not translated",
+            declaredRequirementKey: "<declared-translation-overflow>",
+        })
+    }
     return freezeVerifyPlan(
-        detected.commands,
+        boundedDeclaredCommands(detected.commands, declaredCommands),
         detected.javascriptPackageManagers,
     )
 }
@@ -424,6 +532,8 @@ export function mergeVerifyPlans(...plans: readonly VerifyPlan[]): VerifyPlan {
     const managerAuthorities = new Map<string, VerifyJavaScriptPackageManager>()
     const packageManagers: VerifyJavaScriptPackageManager[] = []
     const finalPlanIndex = plans.length - 1
+    let finalAddedExecutableCommands = 0
+    let omittedFinalCommands = 0
     for (const [planIndex, plan] of plans.entries()) {
         // The first snapshot establishes trusted manager choices before any
         // command is considered. Later snapshots can establish authority only
@@ -443,7 +553,7 @@ export function mergeVerifyPlans(...plans: readonly VerifyPlan[]): VerifyPlan {
             if (
                 plans.length > 1 &&
                 planIndex !== finalPlanIndex &&
-                command.preflightFailure
+                (command.preflightFailure || command.incompleteReason)
             ) continue
             const authoritativeCommand = planIndex === 0
                 ? command
@@ -451,6 +561,18 @@ export function mergeVerifyPlans(...plans: readonly VerifyPlan[]): VerifyPlan {
             const key = verifyCommandIdentity(authoritativeCommand)
             if (seen.has(key)) continue
             seen.add(key)
+            const executable =
+                !authoritativeCommand.preflightFailure &&
+                !authoritativeCommand.incompleteReason
+            if (
+                planIndex > 0 &&
+                executable &&
+                finalAddedExecutableCommands >= MAX_FINAL_ADDED_VERIFY_COMMANDS
+            ) {
+                omittedFinalCommands += 1
+                continue
+            }
+            if (planIndex > 0 && executable) finalAddedExecutableCommands += 1
             commands.push(authoritativeCommand)
         }
         if (planIndex !== 0) {
@@ -461,6 +583,16 @@ export function mergeVerifyPlans(...plans: readonly VerifyPlan[]): VerifyPlan {
                 true,
             )
         }
+    }
+    if (omittedFinalCommands > 0) {
+        commands.push({
+            label: "final verification additions beyond bounded budget",
+            tool: "node",
+            args: [],
+            incompleteReason:
+                `${omittedFinalCommands} final command(s) were not executed; ` +
+                `the adaptive verification limit is ${MAX_FINAL_ADDED_VERIFY_COMMANDS}`,
+        })
     }
     return freezeVerifyPlan(commands, packageManagers)
 }
@@ -493,6 +625,7 @@ function registerPackageManagerAuthorities(
 interface JavaScriptCommandDetails {
     manager: JavaScriptPackageManager
     script: string
+    trailingArgs: readonly string[]
 }
 
 function javascriptCommandDetails(
@@ -506,6 +639,7 @@ function javascriptCommandDetails(
         return {
             manager: command.tool as JavaScriptPackageManager,
             script: command.args[1],
+            trailingArgs: command.args.slice(2),
         }
     }
     if (
@@ -517,6 +651,7 @@ function javascriptCommandDetails(
         return {
             manager: command.args[0] as JavaScriptPackageManager,
             script: command.args[2],
+            trailingArgs: command.args.slice(3),
         }
     }
     return null
@@ -540,6 +675,7 @@ function rewriteJavaScriptCommandForAuthority(
         authority.manager,
         declared,
         details.script,
+        details.trailingArgs,
     )
     return {
         ...command,
@@ -558,12 +694,20 @@ function rewriteJavaScriptCommandForAuthority(
  * invoke a second manager merely by changing packageManager or a lockfile.
  */
 function verifyCommandIdentity(command: VerifyCommandSpec): string {
+    if (command.declaredRequirementKey) {
+        return JSON.stringify([
+            "declared-requirement",
+            command.declaredRequirementKey,
+        ])
+    }
     const details = javascriptCommandDetails(command)
     if (details) {
         return JSON.stringify([
             "javascript-script",
             command.cwd ?? null,
             details.script,
+            details.trailingArgs,
+            command.containedPaths ?? null,
         ])
     }
     return JSON.stringify([
@@ -572,6 +716,9 @@ function verifyCommandIdentity(command: VerifyCommandSpec): string {
         command.args,
         command.cwd ?? null,
         command.preflightFailure ?? null,
+        command.incompleteReason ?? null,
+        command.declaredRequirementKey ?? null,
+        command.containedPaths ?? null,
     ])
 }
 
@@ -585,6 +732,15 @@ function freezeVerifyPlan(
                 Object.freeze({
                     ...command,
                     args: Object.freeze([...command.args]),
+                    ...(command.containedPaths
+                        ? {
+                              containedPaths: Object.freeze(
+                                  command.containedPaths.map((path) =>
+                                      Object.freeze({ ...path }),
+                                  ),
+                              ),
+                          }
+                        : {}),
                 }),
             ),
         ),
@@ -597,9 +753,32 @@ function freezeVerifyPlan(
 /** Worst-case command budget plus one minute for mailbox/process teardown. */
 export function recommendedVerifyTimeoutMs(plan: VerifyPlan): number {
     const executableCommands = plan.commands.filter(
-        (command) => !command.preflightFailure,
+        (command) => !command.preflightFailure && !command.incompleteReason,
     ).length
-    return Math.max(60_000, executableCommands * TIMEOUT_MS + 60_000)
+    return Math.max(
+        60_000,
+        executableCommands * (TIMEOUT_MS + COMMAND_SETTLEMENT_GRACE_MS) +
+            executableCommands * COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS +
+            60_000,
+    )
+}
+
+/**
+ * Default watchdog for a baseline plus the largest final-plan delta that
+ * mergeVerifyPlans can admit. The verifier therefore cannot create a valid
+ * bounded plan whose own per-command budgets systematically exceed the Board.
+ */
+export function recommendedMergedVerifyTimeoutMs(baseline: VerifyPlan): number {
+    const baselineCommands = baseline.commands.filter(
+        (command) => !command.preflightFailure && !command.incompleteReason,
+    ).length
+    return (
+        (baselineCommands + MAX_FINAL_ADDED_VERIFY_COMMANDS) *
+            (TIMEOUT_MS +
+                COMMAND_SETTLEMENT_GRACE_MS +
+                COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS) +
+        60_000
+    )
 }
 
 type CmdOutcome =
@@ -613,6 +792,13 @@ async function runCmd(
     signal?: AbortSignal,
 ): Promise<CmdOutcome> {
     const startedAt = Date.now()
+    if (c.incompleteReason) {
+        return {
+            status: "skipped",
+            durationMs: 0,
+            tail: c.incompleteReason,
+        }
+    }
     if (c.preflightFailure) {
         return {
             status: "failed",
@@ -629,12 +815,25 @@ async function runCmd(
         }
     }
     throwIfAborted(signal)
+    if (c.containedPaths) {
+        const containmentFailure = revalidateContainedPaths(
+            commandCwd,
+            c.containedPaths,
+        )
+        if (containmentFailure) {
+            return {
+                status: "skipped",
+                durationMs: Date.now() - startedAt,
+                tail: containmentFailure,
+            }
+        }
+    }
     try {
-        await execFileAsync(c.tool, [...c.args], {
+        await execFileCli(c.tool, c.args, {
             cwd: commandCwd,
             timeout: TIMEOUT_MS,
+            terminationGraceMs: COMMAND_SETTLEMENT_GRACE_MS,
             maxBuffer: 8 * 1024 * 1024,
-            shell: process.platform === "win32",
             signal,
         })
         return { status: "passed", durationMs: Date.now() - startedAt }

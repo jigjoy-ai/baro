@@ -4,9 +4,16 @@ import {
     FunctionCallOutputItem,
     ModelMessageItem,
     Participant,
+    SemanticEvent,
 } from "@mozaik-ai/core"
 
+import {
+    WorkLeaseGranted,
+    WorkLeaseReleased,
+} from "../../semantic-events.js"
 import { emit } from "../../tui-protocol.js"
+import { ActiveLeaseRegistry } from "../../runtime/active-lease-registry.js"
+import type { StoryOutcomeAuthority } from "../../runtime/story-outcome-authority.js"
 import { testVerdict } from "./test-verdict.js"
 
 /**
@@ -14,8 +21,48 @@ import { testVerdict } from "./test-verdict.js"
  * ONE condensed `activity` event per bus item.
  */
 export class AgentStreamForwarder extends BaseObserver {
+    private readonly leases = new ActiveLeaseRegistry()
+    private collectiveAuthorities: Readonly<CollectiveAgentStreamAuthorities> | null = null
+
+    constructor(private readonly collectiveFailClosed = false) {
+        super()
+    }
+
+    sealCollectiveAuthorities(
+        authorities: CollectiveAgentStreamAuthorities,
+    ): void {
+        if (this.collectiveAuthorities) {
+            throw new Error(
+                "agent stream forwarder collective authorities are already sealed",
+            )
+        }
+        this.collectiveAuthorities = Object.freeze({ ...authorities })
+    }
+
+    override async onExternalEvent(
+        source: Participant,
+        event: SemanticEvent<unknown>,
+    ): Promise<void> {
+        if (!WorkLeaseGranted.is(event) && !WorkLeaseReleased.is(event)) return
+        const authorities = this.collectiveAuthorities
+        if (
+            !authorities ||
+            source !== authorities.broker ||
+            event.data.runId !== authorities.runId
+        ) return
+        if (
+            WorkLeaseReleased.is(event) &&
+            !this.leases.matchesLease(
+                event.data.storyId,
+                event.data.runId,
+                event.data.leaseId,
+            )
+        ) return
+        this.leases.observe(event, authorities.runId)
+    }
+
     override async onExternalModelMessage(source: Participant, item: ModelMessageItem): Promise<void> {
-        const agentId = agentIdOf(source)
+        const agentId = this.authorizedAgentId(source)
         if (!agentId) return
         const json = item.toJSON() as { content?: Array<{ text?: string }> }
         const text = json.content?.[0]?.text ?? ""
@@ -25,7 +72,7 @@ export class AgentStreamForwarder extends BaseObserver {
     }
 
     override async onExternalFunctionCall(source: Participant, item: FunctionCallItem): Promise<void> {
-        const agentId = agentIdOf(source)
+        const agentId = this.authorizedAgentId(source)
         if (!agentId) return
         const args = parseArgs(item.args)
         const tool = item.name
@@ -53,7 +100,7 @@ export class AgentStreamForwarder extends BaseObserver {
         source: Participant,
         item: FunctionCallOutputItem,
     ): Promise<void> {
-        const agentId = agentIdOf(source)
+        const agentId = this.authorizedAgentId(source)
         if (!agentId) return
         const json = item.toJSON() as { output?: Array<{ text?: string }> }
         const out = json.output?.[0]?.text ?? ""
@@ -72,6 +119,43 @@ export class AgentStreamForwarder extends BaseObserver {
         }
         emit({ type: "activity", id: agentId, kind: "tool_result", text: truncate(firstLine(out), 120) })
     }
+
+    private authorizedAgentId(source: Participant): string | null {
+        const agentId = agentIdOf(source)
+        if (!agentId) return null
+        const isCollective =
+            this.collectiveFailClosed || this.collectiveAuthorities !== null
+        if (!isCollective) return agentId
+        const authorities = this.collectiveAuthorities
+        if (!authorities) return null
+        const correlation =
+            authorities.outcomeAuthority.terminalCorrelationForSource(
+                source,
+                agentId,
+            )
+        if (!correlation) return null
+        return this.leases.matches(
+            {
+                storyId: correlation.storyId,
+                success: false,
+                attempts: 0,
+                durationSecs: 0,
+                error: null,
+                runId: correlation.runId,
+                leaseId: correlation.leaseId,
+                generation: correlation.generation,
+            },
+            authorities.runId,
+        )
+            ? agentId
+            : null
+    }
+}
+
+export interface CollectiveAgentStreamAuthorities {
+    runId: string
+    broker: Participant
+    outcomeAuthority: StoryOutcomeAuthority
 }
 
 function agentIdOf(source: Participant): string | null {

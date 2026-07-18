@@ -72,7 +72,7 @@ class RuntimeAdaptingExecutor extends BaseObserver implements StoryExecutor {
                                     dependsOn: ["S1"],
                                     retries: 1,
                                     acceptance: ["follow-up is integrated"],
-                                    tests: ["npm test"],
+                                    tests: ["node --check proof.mjs"],
                                     model: "standard",
                                 },
                             ],
@@ -132,6 +132,7 @@ describe("runtime DAG adaptation orchestration", () => {
                 prdPath,
                 JSON.stringify(initialPrd(), null, 2) + "\n",
             )
+            writeFileSync(join(dir, "proof.mjs"), "export {}\n")
             const executor = new RuntimeAdaptingExecutor()
 
             const result = await orchestrate({

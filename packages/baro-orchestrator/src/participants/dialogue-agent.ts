@@ -49,6 +49,7 @@ import {
     type ConversationContextSnapshot,
 } from "../session/conversation-context.js"
 import type { FrontDoorBillingRole } from "../session/frontdoor-billing.js"
+import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import {
     conversationDelegationProposalId,
     parseConversationDelegation,
@@ -77,7 +78,7 @@ Return only one JSON object in this exact shape:
 {"message":"answer to the user","messages":[{"recipient_id":"active worker id","text":"short useful message"}],"delegation":null}
 
 To propose new work, replace null with exactly:
-{"reason":"why new work is needed","stories":[{"id":"new unique id","title":"short title","description":"implementation scope","depends_on":["known story id"],"acceptance":["observable outcome"],"tests":["focused check"]}]}
+{"reason":"why new work is needed","stories":[{"id":"new unique id","title":"short title","description":"implementation scope","depends_on":["known story id"],"acceptance":["observable outcome"],"tests":["focused check"],"goal_invariant_ids":["G-A1"]}]}
 
 "messages" may be empty. Use only worker ids from the ACTIVE WORKERS line. Delegated stories
 may depend only on KNOWN STORY IDS or earlier stories in the same delegation. Never propose a
@@ -155,6 +156,17 @@ export interface DialogueAgentOptions {
     /** Exact Board allowed to publish graph lifecycle and replan decisions.
      * Delegation remains disabled when this authority is absent. */
     controlAuthority?: Participant
+    /** When present, every observation capable of influencing a worker
+     * message is source-bound. Do not authorize Dialogue as a collective
+     * message producer without this complete topology. */
+    observationAuthorities?: {
+        outcomeAuthority: StoryOutcomeAuthority
+        criticAuthority?: Participant
+        qualityAuthority?: Participant
+        repositoryAuthority?: Participant
+        verificationAuthority?: Participant
+        collaborationAuthority?: Participant
+    }
     /** Ephemeral, validated continuity from the front-door session. This is
      * prompt context only and grants no event-bus or control-plane authority. */
     conversationContext?: ConversationContextSnapshot
@@ -182,12 +194,28 @@ interface DialogueControlSnapshot {
     knownStoryIds: readonly string[]
 }
 
+interface DialogueFeedbackLeaseSnapshot {
+    leaseId: string
+    generation: number
+    workerId: string
+}
+
+interface DialogueRequestSnapshot {
+    control: DialogueControlSnapshot
+    /** Exact feedback capabilities represented in this request's prompt.
+     * A later lease generation must never inherit an older model reply. */
+    feedbackLeases: ReadonlyMap<string, DialogueFeedbackLeaseSnapshot>
+}
+
 export class DialogueAgent extends SerializedObserver {
     readonly agentId: string
 
     private readonly seenMessageIds = new Set<string>()
     private readonly activeWorkers = new Set<string>()
-    private readonly liveFeedbackWorkers = new Set<string>()
+    /** Workers whose exact lease has a Bridge delivery lane. Claude/OpenAI
+     * consume feedback live; Codex/OpenCode/Pi consume the same intent from
+     * their capability-bound poll inbox. */
+    private readonly feedbackCapableWorkers = new Set<string>()
     private readonly activeLeases = new Map<
         string,
         {
@@ -251,12 +279,12 @@ export class DialogueAgent extends SerializedObserver {
             }
             this.seenMessageIds.add(event.data.messageId)
             const request = Object.freeze({ ...event.data })
-            const control = this.controlSnapshot()
-            const prompt = this.buildUserPrompt(request.text, control)
+            const snapshot = this.requestSnapshot()
+            const prompt = this.buildUserPrompt(request.text, snapshot)
             this.remember("user", request.text)
             context.spawnTask(
                 { label: `answer ${request.messageId}`, key: "dialogue" },
-                () => this.answer(request.messageId, prompt, control),
+                () => this.answer(request.messageId, prompt, snapshot),
             )
             return
         }
@@ -272,7 +300,7 @@ export class DialogueAgent extends SerializedObserver {
     private async answer(
         messageId: string,
         userPrompt: string,
-        control: DialogueControlSnapshot,
+        snapshot: DialogueRequestSnapshot,
     ): Promise<void> {
         const controller = new AbortController()
         this.controllers.add(controller)
@@ -305,7 +333,7 @@ export class DialogueAgent extends SerializedObserver {
             if (typeof output !== "string") {
                 this.publishInvocation(messageId, output.invocation)
             }
-            const parsed = this.parseResponse(raw)
+            const parsed = this.parseResponse(raw, snapshot)
             this.remember("assistant", parsed.text)
             this.publish(
                 ConversationResponded.create({
@@ -317,6 +345,10 @@ export class DialogueAgent extends SerializedObserver {
                 }),
             )
             for (const action of parsed.actions) {
+                if (!this.hasUnchangedFeedbackLease(
+                    action.recipientId,
+                    snapshot.feedbackLeases.get(action.recipientId),
+                )) continue
                 this.publish(
                     AgentTargetedMessage.create({
                         recipientId: action.recipientId,
@@ -331,8 +363,8 @@ export class DialogueAgent extends SerializedObserver {
             }
             if (
                 parsed.delegation &&
-                control.runActive &&
-                control.graphVersion !== null
+                snapshot.control.runActive &&
+                snapshot.control.graphVersion !== null
             ) {
                 this.publish(
                     ConversationDelegationProposed.create({
@@ -343,7 +375,7 @@ export class DialogueAgent extends SerializedObserver {
                             messageId,
                         ),
                         agentId: this.agentId,
-                        baseGraphVersion: control.graphVersion,
+                        baseGraphVersion: snapshot.control.graphVersion,
                         reason: parsed.delegation.reason,
                         addedStories: parsed.delegation.addedStories.map(
                             snapshotDelegatedStory,
@@ -401,7 +433,10 @@ export class DialogueAgent extends SerializedObserver {
         )
     }
 
-    private parseResponse(raw: string): ParsedDialogueResponse {
+    private parseResponse(
+        raw: string,
+        snapshot: DialogueRequestSnapshot,
+    ): ParsedDialogueResponse {
         const trimmed = raw.trim()
         let value: unknown
         try {
@@ -436,8 +471,10 @@ export class DialogueAgent extends SerializedObserver {
             if (
                 !recipientId ||
                 !message ||
-                !this.activeWorkers.has(recipientId) ||
-                !this.liveFeedbackWorkers.has(recipientId)
+                !this.hasUnchangedFeedbackLease(
+                    recipientId,
+                    snapshot.feedbackLeases.get(recipientId),
+                )
             ) {
                 continue
             }
@@ -455,11 +492,10 @@ export class DialogueAgent extends SerializedObserver {
 
     private buildUserPrompt(
         text: string,
-        control: DialogueControlSnapshot,
+        snapshot: DialogueRequestSnapshot,
     ): string {
-        const active = [...this.activeWorkers]
-            .filter((storyId) => this.liveFeedbackWorkers.has(storyId))
-            .sort()
+        const { control } = snapshot
+        const active = [...snapshot.feedbackLeases.keys()].sort()
         const timeline = this.timeline.length > 0
             ? this.timeline.map((entry) => `- ${entry}`).join("\n")
             : "- No run events observed yet."
@@ -504,6 +540,40 @@ export class DialogueAgent extends SerializedObserver {
             graphVersion: this.currentGraphVersion,
             knownStoryIds: [...this.knownStoryIds].sort(),
         }
+    }
+
+    private requestSnapshot(): DialogueRequestSnapshot {
+        const feedbackLeases = new Map<
+            string,
+            DialogueFeedbackLeaseSnapshot
+        >()
+        for (const storyId of this.feedbackCapableWorkers) {
+            const active = this.activeLeases.get(storyId)
+            if (!active || !this.activeWorkers.has(storyId)) continue
+            feedbackLeases.set(storyId, {
+                leaseId: active.leaseId,
+                generation: active.generation,
+                workerId: active.workerId,
+            })
+        }
+        return {
+            control: this.controlSnapshot(),
+            feedbackLeases,
+        }
+    }
+
+    private hasUnchangedFeedbackLease(
+        storyId: string,
+        expected: DialogueFeedbackLeaseSnapshot | undefined,
+    ): boolean {
+        if (!expected || !this.feedbackCapableWorkers.has(storyId)) return false
+        const active = this.activeLeases.get(storyId)
+        return (
+            active !== undefined &&
+            active.leaseId === expected.leaseId &&
+            active.generation === expected.generation &&
+            active.workerId === expected.workerId
+        )
     }
 
     private observeControlState(context: SerializedEventContext): void {
@@ -605,12 +675,12 @@ export class DialogueAgent extends SerializedObserver {
                 })
                 this.activeWorkers.add(storyId)
                 if (event.data.route) {
-                    this.setLiveFeedbackCapability(
+                    this.setFeedbackCapability(
                         storyId,
                         event.data.route.backend,
                     )
                 } else {
-                    this.liveFeedbackWorkers.delete(storyId)
+                    this.feedbackCapableWorkers.delete(storyId)
                 }
                 this.pushObservation(
                     `lease granted: ${storyId} → ${event.data.workerId}`,
@@ -628,7 +698,7 @@ export class DialogueAgent extends SerializedObserver {
                 ) return
                 this.activeLeases.delete(event.data.storyId)
                 this.activeWorkers.delete(event.data.storyId)
-                this.liveFeedbackWorkers.delete(event.data.storyId)
+                this.feedbackCapableWorkers.delete(event.data.storyId)
                 this.pushObservation(
                     `lease released: ${event.data.storyId} (${event.data.reason})`,
                 )
@@ -636,8 +706,10 @@ export class DialogueAgent extends SerializedObserver {
             return
         }
         if (LevelStarted.is(event)) {
+            if (!this.acceptsObservation(source, this.opts.controlAuthority)) return
             this.pushObservation(`level ${event.data.ordinal} started: ${event.data.storyIds.join(", ")}`)
         } else if (LevelCompleted.is(event)) {
+            if (!this.acceptsObservation(source, this.opts.controlAuthority)) return
             const blocked = event.data.blocked?.join(",") || "none"
             this.pushObservation(
                 `level ${event.data.ordinal} completed: passed=${event.data.passed.join(",") || "none"}; failed=${event.data.failed.join(",") || "none"}; blocked=${blocked}`,
@@ -652,7 +724,7 @@ export class DialogueAgent extends SerializedObserver {
                 event.data.leaseId !== active.leaseId ||
                 event.data.generation !== active.generation
             ) return
-            this.setLiveFeedbackCapability(
+            this.setFeedbackCapability(
                 event.data.storyId,
                 event.data.backend,
             )
@@ -664,32 +736,111 @@ export class DialogueAgent extends SerializedObserver {
                 `${event.data.storyId} routed to ${event.data.backend}:${event.data.model}`,
             )
         } else if (AgentState.is(event)) {
+            if (!this.acceptsStoryObservation(source, event.data.agentId)) return
             this.pushObservation(
                 `${event.data.agentId} is ${event.data.phase}${event.data.detail ? ` (${event.data.detail})` : ""}`,
             )
         } else if (Critique.is(event)) {
+            if (!this.acceptsObservation(
+                source,
+                this.opts.observationAuthorities?.criticAuthority,
+            )) return
             this.pushObservation(
                 `critic ${event.data.status === "inconclusive" ? "inconclusive" : event.data.verdict} for ${event.data.agentId}: ${event.data.reasoning}`,
             )
         } else if (StoryQualityCompleted.is(event) && event.data.runId === this.opts.runId) {
+            if (!this.acceptsObservation(
+                source,
+                this.opts.observationAuthorities?.qualityAuthority,
+            ) || !this.acceptsActiveStoryCorrelation(event.data)) return
             this.pushObservation(
                 `quality ${event.data.status} for ${event.data.storyId}: ${event.data.reason}`,
             )
         } else if (StoryMerged.is(event) && event.data.runId === this.opts.runId) {
+            if (!this.acceptsObservation(
+                source,
+                this.opts.observationAuthorities?.repositoryAuthority,
+            ) || !this.acceptsActiveStoryCorrelation(event.data)) return
             this.pushObservation(`${event.data.storyId} integrated (${event.data.mode})`)
         } else if (StoryMergeFailed.is(event) && event.data.runId === this.opts.runId) {
+            if (!this.acceptsObservation(
+                source,
+                this.opts.observationAuthorities?.repositoryAuthority,
+            ) || !this.acceptsActiveStoryCorrelation(event.data)) return
             this.pushObservation(`${event.data.storyId} integration failed: ${event.data.error}`)
         } else if (StoryResult.is(event) && event.data.runId === this.opts.runId) {
+            const outcomeAuthority =
+                this.opts.observationAuthorities?.outcomeAuthority
+            if (
+                outcomeAuthority &&
+                (!outcomeAuthority.matchesResult(source, event.data) ||
+                    !this.acceptsActiveStoryCorrelation(event.data))
+            ) return
             this.pushObservation(event.data.suspension
                 ? `${event.data.storyId} execution suspended for dependency block ${event.data.suspension.blockId}`
                 : `${event.data.storyId} execution ${event.data.success ? "succeeded" : "failed"}`)
         } else if (CollaborationNote.is(event) && event.data.runId === this.opts.runId) {
+            if (!this.acceptsObservation(
+                source,
+                this.opts.observationAuthorities?.collaborationAuthority,
+            )) return
             this.pushObservation(`${event.data.sourceAgentId} note: ${event.data.text}`)
         } else if (RunVerificationCompleted.is(event) && event.data.runId === this.opts.runId) {
+            if (!this.acceptsObservation(
+                source,
+                this.opts.observationAuthorities?.verificationAuthority,
+            )) return
             this.pushObservation(`objective verification ${event.data.status}`)
         } else if (RunCompleted.is(event) && event.data.runId === this.opts.runId) {
+            if (!this.acceptsObservation(source, this.opts.controlAuthority)) return
             this.pushObservation(`run completed with success=${event.data.success}`)
         }
+    }
+
+    private acceptsObservation(
+        source: Participant,
+        authority: Participant | undefined,
+    ): boolean {
+        return this.opts.observationAuthorities === undefined ||
+            (authority !== undefined && source === authority)
+    }
+
+    private acceptsStoryObservation(
+        source: Participant,
+        storyId: string,
+    ): boolean {
+        const authorities = this.opts.observationAuthorities
+        if (!authorities) return true
+        const active = this.activeLeases.get(storyId)
+        const correlation =
+            authorities.outcomeAuthority.terminalCorrelationForSource(
+                source,
+                storyId,
+            )
+        return (
+            active !== undefined &&
+            correlation !== null &&
+            correlation.runId === this.opts.runId &&
+            correlation.leaseId === active.leaseId &&
+            correlation.generation === active.generation
+        )
+    }
+
+    private acceptsActiveStoryCorrelation(data: {
+        runId?: string
+        storyId: string
+        leaseId?: string
+        generation?: number
+    }): boolean {
+        if (!this.opts.observationAuthorities) return true
+        const active = this.activeLeases.get(data.storyId)
+        if (
+            active === undefined ||
+            data.runId !== this.opts.runId ||
+            data.leaseId !== active.leaseId
+        ) return false
+        return data.generation === undefined ||
+            data.generation === active.generation
     }
 
     private pushObservation(value: string): void {
@@ -706,11 +857,17 @@ export class DialogueAgent extends SerializedObserver {
         }
     }
 
-    private setLiveFeedbackCapability(storyId: string, backend: string): void {
-        if (backend === "claude" || backend === "openai") {
-            this.liveFeedbackWorkers.add(storyId)
+    private setFeedbackCapability(storyId: string, backend: string): void {
+        if (
+            backend === "claude" ||
+            backend === "openai" ||
+            backend === "codex" ||
+            backend === "opencode" ||
+            backend === "pi"
+        ) {
+            this.feedbackCapableWorkers.add(storyId)
         } else {
-            this.liveFeedbackWorkers.delete(storyId)
+            this.feedbackCapableWorkers.delete(storyId)
         }
     }
 }
@@ -740,6 +897,9 @@ function snapshotDelegatedStory(
         dependsOn: [...story.dependsOn],
         acceptance: [...story.acceptance],
         tests: [...story.tests],
+        ...(story.goalInvariantIds
+            ? { goalInvariantIds: [...story.goalInvariantIds] }
+            : {}),
     }
 }
 

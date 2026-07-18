@@ -17,11 +17,15 @@ import {
     WorkLeaseReleased,
     WorkSuspended,
     WorkOfferExpired,
+    WorkOfferRetractionRequested,
+    WorkOfferRetractionResolved,
     WorkOffered,
     WorkerCapabilityAdvertised,
     type WorkBidData,
     type WorkClaimedData,
     type WorkLeaseGrantedData,
+    type WorkOfferRetractionRequestedData,
+    type WorkOfferRetractionResolvedData,
     type WorkOfferedData,
     type WorkerCapabilityAdvertisedData,
     type StoryFailureData,
@@ -85,12 +89,23 @@ interface LeaseCompletionState {
 
 export class LeaseBroker extends SerializedObserver {
     private readonly opts: LeaseBrokerOptions
+    /**
+     * Orchestrator-owned worker identities. Capability advertisements describe
+     * what an already-bound worker can do; they never establish authority by
+     * themselves. This prevents a first-writer-wins advertisement or claim from
+     * impersonating a configured StoryFactory.
+     */
+    private readonly workerAuthorities = new Map<string, Participant>()
     private readonly offers = new Map<string, WorkOfferedData>()
     private readonly earlyClaims = new Map<string, WorkClaimedData>()
     private readonly workers = new Map<string, RegisteredWorker>()
     private readonly bids = new Map<string, Map<string, WorkBidData>>()
     private readonly earlyBids = new Map<string, Map<string, WorkBidData>>()
     private readonly closedOfferIds = new Set<string>()
+    private readonly retractionResponses = new Map<
+        string,
+        WorkOfferRetractionResolvedData
+    >()
     private readonly offerTimers = new Map<string, ReturnType<typeof setTimeout>>()
     private readonly pending: PendingClaim[] = []
     private readonly activeByStory = new Map<string, WorkLeaseGrantedData>()
@@ -165,6 +180,18 @@ export class LeaseBroker extends SerializedObserver {
         this.blockAuthority = authority
     }
 
+    /** Bind one configured worker id to its exact live StoryFactory object. */
+    setWorkerAuthority(workerId: string, authority: Participant): void {
+        if (!workerId.trim() || workerId !== workerId.trim()) {
+            throw new Error("lease broker workerId must be a trimmed, non-empty string")
+        }
+        const current = this.workerAuthorities.get(workerId)
+        if (current && current !== authority) {
+            throw new Error(`lease broker worker authority is already bound for ${workerId}`)
+        }
+        this.workerAuthorities.set(workerId, authority)
+    }
+
     protected override handleEvent(context: SerializedEventContext): void {
         const { event } = context
         if (WorkerCapabilityAdvertised.is(event)) {
@@ -177,6 +204,14 @@ export class LeaseBroker extends SerializedObserver {
                 context.source !== this.offerAuthority
             ) return
             this.onOffer(event.data)
+            return
+        }
+        if (WorkOfferRetractionRequested.is(event)) {
+            if (
+                this.offerAuthority !== null &&
+                context.source !== this.offerAuthority
+            ) return
+            this.onOfferRetraction(event.data)
             return
         }
         if (WorkBid.is(event)) {
@@ -413,7 +448,10 @@ export class LeaseBroker extends SerializedObserver {
         const earlyClaim = this.earlyClaims.get(offer.offerId)
         if (earlyClaim) {
             this.earlyClaims.delete(offer.offerId)
-            this.onClaim(earlyClaim)
+            this.onClaim(
+                earlyClaim,
+                this.workerAuthorities.get(earlyClaim.workerId),
+            )
             return
         }
         const timeoutMs = this.opts.claimTimeoutMs ?? 1_000
@@ -432,13 +470,75 @@ export class LeaseBroker extends SerializedObserver {
         this.offerTimers.set(offer.offerId, timer)
     }
 
+    private onOfferRetraction(
+        request: WorkOfferRetractionRequestedData,
+    ): void {
+        if (
+            this.stopped ||
+            request.runId !== this.opts.runId ||
+            !validOfferRetraction(request)
+        ) return
+
+        const replay = this.retractionResponses.get(request.retractionId)
+        if (replay) {
+            if (sameOfferRetraction(replay, request)) {
+                this.emit(WorkOfferRetractionResolved.create(replay))
+            }
+            return
+        }
+
+        // A story lease is the stronger correlation. Treat a stale request for
+        // an older offer of the same story as leased too, so graph mutation can
+        // never race past a newer active attempt.
+        const active = this.activeByStory.get(request.storyId) ??
+            [...this.activeByStory.values()].find(
+                (lease) => lease.offerId === request.offerId,
+            )
+        if (active) {
+            const response: WorkOfferRetractionResolvedData = {
+                ...request,
+                disposition: "leased",
+                leaseId: active.leaseId,
+                workerId: active.workerId,
+            }
+            this.retractionResponses.set(request.retractionId, response)
+            this.emit(WorkOfferRetractionResolved.create(response))
+            return
+        }
+
+        // Tombstone before removing mutable auction state. Any bid/claim that
+        // was already delivered but is later in the mailbox observes closed.
+        this.closedOfferIds.add(request.offerId)
+        this.offers.delete(request.offerId)
+        this.clearOfferTimer(request.offerId)
+        this.bids.delete(request.offerId)
+        this.earlyBids.delete(request.offerId)
+        this.earlyClaims.delete(request.offerId)
+        for (let index = this.pending.length - 1; index >= 0; index -= 1) {
+            if (this.pending[index]?.offer.offerId === request.offerId) {
+                this.pending.splice(index, 1)
+            }
+        }
+
+        const response: WorkOfferRetractionResolvedData = {
+            ...request,
+            disposition: "retracted",
+        }
+        this.retractionResponses.set(request.retractionId, response)
+        this.emit(WorkOfferRetractionResolved.create(response))
+        this.pump()
+    }
+
     private onCapability(
         advertisement: WorkerCapabilityAdvertisedData,
         source: Participant,
     ): void {
+        const authority = this.workerAuthorities.get(advertisement.workerId)
         if (
             this.stopped ||
             advertisement.runId !== this.opts.runId ||
+            authority === undefined ||
+            source !== authority ||
             !validAdvertisement(advertisement)
         ) return
 
@@ -586,12 +686,10 @@ export class LeaseBroker extends SerializedObserver {
     private onClaim(claim: WorkClaimedData, source?: Participant): void {
         if (
             this.stopped ||
-            claim.runId !== this.opts.runId
+            claim.runId !== this.opts.runId ||
+            this.closedOfferIds.has(claim.offerId) ||
+            !this.isRegisteredClaim(claim, source)
         ) return
-        if (claim.supportsCooperativeSuspend === true) {
-            const worker = this.workers.get(claim.workerId)
-            if (!worker || (source !== undefined && worker.source !== source)) return
-        }
         const offer = this.offers.get(claim.offerId)
         if (!offer) {
             if (
@@ -604,6 +702,36 @@ export class LeaseBroker extends SerializedObserver {
         }
         if (offer.request.storyId !== claim.storyId) return
         this.acceptClaim(offer, claim)
+    }
+
+    private isRegisteredClaim(
+        claim: WorkClaimedData,
+        source: Participant | undefined,
+    ): boolean {
+        if (!source || !claim.workerId || !claim.backend || !claim.model) return false
+        const authority = this.workerAuthorities.get(claim.workerId)
+        const worker = this.workers.get(claim.workerId)
+        if (
+            authority === undefined ||
+            authority !== source ||
+            !worker ||
+            worker.source !== source
+        ) return false
+
+        const capabilities = worker.advertisement.capabilities
+        if (!capabilities.backends.includes(claim.backend)) return false
+        if (claim.supportsCooperativeSuspend === true && !capabilities.supportsAbort) {
+            return false
+        }
+        const claimRoute = claim.route
+        if (!claimRoute) return true
+        if (
+            !validRoute(claimRoute) ||
+            claimRoute.backend !== claim.backend ||
+            claimRoute.model !== claim.model
+        ) return false
+        const routes = capabilities.routes
+        return !routes?.length || routes.some((route) => sameRoute(route, claimRoute))
     }
 
     private acceptClaim(
@@ -888,6 +1016,7 @@ export class LeaseBroker extends SerializedObserver {
         this.bids.clear()
         this.earlyBids.clear()
         this.closedOfferIds.clear()
+        this.retractionResponses.clear()
         this.unavailableRouteIds.clear()
         this.unavailableWorkerIds.clear()
         this.pending.length = 0
@@ -913,6 +1042,42 @@ function validSuspensionSummary(attempts: number, durationSecs: number): boolean
     )
 }
 
+function validOfferRetraction(
+    request: WorkOfferRetractionRequestedData,
+): boolean {
+    return (
+        typeof request.runId === "string" &&
+        request.runId.length > 0 &&
+        typeof request.proposalId === "string" &&
+        request.proposalId.length > 0 &&
+        typeof request.retractionId === "string" &&
+        request.retractionId.length > 0 &&
+        typeof request.offerId === "string" &&
+        request.offerId.length > 0 &&
+        typeof request.storyId === "string" &&
+        request.storyId.length > 0 &&
+        Number.isSafeInteger(request.generation) &&
+        request.generation >= 0 &&
+        Number.isSafeInteger(request.graphVersion) &&
+        request.graphVersion >= 1
+    )
+}
+
+function sameOfferRetraction(
+    left: WorkOfferRetractionResolvedData,
+    right: WorkOfferRetractionRequestedData,
+): boolean {
+    return (
+        left.runId === right.runId &&
+        left.proposalId === right.proposalId &&
+        left.retractionId === right.retractionId &&
+        left.offerId === right.offerId &&
+        left.storyId === right.storyId &&
+        left.generation === right.generation &&
+        left.graphVersion === right.graphVersion
+    )
+}
+
 function isSemanticWorkFailure(failure: StoryFailureData): boolean {
     return failure.kind === "execution" ||
         (failure.kind === "verification" &&
@@ -922,14 +1087,31 @@ function isSemanticWorkFailure(failure: StoryFailureData): boolean {
 
 function validAdvertisement(item: WorkerCapabilityAdvertisedData): boolean {
     const { capabilities } = item
+    const backends = capabilities?.backends
+    const routes = capabilities?.routes
     if (
         !item.workerId ||
-        !capabilities.backends.every((backend) => backend.length > 0) ||
+        item.workerId !== item.workerId.trim() ||
+        !capabilities ||
+        !Array.isArray(backends) ||
+        backends.length === 0 ||
+        backends.some(
+            (backend) => !backend || backend !== backend.trim(),
+        ) ||
+        new Set(backends).size !== backends.length ||
+        typeof capabilities.supportsAbort !== "boolean" ||
+        typeof capabilities.supportsLiveFeedback !== "boolean" ||
+        typeof capabilities.supportsPeerMessages !== "boolean" ||
         (capabilities.maxConcurrent !== undefined &&
             (!Number.isInteger(capabilities.maxConcurrent) ||
-                capabilities.maxConcurrent <= 0))
+                capabilities.maxConcurrent <= 0)) ||
+        (routes !== undefined &&
+            (!Array.isArray(routes) ||
+                !routes.every(validRoute) ||
+                new Set(routes.map((route) => route.routeId)).size !== routes.length ||
+                routes.some((route) => !backends.includes(route.backend))))
     ) return false
-    return capabilities.routes?.every(validRoute) ?? true
+    return true
 }
 
 function validRoute(route: {
@@ -937,7 +1119,14 @@ function validRoute(route: {
     backend: string
     model: string
 }): boolean {
-    return Boolean(route.routeId && route.backend && route.model)
+    return Boolean(
+        route.routeId &&
+        route.routeId === route.routeId.trim() &&
+        route.backend &&
+        route.backend === route.backend.trim() &&
+        route.model &&
+        route.model === route.model.trim(),
+    )
 }
 
 function sameRoute(

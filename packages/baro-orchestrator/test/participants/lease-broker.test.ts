@@ -16,6 +16,8 @@ import {
     WorkLeaseGranted,
     WorkLeaseReleased,
     WorkOfferExpired,
+    WorkOfferRetractionRequested,
+    WorkOfferRetractionResolved,
     WorkOffered,
     WorkSuspended,
     WorkerCapabilityAdvertised,
@@ -33,6 +35,7 @@ describe("LeaseBroker", () => {
             claimTimeoutMs: 1_000,
         })
         const env = joinWithCapture(broker)
+        const worker = defaultWorker(broker, env, "run-broker")
 
         for (const storyId of ["S1", "S2"]) {
             const offerId = `offer-${storyId}`
@@ -53,7 +56,7 @@ describe("LeaseBroker", () => {
                 }),
             )
             env.deliverSemanticEvent(
-                source("worker"),
+                worker,
                 WorkClaimed.create({
                     runId: "run-broker",
                     offerId,
@@ -97,6 +100,7 @@ describe("LeaseBroker", () => {
             leaseTimeoutMs: 5,
         })
         const env = joinWithCapture(broker)
+        const worker = defaultWorker(broker, env, "run-expiry")
         env.deliverSemanticEvent(
             source("board"),
             WorkOffered.create({
@@ -114,7 +118,7 @@ describe("LeaseBroker", () => {
             }),
         )
         env.deliverSemanticEvent(
-            source("worker"),
+            worker,
             WorkClaimed.create({
                 runId: "run-expiry",
                 offerId: "offer-S1",
@@ -147,7 +151,7 @@ describe("LeaseBroker", () => {
         })
         const env = joinWithCapture(broker)
 
-        offerAndClaim(env, source("board"), runId, "S1")
+        offerAndClaim(broker, env, source("board"), runId, "S1")
         await flush()
         const lease = env.events.find(WorkLeaseGranted.is)!
         env.deliverSemanticEvent(
@@ -181,7 +185,7 @@ describe("LeaseBroker", () => {
         broker.setQualityAuthority(source("quality-gate"))
         const env = joinWithCapture(broker)
 
-        offerAndClaim(env, source("board"), runId, "S1")
+        offerAndClaim(broker, env, source("board"), runId, "S1")
         await flush()
         const lease = env.events.find(WorkLeaseGranted.is)!
         env.deliverSemanticEvent(
@@ -208,6 +212,7 @@ describe("LeaseBroker", () => {
         const qualityGate = source("quality-gate")
         broker.setQualityAuthority(qualityGate)
         const env = joinWithCapture(broker)
+        const worker = defaultWorker(broker, env, "run-quality")
         env.deliverSemanticEvent(
             source("board"),
             WorkOffered.create(
@@ -215,7 +220,7 @@ describe("LeaseBroker", () => {
             ),
         )
         env.deliverSemanticEvent(
-            source("worker"),
+            worker,
             WorkClaimed.create({
                 runId: "run-quality",
                 offerId: "offer-S1",
@@ -261,7 +266,7 @@ describe("LeaseBroker", () => {
         broker.setQualityAuthority(qualityGate)
         const env = joinWithCapture(broker)
 
-        offerAndClaim(env, source("board"), runId, "S1", true)
+        offerAndClaim(broker, env, source("board"), runId, "S1", true)
         await waitFor(() => env.events.some(WorkLeaseGranted.is))
         const lease = env.events.find(WorkLeaseGranted.is)!
 
@@ -300,7 +305,7 @@ describe("LeaseBroker", () => {
         broker.setQualityAuthority(qualityGate)
         const env = joinWithCapture(broker)
 
-        offerAndClaim(env, source("board"), runId, "S1", true)
+        offerAndClaim(broker, env, source("board"), runId, "S1", true)
         await flush()
         const lease = env.events.find(WorkLeaseGranted.is)!
         assert.ok(lease)
@@ -367,7 +372,7 @@ describe("LeaseBroker", () => {
         broker.setQualityAuthority(qualityGate)
         const env = joinWithCapture(broker)
 
-        offerAndClaim(env, source("board"), runId, "S1", true)
+        offerAndClaim(broker, env, source("board"), runId, "S1", true)
         await flush()
         const lease = env.events.find(WorkLeaseGranted.is)!
         assert.ok(lease)
@@ -410,6 +415,14 @@ describe("LeaseBroker", () => {
             offerAuthority: board,
         })
         const env = joinWithCapture(broker)
+        advertise(
+            broker,
+            env,
+            worker,
+            "run-authority",
+            "worker",
+            route("default-worker", "claude", "sonnet"),
+        )
         const work = WorkOffered.create(
             offer("run-authority", "offer-S1", "S1", 1),
         )
@@ -450,6 +463,220 @@ describe("LeaseBroker", () => {
         assert.equal(env.events.find(WorkLeaseReleased.is)?.data.reason, "expired")
     })
 
+    it("rejects a forged source claiming an existing worker id", async () => {
+        const runId = "run-forged-worker-id"
+        const broker = new LeaseBroker({ runId, claimTimeoutMs: 100 })
+        const env = joinWithCapture(broker)
+        const worker = source("configured-worker")
+        const workerRoute = route("configured-route", "claude", "sonnet")
+        advertise(broker, env, worker, runId, "worker-1", workerRoute)
+        env.deliverSemanticEvent(
+            source("board"),
+            WorkOffered.create(offer(runId, "offer-S1", "S1", 1)),
+        )
+        const claim = WorkClaimed.create({
+            runId,
+            offerId: "offer-S1",
+            storyId: "S1",
+            workerId: "worker-1",
+            backend: workerRoute.backend,
+            model: workerRoute.model,
+            route: workerRoute,
+        })
+
+        env.deliverSemanticEvent(source("forged-worker"), claim)
+        await broker.idle()
+        assert.equal(env.events.filter(WorkLeaseGranted.is).length, 0)
+
+        env.deliverSemanticEvent(worker, claim)
+        await waitFor(() => env.events.some(WorkLeaseGranted.is))
+        assert.equal(env.events.find(WorkLeaseGranted.is)?.data.workerId, "worker-1")
+    })
+
+    it("rejects an advertised worker that was never authority-bound", async () => {
+        const runId = "run-unbound-worker"
+        const broker = new LeaseBroker({ runId, claimTimeoutMs: 5 })
+        const env = joinWithCapture(broker)
+        const worker = source("nonexistent-worker")
+        const workerRoute = route("ghost-route", "claude", "sonnet")
+        env.deliverSemanticEvent(
+            worker,
+            WorkerCapabilityAdvertised.create({
+                runId,
+                workerId: "ghost",
+                capabilities: {
+                    backends: [workerRoute.backend],
+                    supportsAbort: true,
+                    supportsLiveFeedback: true,
+                    supportsPeerMessages: true,
+                    routes: [workerRoute],
+                },
+            }),
+        )
+        env.deliverSemanticEvent(
+            source("board"),
+            WorkOffered.create(offer(runId, "offer-ghost", "S-ghost", 1)),
+        )
+        env.deliverSemanticEvent(
+            worker,
+            WorkClaimed.create({
+                runId,
+                offerId: "offer-ghost",
+                storyId: "S-ghost",
+                workerId: "ghost",
+                backend: workerRoute.backend,
+                model: workerRoute.model,
+                route: workerRoute,
+            }),
+        )
+
+        await waitFor(() => env.events.some(WorkOfferExpired.is))
+        assert.equal(env.events.filter(WorkLeaseGranted.is).length, 0)
+    })
+
+    it("rejects empty and duplicate backend capability advertisements", async () => {
+        const runId = "run-invalid-capability"
+        const broker = new LeaseBroker({ runId, claimTimeoutMs: 100 })
+        const env = joinWithCapture(broker)
+        const worker = source("configured-worker")
+        broker.setWorkerAuthority("worker-1", worker)
+        for (const backends of [[], ["claude", "claude"]]) {
+            env.deliverSemanticEvent(
+                worker,
+                WorkerCapabilityAdvertised.create({
+                    runId,
+                    workerId: "worker-1",
+                    capabilities: {
+                        backends,
+                        supportsAbort: true,
+                        supportsLiveFeedback: true,
+                        supportsPeerMessages: true,
+                    },
+                }),
+            )
+        }
+        env.deliverSemanticEvent(
+            source("board"),
+            WorkOffered.create(offer(runId, "offer-S1", "S1", 1)),
+        )
+        const claim = WorkClaimed.create({
+            runId,
+            offerId: "offer-S1",
+            storyId: "S1",
+            workerId: "worker-1",
+            backend: "claude",
+            model: "sonnet",
+        })
+        env.deliverSemanticEvent(worker, claim)
+        await broker.idle()
+        assert.equal(env.events.filter(WorkLeaseGranted.is).length, 0)
+
+        advertise(
+            broker,
+            env,
+            worker,
+            runId,
+            "worker-1",
+            route("safe-route", "claude", "sonnet"),
+        )
+        env.deliverSemanticEvent(worker, claim)
+        await waitFor(() => env.events.some(WorkLeaseGranted.is))
+        assert.equal(env.events.filter(WorkLeaseGranted.is).length, 1)
+    })
+
+    it("rejects claims outside the bound worker's advertised backend or route", async () => {
+        const runId = "run-worker-capability"
+        const broker = new LeaseBroker({ runId, claimTimeoutMs: 100 })
+        const env = joinWithCapture(broker)
+        const worker = source("configured-worker")
+        const workerRoute = route("safe-route", "claude", "sonnet")
+        advertise(broker, env, worker, runId, "worker-1", workerRoute)
+        env.deliverSemanticEvent(
+            source("board"),
+            WorkOffered.create(offer(runId, "offer-S1", "S1", 1)),
+        )
+
+        env.deliverSemanticEvent(
+            worker,
+            WorkClaimed.create({
+                runId,
+                offerId: "offer-S1",
+                storyId: "S1",
+                workerId: "worker-1",
+                backend: "openai",
+                model: "gpt-5.6",
+                route: route("foreign-backend", "openai", "gpt-5.6"),
+            }),
+        )
+        env.deliverSemanticEvent(
+            worker,
+            WorkClaimed.create({
+                runId,
+                offerId: "offer-S1",
+                storyId: "S1",
+                workerId: "worker-1",
+                backend: workerRoute.backend,
+                model: "opus",
+                route: route("unadvertised-route", "claude", "opus"),
+            }),
+        )
+        await broker.idle()
+        assert.equal(env.events.filter(WorkLeaseGranted.is).length, 0)
+
+        env.deliverSemanticEvent(
+            worker,
+            WorkClaimed.create({
+                runId,
+                offerId: "offer-S1",
+                storyId: "S1",
+                workerId: "worker-1",
+                backend: workerRoute.backend,
+                model: workerRoute.model,
+                route: workerRoute,
+            }),
+        )
+        await waitFor(() => env.events.some(WorkLeaseGranted.is))
+        assert.deepEqual(
+            env.events.find(WorkLeaseGranted.is)?.data.route,
+            workerRoute,
+        )
+    })
+
+    it("accepts a legitimate authority-bound and advertised worker", async () => {
+        const runId = "run-legitimate-worker"
+        const broker = new LeaseBroker({ runId })
+        const env = joinWithCapture(broker)
+        const worker = source("configured-worker")
+        advertise(
+            broker,
+            env,
+            worker,
+            runId,
+            "worker-1",
+            route("safe-route", "claude", "sonnet"),
+        )
+
+        env.deliverSemanticEvent(
+            source("board"),
+            WorkOffered.create(offer(runId, "offer-S1", "S1", 1)),
+        )
+        env.deliverSemanticEvent(
+            worker,
+            WorkClaimed.create({
+                runId,
+                offerId: "offer-S1",
+                storyId: "S1",
+                workerId: "worker-1",
+                backend: "claude",
+                model: "sonnet",
+                route: route("safe-route", "claude", "sonnet"),
+            }),
+        )
+
+        await waitFor(() => env.events.some(WorkLeaseGranted.is))
+        assert.equal(env.events.filter(WorkLeaseGranted.is).length, 1)
+    })
+
     it("releases a lease on merge outcomes only from its bound repository", async () => {
         const board = source("collective-board")
         const repository = source("repository")
@@ -462,6 +689,11 @@ describe("LeaseBroker", () => {
             integrationAuthority: repository,
         })
         const env = joinWithCapture(broker)
+        const worker = defaultWorker(
+            broker,
+            env,
+            "run-integration-authority",
+        )
         env.deliverSemanticEvent(
             board,
             WorkOffered.create(
@@ -474,7 +706,7 @@ describe("LeaseBroker", () => {
             ),
         )
         env.deliverSemanticEvent(
-            source("worker"),
+            worker,
             WorkClaimed.create({
                 runId: "run-integration-authority",
                 offerId: "offer-S1",
@@ -543,14 +775,182 @@ describe("LeaseBroker", () => {
         })
 
         env.deliverSemanticEvent(observer, completed)
-        offerAndClaim(env, board, runId, "S1")
+        offerAndClaim(broker, env, board, runId, "S1")
         await flush()
         assert.equal(env.events.filter(WorkLeaseGranted.is).length, 1)
 
         env.deliverSemanticEvent(board, completed)
-        offerAndClaim(env, board, runId, "S2")
+        offerAndClaim(broker, env, board, runId, "S2")
         await flush()
         assert.equal(env.events.filter(WorkLeaseGranted.is).length, 1)
+    })
+
+    it("tombstones a retracted market offer against late bids and replayed offers", async () => {
+        const runId = "run-retract-late-bid"
+        const board = source("collective-board")
+        const worker = source("market-worker")
+        const workerRoute = route("route-market", "openai", "deepseek")
+        const broker = new LeaseBroker({
+            runId,
+            offerAuthority: board,
+            parallel: 1,
+            market: { bidWindowMs: 1_000 },
+        })
+        const env = joinWithCapture(broker)
+        advertise(broker, env, worker, runId, "market-worker", workerRoute)
+        const work = WorkOffered.create(
+            offer(runId, "offer-retracted", "S-retracted", 3),
+        )
+        env.deliverSemanticEvent(board, work)
+        env.deliverSemanticEvent(
+            board,
+            WorkOfferRetractionRequested.create(
+                retraction(runId, "offer-retracted", "S-retracted", 3),
+            ),
+        )
+        submitBid(env, worker, {
+            runId,
+            offerId: "offer-retracted",
+            storyId: "S-retracted",
+            generation: 3,
+            bidId: "late-bid",
+            workerId: "market-worker",
+            route: workerRoute,
+            cost: 0.01,
+            success: 1,
+            latencyMs: 1,
+        })
+        env.deliverSemanticEvent(board, work)
+
+        await broker.idle()
+
+        assert.equal(
+            env.events.find(WorkOfferRetractionResolved.is)?.data.disposition,
+            "retracted",
+        )
+        assert.equal(env.events.filter(WorkBidWindowClosed.is).length, 0)
+        assert.equal(env.events.filter(WorkLeaseGranted.is).length, 0)
+    })
+
+    it("removes a pending claim before capacity becomes available", async () => {
+        const runId = "run-retract-pending"
+        const board = source("collective-board")
+        const broker = new LeaseBroker({
+            runId,
+            offerAuthority: board,
+            parallel: 1,
+            intraLevelDelaySecs: 0,
+        })
+        const env = joinWithCapture(broker)
+
+        offerAndClaim(broker, env, board, runId, "S-active")
+        offerAndClaim(broker, env, board, runId, "S-pending")
+        env.deliverSemanticEvent(
+            board,
+            WorkOfferRetractionRequested.create(
+                retraction(runId, "offer-S-pending", "S-pending", 1),
+            ),
+        )
+        await broker.idle()
+
+        const active = env.events.find(WorkLeaseGranted.is)!
+        assert.equal(active.data.request.storyId, "S-active")
+        assert.equal(env.events.filter(WorkLeaseGranted.is).length, 1)
+        assert.equal(
+            env.events.find(WorkOfferRetractionResolved.is)?.data.disposition,
+            "retracted",
+        )
+
+        env.deliverSemanticEvent(
+            source("repository"),
+            StoryMerged.create({
+                runId,
+                storyId: "S-active",
+                leaseId: active.data.leaseId,
+                mode: "worktree",
+            }),
+        )
+        await broker.idle()
+        assert.equal(env.events.filter(WorkLeaseGranted.is).length, 1)
+    })
+
+    it("reports an already-won lease instead of retracting its offer", async () => {
+        const runId = "run-retract-lease-wins"
+        const board = source("collective-board")
+        const broker = new LeaseBroker({
+            runId,
+            offerAuthority: board,
+            parallel: 1,
+            intraLevelDelaySecs: 0,
+        })
+        const env = joinWithCapture(broker)
+        offerAndClaim(broker, env, board, runId, "S1")
+        const request = WorkOfferRetractionRequested.create(
+            retraction(runId, "offer-S1", "S1", 1),
+        )
+        env.deliverSemanticEvent(board, request)
+        await broker.idle()
+
+        const lease = env.events.find(WorkLeaseGranted.is)!
+        const resolved = env.events.find(WorkOfferRetractionResolved.is)!
+        assert.deepEqual(resolved.data, {
+            ...request.data,
+            disposition: "leased",
+            leaseId: lease.data.leaseId,
+            workerId: lease.data.workerId,
+        })
+    })
+
+    it("replays one exact retraction result and rejects late claims", async () => {
+        const runId = "run-retract-replay"
+        const board = source("collective-board")
+        const broker = new LeaseBroker({
+            runId,
+            offerAuthority: board,
+            parallel: 1,
+            intraLevelDelaySecs: 0,
+        })
+        const env = joinWithCapture(broker)
+        const work = WorkOffered.create(offer(runId, "offer-S1", "S1", 1))
+        const requestData = retraction(runId, "offer-S1", "S1", 1)
+        const request = WorkOfferRetractionRequested.create(requestData)
+        env.deliverSemanticEvent(board, work)
+        env.deliverSemanticEvent(source("forged-board"), request)
+        env.deliverSemanticEvent(
+            board,
+            WorkOfferRetractionRequested.create({
+                ...requestData,
+                graphVersion: 0,
+            }),
+        )
+        env.deliverSemanticEvent(board, request)
+        env.deliverSemanticEvent(board, request)
+        env.deliverSemanticEvent(
+            board,
+            WorkOfferRetractionRequested.create({
+                ...requestData,
+                storyId: "conflicting-replay",
+            }),
+        )
+        env.deliverSemanticEvent(
+            source("late-worker"),
+            WorkClaimed.create({
+                runId,
+                offerId: "offer-S1",
+                storyId: "S1",
+                workerId: "late-worker",
+                backend: "claude",
+                model: "sonnet",
+            }),
+        )
+        env.deliverSemanticEvent(board, work)
+        await broker.idle()
+
+        const resolutions = env.events.filter(WorkOfferRetractionResolved.is)
+        assert.equal(resolutions.length, 2)
+        assert.deepEqual(resolutions[0]?.data, resolutions[1]?.data)
+        assert.equal(resolutions[0]?.data.disposition, "retracted")
+        assert.equal(env.events.filter(WorkLeaseGranted.is).length, 0)
     })
 
     it("waits for the bounded market window and selects the best verified cost", async () => {
@@ -566,8 +966,8 @@ describe("LeaseBroker", () => {
         const expensiveRoute = route("expensive", "claude", "opus")
         const cheapRoute = route("cheap", "openai", "deepseek-chat")
 
-        advertise(env, expensiveWorker, "run-market", "expensive-worker", expensiveRoute)
-        advertise(env, cheapWorker, "run-market", "cheap-worker", cheapRoute)
+        advertise(broker, env, expensiveWorker, "run-market", "expensive-worker", expensiveRoute)
+        advertise(broker, env, cheapWorker, "run-market", "cheap-worker", cheapRoute)
         env.deliverSemanticEvent(
             source("board"),
             WorkOffered.create(offer("run-market", "offer-S1", "S1", 1)),
@@ -618,7 +1018,7 @@ describe("LeaseBroker", () => {
         const env = joinWithCapture(broker)
         const worker = source("registered-source")
         const advertisedRoute = route("safe", "openai", "glm-5")
-        advertise(env, worker, "run-guarded", "registered-worker", advertisedRoute)
+        advertise(broker, env, worker, "run-guarded", "registered-worker", advertisedRoute)
         env.deliverSemanticEvent(
             source("board"),
             WorkOffered.create(offer("run-guarded", "offer-S2", "S2", 2)),
@@ -681,8 +1081,8 @@ describe("LeaseBroker", () => {
         const otherWorker = source("other-source")
         const earlyRoute = route("early", "openai", "deepseek-chat")
         const otherRoute = route("other", "openai", "glm-5")
-        advertise(env, earlyWorker, "run-replay", "early-worker", earlyRoute)
-        advertise(env, otherWorker, "run-replay", "other-worker", otherRoute)
+        advertise(broker, env, earlyWorker, "run-replay", "early-worker", earlyRoute)
+        advertise(broker, env, otherWorker, "run-replay", "other-worker", otherRoute)
 
         const early = {
             runId: "run-replay",
@@ -749,8 +1149,8 @@ describe("LeaseBroker", () => {
         const alternateWorker = source("alternate-source")
         const cheapRoute = route("route-cheap", "openai", "deepseek")
         const alternateRoute = route("route-alternate", "openai", "glm")
-        advertise(env, cheapWorker, runId, "cheap-worker", cheapRoute)
-        advertise(env, alternateWorker, runId, "alternate-worker", alternateRoute)
+        advertise(broker, env, cheapWorker, runId, "cheap-worker", cheapRoute)
+        advertise(broker, env, alternateWorker, runId, "alternate-worker", alternateRoute)
 
         const bidBoth = (storyId: string, generation: number): void => {
             const offerId = `offer-${storyId}`
@@ -861,7 +1261,7 @@ describe("LeaseBroker", () => {
         })
         const env = joinWithCapture(broker)
 
-        offerAndClaim(env, source("board"), runId, "S1")
+        offerAndClaim(broker, env, source("board"), runId, "S1")
         await waitFor(() => env.events.some(WorkLeaseGranted.is))
         const first = env.events.find(WorkLeaseGranted.is)!
 
@@ -884,7 +1284,7 @@ describe("LeaseBroker", () => {
         )
         await waitFor(() => env.events.some(WorkLeaseReleased.is))
 
-        offerAndClaim(env, source("board"), runId, "S2")
+        offerAndClaim(broker, env, source("board"), runId, "S2")
         await waitFor(() =>
             env.events.some(
                 (event) =>
@@ -917,8 +1317,8 @@ describe("LeaseBroker", () => {
         const expensiveWorker = source("policy-source")
         const cheapRoute = route("excluded", "openai", "deepseek")
         const expensiveRoute = route("too-expensive", "openai", "glm")
-        advertise(env, cheapWorker, runId, "excluded-worker", cheapRoute)
-        advertise(env, expensiveWorker, runId, "policy-worker", expensiveRoute)
+        advertise(broker, env, cheapWorker, runId, "excluded-worker", cheapRoute)
+        advertise(broker, env, expensiveWorker, runId, "policy-worker", expensiveRoute)
 
         const offered = offer(runId, "offer-S1", "S1", 1)
         env.deliverSemanticEvent(
@@ -966,6 +1366,7 @@ describe("LeaseBroker", () => {
         broker.setOfferAuthority(board)
         broker.setBlockAuthority(board)
         const env = joinWithCapture(broker)
+        broker.setWorkerAuthority("worker", worker)
         env.deliverSemanticEvent(
             worker,
             WorkerCapabilityAdvertised.create({
@@ -1089,13 +1490,32 @@ function qualityOffer(
     }
 }
 
+function retraction(
+    runId: string,
+    offerId: string,
+    storyId: string,
+    generation: number,
+) {
+    return {
+        runId,
+        proposalId: `proposal-${storyId}`,
+        retractionId: `retraction-${offerId}`,
+        offerId,
+        storyId,
+        generation,
+        graphVersion: 4,
+    }
+}
+
 function advertise(
+    broker: LeaseBroker,
     env: ReturnType<typeof joinWithCapture>,
     worker: ReturnType<typeof source>,
     runId: string,
     workerId: string,
     advertisedRoute: WorkRouteDescriptor,
 ): void {
+    broker.setWorkerAuthority(workerId, worker)
     env.deliverSemanticEvent(
         worker,
         WorkerCapabilityAdvertised.create({
@@ -1148,13 +1568,40 @@ function submitBid(
     )
 }
 
+const defaultWorkers = new WeakMap<
+    LeaseBroker,
+    ReturnType<typeof source>
+>()
+
+function defaultWorker(
+    broker: LeaseBroker,
+    env: ReturnType<typeof joinWithCapture>,
+    runId: string,
+): ReturnType<typeof source> {
+    const existing = defaultWorkers.get(broker)
+    if (existing) return existing
+    const worker = source("worker")
+    advertise(
+        broker,
+        env,
+        worker,
+        runId,
+        "worker",
+        route("default-worker", "claude", "sonnet"),
+    )
+    defaultWorkers.set(broker, worker)
+    return worker
+}
+
 function offerAndClaim(
+    broker: LeaseBroker,
     env: ReturnType<typeof joinWithCapture>,
     board: ReturnType<typeof source>,
     runId: string,
     storyId: string,
     requiresQualityReview = false,
 ): void {
+    const worker = defaultWorker(broker, env, runId)
     const offerId = `offer-${storyId}`
     env.deliverSemanticEvent(
         board,
@@ -1165,7 +1612,7 @@ function offerAndClaim(
         ),
     )
     env.deliverSemanticEvent(
-        source("worker"),
+        worker,
         WorkClaimed.create({
             runId,
             offerId,
@@ -1223,6 +1670,14 @@ async function assertOperationalFailureKeepsRouteAvailable(
         claimTimeoutMs: 50,
     })
     const env = joinWithCapture(broker)
+    advertise(
+        broker,
+        env,
+        worker,
+        runId,
+        `worker-${suffix}`,
+        routeDescriptor,
+    )
 
     const claim = (storyId: string): void => {
         const offerId = `offer-${storyId}`

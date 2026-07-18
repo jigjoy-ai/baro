@@ -56,10 +56,32 @@ export function classifyTransportFailure(
 export function classifyStoryFailure(
     ...signals: readonly unknown[]
 ): StoryFailureData | undefined {
+    if (
+        signals.some((signal) =>
+            isRepositoryCommandTimeoutSignal(signal, 0, new Set<object>()),
+        )
+    ) {
+        return { kind: "infrastructure", code: "command_timeout" }
+    }
     return (
         classifyProviderFailure(...signals) ??
         classifyTransportFailure(...signals)
     )
+}
+
+function isRepositoryCommandTimeoutSignal(
+    value: unknown,
+    depth: number,
+    seen: Set<object>,
+): boolean {
+    if (!isRecord(value) || depth > MAX_INSPECTION_DEPTH || seen.has(value)) {
+        return false
+    }
+    seen.add(value)
+    if (value.name === "RepositoryCommandError" && value.timedOut === true) {
+        return true
+    }
+    return isRepositoryCommandTimeoutSignal(value.cause, depth + 1, seen)
 }
 
 /**

@@ -69,6 +69,19 @@ and declares completion only after the required independent authorities have
 answered. Runtime graph changes pass through the durable coordinator before
 the Board schedules newly ready work.
 
+### GoalGuardian
+
+Source: [goal-guardian.ts](./goal-guardian.ts)
+
+GoalGuardian is the independent semantic authority for the accepted
+`GoalContract`. It projects exact story-to-invariant mappings, source-bound
+challenges, durable integrations, and Critic quality tied to the exact lease.
+It may request bounded corrective work and attest goal completion, but cannot
+schedule, grant leases, mutate the graph, integrate code, or verify the run.
+Its projection crosses the PRD persistence boundary before Board can accept a
+completion attestation; restart replay cannot infer a green result from an old
+or uncorrelated quality verdict.
+
 ### LeaseBroker
 
 Source: [lease-broker.ts](./lease-broker.ts)
@@ -77,7 +90,10 @@ The Broker owns offers, deterministic bid windows, claims, leases, expiry, and
 release. Market bids contain only route descriptors and estimates; credentials
 remain inside StoryFactory. The selected route can be suppressed after a
 permanent provider failure, while operational recovery can reroute a later
-offer.
+offer. If runtime adaptation targets work that is offered but not yet leased,
+Broker serializes an exact retraction against bids, claims, and lease grants.
+Only its `retracted` receipt permits the graph transaction; `leased` fences the
+story from mutation.
 
 ### AcceptanceGate and Critic
 
@@ -104,8 +120,11 @@ Sources: [runtime-replan-coordinator.ts](./runtime-replan-coordinator.ts),
 `RuntimeReplanCoordinator` validates graph-version CAS, exact lease authority,
 idempotency, mutability, cycles, budgets, and persist-before-applied ordering.
 Workers can propose changes through the native interception path or the
-`agent-collab.mjs` bridge. Operational retries, worker/discovery adaptations,
-and Surgeon semantic healing use separate accounting.
+`agent-collab.mjs` bridge. Planned work can change immediately; offered work
+first completes the Broker retraction handshake, while leased, integrating,
+reviewing, recovery, and cleanup work remains immutable. Operational retries,
+worker/discovery adaptations, and Surgeon semantic healing use separate
+accounting.
 
 ### Route learning
 
@@ -114,11 +133,58 @@ Sources: [route-learning.ts](./route-learning.ts) and
 
 Each configured market worker learns a run-local pseudo-prior estimate from
 verified lease outcomes, latency, and known exact-correlated invocation cost.
-Unknown cost remains unknown. The production Gateway/Cloud billed-cost
-producer is not connected yet, so the current seam must not be described as
-live billed-cost optimization.
+Unknown cost remains unknown. A concrete OpenAI route can receive authoritative
+cost only from an explicitly configured, same-origin Baro Gateway receipt feed
+whose credential and invocation correlation match that route. Harness-backed
+workers and arbitrary compatible endpoints do not inherit billing authority;
+their unknown cost remains unknown. Route learning is still run-local and
+advisory, not a claim of globally calibrated live optimization.
+
+### CollaborationBridge, Librarian, and Supervisor
+
+Sources: [collaboration-bridge.ts](./collaboration-bridge.ts),
+[librarian.ts](./librarian.ts), [memory-librarian.ts](./memory-librarian.ts),
+and [supervisor.ts](./supervisor.ts).
+
+In collective mode, worker messages are routed through the exact run-local
+Bridge and rebound to the recipient's active run/lease/generation. Story
+backends reject direct, stale, or same-label messages. Operator, the tag-based
+Librarian, and Dialogue are the only in-process message-intent producers;
+workers receive only an opaque loopback endpoint/token bound to their exact
+lease, never the Bridge's manager-private session path. Claude and native
+OpenAI use live delivery; Codex, OpenCode and Pi consume a broker inbox.
+Pre-launch messages enter every backend's initial prompt exactly once, while a
+poll response is printed before acknowledgement and may therefore repeat its
+stable delivery id after a lost ACK. Ordinary worker events and durable
+challenges use stable client ids, so an ambiguous HTTP outcome is retried with
+the exact id and payload instead of creating a duplicate semantic action. A
+request is correlation-checked again after its body is read, and release
+revokes all message, note, help, discovery, and replan influence from that
+lease. Durable challenges additionally require an invariant id from the
+authoritative derived GoalContract, so a syntactically valid unknown id cannot
+become an unacknowledgeable replay record.
+
+Supervisor and both Librarians source-bind Broker lease transitions and the
+dynamic worker authority registered for the exact attempt. Supervisor alone
+may emit the correlated abort consumed by StoryFactory. Librarian findings may
+become cross-worker context only after the call and output come from the same
+active worker capability. These participants advise or intervene over Mozaik;
+none owns scheduling, graph persistence, integration, or run completion.
 
 ## Human and advisory edge
+
+### Conversation session and RepoScout
+
+Sources: [conversation-frontdoor.ts](../session/conversation-frontdoor.ts) and
+[autonomous-repository-scout.ts](../session/autonomous-repository-scout.ts).
+
+Before a PRD exists, Conversation is the durable first-contact authority. For
+each turn it asks an autonomous, read-only RepoScout to iteratively choose from
+Baro-owned read/search/glob capabilities and return a source-bound evidence
+brief. Conversation uses that brief to answer or clarify, then hands exactly
+one accepted GoalEnvelope to Architect/Planner. RepoScout cannot write, run
+commands, use the network, plan stories, select routes, or enter the execution
+control plane; deterministic scanning is its bounded bootstrap and fail-safe.
 
 ### Operator
 
@@ -126,8 +192,10 @@ Source: [operator.ts](./operator.ts)
 
 Operator translates external commands into bus-safe actions. `redirect`
 publishes an `AgentTargetedMessage`; `converse` publishes
-`ConversationRequested`; abort/shutdown commands invoke their bound hooks.
-Operator does not own leases, graph mutation, integration, or completion.
+`ConversationRequested`. Direct abort/shutdown callback hooks are a legacy-only
+adapter and orchestration rejects them in collective mode; collective control
+must cross a source-bound Mozaik semantic lane. Operator does not own leases,
+graph mutation, integration, or completion.
 
 ### DialogueAgent
 
@@ -143,7 +211,9 @@ choose route/model/retry/priority or remove/rewire work. Board validates and
 durably commits it with worker adaptation accounting, including a second exact
 schema/correlation check at the Board boundary; Broker independently auctions
 any resulting offer. Route capability and lease lifetime are source- and
-correlation-bound before Dialogue may address a worker. Baro-created semantic
+correlation-bound before Dialogue may address a worker. Board, Broker,
+Repository, Critic, AcceptanceGate, Verifier, Bridge, and worker observations
+are source-bound before they enter its prompt. Baro-created semantic
 events are immutable snapshots before Mozaik fan-out. Dialogue cannot directly
 bid, grant a lease, mutate durable state, integrate, verify, or complete a run.
 An optional ephemeral `ConversationContextSnapshot` can seed the accepted goal,
@@ -153,5 +223,7 @@ an exact size-bounded schema, and binds its session and goal fingerprint to the
 PRD before the run starts. Free-form context stays in an explicitly untrusted
 prompt section; only safe session correlation and the caller-owned lifecycle
 phase reach the system layer. The snapshot is not copied into the PRD.
-It is still a text-only semantic supervisor rather than a full repository-tool
-harness; the TUI redesign is deferred until the headless contract is stable.
+The in-run Dialogue participant is deliberately text-only rather than a second
+repository harness: repository investigation belongs to the pre-run RepoScout
+and later Architect, while execution remains with independently leased workers.
+The TUI redesign is deferred until the headless contract is stable.

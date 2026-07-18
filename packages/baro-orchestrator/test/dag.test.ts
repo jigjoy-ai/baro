@@ -49,16 +49,44 @@ describe("buildDag", () => {
         ])
     })
 
-    it("ignores dependencies on unknown stories", () => {
-        const levels = buildDag([
-            { id: "ready", dependsOn: ["missing"] },
-            { id: "dependent", dependsOn: ["ready"] },
+    it("fails closed on dependencies outside the projected graph", () => {
+        assert.throws(
+            () =>
+                buildDag([
+                    { id: "ready", dependsOn: ["missing"] },
+                    { id: "dependent", dependsOn: ["ready"] },
+                ]),
+            /Unknown dependency: ready -> missing/,
+        )
+    })
+
+    it("fails closed on duplicate story ids and dependency edges", () => {
+        assert.throws(
+            () => buildDag([{ id: "same" }, { id: "same" }]),
+            /Duplicate story id: same/,
+        )
+        assert.throws(
+            () =>
+                buildDag([
+                    { id: "base" },
+                    { id: "child", dependsOn: ["base", "base"] },
+                ]),
+            /Duplicate dependency: child -> base/,
+        )
+    })
+
+    it("uses story ids as a stable tie-break independent of input order", () => {
+        const first = buildDag([
+            { id: "zeta", priority: 1 },
+            { id: "alpha", priority: 1 },
+        ])
+        const second = buildDag([
+            { id: "alpha", priority: 1 },
+            { id: "zeta", priority: 1 },
         ])
 
-        assert.deepEqual(levels, [
-            { storyIds: ["ready"] },
-            { storyIds: ["dependent"] },
-        ])
+        assert.deepEqual(first, [{ storyIds: ["alpha", "zeta"] }])
+        assert.deepEqual(second, first)
     })
 
     it("throws when active stories contain a dependency cycle", () => {

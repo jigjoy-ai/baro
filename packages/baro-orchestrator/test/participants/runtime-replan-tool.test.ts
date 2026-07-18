@@ -66,6 +66,7 @@ describe("runtime replan function tool", () => {
                         acceptance: ["migration exists"],
                         tests: ["npm test"],
                         model: "gpt-5.4-mini",
+                        goalInvariantIds: ["G-A1", "G-C1"],
                     },
                 ],
                 removedStoryIds: ["S-future"],
@@ -90,6 +91,7 @@ describe("runtime replan function tool", () => {
                             acceptance: ["migration exists"],
                             tests: ["npm test"],
                             model: "gpt-5.4-mini",
+                            goalInvariantIds: ["G-A1", "G-C1"],
                         },
                     ],
                     removedStoryIds: ["S-future"],
@@ -183,6 +185,26 @@ describe("runtime replan function tool", () => {
             [
                 { ...valid, addedStories: [{ ...validStory, tests: ["\t"] }] },
                 /tests must be a non-empty array of non-blank strings/,
+            ],
+            [
+                {
+                    ...valid,
+                    addedStories: [{
+                        ...validStory,
+                        goalInvariantIds: ["G-A1", "G-A1"],
+                    }],
+                },
+                /unique GoalContract invariant ids/,
+            ],
+            [
+                {
+                    ...valid,
+                    addedStories: [{
+                        ...validStory,
+                        goalInvariantIds: ["not-an-invariant"],
+                    }],
+                },
+                /unique GoalContract invariant ids/,
             ],
             [{ ...valid, removedStoryIds: [1] }, /array of strings/],
             [{ ...valid, modifiedDeps: { S1: [1] } }, /array of strings/],

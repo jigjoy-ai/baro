@@ -19,7 +19,13 @@ import {
     Knowledge,
     StoryResult,
     StorySpawned,
+    WorkLeaseGranted,
+    WorkLeaseReleased,
 } from "../semantic-events.js"
+import type {
+    StoryOutcomeAuthority,
+    StoryResultAuthorityCorrelation,
+} from "../runtime/story-outcome-authority.js"
 
 const DEBUG = process.env.BARO_DEBUG?.includes("memory") ?? false
 import { appendFileSync, mkdirSync } from "fs"
@@ -65,6 +71,7 @@ const EXPLORATION_TOOLS = new Set(["Read", "Grep", "Glob", "Bash", "LSP"])
 /** TTL-based cleanup prevents leaks from timed-out agents. */
 interface PendingCall {
     agentId: string
+    correlation: StoryResultAuthorityCorrelation | null
     tool: string
     args: Record<string, unknown>
     timestamp: number
@@ -81,12 +88,29 @@ export interface MemoryLibrarianOptions {
      * share state across processes.
      */
     sessionPath?: string
+    /** Enables exact-source, active-lease filtering before collective worker
+     * evidence can enter the shared semantic-memory store. */
+    collective?: {
+        runId: string
+        outcomeAuthority: StoryOutcomeAuthority
+    }
 }
 
 export class MemoryLibrarian extends BaseObserver {
-    private readonly opts: Required<MemoryLibrarianOptions>
-    private readonly pending = new Map<string, PendingCall>()
+    private readonly opts: Required<Omit<MemoryLibrarianOptions, "collective">> &
+        Pick<MemoryLibrarianOptions, "collective">
+    /** Call ids are producer-local, not globally unique across parallel
+     * participants. The outer identity map preserves those namespaces. */
+    private readonly pending = new Map<
+        Participant,
+        Map<string, PendingCall>
+    >()
     private readonly inFlight = new Set<string>()
+    private readonly activeLeases = new Map<
+        string,
+        StoryResultAuthorityCorrelation
+    >()
+    private leaseAuthority: Participant | null = null
     private store: MemoryStore | null = null
     private initPromise: Promise<void> | null = null
     private initAttempts = 0
@@ -99,12 +123,26 @@ export class MemoryLibrarian extends BaseObserver {
             minSimilarity: opts.minSimilarity ?? 0.3,
             maxInjectedChars: opts.maxInjectedChars ?? 20000,
             sessionPath: opts.sessionPath ?? '',
+            collective: opts.collective,
+        }
+        if (
+            opts.collective &&
+            opts.collective.outcomeAuthority.runId !== opts.collective.runId
+        ) {
+            throw new Error("MemoryLibrarian collective authority runId mismatch")
         }
         if (this.opts.sessionPath) {
             log(`MemoryLibrarian initialized with sessionPath: ${this.opts.sessionPath}`)
         } else {
             log("MemoryLibrarian initialized (in-memory only, no shared path)")
         }
+    }
+
+    setLeaseAuthority(authority: Participant): void {
+        if (this.leaseAuthority && this.leaseAuthority !== authority) {
+            throw new Error("MemoryLibrarian lease authority is already bound")
+        }
+        this.leaseAuthority = authority
     }
 
     private async ensureStore(): Promise<MemoryStore | null> {
@@ -137,17 +175,19 @@ export class MemoryLibrarian extends BaseObserver {
 
     private pruneStalePending(): void {
         const now = Date.now()
-        for (const [callId, pending] of this.pending) {
-            if (now - pending.timestamp > PENDING_TTL_MS) {
-                this.pending.delete(callId)
+        for (const [source, calls] of this.pending) {
+            for (const [callId, pending] of calls) {
+                if (now - pending.timestamp > PENDING_TTL_MS) {
+                    calls.delete(callId)
+                }
             }
+            if (calls.size === 0) this.pending.delete(source)
         }
     }
 
-    /**
-     * ALWAYS returns the CLI instructions (even when the store is empty) so
-     * agents know they can query mid-flight as other agents store findings.
-     */
+    /** Always returns memory guidance when the store is available. Legacy
+     * agents retain the CLI; collective agents receive only authenticated,
+     * automatically indexed findings and capability-bound sharing guidance. */
     async gatherContext(storyId: string, hints: readonly string[] = []): Promise<string | null> {
         const store = await this.ensureStore()
         if (!store) return null
@@ -162,7 +202,16 @@ export class MemoryLibrarian extends BaseObserver {
             context = await store.gatherContext(storyId, [...hints], this.opts.maxInjectedChars)
         }
 
-        const cachedPaths = await store.getCachedPaths()
+        // Collective workers must not receive a second, unauthenticated
+        // memory transport. Their tool evidence is source/lease checked by
+        // this participant and their explicit findings use the capability-
+        // bound collaboration channel from the main worker prompt.
+        const cachedPaths = this.opts.collective
+            ? []
+            : await store.getCachedPaths()
+        const legacyCliPath = !this.opts.collective && this.opts.sessionPath
+            ? jsonQuotedShellArgument(this.opts.sessionPath)
+            : null
 
         const parts: string[] = []
 
@@ -170,23 +219,36 @@ export class MemoryLibrarian extends BaseObserver {
         parts.push("")
         parts.push("This project uses a shared memory system. Other agents have")
         parts.push("already explored the codebase (or will as they work).")
-        parts.push("Use these commands via Bash to check what's available:")
-        parts.push("")
-        parts.push("\t# Find relevant context from other agents")
-        parts.push("\tnode ~/.baro/bin/baro-memory.mjs query \"JWT authentication\"")
-        parts.push("")
-        parts.push("\t# List files already read by other agents")
-        parts.push("\tnode ~/.baro/bin/baro-memory.mjs cache list")
-        parts.push("")
-        parts.push("\t# Get cached file content (no disk read needed)")
-        parts.push("\tnode ~/.baro/bin/baro-memory.mjs cache get src/auth.ts")
-        parts.push("")
-        parts.push("\t# Store a finding for other agents")
-        parts.push("\tnode ~/.baro/bin/baro-memory.mjs store \"found X\" --tool Read --file src/foo.ts")
-        parts.push("")
-        parts.push("IMPORTANT: Check cached files BEFORE reading from disk.")
-        parts.push("If a file is cached, use `baro-memory cache get` instead of Read.")
-        parts.push("")
+        if (this.opts.collective) {
+            parts.push("Verified exploration-tool evidence is indexed automatically.")
+            parts.push("Do not write to shared memory through a separate transport.")
+            parts.push("Share explicit findings through the lease-capable `agent-collab note`")
+            parts.push("channel described in the main task prompt.")
+            parts.push("")
+        } else if (legacyCliPath) {
+            parts.push("Use these commands via Bash to check what's available:")
+            parts.push("")
+            parts.push("\t# Find relevant context from other agents")
+            parts.push(`\tnode ~/.baro/bin/baro-memory.mjs query "JWT authentication" --path ${legacyCliPath}`)
+            parts.push("")
+            parts.push("\t# List files already read by other agents")
+            parts.push(`\tnode ~/.baro/bin/baro-memory.mjs cache list --path ${legacyCliPath}`)
+            parts.push("")
+            parts.push("\t# Get cached file content (no disk read needed)")
+            parts.push(`\tnode ~/.baro/bin/baro-memory.mjs cache get src/auth.ts --path ${legacyCliPath}`)
+            parts.push("")
+            parts.push("\t# Store a finding for other agents")
+            parts.push(`\tnode ~/.baro/bin/baro-memory.mjs store "found X" --tool Read --file src/foo.ts --path ${legacyCliPath}`)
+            parts.push("")
+            parts.push("IMPORTANT: Check cached files BEFORE reading from disk.")
+            parts.push("If a file is cached, use `baro-memory cache get` instead of Read.")
+            parts.push("")
+        } else {
+            parts.push("Verified exploration-tool evidence is indexed in this process.")
+            parts.push("Cross-process memory CLI access is unavailable because this run")
+            parts.push("has no explicit session-scoped memory path.")
+            parts.push("")
+        }
 
         if (cachedPaths.length > 0) {
             parts.push("### Cached files (already read by other agents):")
@@ -223,12 +285,27 @@ export class MemoryLibrarian extends BaseObserver {
         if (!EXPLORATION_TOOLS.has(item.name)) return
         const agentId = (source as unknown as { agentId?: string }).agentId
         if (typeof agentId !== "string") return
+        const correlation = this.opts.collective
+            ? this.collectiveCorrelation(source, agentId)
+            : null
+        if (this.opts.collective && !correlation) return
 
-        if (this.pending.size > 100) this.pruneStalePending()
+        if (this.pendingCallCount() > 100) this.pruneStalePending()
 
         let args: Record<string, unknown> = {}
         try { args = JSON.parse(item.args) } catch {}
-        this.pending.set(item.callId, { agentId, tool: item.name, args, timestamp: Date.now() })
+        let sourcePending = this.pending.get(source)
+        if (!sourcePending) {
+            sourcePending = new Map()
+            this.pending.set(source, sourcePending)
+        }
+        sourcePending.set(item.callId, {
+            agentId,
+            correlation,
+            tool: item.name,
+            args,
+            timestamp: Date.now(),
+        })
     }
 
     override async onExternalFunctionCallOutput(source: Participant, item: FunctionCallOutputItem): Promise<void> {
@@ -246,9 +323,21 @@ export class MemoryLibrarian extends BaseObserver {
             return // malformed output — skip silently
         }
 
-        const pending = this.pending.get(callId)
+        const pending = this.pending.get(source)?.get(callId)
         if (!pending) return
-        this.pending.delete(callId)
+        if (
+            pending.correlation &&
+            !sameCorrelation(
+                pending.correlation,
+                this.collectiveCorrelation(source, pending.agentId),
+            )
+        ) {
+            // The genuine source completed after its lease was released or
+            // superseded. It must never be replayable into a later generation.
+            this.deletePending(source, callId)
+            return
+        }
+        this.deletePending(source, callId)
 
         const store = await this.ensureStore()
         if (!store) return
@@ -298,7 +387,54 @@ export class MemoryLibrarian extends BaseObserver {
         }
     }
 
-    override async onExternalEvent(_source: Participant, event: SemanticEvent<unknown>): Promise<void> {
+    override async onExternalEvent(source: Participant, event: SemanticEvent<unknown>): Promise<void> {
+        const collective = this.opts.collective
+        if (collective && WorkLeaseGranted.is(event)) {
+            if (
+                source !== this.leaseAuthority ||
+                event.data.runId !== collective.runId
+            ) return
+            const storyId = event.data.request.storyId
+            const current = this.activeLeases.get(storyId)
+            if (
+                current &&
+                (event.data.generation < current.generation ||
+                    (event.data.generation === current.generation &&
+                        event.data.leaseId !== current.leaseId))
+            ) return
+            if (
+                current &&
+                event.data.generation === current.generation &&
+                event.data.leaseId === current.leaseId
+            ) return
+            if (current) this.dropPendingForCorrelation(current)
+            this.activeLeases.set(storyId, {
+                runId: collective.runId,
+                storyId,
+                leaseId: event.data.leaseId,
+                generation: event.data.generation,
+            })
+            this.inFlight.add(storyId)
+            log(`Story ${storyId} started (${this.inFlight.size} active)`)
+            return
+        }
+        if (collective && WorkLeaseReleased.is(event)) {
+            if (
+                source !== this.leaseAuthority ||
+                event.data.runId !== collective.runId
+            ) return
+            const current = this.activeLeases.get(event.data.storyId)
+            if (current?.leaseId !== event.data.leaseId) return
+            this.dropPendingForCorrelation(current)
+            this.activeLeases.delete(event.data.storyId)
+            this.inFlight.delete(event.data.storyId)
+            log(`Story ${event.data.storyId} done (${this.inFlight.size} active)`)
+            if (this.inFlight.size === 0) logStats()
+            return
+        }
+        // Collective lifecycle projection is lease-owned; ambient legacy
+        // StorySpawned/StoryResult payloads are forgeable bus observations.
+        if (collective) return
         if (StorySpawned.is(event)) {
             this.inFlight.add(event.data.storyId)
             log(`Story ${event.data.storyId} started (${this.inFlight.size} active)`)
@@ -313,6 +449,47 @@ export class MemoryLibrarian extends BaseObserver {
         }
     }
 
+    private collectiveCorrelation(
+        source: Participant,
+        storyId: string,
+    ): StoryResultAuthorityCorrelation | null {
+        const collective = this.opts.collective
+        if (!collective) return null
+        const active = this.activeLeases.get(storyId)
+        const authenticated =
+            collective.outcomeAuthority.terminalCorrelationForSource(
+                source,
+                storyId,
+            )
+        return sameCorrelation(active ?? null, authenticated) ? active! : null
+    }
+
+    private dropPendingForCorrelation(
+        correlation: StoryResultAuthorityCorrelation,
+    ): void {
+        for (const [source, calls] of this.pending) {
+            for (const [callId, pending] of calls) {
+                if (sameCorrelation(pending.correlation, correlation)) {
+                    calls.delete(callId)
+                }
+            }
+            if (calls.size === 0) this.pending.delete(source)
+        }
+    }
+
+    private deletePending(source: Participant, callId: string): void {
+        const calls = this.pending.get(source)
+        if (!calls) return
+        calls.delete(callId)
+        if (calls.size === 0) this.pending.delete(source)
+    }
+
+    private pendingCallCount(): number {
+        let count = 0
+        for (const calls of this.pending.values()) count += calls.size
+        return count
+    }
+
     /** Release the underlying store. Call on orchestrator shutdown. */
     async close(): Promise<void> {
         if (this.store) {
@@ -320,4 +497,29 @@ export class MemoryLibrarian extends BaseObserver {
             this.store = null
         }
     }
+}
+
+function sameCorrelation(
+    left: StoryResultAuthorityCorrelation | null,
+    right: StoryResultAuthorityCorrelation | null,
+): boolean {
+    return (
+        left !== null &&
+        right !== null &&
+        left.runId === right.runId &&
+        left.storyId === right.storyId &&
+        left.leaseId === right.leaseId &&
+        left.generation === right.generation
+    )
+}
+
+/** Render one JSON-style double-quoted shell argument. JSON escaping handles
+ * quotes/backslashes; the extra escapes prevent expansion inside Bash double
+ * quotes. Control characters fail closed rather than advertising a command
+ * whose argv could not faithfully represent the configured path. */
+function jsonQuotedShellArgument(value: string): string | null {
+    if (/[\u0000-\u001f\u007f]/u.test(value)) return null
+    return JSON.stringify(value)
+        .replace(/\$/g, "\\$")
+        .replace(/`/g, "\\`")
 }

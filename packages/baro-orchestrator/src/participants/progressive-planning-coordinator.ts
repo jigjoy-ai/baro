@@ -127,6 +127,16 @@ export class ProgressivePlanningCoordinator {
                 policyStories: 0,
                 appliedDecisions: [],
                 planning,
+                ...(prd.runtimeGraph?.protocol
+                    ? {
+                          protocol: {
+                              schemaVersion: 1,
+                              goal: structuredClone(
+                                  prd.runtimeGraph.protocol.goal,
+                              ),
+                          },
+                      }
+                    : {}),
             },
         }
         this.opts.host.commitPrd(initialized)
@@ -344,6 +354,9 @@ export class ProgressivePlanningCoordinator {
                     retries: story.retries,
                     acceptance: [...story.acceptance],
                     tests: [...story.tests],
+                    ...(story.goalInvariantIds
+                        ? { goalInvariantIds: [...story.goalInvariantIds] }
+                        : {}),
                     model: story.model,
                 })),
                 removedStoryIds: [],

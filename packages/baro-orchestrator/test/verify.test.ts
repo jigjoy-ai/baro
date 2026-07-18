@@ -1,5 +1,11 @@
-import { mkdirSync, writeFileSync } from "node:fs"
+import {
+    existsSync,
+    mkdirSync,
+    readFileSync,
+    writeFileSync,
+} from "node:fs"
 import { join } from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
@@ -14,6 +20,50 @@ import { withTempDir } from "./participants/helpers.js"
 // Uses real `npm run <script>` so the gate is exercised end-to-end (no lockfile
 // → npm is the detected package manager). Timeouts are generous, so these run in
 // a couple of seconds each.
+
+async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (!existsSync(path)) {
+        if (Date.now() >= deadline) assert.fail(`fixture did not create ${path}`)
+        await delay(10)
+    }
+}
+
+async function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+        return await Promise.race([
+            promise,
+            new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(
+                    () => reject(new Error(`test operation timed out after ${timeoutMs}ms`)),
+                    timeoutMs,
+                )
+            }),
+        ])
+    } finally {
+        if (timer) clearTimeout(timer)
+    }
+}
+
+function processIsAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0)
+        return true
+    } catch {
+        return false
+    }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs = 2_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (processIsAlive(pid)) {
+        if (Date.now() >= deadline) {
+            assert.fail(`fixture process ${pid} survived verification settlement`)
+        }
+        await delay(10)
+    }
+}
 
 describe("verifyBuild", () => {
     it("returns {ran:true, ok:false} when a test that runs exits non-zero", async () => {
@@ -73,6 +123,72 @@ describe("verifyBuild", () => {
             )
         })
     })
+
+    it(
+        "drains a TERM-resistant inherited-stdio descendant before cancellation settles",
+        { skip: process.platform === "win32" },
+        async () => {
+            await withTempDir("baro-verify-process-tree-", async (dir) => {
+                const descendantStarted = join(dir, "descendant-started")
+                const descendantEscaped = join(dir, "descendant-escaped")
+                const descendantSource = `
+import { writeFileSync } from "node:fs";
+process.on("SIGTERM", () => {});
+writeFileSync(${JSON.stringify(descendantStarted)}, String(process.pid));
+setTimeout(() => {
+    writeFileSync(${JSON.stringify(descendantEscaped)}, "yes");
+    process.exit(0);
+}, 12_000);
+setInterval(() => {}, 10_000);
+`
+                const verifierSource = `
+import { spawn } from "node:child_process";
+process.on("SIGTERM", () => {});
+const descendant = spawn(
+    process.execPath,
+    ["--input-type=module", "-e", ${JSON.stringify(descendantSource)}],
+    { stdio: ["ignore", "inherit", "inherit"] },
+);
+descendant.unref();
+setTimeout(() => process.exit(0), 12_000);
+setInterval(() => {}, 10_000);
+`
+                const controller = new AbortController()
+                const pending = verifyBuild(dir, {
+                    signal: controller.signal,
+                    plan: {
+                        commands: [{
+                            label: "TERM-resistant verification fixture",
+                            tool: process.execPath,
+                            args: ["--input-type=module", "-e", verifierSource],
+                        }],
+                    },
+                })
+
+                await waitForFile(descendantStarted)
+                controller.abort(new Error("cancel verifier fixture"))
+
+                await assert.rejects(
+                    within(pending, 9_000),
+                    (error: Error) => {
+                        assert.equal(error.name, "AbortError")
+                        return true
+                    },
+                )
+
+                const descendantPid = Number(
+                    readFileSync(descendantStarted, "utf8").trim(),
+                )
+                assert.equal(Number.isSafeInteger(descendantPid), true)
+                await waitForProcessExit(descendantPid)
+                assert.equal(
+                    existsSync(descendantEscaped),
+                    false,
+                    "verification settled before its descendant was killed",
+                )
+            })
+        },
+    )
 
     it("runs typecheck and lint as deterministic final gates", async () => {
         await withTempDir("baro-verify-static-gates-", async (dir) => {
@@ -571,7 +687,7 @@ describe("verifyBuild", () => {
             )
             const plan = createVerifyPlan(dir)
 
-            assert.equal(recommendedVerifyTimeoutMs(plan), 11 * 60_000)
+            assert.equal(recommendedVerifyTimeoutMs(plan), 11 * 60_000 + 16_000)
         })
     })
 })

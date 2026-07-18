@@ -1,9 +1,10 @@
 import assert from "node:assert/strict"
-import { writeFileSync } from "node:fs"
+import { existsSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import { RunVerifier } from "../../src/participants/run-verifier.js"
+import { createVerifyPlan } from "../../src/verify.js"
 import {
     RunVerificationCompleted,
     RunVerificationRequested,
@@ -11,19 +12,62 @@ import {
 } from "../../src/semantic-events.js"
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
 
+const BOARD = source("board")
+
 describe("RunVerifier", () => {
-    it("accepts requests and replays only from the bound Board", async () => {
+    it("fails closed before the Board authority is bound", async () => {
         let calls = 0
-        const board = source("board")
         const verifier = new RunVerifier({
-            runId: "run-authority",
+            runId: "run-unbound",
             cwd: "/repo",
             verify: async () => {
                 calls += 1
                 return { ran: true, ok: true, failures: [], commands: [] }
             },
         })
+        const env = joinWithCapture(verifier)
+
+        env.deliverSemanticEvent(
+            source("ambient-board"),
+            RunVerificationRequested.create({
+                runId: "run-unbound",
+                verificationId: "run-unbound:verification:1",
+            }),
+        )
+        await verifier.idle()
+
+        assert.equal(calls, 0)
+        assert.equal(env.events.filter(RunVerificationCompleted.is).length, 0)
+    })
+
+    it("accepts requests and replays only from the bound Board", async () => {
+        let calls = 0
+        const board = BOARD
+        const verifier = new RunVerifier({
+            runId: "run-authority",
+            cwd: "/repo",
+            verify: async () => {
+                calls += 1
+                return {
+                    ran: true,
+                    ok: true,
+                    failures: [],
+                    commands: [
+                        {
+                            command: "npm run test",
+                            status: "passed" as const,
+                            durationMs: 1,
+                        },
+                    ],
+                }
+            },
+        })
         verifier.setRequestAuthority(board)
+        verifier.setRequestAuthority(board)
+        assert.throws(
+            () => verifier.setRequestAuthority(source("other-board")),
+            /already bound/,
+        )
         const env = joinWithCapture(verifier)
         const request = RunVerificationRequested.create({
             runId: "run-authority",
@@ -66,14 +110,15 @@ describe("RunVerifier", () => {
                 }
             },
         })
+        verifier.setRequestAuthority(BOARD)
         const env = joinWithCapture(verifier)
         const request = RunVerificationRequested.create({
             runId: "run-1",
             verificationId: "verify-1",
         })
 
-        env.deliverSemanticEvent(source("board"), request)
-        env.deliverSemanticEvent(source("replay"), request)
+        env.deliverSemanticEvent(BOARD, request)
+        env.deliverSemanticEvent(BOARD, request)
         await verifier.idle()
 
         const completed = env.events.filter(RunVerificationCompleted.is)
@@ -83,35 +128,75 @@ describe("RunVerifier", () => {
         assert.equal(completed[0]?.data.status, "passed")
         assert.equal(completed[0]?.data.commands[0]?.command, "npm run test")
 
-        env.deliverSemanticEvent(source("late-replay"), request)
+        env.deliverSemanticEvent(BOARD, request)
         await verifier.idle()
         assert.equal(calls, 1)
         assert.equal(env.events.filter(RunVerificationCompleted.is).length, 2)
     })
 
-    it("distinguishes an unverified skip from a verified pass", async () => {
+    it("reports no applicable commands as skipped, not passed or failed", async () => {
+        await withTempDir("baro-run-verifier-skip-", async (dir) => {
+            const verifier = new RunVerifier({
+                runId: "run-skip",
+                cwd: dir,
+            })
+            verifier.setRequestAuthority(BOARD)
+            const env = joinWithCapture(verifier)
+            env.deliverSemanticEvent(
+                BOARD,
+                RunVerificationRequested.create({
+                    runId: "run-skip",
+                    verificationId: "verify-skip",
+                }),
+            )
+            await verifier.idle()
+
+            const completed = env.events.find(RunVerificationCompleted.is)
+            assert.equal(completed?.data.status, "skipped")
+            assert.deepEqual(completed?.data.commands, [])
+        })
+    })
+
+    it("reports partial pass plus skipped evidence as incomplete", async () => {
         const verifier = new RunVerifier({
-            runId: "run-skip",
+            runId: "run-partial-skip",
             cwd: "/repo",
             verify: async () => ({
-                ran: false,
+                ran: true,
                 ok: true,
                 failures: [],
-                commands: [],
+                commands: [
+                    {
+                        command: "cargo test",
+                        status: "passed",
+                        durationMs: 10,
+                    },
+                    {
+                        command: "npm run test",
+                        status: "skipped",
+                        durationMs: 1,
+                        tail: "npm is not installed",
+                    },
+                ],
             }),
         })
+        verifier.setRequestAuthority(BOARD)
         const env = joinWithCapture(verifier)
         env.deliverSemanticEvent(
-            source("board"),
+            BOARD,
             RunVerificationRequested.create({
-                runId: "run-skip",
-                verificationId: "verify-skip",
+                runId: "run-partial-skip",
+                verificationId: "verify-partial-skip",
             }),
         )
         await verifier.idle()
 
         const completed = env.events.find(RunVerificationCompleted.is)
         assert.equal(completed?.data.status, "skipped")
+        assert.deepEqual(
+            completed?.data.commands.map(({ status }) => status),
+            ["passed", "skipped"],
+        )
     })
 
     it("runs a test script introduced after the verifier snapshots the repo", async () => {
@@ -125,6 +210,7 @@ describe("RunVerifier", () => {
                 runId: "run-final-plan",
                 cwd: dir,
             })
+            verifier.setRequestAuthority(BOARD)
             const env = joinWithCapture(verifier)
             writeFileSync(
                 pkgPath,
@@ -132,7 +218,7 @@ describe("RunVerifier", () => {
             )
 
             env.deliverSemanticEvent(
-                source("board"),
+                BOARD,
                 RunVerificationRequested.create({
                     runId: "run-final-plan",
                     verificationId: "verify-final-plan",
@@ -152,6 +238,71 @@ describe("RunVerifier", () => {
         })
     })
 
+    it("uses final PRD requirements so runtime additions enter and removals exit", async () => {
+        await withTempDir("baro-run-verifier-authoritative-prd-", async (dir) => {
+            const pkgPath = join(dir, "package.json")
+            const addedMarker = join(dir, "added.marker")
+            const removedMarker = join(dir, "removed.marker")
+            const scripts = {
+                test:
+                    "node -e \"const fs=require('node:fs');const marker=process.argv[1];if(marker)fs.writeFileSync(marker+'.marker','yes')\"",
+            }
+            writeFileSync(
+                pkgPath,
+                JSON.stringify({
+                    name: "v",
+                    packageManager: "npm@10.9.0",
+                    scripts,
+                }),
+            )
+            let finalRequirements = [
+                { storyId: "S-removed", command: "npm test -- removed" },
+            ]
+            const verifier = new RunVerifier({
+                runId: "run-authoritative-prd",
+                cwd: dir,
+                createFinalPlan: (cwd) =>
+                    createVerifyPlan(cwd, {
+                        declaredTests: finalRequirements,
+                    }),
+            })
+            verifier.setRequestAuthority(BOARD)
+            const env = joinWithCapture(verifier)
+
+            // Simulate a runtime replan plus package-manager drift after the
+            // trusted baseline snapshot. Only the final PRD test remains, but
+            // the baseline npm authority must still govern its invocation.
+            finalRequirements = [
+                { storyId: "S-added", command: "yarn run test -- added" },
+            ]
+            writeFileSync(
+                pkgPath,
+                JSON.stringify({
+                    name: "v",
+                    packageManager: "yarn@4.9.2",
+                    scripts,
+                }),
+            )
+            env.deliverSemanticEvent(
+                BOARD,
+                RunVerificationRequested.create({
+                    runId: "run-authoritative-prd",
+                    verificationId: "verify-authoritative-prd",
+                }),
+            )
+            await verifier.idle()
+
+            const completed = env.events.find(RunVerificationCompleted.is)
+            assert.equal(completed?.data.status, "passed")
+            assert.deepEqual(
+                completed?.data.commands.map(({ command }) => command),
+                ["npm run test", "npm run test -- added"],
+            )
+            assert.equal(existsSync(addedMarker), true)
+            assert.equal(existsSync(removedMarker), false)
+        })
+    })
+
     it("turns an unexpected verifier crash into failed evidence", async () => {
         const verifier = new RunVerifier({
             runId: "run-fail",
@@ -160,9 +311,10 @@ describe("RunVerifier", () => {
                 throw new Error("verifier exploded")
             },
         })
+        verifier.setRequestAuthority(BOARD)
         const env = joinWithCapture(verifier)
         env.deliverSemanticEvent(
-            source("board"),
+            BOARD,
             RunVerificationRequested.create({
                 runId: "run-fail",
                 verificationId: "verify-fail",

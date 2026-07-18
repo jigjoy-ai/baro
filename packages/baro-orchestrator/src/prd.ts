@@ -7,11 +7,18 @@ import { randomUUID } from "node:crypto"
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from "fs"
 
 import type {
+    GoalCompletionAttestedData,
     ReplanData,
     ReplanStoryAdd,
     RuntimeReplanAppliedData,
 } from "./semantic-events.js"
 import { runtimeDecisionFingerprintMatches } from "./runtime/runtime-replan-fingerprint.js"
+import {
+    deriveGoalContract,
+    normalizeGoalLedgerProjection,
+    type GoalContract,
+    type GoalLedgerProjection,
+} from "./runtime/goal-contract.js"
 import {
     assertCorrelationId,
     type GoalEnvelope,
@@ -27,6 +34,9 @@ export interface PrdStory {
     retries: number
     acceptance: string[]
     tests: string[]
+    /** Stable GoalContract invariant ids this work item is expected to
+     * provide evidence for. Optional only for pre-governance PRDs. */
+    goalInvariantIds?: string[]
     passes: boolean
     completedAt: string | null
     durationSecs: number | null
@@ -79,6 +89,15 @@ export interface PrdRuntimeGraphState {
     appliedDecisions: PrdRuntimeReplanDecision[]
     /** Present only for the opt-in collective progressive-planning lane. */
     planning?: PrdProgressivePlanningState
+    /** Guardian-owned semantic evidence persisted by the serialized Board. */
+    protocol?: PrdCollectiveProtocolState
+}
+
+export interface PrdCollectiveProtocolState {
+    schemaVersion: 1
+    goal: GoalLedgerProjection
+    /** Last correlated completion decision; cleared whenever the ledger advances. */
+    completion?: GoalCompletionAttestedData
 }
 
 export interface PrdPlanningFragmentDecision {
@@ -161,12 +180,31 @@ export function normalizePrd(input: Partial<PrdFile>, source: string): PrdFile {
             ? input.executionMode
             : undefined
     const conversationMetadata = normalizeConversationMetadata(input, source)
-    const runtimeGraph = normalizeRuntimeGraph(input.runtimeGraph, source)
+    const goalContract = deriveGoalContract(conversationMetadata.goalEnvelope)
+    const runtimeGraph = normalizeRuntimeGraph(
+        input.runtimeGraph,
+        source,
+        goalContract,
+    )
+    const userStories = stories.map((s, i) => normalizeStory(s, i, source))
+    // Pre-governance focused PRDs had a GoalEnvelope but no explicit coverage
+    // map. One story necessarily owns the whole focused goal, so this exact
+    // migration is unambiguous. Multi-story plans fail closed at attestation
+    // instead of guessing which agent owned a global invariant.
+    if (
+        conversationMetadata.goalEnvelope &&
+        userStories.length === 1 &&
+        userStories[0]?.goalInvariantIds === undefined
+    ) {
+        userStories[0].goalInvariantIds = deriveGoalContract(
+            conversationMetadata.goalEnvelope,
+        )!.invariants.map(({ id }) => id)
+    }
     return {
         project,
         branchName,
         description,
-        userStories: stories.map((s, i) => normalizeStory(s, i, source)),
+        userStories,
         ...conversationMetadata,
         decisionDocument,
         executionMode,
@@ -206,10 +244,11 @@ function normalizeConversationMetadata(
 function normalizeRuntimeGraph(
     value: unknown,
     source: string,
+    goalContract: GoalContract | null,
 ): PrdRuntimeGraphState | undefined {
     if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
     const graph = value as Partial<PrdRuntimeGraphState>
-    if (
+    const malformed =
         typeof graph.runId !== "string" ||
         !Number.isSafeInteger(graph.version) ||
         Number(graph.version) < 1 ||
@@ -219,12 +258,24 @@ function normalizeRuntimeGraph(
             (!Number.isSafeInteger(graph.policyStories) ||
                 Number(graph.policyStories) < 0)) ||
         !Array.isArray(graph.appliedDecisions)
-    ) return undefined
-    const validDecisions = graph.appliedDecisions
+    if (malformed) {
+        // A protocol snapshot may contain an open challenge. Silently dropping
+        // it because an outer graph counter was corrupted could turn a resume
+        // green, so protocol-bearing state always fails closed.
+        if (graph.protocol !== undefined) {
+            throw new Error(
+                `PRD at ${source} has malformed runtime graph containing collective protocol state`,
+            )
+        }
+        return undefined
+    }
+    const runId = graph.runId as string
+    const decisions = graph.appliedDecisions as PrdRuntimeReplanDecision[]
+    const validDecisions = decisions
         .filter((decision) =>
             validRuntimeDecision(
                 decision,
-                graph.runId!,
+                runId,
                 Number(graph.version),
             ),
         )
@@ -242,12 +293,18 @@ function normalizeRuntimeGraph(
         .map((decision) => structuredClone(decision))
     const planning = normalizeProgressivePlanning(
         graph.planning,
-        graph.runId,
+        runId,
         Number(graph.version),
         source,
     )
+    const protocol = normalizeCollectiveProtocol(
+        graph.protocol,
+        runId,
+        goalContract,
+        source,
+    )
     return {
-        runId: graph.runId,
+        runId,
         version: Number(graph.version),
         dynamicStories: Number(graph.dynamicStories),
         // Backwards compatible with durable state written before recovery
@@ -255,7 +312,109 @@ function normalizeRuntimeGraph(
         policyStories: Number(graph.policyStories ?? 0),
         appliedDecisions,
         ...(planning ? { planning } : {}),
+        ...(protocol ? { protocol } : {}),
     }
+}
+
+function normalizeCollectiveProtocol(
+    value: unknown,
+    runtimeRunId: string,
+    goalContract: GoalContract | null,
+    source: string,
+): PrdCollectiveProtocolState | undefined {
+    if (value === undefined) return undefined
+    if (!plainRecord(value) || value.schemaVersion !== 1 || !goalContract) {
+        throw new Error(`PRD at ${source} has malformed collective protocol state`)
+    }
+    let goal: GoalLedgerProjection
+    try {
+        goal = normalizeGoalLedgerProjection(value.goal, goalContract)
+    } catch (error) {
+        throw new Error(
+            `PRD at ${source} has malformed collective protocol state: ${messageOf(error)}`,
+        )
+    }
+    const completion = value.completion === undefined
+        ? undefined
+        : normalizeGoalCompletion(
+              value.completion,
+              runtimeRunId,
+              goal.contractId,
+              goal.revision,
+              source,
+          )
+    return {
+        schemaVersion: 1,
+        goal,
+        ...(completion ? { completion } : {}),
+    }
+}
+
+function normalizeGoalCompletion(
+    value: unknown,
+    runtimeRunId: string,
+    contractId: string,
+    goalRevision: number,
+    source: string,
+): GoalCompletionAttestedData {
+    if (!plainRecord(value)) {
+        throw new Error(`PRD at ${source} has malformed goal completion evidence`)
+    }
+    const validStatus =
+        value.status === "satisfied" || value.status === "incomplete"
+    if (
+        value.runId !== runtimeRunId ||
+        !nonBlank(value.checkId) ||
+        value.contractId !== contractId ||
+        value.goalRevision !== goalRevision ||
+        !nonBlank(value.verificationId) ||
+        !validStatus ||
+        !stringArrayValue(value.satisfiedInvariantIds) ||
+        !stringArrayValue(value.openInvariantIds) ||
+        !stringArrayValue(value.rejectedInvariantIds) ||
+        !Array.isArray(value.invariants) ||
+        !nonBlank(value.reason)
+    ) {
+        throw new Error(`PRD at ${source} has malformed goal completion evidence`)
+    }
+    const invariants = value.invariants.map((item) => {
+        if (
+            !plainRecord(item) ||
+            !nonBlank(item.invariantId) ||
+            (item.status !== "satisfied" &&
+                item.status !== "open" &&
+                item.status !== "rejected") ||
+            !stringArrayValue(item.mappedStoryIds) ||
+            !stringArrayValue(item.integratedStoryIds) ||
+            !stringArrayValue(item.independentlyReviewedStoryIds) ||
+            !nonBlank(item.reason)
+        ) {
+            throw new Error(`PRD at ${source} has malformed goal completion evidence`)
+        }
+        return {
+            invariantId: item.invariantId,
+            status: item.status,
+            mappedStoryIds: [...item.mappedStoryIds],
+            integratedStoryIds: [...item.integratedStoryIds],
+            independentlyReviewedStoryIds: [
+                ...item.independentlyReviewedStoryIds,
+            ],
+            reason: item.reason,
+        }
+    })
+    return structuredClone({
+        runId: runtimeRunId,
+        checkId: value.checkId,
+        contractId,
+        goalRevision,
+        verificationId: value.verificationId,
+        status: value.status,
+        satisfiedInvariantIds: [...value.satisfiedInvariantIds],
+        openInvariantIds: [...value.openInvariantIds],
+        rejectedInvariantIds: [...value.rejectedInvariantIds],
+        invariants,
+        reason: value.reason,
+    } as GoalCompletionAttestedData)
 }
 
 function normalizeProgressivePlanning(
@@ -393,6 +552,7 @@ function validStoredRuntimeStory(value: unknown): boolean {
             "retries",
             "acceptance",
             "tests",
+            "goalInvariantIds",
             "model",
         ])
     ) return false
@@ -408,8 +568,15 @@ function validStoredRuntimeStory(value: unknown): boolean {
                 Number(value.retries) <= MAX_STORY_RETRIES)) &&
         (value.acceptance === undefined || stringArrayValue(value.acceptance)) &&
         (value.tests === undefined || stringArrayValue(value.tests)) &&
+        (value.goalInvariantIds === undefined ||
+            (stringArrayValue(value.goalInvariantIds) &&
+                value.goalInvariantIds.every((id) => /^G-[AC][1-9]\d*$/.test(id)))) &&
         (value.model === undefined || nonBlank(value.model))
     )
+}
+
+function messageOf(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
 }
 
 function safeIntegerAtLeast(value: unknown, minimum: number): boolean {
@@ -471,6 +638,17 @@ function normalizeStory(
     const tests = Array.isArray(input.tests)
         ? input.tests.filter((t): t is string => typeof t === "string")
         : []
+    const goalInvariantIds = Array.isArray(input.goalInvariantIds)
+        ? [
+              ...new Set(
+                  input.goalInvariantIds.filter(
+                      (item): item is string =>
+                          typeof item === "string" &&
+                          /^G-[AC][1-9]\d*$/.test(item),
+                  ),
+              ),
+          ]
+        : undefined
     const passes = input.passes === true
     const completedAt =
         typeof input.completedAt === "string" ? input.completedAt : null
@@ -486,6 +664,7 @@ function normalizeStory(
         retries,
         acceptance,
         tests,
+        ...(goalInvariantIds ? { goalInvariantIds } : {}),
         passes,
         completedAt,
         durationSecs,
@@ -583,6 +762,9 @@ export function applyReplanWithEffectiveDelta(
                 retries: Math.min(MAX_STORY_RETRIES, applied.retries ?? 2),
                 acceptance: applied.acceptance ? [...applied.acceptance] : [],
                 tests: applied.tests ? [...applied.tests] : [],
+                ...(applied.goalInvariantIds
+                    ? { goalInvariantIds: [...applied.goalInvariantIds] }
+                    : {}),
                 passes: false,
                 completedAt: null,
                 durationSecs: null,
@@ -627,6 +809,9 @@ function cloneReplanStoryAdd(story: ReplanStoryAdd): ReplanStoryAdd {
         dependsOn: [...story.dependsOn],
         ...(story.acceptance ? { acceptance: [...story.acceptance] } : {}),
         ...(story.tests ? { tests: [...story.tests] } : {}),
+        ...(story.goalInvariantIds
+            ? { goalInvariantIds: [...story.goalInvariantIds] }
+            : {}),
     }
 }
 
@@ -662,6 +847,9 @@ export function buildDefaultStoryPrompt(story: PrdStory): string {
         "",
         "SCOPE DISCIPLINE (read this twice):",
         "- Do ONLY what this story's description and acceptance criteria require. Nothing else.",
+        "- Local scope never overrides a GLOBAL GOAL CONTRACT included above. If this",
+        "  story cannot honestly provide its assigned global evidence, use the collective",
+        "  collaboration/replan path to add or reshape work; do not silently ignore it.",
         "- Do NOT refactor adjacent code, rename neighbouring symbols, tidy unrelated files,",
         "  reformat imports, or fix issues you happen to notice along the way. Those are",
         "  separate stories the user did not ask for.",

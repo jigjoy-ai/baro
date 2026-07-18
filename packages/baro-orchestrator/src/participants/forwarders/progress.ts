@@ -10,6 +10,9 @@ import {
     RuntimeReplanApplied,
     RuntimeReplanRejected,
     StoryMerged,
+    StoryQualityCompleted,
+    WorkLeaseGranted,
+    WorkLeaseReleased,
     type ConductorStateData,
     type CritiqueData,
     type ReplanData,
@@ -17,6 +20,7 @@ import {
     type RuntimeReplanRejectedData,
 } from "../../semantic-events.js"
 import { emit } from "../../tui-protocol.js"
+import { ActiveLeaseRegistry } from "../../runtime/active-lease-registry.js"
 
 /**
  * Mirrors Conductor lifecycle as a `progress` BaroEvent — the Rust TUI
@@ -26,11 +30,45 @@ export class ProgressForwarder extends BaseObserver {
     private legacyReplanAuthority: Participant | null = null
     private runtimeReplanAuthority: Participant | null = null
     private repositoryAuthority: Participant | null = null
+    private critiqueAuthority: Participant | null = null
+    private collectiveAuthorities: Readonly<CollectiveProgressAuthorities> | null = null
+    private readonly leases = new ActiveLeaseRegistry()
     private readonly seenRuntimeDecisions = new Set<string>()
+    private readonly seenQualityEvaluations = new Set<string>()
+    private latestRuntimeGraphVersion = 0
     private totalStories: number | null = null
     private knownStories: Set<string> | null = null
     private readonly completedStories = new Set<string>()
     private requireMergedCompletion = false
+
+    constructor(private readonly collectiveFailClosed = false) {
+        super()
+    }
+
+    sealCollectiveAuthorities(
+        authorities: CollectiveProgressAuthorities,
+    ): void {
+        if (this.collectiveAuthorities) {
+            throw new Error(
+                "progress forwarder collective authorities are already sealed",
+            )
+        }
+        if (
+            this.runtimeReplanAuthority &&
+            this.runtimeReplanAuthority !== authorities.board
+        ) {
+            throw new Error("progress forwarder Board authority mismatch")
+        }
+        if (
+            this.repositoryAuthority &&
+            this.repositoryAuthority !== authorities.repository
+        ) {
+            throw new Error("progress forwarder repository authority mismatch")
+        }
+        this.runtimeReplanAuthority = authorities.board
+        this.repositoryAuthority = authorities.repository
+        this.collectiveAuthorities = Object.freeze({ ...authorities })
+    }
 
     setLegacyReplanAuthority(authority: Participant): void {
         if (
@@ -65,10 +103,38 @@ export class ProgressForwarder extends BaseObserver {
         this.repositoryAuthority = authority
     }
 
+    setCritiqueAuthority(authority: Participant): void {
+        if (this.critiqueAuthority && this.critiqueAuthority !== authority) {
+            throw new Error(
+                "Progress forwarder critique authority is already bound",
+            )
+        }
+        this.critiqueAuthority = authority
+    }
+
     override async onExternalEvent(
         source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
+        if (this.collectiveFailClosed && !this.collectiveAuthorities) return
+        if (WorkLeaseGranted.is(event) || WorkLeaseReleased.is(event)) {
+            const authorities = this.collectiveAuthorities
+            if (
+                !authorities ||
+                source !== authorities.broker ||
+                event.data.runId !== authorities.runId
+            ) return
+            if (
+                WorkLeaseReleased.is(event) &&
+                !this.leases.matchesLease(
+                    event.data.storyId,
+                    event.data.runId,
+                    event.data.leaseId,
+                )
+            ) return
+            this.leases.observe(event, authorities.runId)
+            return
+        }
         if (RunStarted.is(event)) {
             const expectedAuthority = event.data.coordinationMode === "collective"
                 ? this.runtimeReplanAuthority
@@ -89,6 +155,17 @@ export class ProgressForwarder extends BaseObserver {
         }
         if (StoryMerged.is(event)) {
             if (source !== this.repositoryAuthority) return
+            if (
+                this.isCollective() &&
+                (!this.collectiveAuthorities ||
+                    event.data.runId !== this.collectiveAuthorities.runId ||
+                    !event.data.leaseId ||
+                    !this.leases.matchesLease(
+                        event.data.storyId,
+                        this.collectiveAuthorities.runId,
+                        event.data.leaseId,
+                    ))
+            ) return
             this.completeStory(event.data.storyId)
             return
         }
@@ -124,9 +201,12 @@ export class ProgressForwarder extends BaseObserver {
                 source !== this.runtimeReplanAuthority ||
                 this.seenRuntimeDecisions.has(event.data.proposalId) ||
                 (event.data.currentGraphVersion !== undefined &&
-                    event.data.graphVersion < event.data.currentGraphVersion)
+                    event.data.graphVersion < event.data.currentGraphVersion) ||
+                event.data.graphVersion <= this.latestRuntimeGraphVersion
             ) return
             this.seenRuntimeDecisions.add(event.data.proposalId)
+            this.latestRuntimeGraphVersion =
+                event.data.currentGraphVersion ?? event.data.graphVersion
             this.handleRuntimeReplanApplied(event.data)
             return
         }
@@ -140,7 +220,49 @@ export class ProgressForwarder extends BaseObserver {
             return
         }
         if (Critique.is(event)) {
+            if (this.isCollective()) {
+                // Collective presentation uses AcceptanceGate's correlated
+                // StoryQualityCompleted projection below. Raw Critique cannot
+                // prove which run/lease/generation it describes.
+                return
+            } else if (
+                this.critiqueAuthority &&
+                source !== this.critiqueAuthority
+            ) return
             this.handleCritique(event.data)
+            return
+        }
+        if (StoryQualityCompleted.is(event)) {
+            const authorities = this.collectiveAuthorities
+            if (
+                !authorities?.quality ||
+                source !== authorities.quality ||
+                event.data.runId !== authorities.runId ||
+                !this.leases.matchesLeaseGeneration(
+                    event.data.storyId,
+                    authorities.runId,
+                    event.data.leaseId,
+                    event.data.generation,
+                ) ||
+                this.seenQualityEvaluations.has(event.data.evaluationId)
+            ) return
+            this.seenQualityEvaluations.add(event.data.evaluationId)
+            if (event.data.critique) {
+                this.handleCritique({
+                    agentId: event.data.storyId,
+                    ...event.data.critique,
+                })
+            } else {
+                emit({
+                    type: "activity",
+                    id: event.data.storyId,
+                    kind: "verdict",
+                    ...(event.data.status === "inconclusive"
+                        ? {}
+                        : { ok: event.data.status === "passed" }),
+                    text: event.data.reason,
+                })
+            }
             return
         }
     }
@@ -268,4 +390,16 @@ export class ProgressForwarder extends BaseObserver {
                     : Math.round((completed / this.totalStories) * 100),
         })
     }
+
+    private isCollective(): boolean {
+        return this.collectiveFailClosed || this.collectiveAuthorities !== null
+    }
+}
+
+export interface CollectiveProgressAuthorities {
+    runId: string
+    board: Participant
+    broker: Participant
+    repository: Participant
+    quality?: Participant
 }

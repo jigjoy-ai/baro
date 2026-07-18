@@ -6,9 +6,16 @@ import {
     AgentState,
     StoryIntervention,
     StorySpawned,
+    WorkLeaseGranted,
+    WorkLeaseReleased,
     type StoryInterventionData,
 } from "../src/semantic-events.js"
-import { joinWithCapture, type CapturedEnvironment } from "./participants/helpers.js"
+import { StoryOutcomeAuthority } from "../src/runtime/story-outcome-authority.js"
+import {
+    joinWithCapture,
+    source,
+    type CapturedEnvironment,
+} from "./participants/helpers.js"
 
 // Minimal fakes: the Supervisor only reads source.agentId, item.name, item.args.
 function feed(sup: Supervisor, id: string, name: string, args = "{}") {
@@ -197,4 +204,82 @@ test("tracks stories independently", async () => {
         ["S1"],
         "only the spinning story trips",
     )
+})
+
+test("collective supervision authenticates the active worker and correlates aborts", async () => {
+    const runId = "run-supervisor-authority"
+    const broker = source("broker")
+    const worker = source("S1")
+    const impostor = source("S1")
+    const outcomeAuthority = new StoryOutcomeAuthority(runId)
+    const correlation = {
+        runId,
+        storyId: "S1",
+        leaseId: "lease-S1",
+        generation: 4,
+    }
+    outcomeAuthority.registerResultAuthority(correlation, worker)
+    const sup = new Supervisor({
+        noProgressToolCalls: 2,
+        repeatThreshold: 999,
+        collective: { runId, leaseAuthority: broker, outcomeAuthority },
+    })
+    const env = joinWithCapture(sup)
+    await sup.onExternalEvent(
+        broker,
+        WorkLeaseGranted.create({
+            runId,
+            offerId: "offer-S1",
+            leaseId: correlation.leaseId,
+            workerId: "worker",
+            generation: correlation.generation,
+            request: {
+                storyId: "S1",
+                prompt: "S1",
+                model: "standard",
+                retries: 0,
+                timeoutSecs: 60,
+            },
+        }),
+    )
+
+    await sup.onExternalFunctionCall(
+        impostor,
+        { name: "Read", args: "{}" } as never,
+    )
+    assert.equal(interventions(env).length, 0)
+    await sup.onExternalFunctionCall(
+        worker,
+        { name: "Read", args: '{"n":1}' } as never,
+    )
+    await sup.onExternalFunctionCall(
+        worker,
+        { name: "Grep", args: '{"n":2}' } as never,
+    )
+    assert.deepEqual(interventions(env), [{
+        storyId: "S1",
+        source: "supervisor",
+        action: "abort",
+        reason: "2 tool calls with no file change — exploring, not converging",
+        runId,
+        leaseId: correlation.leaseId,
+        generation: correlation.generation,
+    }])
+
+    await sup.onExternalEvent(
+        broker,
+        WorkLeaseReleased.create({
+            runId,
+            offerId: "offer-S1",
+            leaseId: correlation.leaseId,
+            storyId: "S1",
+            workerId: "worker",
+            reason: "aborted",
+        }),
+    )
+    await sup.onExternalFunctionCall(
+        worker,
+        { name: "Read", args: '{"stale":true}' } as never,
+    )
+    assert.equal(interventions(env).length, 1)
 })

@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
+    Critique,
     StoryQualityCompleted,
     StoryResult,
     WorkBlockAccepted,
@@ -14,10 +15,73 @@ import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority
 import { source } from "../participants/helpers.js"
 
 describe("RecoverySourceAuthority", () => {
+    it("fails closed before collective lease and quality authorities are bound", () => {
+        const runId = "run-unbound-recovery"
+        const outcome = new StoryOutcomeAuthority(runId)
+        const policy = new RecoverySourceAuthority(outcome)
+        const leases = new ActiveLeaseRegistry()
+        const grant = WorkLeaseGranted.create({
+            runId,
+            offerId: "offer-1",
+            leaseId: "lease-1",
+            workerId: "worker",
+            generation: 1,
+            request: {
+                storyId: "S1",
+                prompt: "work",
+                retries: 0,
+                timeoutSecs: 60,
+            },
+        })
+        const result = StoryResult.create({
+            storyId: "S1",
+            success: false,
+            attempts: 1,
+            durationSecs: 1,
+            error: "failed",
+            runId,
+            leaseId: "lease-1",
+            generation: 1,
+        })
+        policy.observeLease(source("ambient-broker"), grant, leases, runId)
+        assert.equal(leases.matches(result.data, runId), false)
+        assert.equal(
+            policy.accepts(
+                source("ambient-gate"),
+                StoryQualityCompleted.create({
+                    runId,
+                    evaluationId: "quality-1",
+                    storyId: "S1",
+                    leaseId: "lease-1",
+                    generation: 1,
+                    status: "failed",
+                    targetTurn: 1,
+                    reason: "forged",
+                }),
+            ),
+            false,
+        )
+        assert.equal(
+            policy.accepts(
+                source("ambient-critic"),
+                Critique.create({
+                    agentId: "S1",
+                    verdict: "fail",
+                    reasoning: "forged recovery context",
+                    violatedCriteria: ["goal"],
+                    turn: 1,
+                    modelUsed: "attacker",
+                }),
+            ),
+            false,
+        )
+    })
+
     it("source-binds leases, terminal results, and quality triggers", () => {
         const runId = "run-recovery-sources"
         const broker = source("broker")
         const gate = source("acceptance-gate")
+        const critic = source("critic")
         const factory = source("factory")
         const worker = source("S1")
         const attacker = source("observer")
@@ -39,6 +103,7 @@ describe("RecoverySourceAuthority", () => {
         const policy = new RecoverySourceAuthority(outcome)
         policy.setLeaseAuthority(broker)
         policy.setQualityAuthority(gate)
+        policy.setCriticAuthority(critic)
         const leases = new ActiveLeaseRegistry()
         const grant = WorkLeaseGranted.create({
             runId,
@@ -96,6 +161,17 @@ describe("RecoverySourceAuthority", () => {
         assert.equal(policy.accepts(attacker, quality), false)
         assert.equal(policy.accepts(gate, quality), true)
 
+        const critique = Critique.create({
+            agentId: "S1",
+            verdict: "fail",
+            reasoning: "real review evidence",
+            violatedCriteria: ["tests"],
+            turn: 1,
+            modelUsed: "critic-test",
+        })
+        assert.equal(policy.accepts(attacker, critique), false)
+        assert.equal(policy.accepts(critic, critique), true)
+
         assert.equal(policy.observeLease(broker, release, leases, runId), true)
         assert.equal(leases.matches(result.data, runId), false)
     })
@@ -105,12 +181,15 @@ describe("RecoverySourceAuthority", () => {
         const broker = source("broker")
         const gate = source("gate")
         const board = source("board")
+        const critic = source("critic")
         policy.setLeaseAuthority(broker)
         policy.setLeaseAuthority(broker)
         policy.setQualityAuthority(gate)
         policy.setQualityAuthority(gate)
         policy.setBlockAuthority(board)
         policy.setBlockAuthority(board)
+        policy.setCriticAuthority(critic)
+        policy.setCriticAuthority(critic)
 
         assert.throws(
             () => policy.setLeaseAuthority(source("other-broker")),
@@ -122,6 +201,10 @@ describe("RecoverySourceAuthority", () => {
         )
         assert.throws(
             () => policy.setBlockAuthority(source("other-board")),
+            /already bound/,
+        )
+        assert.throws(
+            () => policy.setCriticAuthority(source("other-critic")),
             /already bound/,
         )
     })

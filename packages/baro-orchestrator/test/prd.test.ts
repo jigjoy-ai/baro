@@ -14,6 +14,10 @@ import {
     type PrdStory,
 } from "../src/prd.js"
 import { runtimeAppliedProposalFingerprint } from "../src/runtime/runtime-replan-fingerprint.js"
+import {
+    deriveGoalContract,
+    GoalInvariantLedger,
+} from "../src/runtime/goal-contract.js"
 import type { RuntimeReplanAppliedData } from "../src/semantic-events.js"
 import { withTempDir } from "./participants/helpers.js"
 
@@ -314,6 +318,139 @@ describe("normalizePrd", () => {
                 (decision) => decision.applied.proposalId,
             ),
             ["unique"],
+        )
+    })
+
+    it("validates a contract-bound durable goal projection and rejects mismatch", () => {
+        const goalEnvelope = {
+            objective: "Keep cancellation lossless.",
+            constraints: ["Preserve the public API."],
+            acceptanceCriteria: ["All provider paths abort before returning."],
+            nonGoals: [],
+            assumptions: [],
+        }
+        const contract = deriveGoalContract(goalEnvelope)!
+        const ledger = new GoalInvariantLedger(contract, [{
+            storyId: "S1",
+            invariantIds: contract.invariants.map(({ id }) => id),
+        }])
+        ledger.recordQuality({
+            storyId: "S1",
+            leaseId: "lease-S1",
+            evaluationId: "quality-S1",
+            status: "passed",
+            independentlyPassed: true,
+        })
+        ledger.recordIntegration({ storyId: "S1", leaseId: "lease-S1" })
+        const projection = ledger.snapshot(3)
+        const normalized = normalizePrd(
+            {
+                goalEnvelope,
+                userStories: [story({
+                    goalInvariantIds: contract.invariants.map(({ id }) => id),
+                })],
+                runtimeGraph: {
+                    runId: "run-goal-protocol",
+                    version: 1,
+                    dynamicStories: 0,
+                    policyStories: 0,
+                    appliedDecisions: [],
+                    protocol: {
+                        schemaVersion: 1,
+                        goal: projection,
+                    },
+                },
+            },
+            "goal-protocol.json",
+        )
+        assert.deepEqual(normalized.runtimeGraph?.protocol?.goal, projection)
+        assert.notEqual(normalized.runtimeGraph?.protocol?.goal, projection)
+
+        const completion = {
+            runId: "run-goal-protocol",
+            checkId: "check-goal-protocol",
+            contractId: contract.contractId,
+            goalRevision: projection.revision,
+            verificationId: "verify-goal-protocol",
+            status: "satisfied" as const,
+            satisfiedInvariantIds: contract.invariants.map(({ id }) => id),
+            openInvariantIds: [],
+            rejectedInvariantIds: [],
+            invariants: contract.invariants.map(({ id }) => ({
+                invariantId: id,
+                status: "satisfied" as const,
+                mappedStoryIds: ["S1"],
+                integratedStoryIds: ["S1"],
+                independentlyReviewedStoryIds: ["S1"],
+                reason: "mapped evidence is independently reviewed",
+            })),
+            reason: "all goal invariants are satisfied",
+        }
+        const withCompletion = normalizePrd(
+            {
+                ...normalized,
+                runtimeGraph: {
+                    ...normalized.runtimeGraph!,
+                    protocol: {
+                        schemaVersion: 1,
+                        goal: projection,
+                        completion,
+                    },
+                },
+            },
+            "goal-protocol-completion.json",
+        )
+        assert.equal(
+            withCompletion.runtimeGraph?.protocol?.completion?.goalRevision,
+            projection.revision,
+        )
+        assert.throws(
+            () => normalizePrd(
+                {
+                    ...withCompletion,
+                    runtimeGraph: {
+                        ...withCompletion.runtimeGraph!,
+                        protocol: {
+                            ...withCompletion.runtimeGraph!.protocol!,
+                            completion: {
+                                ...completion,
+                                goalRevision: projection.revision - 1,
+                            },
+                        },
+                    },
+                },
+                "stale-goal-completion.json",
+            ),
+            /malformed goal completion evidence/u,
+        )
+
+        assert.throws(
+            () => normalizePrd(
+                {
+                    ...normalized,
+                    runtimeGraph: {
+                        ...normalized.runtimeGraph!,
+                        version: 0,
+                    },
+                },
+                "corrupt-protocol-graph.json",
+            ),
+            /malformed runtime graph containing collective protocol state/u,
+        )
+
+        const otherEnvelope = {
+            ...goalEnvelope,
+            acceptanceCriteria: ["A different contract must not reuse evidence."],
+        }
+        assert.throws(
+            () => normalizePrd(
+                {
+                    ...normalized,
+                    goalEnvelope: otherEnvelope,
+                },
+                "mismatched-goal-protocol.json",
+            ),
+            /contract does not match GoalEnvelope/u,
         )
     })
 })

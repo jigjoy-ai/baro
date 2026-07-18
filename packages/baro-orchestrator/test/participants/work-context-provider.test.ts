@@ -10,6 +10,53 @@ import {
 import { joinWithCapture, source } from "./helpers.js"
 
 describe("WorkContextProvider", () => {
+    it("fails closed before request and collaboration authorities are bound", async () => {
+        const provider = new WorkContextProvider("run-unbound", null)
+        const env = joinWithCapture(provider)
+        env.deliverSemanticEvent(
+            source("ambient-bridge"),
+            CollaborationNote.create({
+                runId: "run-unbound",
+                sourceAgentId: "forged",
+                text: "poison launch context",
+            }),
+        )
+        env.deliverSemanticEvent(
+            source("ambient-board"),
+            WorkContextRequested.create({
+                runId: "run-unbound",
+                requestId: "unbound-request",
+                storyId: "S1",
+                hints: [],
+            }),
+        )
+        await provider.idle()
+
+        assert.equal(env.events.filter(WorkContextProvided.is).length, 0)
+
+        const board = source("board")
+        const bridge = source("bridge")
+        provider.setRequestAuthority(board)
+        provider.setCollaborationAuthority(bridge)
+        env.deliverSemanticEvent(
+            board,
+            WorkContextRequested.create({
+                runId: "run-unbound",
+                requestId: "bound-request",
+                storyId: "S1",
+                hints: [],
+            }),
+        )
+        await provider.idle()
+
+        const result = env.events.find(
+            (event) =>
+                WorkContextProvided.is(event) &&
+                event.data.requestId === "bound-request",
+        )
+        assert.equal(result?.data.context, null)
+    })
+
     it("accepts context requests only from the bound Board", async () => {
         const calls: string[] = []
         const board = source("board")
@@ -47,10 +94,12 @@ describe("WorkContextProvider", () => {
                 return "context from a peer"
             },
         })
+        const board = source("board")
+        provider.setRequestAuthority(board)
         const env = joinWithCapture(provider)
 
         env.deliverSemanticEvent(
-            source("board"),
+            board,
             WorkContextRequested.create({
                 runId: "run-context",
                 requestId: "context-1",
@@ -134,10 +183,12 @@ describe("WorkContextProvider", () => {
             { gatherContext: () => new Promise(() => {}) },
             5,
         )
+        const board = source("board")
+        provider.setRequestAuthority(board)
         const env = joinWithCapture(provider)
 
         env.deliverSemanticEvent(
-            source("board"),
+            board,
             WorkContextRequested.create({
                 runId: "run-timeout",
                 requestId: "context-timeout",

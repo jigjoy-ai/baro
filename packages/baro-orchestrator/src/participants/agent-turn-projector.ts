@@ -141,7 +141,7 @@ export class AgentTurnProjector extends BaseObserver {
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         if (WorkLeaseGranted.is(event)) {
-            if (this.leaseAuthority && source !== this.leaseAuthority) return
+            if (!this.acceptsLeaseSource(source)) return
             if (
                 this.opts.outcomeAuthority &&
                 event.data.runId !== this.opts.outcomeAuthority.runId
@@ -157,7 +157,7 @@ export class AgentTurnProjector extends BaseObserver {
             return
         }
         if (WorkLeaseReleased.is(event)) {
-            if (this.leaseAuthority && source !== this.leaseAuthority) return
+            if (!this.acceptsLeaseSource(source)) return
             const active = this.activeLeases.get(event.data.storyId)
             if (
                 active?.runId === event.data.runId &&
@@ -172,6 +172,20 @@ export class AgentTurnProjector extends BaseObserver {
             return
         }
         if (StoryRouted.is(event)) {
+            if (this.opts.outcomeAuthority) {
+                const active = this.activeLeases.get(event.data.storyId)
+                if (
+                    !active ||
+                    event.data.runId !== active.runId ||
+                    event.data.leaseId !== active.leaseId ||
+                    event.data.generation !== active.generation ||
+                    !this.opts.outcomeAuthority.matchesSpawnAuthority(source, {
+                        runId: active.runId,
+                        storyId: event.data.storyId,
+                        leaseId: active.leaseId,
+                    })
+                ) return
+            }
             this.backends.set(event.data.storyId, event.data.backend)
             return
         }
@@ -212,6 +226,12 @@ export class AgentTurnProjector extends BaseObserver {
     private acceptsNativeSource(source: Participant, agentId: string): boolean {
         return this.opts.outcomeAuthority === undefined ||
             this.opts.outcomeAuthority.matchesTerminalTurnSource(source, agentId)
+    }
+
+    private acceptsLeaseSource(source: Participant): boolean {
+        return this.opts.outcomeAuthority
+            ? this.leaseAuthority !== null && source === this.leaseAuthority
+            : this.leaseAuthority === null || source === this.leaseAuthority
     }
 
     private rememberNativeCandidate(

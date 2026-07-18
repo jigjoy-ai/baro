@@ -6,12 +6,14 @@
  * Claude side — `claude --print` ships its own Read/Grep/Glob/Bash.
  */
 
-import { execFile, execFileSync } from "child_process"
+import { execFileSync } from "child_process"
 import * as fs from "fs"
 import * as os from "os"
 import * as path from "path"
 
 import { type Tool } from "@mozaik-ai/core"
+
+import { execFileCli } from "../exec-file-cli.js"
 
 const IGNORE = new Set([
     "node_modules",
@@ -41,6 +43,9 @@ const MAX_GLOB_VISITS = 50_000
 const MAX_GLOB_RESULTS = 200
 const MAX_GLOB_MATCH_WORK = 16_000_000
 const MAX_BASH_OUTPUT_BYTES = 8_000
+const DEFAULT_BASH_TIMEOUT_MS = 300_000
+const GIT_DISCOVERY_TIMEOUT_MS = 10_000
+const GIT_DISCOVERY_MAX_BUFFER = 1024 * 1024
 
 type GlobToken =
     | Readonly<{ kind: "literal"; value: string }>
@@ -60,12 +65,14 @@ export interface CodebaseToolOptions {
     includeBash?: boolean
     /**
      * Exact manager-owned transport used by collective StoryAgents. The shell
-     * guard recognizes it only as `node <commandPath> ... --session
-     * <sessionDir>`; these paths do not become generally trusted operands.
+     * guard recognizes only the helper executable. The loopback endpoint and
+     * lease token are data arguments; no manager-private session path or
+     * writable transport directory is exposed to the worker.
      */
     collaboration?: Readonly<{
         commandPath: string
-        sessionDir: string
+        endpoint: string
+        token: string
     }>
 }
 
@@ -547,7 +554,7 @@ function bashTool(cwd: string, options: CodebaseToolOptions): SignalAwareTool {
     }
 }
 
-function runBash(
+async function runBash(
     cwd: string,
     command: string,
     options: CodebaseToolOptions,
@@ -562,53 +569,40 @@ function runBash(
     }
 
     const sandbox = prepareShellSandbox(cwd, command, access)
-
-    return new Promise((resolve) => {
-        const finish = (value: string): void => {
-            sandbox.cleanup()
-            resolve(value)
+    const configuredTimeout = Number(process.env.BARO_BASH_TIMEOUT_MS)
+    const timeout = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+        ? configuredTimeout
+        : DEFAULT_BASH_TIMEOUT_MS
+    try {
+        const { stdout } = await execFileCli(
+            sandbox.executable,
+            sandbox.args,
+            {
+                cwd,
+                env: sandbox.env,
+                maxBuffer: 4 * 1024 * 1024,
+                // Real builds/test suites take minutes; 30s was far too short.
+                timeout,
+                signal,
+            },
+        )
+        return limitBashOutput(stdout, false) || "(empty output)"
+    } catch (error) {
+        const failure = error as Error & {
+            code?: string | number | null
+            stderr?: string
         }
-        try {
-            const child = execFile(
-                sandbox.executable,
-                sandbox.args,
-                {
-                    cwd,
-                    encoding: "utf-8",
-                    maxBuffer: 4 * 1024 * 1024,
-                    env: sandbox.env,
-                    // Real builds/test suites take minutes; 30s was far too short.
-                    timeout:
-                        Number(process.env.BARO_BASH_TIMEOUT_MS) || 300_000,
-                    ...(signal ? { signal } : {}),
-                },
-                (error, stdout, stderr) => {
-                    if (error) {
-                        const status =
-                            typeof error.code === "number" ? error.code : "?"
-                        const detail = limitBashOutput(
-                            stderr || error.message || "unknown error",
-                            true,
-                        )
-                        finish(
-                            `bash exited with status ${status}: ` +
-                                detail,
-                        )
-                        return
-                    }
-                    finish(limitBashOutput(stdout, false) || "(empty output)")
-                },
-            )
-            // Match the old execSync({ stdio: ["ignore", ...] }) behavior:
-            // commands that read stdin must see EOF instead of hanging.
-            child.stdin?.end()
-        } catch (error) {
-            finish(
-                `bash exited with status ?: ` +
-                    ((error as Error)?.message ?? String(error)),
-            )
-        }
-    })
+        const status = typeof failure.code === "number" ? failure.code : "?"
+        const detail = limitBashOutput(
+            failure.stderr || failure.message || "unknown error",
+            true,
+        )
+        return `bash exited with status ${status}: ${detail}`
+    } finally {
+        // execFileCli rejects only after its ManagedProcessTree has drained, so
+        // no descendant can still be using the per-command Seatbelt scratch.
+        sandbox.cleanup()
+    }
 }
 
 interface PreparedShellSandbox {
@@ -621,9 +615,6 @@ interface PreparedShellSandbox {
 interface CollaborationShellAccess {
     commandPath: string
     commandReal: string
-    sessionDir: string
-    sessionReal: string
-    outboxReal: string
 }
 
 interface ShellAccessContext {
@@ -653,22 +644,26 @@ function resolveCollaborationShellAccess(
     if (!collaboration) return null
     try {
         const commandPath = path.resolve(collaboration.commandPath)
-        const sessionDir = path.resolve(collaboration.sessionDir)
         const commandStat = fs.statSync(commandPath)
-        const sessionStat = fs.statSync(sessionDir)
-        if (!commandStat.isFile() || !sessionStat.isDirectory()) return null
-
-        const outbox = path.join(sessionDir, "outbox")
-        if (!fs.statSync(outbox).isDirectory()) return null
+        if (!commandStat.isFile()) return null
+        const endpoint = new URL(collaboration.endpoint)
+        if (
+            endpoint.protocol !== "http:" ||
+            endpoint.hostname !== "127.0.0.1" ||
+            endpoint.username ||
+            endpoint.password ||
+            endpoint.pathname !== "/" ||
+            endpoint.search ||
+            endpoint.hash ||
+            !/^\d+$/u.test(endpoint.port) ||
+            !/^[A-Za-z0-9_-]{32,256}$/u.test(collaboration.token)
+        ) return null
         return {
             commandPath,
             commandReal: fs.realpathSync.native(commandPath),
-            sessionDir,
-            sessionReal: fs.realpathSync.native(sessionDir),
-            outboxReal: fs.realpathSync.native(outbox),
         }
     } catch {
-        // A missing/replaced helper or inactive session fails closed.
+        // A missing/replaced helper or malformed capability fails closed.
         return null
     }
 }
@@ -676,7 +671,8 @@ function resolveCollaborationShellAccess(
 /**
  * On macOS, run the shell under Seatbelt with writes confined to the current
  * worktree, a per-command scratch directory, narrowly required Git metadata,
- * Cargo's shared download cache, and the collective collaboration outbox.
+ * and Cargo's shared download cache. Collaboration is loopback HTTP and needs
+ * no filesystem write exception.
  * Manager-owned dependency symlink targets remain readable but are deliberately
  * omitted from the write allow-list. Other platforms retain the portable
  * command guard above until they gain an equivalent process sandbox.
@@ -778,7 +774,6 @@ function sandboxWritablePaths(
     // WorktreeManager-owned dependency links are read-only from StoryAgents.
     // Seatbelt resolves a write through the lexical in-worktree symlink to its
     // external real target, which is intentionally absent from this allow-list.
-    if (access.collaboration) writable.add(access.collaboration.outboxReal)
     for (const entry of cargoCachePaths()) writable.add(entry)
     return [...writable]
 }
@@ -793,6 +788,8 @@ function gitSandboxPaths(cwd: string): {
                 cwd,
                 encoding: "utf8",
                 stdio: ["ignore", "pipe", "ignore"],
+                timeout: GIT_DISCOVERY_TIMEOUT_MS,
+                maxBuffer: GIT_DISCOVERY_MAX_BUFFER,
             }).trim(),
         )
         const commonRaw = execFileSync(
@@ -802,6 +799,8 @@ function gitSandboxPaths(cwd: string): {
                 cwd,
                 encoding: "utf8",
                 stdio: ["ignore", "pipe", "ignore"],
+                timeout: GIT_DISCOVERY_TIMEOUT_MS,
+                maxBuffer: GIT_DISCOVERY_MAX_BUFFER,
             },
         ).trim()
         const commonDir = fs.realpathSync.native(path.resolve(cwd, commonRaw))
@@ -813,6 +812,8 @@ function gitSandboxPaths(cwd: string): {
                 cwd,
                 encoding: "utf8",
                 stdio: ["ignore", "pipe", "ignore"],
+                timeout: GIT_DISCOVERY_TIMEOUT_MS,
+                maxBuffer: GIT_DISCOVERY_MAX_BUFFER,
             }).trim()
         } catch {
             // Detached worktrees update HEAD inside gitDir, already allowed.
@@ -1027,7 +1028,6 @@ function bashContainmentRejection(
                 word,
                 false,
                 access,
-                false,
                 true,
                 false,
             )
@@ -1127,7 +1127,6 @@ function bashContainmentRejection(
                 access,
                 false,
                 false,
-                false,
             )
             if (rejected) return `cd target ${rejected}`
             const nextDir = safePath(cwd, path.resolve(currentDir, word))
@@ -1150,7 +1149,6 @@ function bashContainmentRejection(
             word,
             false,
             access,
-            collaborationInvocation,
             false,
             canSandboxOpaqueCode,
         )
@@ -1168,7 +1166,6 @@ function rejectPathOperand(
     word: string,
     requirePath: boolean,
     access: ShellAccessContext,
-    allowCollaborationSession: boolean,
     allowDevNull: boolean,
     allowManagerDependency: boolean,
 ): string | null {
@@ -1182,10 +1179,6 @@ function rejectPathOperand(
 
         if (path.isAbsolute(candidate)) {
             if (allowDevNull && candidate === "/dev/null") continue
-            if (
-                allowCollaborationSession &&
-                matchesTrustedSession(candidate, access.collaboration)
-            ) continue
             if (
                 !safePath(root, candidate) &&
                 !(
@@ -1276,20 +1269,6 @@ function matchesTrustedFile(
     if (resolved === collaboration.commandPath) return true
     try {
         return fs.realpathSync.native(resolved) === collaboration.commandReal
-    } catch {
-        return false
-    }
-}
-
-function matchesTrustedSession(
-    candidate: string,
-    collaboration: CollaborationShellAccess | null,
-): boolean {
-    if (!collaboration || !path.isAbsolute(candidate)) return false
-    const resolved = path.resolve(candidate)
-    if (resolved === collaboration.sessionDir) return true
-    try {
-        return fs.realpathSync.native(resolved) === collaboration.sessionReal
     } catch {
         return false
     }

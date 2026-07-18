@@ -25,10 +25,8 @@
  *   - `gh pr create` returns non-zero
  */
 
-import { execFile } from "child_process"
 import { mkdirSync, writeFileSync } from "fs"
 import { join } from "path"
-import { promisify } from "util"
 
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
@@ -36,6 +34,8 @@ import { AgenticEnvironment } from "@mozaik-ai/core"
 import { buildDag } from "../dag.js"
 import { getHeadSha } from "../git.js"
 import { BARO_COAUTHOR_TRAILER, loadPrd, type PrdFile, type PrdStory } from "../prd.js"
+import { readAuthoritativeDeclaredTests } from "../prd-declared-tests.js"
+import { runRepositoryCommand as execFileAsync } from "../repository-command.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import {
     FinalizeStarted,
@@ -50,9 +50,13 @@ import {
     type RunCompletedData,
     type RunVerificationEvidence,
 } from "../semantic-events.js"
-import { verifyBuild, type VerifyResult } from "../verify.js"
-
-const execFileAsync = promisify(execFile)
+import {
+    createVerifyPlan,
+    mergeVerifyPlans,
+    verifyBuild,
+    type VerifyPlan,
+    type VerifyResult,
+} from "../verify.js"
 
 export interface FinalizerOptions {
     cwd: string
@@ -93,6 +97,8 @@ export class Finalizer extends BaseObserver {
     private coordinationAuthority: Participant | null = null
     private repositoryAuthority: Participant | null = null
     private verifierAuthority: Participant | null = null
+    /** Trusted automatic gates captured before any story can edit manifests. */
+    private readonly baselineVerifyPlan: VerifyPlan
 
     private startedAtMs: number | null = null
     private baseSha: string | null
@@ -130,6 +136,7 @@ export class Finalizer extends BaseObserver {
             onLog: opts.onLog,
         }
         this.baseSha = opts.baseSha ?? null
+        this.baselineVerifyPlan = createVerifyPlan(opts.cwd)
         this.runId = opts.runId?.trim() || null
         this.outcomeAuthority = opts.outcomeAuthority ?? null
         if (
@@ -461,7 +468,8 @@ export class Finalizer extends BaseObserver {
         // Objective gate: build + run tests on the fully-merged branch. A run
         // the Critic judged "green" can still merge with tests actually failing;
         // a failed verify demotes the PR to a checkpoint so it isn't reported as
-        // clean. "Couldn't verify" (verify.ran === false) is NOT a failure.
+        // clean. "Couldn't verify" is distinct from a command failure, but it
+        // still produces an explicitly incomplete checkpoint.
         this.log("[finalizer] verifying build…")
         const correlatedVerification =
             // The evidence embedded by the Board in RunCompleted is the
@@ -472,18 +480,45 @@ export class Finalizer extends BaseObserver {
                 : run.runId && this.objectiveVerification?.runId === run.runId
                   ? this.objectiveVerification.result
                   : null
-        const verify = correlatedVerification ?? await verifyBuild(this.opts.cwd)
-        if (!verify.ran) {
-            this.log("[finalizer] nothing to verify (no build/test)")
-        } else if (verify.ok) {
-            this.log("[finalizer] ✓ build-verified")
-        } else {
+        let verify = correlatedVerification
+        if (!verify) {
+            const declaredTests = readAuthoritativeDeclaredTests(this.opts.prdPath)
+            if (!prd) {
+                declaredTests.push({
+                    storyId: "final PRD",
+                    command: "full schema validation",
+                    declarationError:
+                        "final PRD is missing, malformed, or failed validation",
+                })
+            }
+            const finalVerifyPlan: VerifyPlan = createVerifyPlan(this.opts.cwd, {
+                declaredTests,
+            })
+            verify = await verifyBuild(this.opts.cwd, {
+                plan: mergeVerifyPlans(this.baselineVerifyPlan, finalVerifyPlan),
+            })
+        }
+        const verificationIncomplete =
+            !verify.ran ||
+            verify.commands.some((command) => command.status === "skipped")
+        if (!verify.ok) {
             this.log(`[finalizer] ⚠ verification failed: ${verify.failures[0]?.cmd ?? "build/test"}`)
+        } else if (!verify.ran) {
+            this.log("[finalizer] nothing to verify (no build/test)")
+        } else if (verificationIncomplete) {
+            const skipped = verify.commands.find((command) => command.status === "skipped")
+            this.log(`[finalizer] ⚠ verification incomplete: ${skipped?.command ?? "build/test"}`)
+        } else {
+            this.log("[finalizer] ✓ build-verified")
         }
 
         // A merge-back failure means the branch is an incomplete/partial
         // integration — never present that as a fully verified completion.
-        const checkpoint = !run.success || (verify.ran && !verify.ok) || this.mergeFailed.size > 0
+        const checkpoint =
+            !run.success ||
+            !verify.ok ||
+            verificationIncomplete ||
+            this.mergeFailed.size > 0
         const title = this.buildPrTitle(prd, passed.length, orderedStories.length, checkpoint)
         const body = this.buildPrBody({
             prd,
@@ -818,6 +853,24 @@ export class Finalizer extends BaseObserver {
             }
         }
 
+        const skippedVerification = args.verify.commands.filter(
+            (command) => command.status === "skipped",
+        )
+        if (!args.verify.ran || skippedVerification.length > 0) {
+            lines.push("## ⚠ Build/test verification incomplete")
+            lines.push("")
+            lines.push(
+                skippedVerification.length > 0
+                    ? "One or more required checks could not be executed:"
+                    : "No applicable objective build/test command could be executed.",
+            )
+            lines.push("")
+            for (const command of skippedVerification) {
+                lines.push(`- \`${command.command}\`${command.tail ? ` — ${command.tail}` : ""}`)
+            }
+            if (skippedVerification.length > 0) lines.push("")
+        }
+
         if (prd?.description) {
             lines.push("## Goal")
             lines.push("")
@@ -976,16 +1029,27 @@ function bindAuthority(
 }
 
 function verificationResult(evidence: RunVerificationEvidence): VerifyResult {
+    const commands = evidence.commands.map((command) => ({ ...command }))
+    if (
+        evidence.status === "skipped" &&
+        !commands.some((command) => command.status === "skipped")
+    ) {
+        commands.push({
+            command: "objective verification verdict",
+            status: "skipped",
+            durationMs: 0,
+            tail: "verifier reported an incomplete/skipped objective gate",
+        })
+    }
+    const failed = commands.filter((command) => command.status === "failed")
     return {
-        ran: evidence.status !== "skipped",
-        ok: evidence.status !== "failed",
-        failures: evidence.commands
-            .filter((command) => command.status === "failed")
-            .map((command) => ({
-                cmd: command.command,
-                tail: command.tail ?? "",
-            })),
-        commands: evidence.commands.map((command) => ({ ...command })),
+        ran: commands.some((command) => command.status !== "skipped"),
+        ok: evidence.status !== "failed" && failed.length === 0,
+        failures: failed.map((command) => ({
+            cmd: command.command,
+            tail: command.tail ?? "",
+        })),
+        commands,
     }
 }
 

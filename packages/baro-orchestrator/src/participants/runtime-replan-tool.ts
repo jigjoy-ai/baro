@@ -95,6 +95,12 @@ export function createRuntimeReplanTool(graphVersion: number): Tool {
                                 items: { type: "string" },
                             },
                             model: { type: "string" },
+                            goalInvariantIds: {
+                                type: "array",
+                                items: { type: "string" },
+                                description:
+                                    "GoalContract invariant ids this work will satisfy.",
+                            },
                         },
                         required: [
                             "id",
@@ -222,6 +228,7 @@ function parseAddedStories(
         "acceptance",
         "tests",
         "model",
+        "goalInvariantIds",
     ])
     for (let index = 0; index < value.length; index += 1) {
         const story = value[index]
@@ -281,6 +288,13 @@ function parseAddedStories(
             `addedStories[${index}].tests`,
         )
         if (!tests.ok) return tests
+        const goalInvariantIds = story.goalInvariantIds === undefined
+            ? undefined
+            : goalInvariantIdArray(
+                  story.goalInvariantIds,
+                  `addedStories[${index}].goalInvariantIds`,
+              )
+        if (goalInvariantIds && !goalInvariantIds.ok) return goalInvariantIds
         if (story.model !== undefined && typeof story.model !== "string") {
             return {
                 ok: false,
@@ -299,6 +313,9 @@ function parseAddedStories(
             acceptance: acceptance.value,
             tests: tests.value,
             ...(story.model !== undefined ? { model: story.model } : {}),
+            ...(goalInvariantIds?.ok
+                ? { goalInvariantIds: goalInvariantIds.value }
+                : {}),
         })
     }
     return { ok: true, value: stories }
@@ -346,6 +363,26 @@ function requiredNonBlankStringArray(
         }
     }
     return { ok: true, value: [...value] }
+}
+
+function goalInvariantIdArray(
+    value: unknown,
+    field: string,
+): { ok: true; value: string[] } | { ok: false; error: string } {
+    if (
+        !Array.isArray(value) ||
+        value.length === 0 ||
+        !value.every(
+            (item) => typeof item === "string" && /^G-[AC][1-9]\d*$/.test(item),
+        ) ||
+        new Set(value).size !== value.length
+    ) {
+        return {
+            ok: false,
+            error: `${field} must contain unique GoalContract invariant ids`,
+        }
+    }
+    return { ok: true, value: [...value] as string[] }
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

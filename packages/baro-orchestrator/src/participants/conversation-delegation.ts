@@ -177,6 +177,9 @@ export function toRuntimeReplanProposal(
                 retries: 1,
                 acceptance: [...story.acceptance],
                 tests: [...story.tests],
+                ...(story.goalInvariantIds
+                    ? { goalInvariantIds: [...story.goalInvariantIds] }
+                    : {}),
             })),
             removedStoryIds: [],
             modifiedDeps: {},
@@ -186,14 +189,14 @@ export function toRuntimeReplanProposal(
 
 function parseDelegatedStory(value: unknown): ConversationDelegatedStory | null {
     if (
-        !isExactRecord(value, [
+        !isRecordWithOptionalKeys(value, [
             "id",
             "title",
             "description",
             "depends_on",
             "acceptance",
             "tests",
-        ])
+        ], ["goal_invariant_ids"])
     ) return null
 
     const id = normalizedString(value.id, MAX_ID_LENGTH)
@@ -214,6 +217,12 @@ function parseDelegatedStory(value: unknown): ConversationDelegatedStory | null 
         allowEmpty: false,
         itemLimit: MAX_LIST_ITEM_LENGTH,
     })
+    const goalInvariantIds = value.goal_invariant_ids === undefined
+        ? undefined
+        : normalizedStringList(value.goal_invariant_ids, {
+              allowEmpty: true,
+              itemLimit: MAX_ID_LENGTH,
+          })
     if (
         !id ||
         !title ||
@@ -221,6 +230,8 @@ function parseDelegatedStory(value: unknown): ConversationDelegatedStory | null 
         !dependsOn ||
         !acceptance ||
         !tests ||
+        goalInvariantIds === null ||
+        goalInvariantIds?.some((id) => !/^G-[AC][1-9]\d*$/.test(id)) ||
         dependsOn.includes(id)
     ) return null
 
@@ -231,6 +242,7 @@ function parseDelegatedStory(value: unknown): ConversationDelegatedStory | null 
         dependsOn,
         acceptance,
         tests,
+        ...(goalInvariantIds !== undefined ? { goalInvariantIds } : {}),
     }
 }
 
@@ -238,14 +250,14 @@ function parseBoardDelegatedStory(
     value: unknown,
 ): ConversationDelegatedStory | null {
     if (
-        !isExactRecord(value, [
+        !isRecordWithOptionalKeys(value, [
             "id",
             "title",
             "description",
             "dependsOn",
             "acceptance",
             "tests",
-        ])
+        ], ["goalInvariantIds"])
     ) return null
 
     return parseDelegatedStory({
@@ -255,6 +267,9 @@ function parseBoardDelegatedStory(
         depends_on: value.dependsOn,
         acceptance: value.acceptance,
         tests: value.tests,
+        ...(value.goalInvariantIds !== undefined
+            ? { goal_invariant_ids: value.goalInvariantIds }
+            : {}),
     })
 }
 
@@ -297,5 +312,21 @@ function isExactRecord(
     return (
         keys.length === allowedKeys.length &&
         keys.every((key) => allowedKeys.includes(key))
+    )
+}
+
+function isRecordWithOptionalKeys(
+    value: unknown,
+    requiredKeys: readonly string[],
+    optionalKeys: readonly string[],
+): value is Record<string, unknown> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) return false
+    const keys = Object.keys(value)
+    const allowed = new Set([...requiredKeys, ...optionalKeys])
+    return (
+        requiredKeys.every((key) => keys.includes(key)) &&
+        keys.every((key) => allowed.has(key))
     )
 }

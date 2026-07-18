@@ -207,7 +207,7 @@ export function validateProgressivePlannerStory(
                 "completedAt",
                 "durationSecs",
             ],
-            "model",
+            ["model", "goalInvariantIds"],
         )
     ) {
         throw contractError(
@@ -264,6 +264,24 @@ export function validateProgressivePlannerStory(
         false,
         "invalid_fragment",
     )
+    const goalInvariantIds = value.goalInvariantIds === undefined
+        ? []
+        : safeIdArray(
+              value.goalInvariantIds,
+              `${label} '${id}' goalInvariantIds`,
+              true,
+              "invalid_fragment",
+          )
+    if (
+        goalInvariantIds?.some(
+            (invariantId) => !/^G-[AC][1-9]\d*$/.test(invariantId),
+        )
+    ) {
+        throw contractError(
+            "invalid_fragment",
+            `${label} '${id}' has an invalid goal invariant id`,
+        )
+    }
     if (
         value.passes !== false ||
         value.completedAt !== null ||
@@ -287,6 +305,7 @@ export function validateProgressivePlannerStory(
         retries: Number(value.retries),
         acceptance,
         tests,
+        goalInvariantIds,
         passes: false,
         completedAt: null,
         durationSecs: null,
@@ -837,6 +856,7 @@ function snapshotStory(story: PrdStory): PrdStory {
         retries: story.retries,
         acceptance: [...story.acceptance],
         tests: [...story.tests],
+        goalInvariantIds: [...(story.goalInvariantIds ?? [])],
         passes: story.passes,
         completedAt: story.completedAt,
         durationSecs: story.durationSecs,
@@ -933,11 +953,11 @@ function isExactRecord(
 function isRecordWithOptionalKey(
     value: unknown,
     required: readonly string[],
-    optional: string,
+    optional: readonly string[],
 ): value is Record<string, unknown> {
     if (!isPlainRecord(value)) return false
     const keys = Object.keys(value)
-    const allowed = new Set([...required, optional])
+    const allowed = new Set([...required, ...optional])
     return (
         required.every((key) => Object.prototype.hasOwnProperty.call(value, key)) &&
         keys.every((key) => allowed.has(key))

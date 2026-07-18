@@ -11,6 +11,7 @@ import { AgenticEnvironment, type Participant } from "@mozaik-ai/core"
 import type { GatewayBillingCoordinator } from "../billing/index.js"
 import type { StorySpawnRequestData } from "../semantic-events.js"
 import type { StoryRoute } from "../routing.js"
+import type { CollaborationDeliveryMode } from "./collaboration-bridge.js"
 import { PROCESS_TREE_CAPABILITIES } from "../process-tree.js"
 import { CodexStoryAgent } from "./codex-story-agent.js"
 import { OpenAIStoryAgent } from "./openai-story-agent.js"
@@ -31,15 +32,19 @@ export interface StoryExecOpts {
     /** Exact Critic participant whose terminal-turn verdict may resume a
      * continuation-capable worker. */
     turnReviewAuthority?: Participant
+    /** Exact Bridge for correlated collective message delivery. Custom
+     * executors must propagate and enforce this capability. */
+    targetedMessageAuthority?: Participant
     turnReviewTimeoutMs?: number
     /** True only when collective AcceptanceGate remains the final integration
      * authority after a continuation-capable worker exits. */
     handoffInconclusiveToAcceptanceGate?: boolean
-    /** Exact run-scoped collaboration transport for native StoryAgent tools. */
-    collaboration?: Readonly<{
-        commandPath: string
-        sessionDir: string
-    }>
+    /**
+     * Lease-scoped, harness-neutral collaboration capability. Custom
+     * executors may forward this to their worker transport, but must never
+     * replace it with manager-private Bridge state or a filesystem path.
+     */
+    collaboration?: StoryCollaborationAccess
     /** Exact run-scoped trusted Gateway billing interceptor. */
     billingCoordinator?: GatewayBillingCoordinator
     /**
@@ -53,6 +58,17 @@ export interface StoryExecOpts {
      * joins the bus. Collective policy consumers reject unregistered sources.
      */
     registerTerminalAuthority?: (source: Participant) => void
+}
+
+export interface StoryCollaborationAccess {
+    /** Manager-installed helper executable; no mutable Bridge state lives here. */
+    readonly commandPath: string
+    /** Loopback capability broker endpoint for this exact lease. */
+    readonly endpoint: string
+    /** Opaque bearer token bound to run/story/lease/generation. */
+    readonly token: string
+    /** Live-capable harnesses receive bus messages; one-shot harnesses poll. */
+    readonly deliveryMode: CollaborationDeliveryMode
 }
 
 export interface StoryExecution {
@@ -133,6 +149,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                       model: route.model,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
+                      targetedMessageAuthority: opts.targetedMessageAuthority,
                       ...correlation,
                   })
                 : route.backend === "opencode"
@@ -143,6 +160,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                       model: route.model,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
+                      targetedMessageAuthority: opts.targetedMessageAuthority,
                       ...correlation,
                   })
                 : route.backend === "codex"
@@ -154,6 +172,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                       model: route.model,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
+                      targetedMessageAuthority: opts.targetedMessageAuthority,
                       ...correlation,
                   })
                 : route.backend === "openai"
@@ -169,6 +188,8 @@ export class LocalStoryExecutor implements StoryExecutor {
                           requiresQualityReview: req.requiresQualityReview,
                           handoffInconclusiveToAcceptanceGate:
                               opts.handoffInconclusiveToAcceptanceGate,
+                          targetedMessageAuthority:
+                              opts.targetedMessageAuthority,
                           ...correlation,
                       },
                       {
@@ -199,6 +220,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                           opts.handoffInconclusiveToAcceptanceGate,
                       turnReviewAuthority: opts.turnReviewAuthority,
                       turnReviewTimeoutMs: opts.turnReviewTimeoutMs,
+                      targetedMessageAuthority: opts.targetedMessageAuthority,
                       ...correlation,
                   })
 

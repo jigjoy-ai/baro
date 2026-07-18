@@ -23,6 +23,7 @@ import {
     type StoryFailureData,
     type StoryResultData,
 } from "../semantic-events.js"
+import { acceptsTargetedMessage } from "../runtime/targeted-message-authority.js"
 import {
     classifyProviderFailure,
     classifyStoryFailure,
@@ -64,6 +65,8 @@ export interface StorySpec {
     requiresQualityReview?: boolean
     /** Object-identity authority allowed to review this worker's turns. */
     turnReviewAuthority?: Participant
+    /** Exact Bridge allowed to deliver a collective message for this lease. */
+    targetedMessageAuthority?: Participant
     /** Bound for one terminal-turn review. Default: 240 seconds. */
     turnReviewTimeoutMs?: number
     /** Collective-only execution handoff. An inconclusive review closes the
@@ -206,7 +209,17 @@ export class StoryAgent extends BaseObserver {
     ): Promise<void> {
         if (
             AgentTargetedMessage.is(event) &&
-            event.data.recipientId === this.spec.id
+            acceptsTargetedMessage(
+                source,
+                event.data,
+                this.spec.id,
+                this.spec.targetedMessageAuthority,
+                this.spec,
+            ) &&
+            !(
+                this.spec.requiresQualityReview &&
+                typeof event.data.metadata.terminalId === "string"
+            )
         ) {
             this.turnLifecycle?.observeMessage()
         }
@@ -428,6 +441,10 @@ export class StoryAgent extends BaseObserver {
             model: this.spec.model,
             effort: this.spec.effort,
             claudeBin: this.spec.claudeBin,
+            targetedMessageAuthority: this.spec.targetedMessageAuthority,
+            targetedMessageCorrelation: correlationOf(this.spec),
+            ignoreCorrelatedTerminalFeedback:
+                this.spec.requiresQualityReview,
             ...(this.spec.requiresQualityReview && this.spec.turnReviewAuthority
                 ? {
                       ignoredTargetedMessageAuthority:

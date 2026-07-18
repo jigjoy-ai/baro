@@ -328,6 +328,7 @@ pub struct ReviewStory {
     pub retries: u32,
     pub acceptance: Vec<String>,
     pub tests: Vec<String>,
+    pub goal_invariant_ids: Vec<String>,
     pub completed: bool,
     pub model: Option<String>,
 }

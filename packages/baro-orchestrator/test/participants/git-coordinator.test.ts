@@ -19,7 +19,64 @@ import {
 } from "../../src/semantic-events.js"
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
 
+const BOARD = source("board")
+const BROKER = source("broker")
+
 describe("GitCoordinator", () => {
+    it("fails closed while collective repository authorities are unbound", async () => {
+        await withTempDir("git-unbound-authority-", async (dir) => {
+            const cleaned: string[] = []
+            const worktrees = {
+                cleanup: async (storyId: string) => {
+                    cleaned.push(storyId)
+                },
+            } as unknown as WorktreeManager
+            const coordinator = new GitCoordinator({
+                cwd: dir,
+                gitGate: new GitGate(),
+                worktrees,
+                emitTui: false,
+                eventDriven: true,
+                runId: "run-unbound",
+                push: false,
+            })
+            const env = joinWithCapture(coordinator)
+            env.deliverSemanticEvent(
+                source("ambient-broker"),
+                WorkLeaseGranted.create({
+                    runId: "run-unbound",
+                    offerId: "offer-1",
+                    leaseId: "lease-1",
+                    workerId: "worker",
+                    generation: 1,
+                    request: {
+                        storyId: "S1",
+                        prompt: "work",
+                        retries: 0,
+                        timeoutSecs: 60,
+                    },
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("ambient-board"),
+                WorkspaceCleanupRequested.create({
+                    runId: "run-unbound",
+                    cleanupId: "cleanup-1",
+                    storyId: "S1",
+                    leaseId: "lease-1",
+                    generation: 1,
+                }),
+            )
+            await coordinator.idle()
+
+            assert.deepEqual(cleaned, [])
+            assert.equal(
+                env.events.filter(WorkspaceCleanupCompleted.is).length,
+                0,
+            )
+        })
+    })
+
     it("rejects forged Board requests and forged lease updates when authorities are bound", async () => {
         await withTempDir("git-authority-", async (dir) => {
             const cleaned: string[] = []
@@ -112,9 +169,11 @@ describe("GitCoordinator", () => {
                 runId: "run-push-failure",
                 push: true,
             })
+            coordinator.setEventAuthority(BOARD)
+            coordinator.setLeaseAuthority(BROKER)
             const env = joinWithCapture(coordinator)
             env.deliverSemanticEvent(
-                source("board"),
+                BOARD,
                 StoryIntegrationRequested.create({
                     runId: "run-push-failure",
                     leaseId: "lease-1",
@@ -124,7 +183,7 @@ describe("GitCoordinator", () => {
                 }),
             )
             env.deliverSemanticEvent(
-                source("board"),
+                BOARD,
                 RunPushRequested.create({ runId: "run-push-failure" }),
             )
             await coordinator.idle()
@@ -151,6 +210,8 @@ describe("GitCoordinator", () => {
                 runId: "run-cleanup",
                 push: false,
             })
+            coordinator.setEventAuthority(BOARD)
+            coordinator.setLeaseAuthority(BROKER)
             const env = joinWithCapture(coordinator)
             const request = {
                 storyId: "S1",
@@ -161,7 +222,7 @@ describe("GitCoordinator", () => {
             }
 
             env.deliverSemanticEvent(
-                source("broker"),
+                BROKER,
                 WorkLeaseGranted.create({
                     runId: "run-cleanup",
                     offerId: "offer-old",
@@ -178,12 +239,12 @@ describe("GitCoordinator", () => {
                 leaseId: "lease-old",
                 generation: 1,
             })
-            env.deliverSemanticEvent(source("board"), oldCleanup)
+            env.deliverSemanticEvent(BOARD, oldCleanup)
             await coordinator.idle()
             assert.deepEqual(cleaned, ["S1"])
 
             env.deliverSemanticEvent(
-                source("broker"),
+                BROKER,
                 WorkLeaseGranted.create({
                     runId: "run-cleanup",
                     offerId: "offer-new",
@@ -193,7 +254,7 @@ describe("GitCoordinator", () => {
                     request,
                 }),
             )
-            env.deliverSemanticEvent(source("replay"), oldCleanup)
+            env.deliverSemanticEvent(BOARD, oldCleanup)
             await coordinator.idle()
 
             assert.deepEqual(cleaned, ["S1"])
@@ -224,6 +285,8 @@ describe("GitCoordinator", () => {
                 runId: "run-preserve",
                 push: false,
             })
+            coordinator.setEventAuthority(BOARD)
+            coordinator.setLeaseAuthority(BROKER)
             const env = joinWithCapture(coordinator)
             const request = {
                 storyId: "S1",
@@ -233,7 +296,7 @@ describe("GitCoordinator", () => {
                 timeoutSecs: 60,
             }
             env.deliverSemanticEvent(
-                source("broker"),
+                BROKER,
                 WorkLeaseGranted.create({
                     runId: "run-preserve",
                     offerId: "offer-1",
@@ -251,7 +314,7 @@ describe("GitCoordinator", () => {
                 generation: 3,
                 preserveForRecovery: true,
             })
-            env.deliverSemanticEvent(source("board"), cleanup)
+            env.deliverSemanticEvent(BOARD, cleanup)
             await coordinator.idle()
 
             assert.deepEqual(preserved, ["S1"])
@@ -265,7 +328,7 @@ describe("GitCoordinator", () => {
                 "baro-recovery/run-preserve/S1/1",
             )
 
-            env.deliverSemanticEvent(source("board"), cleanup)
+            env.deliverSemanticEvent(BOARD, cleanup)
             await coordinator.idle()
             assert.deepEqual(preserved, ["S1"], "replay does not snapshot twice")
             const replayed = env.events.filter(WorkspaceCleanupCompleted.is)
@@ -296,9 +359,11 @@ describe("GitCoordinator", () => {
                 runId: "run-retained",
                 push: false,
             })
+            coordinator.setEventAuthority(BOARD)
+            coordinator.setLeaseAuthority(BROKER)
             const env = joinWithCapture(coordinator)
             env.deliverSemanticEvent(
-                source("board"),
+                BOARD,
                 WorkspaceCleanupRequested.create({
                     runId: "run-retained",
                     cleanupId: "cleanup-retained",

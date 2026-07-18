@@ -55,4 +55,36 @@ describe("FinalizationForwarder", () => {
             },
         ])
     })
+
+    it("accepts only the sealed collective Finalizer and denies an omitted one", async () => {
+        const finalizer = source("finalizer")
+        const forger = source("finalizer")
+        const event = PrCreated.create({
+            url: "https://github.com/acme/baro/pull/9",
+            branch: "feature/s9",
+            baseBranch: "main",
+        })
+
+        const bound = new FinalizationForwarder(true)
+        const boundLines = await captureStdout(async () => {
+            await bound.onExternalEvent(finalizer, event)
+            bound.sealCollectiveAuthorities({ finalizer })
+            await bound.onExternalEvent(forger, event)
+            await bound.onExternalEvent(finalizer, event)
+        })
+        assert.deepEqual(
+            boundLines.map((line) => JSON.parse(line) as BaroEvent),
+            [{
+                type: "finalize_complete",
+                pr_url: "https://github.com/acme/baro/pull/9",
+            }],
+        )
+
+        const disabled = new FinalizationForwarder(true)
+        const disabledLines = await captureStdout(async () => {
+            disabled.sealCollectiveAuthorities({})
+            await disabled.onExternalEvent(forger, event)
+        })
+        assert.deepEqual(disabledLines, [])
+    })
 })

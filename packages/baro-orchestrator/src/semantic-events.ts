@@ -93,6 +93,8 @@ export interface ReplanStoryAdd {
     acceptance?: readonly string[]
     tests?: readonly string[]
     model?: string
+    /** Goal-contract invariants for which this story must produce evidence. */
+    goalInvariantIds?: readonly string[]
 }
 
 export interface ReplanData {
@@ -175,6 +177,7 @@ export type RuntimeReplanRejectionCode =
     | "no_op"
     | "dynamic_story_limit"
     | "adaptation_budget_exhausted"
+    | "offer_retraction_failed"
     | "immutable_story"
     | "unknown_story"
     | "duplicate_story"
@@ -294,6 +297,12 @@ export interface AgentTargetedMessageData {
     recipientId: string
     text: string
     metadata: Readonly<Record<string, unknown>>
+    /** Present together only on a CollaborationBridge-authenticated
+     * collective delivery. Uncorrelated events remain legacy-compatible
+     * message intents and carry no execution authority. */
+    runId?: string
+    leaseId?: string
+    generation?: number
 }
 export const AgentTargetedMessage =
     defineSemanticEvent<AgentTargetedMessageData>("agent_targeted_message")
@@ -327,6 +336,7 @@ export interface ConversationDelegatedStory {
     dependsOn: readonly string[]
     acceptance: readonly string[]
     tests: readonly string[]
+    goalInvariantIds?: readonly string[]
 }
 
 /** Advisory, add-only work proposal from the exact bound DialogueAgent.
@@ -717,6 +727,40 @@ export interface WorkOfferedData {
 }
 export const WorkOffered = defineSemanticEvent<WorkOfferedData>("work_offered")
 
+/** Board-to-Broker cancellation handshake for an offer that a runtime graph
+ * mutation wants to retract. The Broker serializes this request against bid,
+ * claim and lease decisions; the graph may change only after its resolution. */
+export interface WorkOfferRetractionRequestedData {
+    runId: string
+    proposalId: string
+    retractionId: string
+    offerId: string
+    storyId: string
+    generation: number
+    graphVersion: number
+}
+export const WorkOfferRetractionRequested =
+    defineSemanticEvent<WorkOfferRetractionRequestedData>(
+        "work_offer_retraction_requested",
+    )
+
+type WorkOfferRetractionResolutionCorrelation =
+    WorkOfferRetractionRequestedData
+
+export type WorkOfferRetractionResolvedData =
+    | (WorkOfferRetractionResolutionCorrelation & {
+          disposition: "retracted"
+      })
+    | (WorkOfferRetractionResolutionCorrelation & {
+          disposition: "leased"
+          leaseId: string
+          workerId: string
+      })
+export const WorkOfferRetractionResolved =
+    defineSemanticEvent<WorkOfferRetractionResolvedData>(
+        "work_offer_retraction_resolved",
+    )
+
 /** Safe-to-audit route identity. Provider credentials never enter the bus. */
 export interface WorkRouteDescriptor {
     routeId: string
@@ -970,6 +1014,8 @@ export interface DiscoveredWork {
     model?: string
     priority?: number
     retries?: number
+    /** Goal-contract invariants for which the discovered work produces evidence. */
+    goalInvariantIds?: readonly string[]
 }
 
 export interface WorkDiscoveredData {
@@ -977,7 +1023,8 @@ export interface WorkDiscoveredData {
     sourceAgentId: string
     /** Exact lease that produced the discovery. Retained bridge attribution
      * alone is insufficient because the same story may already be on a newer
-     * generation when a disk outbox record is polled. */
+     * generation when an authenticated request or durable compatibility
+     * record is consumed. */
     leaseId: string
     generation: number
     reason: string
@@ -1229,6 +1276,159 @@ export interface RunVerificationCompletedData extends RunVerificationEvidence {
 export const RunVerificationCompleted =
     defineSemanticEvent<RunVerificationCompletedData>("run_verification_completed")
 
+// Goal-contract governance
+
+/**
+ * The coordinator's accepted story-to-goal coverage declaration.  This is a
+ * projection input, not proof that the story has been integrated or reviewed.
+ */
+export interface GoalStoryInvariantMappedData {
+    runId: string
+    mappingId: string
+    storyId: string
+    invariantIds: readonly string[]
+}
+export const GoalStoryInvariantMapped =
+    defineSemanticEvent<GoalStoryInvariantMappedData>(
+        "goal_story_invariant_mapped",
+    )
+
+/** Any joined collective participant may fail closed by challenging a goal invariant. */
+export interface GoalInvariantChallengeRaisedData {
+    runId: string
+    challengeId: string
+    invariantId: string
+    raisedBy: string
+    reason: string
+    storyId?: string
+}
+export const GoalInvariantChallengeRaised =
+    defineSemanticEvent<GoalInvariantChallengeRaisedData>(
+        "goal_invariant_challenge_raised",
+    )
+
+/** Only the bound goal-governance authority may settle a challenge. */
+export interface GoalInvariantChallengeResolvedData {
+    runId: string
+    challengeId: string
+    /** `resolved` clears the challenge; `rejected` records an upheld failure. */
+    resolution: "resolved" | "rejected"
+    reason: string
+}
+export const GoalInvariantChallengeResolved =
+    defineSemanticEvent<GoalInvariantChallengeResolvedData>(
+        "goal_invariant_challenge_resolved",
+    )
+
+/** Guardian-authored add-only work proposal for an unresolved invariant. */
+export interface GoalInvariantRemediationProposedData {
+    runId: string
+    contractId: string
+    challengeId: string
+    invariantId: string
+    proposalId: string
+    reason: string
+    story: ReplanStoryAdd
+}
+export const GoalInvariantRemediationProposed =
+    defineSemanticEvent<GoalInvariantRemediationProposedData>(
+        "goal_invariant_remediation_proposed",
+    )
+
+/** Board's durable graph admission receipt for Guardian remediation work. */
+export interface GoalInvariantRemediationAdmittedData {
+    runId: string
+    contractId: string
+    challengeId: string
+    invariantId: string
+    proposalId: string
+    storyId: string
+    graphVersion: number
+    disposition: "applied" | "existing"
+}
+export const GoalInvariantRemediationAdmitted =
+    defineSemanticEvent<GoalInvariantRemediationAdmittedData>(
+        "goal_invariant_remediation_admitted",
+    )
+
+/**
+ * Guardian-owned complete ledger snapshot.  The coordinator may persist this
+ * projection, but cannot manufacture or edit its semantic contents.
+ */
+export interface GoalLedgerProjectionUpdatedData {
+    runId: string
+    contractId: string
+    revision: number
+    projection: import("./runtime/goal-contract.js").GoalLedgerProjection
+}
+export const GoalLedgerProjectionUpdated =
+    defineSemanticEvent<GoalLedgerProjectionUpdatedData>(
+        "goal_ledger_projection_updated",
+    )
+
+/**
+ * Board-authored receipt emitted only after the exact Guardian projection has
+ * crossed the atomic PRD persistence boundary. Consumers may use this to
+ * retire durable transport records; ProjectionUpdated alone is not an ack.
+ */
+export interface GoalLedgerProjectionPersistedData
+    extends GoalLedgerProjectionUpdatedData {}
+export const GoalLedgerProjectionPersisted =
+    defineSemanticEvent<GoalLedgerProjectionPersistedData>(
+        "goal_ledger_projection_persisted",
+    )
+
+/**
+ * Authority-bound request to attest the event-projected goal ledger.  The
+ * caller supplies the exact integrated story set so removed/stale work cannot
+ * satisfy a later DAG projection.
+ */
+export interface GoalCompletionCheckRequestedData {
+    runId: string
+    checkId: string
+    contractId: string | null
+    storyIds: readonly string[]
+    verificationId: string
+}
+export const GoalCompletionCheckRequested =
+    defineSemanticEvent<GoalCompletionCheckRequestedData>(
+        "goal_completion_check_requested",
+    )
+
+export type GoalInvariantAttestationStatus =
+    | "satisfied"
+    | "open"
+    | "rejected"
+
+export interface GoalInvariantAttestationEvidence {
+    invariantId: string
+    status: GoalInvariantAttestationStatus
+    mappedStoryIds: readonly string[]
+    integratedStoryIds: readonly string[]
+    independentlyReviewedStoryIds: readonly string[]
+    reason: string
+}
+
+/** GoalGuardian's correlated, replay-safe completion decision. */
+export interface GoalCompletionAttestedData {
+    runId: string
+    checkId: string
+    contractId: string | null
+    /** Exact Guardian projection revision from which this decision was derived. */
+    goalRevision: number | null
+    verificationId: string
+    status: "satisfied" | "incomplete" | "disabled"
+    satisfiedInvariantIds: readonly string[]
+    openInvariantIds: readonly string[]
+    rejectedInvariantIds: readonly string[]
+    invariants: readonly GoalInvariantAttestationEvidence[]
+    reason: string
+}
+export const GoalCompletionAttested =
+    defineSemanticEvent<GoalCompletionAttestedData>(
+        "goal_completion_attested",
+    )
+
 export interface RunCompletedData {
     success: boolean
     completedStories: readonly string[]
@@ -1348,6 +1548,11 @@ export interface StoryInterventionData {
     source: string
     action: "abort"
     reason: string
+    /** Collective-only active execution capability. The display-only
+     * `source` string is never authority. */
+    runId?: string
+    leaseId?: string
+    generation?: number
 }
 export const StoryIntervention =
     defineSemanticEvent<StoryInterventionData>("story_intervention")

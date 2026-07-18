@@ -448,9 +448,10 @@ describe("Finalizer", () => {
                 assert.equal(prCreate[prCreate.indexOf("--head") + 1], "baro/fake-pr")
                 assert.equal(
                     prCreate[prCreate.indexOf("--title") + 1],
-                    "Finalizer fake PR (1 story)",
+                    "Checkpoint: Finalizer fake PR (1 story)",
                 )
                 const body = prCreate[prCreate.indexOf("--body") + 1]
+                assert.match(body, /Build\/test verification incomplete/)
                 assert.match(body, /\| S1 \| Ship finalizer test \|/)
                 assert.match(body, /Co-Authored-By: baro/)
             } finally {
@@ -479,16 +480,34 @@ describe("Finalizer", () => {
         objectiveVerification?: RunVerificationCompletedData,
         deliverVerificationEvent = true,
         completedVerification = objectiveVerification,
+        declaredTests: string[] = [],
+        prdContents?: string,
     ): Promise<{ title: string; body: string }> {
         const prdPath = join(dir, "prd.json")
         writeFileSync(
             prdPath,
             JSON.stringify({
-                project: "Verify gate",
-                branchName: "baro/verify",
-                description: "Exercise the verify gate",
-                userStories: [],
-            }),
+                    project: "Verify gate",
+                    branchName: "baro/verify",
+                    description: "Exercise the verify gate",
+                    userStories: declaredTests.length > 0
+                        ? [
+                              {
+                                  id: "S1",
+                                  priority: 1,
+                                  title: "Declared verification",
+                                  description: "Exercise declared verification",
+                                  dependsOn: [],
+                                  retries: 0,
+                                  acceptance: [],
+                                  tests: declaredTests,
+                                  passes: true,
+                                  completedAt: null,
+                                  durationSecs: null,
+                              },
+                          ]
+                        : [],
+                }),
         )
         if (pkgJson) writeFileSync(join(dir, "package.json"), JSON.stringify(pkgJson))
 
@@ -523,6 +542,7 @@ describe("Finalizer", () => {
                 source("conductor"),
                 RunStarted.create({ project: "Verify gate", storyCount: 0 }),
             )
+            if (prdContents !== undefined) writeFileSync(prdPath, prdContents)
             if (objectiveVerification && deliverVerificationEvent) {
                 await finalizer.onExternalEvent(
                     source("run-verifier"),
@@ -585,7 +605,7 @@ describe("Finalizer", () => {
         })
     })
 
-    it("stays a clean PR when verify did not run (no build/test scripts)", async () => {
+    it("stays a clean PR when every applicable final gate passes", async () => {
         await withTempDir("baro-finalizer-", async (dir) => {
             const { title, body } = await runFinalizerWithVerify(
                 dir,
@@ -594,6 +614,67 @@ describe("Finalizer", () => {
             )
             assert.doesNotMatch(title, /^Checkpoint:/)
             assert.doesNotMatch(body, /Build\/test verification failed/)
+        })
+    })
+
+    it("checkpoints fallback verification when a PRD test cannot execute", async () => {
+        await withTempDir("baro-finalizer-", async (dir) => {
+            const { title, body } = await runFinalizerWithVerify(
+                dir,
+                { name: "v", scripts: { lint: "true" } },
+                true,
+                undefined,
+                true,
+                undefined,
+                ["npm run missing"],
+            )
+            assert.match(title, /^Checkpoint:/)
+            assert.match(body, /Build\/test verification incomplete/)
+            assert.match(body, /does not declare script 'missing'/)
+        })
+    })
+
+    it("checkpoints fallback verification when the final PRD is unreadable", async () => {
+        await withTempDir("baro-finalizer-", async (dir) => {
+            const { title, body } = await runFinalizerWithVerify(
+                dir,
+                { name: "v", scripts: { test: "exit 0" } },
+                true,
+                undefined,
+                true,
+                undefined,
+                [],
+                "{malformed",
+            )
+            assert.match(title, /^Checkpoint:/)
+            assert.match(body, /Build\/test verification incomplete/)
+            assert.match(body, /final PRD is missing, malformed, or failed validation/)
+        })
+    })
+
+    it("fails closed for a skipped verdict carrying only passed commands", async () => {
+        await withTempDir("baro-finalizer-", async (dir) => {
+            const { title, body } = await runFinalizerWithVerify(
+                dir,
+                { name: "v", scripts: { test: "exit 3" } },
+                true,
+                {
+                    runId: "run-incoherent-skip",
+                    verificationId: "verify-incoherent-skip",
+                    status: "skipped",
+                    commands: [
+                        {
+                            command: "npm run test",
+                            status: "passed",
+                            durationMs: 2,
+                        },
+                    ],
+                    durationMs: 2,
+                },
+            )
+            assert.match(title, /^Checkpoint:/)
+            assert.match(body, /Build\/test verification incomplete/)
+            assert.match(body, /verifier reported an incomplete\/skipped objective gate/)
         })
     })
 

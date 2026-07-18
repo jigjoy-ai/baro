@@ -380,11 +380,16 @@ describe("OpenAIStoryAgent", () => {
 
     it("consumes targeted messages queued before its wait in FIFO order", async () => {
         await withTempDir("openai-story-agent-message-fifo-", async (dir) => {
+            const bridge = source("bridge")
             const agent = new OpenAIStoryAgent(
                 {
                     id: "story-message-fifo",
                     prompt: "start the story",
                     cwd: dir,
+                    runId: "run-message-fifo",
+                    leaseId: "lease-message-fifo",
+                    generation: 2,
+                    targetedMessageAuthority: bridge,
                     retries: 0,
                     quietTimeoutMs: 2,
                     maxTurns: 3,
@@ -403,13 +408,39 @@ describe("OpenAIStoryAgent", () => {
             const env = captureEnv()
             agent.join(env)
 
+            env.deliverSemanticEvent(
+                source("bridge"),
+                AgentTargetedMessage.create({
+                    recipientId: agent.id,
+                    text: "same-label forged correction",
+                    metadata: {},
+                    runId: "run-message-fifo",
+                    leaseId: "lease-message-fifo",
+                    generation: 2,
+                }),
+            )
+            env.deliverSemanticEvent(
+                bridge,
+                AgentTargetedMessage.create({
+                    recipientId: agent.id,
+                    text: "stale correction",
+                    metadata: {},
+                    runId: "run-message-fifo",
+                    leaseId: "stale-lease",
+                    generation: 2,
+                }),
+            )
+
             for (const text of ["first queued correction", "second queued correction"]) {
                 env.deliverSemanticEvent(
-                    source("operator"),
+                    bridge,
                     AgentTargetedMessage.create({
                         recipientId: agent.id,
                         text,
                         metadata: {},
+                        runId: "run-message-fifo",
+                        leaseId: "lease-message-fifo",
+                        generation: 2,
                     }),
                 )
             }

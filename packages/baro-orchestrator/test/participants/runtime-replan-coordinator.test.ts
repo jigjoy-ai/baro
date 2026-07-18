@@ -4,6 +4,10 @@ import { describe, it } from "node:test"
 import { RuntimeReplanCoordinator } from "../../src/participants/runtime-replan-coordinator.js"
 import type { PrdFile } from "../../src/prd.js"
 import {
+    deriveGoalContract,
+    GoalInvariantLedger,
+} from "../../src/runtime/goal-contract.js"
+import {
     RuntimeReplanApplied,
     RuntimeReplanRejected,
     type RuntimeReplanProposedData,
@@ -308,14 +312,15 @@ describe("RuntimeReplanCoordinator", () => {
         }
     })
 
-    it("does not advance in-memory state when persistence fails", () => {
+    it("does not advance in-memory state when persistence fails and permits a retry", () => {
+        let failPersistence = true
         const coordinator = new RuntimeReplanCoordinator({
             runId: "run-1",
             prdPath: "/unused/prd.json",
             maxDynamicStories: 3,
             adaptationBudget: 3,
             persist: () => {
-                throw new Error("disk full")
+                if (failPersistence) throw new Error("disk full")
             },
         })
         coordinator.start(initialPrd())
@@ -329,6 +334,12 @@ describe("RuntimeReplanCoordinator", () => {
         }
         assert.equal(outcome.applied, undefined)
         assert.equal(coordinator.graphVersion, 1)
+
+        failPersistence = false
+        const retried = coordinator.decide(addProposal(), decisionState())
+        assert.ok(RuntimeReplanApplied.is(retried.event))
+        assert.ok(retried.applied)
+        assert.equal(coordinator.graphVersion, 2)
     })
 
     it("uses graph-version CAS and exact active lease correlation", () => {
@@ -372,6 +383,162 @@ describe("RuntimeReplanCoordinator", () => {
             assert.equal(outcome.event.data.code, "invalid_proposal")
         }
         assert.equal(coordinator.graphVersion, 1)
+    })
+
+    it("preserves the Guardian protocol snapshot across a graph transaction", () => {
+        const goalEnvelope = {
+            objective: "Keep cancellation lossless.",
+            constraints: [],
+            acceptanceCriteria: ["All provider paths abort before returning."],
+            nonGoals: [],
+            assumptions: [],
+        }
+        const contract = deriveGoalContract(goalEnvelope)!
+        const ledger = new GoalInvariantLedger(contract, [{
+            storyId: "S1",
+            invariantIds: ["G-A1"],
+        }])
+        const protocol = {
+            schemaVersion: 1 as const,
+            goal: ledger.snapshot(2),
+            completion: {
+                runId: "run-1",
+                checkId: "check-before-mutation",
+                contractId: contract.contractId,
+                goalRevision: 2,
+                verificationId: "verify-before-mutation",
+                status: "incomplete" as const,
+                satisfiedInvariantIds: [],
+                openInvariantIds: ["G-A1"],
+                rejectedInvariantIds: [],
+                invariants: [{
+                    invariantId: "G-A1",
+                    status: "open" as const,
+                    mappedStoryIds: ["S1"],
+                    integratedStoryIds: [],
+                    independentlyReviewedStoryIds: [],
+                    reason: "story has not integrated",
+                }],
+                reason: "goal remains incomplete",
+            },
+        }
+        const prd: PrdFile = {
+            ...initialPrd(),
+            goalEnvelope,
+            userStories: initialPrd().userStories.map((story) => ({
+                ...story,
+                goalInvariantIds: ["G-A1"],
+            })),
+            runtimeGraph: {
+                runId: "run-1",
+                version: 1,
+                dynamicStories: 0,
+                policyStories: 0,
+                appliedDecisions: [],
+                protocol,
+            },
+        }
+        const coordinator = new RuntimeReplanCoordinator({
+            runId: "run-1",
+            prdPath: "/unused/prd.json",
+            maxDynamicStories: 3,
+            adaptationBudget: 3,
+            persist: () => undefined,
+        })
+        coordinator.start(prd)
+
+        const outcome = coordinator.decide(addProposal(), decisionState(prd))
+        assert.ok(outcome.applied)
+        assert.deepEqual(
+            outcome.applied.prd.runtimeGraph?.protocol?.goal,
+            protocol.goal,
+        )
+        assert.notEqual(
+            outcome.applied.prd.runtimeGraph?.protocol?.goal,
+            protocol.goal,
+        )
+        assert.equal(
+            outcome.applied.prd.runtimeGraph?.protocol?.completion,
+            undefined,
+        )
+    })
+
+    it("carries contract evidence into a new run without carrying its completion receipt", () => {
+        const goalEnvelope = {
+            objective: "Keep cancellation lossless.",
+            constraints: [],
+            acceptanceCriteria: ["All provider paths abort before returning."],
+            nonGoals: [],
+            assumptions: [],
+        }
+        const contract = deriveGoalContract(goalEnvelope)!
+        const ledger = new GoalInvariantLedger(contract, [{
+            storyId: "S1",
+            invariantIds: ["G-A1"],
+        }])
+        const goal = ledger.snapshot(4)
+        const priorRun: PrdFile = {
+            ...initialPrd(),
+            goalEnvelope,
+            userStories: initialPrd().userStories.map((story) => ({
+                ...story,
+                goalInvariantIds: ["G-A1"],
+            })),
+            runtimeGraph: {
+                runId: "run-1",
+                version: 3,
+                dynamicStories: 0,
+                policyStories: 0,
+                appliedDecisions: [],
+                protocol: {
+                    schemaVersion: 1,
+                    goal,
+                    completion: {
+                        runId: "run-1",
+                        checkId: "check-run-1",
+                        contractId: contract.contractId,
+                        goalRevision: goal.revision,
+                        verificationId: "verify-run-1",
+                        status: "incomplete",
+                        satisfiedInvariantIds: [],
+                        openInvariantIds: ["G-A1"],
+                        rejectedInvariantIds: [],
+                        invariants: [{
+                            invariantId: "G-A1",
+                            status: "open",
+                            mappedStoryIds: ["S1"],
+                            integratedStoryIds: [],
+                            independentlyReviewedStoryIds: [],
+                            reason: "story has not integrated",
+                        }],
+                        reason: "goal remains incomplete",
+                    },
+                },
+            },
+        }
+        const coordinator = new RuntimeReplanCoordinator({
+            runId: "run-2",
+            prdPath: "/unused/prd.json",
+            maxDynamicStories: 3,
+            adaptationBudget: 3,
+            persist: () => undefined,
+        })
+        coordinator.start(priorRun)
+        const proposal: RuntimeReplanProposedData = {
+            ...addProposal(),
+            runId: "run-2",
+            proposalId: "proposal-new-run",
+            baseGraphVersion: 3,
+        }
+
+        const outcome = coordinator.decide(proposal, decisionState(priorRun))
+        assert.ok(outcome.applied)
+        assert.deepEqual(outcome.applied.prd.runtimeGraph?.protocol?.goal, goal)
+        assert.equal(
+            outcome.applied.prd.runtimeGraph?.protocol?.completion,
+            undefined,
+        )
+        assert.equal(outcome.applied.prd.runtimeGraph?.runId, "run-2")
     })
 })
 

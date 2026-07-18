@@ -36,6 +36,7 @@ export interface OpenCodeStorySpec {
     runId?: string
     leaseId?: string
     generation?: number
+    targetedMessageAuthority?: Participant
     /** Provider-qualified model, e.g. "anthropic/claude-sonnet-4-20250514". */
     model?: string
     opencodeBin?: string
@@ -348,6 +349,8 @@ export class OpenCodeStoryAgent extends BaseObserver {
             model: this.spec.model,
             opencodeBin: this.spec.opencodeBin,
             skipPermissions: this.spec.skipPermissions,
+            targetedMessageAuthority: this.spec.targetedMessageAuthority,
+            targetedMessageCorrelation: correlationOf(this.spec),
         })
         this.currentOpenCode = opencode
         this.terminalSourceRegistrar?.(opencode)

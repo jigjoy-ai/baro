@@ -10,15 +10,18 @@ import {
     RunVerificationRequested,
     RunVerificationTimedOut,
     StoryIntervention,
+    StoryQualityCompleted,
     WorkClaimed,
     WorkDiscovered,
-    WorkLeaseGranted,
     WorkLeaseExpired,
+    WorkLeaseGranted,
+    WorkLeaseReleased,
     WorkOffered,
     type CoordinationData,
     type CritiqueData,
     type StoryInterventionData,
 } from "../../semantic-events.js"
+import { ActiveLeaseRegistry } from "../../runtime/active-lease-registry.js"
 import { emit } from "../../tui-protocol.js"
 
 /**
@@ -27,23 +30,99 @@ import { emit } from "../../tui-protocol.js"
  * `story_log` mirrors for one release.
  */
 export class CoordinationForwarder extends BaseObserver {
+    private interventionAuthority: Participant | null = null
+    private collectiveAuthorities: Readonly<CollectiveCoordinationAuthorities> | null = null
+    private readonly leases = new ActiveLeaseRegistry()
+    private readonly seenQualityEvaluations = new Set<string>()
+
+    constructor(private readonly collectiveFailClosed = false) {
+        super()
+    }
+
+    /**
+     * Seal the presentation plane to the same concrete participants that own
+     * the collective state transitions. An omitted optional authority means
+     * that event family is disabled, not ambiently trusted.
+     */
+    sealCollectiveAuthorities(
+        authorities: CollectiveCoordinationAuthorities,
+    ): void {
+        if (this.collectiveAuthorities) {
+            throw new Error(
+                "coordination forwarder collective authorities are already sealed",
+            )
+        }
+        this.collectiveAuthorities = Object.freeze({ ...authorities })
+    }
+
+    setInterventionAuthority(authority: Participant): void {
+        if (
+            this.interventionAuthority &&
+            this.interventionAuthority !== authority
+        ) {
+            throw new Error("coordination forwarder intervention authority is already bound")
+        }
+        this.interventionAuthority = authority
+    }
+
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         if (Coordination.is(event)) {
+            if (!this.matchesCollective(source, "coordination")) return
             this.handleCoordination(event.data)
             return
         }
         if (Critique.is(event)) {
+            // Raw Critique has no run/lease/generation correlation. It remains
+            // a legacy presentation event, but collective presentation waits
+            // for AcceptanceGate's correlated projection below.
+            if (this.collectiveAuthorities || this.collectiveFailClosed) return
             this.handleCritique(event.data)
             return
         }
+        if (StoryQualityCompleted.is(event)) {
+            const authorities = this.collectiveAuthorities
+            if (
+                !authorities?.quality ||
+                source !== authorities.quality ||
+                event.data.runId !== authorities.runId ||
+                !this.leases.matchesLeaseGeneration(
+                    event.data.storyId,
+                    authorities.runId,
+                    event.data.leaseId,
+                    event.data.generation,
+                ) ||
+                this.seenQualityEvaluations.has(event.data.evaluationId)
+            ) return
+            this.seenQualityEvaluations.add(event.data.evaluationId)
+            if (event.data.critique) {
+                this.handleCritique({
+                    agentId: event.data.storyId,
+                    ...event.data.critique,
+                })
+            } else {
+                emit({
+                    type: "story_log",
+                    id: event.data.storyId,
+                    line: `[critic/${event.data.status}] ${event.data.reason}`,
+                })
+            }
+            return
+        }
         if (StoryIntervention.is(event)) {
+            if (this.collectiveAuthorities || this.collectiveFailClosed) {
+                if (!this.matchesCollective(source, "intervention")) return
+            } else if (
+                this.interventionAuthority &&
+                source !== this.interventionAuthority
+            ) return
             this.handleIntervention(event.data)
             return
         }
         if (CoordinationModeSelected.is(event)) {
+            if (!this.matchesCollective(source, "board")) return
             emit({
                 type: "story_log",
                 id: "_run",
@@ -52,6 +131,7 @@ export class CoordinationForwarder extends BaseObserver {
             return
         }
         if (RunVerificationRequested.is(event)) {
+            if (!this.matchesCollective(source, "board")) return
             emit({
                 type: "activity",
                 id: "_verify",
@@ -66,6 +146,7 @@ export class CoordinationForwarder extends BaseObserver {
             return
         }
         if (RunVerificationCompleted.is(event)) {
+            if (!this.matchesCollective(source, "verifier")) return
             const commands = event.data.commands
                 .map((command) => `${command.command}: ${command.status}`)
                 .join(", ")
@@ -86,6 +167,7 @@ export class CoordinationForwarder extends BaseObserver {
             return
         }
         if (RunVerificationTimedOut.is(event)) {
+            if (!this.matchesCollective(source, "board")) return
             emit({
                 type: "activity",
                 id: "_verify",
@@ -96,6 +178,7 @@ export class CoordinationForwarder extends BaseObserver {
             return
         }
         if (WorkOffered.is(event)) {
+            if (!this.matchesCollective(source, "board")) return
             emit({
                 type: "story_log",
                 id: event.data.request.storyId,
@@ -104,6 +187,10 @@ export class CoordinationForwarder extends BaseObserver {
             return
         }
         if (WorkClaimed.is(event)) {
+            // A claim is a worker-authored proposal, not an accepted routing
+            // fact. In collective mode the exact Broker's correlated lease
+            // below is the first presentation-safe projection.
+            if (this.collectiveAuthorities || this.collectiveFailClosed) return
             emit({
                 type: "story_log",
                 id: event.data.storyId,
@@ -112,14 +199,39 @@ export class CoordinationForwarder extends BaseObserver {
             return
         }
         if (WorkLeaseGranted.is(event)) {
+            if (!this.matchesCollective(source, "broker")) return
+            if (
+                this.collectiveAuthorities &&
+                event.data.runId !== this.collectiveAuthorities.runId
+            ) return
+            this.leases.observe(event, this.collectiveAuthorities?.runId)
+            const route = event.data.route
             emit({
                 type: "story_log",
                 id: event.data.request.storyId,
-                line: `[collective] lease granted to ${event.data.workerId}`,
+                line:
+                    `[collective] lease granted to ${event.data.workerId}` +
+                    (route ? ` → ${route.backend}:${route.model}` : ""),
             })
             return
         }
+        if (WorkLeaseReleased.is(event)) {
+            const authorities = this.collectiveAuthorities
+            if (
+                !authorities ||
+                source !== authorities.broker ||
+                event.data.runId !== authorities.runId ||
+                !this.leases.matchesLease(
+                    event.data.storyId,
+                    authorities.runId,
+                    event.data.leaseId,
+                )
+            ) return
+            this.leases.observe(event, authorities.runId)
+            return
+        }
         if (WorkLeaseExpired.is(event)) {
+            if (!this.matchesCollective(source, "broker")) return
             emit({
                 type: "story_log",
                 id: event.data.storyId,
@@ -128,6 +240,7 @@ export class CoordinationForwarder extends BaseObserver {
             return
         }
         if (PeerHelpRequested.is(event)) {
+            if (!this.matchesCollective(source, "bridge")) return
             emit({
                 type: "story_log",
                 id: event.data.sourceAgentId,
@@ -136,6 +249,7 @@ export class CoordinationForwarder extends BaseObserver {
             return
         }
         if (CollaborationNote.is(event)) {
+            if (!this.matchesCollective(source, "bridge")) return
             emit({
                 type: "story_log",
                 id: event.data.sourceAgentId,
@@ -144,6 +258,7 @@ export class CoordinationForwarder extends BaseObserver {
             return
         }
         if (WorkDiscovered.is(event)) {
+            if (!this.matchesCollective(source, "bridge")) return
             emit({
                 type: "story_log",
                 id: event.data.sourceAgentId,
@@ -151,6 +266,14 @@ export class CoordinationForwarder extends BaseObserver {
             })
             return
         }
+    }
+
+    private matchesCollective(
+        source: Participant,
+        family: keyof CollectiveCoordinationAuthorities,
+    ): boolean {
+        if (!this.collectiveAuthorities) return !this.collectiveFailClosed
+        return this.collectiveAuthorities[family] === source
     }
 
     private handleIntervention(item: StoryInterventionData): void {
@@ -196,4 +319,18 @@ export class CoordinationForwarder extends BaseObserver {
             line: `[critic/${item.status === "inconclusive" ? "inconclusive" : item.verdict}] ${item.reasoning}`,
         })
     }
+}
+
+export interface CollectiveCoordinationAuthorities {
+    runId: string
+    /** Board owns run phase, offers, and verification request/deadline. */
+    board: Participant
+    /** Broker owns accepted claims and lease lifecycle. */
+    broker: Participant
+    verifier: Participant
+    bridge: Participant
+    coordination?: Participant
+    /** AcceptanceGate owns the lease-correlated final critique projection. */
+    quality?: Participant
+    intervention?: Participant
 }

@@ -12,7 +12,10 @@
 import type { SpawnOptions } from "child_process"
 import spawn from "cross-spawn"
 
-import { ManagedProcessTree } from "./process-tree.js"
+import {
+    ManagedProcessTree,
+    POSIX_PROCESS_GROUPS_SUPPORTED,
+} from "./process-tree.js"
 
 export interface ExecFileCliOptions {
     cwd?: string
@@ -49,14 +52,20 @@ export function execFileCli(
             cwd: options.cwd,
             env: options.env,
             stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+            detached: POSIX_PROCESS_GROUPS_SUPPORTED,
         } as SpawnOptions)
         const processTree = new ManagedProcessTree(child, {
             terminationGraceMs,
             pollIntervalMs: 25,
+            ownsProcessGroup: POSIX_PROCESS_GROUPS_SUPPORTED,
         })
 
         let stdout = ""
         let stderr = ""
+        let stdoutBytes = 0
+        let stderrBytes = 0
+        let stdoutCapped = false
+        let stderrCapped = false
         let settled = false
         let timer: ReturnType<typeof setTimeout> | undefined
         let terminationError: Error | undefined
@@ -109,14 +118,25 @@ export function execFileCli(
 
         child.stdout?.on("data", (d: Buffer) => {
             refreshProcessTree()
-            stdout += d.toString()
-            if (stdout.length > maxBuffer) {
+            if (stdoutCapped) return
+            const remaining = Math.max(0, maxBuffer - stdoutBytes)
+            if (remaining > 0) stdout += d.subarray(0, remaining).toString()
+            stdoutBytes += Math.min(d.length, remaining)
+            if (d.length > remaining) {
+                stdoutCapped = true
                 terminate(new Error(`${command} stdout exceeded maxBuffer`))
             }
         })
         child.stderr?.on("data", (d: Buffer) => {
             refreshProcessTree()
-            stderr += d.toString()
+            if (stderrCapped) return
+            const remaining = Math.max(0, maxBuffer - stderrBytes)
+            if (remaining > 0) stderr += d.subarray(0, remaining).toString()
+            stderrBytes += Math.min(d.length, remaining)
+            if (d.length > remaining) {
+                stderrCapped = true
+                terminate(new Error(`${command} stderr exceeded maxBuffer`))
+            }
         })
         child.stdin?.on("error", (err) => {
             if (!settled) terminate(err)

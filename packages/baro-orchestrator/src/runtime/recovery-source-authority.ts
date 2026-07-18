@@ -1,6 +1,7 @@
 import type { Participant, SemanticEvent } from "@mozaik-ai/core"
 
 import {
+    Critique,
     RunCompleted,
     StoryQualityCompleted,
     StoryResult,
@@ -22,6 +23,7 @@ export class RecoverySourceAuthority {
     private leaseAuthority: Participant | null = null
     private qualityAuthority: Participant | null = null
     private blockAuthority: Participant | null = null
+    private criticAuthority: Participant | null = null
     private readonly blockedLeases = new Map<string, string>()
 
     constructor(
@@ -47,6 +49,13 @@ export class RecoverySourceAuthority {
             throw new Error("recovery block authority is already bound")
         }
         this.blockAuthority = authority
+    }
+
+    setCriticAuthority(authority: Participant): void {
+        if (this.criticAuthority && this.criticAuthority !== authority) {
+            throw new Error("recovery critic authority is already bound")
+        }
+        this.criticAuthority = authority
     }
 
     /** Consume every lease lifecycle event, applying it only from the Broker. */
@@ -85,7 +94,11 @@ export class RecoverySourceAuthority {
         if (!WorkLeaseGranted.is(event) && !WorkLeaseReleased.is(event)) {
             return false
         }
-        if (!this.leaseAuthority || source === this.leaseAuthority) {
+        if (
+            this.outcomeAuthority
+                ? this.leaseAuthority !== null && source === this.leaseAuthority
+                : this.leaseAuthority === null || source === this.leaseAuthority
+        ) {
             leases.observe(event, runId)
         }
         return true
@@ -93,6 +106,11 @@ export class RecoverySourceAuthority {
 
     /** Validate the source of an event that may trigger recovery policy. */
     accepts(source: Participant, event: SemanticEvent<unknown>): boolean {
+        if (Critique.is(event)) {
+            return this.outcomeAuthority
+                ? this.criticAuthority !== null && source === this.criticAuthority
+                : this.criticAuthority === null || source === this.criticAuthority
+        }
         if (StoryResult.is(event)) {
             if (
                 event.data.runId &&
@@ -112,7 +130,9 @@ export class RecoverySourceAuthority {
                 this.outcomeAuthority.matchesResult(source, event.data)
         }
         if (StoryQualityCompleted.is(event)) {
-            return !this.qualityAuthority || source === this.qualityAuthority
+            return this.outcomeAuthority
+                ? this.qualityAuthority !== null && source === this.qualityAuthority
+                : this.qualityAuthority === null || source === this.qualityAuthority
         }
         return true
     }

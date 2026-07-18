@@ -10,7 +10,10 @@ import { ChildProcess } from "child_process"
 import spawn from "cross-spawn"
 
 import { harnessChildEnvironment } from "./harness-environment.js"
-import { ManagedProcessTree } from "./process-tree.js"
+import {
+    ManagedProcessTree,
+    POSIX_PROCESS_GROUPS_SUPPORTED,
+} from "./process-tree.js"
 
 import {
     knownMetric,
@@ -233,6 +236,7 @@ export async function runCodexOneShot(
                     ...additionalEnvironment,
                 },
                 stdio: [opts.promptViaStdin ? "pipe" : "ignore", "pipe", "pipe"],
+                detached: POSIX_PROCESS_GROUPS_SUPPORTED,
             })
         } catch (e) {
             invocations.finish(
@@ -244,6 +248,7 @@ export async function runCodexOneShot(
         const processTree = new ManagedProcessTree(proc, {
             terminationGraceMs,
             pollIntervalMs: 25,
+            ownsProcessGroup: POSIX_PROCESS_GROUPS_SUPPORTED,
         })
 
         let agentMessage = ""

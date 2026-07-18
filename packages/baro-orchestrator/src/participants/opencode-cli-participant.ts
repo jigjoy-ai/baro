@@ -30,6 +30,7 @@ import {
     type AgentPhase,
 } from "../semantic-events.js"
 import { mapOpenCodeEvent } from "../opencode-stream-mapper.js"
+import { acceptsTargetedMessage } from "../runtime/targeted-message-authority.js"
 import { appendCliDiagnosticTail } from "./cli-story-failure.js"
 
 export interface OpenCodeCliParticipantOptions {
@@ -45,6 +46,12 @@ export interface OpenCodeCliParticipantOptions {
      * for tool approvals, which blocks autonomous runs. Default: true.
      */
     skipPermissions?: boolean
+    targetedMessageAuthority?: Participant
+    targetedMessageCorrelation?: Readonly<{
+        runId?: string
+        leaseId?: string
+        generation?: number
+    }>
 }
 
 export interface OpenCodeRunSummary {
@@ -352,14 +359,20 @@ export class OpenCodeCliParticipant extends BaseObserver {
     }
 
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         // OpenCode run is one-shot — no stdin channel; targeted messages are
         // logged and dropped.
         if (
             AgentTargetedMessage.is(event) &&
-            event.data.recipientId === this.agentId
+            acceptsTargetedMessage(
+                source,
+                event.data,
+                this.agentId,
+                this.options.targetedMessageAuthority,
+                this.options.targetedMessageCorrelation ?? {},
+            )
         ) {
             process.stderr.write(
                 `[opencode:${this.agentId}] received AgentTargetedMessage but OpenCode run is one-shot — dropped\n`,

@@ -33,6 +33,7 @@ import {
     WorkBid,
     WorkLeaseGranted,
     WorkLeaseReleased,
+    WorkOfferRetractionResolved,
     WorkOffered,
     WorkSuspended,
     WorkerCapabilityAdvertised,
@@ -46,6 +47,7 @@ import {
     LocalStoryExecutor,
     type StoryExecution,
     type StoryExecutor,
+    type StoryCollaborationAccess,
     type StorySuspensionSummary,
 } from "./story-executor.js"
 import { RouteLearner } from "./route-learning.js"
@@ -64,6 +66,11 @@ import {
     type StoryResultAuthorityCorrelation,
 } from "../runtime/story-outcome-authority.js"
 import { classifyStoryFailure } from "../provider-failure.js"
+import type {
+    CollaborationDeliveryMode,
+    CollaborationLeaseCapability,
+    CollaborationLeaseCapabilityRequest,
+} from "./collaboration-bridge.js"
 
 export interface StoryFactoryOptions {
     cwd: string
@@ -76,6 +83,12 @@ export interface StoryFactoryOptions {
     offerAuthority?: Participant
     /** Shared run-scoped authority for dynamic factory/agent outcomes. */
     outcomeAuthority?: StoryOutcomeAuthority
+    /** Exact CollaborationBridge whose correlated deliveries may reach a
+     * collective worker. Presence enables fail-closed message validation. */
+    targetedMessageAuthority?: Participant
+    /** Exact Supervisor allowed to abort the current collective lease. When
+     * omitted, collective bus interventions are disabled. */
+    interventionAuthority?: Participant
     /** Collective Board allowed to answer native `propose_replan` tool calls. */
     runtimeReplanDecisionAuthority?: Participant
     /** Exact Critic allowed to complete a continuation-capable worker turn. */
@@ -89,7 +102,16 @@ export interface StoryFactoryOptions {
     telemetryAuthority?: Participant
     collaboration?: {
         commandPath: string
-        sessionDir: string
+        /** Exact manager-owned Bridge capability issuer. Its private storage
+         * is never forwarded to an executor or rendered into a prompt. */
+        capabilityBroker: {
+            /** Drain the Bridge's ordered lease mailbox before synchronous
+             * capability issuance. Optional for simple custom/test brokers. */
+            idle?(): Promise<void>
+            capabilityForLease(
+                request: CollaborationLeaseCapabilityRequest,
+            ): CollaborationLeaseCapability
+        }
     }
     /**
      * When set, each story runs in its own isolated git worktree instead of
@@ -339,6 +361,21 @@ export class StoryFactory extends BaseObserver {
 
         if (
             this.opts.coordinationMode === "collective" &&
+            WorkOfferRetractionResolved.is(event) &&
+            event.data.runId === this.runId() &&
+            event.data.disposition === "retracted" &&
+            source === this.opts.leaseAuthority
+        ) {
+            for (const [bidId, stored] of this.bidRoutes) {
+                if (stored.offerId === event.data.offerId) {
+                    this.bidRoutes.delete(bidId)
+                }
+            }
+            return
+        }
+
+        if (
+            this.opts.coordinationMode === "collective" &&
             WorkLeaseGranted.is(event) &&
             event.data.runId === this.runId() &&
             source === this.opts.leaseAuthority
@@ -490,6 +527,16 @@ export class StoryFactory extends BaseObserver {
         }
 
         if (StoryIntervention.is(event) && event.data.action === "abort") {
+            if (this.opts.coordinationMode === "collective") {
+                const lease = this.leases.get(event.data.storyId)
+                if (
+                    source !== this.opts.interventionAuthority ||
+                    !lease ||
+                    event.data.runId !== this.runId() ||
+                    event.data.leaseId !== lease.leaseId ||
+                    event.data.generation !== lease.generation
+                ) return
+            }
             const aborted = this.abort(event.data.storyId)
             if (aborted) {
                 process.stderr.write(
@@ -531,6 +578,18 @@ export class StoryFactory extends BaseObserver {
     private claim(offer: WorkOfferedData): void {
         try {
             const route = this.resolveRoute(offer.request.model)
+            const descriptor = directClaimRoute(this.workerId(), route)
+            // A non-market factory can route each story through a different
+            // tier-map backend. Publish the concrete, credential-free route
+            // before claiming so the Broker validates the claim against this
+            // exact worker's current advertised capability.
+            this.emitBus(
+                workerCapabilityEvent(
+                    this.runId(),
+                    this.workerId(),
+                    descriptor,
+                ),
+            )
             this.emitBus(
                 WorkClaimed.create({
                     runId: offer.runId,
@@ -539,6 +598,7 @@ export class StoryFactory extends BaseObserver {
                     workerId: this.workerId(),
                     backend: route.backend,
                     model: route.model ?? "default",
+                    route: descriptor,
                     ...(this.supportsCooperativeSuspend(route)
                         ? { supportsCooperativeSuspend: true }
                         : {}),
@@ -846,20 +906,6 @@ export class StoryFactory extends BaseObserver {
         // when the route names none — so one DAG can mix all three
         // backends story-by-story.
         const route = this.leasedRoutes.get(req.storyId) ?? this.resolveRoute(req.model)
-        const executionRequest =
-            this.opts.collaboration && req.leaseId
-                ? {
-                      ...req,
-                      prompt: `${req.prompt}\n\n${this.collaborationInstructions(
-                          req.storyId,
-                          req.leaseId,
-                          req.graphVersion,
-                          route.backend !== "openai",
-                          this.opts.worktrees !== undefined &&
-                              this.supportsCooperativeSuspend(route),
-                      )}`,
-                  }
-                : req
 
         process.stderr.write(
             `[story-factory] ${req.storyId} → ${formatRoute(route)}` +
@@ -898,6 +944,52 @@ export class StoryFactory extends BaseObserver {
         }
         const storyCwd = createdWorktree ?? this.opts.cwd
 
+        // Issue the worker-visible capability only after isolation exists and
+        // immediately before executor construction. The Bridge remains
+        // manager-private; custom executors receive only endpoint/token data.
+        const deliveryMode = collaborationDeliveryMode(route.backend)
+        await this.opts.collaboration?.capabilityBroker.idle?.()
+        if (this.shuttingDown) return
+        const issuedCapability =
+            this.opts.collaboration &&
+            req.runId &&
+            req.leaseId &&
+            req.generation != null
+                ? this.opts.collaboration.capabilityBroker.capabilityForLease({
+                      runId: req.runId,
+                      storyId: req.storyId,
+                      leaseId: req.leaseId,
+                      generation: req.generation,
+                      deliveryMode,
+                  })
+                : null
+        const collaboration = issuedCapability && this.opts.collaboration
+            ? {
+                  commandPath: this.opts.collaboration.commandPath,
+                  endpoint: issuedCapability.endpoint,
+                  token: issuedCapability.token,
+                  deliveryMode,
+              } as const
+            : undefined
+        const executionRequest = collaboration
+            ? {
+                  ...req,
+                  prompt: [
+                      req.prompt,
+                      this.initialCollaborationMessages(
+                          issuedCapability!.initialMessages,
+                      ),
+                      this.collaborationInstructions(
+                          collaboration,
+                          req.graphVersion,
+                          route.backend !== "openai",
+                          this.opts.worktrees !== undefined &&
+                              this.supportsCooperativeSuspend(route),
+                      ),
+                  ].filter(Boolean).join("\n\n"),
+              }
+            : req
+
         // Run the story — in-process by default, or via an injected executor
         // that runs it elsewhere. Either way the StoryResult lands on the bus
         // when it settles, and Conductor reacts.
@@ -908,6 +1000,15 @@ export class StoryFactory extends BaseObserver {
         const exec = this.executor.start(executionRequest, route, storyCwd, this.envRef, {
             openaiModel: this.opts.openaiModel,
             effort: this.opts.effort,
+            ...(this.opts.coordinationMode === "collective"
+                ? {
+                      // Missing wiring fails closed: no external participant
+                      // can have this exact factory identity. Production
+                      // orchestration supplies the CollaborationBridge.
+                      targetedMessageAuthority:
+                          this.opts.targetedMessageAuthority ?? this,
+                  }
+                : {}),
             ...(route.backend === "openai" &&
             this.opts.runtimeReplanDecisionAuthority
                 ? {
@@ -925,9 +1026,7 @@ export class StoryFactory extends BaseObserver {
                           this.opts.acceptanceGateAuthority !== undefined,
                   }
                 : {}),
-            ...(route.backend === "openai" && this.opts.collaboration
-                ? { collaboration: this.opts.collaboration }
-                : {}),
+            ...(collaboration ? { collaboration } : {}),
             ...(route.backend === "openai" && this.opts.billingCoordinator
                 ? { billingCoordinator: this.opts.billingCoordinator }
                 : {}),
@@ -1094,28 +1193,48 @@ export class StoryFactory extends BaseObserver {
         return this.opts.runId ?? "legacy"
     }
 
+    private initialCollaborationMessages(messages: readonly string[]): string {
+        if (messages.length === 0) return ""
+        return [
+            "## Peer messages received before launch",
+            "",
+            ...messages.map((message) => `- ${JSON.stringify(message)}`),
+            "",
+            "Treat these as authenticated peer input for this exact lease.",
+        ].join("\n")
+    }
+
     private collaborationInstructions(
-        storyId: string,
-        leaseId: string,
+        collaboration: StoryCollaborationAccess,
         graphVersion?: number,
         includeCliDagMutationCommands = true,
         includeDependencySuspendCommand = false,
     ): string {
-        const collaboration = this.opts.collaboration!
         const command = `node ${JSON.stringify(collaboration.commandPath)}`
-        const session = JSON.stringify(collaboration.sessionDir)
-        const lease = JSON.stringify(leaseId)
+        const capability =
+            `--endpoint ${JSON.stringify(collaboration.endpoint)} ` +
+            `--token ${JSON.stringify(collaboration.token)}`
         return [
             "## Collective coordination",
             "",
             "You are an autonomous peer on the shared Baro event bus. Use these commands only when they help the goal:",
-            `- Ask peers: ${command} emit --session ${session} --lease ${lease} --kind help --text ${JSON.stringify("YOUR QUESTION")}`,
-            `- Message a peer: ${command} emit --session ${session} --lease ${lease} --kind message --to S2 --text ${JSON.stringify("YOUR MESSAGE")} (queued if that peer starts in a later wave)`,
-            `- Share a finding: ${command} emit --session ${session} --lease ${lease} --kind note --text ${JSON.stringify("YOUR FINDING")} (retained in later agents' launch context)`,
-            `- Read peer messages: ${command} inbox --session ${session} --agent ${JSON.stringify(storyId)}`,
+            `- Ask peers: ${command} emit ${capability} --kind help --text ${JSON.stringify("YOUR QUESTION")}`,
+            `- Message a peer: ${command} emit ${capability} --kind message --to S2 --text ${JSON.stringify("YOUR MESSAGE")} (queued if that peer starts in a later wave)`,
+            `- Share a finding: ${command} emit ${capability} --kind note --text ${JSON.stringify("YOUR FINDING")} (retained in later agents' launch context)`,
+            "  These event commands generate a stable id. If one returns `outcome_unknown`, retry the exact same payload with its returned `--event-id`; never mint a replacement id.",
+            `- If repository evidence shows a global invariant is unsatisfied or contradicted, fail closed for the collective: ${command} emit ${capability} --kind challenge --invariant G-A1 --reason ${JSON.stringify("CONCRETE EVIDENCE / MISSING WORK")}`,
+            "  A challenge blocks green completion until corrective work supplies evidence and the governance authority resolves it. Use the exact G-A/G-C id from the Global goal contract, not for routine uncertainty.",
+            "  If a challenge returns `outcome_unknown`, retry the exact same payload with its returned `--challenge-id`; never mint a replacement challenge.",
+            ...(collaboration.deliveryMode === "poll"
+                ? [
+                      `- Read peer messages: ${command} inbox ${capability}`,
+                  ]
+                : [
+                      "- Peer messages arrive live as follow-up user messages; no inbox polling is needed.",
+                  ]),
             ...(includeDependencySuspendCommand
                 ? [
-                      `- If an EXISTING, not-yet-integrated story is a hard prerequisite and continuing would require temporary/stale code, cooperatively suspend this story: ${command} emit --session ${session} --lease ${lease} --kind block --requires-json ${JSON.stringify('["S2"]')} --reason ${JSON.stringify("WHY THIS STORY CANNOT HONESTLY COMPLETE FIRST")} --wait-ms 30000`,
+                      `- If an EXISTING, not-yet-integrated story is a hard prerequisite and continuing would require temporary/stale code, cooperatively suspend this story: ${command} emit ${capability} --kind block --requires-json ${JSON.stringify('["S2"]')} --reason ${JSON.stringify("WHY THIS STORY CANNOT HONESTLY COMPLETE FIRST")} --wait-ms 30000`,
                       "  Use block only for a concrete dependency, not for ordinary uncertainty or failing tests. If the Board accepts it, stop work and end the session without claiming completion; Baro preserves this worktree and resumes the logical story after the prerequisite integrates.",
                   ]
                 : []),
@@ -1123,16 +1242,26 @@ export class StoryFactory extends BaseObserver {
                 ? [
                       ...(graphVersion !== undefined
                           ? [
-                                `- The launch DAG version is ${graphVersion}. To atomically add, replace, or rewire future work and receive the Board's decision immediately: ${command} emit --session ${session} --lease ${lease} --kind replan --base-version ${graphVersion} --replan-json ${JSON.stringify('{"addedStories":[],"removedStoryIds":[],"modifiedDeps":{}}')} --reason ${JSON.stringify("WHY THE PLAN MUST CHANGE")}`,
+                                `- The launch DAG version is ${graphVersion}. To atomically add, replace, or rewire future work and receive the Board's decision immediately: ${command} emit ${capability} --kind replan --base-version ${graphVersion} --replan-json ${JSON.stringify('{"addedStories":[],"removedStoryIds":[],"modifiedDeps":{}}')} --reason ${JSON.stringify("WHY THE PLAN MUST CHANGE")}`,
                                 "  Use the newest `graphVersion` returned by a prior decision. Active/already-started stories are immutable; express additional work as future stories.",
-                                `  If replan exits 3 or returns \`outcome_unknown\`, do not assume whether it applied. Resolve that same proposal before continuing: ${command} decision --session ${session} --proposal ${JSON.stringify("PROPOSAL_ID")} --wait-ms 30000`,
+                                `  If replan exits 3 or returns \`outcome_unknown\`, do not assume whether it applied. Resolve that same proposal before continuing: ${command} decision ${capability} --proposal ${JSON.stringify("PROPOSAL_ID")} --wait-ms 30000`,
                             ]
                           : []),
                   ]
                 : []),
-            "Check the inbox after initial exploration and before finishing. Do not create coordination noise for routine work.",
+            collaboration.deliveryMode === "poll"
+                ? "Check the inbox after initial exploration and before finishing. Do not create coordination noise for routine work."
+                : "Use live peer input when it arrives. Do not create coordination noise for routine work.",
         ].join("\n")
     }
+}
+
+function collaborationDeliveryMode(
+    backend: StoryRoute["backend"],
+): CollaborationDeliveryMode {
+    return backend === "codex" || backend === "opencode" || backend === "pi"
+        ? "poll"
+        : "live"
 }
 
 function workerCapabilityEvent(
@@ -1154,6 +1283,18 @@ function workerCapabilityEvent(
             ...(maxConcurrent !== undefined ? { maxConcurrent } : {}),
         },
     })
+}
+
+function directClaimRoute(
+    workerId: string,
+    route: StoryRoute,
+): WorkRouteDescriptor {
+    const model = route.model ?? "default"
+    return {
+        routeId: `direct:${workerId}:${route.backend}:${model}`,
+        backend: route.backend,
+        model,
+    }
 }
 
 function sameRouteDescriptor(

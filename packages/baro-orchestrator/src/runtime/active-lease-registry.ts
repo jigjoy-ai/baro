@@ -65,4 +65,19 @@ export class ActiveLeaseRegistry {
             leaseId === active.leaseId
         )
     }
+
+    matchesLeaseGeneration(
+        storyId: string,
+        runId: string | undefined,
+        leaseId: string | undefined,
+        generation: number | undefined,
+    ): boolean {
+        const active = this.byStory.get(storyId)
+        return (
+            !!active &&
+            runId === active.runId &&
+            leaseId === active.leaseId &&
+            generation === active.generation
+        )
+    }
 }

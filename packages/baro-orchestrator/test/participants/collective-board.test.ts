@@ -6,7 +6,14 @@ import { describe, it } from "node:test"
 import type { PrdFile } from "../../src/prd.js"
 import { CollectiveBoard } from "../../src/participants/collective-board.js"
 import {
+    deriveGoalContract,
+    GoalInvariantLedger,
+} from "../../src/runtime/goal-contract.js"
+import {
     ConductorState,
+    GoalCompletionAttested,
+    GoalCompletionCheckRequested,
+    GoalLedgerProjectionUpdated,
     RecoveryDecision,
     RecoveryEvaluationStarted,
     RecoveryStarted,
@@ -37,6 +44,117 @@ import {
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
 
 describe("CollectiveBoard", () => {
+    it("cannot finish green after goal evidence advances during push", async () => {
+        await withTempDir("collective-late-goal-evidence-", async (dir) => {
+            const runId = "run-late-goal-evidence"
+            const prdPath = join(dir, "prd.json")
+            const goalEnvelope = {
+                objective: "Keep completion evidence current.",
+                constraints: [],
+                acceptanceCriteria: ["The integrated behavior is verified."],
+                nonGoals: [],
+                assumptions: [],
+            }
+            const contract = deriveGoalContract(goalEnvelope)!
+            const input = prd()
+            input.goalEnvelope = goalEnvelope
+            input.userStories[0] = {
+                ...input.userStories[0]!,
+                goalInvariantIds: ["G-A1"],
+                passes: true,
+                completedAt: new Date(0).toISOString(),
+                durationSecs: 1,
+            }
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            const guardian = source("goal-guardian")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                verifyBeforePush: false,
+                goalCompletionAuthority: guardian,
+            })
+            const env = joinWithCapture(board)
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "test" }),
+            )
+            env.deliverSemanticEvent(
+                source("repo"),
+                RunPrepared.create({ runId, baseSha: null }),
+            )
+            const check = await waitFor(
+                env.events,
+                GoalCompletionCheckRequested.is,
+            )
+            const ledger = new GoalInvariantLedger(contract, [{
+                storyId: "S1",
+                invariantIds: ["G-A1"],
+            }])
+            ledger.recordIntegration({ storyId: "S1" })
+            const projection = ledger.snapshot(1)
+            env.deliverSemanticEvent(
+                guardian,
+                GoalLedgerProjectionUpdated.create({
+                    runId,
+                    contractId: contract.contractId,
+                    revision: projection.revision,
+                    projection,
+                }),
+            )
+            env.deliverSemanticEvent(
+                guardian,
+                GoalCompletionAttested.create({
+                    runId,
+                    checkId: check.data.checkId,
+                    contractId: contract.contractId,
+                    goalRevision: projection.revision,
+                    verificationId: check.data.verificationId,
+                    status: "satisfied",
+                    satisfiedInvariantIds: ["G-A1"],
+                    openInvariantIds: [],
+                    rejectedInvariantIds: [],
+                    invariants: [{
+                        invariantId: "G-A1",
+                        status: "satisfied",
+                        mappedStoryIds: ["S1"],
+                        integratedStoryIds: ["S1"],
+                        independentlyReviewedStoryIds: [],
+                        reason: "mapped story evidence is integrated",
+                    }],
+                    reason: "all goal invariants have integrated evidence",
+                }),
+            )
+            await waitFor(env.events, RunPushRequested.is)
+
+            const advanced = ledger.snapshot(2)
+            env.deliverSemanticEvent(
+                guardian,
+                GoalLedgerProjectionUpdated.create({
+                    runId,
+                    contractId: contract.contractId,
+                    revision: advanced.revision,
+                    projection: advanced,
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("repo"),
+                RunPushed.create({ runId, pushed: false }),
+            )
+
+            const summary = await board.done
+            assert.equal(summary.success, false)
+            assert.match(
+                summary.abortReason ?? "",
+                /goal evidence changed after completion attestation/,
+            )
+            const saved = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
+            assert.equal(saved.runtimeGraph?.protocol?.goal.revision, 2)
+            assert.equal(saved.runtimeGraph?.protocol?.completion, undefined)
+        })
+    })
+
     it("gates push and success on correlated run verification", async () => {
         await withTempDir("collective-verify-", async (dir) => {
             const prdPath = join(dir, "prd.json")
@@ -149,6 +267,196 @@ describe("CollectiveBoard", () => {
         })
     })
 
+    it("checkpoints unsuccessfully when objective verification is skipped", async () => {
+        await withTempDir("collective-verify-skipped-", async (dir) => {
+            const runId = "run-verify-skipped"
+            const prdPath = join(dir, "prd.json")
+            const input = prd()
+            input.goalEnvelope = {
+                objective: "Keep completion objectively verified.",
+                constraints: [],
+                acceptanceCriteria: ["The integrated behavior is verified."],
+                nonGoals: [],
+                assumptions: [],
+            }
+            input.userStories[0] = {
+                ...input.userStories[0]!,
+                goalInvariantIds: ["G-A1"],
+            }
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            const verifier = source("verifier")
+            const guardian = source("goal-guardian")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                verifyBeforePush: true,
+                verifierAuthority: verifier,
+                goalCompletionAuthority: guardian,
+            })
+            const env = joinWithCapture(board)
+            const request = await integrateSingleStory(env, runId)
+
+            env.deliverSemanticEvent(
+                verifier,
+                RunVerificationCompleted.create({
+                    runId,
+                    verificationId: request.data.verificationId,
+                    status: "skipped",
+                    commands: [],
+                    durationMs: 1,
+                }),
+            )
+            await waitFor(env.events, RunPushRequested.is)
+
+            assert.equal(
+                env.events.some(GoalCompletionCheckRequested.is),
+                false,
+            )
+            assert.equal(
+                env.events
+                    .filter(ConductorState.is)
+                    .some(({ data }) =>
+                        data.detail?.includes("objective verification passed")
+                    ),
+                false,
+            )
+            env.deliverSemanticEvent(
+                source("repo"),
+                RunPushed.create({ runId, pushed: false }),
+            )
+
+            const summary = await board.done
+            assert.equal(summary.success, false)
+            assert.equal(summary.verificationStatus, "skipped")
+            assert.match(
+                summary.abortReason ?? "",
+                /objective verification incomplete: no applicable .* commands ran/,
+            )
+            const completed = env.events.find(RunCompleted.is)
+            assert.equal(completed?.data.success, false)
+            assert.equal(completed?.data.verificationStatus, "skipped")
+        })
+    })
+
+    it("rejects an incoherent passed payload from the bound verifier", async () => {
+        const scenarios = [
+            { label: "empty", commands: [] },
+            {
+                label: "partial-skip",
+                commands: [
+                    {
+                        command: "cargo test",
+                        status: "passed" as const,
+                        durationMs: 10,
+                    },
+                    {
+                        command: "npm run test",
+                        status: "skipped" as const,
+                        durationMs: 1,
+                        tail: "npm is not installed",
+                    },
+                ],
+            },
+        ]
+        for (const scenario of scenarios) {
+            await withTempDir(
+                `collective-verify-incoherent-${scenario.label}-`,
+                async (dir) => {
+                    const runId = `run-verify-incoherent-${scenario.label}`
+                    const prdPath = join(dir, "prd.json")
+                    writeFileSync(
+                        prdPath,
+                        JSON.stringify(prd(), null, 2) + "\n",
+                    )
+                    const verifier = source("verifier")
+                    const board = new CollectiveBoard({
+                        runId,
+                        prdPath,
+                        cwd: dir,
+                        timeoutSecs: 60,
+                        verifyBeforePush: true,
+                        verifierAuthority: verifier,
+                    })
+                    const env = joinWithCapture(board)
+                    const request = await integrateSingleStory(env, runId)
+
+                    env.deliverSemanticEvent(
+                        verifier,
+                        RunVerificationCompleted.create({
+                            runId,
+                            verificationId: request.data.verificationId,
+                            status: "passed",
+                            commands: scenario.commands,
+                            durationMs: 11,
+                        }),
+                    )
+                    await waitFor(env.events, RunPushRequested.is)
+                    env.deliverSemanticEvent(
+                        source("repo"),
+                        RunPushed.create({ runId, pushed: false }),
+                    )
+
+                    const summary = await board.done
+                    assert.equal(summary.success, false)
+                    assert.equal(summary.verificationStatus, "skipped")
+                    assert.match(
+                        summary.abortReason ?? "",
+                        /verifier reported passed without complete passing command evidence/,
+                    )
+                },
+            )
+        }
+    })
+
+    it("gives failed command evidence priority over a skipped aggregate status", async () => {
+        await withTempDir("collective-verify-failed-evidence-", async (dir) => {
+            const runId = "run-verify-failed-evidence"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const verifier = source("verifier")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                verifyBeforePush: true,
+                verifierAuthority: verifier,
+            })
+            const env = joinWithCapture(board)
+            const request = await integrateSingleStory(env, runId)
+
+            env.deliverSemanticEvent(
+                verifier,
+                RunVerificationCompleted.create({
+                    runId,
+                    verificationId: request.data.verificationId,
+                    status: "skipped",
+                    commands: [
+                        {
+                            command: "cargo test",
+                            status: "failed",
+                            durationMs: 10,
+                            tail: "test failed",
+                        },
+                    ],
+                    durationMs: 10,
+                }),
+            )
+            await waitFor(env.events, RunPushRequested.is)
+            env.deliverSemanticEvent(
+                source("repo"),
+                RunPushed.create({ runId, pushed: false }),
+            )
+
+            const summary = await board.done
+            assert.equal(summary.success, false)
+            assert.equal(summary.verificationStatus, "failed")
+            assert.match(summary.abortReason ?? "", /verification failed: cargo test/)
+        })
+    })
+
     it("fails closed when the verifier never answers", async () => {
         await withTempDir("collective-verify-timeout-", async (dir) => {
             const prdPath = join(dir, "prd.json")
@@ -187,6 +495,112 @@ describe("CollectiveBoard", () => {
             assert.equal(summary.verificationStatus, "failed")
             assert.equal(summary.verification?.commands[0]?.command, "baro run verifier")
             assert.match(summary.abortReason ?? "", /verification timed out/)
+        })
+    })
+
+    it("fails closed when the GoalGuardian never answers the correlated check", async () => {
+        await withTempDir("collective-goal-timeout-", async (dir) => {
+            const runId = "run-goal-timeout"
+            const prdPath = join(dir, "prd.json")
+            const input = prd()
+            input.goalEnvelope = {
+                objective: "Keep completion governed.",
+                constraints: [],
+                acceptanceCriteria: ["The integrated behavior is verified."],
+                nonGoals: [],
+                assumptions: [],
+            }
+            input.userStories[0] = {
+                ...input.userStories[0]!,
+                goalInvariantIds: ["G-A1"],
+                passes: true,
+                completedAt: new Date(0).toISOString(),
+                durationSecs: 1,
+            }
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            const guardian = source("silent-goal-guardian")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                verifyBeforePush: false,
+                goalCompletionAuthority: guardian,
+                goalCompletionTimeoutMs: 10,
+            })
+            const env = joinWithCapture(board)
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "test" }),
+            )
+            env.deliverSemanticEvent(
+                source("repo"),
+                RunPrepared.create({ runId, baseSha: null }),
+            )
+            const check = await waitFor(
+                env.events,
+                GoalCompletionCheckRequested.is,
+            )
+
+            // A response from the right authority with the wrong correlation
+            // tuple must not disarm the pending check's fail-closed timer.
+            env.deliverSemanticEvent(
+                guardian,
+                GoalCompletionAttested.create({
+                    runId,
+                    checkId: `${check.data.checkId}-stale`,
+                    contractId: check.data.contractId,
+                    goalRevision: 1,
+                    verificationId: check.data.verificationId,
+                    status: "incomplete",
+                    satisfiedInvariantIds: [],
+                    openInvariantIds: ["G-A1"],
+                    rejectedInvariantIds: [],
+                    invariants: [],
+                    reason: "stale response",
+                }),
+            )
+
+            await new Promise<void>((resolve) => setTimeout(resolve, 25))
+            await waitFor(env.events, RunPushRequested.is)
+            env.deliverSemanticEvent(
+                source("repo"),
+                RunPushed.create({ runId, pushed: false }),
+            )
+            const summary = await board.done
+            assert.equal(summary.success, false)
+            assert.match(
+                summary.abortReason ?? "",
+                /goal completion attestation timed out/,
+            )
+        })
+    })
+
+    it("fails closed at the soft deadline when repository preparation never answers", async () => {
+        await withTempDir("collective-preparation-timeout-", async (dir) => {
+            const runId = "run-preparation-timeout"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                softDeadlineSecs: 0.01,
+            })
+            const env = joinWithCapture(board)
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "test" }),
+            )
+
+            await new Promise<void>((resolve) => setTimeout(resolve, 25))
+            await waitFor(env.events, RunCompleted.is)
+            const summary = await board.done
+            assert.equal(summary.success, false)
+            assert.match(summary.abortReason ?? "", /soft deadline reached/)
+            assert.match(summary.abortReason ?? "", /preparation was still pending/)
+            assert.equal(env.events.some(RunPushRequested.is), false)
         })
     })
 
@@ -1419,6 +1833,109 @@ describe("CollectiveBoard", () => {
             )
             const saved = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
             assert.equal(saved.userStories.some((story) => story.id === "S2"), true)
+        })
+    })
+
+    it("dispatches a newly ready dependent while an unrelated sibling is still running", async () => {
+        await withTempDir("collective-continuous-dag-", async (dir) => {
+            const runId = "run-continuous-dag"
+            const prdPath = join(dir, "prd.json")
+            const input = prd()
+            input.userStories = [
+                { ...input.userStories[0]!, id: "S1", title: "Prerequisite" },
+                { ...input.userStories[0]!, id: "S2", title: "Slow sibling" },
+                {
+                    ...input.userStories[0]!,
+                    id: "S3",
+                    title: "Immediate dependent",
+                    dependsOn: ["S1"],
+                },
+            ]
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+            })
+            const env = joinWithCapture(board)
+
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "test" }),
+            )
+            env.deliverSemanticEvent(
+                source("repo"),
+                RunPrepared.create({ runId, baseSha: null }),
+            )
+            const initialContexts = await waitForCount(
+                env.events,
+                WorkContextRequested.is,
+                2,
+            )
+            for (const request of initialContexts) {
+                env.deliverSemanticEvent(
+                    source("context"),
+                    WorkContextProvided.create({
+                        runId,
+                        requestId: request.data.requestId,
+                        storyId: request.data.storyId,
+                        context: null,
+                    }),
+                )
+            }
+            const offers = await waitForCount(env.events, WorkOffered.is, 2)
+            const prerequisite = offers.find(
+                (event) => event.data.request.storyId === "S1",
+            )!
+            const sibling = offers.find(
+                (event) => event.data.request.storyId === "S2",
+            )!
+            for (const [offer, leaseId] of [
+                [prerequisite, "lease-S1"],
+                [sibling, "lease-S2"],
+            ] as const) {
+                env.deliverSemanticEvent(
+                    source("broker"),
+                    WorkLeaseGranted.create({
+                        runId,
+                        offerId: offer.data.offerId,
+                        leaseId,
+                        workerId: `worker-${leaseId}`,
+                        generation: offer.data.generation,
+                        request: offer.data.request,
+                    }),
+                )
+            }
+
+            env.deliverSemanticEvent(
+                source("worker-S1"),
+                pass(runId, "S1", "lease-S1", prerequisite.data.generation),
+            )
+            await waitFor(env.events, StoryIntegrationRequested.is)
+            env.deliverSemanticEvent(
+                source("repo"),
+                StoryMerged.create({
+                    runId,
+                    storyId: "S1",
+                    leaseId: "lease-S1",
+                    mode: "worktree",
+                }),
+            )
+
+            const contexts = await waitForCount(
+                env.events,
+                WorkContextRequested.is,
+                3,
+            )
+            assert.equal(contexts[2]?.data.storyId, "S3")
+            assert.equal(
+                env.events
+                    .filter(StoryResult.is)
+                    .some((event) => event.data.storyId === "S2"),
+                false,
+                "the sibling was still executing when S3 became dispatchable",
+            )
         })
     })
 })

@@ -74,6 +74,7 @@ describe("orchestrate progressive planning", () => {
             const auditPath = join(dir, "audit.jsonl")
             const bootstrap = prd([])
             writeFileSync(prdPath, JSON.stringify(bootstrap, null, 2) + "\n")
+            writeFileSync(join(dir, "proof.mjs"), "export {}\n")
             const executor = new GatedExecutor()
             let finalPublished = false
             let startedBeforeFinal = false
@@ -143,6 +144,7 @@ describe("orchestrate progressive planning", () => {
             const planningId = "planning-progressive-fallback"
             const prdPath = join(dir, "prd.json")
             writeFileSync(prdPath, JSON.stringify(prd([]), null, 2) + "\n")
+            writeFileSync(join(dir, "proof.mjs"), "export {}\n")
             const started: string[] = []
 
             const result = await orchestrate({
@@ -236,7 +238,7 @@ function story(id: string, dependsOn: string[] = []): PrdStory {
         dependsOn,
         retries: 2,
         acceptance: [`${id} is observable`],
-        tests: [`npm test -- ${id}`],
+        tests: ["node --check proof.mjs"],
         passes: false,
         completedAt: null,
         durationSecs: null,

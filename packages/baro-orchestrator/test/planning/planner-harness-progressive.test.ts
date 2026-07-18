@@ -57,6 +57,7 @@ function story(
         retries: 2,
         acceptance: [`${id} is observable`],
         tests: [`npm test -- ${id}`],
+        goalInvariantIds: [],
         passes: false,
         completedAt: null,
         durationSecs: null,
@@ -283,6 +284,7 @@ describe("progressive planner harness MCP", () => {
                 "retries",
                 "acceptance",
                 "tests",
+                "goalInvariantIds",
                 "model",
             ])
             assert.equal(storyItems.additionalProperties, false)

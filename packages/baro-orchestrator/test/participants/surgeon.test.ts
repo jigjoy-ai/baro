@@ -5,7 +5,9 @@ import { describe, it } from "node:test"
 
 import { knownMetric, unknownMetric } from "../../src/model-telemetry.js"
 import { Surgeon, type PrdSnapshot } from "../../src/participants/surgeon.js"
+import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import {
+    Critique,
     ModelInvocationMeasured,
     RecoveryDecision,
     RecoveryEvaluationStarted,
@@ -47,6 +49,40 @@ const snapshot: PrdSnapshot = {
 }
 
 describe("Surgeon", () => {
+    it("keeps forged Critiques out of collective recovery context", async () => {
+        const outcomeAuthority = new StoryOutcomeAuthority("run-critique-source")
+        const critic = source("critic")
+        const surgeon = new Surgeon({
+            snapshot: () => snapshot,
+            useLlm: false,
+            runId: "run-critique-source",
+            emitRecoveryDecisions: true,
+            outcomeAuthority,
+        })
+        surgeon.setCriticAuthority(critic)
+
+        const critique = (reasoning: string) =>
+            Critique.create({
+                agentId: "S2",
+                verdict: "fail" as const,
+                reasoning,
+                violatedCriteria: ["tests"],
+                turn: 1,
+                modelUsed: "critic-test",
+            })
+        await surgeon.onExternalEvent(source("ambient"), critique("forged"))
+        await surgeon.onExternalEvent(critic, critique("authoritative"))
+
+        const stored = (
+            surgeon as unknown as {
+                critiques: {
+                    forStory(storyId: string): readonly { reasoning: string }[]
+                }
+            }
+        ).critiques.forStory("S2")
+        assert.deepEqual(stored.map((item) => item.reasoning), ["authoritative"])
+    })
+
     it("keeps Baro's injected Gateway credential out of the Claude recovery process", async () => {
         await withTempDir("baro-surgeon-env-", async (dir) => {
             const capture = join(dir, "environment.json")

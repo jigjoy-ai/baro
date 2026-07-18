@@ -61,7 +61,7 @@ export class WorkContextProvider extends SerializedObserver {
         const { event } = context
         if (CollaborationNote.is(event) && event.data.runId === this.runId) {
             if (
-                this.collaborationAuthority &&
+                !this.collaborationAuthority ||
                 context.source !== this.collaborationAuthority
             ) {
                 return
@@ -72,7 +72,7 @@ export class WorkContextProvider extends SerializedObserver {
         if (!WorkContextRequested.is(event) || event.data.runId !== this.runId) {
             return
         }
-        if (this.requestAuthority && context.source !== this.requestAuthority) return
+        if (!this.requestAuthority || context.source !== this.requestAuthority) return
         // Freeze the note set at request time. A note emitted after the Board
         // requested this story's launch context belongs to a later turn/wave.
         const retainedNotes = this.retainedNotes.map((note) => ({ ...note }))

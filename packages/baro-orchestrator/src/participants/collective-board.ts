@@ -1,19 +1,34 @@
 import type { Participant, SemanticEvent } from "@mozaik-ai/core"
 import { randomUUID } from "node:crypto"
+import { isDeepStrictEqual } from "node:util"
 
 import { buildDag } from "../dag.js"
+import {
+    deriveGoalContract,
+    normalizeGoalLedgerProjection,
+    renderGoalContractPrompt,
+} from "../runtime/goal-contract.js"
 import {
     buildDefaultStoryPrompt,
     loadPrd,
     markStoryPassed,
     savePrdAtomic,
+    type PrdCollectiveProtocolState,
     type PrdFile,
     type PrdStory,
 } from "../prd.js"
 import {
+    defineSemanticEvent,
     ConductorState,
     ConversationDelegationProposed,
     CoordinationModeSelected,
+    GoalCompletionAttested,
+    GoalCompletionCheckRequested,
+    GoalInvariantRemediationAdmitted,
+    GoalInvariantRemediationProposed,
+    GoalLedgerProjectionPersisted,
+    GoalLedgerProjectionUpdated,
+    GoalStoryInvariantMapped,
     LevelCompleted,
     LevelStarted,
     RecoveryDecision,
@@ -51,11 +66,16 @@ import {
     WorkContextProvided,
     WorkContextRequested,
     WorkOfferExpired,
+    WorkOfferRetractionRequested,
+    WorkOfferRetractionResolved,
     WorkOffered,
     WorkspaceCleanupCompleted,
     WorkspaceCleanupFailed,
     WorkspaceCleanupRequested,
     type ReplanData,
+    type GoalCompletionAttestedData,
+    type GoalInvariantRemediationProposedData,
+    type GoalLedgerProjectionUpdatedData,
     type RuntimeReplanRejectionCode,
     type RuntimeReplanProposedData,
     type RunVerificationCompletedData,
@@ -65,13 +85,20 @@ import {
     type WorkDiscoveredData,
     type WorkBlockedData,
     type WorkBlockRejectionCode,
+    type WorkLeaseGrantedData,
+    type WorkOfferedData,
+    type WorkOfferRetractionRequestedData,
+    type WorkOfferRetractionResolvedData,
 } from "../semantic-events.js"
 import type { ConductorRunSummary } from "./conductor.js"
 import {
     toRuntimeReplanProposal,
     validateConversationDelegationProposal,
 } from "./conversation-delegation.js"
-import { RuntimeReplanCoordinator } from "./runtime-replan-coordinator.js"
+import {
+    RuntimeReplanCoordinator,
+    type RuntimeReplanDecisionOutcome,
+} from "./runtime-replan-coordinator.js"
 import { ProgressivePlanningCoordinator } from "./progressive-planning-coordinator.js"
 import { OperationalRecoveryPolicy } from "./operational-recovery.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
@@ -81,6 +108,7 @@ import {
     type SerializedEventContext,
     type SerializedObserverFailure,
 } from "../runtime/serialized-observer.js"
+import { runtimeProposalFingerprint } from "../runtime/runtime-replan-fingerprint.js"
 
 export interface CollectiveBoardOptions {
     runId: string
@@ -101,11 +129,17 @@ export interface CollectiveBoardOptions {
     /** Independent budget for worker/discovery DAG mutations without an
      * integrated story. It is not consumed by Surgeon recovery. Default: 6. */
     runtimeAdaptationBudget?: number
+    /** Persistence seam for graph-transaction tests and alternative durable
+     * stores. Production defaults to the PRD atomic writer. */
+    runtimeReplanPersist?: (path: string, prd: PrdFile) => void
     softDeadlineSecs?: number
     /** Gate a clean completion on objective build/test verification. */
     verifyBeforePush?: boolean
     /** Fail closed if the verifier never answers. Default: 21 minutes. */
     verificationTimeoutMs?: number
+    /** Fail closed if the GoalGuardian never answers a correlated completion
+     * check. Values are clamped to at least 1 ms. Default: 30 seconds. */
+    goalCompletionTimeoutMs?: number
     /** Require a correlated Critic decision before integrating a successful story. */
     expectQualityDecisions?: boolean
     /** Object-identity Broker authority allowed to publish lease lifecycle events. */
@@ -118,6 +152,8 @@ export interface CollectiveBoardOptions {
     integrationAuthority?: Participant
     /** Object-identity RunVerifier authority allowed to publish objective evidence. */
     verifierAuthority?: Participant
+    /** Independent GoalGuardian allowed to attest the global goal ledger. */
+    goalCompletionAuthority?: Participant
     /** Object-identity Surgeon authority allowed to publish recovery policy. */
     recoveryAuthority?: Participant
     /** Object-identity CollaborationBridge authority allowed to discover work. */
@@ -140,6 +176,9 @@ export interface CollectiveBoardOptions {
     unsafeAllowUnboundPlanningAuthority?: boolean
     /** Explicitly unsafe unit-test seam. Never enable in a real run. */
     unsafeAllowUnboundRuntimeReplanAuthority?: boolean
+    /** Bound for the Broker to serialize offer retraction against a claim or
+     * lease. The graph stays unchanged when this expires. Default: 5 seconds. */
+    offerRetractionTimeoutMs?: number
     /** Explicitly unsafe unit-test seam. Never enable in a real run. */
     unsafeAllowUnboundDependencyAuthority?: boolean
     /** Object-identity WorkContextProvider allowed to answer context requests. */
@@ -172,7 +211,63 @@ interface RememberedWorkBlockDecision {
     event: WorkBlockDecisionEvent
 }
 
+interface ActiveWorkOffer {
+    data: WorkOfferedData
+}
+
+interface QueuedRuntimeReplan {
+    proposal: RuntimeReplanProposedData
+    fingerprint: string
+    requireActiveLease: boolean
+}
+
+interface StagedRuntimeReplan extends QueuedRuntimeReplan {
+    stageId: string
+    retractions: Map<
+        string,
+        {
+            request: WorkOfferRetractionRequestedData
+            resolution?: WorkOfferRetractionResolvedData
+        }
+    >
+}
+
+interface RuntimeReplanRetractionTimedOutData {
+    runId: string
+    stageId: string
+    proposalId: string
+}
+
+const RuntimeReplanRetractionTimedOut =
+    defineSemanticEvent<RuntimeReplanRetractionTimedOutData>(
+        "runtime_replan_retraction_timed_out",
+    )
+
+interface SoftDeadlineReachedData {
+    runId: string
+    startedAt: number
+}
+
+const SoftDeadlineReached = defineSemanticEvent<SoftDeadlineReachedData>(
+    "collective_soft_deadline_reached",
+)
+
+interface GoalCompletionCheckTimedOutData {
+    runId: string
+    checkId: string
+    contractId: string | null
+    verificationId: string
+    timeoutMs: number
+}
+
+const GoalCompletionCheckTimedOut =
+    defineSemanticEvent<GoalCompletionCheckTimedOutData>(
+        "goal_completion_check_timed_out",
+    )
+
 type BoardPhase = "idle" | "preparing" | "running" | "verifying" | "pushing" | "done"
+
+const MAX_GOAL_REMEDIATION_ADMISSION_ATTEMPTS = 3
 
 export class CollectiveBoard extends SerializedObserver {
     private phase: BoardPhase = "idle"
@@ -181,9 +276,11 @@ export class CollectiveBoard extends SerializedObserver {
     private wave: WaveState | null = null
     private waveOrdinal = 0
     private offerSequence = 0
+    private runtimeReplanStageSequence = 0
     private contextSequence = 0
     private cleanupSequence = 0
     private verificationSequence = 0
+    private goalCheckSequence = 0
     private discoverySequence = 0
     private totalAttempts = 0
     private readonly completed: string[] = []
@@ -210,6 +307,19 @@ export class CollectiveBoard extends SerializedObserver {
             route?: { routeId: string; backend: string; model: string }
             supportsCooperativeSuspend: boolean
         }
+    >()
+    /** Board-side lifecycle projection for work which has been published but
+     * has not crossed the Broker's lease boundary. Planned/context-pending
+     * stories deliberately do not appear here. */
+    private readonly activeOffers = new Map<string, ActiveWorkOffer>()
+    private readonly runtimeReplanQueue: QueuedRuntimeReplan[] = []
+    private stagedRuntimeReplan: StagedRuntimeReplan | null = null
+    /** A timed-out request can still resolve later. Retain its exact
+     * correlation so a late retraction restores that story without touching a
+     * newer offer. */
+    private readonly abandonedOfferRetractions = new Map<
+        string,
+        WorkOfferRetractionRequestedData
     >()
     private readonly settledLeaseResults = new Set<string>()
     private readonly pendingQuality = new Map<string, StoryResultData>()
@@ -245,9 +355,17 @@ export class CollectiveBoard extends SerializedObserver {
     private readonly unclaimable = new Set<string>()
     private readonly unmergeable = new Set<string>()
     private readonly pendingReplans: ReplanData[] = []
-    /** Future nodes touched by runtime proposals and eligible to cross the
-     * old level barrier as soon as their actual dependencies integrate. */
-    private readonly runtimeAdaptiveStoryIds = new Set<string>()
+    /** Contract-required work deferred only until the next integrated-story
+     * progress checkpoint. The proposal is replay-safe and revalidated before
+     * admission; it never mutates the graph from this queue directly. */
+    private readonly pendingGoalRemediations = new Map<
+        string,
+        GoalInvariantRemediationProposedData
+    >()
+    private readonly pendingGoalRemediationFailures = new Map<
+        string,
+        { reason: string; retryable: boolean; attempts: number }
+    >()
     private readonly runtimeReplans: RuntimeReplanCoordinator
     private readonly progressivePlanning: ProgressivePlanningCoordinator
     /** Exact DialogueAgent object allowed to propose add-only work. It is
@@ -271,11 +389,20 @@ export class CollectiveBoard extends SerializedObserver {
     private runtimeAdaptationsSinceProgress = 0
     private stopReason: string | null = null
     private pendingVerificationId: string | null = null
+    private pendingGoalCheck: {
+        checkId: string
+        contractId: string | null
+        verificationId: string
+    } | null = null
     private verificationStatus: "passed" | "failed" | "skipped" | undefined
     private verification: RunVerificationEvidence | undefined
     private verificationTimer: ReturnType<typeof setTimeout> | null = null
+    private softDeadlineTimer: ReturnType<typeof setTimeout> | null = null
+    private goalCompletionTimer: ReturnType<typeof setTimeout> | null = null
     private operationalRetryTimer: ReturnType<typeof setTimeout> | null = null
     private operationalRetryDueAt: number | null = null
+    private goalRemediationRetryTimer: ReturnType<typeof setTimeout> | null = null
+    private offerRetractionTimer: ReturnType<typeof setTimeout> | null = null
     readonly done: Promise<ConductorRunSummary>
     private resolveDone!: (summary: ConductorRunSummary) => void
 
@@ -302,6 +429,9 @@ export class CollectiveBoard extends SerializedObserver {
             prdPath: opts.prdPath,
             maxDynamicStories: opts.maxDynamicStories ?? 3,
             adaptationBudget: this.runtimeAdaptationBudget,
+            ...(opts.runtimeReplanPersist
+                ? { persist: opts.runtimeReplanPersist }
+                : {}),
         })
         this.progressivePlanning = new ProgressivePlanningCoordinator({
             runId: opts.runId,
@@ -339,14 +469,13 @@ export class CollectiveBoard extends SerializedObserver {
                     })
                     if (outcome.applied && RuntimeReplanApplied.is(outcome.event)) {
                         this.prd = outcome.applied.prd
-                        this.trackRuntimeAdaptiveStories(outcome.applied)
                     }
                     return outcome
                 },
-                emit: (event) => this.emit(event),
+                emit: (event) => this.emitGraphDecision(event),
                 afterAdmission: () => {
                     if (this.phase !== "running") return
-                    if (this.wave) this.reconcileRuntimeReadyStories()
+                    if (this.wave) this.reconcileReadyStories()
                     else this.scheduleNextWave()
                 },
                 afterClose: () => {
@@ -377,6 +506,30 @@ export class CollectiveBoard extends SerializedObserver {
     ): Promise<void> {
         const { event } = context
         if (
+            SoftDeadlineReached.is(event) &&
+            context.internal &&
+            event.data.runId === this.opts.runId
+        ) {
+            this.onSoftDeadlineReached(event.data)
+            return
+        }
+        if (
+            GoalCompletionCheckTimedOut.is(event) &&
+            context.internal &&
+            event.data.runId === this.opts.runId
+        ) {
+            this.onGoalCompletionCheckTimedOut(event.data)
+            return
+        }
+        if (
+            RuntimeReplanRetractionTimedOut.is(event) &&
+            context.internal &&
+            event.data.runId === this.opts.runId
+        ) {
+            this.onRuntimeReplanRetractionTimedOut(event.data)
+            return
+        }
+        if (
             RunStartRequest.is(event) &&
             (!this.opts.startAuthority || context.source === this.opts.startAuthority)
         ) {
@@ -406,14 +559,15 @@ export class CollectiveBoard extends SerializedObserver {
             event.data.runId === this.opts.runId &&
             (!this.opts.leaseAuthority || context.source === this.opts.leaseAuthority)
         ) {
-            this.leases.set(event.data.request.storyId, {
-                leaseId: event.data.leaseId,
-                generation: event.data.generation,
-                workerId: event.data.workerId,
-                ...(event.data.route ? { route: { ...event.data.route } } : {}),
-                supportsCooperativeSuspend:
-                    event.data.supportsCooperativeSuspend === true,
-            })
+            this.onWorkLeaseGranted(event.data)
+            return
+        }
+        if (
+            WorkOfferRetractionResolved.is(event) &&
+            event.data.runId === this.opts.runId &&
+            (!this.opts.leaseAuthority || context.source === this.opts.leaseAuthority)
+        ) {
+            this.onWorkOfferRetractionResolved(event.data)
             return
         }
         if (WorkBlocked.is(event) && event.data.runId === this.opts.runId) {
@@ -443,7 +597,10 @@ export class CollectiveBoard extends SerializedObserver {
             const story = this.contextRequests.get(event.data.requestId)
             if (!story || story.id !== event.data.storyId) return
             this.contextRequests.delete(event.data.requestId)
-            if (this.wave?.pending.has(story.id)) {
+            if (
+                this.wave?.pending.has(story.id) &&
+                !this.runtimeReplanTargetsStory(story.id)
+            ) {
                 this.offerStory(story, event.data.context)
             }
             return
@@ -541,6 +698,24 @@ export class CollectiveBoard extends SerializedObserver {
             event.data.runId === this.opts.runId &&
             (!this.opts.leaseAuthority || context.source === this.opts.leaseAuthority)
         ) {
+            const offer = this.activeOffers.get(event.data.storyId)
+            if (!offer || offer.data.offerId !== event.data.offerId) return
+            const stagedRetraction = this.isOfferAwaitingRetraction(
+                event.data.offerId,
+            )
+            const abandonedRetraction =
+                this.consumeAbandonedOfferRetractions(event.data.offerId)
+            this.activeOffers.delete(event.data.storyId)
+            if (stagedRetraction) return
+            if (abandonedRetraction) {
+                // The graph transaction already failed closed at its
+                // retraction watchdog. Expiry now proves the unchanged old
+                // offer is closed, so return the story to scheduling instead
+                // of converting a delayed Broker ACK into an execution
+                // failure. Any eventual ACK is obsolete after this tombstone.
+                this.restoreRetractedStories([event.data.storyId])
+                return
+            }
             this.unclaimable.add(event.data.storyId)
             this.failStory(event.data.storyId, event.data.reason, false)
             return
@@ -710,6 +885,15 @@ export class CollectiveBoard extends SerializedObserver {
             return
         }
         if (
+            GoalInvariantRemediationProposed.is(event) &&
+            event.data.runId === this.opts.runId &&
+            this.opts.goalCompletionAuthority !== undefined &&
+            context.source === this.opts.goalCompletionAuthority
+        ) {
+            this.onGoalInvariantRemediationProposed(event.data)
+            return
+        }
+        if (
             RuntimeReplanProposed.is(event) &&
             event.data.runId === this.opts.runId
         ) {
@@ -778,6 +962,25 @@ export class CollectiveBoard extends SerializedObserver {
             return
         }
         if (
+            GoalLedgerProjectionUpdated.is(event) &&
+            event.data.runId === this.opts.runId &&
+            this.opts.goalCompletionAuthority !== undefined &&
+            context.source === this.opts.goalCompletionAuthority
+        ) {
+            this.onGoalLedgerProjectionUpdated(event.data)
+            return
+        }
+        if (
+            GoalCompletionAttested.is(event) &&
+            event.data.runId === this.opts.runId &&
+            this.phase === "verifying" &&
+            this.opts.goalCompletionAuthority !== undefined &&
+            context.source === this.opts.goalCompletionAuthority
+        ) {
+            this.onGoalCompletionAttested(event.data)
+            return
+        }
+        if (
             RunPushed.is(event) &&
             event.data.runId === this.opts.runId &&
             (!this.opts.integrationAuthority ||
@@ -805,6 +1008,7 @@ export class CollectiveBoard extends SerializedObserver {
         this.phase = "preparing"
         this.startedAt = Date.now()
         this.prd = this.progressivePlanning.initialize(loadPrd(this.opts.prdPath))
+        this.armSoftDeadlineTimer()
         // A run starts a fresh optimistic-concurrency domain. PRD contents are
         // durable; outstanding proposals never survive across run identities.
         this.runtimeReplans.start(this.prd)
@@ -999,7 +1203,7 @@ export class CollectiveBoard extends SerializedObserver {
             maxAddedStories: 0,
         })
         if (!outcome.applied || !RuntimeReplanApplied.is(outcome.event)) {
-            this.emit(outcome.event)
+            this.emitGraphDecision(outcome.event)
             const code = RuntimeReplanRejected.is(outcome.event)
                 ? blockRejectionCode(outcome.event.data.code)
                 : "invalid_request"
@@ -1011,7 +1215,6 @@ export class CollectiveBoard extends SerializedObserver {
         }
 
         this.prd = outcome.applied.prd
-        this.trackRuntimeAdaptiveStories(outcome.applied)
         this.settledLeaseResults.add(request.leaseId)
         this.pendingDependencyBlocks.set(request.storyId, {
             request: {
@@ -1020,7 +1223,7 @@ export class CollectiveBoard extends SerializedObserver {
             },
             nextDependsOn,
         })
-        this.emit(outcome.event)
+        this.emitGraphDecision(outcome.event)
         const accepted = WorkBlockAccepted.create({
             ...request,
             requiredStoryIds: [...request.requiredStoryIds],
@@ -1306,7 +1509,8 @@ export class CollectiveBoard extends SerializedObserver {
         this.pendingQuality.delete(storyId)
         this.healingActionsSinceProgress = 0
         this.runtimeAdaptationsSinceProgress = 0
-        this.reconcileRuntimeReadyStories()
+        this.retryPendingGoalRemediations(true)
+        this.reconcileReadyStories()
         this.maybeCompleteWave()
     }
 
@@ -1567,10 +1771,9 @@ export class CollectiveBoard extends SerializedObserver {
                 continue
             }
             this.prd = outcome.applied.prd
-            this.trackRuntimeAdaptiveStories(outcome.applied)
             // Raw Surgeon Replan is a proposal in collective mode. Stateful
             // observers consume only this authoritative, persisted decision.
-            this.emit(outcome.event)
+            this.emitGraphDecision(outcome.event)
             appliedReplans += 1
             if (replan.addedStories.length > 0) {
                 for (const id of replan.removedStoryIds) {
@@ -1663,17 +1866,350 @@ export class CollectiveBoard extends SerializedObserver {
         })
     }
 
+    private onGoalInvariantRemediationProposed(
+        remediation: GoalInvariantRemediationProposedData,
+        scheduleAfterAdmission = true,
+    ): void {
+        if (
+            !this.prd ||
+            (this.phase !== "preparing" &&
+                this.phase !== "running" &&
+                this.phase !== "verifying")
+        ) return
+        const contract = deriveGoalContract(this.prd.goalEnvelope)
+        const invariant = contract?.invariants.find(
+            ({ id }) => id === remediation.invariantId,
+        )
+        if (
+            !contract ||
+            remediation.contractId !== contract.contractId ||
+            !invariant ||
+            remediation.story.goalInvariantIds?.length !== 1 ||
+            remediation.story.goalInvariantIds[0] !== invariant.id
+        ) return
+
+        const existing = this.prd.userStories.find(
+            ({ id }) => id === remediation.story.id,
+        )
+        if (existing) {
+            if (!sameRemediationStory(existing, remediation.story)) {
+                this.emit(
+                    ConductorState.create({
+                        phase: "running_level",
+                        detail:
+                            `collective rejected goal remediation ` +
+                            `${remediation.challengeId}: story id collision`,
+                        currentLevel: this.wave?.ordinal,
+                    }),
+                )
+                return
+            }
+            this.pendingGoalRemediations.delete(remediation.proposalId)
+            this.pendingGoalRemediationFailures.delete(remediation.proposalId)
+            if (this.pendingGoalRemediations.size === 0) {
+                this.clearGoalRemediationRetryTimer()
+            }
+            this.emitGoalRemediationAdmitted(
+                remediation,
+                this.runtimeReplans.graphVersion,
+                "existing",
+            )
+            return
+        }
+
+        // GoalGuardian can react to RunStarted/PlanningStreamClosed in the
+        // same Mozaik fan-out in which an empty settled graph asks for final
+        // verification. A valid new contract obligation supersedes that
+        // verification snapshot; stale verifier/attestation replies are
+        // source-correlated and ignored after these ids are cleared.
+        this.resumeRunningForGoalRemediation(remediation)
+
+        const halt = this.healingHaltReason()
+        if (halt) {
+            if (this.softDeadlineReason() === null) {
+                this.queueGoalRemediation(remediation, halt, false)
+            }
+            this.emit(
+                ConductorState.create({
+                    phase: "running_level",
+                    detail: this.softDeadlineReason()
+                        ? `collective could not admit goal remediation ` +
+                          `${remediation.challengeId}: ${halt}`
+                        : `collective deferred goal remediation ` +
+                          `${remediation.challengeId} until the next ` +
+                          `integrated-story progress checkpoint: ${halt}`,
+                    currentLevel: this.wave?.ordinal,
+                }),
+            )
+            if (!this.wave) {
+                if (this.softDeadlineReason() !== null) this.requestPush(halt)
+                else this.scheduleNextWave()
+            }
+            return
+        }
+        const proposal: RuntimeReplanProposedData = {
+            runId: this.opts.runId,
+            proposalId: remediation.proposalId,
+            sourceStoryId: `goal:${remediation.challengeId}`,
+            leaseId: `${this.opts.runId}:goal-guardian`,
+            generation: 0,
+            baseGraphVersion: this.runtimeReplans.graphVersion,
+            reason:
+                `autonomous remediation for ${remediation.invariantId}: ` +
+                remediation.reason,
+            mutation: {
+                addedStories: [remediation.story],
+                removedStoryIds: [],
+                modifiedDeps: {},
+            },
+        }
+        const outcome = this.runtimeReplans.decide(proposal, {
+            active: true,
+            prd: this.prd,
+            immutableStoryIds: this.runtimeImmutableStoryIds(),
+            activeLease: undefined,
+            adaptationsSinceProgress: this.runtimeAdaptationsSinceProgress,
+            requireActiveLease: false,
+            storyAccounting: "policy",
+            maxAddedStories: 1,
+        })
+        if (!outcome.applied || !RuntimeReplanApplied.is(outcome.event)) {
+            if (
+                RuntimeReplanRejected.is(outcome.event) &&
+                (outcome.event.data.code === "stale_graph_version" ||
+                    outcome.event.data.code === "persistence_failed" ||
+                    outcome.event.data.code === "adaptation_budget_exhausted")
+            ) {
+                const retryable =
+                    outcome.event.data.code === "stale_graph_version" ||
+                    outcome.event.data.code === "persistence_failed"
+                this.queueGoalRemediation(
+                    remediation,
+                    outcome.event.data.reason,
+                    retryable,
+                )
+            }
+            this.emitGraphDecision(outcome.event)
+            if (!this.wave && this.phase === "running") {
+                if (
+                    this.pendingGoalRemediationFailures.get(
+                        remediation.proposalId,
+                    )?.retryable
+                ) {
+                    this.scheduleGoalRemediationRetry()
+                } else {
+                    this.scheduleNextWave()
+                }
+            }
+            return
+        }
+        this.pendingGoalRemediations.delete(remediation.proposalId)
+        this.pendingGoalRemediationFailures.delete(remediation.proposalId)
+        if (this.pendingGoalRemediations.size === 0) {
+            this.clearGoalRemediationRetryTimer()
+        }
+        this.prd = outcome.applied.prd
+        this.emitGraphDecision(outcome.event)
+        this.noteHealingAction(this.wave?.ordinal ?? this.waveOrdinal)
+        this.emitGoalRemediationAdmitted(
+            remediation,
+            outcome.event.data.graphVersion,
+            "applied",
+        )
+        if (scheduleAfterAdmission && this.phase === "running") {
+            if (this.wave) this.reconcileReadyStories()
+            else this.scheduleNextWave()
+        }
+    }
+
+    private emitGoalRemediationAdmitted(
+        remediation: GoalInvariantRemediationProposedData,
+        graphVersion: number,
+        disposition: "applied" | "existing",
+    ): void {
+        this.emit(
+            GoalInvariantRemediationAdmitted.create({
+                runId: this.opts.runId,
+                contractId: remediation.contractId,
+                challengeId: remediation.challengeId,
+                invariantId: remediation.invariantId,
+                proposalId: remediation.proposalId,
+                storyId: remediation.story.id,
+                graphVersion,
+                disposition,
+            }),
+        )
+    }
+
+    private retryPendingGoalRemediations(afterIntegratedProgress = false): void {
+        if (this.pendingGoalRemediations.size === 0) return
+        const pending = [...this.pendingGoalRemediations.values()].filter(
+            ({ proposalId }) => {
+                const failure = this.pendingGoalRemediationFailures.get(proposalId)
+                return afterIntegratedProgress ||
+                    (failure?.retryable === true &&
+                        failure.attempts <
+                            MAX_GOAL_REMEDIATION_ADMISSION_ATTEMPTS)
+            },
+        )
+        for (const remediation of pending) {
+            this.pendingGoalRemediations.delete(remediation.proposalId)
+            this.onGoalInvariantRemediationProposed(remediation, false)
+        }
+    }
+
+    private queueGoalRemediation(
+        remediation: GoalInvariantRemediationProposedData,
+        reason: string,
+        retryable: boolean,
+    ): void {
+        const prior = this.pendingGoalRemediationFailures.get(
+            remediation.proposalId,
+        )
+        this.pendingGoalRemediations.set(
+            remediation.proposalId,
+            structuredClone(remediation),
+        )
+        this.pendingGoalRemediationFailures.set(remediation.proposalId, {
+            reason,
+            retryable,
+            attempts: retryable
+                ? (prior?.attempts ?? 0) + 1
+                : (prior?.attempts ?? 0),
+        })
+    }
+
+    private resumeRunningForGoalRemediation(
+        remediation: GoalInvariantRemediationProposedData,
+    ): void {
+        if (this.phase !== "verifying") return
+        this.clearVerificationTimer()
+        this.clearGoalCompletionTimer()
+        this.pendingVerificationId = null
+        this.pendingGoalCheck = null
+        this.verificationStatus = undefined
+        this.verification = undefined
+        this.phase = "running"
+        this.emit(
+            ConductorState.create({
+                phase: "running_level",
+                detail:
+                    `goal remediation ${remediation.challengeId} invalidated ` +
+                    "the older verification snapshot",
+                currentLevel: this.waveOrdinal,
+            }),
+        )
+    }
+
+    private scheduleGoalRemediationRetry(): void {
+        if (this.goalRemediationRetryTimer || this.phase !== "running") return
+        const hasRetryable = [...this.pendingGoalRemediations.keys()].some(
+            (proposalId) => {
+                const failure = this.pendingGoalRemediationFailures.get(proposalId)
+                return failure?.retryable === true &&
+                    failure.attempts <
+                        MAX_GOAL_REMEDIATION_ADMISSION_ATTEMPTS
+            },
+        )
+        if (!hasRetryable) return
+        this.goalRemediationRetryTimer = setTimeout(() => {
+            this.goalRemediationRetryTimer = null
+            this.retryPendingGoalRemediations(false)
+            if (this.phase === "running" && !this.wave) {
+                this.scheduleNextWave()
+            }
+        }, 0)
+    }
+
+    private clearGoalRemediationRetryTimer(): void {
+        if (this.goalRemediationRetryTimer) {
+            clearTimeout(this.goalRemediationRetryTimer)
+        }
+        this.goalRemediationRetryTimer = null
+    }
+
     private decideRuntimeReplan(
         proposal: RuntimeReplanProposedData,
         options: { requireActiveLease?: boolean } = {},
     ): void {
         if (this.progressivePlanning.isFailed()) return
+        const queued: QueuedRuntimeReplan = {
+            proposal: structuredClone(proposal),
+            fingerprint: runtimeProposalFingerprint(proposal),
+            requireActiveLease: options.requireActiveLease !== false,
+        }
+        const duplicate = [
+            ...(this.stagedRuntimeReplan ? [this.stagedRuntimeReplan] : []),
+            ...this.runtimeReplanQueue,
+        ].some(
+            (candidate) =>
+                candidate.proposal.proposalId === proposal.proposalId &&
+                candidate.fingerprint === queued.fingerprint,
+        )
+        if (duplicate) return
+        this.runtimeReplanQueue.push(queued)
+        this.drainRuntimeReplanQueue()
+    }
+
+    private drainRuntimeReplanQueue(): void {
+        if (this.stagedRuntimeReplan || this.progressivePlanning.isFailed()) return
+        for (;;) {
+            const queued = this.runtimeReplanQueue.shift()
+            if (!queued) return
+            const targetIds = runtimeReplanTargetIds(queued.proposal)
+            const offers = [...targetIds]
+                .map((storyId) => this.activeOffers.get(storyId))
+                .filter((offer): offer is ActiveWorkOffer => offer !== undefined)
+            if (offers.length === 0) {
+                this.executeRuntimeReplan(queued)
+                continue
+            }
+
+            const stageId =
+                `${this.opts.runId}:runtime-replan-stage:` +
+                `${++this.runtimeReplanStageSequence}`
+            const staged: StagedRuntimeReplan = {
+                ...queued,
+                stageId,
+                retractions: new Map(),
+            }
+            for (const offer of offers) {
+                const data = offer.data
+                const request: WorkOfferRetractionRequestedData = {
+                    runId: this.opts.runId,
+                    proposalId: queued.proposal.proposalId,
+                    retractionId: `${stageId}:${data.offerId}`,
+                    offerId: data.offerId,
+                    storyId: data.request.storyId,
+                    generation: data.generation,
+                    graphVersion: this.runtimeReplans.graphVersion,
+                }
+                staged.retractions.set(request.retractionId, { request })
+            }
+            this.stagedRuntimeReplan = staged
+            this.armOfferRetractionTimer(staged)
+            for (const { request } of staged.retractions.values()) {
+                this.emit(WorkOfferRetractionRequested.create(request))
+            }
+            return
+        }
+    }
+
+    private executeRuntimeReplan(
+        queued: QueuedRuntimeReplan,
+        additionalImmutableStoryIds: Iterable<string> = [],
+        retractedStoryIds: readonly string[] = [],
+    ): RuntimeReplanDecisionOutcome {
+        const { proposal, requireActiveLease } = queued
         const lease = this.leases.get(proposal.sourceStoryId)
-        const requireActiveLease = options.requireActiveLease !== false
+        const immutableStoryIds = this.runtimeImmutableStoryIds()
+        for (const storyId of additionalImmutableStoryIds) {
+            immutableStoryIds.add(storyId)
+        }
         const outcome = this.runtimeReplans.decide(proposal, {
             active: this.phase === "running",
             prd: this.prd,
-            immutableStoryIds: this.runtimeImmutableStoryIds(),
+            immutableStoryIds,
             activeLease: requireActiveLease && lease
                 ? {
                       leaseId: lease.leaseId,
@@ -1687,8 +2223,7 @@ export class CollectiveBoard extends SerializedObserver {
             // The coordinator has already crossed the durable commit boundary;
             // swap the Board snapshot before any observer can react to Applied.
             this.prd = outcome.applied.prd
-            this.trackRuntimeAdaptiveStories(outcome.applied)
-            this.emit(outcome.event)
+            this.emitGraphDecision(outcome.event)
             this.noteRuntimeAdaptation(this.wave?.ordinal ?? this.waveOrdinal)
             this.emit(
                 ConductorState.create({
@@ -1702,39 +2237,176 @@ export class CollectiveBoard extends SerializedObserver {
                     storyIds: this.wave?.storyIds,
                 }),
             )
-            if (this.wave) this.reconcileRuntimeReadyStories()
-            else this.scheduleNextWave()
+            this.reconcileRuntimeGraphApplication(outcome.applied)
+            return outcome
+        }
+        this.emitGraphDecision(outcome.event)
+        if (RuntimeReplanRejected.is(outcome.event)) {
+            this.emitRuntimeReplanRejectionState(
+                proposal.proposalId,
+                outcome.event.data.reason,
+            )
+        }
+        // A replayed Applied has no new durable snapshot. If its offer was
+        // retracted merely to discover that replay, restore the unchanged work.
+        this.restoreRetractedStories([
+            ...runtimeReplanTargetIds(proposal),
+            ...retractedStoryIds,
+        ])
+        return outcome
+    }
+
+    private onWorkOfferRetractionResolved(
+        resolution: WorkOfferRetractionResolvedData,
+    ): void {
+        const staged = this.stagedRuntimeReplan
+        const entry = staged?.retractions.get(resolution.retractionId)
+        if (staged && entry) {
+            if (
+                entry.resolution ||
+                !sameOfferRetractionCorrelation(entry.request, resolution)
+            ) return
+            entry.resolution = structuredClone(resolution)
+            if (resolution.disposition === "retracted") {
+                const active = this.activeOffers.get(resolution.storyId)
+                if (active?.data.offerId === resolution.offerId) {
+                    this.activeOffers.delete(resolution.storyId)
+                }
+            }
+            if (
+                [...staged.retractions.values()].every(
+                    (candidate) => candidate.resolution !== undefined,
+                )
+            ) {
+                this.finishStagedRuntimeReplan(staged)
+            }
             return
         }
-        this.emit(outcome.event)
-        if (!RuntimeReplanRejected.is(outcome.event)) return
+
+        const abandoned = this.abandonedOfferRetractions.get(
+            resolution.retractionId,
+        )
+        if (
+            !abandoned ||
+            !sameOfferRetractionCorrelation(abandoned, resolution)
+        ) return
+        this.abandonedOfferRetractions.delete(resolution.retractionId)
+        if (resolution.disposition !== "retracted") return
+        const active = this.activeOffers.get(resolution.storyId)
+        if (active?.data.offerId === resolution.offerId) {
+            this.activeOffers.delete(resolution.storyId)
+        }
+        this.restoreRetractedStories([resolution.storyId])
+    }
+
+    private finishStagedRuntimeReplan(staged: StagedRuntimeReplan): void {
+        if (this.stagedRuntimeReplan !== staged) return
+        this.clearOfferRetractionTimer()
+        this.stagedRuntimeReplan = null
+        const resolutions = [...staged.retractions.values()].map(
+            ({ resolution }) => resolution!,
+        )
+        const retractedStoryIds = resolutions
+            .filter(({ disposition }) => disposition === "retracted")
+            .map(({ storyId }) => storyId)
+        const leasedStoryIds = resolutions
+            .filter(({ disposition }) => disposition === "leased")
+            .map(({ storyId }) => storyId)
+
+        this.executeRuntimeReplan(
+            staged,
+            leasedStoryIds,
+            retractedStoryIds,
+        )
+        this.drainRuntimeReplanQueue()
+    }
+
+    private armOfferRetractionTimer(staged: StagedRuntimeReplan): void {
+        this.clearOfferRetractionTimer()
+        const configured = this.opts.offerRetractionTimeoutMs ?? 5_000
+        const timeoutMs =
+            Number.isFinite(configured) && configured > 0
+                ? Math.max(1, Math.floor(configured))
+                : 5_000
+        this.offerRetractionTimer = setTimeout(() => {
+            this.emit(
+                RuntimeReplanRetractionTimedOut.create({
+                    runId: this.opts.runId,
+                    stageId: staged.stageId,
+                    proposalId: staged.proposal.proposalId,
+                }),
+            )
+        }, timeoutMs)
+    }
+
+    private clearOfferRetractionTimer(): void {
+        if (this.offerRetractionTimer) clearTimeout(this.offerRetractionTimer)
+        this.offerRetractionTimer = null
+    }
+
+    private onRuntimeReplanRetractionTimedOut(
+        timeout: RuntimeReplanRetractionTimedOutData,
+    ): void {
+        const staged = this.stagedRuntimeReplan
+        if (
+            !staged ||
+            staged.stageId !== timeout.stageId ||
+            staged.proposal.proposalId !== timeout.proposalId
+        ) return
+        this.clearOfferRetractionTimer()
+        this.stagedRuntimeReplan = null
+        const retractedStoryIds: string[] = []
+        for (const entry of staged.retractions.values()) {
+            if (entry.resolution?.disposition === "retracted") {
+                retractedStoryIds.push(entry.request.storyId)
+            } else if (!entry.resolution) {
+                this.abandonedOfferRetractions.set(
+                    entry.request.retractionId,
+                    entry.request,
+                )
+            }
+        }
+        const reason =
+            `offer retraction timed out before the Broker resolved every ` +
+            `targeted story; the runtime graph was not changed`
+        this.emitGraphDecision(
+            RuntimeReplanRejected.create({
+                runId: staged.proposal.runId,
+                proposalId: staged.proposal.proposalId,
+                sourceStoryId: staged.proposal.sourceStoryId,
+                leaseId: staged.proposal.leaseId,
+                generation: staged.proposal.generation,
+                baseGraphVersion: staged.proposal.baseGraphVersion,
+                currentGraphVersion: this.runtimeReplans.graphVersion,
+                code: "offer_retraction_failed",
+                reason,
+            }),
+        )
+        this.emitRuntimeReplanRejectionState(
+            staged.proposal.proposalId,
+            reason,
+        )
+        this.restoreRetractedStories([
+            ...runtimeReplanTargetIds(staged.proposal),
+            ...retractedStoryIds,
+        ])
+        this.drainRuntimeReplanQueue()
+    }
+
+    private emitRuntimeReplanRejectionState(
+        proposalId: string,
+        reason: string,
+    ): void {
         this.emit(
             ConductorState.create({
                 phase: "running_level",
                 detail:
                     `collective rejected runtime replan ` +
-                    `${proposal.proposalId || "(missing)"}: ` +
-                    outcome.event.data.reason,
+                    `${proposalId || "(missing)"}: ${reason}`,
                 currentLevel: this.wave?.ordinal,
                 storyIds: this.wave?.storyIds,
             }),
         )
-    }
-
-    private trackRuntimeAdaptiveStories(change: {
-        readonly removedStoryIds: readonly string[]
-        readonly addedStoryIds: readonly string[]
-        readonly modifiedStoryIds: readonly string[]
-    }): void {
-        for (const storyId of change.removedStoryIds) {
-            this.runtimeAdaptiveStoryIds.delete(storyId)
-        }
-        for (const storyId of [
-            ...change.addedStoryIds,
-            ...change.modifiedStoryIds,
-        ]) {
-            this.runtimeAdaptiveStoryIds.add(storyId)
-        }
     }
 
     private runtimeImmutableStoryIds(): Set<string> {
@@ -1745,7 +2417,6 @@ export class CollectiveBoard extends SerializedObserver {
             ...this.pendingQuality.keys(),
             ...this.pendingRecovery,
             ...this.recoveryContext.keys(),
-            ...(this.wave?.storyIds ?? []),
         ])
         for (const story of this.prd?.userStories ?? []) {
             if (story.passes) immutable.add(story.id)
@@ -1756,22 +2427,139 @@ export class CollectiveBoard extends SerializedObserver {
         return immutable
     }
 
-    private reconcileRuntimeReadyStories(): void {
+    private onWorkLeaseGranted(grant: WorkLeaseGrantedData): void {
+        const storyId = grant.request.storyId
+        const offer = this.activeOffers.get(storyId)
+        if (
+            !offer ||
+            offer.data.runId !== grant.runId ||
+            offer.data.offerId !== grant.offerId ||
+            offer.data.generation !== grant.generation ||
+            !isDeepStrictEqual(offer.data.request, grant.request)
+        ) return
+        this.activeOffers.delete(storyId)
+        this.leases.set(storyId, {
+            leaseId: grant.leaseId,
+            generation: grant.generation,
+            workerId: grant.workerId,
+            ...(grant.route ? { route: { ...grant.route } } : {}),
+            supportsCooperativeSuspend:
+                grant.supportsCooperativeSuspend === true,
+        })
+    }
+
+    private runtimeReplanTargetsStory(storyId: string): boolean {
+        return runtimeReplanTargetIds(
+            this.stagedRuntimeReplan?.proposal,
+        ).has(storyId)
+    }
+
+    private isOfferAwaitingRetraction(offerId: string): boolean {
+        for (const entry of this.stagedRuntimeReplan?.retractions.values() ?? []) {
+            if (entry.request.offerId === offerId) return true
+        }
+        return false
+    }
+
+    private consumeAbandonedOfferRetractions(offerId: string): boolean {
+        let consumed = false
+        for (const [retractionId, request] of this.abandonedOfferRetractions) {
+            if (request.offerId !== offerId) continue
+            this.abandonedOfferRetractions.delete(retractionId)
+            consumed = true
+        }
+        return consumed
+    }
+
+    private restoreRetractedStories(storyIds: readonly string[]): void {
+        if (this.phase !== "running" || !this.prd || !this.wave) return
+        const currentById = new Map(
+            this.prd.userStories.map((story) => [story.id, story]),
+        )
+        for (const storyId of new Set(storyIds)) {
+            const story = currentById.get(storyId)
+            if (
+                !story ||
+                story.passes ||
+                !this.wave.pending.has(storyId) ||
+                this.leases.has(storyId) ||
+                this.activeOffers.has(storyId) ||
+                this.hasContextRequest(storyId) ||
+                this.runtimeReplanTargetsStory(storyId) ||
+                !story.dependsOn.every(
+                    (dependency) => currentById.get(dependency)?.passes === true,
+                )
+            ) continue
+            this.requestStoryContext(story)
+        }
+    }
+
+    private reconcileRuntimeGraphApplication(
+        applied: NonNullable<RuntimeReplanDecisionOutcome["applied"]>,
+    ): void {
+        if (!this.wave) {
+            this.scheduleNextWave()
+            return
+        }
+        const rescheduled = new Set([
+            ...applied.removedStoryIds,
+            ...applied.modifiedStoryIds,
+        ])
+        for (const storyId of rescheduled) {
+            this.cancelContextRequests(storyId)
+            this.activeOffers.delete(storyId)
+            if (
+                this.wave.pending.has(storyId) &&
+                !this.leases.has(storyId) &&
+                !this.pendingQuality.has(storyId)
+            ) {
+                this.wave.pending.delete(storyId)
+                this.wave.storyIds = this.wave.storyIds.filter(
+                    (candidate) => candidate !== storyId,
+                )
+            }
+        }
+        this.reconcileReadyStories()
+        this.maybeCompleteWave()
+    }
+
+    private hasContextRequest(storyId: string): boolean {
+        for (const story of this.contextRequests.values()) {
+            if (story.id === storyId) return true
+        }
+        return false
+    }
+
+    private cancelContextRequests(storyId: string): void {
+        for (const [requestId, story] of this.contextRequests) {
+            if (story.id === storyId) this.contextRequests.delete(requestId)
+        }
+    }
+
+    /** Project runnable work continuously from the accepted graph. A DAG level
+     * is a display/checkpoint concept, not a barrier: when one prerequisite
+     * integrates, its dependents may start while unrelated siblings continue. */
+    private reconcileReadyStories(): void {
         if (this.phase !== "running" || !this.prd || !this.wave) return
         const storyById = new Map(this.prd.userStories.map((story) => [story.id, story]))
         const scheduled = new Set(this.wave.storyIds)
+        const blocked = this.computeBlockedStoryIds()
         const ready = this.prd.userStories.filter(
             (story) =>
                 !story.passes &&
-                this.runtimeAdaptiveStoryIds.has(story.id) &&
                 !scheduled.has(story.id) &&
                 !this.failed.has(story.id) &&
-                story.dependsOn.every((dependency) => storyById.get(dependency)?.passes),
+                !blocked.has(story.id) &&
+                story.dependsOn.every(
+                    (dependency) => storyById.get(dependency)?.passes === true,
+                ),
         )
         if (ready.length === 0) return
-        ready.sort((left, right) => left.priority - right.priority)
+        ready.sort(
+            (left, right) =>
+                left.priority - right.priority || left.id.localeCompare(right.id),
+        )
         for (const story of ready) {
-            this.runtimeAdaptiveStoryIds.delete(story.id)
             this.wave.storyIds.push(story.id)
             this.wave.pending.add(story.id)
             this.requestStoryContext(story)
@@ -1779,7 +2567,7 @@ export class CollectiveBoard extends SerializedObserver {
         this.emit(
             ConductorState.create({
                 phase: "running_level",
-                detail: `collective admitted ${ready.map((story) => story.id).join(", ")} into the active wave after runtime adaptation`,
+                detail: `collective admitted ${ready.map((story) => story.id).join(", ")} as soon as their dependencies were integrated`,
                 currentLevel: this.wave.ordinal,
                 storyIds: this.wave.storyIds,
             }),
@@ -1829,6 +2617,9 @@ export class CollectiveBoard extends SerializedObserver {
                         retries: story.retries ?? 1,
                         acceptance: [...story.acceptance],
                         tests: [...story.tests],
+                        ...(story.goalInvariantIds
+                            ? { goalInvariantIds: [...story.goalInvariantIds] }
+                            : {}),
                         model: story.model,
                     },
                 ],
@@ -1846,6 +2637,11 @@ export class CollectiveBoard extends SerializedObserver {
             )
             return
         }
+        const deadline = this.softDeadlineReason()
+        if (deadline) {
+            this.requestPush(deadline)
+            return
+        }
 
         const blocked = this.computeBlockedStoryIds()
         const runnable = this.prd.userStories.filter(
@@ -1857,7 +2653,13 @@ export class CollectiveBoard extends SerializedObserver {
 
         let levels
         try {
-            levels = buildDag(runnable)
+            const runnableIds = new Set(runnable.map((story) => story.id))
+            levels = buildDag(
+                this.prd.userStories.filter(
+                    (story) => story.passes || runnableIds.has(story.id),
+                ),
+                { onlyIncomplete: true },
+            )
         } catch (error) {
             this.terminate(false, messageOf(error))
             return
@@ -1986,6 +2788,35 @@ export class CollectiveBoard extends SerializedObserver {
             return
         }
 
+        // Contract-required work is a finalization latch. A transient graph
+        // CAS/persistence failure gets a bounded asynchronous retry; a
+        // progress-gated or exhausted proposal fails explicitly instead of
+        // letting an older goal/verification snapshot reach push.
+        if (this.pendingGoalRemediations.size > 0) {
+            this.scheduleGoalRemediationRetry()
+            if (this.goalRemediationRetryTimer) {
+                this.emit(
+                    ConductorState.create({
+                        phase: "running_level",
+                        detail:
+                            "waiting for required goal remediation admission retry",
+                        currentLevel: this.waveOrdinal,
+                    }),
+                )
+                return
+            }
+            const reasons = [...this.pendingGoalRemediations.keys()]
+                .map((proposalId) =>
+                    this.pendingGoalRemediationFailures.get(proposalId)?.reason,
+                )
+                .filter((reason): reason is string => Boolean(reason))
+            this.requestPush(
+                `collective could not admit required goal remediation: ` +
+                    (reasons.join("; ") || "admission retry budget exhausted"),
+            )
+            return
+        }
+
         const incomplete = this.prd.userStories.filter((story) => !story.passes)
         if (incomplete.length > 0 || this.dropped.size > 0) {
             this.requestPush(
@@ -2005,7 +2836,6 @@ export class CollectiveBoard extends SerializedObserver {
         const ordinal = ++this.waveOrdinal
         const storyIds = stories.map((story) => story.id)
         for (const storyId of storyIds) {
-            this.runtimeAdaptiveStoryIds.delete(storyId)
             this.pendingRecovery.delete(storyId)
             this.recoveryDecided.delete(storyId)
         }
@@ -2056,6 +2886,12 @@ export class CollectiveBoard extends SerializedObserver {
     }
 
     private requestStoryContext(story: PrdStory): void {
+        if (
+            this.hasContextRequest(story.id) ||
+            this.activeOffers.has(story.id) ||
+            this.leases.has(story.id) ||
+            this.runtimeReplanTargetsStory(story.id)
+        ) return
         const requestId = `${this.opts.runId}:context:${++this.contextSequence}:${story.id}`
         this.contextRequests.set(requestId, story)
         this.emit(
@@ -2072,6 +2908,12 @@ export class CollectiveBoard extends SerializedObserver {
     }
 
     private offerStory(story: PrdStory, context: string | null): void {
+        if (
+            !this.wave?.pending.has(story.id) ||
+            this.activeOffers.has(story.id) ||
+            this.leases.has(story.id) ||
+            this.runtimeReplanTargetsStory(story.id)
+        ) return
         const offerId = `${this.opts.runId}:offer:${++this.offerSequence}:${story.id}`
         const basePrompt = this.storyPrompt(story)
         const rememberedRecovery = this.recoveryContext.get(story.id)
@@ -2102,44 +2944,64 @@ export class CollectiveBoard extends SerializedObserver {
                 ...this.operationalRecovery.exclusions(story.id),
             ]),
         ].sort()
-        this.emit(
-            WorkOffered.create({
-                runId: this.opts.runId,
-                offerId,
-                generation: this.wave?.ordinal ?? this.waveOrdinal,
-                priority: story.priority,
-                ...(excludedRouteIds.length > 0 ? { excludedRouteIds } : {}),
-                request: {
-                    storyId: story.id,
-                    prompt,
-                    model: this.opts.overrideModel ?? story.model ?? this.opts.defaultModel ?? "sonnet",
-                    retries: story.retries,
-                    timeoutSecs: this.opts.timeoutSecs,
-                    graphVersion: this.runtimeReplans.graphVersion,
-                    ...(this.opts.expectQualityDecisions &&
-                    story.acceptance.length > 0
-                        ? { requiresQualityReview: true }
-                        : {}),
-                    ...(recovery ? { recovery } : {}),
-                },
-            }),
-        )
+        const offered = WorkOffered.create({
+            runId: this.opts.runId,
+            offerId,
+            generation: this.wave?.ordinal ?? this.waveOrdinal,
+            priority: story.priority,
+            ...(excludedRouteIds.length > 0 ? { excludedRouteIds } : {}),
+            request: {
+                storyId: story.id,
+                prompt,
+                model:
+                    this.opts.overrideModel ??
+                    story.model ??
+                    this.opts.defaultModel ??
+                    "sonnet",
+                retries: story.retries,
+                timeoutSecs: this.opts.timeoutSecs,
+                graphVersion: this.runtimeReplans.graphVersion,
+                ...(this.opts.expectQualityDecisions &&
+                story.acceptance.length > 0
+                    ? { requiresQualityReview: true }
+                    : {}),
+                ...(recovery ? { recovery } : {}),
+            },
+        })
+        this.activeOffers.set(story.id, {
+            data: structuredClone(offered.data),
+        })
+        this.emit(offered)
     }
 
     private storyPrompt(story: PrdStory): string {
-        let prompt = buildDefaultStoryPrompt(story)
+        const sections: string[] = []
+        const contract = deriveGoalContract(this.prd?.goalEnvelope)
+        if (contract) {
+            sections.push(
+                "## Global goal contract",
+                "",
+                renderGoalContractPrompt(contract, story.goalInvariantIds ?? []),
+                "",
+                "---",
+                "",
+            )
+        }
         const document = this.prd?.decisionDocument?.trim()
-        if (!document) return prompt
-        prompt = [
-            "## Design spec (authoritative — already decided)",
-            "",
-            document,
-            "",
-            "---",
-            "",
-            prompt,
-        ].join("\n")
-        return prompt
+        if (document) {
+            sections.push(
+                "## Current shared design decision",
+                "",
+                "This is the Architect's evidence-backed baseline, not an override of the global goal. Preserve it unless repository evidence proves an amendment is required; propose that amendment through the collective rather than silently diverging.",
+                "",
+                document,
+                "",
+                "---",
+                "",
+            )
+        }
+        sections.push(buildDefaultStoryPrompt(story))
+        return sections.join("\n")
     }
 
     private computeBlockedStoryIds(): Set<string> {
@@ -2164,31 +3026,57 @@ export class CollectiveBoard extends SerializedObserver {
     private finishAfterPush(): void {
         if (this.phase !== "pushing" || !this.prd) return
         const incomplete = this.prd.userStories.filter((story) => !story.passes)
+        const goalCompletionFailure = this.goalCompletionFailureReason()
         const success =
             this.stopReason === null &&
             incomplete.length === 0 &&
-            this.dropped.size === 0
+            this.dropped.size === 0 &&
+            goalCompletionFailure === null
         const reason =
             this.stopReason ??
+            goalCompletionFailure ??
             (success
                 ? null
                 : `collective run stopped with incomplete stories: ${incomplete.map((story) => story.id).join(", ") || "dropped work"}`)
         this.terminate(success, reason)
     }
 
+    private goalCompletionFailureReason(): string | null {
+        if (!this.prd) return "global goal state is unavailable"
+        const contract = deriveGoalContract(this.prd.goalEnvelope)
+        if (!contract) return null
+        const completion = this.prd.runtimeGraph?.protocol?.completion
+        if (
+            completion?.contractId === contract.contractId &&
+            completion.goalRevision ===
+                this.prd.runtimeGraph?.protocol?.goal.revision &&
+            completion.status === "satisfied"
+        ) return null
+        return "global goal evidence changed after completion attestation"
+    }
+
     private requestPush(reason: string | null): void {
         if (this.phase !== "running" && this.phase !== "verifying") return
+        this.clearSoftDeadlineTimer()
         this.clearVerificationTimer()
+        this.clearGoalCompletionTimer()
         this.clearOperationalRetryTimer()
+        this.clearGoalRemediationRetryTimer()
+        this.clearOfferRetractionTimer()
         this.pendingVerificationId = null
+        this.pendingGoalCheck = null
         this.stopReason = reason
         this.phase = "pushing"
         this.emit(RunPushRequested.create({ runId: this.opts.runId }))
     }
 
     private requestVerification(reason: string | null): void {
-        if (reason !== null || !this.opts.verifyBeforePush) {
+        if (reason !== null) {
             this.requestPush(reason)
+            return
+        }
+        if (!this.opts.verifyBeforePush) {
+            this.requestGoalCompletion("verification-disabled")
             return
         }
         if (this.phase !== "running") return
@@ -2230,21 +3118,204 @@ export class CollectiveBoard extends SerializedObserver {
     ): void {
         this.clearVerificationTimer()
         this.pendingVerificationId = null
-        this.verificationStatus = result.status
+        const hasPassedCommand = result.commands.some(
+            (command) => command.status === "passed",
+        )
+        const failedCommand = result.commands.find(
+            (command) => command.status === "failed",
+        )
+        const skippedCommands = result.commands
+            .filter((command) => command.status === "skipped")
+            .map((command) => command.command)
+        const effectiveStatus =
+            failedCommand || result.status === "failed"
+                ? "failed"
+                : result.status === "passed" &&
+                      hasPassedCommand &&
+                      skippedCommands.length === 0
+                  ? "passed"
+                  : "skipped"
+        this.verificationStatus = effectiveStatus
         this.verification = {
             verificationId: result.verificationId,
-            status: result.status,
+            status: effectiveStatus,
             commands: result.commands.map((command) => ({ ...command })),
             durationMs: result.durationMs,
         }
-        if (result.status === "failed") {
-            const failed = result.commands.find((command) => command.status === "failed")
+        if (effectiveStatus === "failed") {
             this.requestPush(
-                `verification failed: ${failed?.command ?? "build/test"}`,
+                `verification failed: ${failedCommand?.command ?? "build/test"}`,
             )
             return
         }
-        this.requestPush(null)
+        if (effectiveStatus === "skipped") {
+            const incoherentPass = result.status === "passed"
+            this.requestPush(
+                incoherentPass
+                    ? "objective verification incomplete: verifier reported passed without complete passing command evidence"
+                    : skippedCommands.length > 0
+                    ? `objective verification incomplete: skipped ${skippedCommands.join(", ")}`
+                    : "objective verification incomplete: no applicable build/test/typecheck/lint commands ran",
+            )
+            return
+        }
+        this.requestGoalCompletion(result.verificationId)
+    }
+
+    private requestGoalCompletion(verificationId: string): void {
+        if (!this.prd) return
+        if (!this.opts.goalCompletionAuthority) {
+            this.requestPush(null)
+            return
+        }
+        if (this.phase !== "running" && this.phase !== "verifying") return
+
+        const contract = deriveGoalContract(this.prd.goalEnvelope)
+        const checkId =
+            `${this.opts.runId}:goal-check:${++this.goalCheckSequence}`
+        this.phase = "verifying"
+        this.pendingGoalCheck = {
+            checkId,
+            contractId: contract?.contractId ?? null,
+            verificationId,
+        }
+        this.armGoalCompletionTimer(this.pendingGoalCheck)
+        this.emit(
+            ConductorState.create({
+                phase: "level_complete",
+                detail: contract
+                    ? "objective verification passed; checking global goal invariants"
+                    : "objective verification passed; goal governance is disabled for this legacy PRD",
+                currentLevel: this.waveOrdinal,
+            }),
+        )
+        this.emit(
+            GoalCompletionCheckRequested.create({
+                runId: this.opts.runId,
+                checkId,
+                contractId: contract?.contractId ?? null,
+                storyIds: this.prd.userStories
+                    .filter((story) => story.passes)
+                    .map((story) => story.id),
+                verificationId,
+            }),
+        )
+    }
+
+    private onGoalCompletionAttested(
+        attestation: GoalCompletionAttestedData,
+    ): void {
+        const pending = this.pendingGoalCheck
+        if (
+            !pending ||
+            attestation.checkId !== pending.checkId ||
+            attestation.contractId !== pending.contractId ||
+            attestation.verificationId !== pending.verificationId
+        ) return
+        this.clearGoalCompletionTimer()
+        if (attestation.contractId !== null) {
+            const protocol = this.prd?.runtimeGraph?.protocol
+            if (
+                !protocol ||
+                protocol.goal.contractId !== attestation.contractId ||
+                protocol.goal.revision !== attestation.goalRevision
+            ) {
+                throw new Error(
+                    "goal attestation does not match its durable ledger projection",
+                )
+            }
+            this.persistGoalProtocol({
+                ...protocol,
+                completion: structuredClone(attestation),
+            })
+        }
+        this.pendingGoalCheck = null
+        if (
+            attestation.status === "satisfied" ||
+            attestation.status === "disabled"
+        ) {
+            this.requestPush(null)
+            return
+        }
+        const unresolved = [
+            ...attestation.openInvariantIds,
+            ...attestation.rejectedInvariantIds,
+        ]
+        this.requestPush(
+            `global goal is not satisfied${
+                unresolved.length > 0
+                    ? ` (${unresolved.join(", ")})`
+                    : ""
+            }: ${attestation.reason}`,
+        )
+    }
+
+    private onGoalLedgerProjectionUpdated(
+        update: GoalLedgerProjectionUpdatedData,
+    ): void {
+        if (!this.prd || this.phase === "done") return
+        const contract = deriveGoalContract(this.prd.goalEnvelope)
+        if (!contract || update.contractId !== contract.contractId) return
+        const projection = normalizeGoalLedgerProjection(
+            update.projection,
+            contract,
+        )
+        if (
+            projection.revision !== update.revision ||
+            projection.contractId !== update.contractId
+        ) {
+            throw new Error("goal ledger projection correlation mismatch")
+        }
+
+        const current = this.prd.runtimeGraph?.protocol?.goal
+        if (current?.contractId === projection.contractId) {
+            if (projection.revision < current.revision) return
+            if (projection.revision === current.revision) {
+                if (JSON.stringify(projection) !== JSON.stringify(current)) {
+                    throw new Error(
+                        "goal ledger revision was replayed with different content",
+                    )
+                }
+                this.emitGoalLedgerProjectionPersisted(projection)
+                return
+            }
+        }
+        this.persistGoalProtocol({
+            schemaVersion: 1,
+            goal: projection,
+        })
+        this.emitGoalLedgerProjectionPersisted(projection)
+    }
+
+    private emitGoalLedgerProjectionPersisted(
+        projection: GoalLedgerProjectionUpdatedData["projection"],
+    ): void {
+        this.emit(
+            GoalLedgerProjectionPersisted.create({
+                runId: this.opts.runId,
+                contractId: projection.contractId,
+                revision: projection.revision,
+                projection: structuredClone(projection),
+            }),
+        )
+    }
+
+    private persistGoalProtocol(protocol: PrdCollectiveProtocolState): void {
+        if (!this.prd) return
+        const current = this.prd.runtimeGraph
+        const runtimeGraph = current?.runId === this.opts.runId
+            ? { ...current, protocol: structuredClone(protocol) }
+            : {
+                  runId: this.opts.runId,
+                  version: this.runtimeReplans.graphVersion,
+                  dynamicStories: 0,
+                  policyStories: 0,
+                  appliedDecisions: [],
+                  protocol: structuredClone(protocol),
+              }
+        const next: PrdFile = { ...this.prd, runtimeGraph }
+        savePrdAtomic(this.opts.prdPath, next)
+        this.prd = next
     }
 
     private onVerificationTimedOut(
@@ -2268,6 +3339,24 @@ export class CollectiveBoard extends SerializedObserver {
             durationMs: timeoutMs,
         }
         this.requestPush(reason)
+    }
+
+    private onGoalCompletionCheckTimedOut(
+        timeout: GoalCompletionCheckTimedOutData,
+    ): void {
+        const pending = this.pendingGoalCheck
+        if (
+            this.phase !== "verifying" ||
+            !pending ||
+            timeout.checkId !== pending.checkId ||
+            timeout.contractId !== pending.contractId ||
+            timeout.verificationId !== pending.verificationId
+        ) return
+        this.clearGoalCompletionTimer()
+        this.requestPush(
+            `goal completion attestation timed out after ` +
+                `${Math.ceil(timeout.timeoutMs / 1_000)}s`,
+        )
     }
 
     private healingHaltReason(): string | null {
@@ -2294,6 +3383,80 @@ export class CollectiveBoard extends SerializedObserver {
             0,
             this.startedAt + this.softDeadlineSecs * 1_000 - Date.now(),
         )
+    }
+
+    private armSoftDeadlineTimer(): void {
+        this.clearSoftDeadlineTimer()
+        if (this.softDeadlineSecs <= 0 || this.startedAt <= 0) return
+        const startedAt = this.startedAt
+        const delayMs = Math.max(
+            0,
+            Math.min(this.softDeadlineRemainingMs(), 2_147_483_647),
+        )
+        this.softDeadlineTimer = setTimeout(() => {
+            this.softDeadlineTimer = null
+            this.emit(
+                SoftDeadlineReached.create({
+                    runId: this.opts.runId,
+                    startedAt,
+                }),
+            )
+        }, delayMs)
+    }
+
+    private onSoftDeadlineReached(deadline: SoftDeadlineReachedData): void {
+        if (deadline.startedAt !== this.startedAt) return
+        if (this.softDeadlineReason() === null) {
+            // Very large deadlines are split at the platform timer ceiling.
+            this.armSoftDeadlineTimer()
+            return
+        }
+        if (this.phase === "preparing") {
+            this.terminate(
+                false,
+                `${this.softDeadlineReason()} while repository preparation was still pending`,
+            )
+            return
+        }
+        // Active work remains immutable and is allowed to settle. Its normal
+        // completion path calls scheduleNextWave(), which observes the expired
+        // deadline before dispatching any more work.
+        if (this.phase === "running" && !this.wave) this.scheduleNextWave()
+    }
+
+    private clearSoftDeadlineTimer(): void {
+        if (this.softDeadlineTimer) clearTimeout(this.softDeadlineTimer)
+        this.softDeadlineTimer = null
+    }
+
+    private armGoalCompletionTimer(
+        pending: NonNullable<CollectiveBoard["pendingGoalCheck"]>,
+    ): void {
+        this.clearGoalCompletionTimer()
+        const configuredTimeoutMs =
+            this.opts.goalCompletionTimeoutMs ??
+            envNonNegativeInt("BARO_GOAL_COMPLETION_TIMEOUT_SECS", 30) * 1_000
+        const timeoutMs = Math.max(
+            1,
+            Math.min(configuredTimeoutMs, 2_147_483_647),
+        )
+        this.goalCompletionTimer = setTimeout(() => {
+            this.goalCompletionTimer = null
+            this.emit(
+                GoalCompletionCheckTimedOut.create({
+                    runId: this.opts.runId,
+                    checkId: pending.checkId,
+                    contractId: pending.contractId,
+                    verificationId: pending.verificationId,
+                    timeoutMs,
+                }),
+            )
+        }, timeoutMs)
+    }
+
+    private clearGoalCompletionTimer(): void {
+        if (this.goalCompletionTimer) clearTimeout(this.goalCompletionTimer)
+        this.goalCompletionTimer = null
     }
 
     private scheduleOperationalRetry(delayMs: number): void {
@@ -2347,8 +3510,13 @@ export class CollectiveBoard extends SerializedObserver {
 
     private terminate(success: boolean, abortReason: string | null): void {
         if (this.phase === "done") return
+        this.clearSoftDeadlineTimer()
         this.clearVerificationTimer()
+        this.clearGoalCompletionTimer()
         this.clearOperationalRetryTimer()
+        this.clearGoalRemediationRetryTimer()
+        this.clearOfferRetractionTimer()
+        this.pendingGoalCheck = null
         this.phase = "done"
         const totalDurationSecs = Math.round((Date.now() - this.startedAt) / 1_000)
         const failedStories = this.prd
@@ -2398,6 +3566,25 @@ export class CollectiveBoard extends SerializedObserver {
         this.verificationTimer = null
     }
 
+    /** Publish the durable graph decision, then project any newly admitted
+     * story-to-goal links for the independent GoalGuardian. */
+    private emitGraphDecision(event: SemanticEvent<unknown>): void {
+        this.emit(event)
+        if (!RuntimeReplanApplied.is(event)) return
+        for (const story of event.data.mutation.addedStories) {
+            this.emit(
+                GoalStoryInvariantMapped.create({
+                    runId: this.opts.runId,
+                    mappingId:
+                        `${this.opts.runId}:goal-map:` +
+                        `${event.data.graphVersion}:${story.id}`,
+                    storyId: story.id,
+                    invariantIds: [...(story.goalInvariantIds ?? [])],
+                }),
+            )
+        }
+    }
+
     private emit(event: SemanticEvent<unknown>): void {
         for (const env of this.getEnvironments()) {
             env.deliverSemanticEvent(this, event)
@@ -2407,6 +3594,62 @@ export class CollectiveBoard extends SerializedObserver {
 
 function addUnique(values: string[], value: string): void {
     if (!values.includes(value)) values.push(value)
+}
+
+function runtimeReplanTargetIds(
+    proposal: RuntimeReplanProposedData | undefined,
+): Set<string> {
+    if (!proposal) return new Set()
+    return new Set([
+        ...proposal.mutation.removedStoryIds,
+        ...Object.keys(proposal.mutation.modifiedDeps),
+    ])
+}
+
+function sameOfferRetractionCorrelation(
+    request: WorkOfferRetractionRequestedData,
+    resolution: WorkOfferRetractionResolvedData,
+): boolean {
+    return (
+        request.runId === resolution.runId &&
+        request.proposalId === resolution.proposalId &&
+        request.retractionId === resolution.retractionId &&
+        request.offerId === resolution.offerId &&
+        request.storyId === resolution.storyId &&
+        request.generation === resolution.generation &&
+        request.graphVersion === resolution.graphVersion
+    )
+}
+
+function sameRemediationStory(
+    current: PrdStory,
+    expected: GoalInvariantRemediationProposedData["story"],
+): boolean {
+    return (
+        current.id === expected.id &&
+        current.priority === expected.priority &&
+        current.title === expected.title &&
+        current.description === expected.description &&
+        sameStrings(current.dependsOn, expected.dependsOn) &&
+        current.retries === (expected.retries ?? 2) &&
+        sameStrings(current.acceptance, expected.acceptance ?? []) &&
+        sameStrings(current.tests, expected.tests ?? []) &&
+        sameStrings(
+            current.goalInvariantIds ?? [],
+            expected.goalInvariantIds ?? [],
+        ) &&
+        current.model === expected.model
+    )
+}
+
+function sameStrings(
+    left: readonly string[],
+    right: readonly string[],
+): boolean {
+    return (
+        left.length === right.length &&
+        left.every((value, index) => value === right[index])
+    )
 }
 
 function workBlockFingerprint(request: WorkBlockedData): string {

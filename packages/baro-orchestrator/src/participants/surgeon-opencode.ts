@@ -123,13 +123,17 @@ export class SurgeonOpenCode extends BaseObserver {
         this.sources.setBlockAuthority(authority)
     }
 
+    setCriticAuthority(authority: Participant): void {
+        this.sources.setCriticAuthority(authority)
+    }
+
     override async onExternalEvent(
         source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
-        this.critiques.record(event)
         if (this.sources.observeLease(source, event, this.leases, this.opts.runId)) return
         if (!this.sources.accepts(source, event)) return
+        this.critiques.record(event)
         const failure = recoveryInput(event)
         if (!failure) return
         if (

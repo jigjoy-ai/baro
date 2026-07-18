@@ -255,6 +255,7 @@ export class RuntimeReplanCoordinator {
                 fingerprint,
                 event.data,
                 state.planningState ?? state.prd.runtimeGraph?.planning,
+                protocolForRun(state.prd, this.opts.runId),
             ),
         }
         try {
@@ -308,6 +309,7 @@ export class RuntimeReplanCoordinator {
         fingerprint: string,
         applied: RuntimeReplanAppliedData,
         planning: PrdRuntimeGraphState["planning"],
+        protocol: PrdRuntimeGraphState["protocol"],
     ): PrdRuntimeGraphState {
         const appliedDecisions: PrdRuntimeGraphState["appliedDecisions"] = []
         for (const decision of this.decisions.values()) {
@@ -328,6 +330,7 @@ export class RuntimeReplanCoordinator {
             policyStories,
             appliedDecisions: appliedDecisions.slice(-32),
             ...(planning ? { planning: structuredClone(planning) } : {}),
+            ...(protocol ? { protocol: structuredClone(protocol) } : {}),
         }
     }
 
@@ -338,7 +341,7 @@ export class RuntimeReplanCoordinator {
         reason: string,
     ): RuntimeReplanDecisionOutcome {
         const event = this.rejection(proposal, code, reason)
-        if (proposal.proposalId) {
+        if (proposal.proposalId && !retryableRejection(code)) {
             this.decisions.set(proposal.proposalId, { fingerprint, event })
         }
         return { event }
@@ -361,6 +364,14 @@ export class RuntimeReplanCoordinator {
             reason,
         })
     }
+}
+
+function retryableRejection(code: RuntimeReplanRejectedData["code"]): boolean {
+    return (
+        code === "persistence_failed" ||
+        code === "stale_graph_version" ||
+        code === "adaptation_budget_exhausted"
+    )
 }
 
 function validRuntimeCorrelation(proposal: RuntimeReplanProposedData): boolean {
@@ -396,4 +407,19 @@ function countProposalIds(
 
 function messageOf(error: unknown): string {
     return (error as Error)?.message ?? String(error)
+}
+
+function protocolForRun(
+    prd: PrdFile,
+    _runId: string,
+): PrdRuntimeGraphState["protocol"] {
+    const protocol = prd.runtimeGraph?.protocol
+    if (!protocol) return undefined
+    // Goal evidence is contract-scoped and survives graph transactions. A
+    // completion receipt describes one exact graph projection, so every graph
+    // version mutation invalidates it even within the same run.
+    return {
+        schemaVersion: 1,
+        goal: structuredClone(protocol.goal),
+    }
 }

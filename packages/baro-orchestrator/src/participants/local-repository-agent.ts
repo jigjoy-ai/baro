@@ -29,7 +29,11 @@ export class LocalRepositoryAgent extends BaseObserver {
         source: Participant,
         event: SemanticEvent<unknown>,
     ): void {
-        if (this.requestAuthority && source !== this.requestAuthority) return
+        // This participant exists only on the collective path. Joining it
+        // before Board construction must not create a fail-open startup
+        // window in which an ambient bus participant can request integration,
+        // cleanup, or run completion side effects.
+        if (!this.requestAuthority || source !== this.requestAuthority) return
         if (
             RunPreparationRequested.is(event) &&
             event.data.runId === this.runId

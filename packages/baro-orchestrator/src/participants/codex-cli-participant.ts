@@ -31,6 +31,7 @@ import {
     type AgentPhase,
 } from "../semantic-events.js"
 import { mapCodexEvent } from "../codex-stream-mapper.js"
+import { acceptsTargetedMessage } from "../runtime/targeted-message-authority.js"
 import { appendCliDiagnosticTail } from "./cli-story-failure.js"
 
 export interface CodexCliParticipantOptions {
@@ -54,6 +55,12 @@ export interface CodexCliParticipantOptions {
     codexBin?: string
     /** Bound inherited-stdio drain after the direct CLI root exits. */
     closeDrainTimeoutMs?: number
+    targetedMessageAuthority?: Participant
+    targetedMessageCorrelation?: Readonly<{
+        runId?: string
+        leaseId?: string
+        generation?: number
+    }>
 }
 
 export interface CodexRunSummary {
@@ -342,14 +349,20 @@ export class CodexCliParticipant extends BaseObserver {
     }
 
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         // Codex exec is one-shot — no stdin channel; targeted messages are
         // logged and dropped.
         if (
             AgentTargetedMessage.is(event) &&
-            event.data.recipientId === this.agentId
+            acceptsTargetedMessage(
+                source,
+                event.data,
+                this.agentId,
+                this.options.targetedMessageAuthority,
+                this.options.targetedMessageCorrelation ?? {},
+            )
         ) {
             process.stderr.write(
                 `[codex:${this.agentId}] received AgentTargetedMessage but Codex exec is one-shot — dropped\n`,

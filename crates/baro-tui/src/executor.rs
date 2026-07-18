@@ -75,6 +75,12 @@ pub struct PrdStory {
     pub acceptance: Vec<String>,
     #[serde(default)]
     pub tests: Vec<String>,
+    #[serde(
+        rename = "goalInvariantIds",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub goal_invariant_ids: Vec<String>,
     #[serde(default)]
     pub passes: bool,
     #[serde(rename = "completedAt", default)]
@@ -320,6 +326,7 @@ fn prd_story_from_review(story: &ReviewStory) -> PrdStory {
         retries: story.retries,
         acceptance: story.acceptance.clone(),
         tests: story.tests.clone(),
+        goal_invariant_ids: story.goal_invariant_ids.clone(),
         passes: false,
         completed_at: None,
         duration_secs: None,
@@ -411,6 +418,7 @@ mod tests {
                 "Priority remains unchanged".to_string(),
             ],
             tests: vec!["cargo test -p baro-tui".to_string()],
+            goal_invariant_ids: vec!["G-A1".to_string(), "G-C1".to_string()],
             completed: false,
             model: Some("heavy".to_string()),
         }];
@@ -490,6 +498,7 @@ mod tests {
             retries: 3,
             acceptance: vec!["new behavior".into()],
             tests: vec!["cargo test".into()],
+            goal_invariant_ids: vec!["G-A1".into()],
             completed: true, // untrusted planner output must not grant a pass
             model: Some("light".into()),
         }];
@@ -550,6 +559,7 @@ mod tests {
             retries: 2,
             acceptance: vec!["refined".into()],
             tests: vec!["test refined".into()],
+            goal_invariant_ids: vec![],
             completed: false,
             model: Some("standard".into()),
         };

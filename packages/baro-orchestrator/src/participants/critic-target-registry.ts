@@ -12,7 +12,10 @@ export class CriticTargetRegistry extends BaseObserver {
     private readonly seenRuntimeProposals = new Set<string>()
     private latestRuntimeGraphVersion = 0
 
-    constructor(private readonly targets: Map<string, readonly string[]>) {
+    constructor(
+        private readonly targets: Map<string, readonly string[]>,
+        private readonly goalInvariantText: ReadonlyMap<string, string> = new Map(),
+    ) {
         super()
     }
 
@@ -52,7 +55,7 @@ export class CriticTargetRegistry extends BaseObserver {
             }
             for (const story of event.data.addedStories) {
                 if (story.acceptance?.length) {
-                    this.targets.set(story.id, [...story.acceptance])
+                    this.targets.set(story.id, this.criteriaFor(story))
                 } else {
                     this.targets.delete(story.id)
                 }
@@ -75,11 +78,25 @@ export class CriticTargetRegistry extends BaseObserver {
             }
             for (const story of event.data.mutation.addedStories) {
                 if (story.acceptance?.length) {
-                    this.targets.set(story.id, [...story.acceptance])
+                    this.targets.set(story.id, this.criteriaFor(story))
                 } else {
                     this.targets.delete(story.id)
                 }
             }
         }
+    }
+
+    private criteriaFor(story: {
+        acceptance?: readonly string[]
+        goalInvariantIds?: readonly string[]
+    }): readonly string[] {
+        return [
+            ...new Set([
+                ...(story.acceptance ?? []),
+                ...(story.goalInvariantIds ?? [])
+                    .map((id) => this.goalInvariantText.get(id))
+                    .filter((item): item is string => item !== undefined),
+            ]),
+        ]
     }
 }

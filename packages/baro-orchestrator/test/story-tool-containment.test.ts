@@ -11,6 +11,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
+import { setTimeout as delay } from "node:timers/promises"
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
@@ -26,6 +27,57 @@ function namedTool(tools: Tool[], name: string): Tool {
 
 async function invoke(tool: Tool, args: Record<string, unknown>): Promise<string> {
     return String(await tool.invoke(args))
+}
+
+type SignalAwareTool = Tool & {
+    invokeWithSignal(
+        args: Record<string, unknown>,
+        signal: AbortSignal,
+    ): Promise<unknown>
+}
+
+async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (!existsSync(path)) {
+        if (Date.now() >= deadline) assert.fail(`fixture did not create ${path}`)
+        await delay(10)
+    }
+}
+
+async function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+        return await Promise.race([
+            promise,
+            new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(
+                    () => reject(new Error(`test operation timed out after ${timeoutMs}ms`)),
+                    timeoutMs,
+                )
+            }),
+        ])
+    } finally {
+        if (timer) clearTimeout(timer)
+    }
+}
+
+function processIsAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0)
+        return true
+    } catch {
+        return false
+    }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs = 2_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (processIsAlive(pid)) {
+        if (Date.now() >= deadline) {
+            assert.fail(`fixture process ${pid} survived bash tool settlement`)
+        }
+        await delay(10)
+    }
 }
 
 async function withProjectAndSibling(
@@ -87,6 +139,86 @@ async function withManagerDependencyLink(
 }
 
 describe("Story tool project containment", () => {
+    it(
+        "drains an inherited-stdio process tree and removes its sandbox before abort settles",
+        { skip: process.platform === "win32" },
+        async () => {
+            await withProjectAndSibling(async (project) => {
+                const started = join(project, "bash-descendant-started")
+                const escaped = join(project, "bash-descendant-escaped")
+                const fixture = join(project, "bash-tree-fixture.mjs")
+                const descendantSource = `
+import { writeFileSync } from "node:fs";
+process.on("SIGTERM", () => {});
+writeFileSync(
+    ${JSON.stringify(started)},
+    String(process.pid) + "\\n" + String(process.env.TMPDIR ?? ""),
+);
+setTimeout(() => {
+    writeFileSync(${JSON.stringify(escaped)}, "yes");
+    process.exit(0);
+}, 12_000);
+setInterval(() => {}, 10_000);
+`
+                writeFileSync(
+                    fixture,
+                    `#!/usr/bin/env node
+import { spawn } from "node:child_process";
+process.on("SIGTERM", () => {});
+const descendant = spawn(
+    process.execPath,
+    ["--input-type=module", "-e", ${JSON.stringify(descendantSource)}],
+    { stdio: ["ignore", "inherit", "inherit"] },
+);
+descendant.unref();
+setTimeout(() => process.exit(0), 12_000);
+setInterval(() => {}, 10_000);
+`,
+                )
+                chmodSync(fixture, 0o755)
+                const bash = namedTool(
+                    createStoryTools(project),
+                    "bash",
+                ) as SignalAwareTool
+                const controller = new AbortController()
+                const pending = Promise.resolve(
+                    bash.invokeWithSignal(
+                        { command: "./bash-tree-fixture.mjs" },
+                        controller.signal,
+                    ),
+                ).then(String)
+
+                await waitForFile(started)
+                controller.abort(new Error("cancel bash fixture"))
+                const result = await within(pending, 9_000)
+
+                assert.match(result, /^bash exited with status \?: .*aborted/m)
+                const [pidText, scratch = ""] = readFileSync(started, "utf8")
+                    .trimEnd()
+                    .split("\n")
+                const descendantPid = Number(pidText)
+                assert.equal(Number.isSafeInteger(descendantPid), true)
+                await waitForProcessExit(descendantPid)
+                assert.equal(
+                    existsSync(escaped),
+                    false,
+                    "bash tool settled before its descendant was killed",
+                )
+                if (
+                    process.platform === "darwin" &&
+                    existsSync("/usr/bin/sandbox-exec")
+                ) {
+                    assert.match(scratch, /baro-story-shell-/)
+                    assert.equal(
+                        existsSync(scratch),
+                        false,
+                        "bash tool settled before removing its Seatbelt scratch",
+                    )
+                }
+            })
+        },
+    )
+
     it("strips provider secrets and rejects environment-dump commands", async () => {
         await withProjectAndSibling(async (project) => {
             const previous = process.env.OPENAI_API_KEY
@@ -323,73 +455,62 @@ describe("Story tool project containment", () => {
         })
     })
 
-    it("trusts the exact collaboration helper and session only for its invocation", async () => {
+    it("trusts only the exact collaboration helper and gives no session write exception", async () => {
         await withProjectAndSibling(async (project, sibling) => {
-            const commandPath = join(
-                import.meta.dirname,
-                "..",
-                "scripts",
-                "agent-collab.mjs",
+            const commandPath = join(sibling, "agent-collab-fixture.mjs")
+            const managerPrivateDir = join(sibling, "collective-session")
+            mkdirSync(managerPrivateDir, { recursive: true })
+            writeFileSync(
+                commandPath,
+                "process.stdout.write(process.argv.slice(2).join(' '))\n",
             )
-            const sessionDir = join(sibling, "collective-session")
-            for (const child of ["outbox", "inbox", "decisions"]) {
-                mkdirSync(join(sessionDir, child), { recursive: true })
-            }
+            const endpoint = "http://127.0.0.1:4242"
+            const token = "a".repeat(43)
             const bash = namedTool(
                 createStoryTools(project, {
-                    collaboration: { commandPath, sessionDir },
+                    collaboration: { commandPath, endpoint, token },
                 }),
                 "bash",
             )
 
-            const inbox = await invoke(bash, {
+            const helperInvocation = await invoke(bash, {
                 command:
                     `node ${JSON.stringify(commandPath)} inbox ` +
-                    `--session ${JSON.stringify(sessionDir)} --agent S1`,
-            })
-            const emit = await invoke(bash, {
-                command:
-                    `node ${JSON.stringify(commandPath)} emit ` +
-                    `--session ${JSON.stringify(sessionDir)} --lease lease-S1 ` +
-                    "--kind note --text 'shared finding'",
+                    `--endpoint ${JSON.stringify(endpoint)} ` +
+                    `--token ${JSON.stringify(token)}`,
             })
             const helperOutsideInvocation = await invoke(bash, {
                 command: `cat ${JSON.stringify(commandPath)}`,
             })
-            const untrustedSession = await invoke(bash, {
+            const managerPathOperand = await invoke(bash, {
                 command:
                     `node ${JSON.stringify(commandPath)} inbox ` +
-                    `--session ${JSON.stringify(sibling)} --agent S1`,
+                    `--endpoint ${JSON.stringify(endpoint)} ` +
+                    `--token ${JSON.stringify(token)} ` +
+                    `--session ${JSON.stringify(managerPrivateDir)}`,
             })
-            const unauthorizedInboxWrite =
+            const unauthorizedManagerWrite =
                 process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec")
                     ? await invoke(bash, {
                           command:
                               `${JSON.stringify(process.execPath)} -e ` +
                               JSON.stringify(
                                   `require("node:fs").writeFileSync(` +
-                                      `${JSON.stringify(join(sessionDir, "inbox", "hijack"))}, ` +
+                                      `${JSON.stringify(join(managerPrivateDir, "hijack"))}, ` +
                                       `"unsafe")`,
                               ),
                       })
                     : null
 
-            assert.equal(inbox, "No peer messages.\n")
-            assert.equal(emit, "event queued\n")
             assert.equal(
-                execFileSync("find", [join(sessionDir, "outbox"), "-type", "f"], {
-                    encoding: "utf8",
-                })
-                    .trim()
-                    .split("\n")
-                    .filter(Boolean).length,
-                1,
+                helperInvocation,
+                `inbox --endpoint ${endpoint} --token ${token}`,
             )
             assert.match(helperOutsideInvocation, /rejected by project containment guard/)
-            assert.match(untrustedSession, /rejected by project containment guard/)
-            if (unauthorizedInboxWrite !== null) {
-                assert.match(unauthorizedInboxWrite, /Operation not permitted|EPERM/)
-                assert.equal(existsSync(join(sessionDir, "inbox", "hijack")), false)
+            assert.match(managerPathOperand, /rejected by project containment guard/)
+            if (unauthorizedManagerWrite !== null) {
+                assert.match(unauthorizedManagerWrite, /Operation not permitted|EPERM/)
+                assert.equal(existsSync(join(managerPrivateDir, "hijack")), false)
             }
         })
     })

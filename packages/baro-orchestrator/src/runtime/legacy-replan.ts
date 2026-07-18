@@ -203,6 +203,7 @@ function parseAddedStory(
             "acceptance",
             "tests",
             "model",
+            "goalInvariantIds",
         ]) ||
         !validId(value.id) ||
         !Number.isInteger(value.priority) ||
@@ -217,7 +218,12 @@ function parseAddedStory(
                 Number(value.retries) > MAX_STORY_RETRIES)) ||
         !nonBlankStringArray(value.acceptance) ||
         !nonBlankStringArray(value.tests) ||
-        (value.model !== undefined && !nonBlank(value.model))
+        (value.model !== undefined && !nonBlank(value.model)) ||
+        (value.goalInvariantIds !== undefined &&
+            (!validIdArray(value.goalInvariantIds) ||
+                value.goalInvariantIds.some(
+                    (invariantId) => !/^G-[AC][1-9]\d*$/.test(invariantId),
+                )))
     ) {
         return { ok: false, reason: "legacy replan contains a malformed added story" }
     }
@@ -235,6 +241,9 @@ function parseAddedStory(
                 : {}),
             acceptance: [...value.acceptance],
             tests: [...value.tests],
+            ...(value.goalInvariantIds !== undefined
+                ? { goalInvariantIds: [...value.goalInvariantIds] }
+                : {}),
             ...(value.model !== undefined ? { model: value.model } : {}),
         },
     }

@@ -19,6 +19,7 @@ import {
 } from "../../semantic-events.js"
 import { emit } from "../../tui-protocol.js"
 import { ActiveLeaseRegistry } from "../../runtime/active-lease-registry.js"
+import type { StoryOutcomeAuthority } from "../../runtime/story-outcome-authority.js"
 
 // Write-ish tools across all backends. "create" = a whole-file write
 // (Claude `Write`, story-tools `write_file`); "edit" = an in-place edit
@@ -46,41 +47,76 @@ export class StoryLifecycleForwarder extends BaseObserver {
     private filesByStory = new Map<string, Map<string, "created" | "modified">>()
     private pendingIntegration = new Map<string, StoryResultData>()
     private readonly leases = new ActiveLeaseRegistry()
+    private collectiveAuthorities: Readonly<CollectiveStoryLifecycleAuthorities> | null = null
+
+    constructor(private readonly collectiveFailClosed = false) {
+        super()
+    }
+
+    sealCollectiveAuthorities(
+        authorities: CollectiveStoryLifecycleAuthorities,
+    ): void {
+        if (this.collectiveAuthorities) {
+            throw new Error(
+                "story lifecycle forwarder collective authorities are already sealed",
+            )
+        }
+        this.collectiveAuthorities = Object.freeze({ ...authorities })
+    }
 
     override async onExternalEvent(
-        _source: Participant,
+        source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
         if (WorkLeaseReleased.is(event)) {
+            if (!this.acceptsLeaseSource(source, event.data.runId)) return
+            if (
+                this.isCollective() &&
+                !this.leases.matchesLease(
+                    event.data.storyId,
+                    event.data.runId,
+                    event.data.leaseId,
+                )
+            ) return
             const key = integrationKey(event.data.runId, event.data.leaseId)
             if (key) this.pendingIntegration.delete(key)
             if (event.data.reason !== "integrated") {
                 this.filesByStory.delete(event.data.storyId)
+                this.startedStories.delete(event.data.storyId)
             }
-            this.leases.observe(event, undefined)
+            this.leases.observe(
+                event,
+                this.collectiveAuthorities?.runId,
+            )
             return
         }
         if (WorkLeaseGranted.is(event)) {
-            this.leases.observe(event, undefined)
+            if (!this.acceptsLeaseSource(source, event.data.runId)) return
+            this.leases.observe(
+                event,
+                this.collectiveAuthorities?.runId,
+            )
             return
         }
         if (AgentState.is(event)) {
+            if (!this.acceptsActiveTerminalSource(source, event.data.agentId)) {
+                return
+            }
             this.handleAgentState(event.data)
             return
         }
         if (StorySpawnRequest.is(event)) {
+            if (!this.acceptsSpawnSource(source, event.data)) return
             this.retryBudget.set(event.data.storyId, event.data.retries)
             return
         }
         if (StoryResult.is(event)) {
-            if (
-                event.data.runId &&
-                !this.leases.matches(event.data, event.data.runId)
-            ) return
+            if (!this.acceptsStoryResult(source, event.data)) return
             this.handleStoryResult(event.data)
             return
         }
         if (StoryRouted.is(event)) {
+            if (!this.acceptsSpawnSource(source, event.data)) return
             emit({
                 type: "routed",
                 id: event.data.storyId,
@@ -90,14 +126,7 @@ export class StoryLifecycleForwarder extends BaseObserver {
             return
         }
         if (StoryMerged.is(event)) {
-            if (
-                event.data.runId &&
-                !this.leases.matchesLease(
-                    event.data.storyId,
-                    event.data.runId,
-                    event.data.leaseId,
-                )
-            ) return
+            if (!this.acceptsRepositoryEvent(source, event.data)) return
             const key = integrationKey(event.data.runId, event.data.leaseId)
             const pending = key ? this.pendingIntegration.get(key) : undefined
             if (pending) {
@@ -112,14 +141,7 @@ export class StoryLifecycleForwarder extends BaseObserver {
             return
         }
         if (StoryMergeFailed.is(event)) {
-            if (
-                event.data.runId &&
-                !this.leases.matchesLease(
-                    event.data.storyId,
-                    event.data.runId,
-                    event.data.leaseId,
-                )
-            ) return
+            if (!this.acceptsRepositoryEvent(source, event.data)) return
             const key = integrationKey(event.data.runId, event.data.leaseId)
             const pending = key ? this.pendingIntegration.get(key) : undefined
             if (pending) {
@@ -155,6 +177,7 @@ export class StoryLifecycleForwarder extends BaseObserver {
         if (!isCreate && !isEdit) return
         const agentId = (source as unknown as { agentId?: string }).agentId
         if (typeof agentId !== "string") return
+        if (!this.acceptsActiveTerminalSource(source, agentId)) return
         const path = extractPath(item)
         if (!path) return
 
@@ -240,6 +263,136 @@ export class StoryLifecycleForwarder extends BaseObserver {
             files_modified: modified,
         })
     }
+
+    private isCollective(): boolean {
+        return this.collectiveFailClosed || this.collectiveAuthorities !== null
+    }
+
+    private acceptsLeaseSource(source: Participant, runId: string): boolean {
+        if (!this.isCollective()) return true
+        const authorities = this.collectiveAuthorities
+        return (
+            authorities !== null &&
+            source === authorities.broker &&
+            runId === authorities.runId
+        )
+    }
+
+    private acceptsStoryResult(
+        source: Participant,
+        data: StoryResultData,
+    ): boolean {
+        if (!this.isCollective()) {
+            return !data.runId || this.leases.matches(data, data.runId)
+        }
+        const authorities = this.collectiveAuthorities
+        return (
+            authorities !== null &&
+            authorities.outcomeAuthority.matchesResult(source, data) &&
+            this.leases.matches(data, authorities.runId)
+        )
+    }
+
+    private acceptsSpawnSource(
+        source: Participant,
+        data: {
+            storyId: string
+            runId?: string
+            leaseId?: string
+            generation?: number
+        },
+    ): boolean {
+        if (!this.isCollective()) return true
+        const authorities = this.collectiveAuthorities
+        if (
+            !authorities ||
+            data.runId !== authorities.runId ||
+            !data.leaseId ||
+            data.generation == null ||
+            !authorities.outcomeAuthority.matchesSpawnAuthority(source, {
+                runId: data.runId,
+                storyId: data.storyId,
+                leaseId: data.leaseId,
+            })
+        ) return false
+        return this.matchesActiveCorrelation({
+            runId: data.runId,
+            storyId: data.storyId,
+            leaseId: data.leaseId,
+            generation: data.generation,
+        })
+    }
+
+    private acceptsRepositoryEvent(
+        source: Participant,
+        data: { storyId: string; runId?: string; leaseId?: string },
+    ): boolean {
+        if (!this.isCollective()) {
+            return (
+                !data.runId ||
+                this.leases.matchesLease(
+                    data.storyId,
+                    data.runId,
+                    data.leaseId,
+                )
+            )
+        }
+        const authorities = this.collectiveAuthorities
+        return (
+            authorities !== null &&
+            source === authorities.repository &&
+            data.runId === authorities.runId &&
+            !!data.leaseId &&
+            this.leases.matchesLease(
+                data.storyId,
+                authorities.runId,
+                data.leaseId,
+            )
+        )
+    }
+
+    private acceptsActiveTerminalSource(
+        source: Participant,
+        storyId: string,
+    ): boolean {
+        if (!this.isCollective()) return true
+        const authorities = this.collectiveAuthorities
+        if (!authorities) return false
+        const correlation =
+            authorities.outcomeAuthority.terminalCorrelationForSource(
+                source,
+                storyId,
+            )
+        return correlation !== null && this.matchesActiveCorrelation(correlation)
+    }
+
+    private matchesActiveCorrelation(correlation: {
+        runId: string
+        storyId: string
+        leaseId: string
+        generation: number
+    }): boolean {
+        return this.leases.matches(
+            {
+                storyId: correlation.storyId,
+                success: false,
+                attempts: 0,
+                durationSecs: 0,
+                error: null,
+                runId: correlation.runId,
+                leaseId: correlation.leaseId,
+                generation: correlation.generation,
+            },
+            this.collectiveAuthorities?.runId,
+        )
+    }
+}
+
+export interface CollectiveStoryLifecycleAuthorities {
+    runId: string
+    broker: Participant
+    repository: Participant
+    outcomeAuthority: StoryOutcomeAuthority
 }
 
 function integrationKey(

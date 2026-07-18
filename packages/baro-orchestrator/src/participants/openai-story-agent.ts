@@ -54,7 +54,9 @@ import {
     classifyStoryFailure,
     compactProviderFailureDetail,
 } from "../provider-failure.js"
+import { acceptsTargetedMessage } from "../runtime/targeted-message-authority.js"
 import { correlationOf, type StoryOutcome, type StorySpec } from "./story-agent.js"
+import type { StoryCollaborationAccess } from "./story-executor.js"
 import {
     createRuntimeReplanTool,
     parseRuntimeReplanArgs,
@@ -133,12 +135,9 @@ export interface OpenAIStoryAgentOptions {
     turnReviewAuthority?: Participant
     /** Bound for one terminal-turn review. Default: 240 seconds. */
     turnReviewTimeoutMs?: number
-    /** Exact manager-owned helper/session made available to the contained
-     * native shell tool. No external path is trusted when omitted. */
-    collaboration?: Readonly<{
-        commandPath: string
-        sessionDir: string
-    }>
+    /** Exact lease capability made available to the contained native shell.
+     * Manager-private Bridge state and filesystem paths are never exposed. */
+    collaboration?: StoryCollaborationAccess
     /** Trusted Gateway billing interceptor. Omitted for direct/unmetered endpoints. */
     billingCoordinator?: GatewayBillingCoordinator
 }
@@ -324,14 +323,21 @@ export class OpenAIStoryAgent extends BaseObserver {
         }
         if (
             AgentTargetedMessage.is(event) &&
-            event.data.recipientId === this.spec.id
+            acceptsTargetedMessage(
+                source,
+                event.data,
+                this.spec.id,
+                this.spec.targetedMessageAuthority,
+                this.spec,
+            )
         ) {
             // In reviewed collective execution Critique itself is the
             // authoritative feedback. Ignore its compatibility twin so the
             // same correction is not injected twice.
             if (
                 this.spec.requiresQualityReview &&
-                source === this.opts.turnReviewAuthority &&
+                (source === this.opts.turnReviewAuthority ||
+                    source === this.spec.targetedMessageAuthority) &&
                 typeof event.data.metadata.terminalId === "string"
             ) return
             this.turnMessages.deliver(event.data.text)

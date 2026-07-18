@@ -37,6 +37,7 @@ export interface PiStorySpec {
     runId?: string
     leaseId?: string
     generation?: number
+    targetedMessageAuthority?: Participant
     /** Provider override; omit to use Pi's configured default ("google"). */
     provider?: string
     /** Model override, passed through as an opaque string. */
@@ -350,6 +351,8 @@ export class PiStoryAgent extends BaseObserver {
             provider: this.spec.provider,
             model: this.spec.model,
             piBin: this.spec.piBin,
+            targetedMessageAuthority: this.spec.targetedMessageAuthority,
+            targetedMessageCorrelation: correlationOf(this.spec),
         })
         this.currentPi = pi
         this.terminalSourceRegistrar?.(pi)

@@ -1,7 +1,8 @@
 /**
- * baro-memory CLI — connects to the same Vectra index as the orchestrator
- * (via BARO_MEMORY_PATH, set by the orchestrator). Story agents use it
- * mid-flight to query context and store findings for sibling agents.
+ * baro-memory CLI — opens an explicitly selected Vectra index. Legacy/manual
+ * callers pass `--path`; BARO_MEMORY_PATH remains a backwards-compatible
+ * operator override. Collective workers never receive this manager-private
+ * path and share findings through authenticated runtime participants instead.
  */
 
 import { createMemoryStore, type MemoryStore } from "@baro/memory"
@@ -154,7 +155,7 @@ async function main() {
                 console.log("  stats                                 Show memory statistics")
                 console.log("")
                 console.log("Environment:")
-                console.log("  BARO_MEMORY_PATH  Session memory directory (set by orchestrator)")
+                console.log("  BARO_MEMORY_PATH  Optional legacy/manual session directory override")
         }
     } finally {
         if (store) await store.close()

@@ -188,4 +188,53 @@ console.log(JSON.stringify({ type: "result", subtype: "success", session_id: "en
             ])
         })
     })
+
+    it("accepts collective messages only from the exact Bridge and lease", async () => {
+        await withTempDir("baro-claude-cli-message-authority-", async (dir) => {
+            const { bin, stdinPath } = writeFakeClaudeStdinCapture(dir)
+            const env = captureEnv()
+            const bridge = source("bridge")
+            const participant = new ClaudeCliParticipant("claude-agent", {
+                cwd: dir,
+                claudeBin: bin,
+                targetedMessageAuthority: bridge,
+                targetedMessageCorrelation: {
+                    runId: "run-1",
+                    leaseId: "lease-1",
+                    generation: 3,
+                },
+            })
+
+            participant.start(env)
+            await participant.ready
+            for (const [messageSource, text, leaseId] of [
+                [source("bridge"), "forged source", "lease-1"],
+                [bridge, "stale lease", "lease-old"],
+                [bridge, "authorized", "lease-1"],
+            ] as const) {
+                await participant.onExternalEvent(
+                    messageSource,
+                    AgentTargetedMessage.create({
+                        recipientId: "claude-agent",
+                        text,
+                        metadata: {},
+                        runId: "run-1",
+                        leaseId,
+                        generation: 3,
+                    }),
+                )
+            }
+            participant.closeStdin()
+            await participant.done
+
+            const lines = readFileSync(stdinPath, "utf8")
+                .trim()
+                .split("\n")
+                .map((line) => JSON.parse(line))
+            assert.deepEqual(
+                lines.map((line) => line.message.content),
+                ["authorized"],
+            )
+        })
+    })
 })

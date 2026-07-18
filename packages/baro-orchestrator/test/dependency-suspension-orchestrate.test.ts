@@ -50,18 +50,19 @@ class NeverQuiescingExecutor implements StoryExecutor {
             const collaboration = options.collaboration
             assert.ok(collaboration, "fixture requires the collaboration transport")
             setImmediate(() => {
-                const outbox = join(collaboration.sessionDir, "outbox")
-                mkdirSync(outbox, { recursive: true })
-                writeFileSync(
-                    join(outbox, "dependency-timeout.json"),
-                    JSON.stringify({
-                        leaseId: request.leaseId,
+                void fetch(`${collaboration.endpoint}/v1/events`, {
+                    method: "POST",
+                    headers: {
+                        authorization: `Bearer ${collaboration.token}`,
+                        "content-type": "application/json",
+                    },
+                    body: JSON.stringify({
                         kind: "block",
                         blockId: "block-e2e-suspension-timeout",
                         requiredStoryIds: ["S2"],
                         reason: "S2 is a hard prerequisite discovered at runtime",
                     }),
-                )
+                })
             })
         }
 

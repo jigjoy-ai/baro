@@ -248,6 +248,77 @@ describe("AgentTurnProjector", () => {
         assert.equal(projected[1]?.data.resultText, "second real turn")
     })
 
+    it("accepts collective route metadata only from the exact leased factory", async () => {
+        const runId = "run-route-authority"
+        const broker = source("broker")
+        const factory = source("factory")
+        const attacker = source("factory")
+        const worker = source("S1")
+        const nativeCli = source("S1")
+        const authority = new StoryOutcomeAuthority(runId)
+        const correlation = {
+            runId,
+            storyId: "S1",
+            leaseId: "lease-1",
+            generation: 1,
+        }
+        authority.registerSpawnAuthority(correlation, factory)
+        authority.registerResultAuthority(correlation, worker)
+        authority.registerTerminalAuthority(correlation, nativeCli)
+        const projector = new AgentTurnProjector({ outcomeAuthority: authority })
+        projector.setLeaseAuthority(broker)
+        const env = joinWithCapture(projector)
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseGranted.create({
+                runId,
+                offerId: "offer-1",
+                leaseId: "lease-1",
+                workerId: "worker",
+                generation: 1,
+                request: {
+                    storyId: "S1",
+                    prompt: "work",
+                    retries: 0,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+        const route = StoryRouted.create({
+            storyId: "S1",
+            backend: "codex",
+            model: "gpt-test",
+            runId,
+            leaseId: "lease-1",
+            generation: 1,
+        })
+        env.deliverSemanticEvent(
+            attacker,
+            StoryRouted.create({
+                ...route.data,
+                backend: "claude",
+                model: "forged-model",
+            }),
+        )
+        env.deliverSemanticEvent(factory, route)
+        await projector.onExternalModelMessage(
+            nativeCli,
+            ModelMessageItem.rehydrate({ text: "real candidate" }),
+        )
+        await projector.onExternalEvent(
+            nativeCli,
+            CodexTurnEvent.create({
+                agentId: "S1",
+                phase: "completed",
+                raw: {},
+            }),
+        )
+
+        const projected = env.events.filter(AgentTurnCompleted.is)
+        assert.equal(projected.length, 1)
+        assert.equal(projected[0]?.data.backend, "codex")
+    })
+
     it("does not mix output across registered CLI retry sources", async () => {
         const authority = new StoryOutcomeAuthority("run-1")
         const worker = source("S1")

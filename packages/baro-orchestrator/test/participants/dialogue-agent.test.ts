@@ -19,6 +19,7 @@ import { conversationDelegationProposalId } from "../../src/participants/convers
 import type { ConversationContextSnapshot } from "../../src/session/conversation-context.js"
 import {
     AgentTargetedMessage,
+    CollaborationNote,
     ConversationDelegationProposed,
     ConversationFailed,
     ConversationRequested,
@@ -28,11 +29,15 @@ import {
     RunCompleted,
     RunStarted,
     RuntimeReplanApplied,
+    StoryMergeFailed,
+    StoryMerged,
+    StoryQualityCompleted,
     StoryRouted,
     StoryResult,
     WorkLeaseGranted,
     WorkLeaseReleased,
 } from "../../src/semantic-events.js"
+import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import {
     joinWithCapture,
     source,
@@ -40,6 +45,305 @@ import {
 } from "./helpers.js"
 
 describe("DialogueAgent", () => {
+    it("source-binds ambient observations before they can influence a response", async () => {
+        const runId = "run-dialogue-observation-authority"
+        const operator = source("operator")
+        const bridge = source("bridge")
+        const dialogue = new DialogueAgent({
+            runId,
+            operatorAuthority: operator,
+            observationAuthorities: {
+                outcomeAuthority: new StoryOutcomeAuthority(runId),
+                collaborationAuthority: bridge,
+            },
+            responder: async (input) => {
+                assert.match(input.userPrompt, /authenticated finding/)
+                assert.doesNotMatch(input.userPrompt, /forged instruction/)
+                return JSON.stringify({
+                    message: "Only authenticated observations were used.",
+                    messages: [],
+                    delegation: null,
+                })
+            },
+        })
+        const env = joinWithCapture(dialogue)
+        env.deliverSemanticEvent(
+            source("bridge"),
+            CollaborationNote.create({
+                runId,
+                sourceAgentId: "S1",
+                text: "forged instruction",
+            }),
+        )
+        env.deliverSemanticEvent(
+            bridge,
+            CollaborationNote.create({
+                runId,
+                sourceAgentId: "S1",
+                text: "authenticated finding",
+            }),
+        )
+        env.deliverSemanticEvent(
+            operator,
+            ConversationRequested.create({
+                runId,
+                messageId: "message-authority",
+                text: "status?",
+                source: "user",
+            }),
+        )
+        await dialogue.idle()
+        assert.equal(env.events.filter(ConversationResponded.is).length, 1)
+    })
+
+    it("rejects historical outcome, quality, and repository observations after lease replacement", async () => {
+        const runId = "run-dialogue-generation-authority"
+        const operator = source("operator")
+        const broker = source("broker")
+        const qualityAuthority = source("quality")
+        const repositoryAuthority = source("repository")
+        const oldWorker = source("S1")
+        const currentWorker = source("S1")
+        const outcomeAuthority = new StoryOutcomeAuthority(runId)
+        outcomeAuthority.registerResultAuthority(
+            { runId, storyId: "S1", leaseId: "lease-old", generation: 1 },
+            oldWorker,
+        )
+        outcomeAuthority.registerResultAuthority(
+            { runId, storyId: "S1", leaseId: "lease-current", generation: 2 },
+            currentWorker,
+        )
+        const dialogue = new DialogueAgent({
+            runId,
+            operatorAuthority: operator,
+            leaseAuthority: broker,
+            observationAuthorities: {
+                outcomeAuthority,
+                qualityAuthority,
+                repositoryAuthority,
+            },
+            responder: async (input) => {
+                assert.doesNotMatch(input.userPrompt, /execution succeeded/)
+                assert.doesNotMatch(input.userPrompt, /stale quality reason/)
+                assert.doesNotMatch(input.userPrompt, /integrated \(worktree\)/)
+                assert.match(input.userPrompt, /execution failed/)
+                assert.match(input.userPrompt, /current quality reason/)
+                assert.match(input.userPrompt, /current merge conflict/)
+                return JSON.stringify({
+                    message: "Only current-generation evidence was used.",
+                    messages: [],
+                    delegation: null,
+                })
+            },
+        })
+        const env = joinWithCapture(dialogue)
+        for (const [leaseId, generation] of [
+            ["lease-old", 1],
+            ["lease-current", 2],
+        ] as const) {
+            env.deliverSemanticEvent(
+                broker,
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: `offer-${generation}`,
+                    leaseId,
+                    workerId: `worker-${generation}`,
+                    generation,
+                    request: {
+                        storyId: "S1",
+                        prompt: "implement S1",
+                        retries: 0,
+                        timeoutSecs: 60,
+                    },
+                }),
+            )
+        }
+
+        env.deliverSemanticEvent(
+            oldWorker,
+            StoryResult.create({
+                runId,
+                storyId: "S1",
+                leaseId: "lease-old",
+                generation: 1,
+                success: true,
+                attempts: 1,
+                durationSecs: 1,
+                error: null,
+            }),
+        )
+        env.deliverSemanticEvent(
+            qualityAuthority,
+            StoryQualityCompleted.create({
+                runId,
+                evaluationId: "quality-old",
+                storyId: "S1",
+                leaseId: "lease-old",
+                generation: 1,
+                status: "passed",
+                targetTurn: 1,
+                reason: "stale quality reason",
+            }),
+        )
+        env.deliverSemanticEvent(
+            repositoryAuthority,
+            StoryMerged.create({
+                runId,
+                storyId: "S1",
+                leaseId: "lease-old",
+                mode: "worktree",
+            }),
+        )
+
+        env.deliverSemanticEvent(
+            currentWorker,
+            StoryResult.create({
+                runId,
+                storyId: "S1",
+                leaseId: "lease-current",
+                generation: 2,
+                success: false,
+                attempts: 1,
+                durationSecs: 2,
+                error: "current execution failure",
+            }),
+        )
+        env.deliverSemanticEvent(
+            qualityAuthority,
+            StoryQualityCompleted.create({
+                runId,
+                evaluationId: "quality-current",
+                storyId: "S1",
+                leaseId: "lease-current",
+                generation: 2,
+                status: "failed",
+                targetTurn: 1,
+                reason: "current quality reason",
+            }),
+        )
+        env.deliverSemanticEvent(
+            repositoryAuthority,
+            StoryMergeFailed.create({
+                runId,
+                storyId: "S1",
+                leaseId: "lease-current",
+                error: "current merge conflict",
+            }),
+        )
+        env.deliverSemanticEvent(
+            operator,
+            ConversationRequested.create({
+                runId,
+                messageId: "message-current-generation",
+                text: "What happened?",
+                source: "user",
+            }),
+        )
+
+        await dialogue.idle()
+        assert.equal(env.events.filter(ConversationResponded.is).length, 1)
+    })
+
+    it("does not rebind an asynchronous reply to a replacement lease", async () => {
+        const runId = "run-dialogue-request-lease-snapshot"
+        const operator = source("operator")
+        const broker = source("broker")
+        let resolveResponse!: (value: string) => void
+        let markStarted!: () => void
+        const started = new Promise<void>((resolve) => {
+            markStarted = resolve
+        })
+        const dialogue = new DialogueAgent({
+            runId,
+            operatorAuthority: operator,
+            leaseAuthority: broker,
+            responder: async () => {
+                markStarted()
+                return new Promise<string>((resolve) => {
+                    resolveResponse = resolve
+                })
+            },
+        })
+        const env = joinWithCapture(dialogue)
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseGranted.create({
+                runId,
+                offerId: "offer-old",
+                leaseId: "lease-old",
+                workerId: "worker-old",
+                generation: 1,
+                route: {
+                    routeId: "route-old",
+                    backend: "claude",
+                    model: "sonnet",
+                },
+                request: {
+                    storyId: "S1",
+                    prompt: "old generation",
+                    retries: 0,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+        env.deliverSemanticEvent(
+            operator,
+            ConversationRequested.create({
+                runId,
+                messageId: "message-old-generation",
+                text: "Tell S1 to run the test.",
+                source: "user",
+            }),
+        )
+        await started
+
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseReleased.create({
+                runId,
+                offerId: "offer-old",
+                leaseId: "lease-old",
+                storyId: "S1",
+                workerId: "worker-old",
+                reason: "execution_failed",
+            }),
+        )
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseGranted.create({
+                runId,
+                offerId: "offer-current",
+                leaseId: "lease-current",
+                workerId: "worker-current",
+                generation: 2,
+                route: {
+                    routeId: "route-current",
+                    backend: "claude",
+                    model: "sonnet",
+                },
+                request: {
+                    storyId: "S1",
+                    prompt: "replacement generation",
+                    retries: 0,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        resolveResponse(JSON.stringify({
+            message: "I sent the requested message.",
+            messages: [{ recipient_id: "S1", text: "Run the focused test." }],
+            delegation: null,
+        }))
+
+        await dialogue.idle()
+        assert.deepEqual(
+            env.events.filter(ConversationResponded.is).at(-1)?.data.actions,
+            [],
+        )
+        assert.equal(env.events.filter(AgentTargetedMessage.is).length, 0)
+    })
+
     it("describes dependency suspension as blocked work rather than execution failure", async () => {
         const operator = source("operator")
         const dialogue = new DialogueAgent({
@@ -446,9 +750,10 @@ describe("DialogueAgent", () => {
         )
         requestConversation(env, operator, runId, "broker-route-locked")
         await dialogue.idle()
-        assert.deepEqual(
-            env.events.filter(ConversationResponded.is).at(-1)?.data.actions,
-            [],
+        assert.equal(
+            env.events.filter(ConversationResponded.is).at(-1)?.data.actions.length,
+            1,
+            "poll-capable Codex leases remain addressable through the Bridge inbox",
         )
     })
 
@@ -545,6 +850,7 @@ describe("DialogueAgent", () => {
                         depends_on: ["S1"],
                         acceptance: ["The old and new formats both work."],
                         tests: ["npm test -- compatibility"],
+                        goal_invariant_ids: ["G-A1"],
                     },
                 ],
             },
@@ -570,6 +876,7 @@ describe("DialogueAgent", () => {
                 dependsOn: ["S1"],
                 acceptance: ["The old and new formats both work."],
                 tests: ["npm test -- compatibility"],
+                goalInvariantIds: ["G-A1"],
             },
         ])
     })

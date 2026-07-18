@@ -15,6 +15,19 @@ import {
 import { joinWithCapture, source } from "./helpers.js"
 
 describe("LocalRepositoryAgent", () => {
+    it("fails closed before its Board authority is bound", () => {
+        const runId = "run-local-repository-unbound"
+        const repository = new LocalRepositoryAgent(runId)
+        const env = joinWithCapture(repository)
+
+        env.deliverSemanticEvent(
+            source("board"),
+            RunPreparationRequested.create({ runId }),
+        )
+
+        assert.equal(env.events.filter(RunPrepared.is).length, 0)
+    })
+
     it("accepts collective repository requests only from the bound Board", () => {
         const runId = "run-local-repository-authority"
         const board = source("board")

@@ -118,14 +118,17 @@ export class GitCoordinator extends SerializedObserver {
         const runId = this.opts.runId
         if (!runId) return
         if (WorkLeaseGranted.is(event) && event.data.runId === runId) {
-            if (this.leaseAuthority && source !== this.leaseAuthority) return
+            // Event-driven mode is collective-only. Authorities are bound
+            // after the Board/Broker objects are constructed, so the interval
+            // between join and binding must deny rather than ambiently trust.
+            if (!this.leaseAuthority || source !== this.leaseAuthority) return
             this.activeLeases.set(event.data.request.storyId, {
                 leaseId: event.data.leaseId,
                 generation: event.data.generation,
             })
             return
         }
-        if (this.eventAuthority && source !== this.eventAuthority) return
+        if (!this.eventAuthority || source !== this.eventAuthority) return
         if (
             RunPreparationRequested.is(event) &&
             event.data.runId === runId

@@ -25,6 +25,12 @@ export interface RunVerifierOptions {
     verify?: (cwd: string, signal: AbortSignal) => Promise<VerifyResult>
     /** Optional externally trusted plan; defaults to a constructor-time snapshot. */
     plan?: VerifyPlan
+    /**
+     * Reads the authoritative repository/PRD state for each new request.
+     * Runtime-added requirements enter here; removed requirements do not
+     * survive merely because they existed before execution began.
+     */
+    createFinalPlan?: (cwd: string) => VerifyPlan
 }
 
 /**
@@ -44,19 +50,23 @@ export class RunVerifier extends SerializedObserver {
     constructor(private readonly opts: RunVerifierOptions) {
         super()
         const baselinePlan = opts.plan ?? createVerifyPlan(opts.cwd)
+        const createFinalPlan = opts.createFinalPlan ?? createVerifyPlan
         this.verify =
             opts.verify ??
             ((cwd, signal) =>
                 verifyBuild(cwd, {
                     plan: mergeVerifyPlans(
                         baselinePlan,
-                        createVerifyPlan(cwd),
+                        createFinalPlan(cwd),
                     ),
                     signal,
                 }))
     }
 
     setRequestAuthority(authority: Participant): void {
+        if (this.requestAuthority && this.requestAuthority !== authority) {
+            throw new Error("run verifier request authority is already bound")
+        }
         this.requestAuthority = authority
     }
 
@@ -68,7 +78,7 @@ export class RunVerifier extends SerializedObserver {
             RunVerificationTimedOut.is(event) &&
             event.data.runId === this.opts.runId
         ) {
-            if (this.requestAuthority && source !== this.requestAuthority) return
+            if (!this.requestAuthority || source !== this.requestAuthority) return
             this.active.get(event.data.verificationId)?.abort(
                 new Error(
                     `verification timed out after ${Math.ceil(event.data.timeoutMs / 1_000)}s`,
@@ -82,7 +92,9 @@ export class RunVerifier extends SerializedObserver {
         ) {
             return
         }
-        if (this.requestAuthority && source !== this.requestAuthority) return
+        // RunVerifier is collective-only. Before the concrete Board is bound,
+        // requests must be ignored rather than cached under a predictable id.
+        if (!this.requestAuthority || source !== this.requestAuthority) return
 
         const cached = this.completed.get(event.data.verificationId)
         if (cached) {
@@ -116,14 +128,24 @@ export class RunVerifier extends SerializedObserver {
         try {
             const result = await this.verify(this.opts.cwd, controller.signal)
             if (controller.signal.aborted) return
+            const hasFailedCommand = result.commands.some(
+                (command) => command.status === "failed",
+            )
+            const hasSkippedCommand = result.commands.some(
+                (command) => command.status === "skipped",
+            )
+            const hasPassedCommand = result.commands.some(
+                (command) => command.status === "passed",
+            )
             this.complete({
                 runId: this.opts.runId,
                 verificationId,
-                status: !result.ran
-                    ? "skipped"
-                    : result.ok
-                      ? "passed"
-                      : "failed",
+                status:
+                    !result.ok || hasFailedCommand
+                        ? "failed"
+                        : !result.ran || hasSkippedCommand || !hasPassedCommand
+                          ? "skipped"
+                          : "passed",
                 commands: result.commands,
                 durationMs: Date.now() - startedAt,
             })

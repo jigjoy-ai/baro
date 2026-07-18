@@ -5,10 +5,10 @@
  * across stories — GitGate is the async mutex-of-one for that.
  */
 
-import { execFile } from "child_process"
-import { promisify } from "util"
-
-const exec = promisify(execFile)
+import {
+    isRepositoryCommandTimeout,
+    runRepositoryCommand as exec,
+} from "./repository-command.js"
 
 const GIT_PUSH_MAX_ATTEMPTS = 3
 
@@ -49,6 +49,7 @@ export async function getCurrentBranch(cwd: string): Promise<string> {
         }
         return branch
     } catch (e) {
+        if (isRepositoryCommandTimeout(e)) throw e
         throw new Error(
             `Failed to get branch: ${(e as Error)?.message ?? String(e)}`,
         )
@@ -59,7 +60,8 @@ export async function isInsideGitRepo(cwd: string): Promise<boolean> {
     try {
         await exec("git", ["rev-parse", "--is-inside-work-tree"], { cwd })
         return true
-    } catch {
+    } catch (error) {
+        if (isRepositoryCommandTimeout(error)) throw error
         return false
     }
 }
@@ -68,7 +70,8 @@ export async function getHeadSha(cwd: string): Promise<string | null> {
     try {
         const { stdout } = await exec("git", ["rev-parse", "HEAD"], { cwd })
         return stdout.trim() || null
-    } catch {
+    } catch (error) {
+        if (isRepositoryCommandTimeout(error)) throw error
         return null
     }
 }
@@ -91,10 +94,12 @@ export async function createOrCheckoutBranch(
     }
     try {
         await exec("git", ["checkout", "-b", branchName], { cwd })
-    } catch {
+    } catch (error) {
+        if (isRepositoryCommandTimeout(error)) throw error
         try {
             await exec("git", ["checkout", branchName], { cwd })
         } catch (e) {
+            if (isRepositoryCommandTimeout(e)) throw e
             throw new Error(
                 `Failed to checkout branch '${branchName}': ${(e as Error)?.message ?? String(e)}`,
             )
@@ -131,7 +136,8 @@ export async function safePullRebase(
         let branch: string
         try {
             branch = await getCurrentBranch(cwd)
-        } catch {
+        } catch (error) {
+            if (isRepositoryCommandTimeout(error)) throw error
             onLog?.("[git] no branch, skipping pull")
             return
         }
@@ -156,8 +162,9 @@ export async function safePullRebase(
             if (stashSha) {
                 await execSafe("git", ["reset", "--hard", "HEAD"], { cwd })
             }
-        } catch {
+        } catch (error) {
             // no tracked changes to stash; continue
+            if (isRepositoryCommandTimeout(error)) throw error
         }
 
         try {
@@ -165,9 +172,10 @@ export async function safePullRebase(
             // the replay instead of being flattened or dropped.
             await exec("git", ["pull", "--rebase=merges", "origin", branch], { cwd })
             onLog?.("[git] pull ok")
-        } catch {
+        } catch (error) {
             onLog?.("[git] pull conflict, continuing without pull")
             await execSafe("git", ["rebase", "--abort"], { cwd })
+            if (isRepositoryCommandTimeout(error)) throw error
         }
 
         if (stashSha) {
@@ -179,6 +187,7 @@ export async function safePullRebase(
                         (e as Error)?.message ?? String(e)
                     }`,
                 )
+                if (isRepositoryCommandTimeout(e)) throw e
             }
         }
     } finally {
@@ -342,7 +351,8 @@ export async function hasRemoteOrigin(cwd: string): Promise<boolean> {
     try {
         await exec("git", ["remote", "get-url", "origin"], { cwd })
         return true
-    } catch {
+    } catch (error) {
+        if (isRepositoryCommandTimeout(error)) throw error
         return false
     }
 }
@@ -375,7 +385,8 @@ async function hasRemoteBranch(cwd: string, branch: string): Promise<boolean> {
             { cwd },
         )
         return stdout.trim().length > 0
-    } catch {
+    } catch (error) {
+        if (isRepositoryCommandTimeout(error)) throw error
         return false
     }
 }
@@ -387,8 +398,9 @@ async function execSafe(
 ): Promise<void> {
     try {
         await exec(cmd, args, opts)
-    } catch {
-        // best-effort, swallow
+    } catch (error) {
+        if (isRepositoryCommandTimeout(error)) throw error
+        // Ordinary non-zero results remain best-effort at these call sites.
     }
 }
 

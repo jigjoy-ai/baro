@@ -6,7 +6,12 @@ import { describe, it } from "node:test"
 import type { SemanticEvent } from "@mozaik-ai/core"
 
 import { CollectiveBoard } from "../../src/participants/collective-board.js"
+import { ProgressivePlanningCoordinator } from "../../src/participants/progressive-planning-coordinator.js"
 import type { PrdFile, PrdStory } from "../../src/prd.js"
+import {
+    deriveGoalContract,
+    GoalInvariantLedger,
+} from "../../src/runtime/goal-contract.js"
 import {
     PlanFragmentAdmitted,
     PlanFragmentProposed,
@@ -39,6 +44,87 @@ import {
 } from "./helpers.js"
 
 describe("CollectiveBoard progressive planning", () => {
+    it("preserves durable goal evidence while bootstrapping the planning latch", () => {
+        const runId = "run-progressive-protocol"
+        const goalEnvelope = {
+            objective: "Keep cancellation lossless.",
+            constraints: [],
+            acceptanceCriteria: ["All provider paths abort before returning."],
+            nonGoals: [],
+            assumptions: [],
+        }
+        const contract = deriveGoalContract(goalEnvelope)!
+        const goal = new GoalInvariantLedger(contract).snapshot(3)
+        const prd: PrdFile = {
+            ...bootstrapPrd(),
+            goalEnvelope,
+            runtimeGraph: {
+                runId: "prior-run",
+                version: 4,
+                dynamicStories: 0,
+                policyStories: 0,
+                appliedDecisions: [],
+                protocol: {
+                    schemaVersion: 1,
+                    goal,
+                    completion: {
+                        runId: "prior-run",
+                        checkId: "prior-check",
+                        contractId: contract.contractId,
+                        goalRevision: goal.revision,
+                        verificationId: "prior-verification",
+                        status: "incomplete",
+                        satisfiedInvariantIds: [],
+                        openInvariantIds: ["G-A1"],
+                        rejectedInvariantIds: [],
+                        invariants: [{
+                            invariantId: "G-A1",
+                            status: "open",
+                            mappedStoryIds: [],
+                            integratedStoryIds: [],
+                            independentlyReviewedStoryIds: [],
+                            reason: "no mapped story",
+                        }],
+                        reason: "goal remains incomplete",
+                    },
+                },
+            },
+        }
+        let committed: PrdFile | undefined
+        const coordinator = new ProgressivePlanningCoordinator({
+            runId,
+            planningId: "planning-protocol",
+            host: {
+                snapshot: () => ({
+                    phase: "idle",
+                    prd: null,
+                    graphVersion: 1,
+                    wave: null,
+                }),
+                commitPrd: (value) => {
+                    committed = value
+                },
+                admitGraph: () => {
+                    throw new Error("not used")
+                },
+                emit: () => undefined,
+                afterAdmission: () => undefined,
+                afterClose: () => undefined,
+                terminate: () => undefined,
+            },
+        })
+
+        const initialized = coordinator.initialize(prd)
+        assert.equal(committed, initialized)
+        assert.deepEqual(initialized.runtimeGraph?.protocol?.goal, goal)
+        assert.notEqual(initialized.runtimeGraph?.protocol?.goal, goal)
+        assert.equal(
+            initialized.runtimeGraph?.protocol?.completion,
+            undefined,
+        )
+        assert.equal(initialized.runtimeGraph?.planning?.status, "open")
+    })
+
     it("accepts planning events only from the exact bound feed object", async () => {
         await withTempDir("progressive-authority-", async (dir) => {
             const runId = "run-progressive-authority"
@@ -77,6 +163,36 @@ describe("CollectiveBoard progressive planning", () => {
                 readPrd(prdPath).userStories.map((entry) => entry.id),
                 ["S1"],
             )
+        })
+    })
+
+    it("fails closed at the soft deadline when an empty planning stream stays open", async () => {
+        await withTempDir("progressive-soft-deadline-", async (dir) => {
+            const runId = "run-progressive-soft-deadline"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(bootstrapPrd(), null, 2) + "\n")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                progressivePlanningId: "planning-never-closes",
+                unsafeAllowUnboundPlanningAuthority: true,
+                softDeadlineSecs: 0.01,
+            })
+            const env = joinWithCapture(board)
+            await start(env, runId)
+
+            await waitFor(env.events, RunPushRequested.is)
+            assert.equal(env.events.some(WorkOffered.is), false)
+            env.deliverSemanticEvent(
+                source("repo"),
+                RunPushed.create({ runId, pushed: false }),
+            )
+
+            const summary = await board.done
+            assert.equal(summary.success, false)
+            assert.match(summary.abortReason ?? "", /soft deadline reached/)
         })
     })
 

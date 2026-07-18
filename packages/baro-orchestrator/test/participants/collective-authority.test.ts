@@ -481,7 +481,13 @@ describe("collective authority and replay invariants", () => {
                     runId,
                     verificationId: request.data.verificationId,
                     status: "passed",
-                    commands: [],
+                    commands: [
+                        {
+                            command: "node --check proof.mjs",
+                            status: "passed",
+                            durationMs: 1,
+                        },
+                    ],
                     durationMs: 1,
                 }),
             )
@@ -502,7 +508,13 @@ describe("collective authority and replay invariants", () => {
                     runId,
                     verificationId: request.data.verificationId,
                     status: "passed",
-                    commands: [],
+                    commands: [
+                        {
+                            command: "node --check proof.mjs",
+                            status: "passed",
+                            durationMs: 1,
+                        },
+                    ],
                     durationMs: 2,
                 }),
             )

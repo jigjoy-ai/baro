@@ -59,9 +59,18 @@ can overlap with that uncancellable request.
 Claude Code, Codex, OpenCode and Pi are external CLI harnesses, so an
 already-sent provider request cannot be rewritten. They use the same semantic
 contract through `agent-collab.mjs`; the shell tool waits for the correlated
-decision JSON instead of merely reporting that an outbox file was queued. The
-shared replan protocol does not make the one-shot Codex, OpenCode, or Pi process
-persistent.
+decision JSON through the exact lease's short-lived loopback endpoint/token
+capability. The worker never receives the Bridge's manager-private session or
+filesystem outbox path. The shared replan protocol does not make the one-shot
+Codex, OpenCode, or Pi process persistent.
+
+Messages queued before capability issuance enter every backend's initial
+prompt exactly once. After launch, Claude and native OpenAI accept correlated
+live follow-up turns. One-shot Codex, OpenCode, and Pi cannot accept an injected
+turn, so they explicitly poll the capability inbox. Inbox output is written
+before its acknowledgement: if the acknowledgement is lost, a later poll may
+repeat the same stable `deliveryId`, but a delivered message is not silently
+discarded.
 
 Proposal IDs are idempotency keys. Re-delivering the exact same proposal
 returns its remembered decision without applying the mutation again. Reusing
@@ -86,12 +95,14 @@ authenticated revoke → process-stopped → preserve/cleanup handshake; the old
 uncorrelated `StoryIntervention` event is deliberately not used as a shortcut.
 
 The replan command exposed in each collective CLI worker's prompt is equivalent
-to:
+to the following. Use the exact endpoint and token rendered into that worker's
+prompt; the placeholders below are not global credentials and a capability
+from another lease is rejected.
 
 ```bash
 node packages/baro-orchestrator/scripts/agent-collab.mjs emit \
-  --session /path/to/session/collective \
-  --lease RUN_LEASE_ID \
+  --endpoint http://127.0.0.1:PORT \
+  --token OPAQUE_LEASE_TOKEN \
   --kind replan \
   --base-version 1 \
   --replan-json '{"addedStories":[],"removedStoryIds":[],"modifiedDeps":{}}' \
@@ -109,10 +120,21 @@ authoritative decision is available:
 
 ```bash
 node packages/baro-orchestrator/scripts/agent-collab.mjs decision \
-  --session /path/to/session/collective \
+  --endpoint http://127.0.0.1:PORT \
+  --token OPAQUE_LEASE_TOKEN \
   --proposal THE_SAME_PROPOSAL_ID \
   --wait-ms 30000
 ```
+
+Ordinary `message`, `help`, `note`, and `discover` submissions likewise carry
+a stable client-generated `eventId`; `challenge` carries a stable
+`challengeId`. The helper prints that id when an HTTP receipt is lost. Retry
+only the exact same payload with the returned `--event-id` or
+`--challenge-id`: an exact replay is deduplicated, while reusing an id with
+different content is rejected. Never mint a replacement id after
+`outcome_unknown`, because the first request may already have taken effect.
+A structured exit-code-4 broker rejection is definitive and must not be
+reported as queued.
 
 It does not publish a package, create a pull request, contact Baro Cloud, or run either arm in the source repository. Each trial uses an independent local clone created with `--no-hardlinks`; every git remote is removed before Baro starts. The retained clone, event stream, audit log, diff, and verifier logs stay under `~/.baro/experiments` by default.
 
@@ -229,7 +251,7 @@ behavior are stable.
 
 ### Exercise the worker market through the real `baro` CLI
 
-The checked-in [candidate file](collective-workers.example.json) is deliberately a configuration example, not a price/quality claim. Its cost, latency and success values are placeholders so the deterministic policy can be exercised. Replace the model IDs with the IDs exposed by your gateway and calibrate all estimates from repeated externally verified trials before making routing decisions from them. A static file must use `"estimateSource":"configured"`. During a run, each worker may publish a learned `historical` latency/outcome estimate from authoritative lease events and a known cost estimate from exact correlated telemetry. The production Gateway/Cloud billed-cost feed is not wired yet; tests inject that authority. Durable cross-run calibration still requires repeated externally verified trials.
+The checked-in [candidate file](collective-workers.example.json) is deliberately a configuration example, not a price/quality claim. Its cost, latency and success values are placeholders so the deterministic policy can be exercised. Replace the model IDs with the IDs exposed by your gateway and calibrate all estimates from repeated externally verified trials before making routing decisions from them. A static file must use `"estimateSource":"configured"`. During a run, each worker may publish a learned `historical` latency/outcome estimate from authoritative lease events and a known cost estimate from exact correlated telemetry. When `BARO_GATEWAY_BILLING_URL` explicitly selects the same trusted Gateway origin used by a route, Baro registers opaque invocation correlation and consumes the authenticated Cloud/Gateway receipt feed; arbitrary OpenAI-compatible endpoints never become billing authorities implicitly. Durable cross-run calibration still requires repeated externally verified trials.
 
 On a disposable clone whose git remotes have been removed:
 

@@ -32,6 +32,7 @@ import {
     WorkBid,
     WorkLeaseGranted,
     WorkLeaseReleased,
+    WorkOfferRetractionResolved,
     WorkOffered,
     WorkSuspended,
     WorkerCapabilityAdvertised,
@@ -39,7 +40,36 @@ import {
 } from "../../src/semantic-events.js"
 import type { WorktreeManager } from "../../src/worktree.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
+import type {
+    CollaborationLeaseCapabilityRequest,
+} from "../../src/participants/collaboration-bridge.js"
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
+
+const TEST_COLLABORATION_TOKEN = "a".repeat(43)
+
+function capabilityBroker(
+    initialMessages: readonly string[] = [],
+): {
+    readonly requests: CollaborationLeaseCapabilityRequest[]
+    capabilityForLease(request: CollaborationLeaseCapabilityRequest): {
+        endpoint: string
+        token: string
+        initialMessages: readonly string[]
+    }
+} {
+    const requests: CollaborationLeaseCapabilityRequest[] = []
+    return {
+        requests,
+        capabilityForLease(request) {
+            requests.push(request)
+            return {
+                endpoint: "http://127.0.0.1:4242",
+                token: TEST_COLLABORATION_TOKEN,
+                initialMessages,
+            }
+        },
+    }
+}
 
 class CapturingExecutor implements StoryExecutor {
     public readonly resultSource = source("capturing-result-source")
@@ -444,6 +474,9 @@ describe("StoryFactory", () => {
             const executor = new CapturingExecutor()
             const broker = source("broker")
             const runtimeBoard = source("runtime-board")
+            const collaborationBroker = capabilityBroker([
+                "pre-launch peer direction",
+            ])
             const outcomeAuthority = new StoryOutcomeAuthority("run-market")
             const factory = new StoryFactory({
                 cwd: dir,
@@ -458,7 +491,7 @@ describe("StoryFactory", () => {
                 runtimeReplanDecisionAuthority: runtimeBoard,
                 collaboration: {
                     commandPath: "/tmp/agent-collab.mjs",
-                    sessionDir: "/tmp/baro-session",
+                    capabilityBroker: collaborationBroker,
                 },
                 endpoints: {
                     cheap: {
@@ -589,18 +622,35 @@ describe("StoryFactory", () => {
                 },
             )
             assert.match(executor.calls[0].req.prompt, /--kind help/)
-            assert.match(executor.calls[0].req.prompt, /inbox --session/)
+            assert.doesNotMatch(executor.calls[0].req.prompt, /inbox --endpoint/)
+            assert.match(executor.calls[0].req.prompt, /--endpoint "http:\/\/127\.0\.0\.1:4242"/)
+            assert.match(executor.calls[0].req.prompt, /--token "a{43}"/)
+            assert.equal(
+                executor.calls[0].req.prompt.match(/pre-launch peer direction/gu)
+                    ?.length,
+                1,
+            )
             assert.doesNotMatch(executor.calls[0].req.prompt, /--kind discover/)
             assert.doesNotMatch(executor.calls[0].req.prompt, /--kind replan/)
-            assert.doesNotMatch(executor.calls[0].req.prompt, /decision --session/)
+            assert.doesNotMatch(executor.calls[0].req.prompt, /decision --endpoint/)
+            assert.doesNotMatch(executor.calls[0].req.prompt, /--session/)
             assert.equal(
                 executor.calls[0].opts.runtimeReplanDecisionAuthority,
                 runtimeBoard,
             )
             assert.deepEqual(executor.calls[0].opts.collaboration, {
                 commandPath: "/tmp/agent-collab.mjs",
-                sessionDir: "/tmp/baro-session",
+                endpoint: "http://127.0.0.1:4242",
+                token: TEST_COLLABORATION_TOKEN,
+                deliveryMode: "live",
             })
+            assert.deepEqual(collaborationBroker.requests, [{
+                runId: "run-market",
+                storyId: "S1",
+                leaseId: "lease-S1",
+                generation: 1,
+                deliveryMode: "live",
+            }])
 
             await factory.onExternalEvent(
                 source("forged-broker"),
@@ -614,6 +664,71 @@ describe("StoryFactory", () => {
                 }),
             )
             assert.equal(executor.disposeCalls.length, 0)
+        })
+    })
+
+    it("drops a cached bid route after the Broker retracts its offer", async () => {
+        await withTempDir("story-factory-retracted-route-", async (dir) => {
+            const runId = "run-retracted-route"
+            const broker = source("broker")
+            const board = source("board")
+            const executor = new CapturingExecutor()
+            const factory = new StoryFactory({
+                cwd: dir,
+                coordinationMode: "collective",
+                runId,
+                workerId: "worker-a",
+                leaseAuthority: broker,
+                offerAuthority: board,
+                outcomeAuthority: new StoryOutcomeAuthority(runId),
+                executor,
+                bid: {
+                    routeId: "route-a",
+                    route: "claude:haiku",
+                    estimate: {
+                        expectedCostUsd: 1,
+                        estimatedSuccessProbability: 0.8,
+                        estimatedLatencyMs: 100,
+                        estimateSource: "configured",
+                    },
+                },
+            })
+            const env = joinWithCapture(factory)
+            const work = marketOffer(runId, "S1", 1)
+            await factory.onExternalEvent(board, work)
+            const bid = env.events.find(WorkBid.is)!
+
+            await factory.onExternalEvent(
+                broker,
+                WorkOfferRetractionResolved.create({
+                    runId,
+                    proposalId: "proposal-1",
+                    retractionId: "retraction-1",
+                    offerId: work.data.offerId,
+                    storyId: "S1",
+                    generation: 1,
+                    graphVersion: 2,
+                    disposition: "retracted",
+                }),
+            )
+            await factory.onExternalEvent(
+                broker,
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: work.data.offerId,
+                    leaseId: "stale-lease",
+                    workerId: "worker-a",
+                    generation: 1,
+                    request: work.data.request,
+                    bidId: bid.data.bidId,
+                    route: bid.data.route,
+                }),
+            )
+
+            assert.equal(executor.calls.length, 0)
+            const failure = env.events.find(StorySpawnFailed.is)
+            assert.equal(failure?.data.leaseId, "stale-lease")
+            assert.match(failure?.data.error ?? "", /stored bid/)
         })
     })
 
@@ -983,6 +1098,7 @@ describe("StoryFactory", () => {
         await withTempDir("story-factory-mutation-route-", async (dir) => {
             const broker = source("broker")
             const runtimeBoard = source("runtime-board")
+            const nativeCollaborationBroker = capabilityBroker()
 
             const nativeExecutor = new CapturingExecutor()
             const nativeFactory = new StoryFactory({
@@ -998,7 +1114,7 @@ describe("StoryFactory", () => {
                 runtimeReplanDecisionAuthority: runtimeBoard,
                 collaboration: {
                     commandPath: "/tmp/agent-collab.mjs",
-                    sessionDir: "/tmp/baro-session-native",
+                    capabilityBroker: nativeCollaborationBroker,
                 },
                 tierMap: {
                     standard: "openai:glm-4.5-air@cheap",
@@ -1037,12 +1153,12 @@ describe("StoryFactory", () => {
                 apiKey: undefined,
             })
             assert.match(nativeExecutor.calls[0].req.prompt, /--kind help/)
-            assert.match(nativeExecutor.calls[0].req.prompt, /inbox --session/)
+            assert.doesNotMatch(nativeExecutor.calls[0].req.prompt, /inbox --endpoint/)
             assert.doesNotMatch(nativeExecutor.calls[0].req.prompt, /--kind discover/)
             assert.doesNotMatch(nativeExecutor.calls[0].req.prompt, /--kind replan/)
             assert.doesNotMatch(
                 nativeExecutor.calls[0].req.prompt,
-                /decision --session/,
+                /decision --endpoint/,
             )
             assert.equal(
                 nativeExecutor.calls[0].opts.runtimeReplanDecisionAuthority,
@@ -1050,10 +1166,13 @@ describe("StoryFactory", () => {
             )
             assert.deepEqual(nativeExecutor.calls[0].opts.collaboration, {
                 commandPath: "/tmp/agent-collab.mjs",
-                sessionDir: "/tmp/baro-session-native",
+                endpoint: "http://127.0.0.1:4242",
+                token: TEST_COLLABORATION_TOKEN,
+                deliveryMode: "live",
             })
 
             const cliExecutor = new CapturingExecutor()
+            const cliCollaborationBroker = capabilityBroker()
             const cliFactory = new StoryFactory({
                 cwd: dir,
                 coordinationMode: "collective",
@@ -1067,7 +1186,7 @@ describe("StoryFactory", () => {
                 runtimeReplanDecisionAuthority: runtimeBoard,
                 collaboration: {
                     commandPath: "/tmp/agent-collab.mjs",
-                    sessionDir: "/tmp/baro-session-cli",
+                    capabilityBroker: cliCollaborationBroker,
                 },
             })
             joinWithCapture(cliFactory)
@@ -1098,13 +1217,111 @@ describe("StoryFactory", () => {
             assert.doesNotMatch(cliExecutor.calls[0].req.prompt, /--kind discover/)
             assert.match(cliExecutor.calls[0].req.prompt, /--kind replan/)
             assert.match(cliExecutor.calls[0].req.prompt, /outcome_unknown/)
-            assert.match(cliExecutor.calls[0].req.prompt, /decision --session/)
+            assert.match(cliExecutor.calls[0].req.prompt, /\binbox --endpoint\b/)
+            assert.match(cliExecutor.calls[0].req.prompt, /decision --endpoint/)
             assert.match(cliExecutor.calls[0].req.prompt, /--proposal "PROPOSAL_ID"/)
+            assert.doesNotMatch(cliExecutor.calls[0].req.prompt, /--session/)
             assert.equal(
                 cliExecutor.calls[0].opts.runtimeReplanDecisionAuthority,
                 undefined,
             )
-            assert.equal(cliExecutor.calls[0].opts.collaboration, undefined)
+            assert.deepEqual(cliExecutor.calls[0].opts.collaboration, {
+                commandPath: "/tmp/agent-collab.mjs",
+                endpoint: "http://127.0.0.1:4242",
+                token: TEST_COLLABORATION_TOKEN,
+                deliveryMode: "poll",
+            })
+            assert.equal(nativeCollaborationBroker.requests[0]?.deliveryMode, "live")
+            assert.equal(cliCollaborationBroker.requests[0]?.deliveryMode, "poll")
+        })
+    })
+
+    it("selects live or poll collaboration delivery for every production story harness", async () => {
+        await withTempDir("story-factory-collaboration-routes-", async (dir) => {
+            for (const [backend, expectedMode] of [
+                ["claude", "live"],
+                ["openai", "live"],
+                ["codex", "poll"],
+                ["opencode", "poll"],
+                ["pi", "poll"],
+            ] as const) {
+                const runId = `run-collaboration-${backend}`
+                const leaseAuthority = source(`broker-${backend}`)
+                const board = source(`board-${backend}`)
+                const executor = new CapturingExecutor()
+                const requests: CollaborationLeaseCapabilityRequest[] = []
+                const broker = {
+                    capabilityForLease(
+                        request: CollaborationLeaseCapabilityRequest,
+                    ) {
+                        requests.push(request)
+                        return {
+                            endpoint: "http://127.0.0.1:4242",
+                            token: TEST_COLLABORATION_TOKEN,
+                            initialMessages:
+                                request.deliveryMode === "live"
+                                    ? ["one pre-launch message"]
+                                    : [],
+                        }
+                    },
+                }
+                const factory = new StoryFactory({
+                    cwd: dir,
+                    coordinationMode: "collective",
+                    runId,
+                    workerId: `worker-${backend}`,
+                    leaseAuthority,
+                    offerAuthority: board,
+                    outcomeAuthority: new StoryOutcomeAuthority(runId),
+                    llm: backend,
+                    executor,
+                    collaboration: {
+                        commandPath: "/tmp/agent-collab.mjs",
+                        capabilityBroker: broker,
+                    },
+                })
+                joinWithCapture(factory)
+
+                await factory.onExternalEvent(
+                    leaseAuthority,
+                    WorkLeaseGranted.create({
+                        runId,
+                        offerId: `offer-${backend}`,
+                        leaseId: `lease-${backend}`,
+                        workerId: `worker-${backend}`,
+                        generation: 1,
+                        request: {
+                            storyId: `S-${backend}`,
+                            prompt: `Implement with ${backend}`,
+                            model: "test-model",
+                            retries: 0,
+                            timeoutSecs: 30,
+                            graphVersion: 1,
+                        },
+                    }),
+                )
+                await flushBus()
+
+                assert.equal(requests[0]?.deliveryMode, expectedMode)
+                assert.equal(
+                    executor.calls[0]?.opts.collaboration?.deliveryMode,
+                    expectedMode,
+                )
+                const prompt = executor.calls[0]?.req.prompt ?? ""
+                assert.match(prompt, /--endpoint "http:\/\/127\.0\.0\.1:4242"/)
+                assert.match(prompt, /--token "a{43}"/)
+                assert.doesNotMatch(prompt, /--session/)
+                if (expectedMode === "poll") {
+                    assert.match(prompt, /inbox --endpoint/)
+                    assert.doesNotMatch(prompt, /one pre-launch message/)
+                } else {
+                    assert.doesNotMatch(prompt, /inbox --endpoint/)
+                    assert.equal(
+                        prompt.match(/one pre-launch message/gu)?.length,
+                        1,
+                    )
+                }
+            }
         })
     })
 
@@ -1506,6 +1723,79 @@ describe("StoryFactory", () => {
                 }),
             )
             assert.equal(disposals, 1)
+        })
+    })
+
+    it("accepts collective aborts only from the exact authority and active lease", async () => {
+        await withTempDir("story-factory-intervention-authority-", async (dir) => {
+            const runId = "run-intervention-authority"
+            const broker = source("broker")
+            const board = source("board")
+            const supervisor = source("supervisor")
+            const impostor = source("supervisor")
+            const bridge = source("bridge")
+            const outcomeAuthority = new StoryOutcomeAuthority(runId)
+            let aborts = 0
+            const executor: StoryExecutor = {
+                start: (_request, _route, _cwd, _env, opts) => {
+                    opts.registerResultAuthority?.(source("result"))
+                    return {
+                        dispose: () => {},
+                        abort: () => { aborts += 1 },
+                    }
+                },
+            }
+            const factory = new StoryFactory({
+                cwd: dir,
+                coordinationMode: "collective",
+                runId,
+                workerId: "worker",
+                leaseAuthority: broker,
+                offerAuthority: board,
+                outcomeAuthority,
+                targetedMessageAuthority: bridge,
+                interventionAuthority: supervisor,
+                executor,
+            })
+            joinWithCapture(factory)
+            await factory.onExternalEvent(
+                broker,
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: "offer-S1",
+                    leaseId: "lease-S1",
+                    workerId: "worker",
+                    generation: 2,
+                    request: {
+                        storyId: "S1",
+                        prompt: "Implement S1",
+                        model: "standard",
+                        retries: 0,
+                        timeoutSecs: 60,
+                    },
+                }),
+            )
+            await flushBus()
+            const intervention = StoryIntervention.create({
+                storyId: "S1",
+                source: "supervisor",
+                action: "abort",
+                reason: "non-converging",
+                runId,
+                leaseId: "lease-S1",
+                generation: 2,
+            })
+            await factory.onExternalEvent(impostor, intervention)
+            await factory.onExternalEvent(
+                supervisor,
+                StoryIntervention.create({
+                    ...intervention.data,
+                    leaseId: "stale-lease",
+                }),
+            )
+            assert.equal(aborts, 0)
+            await factory.onExternalEvent(supervisor, intervention)
+            assert.equal(aborts, 1)
         })
     })
 })

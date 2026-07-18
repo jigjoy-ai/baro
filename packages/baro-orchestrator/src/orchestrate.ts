@@ -33,6 +33,7 @@ import {
 } from "./git.js"
 import { WorktreeManager } from "./worktree.js"
 import { StoryOutcomeAuthority } from "./runtime/story-outcome-authority.js"
+import { deriveGoalContract } from "./runtime/goal-contract.js"
 import { buildDag } from "./dag.js"
 import {
     canonicalTier,
@@ -46,6 +47,7 @@ import { AcceptanceGate } from "./participants/acceptance-gate.js"
 import { AgentTurnProjector } from "./participants/agent-turn-projector.js"
 import { CollaborationBridge } from "./participants/collaboration-bridge.js"
 import { CollectiveBoard } from "./participants/collective-board.js"
+import { GoalGuardian } from "./participants/goal-guardian.js"
 import {
     Conductor,
     ConductorRunSummary,
@@ -97,6 +99,7 @@ import { SurgeonPi } from "./participants/surgeon-pi.js"
 import { Supervisor } from "./participants/supervisor.js"
 import { resolveEffectiveParallel } from "./planning/mode-enforcement.js"
 import { PrdFile, loadPrd, savePrd } from "./prd.js"
+import { readAuthoritativeDeclaredTests } from "./prd-declared-tests.js"
 import {
     ModelInvocationMeasured,
     RunStartRequest,
@@ -104,7 +107,10 @@ import {
     type WorkBidEstimateData,
 } from "./semantic-events.js"
 import { emit } from "./tui-protocol.js"
-import { createVerifyPlan, recommendedVerifyTimeoutMs } from "./verify.js"
+import {
+    createVerifyPlan,
+    recommendedMergedVerifyTimeoutMs,
+} from "./verify.js"
 import {
     assertConversationContextBinding,
     validateConversationContextSnapshot,
@@ -322,7 +328,11 @@ export interface OrchestrateConfig {
      * changing any other participant.
      */
     executor?: import("./participants/story-executor.js").StoryExecutor
-    /** Hooks for receiving Operator commands externally (Rust TUI). */
+    /**
+     * Legacy-only direct callbacks for Operator abort/shutdown commands (Rust
+     * TUI compatibility). Collective mode rejects configured callbacks;
+     * control there must cross a source-bound Mozaik semantic lane.
+     */
     operatorHooks?: {
         onAbort?: (storyId: string) => void
         onAbortAll?: () => void
@@ -429,6 +439,18 @@ export async function orchestrate(
     const env = new AgenticEnvironment()
     const emitTui = config.emitTuiEvents ?? true
     const coordinationMode = config.coordinationMode ?? "legacy"
+    if (
+        coordinationMode === "collective" &&
+        config.operatorHooks &&
+        Object.values(config.operatorHooks).some(
+            (hook) => typeof hook === "function",
+        )
+    ) {
+        throw new Error(
+            "collective coordination rejects direct Operator control hooks; " +
+                "control must cross a source-bound Mozaik semantic lane",
+        )
+    }
     const publishRemote = config.publishRemote ?? true
     const llm: "claude" | "openai" | "codex" | "opencode" | "pi" = config.llm ?? "claude"
     // Downstream factories branch on these per-phase values, never on the
@@ -537,7 +559,11 @@ export async function orchestrate(
         for (const p of config.extraParticipants) p.join(env)
     }
 
-    const dagForwarder = emitTui ? joinBaroEventForwarders(env) : null
+    const dagForwarder = emitTui
+        ? joinBaroEventForwarders(env, {
+              collective: coordinationMode === "collective",
+          })
+        : null
 
     const operator = new Operator(
         config.operatorHooks ?? {},
@@ -597,6 +623,7 @@ export async function orchestrate(
     let cleanupDialogue: (() => void) | null = null
     let shutdownStoryFactories: StoryFactory[] = []
     let shutdownWorktrees: WorktreeManager | null = null
+    let shutdownCollaborationBridge: CollaborationBridge | null = null
     let workerShutdownDrained = false
     const reconcileGatewayBilling = async (): Promise<void> => {
         if (!gatewayBillingCoordinator || gatewayBillingReconciled) return
@@ -681,10 +708,11 @@ export async function orchestrate(
     const useSentry = config.withSentry ?? true
     const useMemory = config.withMemory ?? true
 
-    // Session-scoped memory path (Vectra index + cache.json), shared
-    // cross-process via BARO_MEMORY_PATH.
+    // Legacy workers use an explicit run-scoped CLI path. Collective memory
+    // stays manager-private/in-process and never mutates a process-global env
+    // variable that unrelated workers or later orchestrations could inherit.
     const sessionsDir = join(homedir(), ".baro", "sessions")
-    const memorySessionPath = useMemory
+    const memorySessionPath = useMemory && coordinationMode === "legacy"
         ? join(sessionsDir, runId, "memory")
         : undefined
 
@@ -696,12 +724,16 @@ export async function orchestrate(
         } catch { /* non-critical */ }
     }
 
-    if (memorySessionPath) {
-        process.env.BARO_MEMORY_PATH = memorySessionPath
-    }
-
+    const librarianCollectiveOptions = coordinationMode === "collective"
+        ? { collective: { runId, outcomeAuthority: outcomeAuthority! } }
+        : {}
     const librarian = useLibrarian
-        ? (useMemory ? new MemoryLibrarian({ sessionPath: memorySessionPath }) : new Librarian())
+        ? (useMemory
+              ? new MemoryLibrarian({
+                    sessionPath: memorySessionPath,
+                    ...librarianCollectiveOptions,
+                })
+              : new Librarian(librarianCollectiveOptions))
         : null
     const sentry = useSentry ? new Sentry() : null
     if (librarian) librarian.join(env)
@@ -719,16 +751,24 @@ export async function orchestrate(
         new URL("../scripts/agent-collab.mjs", import.meta.url),
     )
     const collaborationEpoch = randomUUID()
+    const collectiveSessionRoot = join(sessionsDir, runId, "collective")
+    const collaborationGoalInvariantIds =
+        coordinationMode === "collective"
+            ? deriveGoalContract(loadPrd(config.prdPath).goalEnvelope)
+                  ?.invariants.map((invariant) => invariant.id) ?? []
+            : []
     const collaborationConfig = coordinationMode === "collective"
         ? {
               commandPath: existsSync(bundledCollaborationCommand)
                   ? bundledCollaborationCommand
                   : developmentCollaborationCommand,
               sessionDir: join(
-                  sessionsDir,
-                  runId,
-                  "collective",
+                  collectiveSessionRoot,
                   collaborationEpoch,
+              ),
+              challengeInflightDir: join(
+                  collectiveSessionRoot,
+                  "challenge-inflight",
               ),
           }
         : undefined
@@ -736,8 +776,12 @@ export async function orchestrate(
         ? new CollaborationBridge({
               runId,
               sessionDir: collaborationConfig.sessionDir,
+              challengeInflightDir:
+                  collaborationConfig.challengeInflightDir,
+              goalInvariantIds: collaborationGoalInvariantIds,
           })
         : null
+    shutdownCollaborationBridge = collaborationBridge
     if (collaborationBridge) {
         workContextProvider?.setCollaborationAuthority(collaborationBridge)
     }
@@ -758,6 +802,7 @@ export async function orchestrate(
                     description: s.description,
                     acceptance: s.acceptance,
                     tests: s.tests,
+                    goalInvariantIds: s.goalInvariantIds,
                     dependsOn: s.dependsOn,
                     passes: s.passes,
                     model: s.model,
@@ -876,12 +921,33 @@ export async function orchestrate(
                 commandEvidence.snapshotForEvaluation(storyId),
         }
         const prd = loadPrd(config.prdPath)
+        const goalContract = deriveGoalContract(prd.goalEnvelope)
+        const goalInvariantText = new Map(
+            goalContract?.invariants.map((invariant) => [
+                invariant.id,
+                `[${invariant.id}] ${invariant.text}`,
+            ]) ?? [],
+        )
         criticTargets = new Map<string, readonly string[]>(
             prd.userStories
                 .filter((s) => s.acceptance && s.acceptance.length > 0)
-                .map((s) => [s.id, s.acceptance] as [string, readonly string[]]),
+                .map((s) => {
+                    const criteria = [
+                        ...s.acceptance,
+                        ...(s.goalInvariantIds ?? [])
+                            .map((id) => goalInvariantText.get(id))
+                            .filter((item): item is string => item !== undefined),
+                    ]
+                    return [
+                        s.id,
+                        [...new Set(criteria)],
+                    ] as [string, readonly string[]]
+                }),
         )
-        criticTargetRegistry = new CriticTargetRegistry(criticTargets)
+        criticTargetRegistry = new CriticTargetRegistry(
+            criticTargets,
+            goalInvariantText,
+        )
         criticTargetRegistry.join(env)
         // Bus contract is identical across providers, so observers never
         // notice the swap.
@@ -981,6 +1047,7 @@ export async function orchestrate(
     let runVerifier: RunVerifier | null = null
     let leaseBroker: LeaseBroker | null = null
     let acceptanceGate: AcceptanceGate | null = null
+    let goalGuardian: GoalGuardian | null = null
     let dialogueAgent: DialogueAgent | null = null
     let planningFeed: PlanningFeed | null = null
     let collectiveBoard: CollectiveBoard | null = null
@@ -1056,9 +1123,17 @@ export async function orchestrate(
             runId,
             cwd: config.cwd,
             plan: verifyPlan,
+            createFinalPlan: (cwd) => {
+                // Full PRD validation remains authoritative for graph state;
+                // raw inspection prevents its legacy normalization from
+                // erasing malformed `tests` fields at the objective gate.
+                loadPrd(config.prdPath)
+                return createVerifyPlan(cwd, {
+                    declaredTests: readAuthoritativeDeclaredTests(config.prdPath),
+                })
+            },
         })
         finalizer?.setVerifierAuthority(runVerifier)
-        runVerifier.join(env)
         leaseBroker = new LeaseBroker({
             runId,
             parallel: collectiveParallel,
@@ -1095,6 +1170,31 @@ export async function orchestrate(
             agentTurnProjector.setReverificationAuthority(acceptanceGate)
         }
         if (acceptanceGate) leaseBroker.setQualityAuthority(acceptanceGate)
+        const collectivePrd = loadPrd(config.prdPath)
+        goalGuardian = new GoalGuardian({
+            runId,
+            goalEnvelope: collectivePrd.goalEnvelope,
+            storyMappings: collectivePrd.userStories.map((story) => ({
+                storyId: story.id,
+                invariantIds: [...(story.goalInvariantIds ?? [])],
+            })),
+            integratedStoryIds: collectivePrd.userStories
+                .filter((story) => story.passes)
+                .map((story) => story.id),
+            projection: collectivePrd.runtimeGraph?.protocol?.goal,
+            deferCoverageUntilPlanningClosed:
+                config.progressivePlanningId !== undefined &&
+                collectivePrd.runtimeGraph?.planning?.status !== "completed",
+            // With a Critic configured, restart semantics stay strict: only
+            // persisted independent evidence can satisfy the contract. A
+            // pre-protocol passed story must be re-run/reviewed, never guessed.
+            requireIndependentQuality: acceptanceGate !== null,
+        })
+        goalGuardian.setIntegrationAuthority(repositoryAuthority)
+        if (acceptanceGate) goalGuardian.setQualityAuthority(acceptanceGate)
+        if (collaborationBridge) {
+            goalGuardian.setChallengeAuthority(collaborationBridge)
+        }
         const board = collectiveBoard = new CollectiveBoard({
             runId,
             prdPath: config.prdPath,
@@ -1110,6 +1210,7 @@ export async function orchestrate(
             qualityAuthority: acceptanceGate ?? undefined,
             integrationAuthority: repositoryAuthority,
             verifierAuthority: runVerifier,
+            goalCompletionAuthority: goalGuardian,
             recoveryAuthority: surgeon ?? undefined,
             discoveryAuthority: collaborationBridge ?? undefined,
             dependencyAuthority: collaborationBridge ?? undefined,
@@ -1124,14 +1225,13 @@ export async function orchestrate(
             verifyBeforePush: true,
             verificationTimeoutMs:
                 config.collectiveVerificationTimeoutMs ??
-                Math.max(
-                    recommendedVerifyTimeoutMs(verifyPlan),
-                    // The final integrated snapshot may introduce its first
-                    // build/test scripts after this baseline was captured.
-                    21 * 60_000,
-                ),
+                recommendedMergedVerifyTimeoutMs(verifyPlan),
         })
         runVerifier.setRequestAuthority(board)
+        // Bind before join so even an asynchronously firing extra participant
+        // cannot pre-seed a predictable verification id during setup.
+        runVerifier.join(env)
+        goalGuardian.setRequestAuthority(board)
         acceptanceGate?.setCompletionAuthority(board)
         finalizer?.setCoordinationAuthority(board)
         leaseBroker.setOfferAuthority(board)
@@ -1142,16 +1242,40 @@ export async function orchestrate(
         workContextProvider?.setRequestAuthority(board)
         collaborationBridge?.setLeaseAuthority(leaseBroker)
         collaborationBridge?.setDecisionAuthority(board)
+        librarian?.setLeaseAuthority(leaseBroker)
         criticTargetRegistry?.setRuntimeReplanAuthority(board)
         dagForwarder?.setRuntimeReplanAuthority(board)
         surgeon?.setLeaseAuthority(leaseBroker)
         surgeon?.setBlockAuthority(board)
+        if (critic) surgeon?.setCriticAuthority(critic)
         if (acceptanceGate) surgeon?.setQualityAuthority(acceptanceGate)
         leaseBroker.join(env)
+        goalGuardian.join(env)
         board.join(env)
         planningFeed?.join(env)
         acceptanceGate?.join(env)
         coordinationDone = board.done
+    }
+
+    // Supervision is an independent, lease-scoped participant. It may detect
+    // non-convergence, but only the exact active worker capability can feed it
+    // evidence and only this concrete Supervisor can request an abort.
+    const supervisor = config.withSupervisor
+        ? new Supervisor(
+              coordinationMode === "collective"
+                  ? {
+                        collective: {
+                            runId,
+                            leaseAuthority: leaseBroker!,
+                            outcomeAuthority: outcomeAuthority!,
+                        },
+                    }
+                  : {},
+          )
+        : null
+    supervisor?.join(env)
+    if (supervisor && coordinationMode === "legacy") {
+        dagForwarder?.setInterventionAuthority(supervisor)
     }
 
     // Join workers after the coordinator/projector so nested executor events
@@ -1162,9 +1286,20 @@ export async function orchestrate(
         runId,
         worktrees: worktrees ?? undefined,
         requireWorktree: coordinationMode === "collective" && worktrees !== null,
-        collaboration: collaborationConfig,
+        collaboration:
+            collaborationConfig && collaborationBridge
+                ? {
+                      commandPath: collaborationConfig.commandPath,
+                      capabilityBroker: collaborationBridge,
+                  }
+                : undefined,
         leaseAuthority: leaseBroker ?? undefined,
         offerAuthority: collectiveBoard ?? undefined,
+        targetedMessageAuthority:
+            coordinationMode === "collective"
+                ? collaborationBridge ?? undefined
+                : undefined,
+        interventionAuthority: supervisor ?? undefined,
         llm: storyLlm,
         openaiModel: config.storyModel ?? "gpt-5.5",
         storyModelOverride: config.storyModel,
@@ -1203,15 +1338,14 @@ export async function orchestrate(
         : [new StoryFactory(factoryBase)]
     shutdownStoryFactories = storyFactories
     for (const storyFactory of storyFactories) {
+        // Authority is topology, not self-advertised data. Bind every concrete
+        // worker object before setEnvironment synchronously advertises it.
+        leaseBroker?.setWorkerAuthority(
+            storyFactory.getWorkerId(),
+            storyFactory,
+        )
         storyFactory.setEnvironment(env)
         storyFactory.join(env)
-    }
-
-    // Emits StoryIntervention(abort) for a spinning story so it settles as a
-    // failed StoryResult the Surgeon can split/escalate, instead of burning
-    // the run budget. StoryFactory consumes the event off the bus.
-    if (config.withSupervisor) {
-        new Supervisor().join(env)
     }
 
     // Dialogue is an optional conversational supervisor, never a root
@@ -1253,6 +1387,14 @@ export async function orchestrate(
                 ] as const),
             ),
             controlAuthority: collectiveBoard,
+            observationAuthorities: {
+                outcomeAuthority: outcomeAuthority!,
+                criticAuthority: critic ?? undefined,
+                qualityAuthority: acceptanceGate ?? undefined,
+                repositoryAuthority: repositoryAuthority ?? undefined,
+                verificationAuthority: runVerifier ?? undefined,
+                collaborationAuthority: collaborationBridge ?? undefined,
+            },
             conversationContext,
             timeoutMs: config.dialogueTimeoutMs,
         })
@@ -1264,8 +1406,51 @@ export async function orchestrate(
             }
         }
         if (emitTui) new DialogueForwarder(dialogueAgent).join(env)
-        config.onDialogueReady?.(dialogueAgent)
     }
+
+    // Message producers submit uncorrelated intents; the Bridge alone binds
+    // them to the recipient's current run/lease/generation. Workers use their
+    // lease-bound loopback capability, while Critic compatibility messages and
+    // arbitrary extra participants deliberately remain outside this set.
+    collaborationBridge?.setMessageIntentAuthorities([
+        operator,
+        ...(librarian instanceof Librarian ? [librarian] : []),
+        ...(dialogueAgent ? [dialogueAgent] : []),
+    ])
+
+    if (coordinationMode === "collective") {
+        if (
+            !collectiveBoard ||
+            !leaseBroker ||
+            !runVerifier ||
+            !collaborationBridge ||
+            !repositoryAuthority ||
+            !outcomeAuthority
+        ) {
+            throw new Error(
+                "collective presentation requires Board, Broker, Repository, Verifier, Bridge, and outcome authorities",
+            )
+        }
+        dagForwarder?.sealCollectivePresentationAuthorities({
+            runId,
+            board: collectiveBoard,
+            broker: leaseBroker,
+            repository: repositoryAuthority,
+            verifier: runVerifier,
+            bridge: collaborationBridge,
+            outcomeAuthority,
+            modelTelemetryCollector,
+            coordination: sentry ?? undefined,
+            critique: critic ?? undefined,
+            quality: acceptanceGate ?? undefined,
+            surgeon: surgeon ?? undefined,
+            dialogue: dialogueAgent ?? undefined,
+            finalizer: finalizer ?? undefined,
+            intervention: supervisor ?? undefined,
+        })
+    }
+    if (dialogueAgent) config.onDialogueReady?.(dialogueAgent)
+
     // Do not expose the Operator until every consumer of its commands has
     // joined; startup-window commands are intentionally dropped by the CLI.
     config.onOperatorReady?.(operator)
@@ -1296,6 +1481,9 @@ export async function orchestrate(
         }
     }
 
+    // Joining starts the loopback listener eagerly, but this explicit barrier
+    // makes a usable capability broker a precondition of collective RunStart.
+    await collaborationBridge?.ready()
     env.deliverSemanticEvent(
         operator,
         RunStartRequest.create({ reason: "orchestrate" }),
@@ -1460,6 +1648,7 @@ export async function orchestrate(
             )
         }
         await reconcileGatewayBilling()
+        await shutdownCollaborationBridge?.shutdown()
         if (dialogueRuntimeCwd) {
             rmSync(dialogueRuntimeCwd, { recursive: true, force: true })
         }

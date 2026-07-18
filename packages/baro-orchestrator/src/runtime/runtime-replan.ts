@@ -355,6 +355,7 @@ function validateAddedStoryShape(story: ReplanStoryAdd): string | null {
             "acceptance",
             "tests",
             "model",
+            "goalInvariantIds",
         ])
     ) return `added story '${story.id || "(missing)"}' has unknown fields`
     if (!validId(story.id)) return "added story id must be a non-empty, trimmed string"
@@ -387,6 +388,16 @@ function validateAddedStoryShape(story: ReplanStoryAdd): string | null {
     if (story.model !== undefined && !validNonBlankString(story.model)) {
         return `added story '${story.id}' has invalid model`
     }
+    if (
+        story.goalInvariantIds !== undefined &&
+        (!validStringArray(story.goalInvariantIds, true) ||
+            new Set(story.goalInvariantIds).size !== story.goalInvariantIds.length ||
+            story.goalInvariantIds.some(
+                (invariantId) => !/^G-[AC][1-9]\d*$/.test(invariantId),
+            ))
+    ) {
+        return `added story '${story.id}' has invalid goal invariant ids`
+    }
     return null
 }
 
@@ -410,6 +421,11 @@ function validPrdStoryShape(story: PrdStory): boolean {
         (story.completedAt === null || typeof story.completedAt === "string") &&
         (story.durationSecs === null || Number.isFinite(story.durationSecs)) &&
         (story.model === undefined || typeof story.model === "string")
+        &&
+        (story.goalInvariantIds === undefined ||
+            (validStringArray(story.goalInvariantIds, true) &&
+                new Set(story.goalInvariantIds).size === story.goalInvariantIds.length &&
+                story.goalInvariantIds.every((id) => /^G-[AC][1-9]\d*$/.test(id))))
     )
 }
 
@@ -424,6 +440,9 @@ function clonePrd(prd: PrdFile): PrdFile {
             dependsOn: [...story.dependsOn],
             acceptance: [...story.acceptance],
             tests: [...story.tests],
+            ...(story.goalInvariantIds
+                ? { goalInvariantIds: [...story.goalInvariantIds] }
+                : {}),
         })),
     }
 }
@@ -438,6 +457,9 @@ function toPrdStory(story: ReplanStoryAdd): PrdStory {
         retries: story.retries ?? 2,
         acceptance: [...story.acceptance!],
         tests: [...story.tests!],
+        ...(story.goalInvariantIds
+            ? { goalInvariantIds: [...story.goalInvariantIds] }
+            : {}),
         passes: false,
         completedAt: null,
         durationSecs: null,
@@ -457,6 +479,9 @@ function snapshotStoryAdd(story: ReplanStoryAdd): ReplanStoryAdd {
             ? { acceptance: [...story.acceptance] }
             : {}),
         ...(story.tests !== undefined ? { tests: [...story.tests] } : {}),
+        ...(story.goalInvariantIds !== undefined
+            ? { goalInvariantIds: [...story.goalInvariantIds] }
+            : {}),
         ...(story.model !== undefined ? { model: story.model } : {}),
     }
 }

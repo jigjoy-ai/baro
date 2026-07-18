@@ -38,6 +38,7 @@ export interface CodexStorySpec {
     runId?: string
     leaseId?: string
     generation?: number
+    targetedMessageAuthority?: Participant
     model?: string
     codexBin?: string
     /** Number of *additional* attempts after the first. */
@@ -359,6 +360,8 @@ export class CodexStoryAgent extends BaseObserver {
             codexBin: this.spec.codexBin,
             bypassSandbox: this.spec.bypassSandbox,
             skipGitRepoCheck: this.spec.skipGitRepoCheck,
+            targetedMessageAuthority: this.spec.targetedMessageAuthority,
+            targetedMessageCorrelation: correlationOf(this.spec),
         })
         this.currentCodex = codex
         this.terminalSourceRegistrar?.(codex)

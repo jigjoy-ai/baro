@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process"
 import { createHash, type Hash } from "node:crypto"
 import { constants } from "node:fs"
 import { lstat, open, readlink, realpath } from "node:fs/promises"
@@ -13,6 +12,10 @@ import {
 } from "@mozaik-ai/core"
 
 import { AgentState } from "../semantic-events.js"
+import {
+    RepositoryCommandError,
+    runRepositoryCommand,
+} from "../repository-command.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 
 const DEFAULT_GIT_TIMEOUT_MS = 10_000
@@ -1192,7 +1195,7 @@ interface GitResult {
     timedOut: boolean
 }
 
-function runGit(
+async function runGit(
     cwd: string,
     args: readonly string[],
     timeoutMs: number,
@@ -1207,15 +1210,15 @@ function runGit(
         "diff.external=",
         ...args,
     ]
-    return new Promise((resolveResult) => {
-        execFile(
+    try {
+        const { stdout, stderr } = await runRepositoryCommand(
             "git",
             hardenedArgs,
             {
                 cwd,
-                encoding: "utf8",
-                timeout: timeoutMs,
+                timeoutMs,
                 maxBuffer: 512 * 1024,
+                terminationGraceMs: Math.min(1_000, Math.max(1, timeoutMs)),
                 env: {
                     ...process.env,
                     GIT_CONFIG_GLOBAL: nullDevice,
@@ -1225,26 +1228,30 @@ function runGit(
                     GIT_PAGER: "cat",
                 },
             },
-            (error, stdout, stderr) => {
-                const details = error as (Error & {
-                    code?: string | number
-                    killed?: boolean
-                }) | null
-                resolveResult({
-                    exitCode: error === null
-                        ? 0
-                        : typeof details?.code === "number"
-                          ? details.code
-                          : null,
-                    stdout: stdout ?? "",
-                    stderr:
-                        stderr ||
-                        (error ? details?.message ?? "git command failed" : ""),
-                    timedOut: details?.killed === true,
-                })
-            },
         )
-    })
+        return {
+            exitCode: 0,
+            stdout,
+            stderr,
+            timedOut: false,
+        }
+    } catch (error) {
+        if (error instanceof RepositoryCommandError) {
+            return {
+                exitCode:
+                    typeof error.code === "number" ? error.code : null,
+                stdout: error.stdout,
+                stderr: error.stderr || error.message,
+                timedOut: error.timedOut,
+            }
+        }
+        return {
+            exitCode: null,
+            stdout: "",
+            stderr: errorMessage(error),
+            timedOut: false,
+        }
+    }
 }
 
 async function readUntrackedEvidence(

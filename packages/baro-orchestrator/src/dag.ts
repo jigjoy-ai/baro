@@ -26,6 +26,33 @@ export function buildDag(
     stories: readonly DagNode[],
     options: BuildOptions = {},
 ): DagLevel[] {
+    const allIds = new Set<string>()
+    for (const story of stories) {
+        if (!story.id || story.id.trim() !== story.id) {
+            throw new Error("DAG story ids must be non-empty trimmed strings")
+        }
+        if (allIds.has(story.id)) {
+            throw new Error(`Duplicate story id: ${story.id}`)
+        }
+        allIds.add(story.id)
+    }
+    for (const story of stories) {
+        const dependencies = story.dependsOn ?? []
+        const seen = new Set<string>()
+        for (const dependency of dependencies) {
+            if (seen.has(dependency)) {
+                throw new Error(
+                    `Duplicate dependency: ${story.id} -> ${dependency}`,
+                )
+            }
+            seen.add(dependency)
+            if (!allIds.has(dependency)) {
+                throw new Error(
+                    `Unknown dependency: ${story.id} -> ${dependency}`,
+                )
+            }
+        }
+    }
     const onlyIncomplete = options.onlyIncomplete ?? false
     const completedIds = new Set(
         stories.filter((s) => s.passes === true).map((s) => s.id),
@@ -56,7 +83,11 @@ export function buildDag(
     let queue: DagNode[] = active.filter((s) => (inDegree.get(s.id) ?? 0) === 0)
 
     while (queue.length > 0) {
-        queue.sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))
+        queue.sort(
+            (a, b) =>
+                (a.priority ?? 0) - (b.priority ?? 0) ||
+                a.id.localeCompare(b.id),
+        )
         levels.push({ storyIds: queue.map((s) => s.id) })
 
         const next: DagNode[] = []
@@ -77,7 +108,10 @@ export function buildDag(
 
     const placed = new Set(levels.flatMap((l) => l.storyIds))
     if (placed.size !== active.length) {
-        const cycled = active.filter((s) => !placed.has(s.id)).map((s) => s.id)
+        const cycled = active
+            .filter((s) => !placed.has(s.id))
+            .map((s) => s.id)
+            .sort((a, b) => a.localeCompare(b))
         throw new Error(`Dependency cycle detected: ${cycled.join(", ")}`)
     }
 
