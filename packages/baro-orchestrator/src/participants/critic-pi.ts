@@ -158,6 +158,12 @@ export class CriticPi extends BaseObserver {
                 violatedCriteria,
                 turn,
                 modelUsed: this.opts.model ?? "pi-default",
+                ...(preparation.repositoryFingerprint
+                    ? {
+                          repositoryFingerprint:
+                              preparation.repositoryFingerprint,
+                      }
+                    : {}),
             })
             for (const env of this.getEnvironments()) {
                 env.deliverSemanticEvent(this, critiqueEvent)

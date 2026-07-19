@@ -38,7 +38,11 @@ import {
     WorkspaceCleanupRequested,
 } from "../semantic-events.js"
 import { emit } from "../tui-protocol.js"
-import type { WorktreeManager } from "../worktree.js"
+import type {
+    WorktreeCandidateSeal,
+    WorktreeManager,
+} from "../worktree.js"
+import { captureCriticRepositoryFingerprint } from "./critic-evidence.js"
 import {
     SerializedObserver,
     type SerializedEventContext,
@@ -64,6 +68,11 @@ interface LeaseCorrelation {
     leaseId: string
 }
 
+interface CandidateSealRequest {
+    required: boolean
+    fingerprint?: string
+}
+
 export class GitCoordinator extends SerializedObserver {
     /** Detached non-worktree pushes, drained by finish() off the critical path. */
     private readonly storyPushes: Promise<void>[] = []
@@ -72,7 +81,11 @@ export class GitCoordinator extends SerializedObserver {
     private readonly integrationLeases = new Set<string>()
     private readonly activeLeases = new Map<
         string,
-        { leaseId: string; generation: number }
+        {
+            leaseId: string
+            generation: number
+            requiresQualityReview: boolean
+        }
     >()
     private readonly completedCleanups = new Map<string, string | null>()
     private eventAuthority: Participant | null = null
@@ -125,6 +138,8 @@ export class GitCoordinator extends SerializedObserver {
             this.activeLeases.set(event.data.request.storyId, {
                 leaseId: event.data.leaseId,
                 generation: event.data.generation,
+                requiresQualityReview:
+                    event.data.request.requiresQualityReview === true,
             })
             return
         }
@@ -146,6 +161,15 @@ export class GitCoordinator extends SerializedObserver {
                 await this.onStoryPassed(event.data.storyId, {
                     runId: event.data.runId,
                     leaseId: event.data.leaseId,
+                }, {
+                    required:
+                        event.data.candidateFingerprintRequired === true,
+                    ...(event.data.candidateFingerprint
+                        ? {
+                              fingerprint:
+                                  event.data.candidateFingerprint,
+                          }
+                        : {}),
                 })
             } catch (error) {
                 this.emitBus(
@@ -285,6 +309,7 @@ export class GitCoordinator extends SerializedObserver {
     async onStoryPassed(
         storyId: string,
         correlation?: LeaseCorrelation,
+        requestedSeal?: CandidateSealRequest,
     ): Promise<void> {
         const emitTui = this.opts.emitTui ?? true
         const { cwd, worktrees, gitGate } = this.opts
@@ -297,9 +322,14 @@ export class GitCoordinator extends SerializedObserver {
         // worktree — that story still needs the shared-tree reconciliation
         // below.
         if (worktrees) {
+            const candidateSeal = this.candidateSealFor(
+                storyId,
+                correlation,
+                requestedSeal,
+            )
             let merged = false
             try {
-                merged = await worktrees.mergeBack(storyId)
+                merged = await worktrees.mergeBack(storyId, candidateSeal)
             } catch (e) {
                 const error = (e as Error)?.message ?? String(e)
                 let branch = worktrees.branchName(storyId)
@@ -438,6 +468,36 @@ export class GitCoordinator extends SerializedObserver {
         } catch (e) {
             this.pushError = (e as Error)?.message ?? String(e)
             if (emitTui) emit({ type: "push_status", id: "_git", success: false, error: (e as Error)?.message ?? String(e) })
+        }
+    }
+
+    private candidateSealFor(
+        storyId: string,
+        correlation?: LeaseCorrelation,
+        requested?: CandidateSealRequest,
+    ): WorktreeCandidateSeal | undefined {
+        const active = this.activeLeases.get(storyId)
+        const leaseRequiresSeal =
+            correlation !== undefined &&
+            active?.leaseId === correlation.leaseId &&
+            active.requiresQualityReview
+
+        if (leaseRequiresSeal && requested?.required !== true) {
+            throw new Error(
+                `reviewed candidate seal marker is missing for story ${storyId}`,
+            )
+        }
+        if (!leaseRequiresSeal && requested?.required !== true) return undefined
+
+        const fingerprint = requested?.fingerprint
+        if (!fingerprint || !/^[a-f0-9]{64}$/i.test(fingerprint)) {
+            throw new Error(
+                `reviewed candidate fingerprint is missing or invalid for story ${storyId}`,
+            )
+        }
+        return {
+            expectedFingerprint: fingerprint,
+            capture: (target) => captureCriticRepositoryFingerprint(target),
         }
     }
 }

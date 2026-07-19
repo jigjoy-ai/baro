@@ -276,6 +276,79 @@ describe("Critic repository evidence", () => {
 
             assert.equal(preparation.status, "ready")
             assert.deepEqual(preparation.issues, [])
+            assert.match(preparation.repositoryFingerprint ?? "", /^[a-f0-9]{64}$/)
+        })
+    })
+
+    it("refuses to seal a repository that changes during evidence capture", async () => {
+        await withTempDir("baro-critic-moving-candidate-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            let capturedCommands = 0
+            const preparation = await prepareCriticEvaluation(
+                ["implementation exists"],
+                "Implemented",
+                "agent-a",
+                {
+                    resolveRepositoryTarget: () => ({ cwd: repo, baseSha }),
+                    commandEvidence: () => {
+                        capturedCommands += 1
+                        writeFileSync(
+                            join(repo, "feature.ts"),
+                            "export const value = 2\n",
+                        )
+                        return {
+                            text: "npm test completed successfully",
+                            commands: [
+                                {
+                                    terminal: true,
+                                    freshness: "fresh",
+                                    sandboxBlocked: false,
+                                },
+                            ],
+                        }
+                    },
+                },
+            )
+
+            assert.equal(capturedCommands, 1)
+            assert.equal(preparation.status, "inconclusive")
+            assert.equal(preparation.repositoryFingerprint, null)
+            assert.ok(
+                preparation.issues.includes(
+                    "repository changed while Critic evidence was being captured",
+                ),
+            )
+        })
+    })
+
+    it("fails closed instead of treating changed gitlink directory metadata as a seal", async () => {
+        await withTempDir("baro-critic-gitlink-candidate-", async (repo) => {
+            const baseSha = initializeRepository(repo)
+            git(
+                repo,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                `160000,${baseSha},nested-repository`,
+            )
+            mkdirSync(join(repo, "nested-repository"))
+
+            const preparation = await prepareCriticEvaluation(
+                ["implementation exists"],
+                "Implemented",
+                "agent-a",
+                {
+                    resolveRepositoryTarget: () => ({ cwd: repo, baseSha }),
+                },
+            )
+
+            assert.equal(preparation.status, "inconclusive")
+            assert.equal(preparation.repositoryFingerprint, null)
+            assert.ok(
+                preparation.issues.some((issue) =>
+                    /does not support directory\/gitlink path/.test(issue),
+                ),
+            )
         })
     })
 

@@ -10,8 +10,10 @@ import { setTimeout as setTimeoutPromise } from "timers/promises"
 import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
+import { PROCESS_TREE_CAPABILITIES } from "../process-tree.js"
 import {
     AgentState,
+    OneShotAttemptFinalized,
     PiSystem,
     PiUnknownEvent,
     StoryResult,
@@ -27,6 +29,10 @@ import {
     PiCliParticipant,
     type PiRunSummary,
 } from "./pi-cli-participant.js"
+import {
+    OneShotTurnReview,
+    oneShotSurgicalRevisionPrompt,
+} from "./one-shot-turn-review.js"
 import { correlationOf, type StorySuspension } from "./story-agent.js"
 
 export interface PiStorySpec {
@@ -50,6 +56,17 @@ export interface PiStorySpec {
     retryDelayMs?: number
     /** Hard cap in seconds for the whole story across all attempts; <= 0 disables. */
     hardTimeoutSecs?: number
+    /** Wait for the exact Critic verdict before publishing StoryResult. */
+    requiresQualityReview?: boolean
+    terminalTurnAuthority?: Participant
+    turnReviewAuthority?: Participant
+    turnReviewTimeoutMs?: number
+    handoffInconclusiveToAcceptanceGate?: boolean
+    /** Collective safety boundary: a spawned CLI attempt must earn a positive
+     * cooperative process-tree observation before retry or settlement. */
+    requireProcessQuiescenceCertification?: boolean
+    /** Fast local repair passes before structural DAG recovery takes over. */
+    maxSurgicalRevisions?: number
 }
 
 export interface PiStoryOutcome {
@@ -71,6 +88,11 @@ export class PiStoryAgent extends BaseObserver {
             | "timeoutSecs"
             | "retryDelayMs"
             | "hardTimeoutSecs"
+            | "requiresQualityReview"
+            | "turnReviewTimeoutMs"
+            | "handoffInconclusiveToAcceptanceGate"
+            | "requireProcessQuiescenceCertification"
+            | "maxSurgicalRevisions"
         >
     > &
         PiStorySpec
@@ -86,8 +108,12 @@ export class PiStoryAgent extends BaseObserver {
     private stopRequested = false
     /** Lifecycle signal also closes the tiny transition→timer lost-wake window. */
     private readonly retryDelayController = new AbortController()
+    private readonly turnReview: OneShotTurnReview
     private suspension: StorySuspension | null = null
     private processQuiescence: Promise<boolean> | null = null
+    private currentProcessQuiesced = false
+    private currentProcessOwnedGroup = false
+    private currentProcessSpawned = false
     private resolveDone!: (outcome: PiStoryOutcome) => void
     public readonly done: Promise<PiStoryOutcome>
 
@@ -99,7 +125,24 @@ export class PiStoryAgent extends BaseObserver {
             retryDelayMs: 1500,
             hardTimeoutSecs: 0,
             ...spec,
+            requiresQualityReview: spec.requiresQualityReview ?? false,
+            turnReviewTimeoutMs: spec.turnReviewTimeoutMs ?? 240_000,
+            handoffInconclusiveToAcceptanceGate:
+                spec.handoffInconclusiveToAcceptanceGate ?? false,
+            requireProcessQuiescenceCertification:
+                spec.requireProcessQuiescenceCertification ?? false,
+            maxSurgicalRevisions: spec.maxSurgicalRevisions ?? 2,
         }
+        this.turnReview = new OneShotTurnReview({
+            agentId: this.spec.id,
+            requiresReview: this.spec.requiresQualityReview,
+            terminalAuthority: this.spec.terminalTurnAuthority,
+            authority: this.spec.turnReviewAuthority,
+            timeoutMs: this.spec.turnReviewTimeoutMs,
+            handoffInconclusiveToAcceptanceGate:
+                this.spec.handoffInconclusiveToAcceptanceGate,
+            maxSurgicalRevisions: this.spec.maxSurgicalRevisions,
+        })
         this.done = new Promise<PiStoryOutcome>((res) => {
             this.resolveDone = res
         })
@@ -149,11 +192,12 @@ export class PiStoryAgent extends BaseObserver {
         return this.done
     }
 
-    /** No-op: Pi `-p` is one-shot — no stdin channel for mid-flight messages. */
+    /** A rejected one-shot turn is resumed by a fresh process in the same worktree. */
     override async onExternalEvent(
         source: Participant,
         event: SemanticEvent<unknown>,
     ): Promise<void> {
+        if (this.turnReview.observe(source, event)) return
         if (source !== this.currentPi) return
         if (
             PiUnknownEvent.is(event) &&
@@ -172,6 +216,7 @@ export class PiStoryAgent extends BaseObserver {
     abort(): void {
         this.stopRequested = true
         this.wakeRetryDelay()
+        this.turnReview.cancel()
         this.quiesceCurrentPi()
         this.transition("aborted", "external abort")
     }
@@ -180,6 +225,7 @@ export class PiStoryAgent extends BaseObserver {
         this.recordSuspension(blockId)
         this.stopRequested = true
         this.wakeRetryDelay()
+        this.turnReview.cancel()
         this.transition("aborted", `dependency suspension ${blockId}`)
         const quiesced = await this.quiesceCurrentPi()
         if (!quiesced) {
@@ -191,24 +237,28 @@ export class PiStoryAgent extends BaseObserver {
     }
 
     private async executeAllAttempts(): Promise<void> {
-        const maxAttempts = this.spec.retries + 1
+        const maxExecutionAttempts = this.spec.retries + 1
         let lastSummary: PiRunSummary | null = null
         let lastError: string | null = null
         let lastFailure: StoryFailureData | undefined
         let attempts = 0
+        let executionFailures = 0
         let hardTimedOut = false
+        let prompt = this.spec.prompt
+        let needsRetryDelay = false
 
         const hardTimer =
             this.spec.hardTimeoutSecs > 0
                 ? setTimeout(() => {
                       hardTimedOut = true
                       this.wakeRetryDelay()
+                      this.turnReview.cancel()
                       this.quiesceCurrentPi()
                   }, this.spec.hardTimeoutSecs * 1000)
                 : null
 
         try {
-            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            while (true) {
                 if (this.stopRequested) break
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
@@ -219,11 +269,11 @@ export class PiStoryAgent extends BaseObserver {
                     break
                 }
 
-                if (attempt > 1) {
+                if (needsRetryDelay) {
                     if (this.stopRequested) break
                     this.transition(
                         "waiting",
-                        `retrying (attempt ${attempt}/${maxAttempts})`,
+                        `retrying execution (${executionFailures + 1}/${maxExecutionAttempts})`,
                     )
                     await this.waitForRetryDelay()
                     if (this.stopRequested) break
@@ -237,29 +287,118 @@ export class PiStoryAgent extends BaseObserver {
                     }
                 }
 
-                attempts = attempt
-                const result = await this.runOneAttempt(attempt)
+                attempts++
+                needsRetryDelay = false
+                this.turnReview.beginCandidate()
+                const result = await this.runOneAttempt(attempts, prompt)
                 lastSummary = result.summary
                 lastError = result.error
                 lastFailure = result.failure
 
-                if (this.stopRequested) break
+                if (this.stopRequested) {
+                    this.turnReview.discardCandidate()
+                    this.finalizeProjectedCandidate("discard", attempts)
+                    break
+                }
+                if (hardTimedOut) {
+                    this.turnReview.discardCandidate()
+                    this.finalizeProjectedCandidate("discard", attempts)
+                    lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                    lastFailure = {
+                        kind: "infrastructure",
+                        code: "command_timeout",
+                    }
+                    break
+                }
                 if (result.success) {
+                    if (this.hasUncertifiedOwnedProcessGroup()) {
+                        this.turnReview.discardCandidate()
+                        this.finalizeProjectedCandidate("discard", attempts)
+                        lastError =
+                            "pi process group quiescence could not be certified; " +
+                            "stopped without workspace cleanup"
+                        lastFailure = {
+                            kind: "infrastructure",
+                            code: "process_quiescence_uncertified",
+                        }
+                        break
+                    }
+                    this.finalizeProjectedCandidate("publish", attempts)
+                    if (this.turnReview.requiresReview) {
+                        this.transition("waiting", "awaiting quality review")
+                    }
+                    const review = await this.turnReview.reviewNext()
+                    if (this.stopRequested) break
+                    if (hardTimedOut) {
+                        lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                        lastFailure = {
+                            kind: "infrastructure",
+                            code: "command_timeout",
+                        }
+                        break
+                    }
+                    if (review.kind === "revise") {
+                        if (this.currentProcessQuiesced) {
+                            prompt = oneShotSurgicalRevisionPrompt(
+                                this.spec.prompt,
+                                review.review,
+                            )
+                            this.transition(
+                                "waiting",
+                                `surgical revision ${review.revision}`,
+                            )
+                            continue
+                        }
+                        if (!this.spec.handoffInconclusiveToAcceptanceGate) {
+                            lastError =
+                                "cannot safely launch a surgical revision: " +
+                                "prior process-tree quiescence was not certified"
+                            lastFailure = {
+                                kind: "infrastructure",
+                                code: "worktree_unavailable",
+                            }
+                            break
+                        }
+                        // The platform cannot certify that a fresh one-shot
+                        // process is safe. Keep this candidate unchanged and
+                        // make the existing AcceptanceGate/DAG recovery lane
+                        // the explicit owner of the rejection instead.
+                        this.transition(
+                            "waiting",
+                            "surgical revision handed to acceptance gate: prior process quiescence uncertified",
+                        )
+                    }
+                    if (review.kind === "failure") {
+                        lastError = review.error
+                        lastFailure = review.failure
+                        break
+                    }
+                    if (review.kind === "cancelled") {
+                        lastError = "quality review wait cancelled"
+                        lastFailure = {
+                            kind: "infrastructure",
+                            code: "review_timeout",
+                        }
+                        break
+                    }
                     const durationSecs = Math.round(
                         (Date.now() - (this.startedAt ?? Date.now())) / 1000,
                     )
-                    this.transition("done", `success on attempt ${attempt}`)
-                    this.emitStoryResult(true, attempt, durationSecs, null)
+                    this.transition("done", `success after ${attempts} invocation(s)`)
+                    this.emitStoryResult(true, attempts, durationSecs, null)
                     this.resolveDone({
                         storyId: this.spec.id,
                         success: true,
-                        attempts: attempt,
+                        attempts,
                         durationSecs,
                         finalSummary: result.summary,
                         error: null,
                     })
                     return
                 }
+
+                this.turnReview.discardCandidate()
+                this.finalizeProjectedCandidate("discard", attempts)
 
                 if (hardTimedOut) {
                     lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
@@ -269,7 +408,20 @@ export class PiStoryAgent extends BaseObserver {
                     }
                     break
                 }
+                if (this.hasUncertifiedOwnedProcessGroup()) {
+                    lastError =
+                        "pi process group quiescence could not be certified; " +
+                        "stopped without workspace cleanup"
+                    lastFailure = {
+                        kind: "infrastructure",
+                        code: "process_quiescence_uncertified",
+                    }
+                    break
+                }
                 if (boardOwnsCliRecovery(result.failure)) break
+                executionFailures++
+                if (executionFailures >= maxExecutionAttempts) break
+                needsRetryDelay = true
             }
         } finally {
             if (hardTimer !== null) clearTimeout(hardTimer)
@@ -277,10 +429,22 @@ export class PiStoryAgent extends BaseObserver {
 
         await this.processQuiescence
 
-        if (this.suspension) {
+        const quiescenceFailure = this.hasUncertifiedOwnedProcessGroup()
+        if (quiescenceFailure) {
+            lastError =
+                "pi process group quiescence could not be certified; " +
+                "stopped without workspace cleanup"
+            lastFailure = {
+                kind: "infrastructure",
+                code: "process_quiescence_uncertified",
+            }
+            this.suspension = null
+        }
+
+        if (!quiescenceFailure && this.suspension) {
             lastError = null
             lastFailure = undefined
-        } else if (this.stopRequested) {
+        } else if (!quiescenceFailure && this.stopRequested) {
             lastError = "story execution aborted externally"
             lastFailure = undefined
         }
@@ -288,7 +452,9 @@ export class PiStoryAgent extends BaseObserver {
         const durationSecs = Math.round(
             (Date.now() - (this.startedAt ?? Date.now())) / 1000,
         )
-        if (this.stopRequested) {
+        if (quiescenceFailure) {
+            this.transition("failed", "process group quiescence uncertified")
+        } else if (this.stopRequested) {
             this.transition(
                 "aborted",
                 this.suspension
@@ -300,7 +466,7 @@ export class PiStoryAgent extends BaseObserver {
                 "failed",
                 boardOwnsCliRecovery(lastFailure)
                     ? `operational failure after ${attempts} attempt(s)`
-                    : `exhausted ${attempts}/${maxAttempts} attempts`,
+                    : `failed after ${attempts} model invocation(s)`,
             )
         }
         this.emitStoryResult(
@@ -324,6 +490,7 @@ export class PiStoryAgent extends BaseObserver {
 
     private async runOneAttempt(
         attempt: number,
+        prompt: string,
     ): Promise<{
         success: boolean
         summary: PiRunSummary | null
@@ -342,12 +509,15 @@ export class PiStoryAgent extends BaseObserver {
         }
 
         this.processQuiescence = null
+        this.currentProcessQuiesced = false
+        this.currentProcessOwnedGroup = false
+        this.currentProcessSpawned = false
         this.transition("running", `attempt ${attempt}`)
         this.currentFailureSignals = []
 
         const pi = new PiCliParticipant(this.spec.id, {
             cwd: this.spec.cwd,
-            prompt: this.spec.prompt,
+            prompt,
             provider: this.spec.provider,
             model: this.spec.model,
             piBin: this.spec.piBin,
@@ -358,6 +528,8 @@ export class PiStoryAgent extends BaseObserver {
         this.terminalSourceRegistrar?.(pi)
         pi.join(this.envRef)
         pi.start(this.envRef)
+        this.currentProcessOwnedGroup = pi.hasOwnedProcessGroup()
+        this.currentProcessSpawned = pi.hasSpawnedProcess()
 
         let summary: PiRunSummary
         try {
@@ -367,7 +539,7 @@ export class PiStoryAgent extends BaseObserver {
                 `attempt ${attempt} timeout after ${this.spec.timeoutSecs}s`,
             )
         } catch (e) {
-            await this.quiesceCurrentPi()
+            this.currentProcessQuiesced = await this.quiesceCurrentPi()
             const error = e instanceof Error ? e.message : String(e)
             let stderrTail: string | null = null
             try {
@@ -388,7 +560,7 @@ export class PiStoryAgent extends BaseObserver {
             }
         }
 
-        await this.quiesceCurrentPi()
+        this.currentProcessQuiesced = await this.quiesceCurrentPi()
         pi.leave(this.envRef)
         this.currentPi = null
 
@@ -491,10 +663,53 @@ export class PiStoryAgent extends BaseObserver {
     private quiesceCurrentPi(): Promise<boolean> {
         const pi = this.currentPi
         if (!pi) return this.processQuiescence ?? Promise.resolve(true)
+        this.currentProcessOwnedGroup ||= pi.hasOwnedProcessGroup()
+        this.currentProcessSpawned ||= pi.hasSpawnedProcess()
         if (!this.processQuiescence) {
             this.processQuiescence = pi.abortAndWait()
         }
         return this.processQuiescence
+    }
+
+    private hasUncertifiedOwnedProcessGroup(): boolean {
+        return (
+            !this.currentProcessQuiesced &&
+            ((this.spec.requireProcessQuiescenceCertification &&
+                this.currentProcessSpawned) ||
+                (PROCESS_TREE_CAPABILITIES
+                    .cooperativeQuiescenceObservation &&
+                    this.currentProcessOwnedGroup))
+        )
+    }
+
+    private finalizeProjectedCandidate(
+        requested: "publish" | "discard",
+        attempt: number,
+    ): void {
+        if (
+            !this.envRef ||
+            !this.spec.runId ||
+            !this.spec.leaseId ||
+            this.spec.generation == null
+        ) return
+        this.envRef.deliverSemanticEvent(
+            this,
+            OneShotAttemptFinalized.create({
+                runId: this.spec.runId,
+                storyId: this.spec.id,
+                leaseId: this.spec.leaseId,
+                generation: this.spec.generation,
+                attempt,
+                disposition:
+                    requested === "publish" && this.currentProcessQuiesced
+                        ? "publish"
+                        : "discard",
+                ownedProcessGroup: this.currentProcessOwnedGroup,
+                quiescenceAssurance: this.currentProcessQuiesced
+                    ? "cooperative-observed"
+                    : "none",
+            }),
+        )
     }
 
     private async waitForRetryDelay(): Promise<void> {

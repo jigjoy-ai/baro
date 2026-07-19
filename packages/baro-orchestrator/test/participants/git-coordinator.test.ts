@@ -12,6 +12,7 @@ import {
     RunPushed,
     RunPushRequested,
     StoryIntegrationRequested,
+    StoryMergeFailed,
     WorkLeaseGranted,
     WorkspaceCleanupCompleted,
     WorkspaceCleanupFailed,
@@ -23,6 +24,64 @@ const BOARD = source("board")
 const BROKER = source("broker")
 
 describe("GitCoordinator", () => {
+    it("fails closed before merge when a reviewed lease omits its candidate seal", async () => {
+        await withTempDir("git-missing-candidate-seal-", async (dir) => {
+            let mergeCalls = 0
+            const worktrees = {
+                mergeBack: async () => {
+                    mergeCalls += 1
+                    return true
+                },
+            } as unknown as WorktreeManager
+            const coordinator = new GitCoordinator({
+                cwd: dir,
+                gitGate: new GitGate(),
+                worktrees,
+                emitTui: false,
+                eventDriven: true,
+                runId: "run-missing-seal",
+                push: false,
+            })
+            coordinator.setEventAuthority(BOARD)
+            coordinator.setLeaseAuthority(BROKER)
+            const env = joinWithCapture(coordinator)
+
+            env.deliverSemanticEvent(
+                BROKER,
+                WorkLeaseGranted.create({
+                    runId: "run-missing-seal",
+                    offerId: "offer-1",
+                    leaseId: "lease-1",
+                    workerId: "worker",
+                    generation: 1,
+                    request: {
+                        storyId: "S1",
+                        prompt: "implement reviewed work",
+                        retries: 0,
+                        timeoutSecs: 60,
+                        requiresQualityReview: true,
+                    },
+                }),
+            )
+            env.deliverSemanticEvent(
+                BOARD,
+                StoryIntegrationRequested.create({
+                    runId: "run-missing-seal",
+                    leaseId: "lease-1",
+                    storyId: "S1",
+                    attempts: 1,
+                    durationSecs: 1,
+                }),
+            )
+            await coordinator.idle()
+
+            assert.equal(mergeCalls, 0)
+            const failure = env.events.find(StoryMergeFailed.is)
+            assert.ok(failure)
+            assert.match(failure.data.error, /candidate seal marker is missing/)
+        })
+    })
+
     it("fails closed while collective repository authorities are unbound", async () => {
         await withTempDir("git-unbound-authority-", async (dir) => {
             const cleaned: string[] = []

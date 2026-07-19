@@ -9,6 +9,7 @@ import {
     AgentResult,
     AgentTurnCompleted,
     CodexTurnEvent,
+    OneShotAttemptFinalized,
     OpenCodeSystem,
     PiTurnEvent,
     StoryQualityReverificationRequested,
@@ -25,6 +26,8 @@ import { criticInput, criticReplayKey } from "./critic-input.js"
 export interface AgentTurnProjectorOptions {
     /** Collective-only exact authority for native CLI event producers. */
     outcomeAuthority?: StoryOutcomeAuthority
+    /** Hold one-shot terminals until their story owner proves process settlement. */
+    requireQuiescenceBarrier?: boolean
 }
 
 interface LeaseCorrelation {
@@ -43,6 +46,16 @@ interface CachedCandidate {
     lease: LeaseCorrelation | null
 }
 
+interface PendingProjectedTerminal {
+    backend: string
+    isError: boolean
+    resultText: string
+    /** Exact nested CLI which emitted this candidate. */
+    source: Participant | null
+    correlation: StoryResultAuthorityCorrelation | null
+    attempt: number | null
+}
+
 /** Projects one-shot CLI message streams into the Critic's neutral terminal contract. */
 export class AgentTurnProjector extends BaseObserver {
     private readonly text = new Map<string, string[]>()
@@ -57,11 +70,21 @@ export class AgentTurnProjector extends BaseObserver {
     private readonly seenNativeTerminalIds = new Set<string>()
     private readonly handledReverifications = new Set<string>()
     private readonly nativeSources = new Map<string, Participant>()
+    private readonly pendingProjectedTerminals = new Map<
+        string,
+        PendingProjectedTerminal
+    >()
+    private readonly lastFinalizedAttempts = new Map<string, number>()
     private leaseAuthority: Participant | null = null
     private reverificationAuthority: Participant | null = null
 
     constructor(private readonly opts: AgentTurnProjectorOptions = {}) {
         super()
+        if (opts.requireQuiescenceBarrier && !opts.outcomeAuthority) {
+            throw new Error(
+                "terminal projector quiescence barrier requires outcome authority",
+            )
+        }
     }
 
     setLeaseAuthority(authority: Participant): void {
@@ -154,6 +177,7 @@ export class AgentTurnProjector extends BaseObserver {
                     this.leaseAuthority !== null &&
                     source === this.leaseAuthority,
             })
+            this.pendingProjectedTerminals.delete(event.data.request.storyId)
             return
         }
         if (WorkLeaseReleased.is(event)) {
@@ -164,11 +188,16 @@ export class AgentTurnProjector extends BaseObserver {
                 active.leaseId === event.data.leaseId
             ) {
                 this.activeLeases.delete(event.data.storyId)
+                this.pendingProjectedTerminals.delete(event.data.storyId)
             }
             return
         }
         if (StoryQualityReverificationRequested.is(event)) {
             this.reverify(source, event.data)
+            return
+        }
+        if (OneShotAttemptFinalized.is(event)) {
+            this.finalizeOneShotAttempt(source, event.data)
             return
         }
         if (StoryRouted.is(event)) {
@@ -263,6 +292,7 @@ export class AgentTurnProjector extends BaseObserver {
         if (current && current !== source) {
             this.text.delete(agentId)
             this.completed.delete(agentId)
+            this.pendingProjectedTerminals.delete(agentId)
         }
         this.nativeSources.set(agentId, source)
     }
@@ -272,13 +302,125 @@ export class AgentTurnProjector extends BaseObserver {
         this.completed.add(agentId)
         const resultText = (this.text.get(agentId) ?? []).join("\n").trim()
         this.text.delete(agentId)
-        const sequence = (this.terminalSequences.get(agentId) ?? 0) + 1
-        this.terminalSequences.set(agentId, sequence)
-        const terminalId = ["projected", agentId, sequence]
+        const backend = this.backends.get(agentId) ?? fallbackBackend
+        if (this.opts.requireQuiescenceBarrier) {
+            const nativeSource = this.nativeSources.get(agentId)
+            const correlation =
+                nativeSource && this.opts.outcomeAuthority
+                    ? this.opts.outcomeAuthority.terminalCorrelationForSource(
+                          nativeSource,
+                          agentId,
+                      )
+                    : null
+            this.pendingProjectedTerminals.set(agentId, {
+                backend,
+                isError,
+                resultText,
+                source: nativeSource ?? null,
+                correlation,
+                attempt:
+                    correlation === null
+                        ? null
+                        : (this.lastFinalizedAttempts.get(
+                              correlationKey(correlation),
+                          ) ?? 0) + 1,
+            })
+            return
+        }
+        this.publishProjectedTerminal(agentId, backend, isError, resultText)
+    }
+
+    private finalizeOneShotAttempt(
+        source: Participant,
+        finalized: {
+            runId: string
+            storyId: string
+            leaseId: string
+            generation: number
+            attempt: number
+            disposition: "publish" | "discard"
+            ownedProcessGroup: boolean
+            quiescenceAssurance: "cooperative-observed" | "none"
+        },
+    ): void {
+        if (!this.opts.requireQuiescenceBarrier || !this.opts.outcomeAuthority) {
+            return
+        }
+        const correlation = {
+            runId: finalized.runId,
+            storyId: finalized.storyId,
+            leaseId: finalized.leaseId,
+            generation: finalized.generation,
+        }
+        const active = this.activeLeases.get(finalized.storyId)
+        if (
+            !active?.authoritative ||
+            active.runId !== finalized.runId ||
+            active.leaseId !== finalized.leaseId ||
+            active.generation !== finalized.generation ||
+            !this.opts.outcomeAuthority.matchesResultAuthority(
+                source,
+                correlation,
+            )
+        ) return
+
+        const finalizedKey = correlationKey(correlation)
+        const expectedAttempt =
+            (this.lastFinalizedAttempts.get(finalizedKey) ?? 0) + 1
+        if (
+            !Number.isInteger(finalized.attempt) ||
+            finalized.attempt !== expectedAttempt
+        ) return
+        this.lastFinalizedAttempts.set(finalizedKey, finalized.attempt)
+
+        const pending = this.pendingProjectedTerminals.get(finalized.storyId)
+        this.pendingProjectedTerminals.delete(finalized.storyId)
+        if (
+            finalized.disposition !== "publish" ||
+            finalized.quiescenceAssurance !== "cooperative-observed" ||
+            !pending ||
+            !sameCorrelation(pending.correlation, correlation) ||
+            pending.attempt !== finalized.attempt ||
+            pending.source === null ||
+            !this.opts.outcomeAuthority.matchesNestedTerminalTurnSource(
+                pending.source,
+                correlation,
+            )
+        ) return
+        const terminalId = [
+            "quiesced",
+            finalized.runId,
+            finalized.storyId,
+            finalized.leaseId,
+            finalized.generation,
+            finalized.attempt,
+        ]
             .map(String)
             .map(encodeURIComponent)
             .join(":")
-        const backend = this.backends.get(agentId) ?? fallbackBackend
+        this.publishProjectedTerminal(
+            finalized.storyId,
+            pending.backend,
+            pending.isError,
+            pending.resultText,
+            terminalId,
+        )
+    }
+
+    private publishProjectedTerminal(
+        agentId: string,
+        backend: string,
+        isError: boolean,
+        resultText: string,
+        terminalIdOverride?: string,
+    ): void {
+        const sequence = (this.terminalSequences.get(agentId) ?? 0) + 1
+        this.terminalSequences.set(agentId, sequence)
+        const terminalId = terminalIdOverride ??
+            ["projected", agentId, sequence]
+                .map(String)
+                .map(encodeURIComponent)
+                .join(":")
         if (!isError && resultText) {
             this.retainCandidate({
                 agentId,
@@ -408,4 +550,26 @@ export class AgentTurnProjector extends BaseObserver {
 function agentIdOf(source: Participant): string | null {
     const id = (source as { agentId?: unknown }).agentId
     return typeof id === "string" && id ? id : null
+}
+
+function sameCorrelation(
+    left: StoryResultAuthorityCorrelation | null,
+    right: StoryResultAuthorityCorrelation,
+): boolean {
+    return left !== null &&
+        left.runId === right.runId &&
+        left.storyId === right.storyId &&
+        left.leaseId === right.leaseId &&
+        left.generation === right.generation
+}
+
+function correlationKey(
+    correlation: StoryResultAuthorityCorrelation,
+): string {
+    return JSON.stringify([
+        correlation.runId,
+        correlation.storyId,
+        correlation.leaseId,
+        correlation.generation,
+    ])
 }

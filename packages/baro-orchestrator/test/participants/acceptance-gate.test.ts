@@ -124,13 +124,24 @@ describe("AcceptanceGate", () => {
         await gate.idle()
         assert.equal(env.events.filter(StoryQualityCompleted.is).length, 0)
 
-        deliverCritique(env, "S1", 1, "pass", "criteria satisfied")
+        deliverCritique(
+            env,
+            "S1",
+            1,
+            "pass",
+            "criteria satisfied",
+            "b".repeat(64),
+        )
         const quality = await qualityResult(env)
 
         assert.equal(quality.data.status, "passed")
         assert.equal(quality.data.targetTurn, 1)
         assert.equal(quality.data.leaseId, "lease-1")
         assert.equal(quality.data.critique?.verdict, "pass")
+        assert.equal(
+            quality.data.critique?.repositoryFingerprint,
+            "b".repeat(64),
+        )
     })
 
     it("resolves a buffered critique that arrives before the successful result", async () => {
@@ -750,6 +761,7 @@ function deliverCritique(
     turn: number,
     verdict: "pass" | "fail",
     reasoning: string,
+    repositoryFingerprint?: string,
 ): void {
     env.deliverSemanticEvent(
         source("critic"),
@@ -760,6 +772,7 @@ function deliverCritique(
             violatedCriteria: verdict === "fail" ? ["tests"] : [],
             turn,
             modelUsed: "test-critic",
+            ...(repositoryFingerprint ? { repositoryFingerprint } : {}),
         }),
     )
 }

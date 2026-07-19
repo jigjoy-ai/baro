@@ -817,6 +817,14 @@ describe("CollectiveBoard", () => {
                 status: "passed",
                 targetTurn: 1,
                 reason: "all acceptance criteria passed",
+                critique: {
+                    verdict: "pass",
+                    reasoning: "all acceptance criteria passed",
+                    violatedCriteria: [],
+                    turn: 1,
+                    modelUsed: "critic-test",
+                    repositoryFingerprint: "a".repeat(64),
+                },
             })
             env.deliverSemanticEvent(source("forged-quality-gate"), verdict)
             await flush()
@@ -825,6 +833,11 @@ describe("CollectiveBoard", () => {
             env.deliverSemanticEvent(qualityGate, verdict)
             const integration = await waitFor(env.events, StoryIntegrationRequested.is)
             assert.equal(integration.data.leaseId, "lease-quality")
+            assert.equal(integration.data.candidateFingerprintRequired, true)
+            assert.equal(
+                integration.data.candidateFingerprint,
+                "a".repeat(64),
+            )
         })
     })
 
@@ -1646,6 +1659,68 @@ describe("CollectiveBoard", () => {
             const retry = (await waitForCount(env.events, WorkOffered.is, 2))[1]!
             assert.equal(retry.data.request.recovery?.kind, "infrastructure")
             assert.equal(env.events.filter(RecoveryEvaluationStarted.is).length, 0)
+        })
+    })
+
+    it("halts without cleanup or recovery when process quiescence is uncertified", async () => {
+        await withTempDir("collective-quiescence-uncertified-", async (dir) => {
+            const runId = "run-quiescence-uncertified"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                maxOperationalRetriesPerStory: 3,
+            })
+            const env = joinWithCapture(board)
+
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "test" }),
+            )
+            env.deliverSemanticEvent(
+                source("repo"),
+                RunPrepared.create({ runId, baseSha: null }),
+            )
+            await provideContext(env, runId, 1)
+            const offer = await waitFor(env.events, WorkOffered.is)
+            env.deliverSemanticEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: offer.data.offerId,
+                    leaseId: "lease-uncertified",
+                    workerId: "worker",
+                    generation: offer.data.generation,
+                    request: offer.data.request,
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("worker"),
+                StoryResult.create({
+                    runId,
+                    storyId: "S1",
+                    leaseId: "lease-uncertified",
+                    generation: offer.data.generation,
+                    success: false,
+                    attempts: 1,
+                    durationSecs: 2,
+                    error: "process group still alive",
+                    failure: {
+                        kind: "infrastructure",
+                        code: "process_quiescence_uncertified",
+                    },
+                }),
+            )
+
+            const summary = await board.done
+            assert.equal(summary.success, false)
+            assert.match(summary.abortReason ?? "", /without workspace cleanup/)
+            assert.equal(env.events.some(WorkspaceCleanupRequested.is), false)
+            assert.equal(env.events.some(RecoveryStarted.is), false)
+            assert.equal(env.events.filter(WorkOffered.is).length, 1)
         })
     })
 

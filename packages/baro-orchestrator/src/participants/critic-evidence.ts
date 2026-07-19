@@ -91,6 +91,9 @@ export interface CriticEvaluationPreparation {
     prompt: string
     status: "ready" | "inconclusive"
     issues: readonly string[]
+    /** Present only when the complete evidence capture was bracketed by the
+     * same exact changed-content fingerprint. */
+    repositoryFingerprint: string | null
 }
 
 export interface InconclusiveCriticVerdict {
@@ -482,6 +485,16 @@ function fingerprintFreshness(
           }
 }
 
+/** Compute the exact changed-content identity used both by Critic evidence
+ * capture and the integration boundary. Callers must supply the immutable
+ * story creation SHA; this helper never guesses a comparison base. */
+export async function captureCriticRepositoryFingerprint(
+    target: CriticRepositoryTarget,
+    timeoutMs = DEFAULT_GIT_TIMEOUT_MS,
+): Promise<string> {
+    return changedContentFingerprint(target, timeoutMs)
+}
+
 async function changedContentFingerprint(
     target: CriticRepositoryTarget,
     timeoutMs: number,
@@ -608,14 +621,14 @@ async function hashChangedPath(
         return totalBytes
     }
     if (!stat.isFile()) {
-        hashField(
-            hash,
-            "type",
-            stat.isDirectory() ? "directory" : "non-regular",
+        // A changed directory can be a gitlink/submodule. Directory metadata
+        // does not bind its commit OID, so treating it as sealed would permit
+        // content changes without changing this fingerprint.
+        throw new Error(
+            `changed-content fingerprint does not support ${
+                stat.isDirectory() ? "directory/gitlink" : "non-regular"
+            } path ${JSON.stringify(path)}`,
         )
-        hashField(hash, "mode", String(stat.mode & 0o7777))
-        hashField(hash, "size", String(stat.size))
-        return totalBytes
     }
     if (stat.size > MAX_FINGERPRINT_FILE_BYTES) {
         throw new Error(
@@ -775,11 +788,27 @@ export async function prepareCriticEvaluation(
     agentId: string,
     source?: CriticEvidenceSource,
 ): Promise<CriticEvaluationPreparation> {
+    const beforeFingerprint = await repositoryFingerprintFor(agentId, source)
     const commandEvidence = await commandEvidenceFor(agentId, source)
     const repositoryEvidence = await repositoryEvidenceFor(agentId, source)
-    const issues = source
+    const afterFingerprint = await repositoryFingerprintFor(agentId, source)
+    const readinessIssues = source
         ? evidenceReadinessIssues(commandEvidence, repositoryEvidence)
         : []
+    const fingerprintIssue = source
+        ? repositoryFingerprintStabilityIssue(
+              beforeFingerprint,
+              afterFingerprint,
+          )
+        : null
+    const issues = [
+        ...readinessIssues,
+        ...(fingerprintIssue && !readinessIssues.some((issue) =>
+            /repository (?:evidence|target)/i.test(issue)
+        )
+            ? [fingerprintIssue]
+            : []),
+    ]
     return {
         prompt: buildEvalPrompt(
             criteria,
@@ -789,6 +818,8 @@ export async function prepareCriticEvaluation(
         ),
         status: issues.length > 0 ? "inconclusive" : "ready",
         issues,
+        repositoryFingerprint:
+            issues.length === 0 ? afterFingerprint.value : null,
     }
 }
 
@@ -1055,6 +1086,60 @@ function acceptanceContractTooLarge(): RangeError {
     return new RangeError(
         "Critic acceptance contract exceeds its lossless prompt budget; refusing partial evaluation",
     )
+}
+
+interface RepositoryFingerprintResult {
+    value: string | null
+    issue: string | null
+}
+
+async function repositoryFingerprintFor(
+    agentId: string,
+    source?: CriticEvidenceSource,
+): Promise<RepositoryFingerprintResult> {
+    if (!source) return { value: null, issue: null }
+
+    let target: CriticRepositoryTarget | null
+    try {
+        target = await source.resolveRepositoryTarget(agentId)
+    } catch (error) {
+        return {
+            value: null,
+            issue: `repository target resolution failed: ${errorMessage(error)}`,
+        }
+    }
+    if (!target) {
+        return { value: null, issue: "repository target is unavailable" }
+    }
+
+    try {
+        return {
+            value: await captureCriticRepositoryFingerprint(
+                target,
+                source.gitTimeoutMs ?? DEFAULT_GIT_TIMEOUT_MS,
+            ),
+            issue: null,
+        }
+    } catch (error) {
+        return {
+            value: null,
+            issue: errorMessage(error),
+        }
+    }
+}
+
+function repositoryFingerprintStabilityIssue(
+    before: RepositoryFingerprintResult,
+    after: RepositoryFingerprintResult,
+): string | null {
+    if (before.value && after.value) {
+        return before.value === after.value
+            ? null
+            : "repository changed while Critic evidence was being captured"
+    }
+    return `repository fingerprint is unavailable: ${
+        after.issue ?? before.issue ?? "repository target is unavailable"
+    }`
 }
 
 async function repositoryEvidenceFor(

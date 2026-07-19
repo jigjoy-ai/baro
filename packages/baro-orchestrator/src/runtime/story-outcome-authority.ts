@@ -128,6 +128,29 @@ export class StoryOutcomeAuthority {
         return this.terminalCorrelationForSource(source, storyId) !== null
     }
 
+    /**
+     * Authenticate the exact currently registered nested one-shot process.
+     * Unlike matchesTerminalTurnSource this deliberately excludes the owning
+     * result participant, so a terminal staged by a superseded CLI attempt can
+     * never be finalized for its silent successor.
+     */
+    matchesNestedTerminalTurnSource(
+        source: Participant,
+        correlation: StoryResultAuthorityCorrelation,
+    ): boolean {
+        if (
+            correlation.runId !== this.runId ||
+            !correlation.storyId ||
+            !correlation.leaseId
+        ) return false
+        const key = resultKey(correlation)
+        const active = this.activeTerminalKeys.get(correlation.storyId)
+        return active?.key === key &&
+            active.generation === correlation.generation &&
+            active.leaseId === correlation.leaseId &&
+            this.terminalAuthorities.get(key)?.nested === source
+    }
+
     /** Resolve the exact active lease generation for an authenticated terminal source. */
     terminalCorrelationForSource(
         source: Participant,

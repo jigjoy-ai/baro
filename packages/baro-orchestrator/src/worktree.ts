@@ -57,6 +57,15 @@ export interface WorktreeManagerOptions {
     resolveConflictsWithTheirs?: boolean
 }
 
+/** Reviewed identity which must still describe the exact commit selected for
+ * merge. The capture callback keeps repository fingerprint policy outside the
+ * worktree lifecycle while allowing the recheck to happen inside its git
+ * critical section, after leftover work has been committed. */
+export interface WorktreeCandidateSeal {
+    expectedFingerprint: string
+    capture(target: { cwd: string; baseSha: string | null }): Promise<string>
+}
+
 /**
  * Per-story worktree lifecycle for one run (one instance per orchestrate()
  * call); the run id scopes branch + dir names so concurrent runs never
@@ -397,16 +406,27 @@ export class WorktreeManager {
      * — leaving the run branch clean — only when even that fails, so the
      * caller preserves the branch rather than discarding the work.
      */
-    async mergeBack(storyId: string): Promise<boolean> {
+    async mergeBack(
+        storyId: string,
+        candidateSeal?: WorktreeCandidateSeal,
+    ): Promise<boolean> {
         const path = this.paths.get(storyId)
         if (!path) return false
         const branch = this.branchOf(storyId)
         const release = await this.gate.acquire()
         try {
             await this.autoCommitLeftovers(storyId, path)
+            // A reviewed candidate is sealed only after every accepted byte is
+            // fixed in a commit. Verify a clean, unchanged HEAD on both sides
+            // of fingerprint capture, then merge that SHA rather than the
+            // mutable logical branch name. A later cooperative writer can
+            // dirty or advance the worktree, but cannot alter this merge.
+            const mergeTarget = candidateSeal
+                ? await this.sealedMergeTarget(storyId, path, candidateSeal)
+                : branch
             const msg = `baro: merge story ${storyId}`
             try {
-                await exec("git", ["merge", "--no-ff", "-m", msg, branch], {
+                await exec("git", ["merge", "--no-ff", "-m", msg, mergeTarget], {
                     cwd: this.repoRoot,
                 })
                 return true
@@ -442,7 +462,15 @@ export class WorktreeManager {
                 try {
                     await exec(
                         "git",
-                        ["merge", "--no-ff", "-X", "theirs", "-m", msg, branch],
+                        [
+                            "merge",
+                            "--no-ff",
+                            "-X",
+                            "theirs",
+                            "-m",
+                            msg,
+                            mergeTarget,
+                        ],
                         { cwd: this.repoRoot },
                     )
                     return true
@@ -467,6 +495,87 @@ export class WorktreeManager {
             throw error
         } finally {
             release()
+        }
+    }
+
+    private async sealedMergeTarget(
+        storyId: string,
+        worktreePath: string,
+        seal: WorktreeCandidateSeal,
+    ): Promise<string> {
+        if (!/^[a-f0-9]{64}$/i.test(seal.expectedFingerprint)) {
+            throw new Error(
+                `reviewed candidate seal is missing or invalid for story ${storyId}`,
+            )
+        }
+        const baseSha = this.baseShas.get(storyId)
+        if (!baseSha) {
+            throw new Error(
+                `reviewed candidate creation SHA is unavailable for story ${storyId}`,
+            )
+        }
+
+        const before = await this.worktreeHead(storyId, worktreePath)
+        try {
+            await exec(
+                "git",
+                ["merge-base", "--is-ancestor", baseSha, before],
+                { cwd: worktreePath },
+            )
+        } catch (error) {
+            if (isRepositoryCommandTimeout(error)) throw error
+            throw new Error(
+                `reviewed candidate history no longer descends from its creation SHA for story ${storyId}`,
+            )
+        }
+        await this.assertCleanSealedCandidate(storyId, worktreePath)
+        const actual = await seal.capture({ cwd: worktreePath, baseSha })
+        const after = await this.worktreeHead(storyId, worktreePath)
+        await this.assertCleanSealedCandidate(storyId, worktreePath)
+
+        if (before !== after) {
+            throw new Error(
+                `reviewed candidate HEAD changed during integration seal recheck for story ${storyId}`,
+            )
+        }
+        if (actual !== seal.expectedFingerprint) {
+            throw new Error(
+                `reviewed candidate fingerprint mismatch for story ${storyId}: ` +
+                    `expected ${seal.expectedFingerprint}, got ${actual}`,
+            )
+        }
+        return before
+    }
+
+    private async worktreeHead(
+        storyId: string,
+        worktreePath: string,
+    ): Promise<string> {
+        const { stdout } = await exec("git", ["rev-parse", "HEAD"], {
+            cwd: worktreePath,
+        })
+        const head = stdout.trim()
+        if (!head) {
+            throw new Error(
+                `reviewed candidate HEAD is unavailable for story ${storyId}`,
+            )
+        }
+        return head
+    }
+
+    private async assertCleanSealedCandidate(
+        storyId: string,
+        worktreePath: string,
+    ): Promise<void> {
+        const { stdout } = await exec(
+            "git",
+            ["status", "--porcelain", "--untracked-files=all"],
+            { cwd: worktreePath },
+        )
+        if (stdout.trim()) {
+            throw new Error(
+                `reviewed candidate remained dirty after commit for story ${storyId}`,
+            )
         }
     }
 

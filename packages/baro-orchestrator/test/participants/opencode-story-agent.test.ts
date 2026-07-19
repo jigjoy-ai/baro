@@ -1,13 +1,18 @@
 import assert from "node:assert/strict"
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import type { Participant } from "@mozaik-ai/core"
 
 import { OpenCodeStoryAgent } from "../../src/participants/opencode-story-agent.js"
-import { StoryResult } from "../../src/semantic-events.js"
-import { captureEnv, withTempDir } from "./helpers.js"
+import { PROCESS_TREE_CAPABILITIES } from "../../src/process-tree.js"
+import {
+    AgentTurnCompleted,
+    Critique,
+    StoryResult,
+} from "../../src/semantic-events.js"
+import { captureEnv, source, withTempDir } from "./helpers.js"
 
 describe("OpenCodeStoryAgent", () => {
     it("emits a successful terminal StoryResult from a fake OpenCode backend", async () => {
@@ -60,6 +65,178 @@ printf '%s\n' \
             assert.equal(terminalSources[0]?.agentId, "story-opencode")
         })
     })
+
+    it(
+        "repairs a rejected candidate with a fresh OpenCode process in the same worktree",
+        {
+            skip: !PROCESS_TREE_CAPABILITIES
+                .cooperativeQuiescenceObservation,
+        },
+        async () => {
+            await withTempDir("opencode-story-agent-surgical-", async (dir) => {
+                const binDir = join(dir, "bin")
+                const cwd = join(dir, "cwd")
+                const opencodeBin = join(binDir, "opencode")
+                const promptLog = join(dir, "prompts.jsonl")
+                mkdirSync(binDir)
+                mkdirSync(cwd)
+                writeFileSync(
+                    opencodeBin,
+                    `#!/usr/bin/env node
+const { appendFileSync, existsSync, writeFileSync } = require("node:fs")
+const { join } = require("node:path")
+const marker = join(process.cwd(), "candidate.txt")
+const inheritedCandidate = existsSync(marker)
+if (!inheritedCandidate) writeFileSync(marker, "candidate from first process")
+appendFileSync(${JSON.stringify(promptLog)}, JSON.stringify({
+  prompt: process.argv[process.argv.length - 1],
+  inheritedCandidate
+}) + "\\n")
+console.log(JSON.stringify({ type: "step_start", sessionID: "opencode-session", timestamp: 1 }))
+console.log(JSON.stringify({
+  type: "tool_use",
+  sessionID: "opencode-session",
+  timestamp: 2,
+  part: {
+    type: "tool",
+    tool: "write",
+    callID: "tool-1",
+    state: {
+      status: "completed",
+      input: { file: "candidate.txt" },
+      output: "ok"
+    }
+  }
+}))
+console.log(JSON.stringify({ type: "step_finish", sessionID: "opencode-session", timestamp: 3 }))
+process.exit(0)
+`,
+                )
+                chmodSync(opencodeBin, 0o755)
+
+                const env = captureEnv()
+                const projector = source("projector")
+                const critic = source("critic")
+                const terminalSources: Array<
+                    Participant & { getPhase?(): string }
+                > = []
+                const originalPrompt =
+                    "Implement request cancellation and its race test."
+                const agent = new OpenCodeStoryAgent({
+                    id: "story-opencode-surgical",
+                    prompt: originalPrompt,
+                    cwd,
+                    opencodeBin,
+                    retries: 0,
+                    timeoutSecs: 30,
+                    requiresQualityReview: true,
+                    terminalTurnAuthority: projector,
+                    turnReviewAuthority: critic,
+                    turnReviewTimeoutMs: 2_000,
+                    maxSurgicalRevisions: 1,
+                    handoffInconclusiveToAcceptanceGate: true,
+                })
+                agent.setTerminalSourceRegistrar((participant) => {
+                    terminalSources.push(
+                        participant as Participant & { getPhase?(): string },
+                    )
+                })
+                agent.join(env)
+
+                const outcomePromise = agent.run(env)
+                await waitUntil(
+                    () => terminalSources[0]?.getPhase?.() === "done",
+                )
+                env.deliverSemanticEvent(
+                    projector,
+                    AgentTurnCompleted.create({
+                        agentId: agent.agentId,
+                        terminalId: "terminal-1",
+                        backend: "opencode",
+                        isError: false,
+                        resultText: "initial candidate",
+                        canContinue: false,
+                    }),
+                )
+                env.deliverSemanticEvent(
+                    critic,
+                    Critique.create({
+                        agentId: agent.agentId,
+                        terminalId: "terminal-1",
+                        status: "evaluated",
+                        verdict: "fail",
+                        reasoning:
+                            "AbortSignal is not forwarded to the request.",
+                        violatedCriteria: [
+                            "forward the exact request signal",
+                        ],
+                        turn: 1,
+                        modelUsed: "test-critic",
+                    }),
+                )
+
+                await waitUntil(() => terminalSources.length === 2)
+                assert.equal(env.events.filter(StoryResult.is).length, 0)
+                assert.equal(terminalSources[0]?.getPhase?.(), "done")
+                await waitUntil(
+                    () => terminalSources[1]?.getPhase?.() === "done",
+                )
+                env.deliverSemanticEvent(
+                    projector,
+                    AgentTurnCompleted.create({
+                        agentId: agent.agentId,
+                        terminalId: "terminal-2",
+                        backend: "opencode",
+                        isError: false,
+                        resultText: "repaired candidate",
+                        canContinue: false,
+                    }),
+                )
+                env.deliverSemanticEvent(
+                    critic,
+                    Critique.create({
+                        agentId: agent.agentId,
+                        terminalId: "terminal-2",
+                        status: "evaluated",
+                        verdict: "pass",
+                        reasoning: "Cancellation is correctly forwarded.",
+                        violatedCriteria: [],
+                        turn: 2,
+                        modelUsed: "test-critic",
+                    }),
+                )
+
+                const outcome = await outcomePromise
+                const prompts = readFileSync(promptLog, "utf8")
+                    .trim()
+                    .split("\n")
+                    .map((line) => JSON.parse(line) as {
+                        prompt: string
+                        inheritedCandidate: boolean
+                    })
+                assert.equal(outcome.success, true)
+                assert.equal(outcome.attempts, 2)
+                assert.equal(env.events.filter(StoryResult.is).length, 1)
+                assert.deepEqual(
+                    prompts.map((entry) => entry.inheritedCandidate),
+                    [false, true],
+                )
+                assert.equal(prompts[0]?.prompt, originalPrompt)
+                assert.match(
+                    prompts[1]?.prompt ?? "",
+                    /Original story contract/,
+                )
+                assert.match(
+                    prompts[1]?.prompt ?? "",
+                    /AbortSignal is not forwarded/,
+                )
+                assert.match(
+                    prompts[1]?.prompt ?? "",
+                    new RegExp(originalPrompt),
+                )
+            })
+        },
+    )
 
     it("emits a failed terminal StoryResult after exhausting OpenCode retries", async () => {
         await withTempDir("opencode-story-agent-retry-", async (dir) => {
@@ -190,3 +367,16 @@ process.exit(1)
         })
     })
 })
+
+async function waitUntil(
+    predicate: () => boolean,
+    timeoutMs = 15_000,
+): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (!predicate()) {
+        if (Date.now() >= deadline) {
+            throw new Error("timed out waiting for test condition")
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+}

@@ -336,6 +336,16 @@ export class CodexCliParticipant extends BaseObserver {
         this.processTree?.terminate(signal)
     }
 
+    /** Whether this invocation actually acquired an owned POSIX process group. */
+    hasOwnedProcessGroup(): boolean {
+        return this.processTree?.requiresOwnershipManifestEntry() ?? false
+    }
+
+    /** Whether spawn returned a concrete provider PID on this platform. */
+    hasSpawnedProcess(): boolean {
+        return this.processTree?.hasSpawnedRootProcess() ?? false
+    }
+
     /** True only when the owned POSIX group is authoritatively absent. */
     async abortAndWait(
         signal: NodeJS.Signals = "SIGTERM",

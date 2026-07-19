@@ -394,6 +394,12 @@ export class AcceptanceGate extends SerializedObserver {
                 violatedCriteria: [...critique.violatedCriteria],
                 turn: critique.turn,
                 modelUsed: critique.modelUsed,
+                ...(critique.repositoryFingerprint
+                    ? {
+                          repositoryFingerprint:
+                              critique.repositoryFingerprint,
+                      }
+                    : {}),
             },
         })
         return true

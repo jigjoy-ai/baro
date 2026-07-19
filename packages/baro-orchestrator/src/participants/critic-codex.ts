@@ -123,6 +123,7 @@ export class CriticCodex extends BaseObserver {
         this.turnCount.set(agentId, turn)
 
         const work = (async () => {
+            let repositoryFingerprint: string | null = null
             let evaluation: {
                 status?: "evaluated" | "inconclusive"
                 verdict: "pass" | "fail"
@@ -136,6 +137,7 @@ export class CriticCodex extends BaseObserver {
                     agentId,
                     this.opts.evidence,
                 )
+                repositoryFingerprint = preparation.repositoryFingerprint
                 evaluation = preparation.status === "ready"
                     ? await this.evaluate(preparation.prompt, agentId, turn)
                     : inconclusiveEvidenceVerdict(preparation.issues)
@@ -163,6 +165,7 @@ export class CriticCodex extends BaseObserver {
                 violatedCriteria,
                 turn,
                 modelUsed: this.opts.model ?? "codex-default",
+                ...(repositoryFingerprint ? { repositoryFingerprint } : {}),
             })
             for (const env of this.getEnvironments()) {
                 env.deliverSemanticEvent(this, critiqueEvent)

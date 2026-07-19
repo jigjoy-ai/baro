@@ -32,6 +32,12 @@ export interface StoryExecOpts {
     /** Exact Critic participant whose terminal-turn verdict may resume a
      * continuation-capable worker. */
     turnReviewAuthority?: Participant
+    /** Exact AgentTurnProjector that issues terminal IDs for one-shot CLIs. */
+    terminalTurnAuthority?: Participant
+    /** Collective safety boundary: a spawned provider CLI must earn a
+     * positive process-tree quiescence certificate before its worktree can
+     * be reused or released. Custom executors must preserve this contract. */
+    requireProcessQuiescenceCertification?: boolean
     /** Exact Bridge for correlated collective message delivery. Custom
      * executors must propagate and enforce this capability. */
     targetedMessageAuthority?: Participant
@@ -120,11 +126,13 @@ export class LocalStoryExecutor implements StoryExecutor {
     supportsCooperativeSuspend(route: StoryRoute): boolean {
         // Native OpenAI tools currently cannot prove that an underlying tool
         // promise stopped writing after AbortSignal wins its outer race.
-        // CLI routes additionally require an OS-owned process group; Windows
-        // needs a Job Object before it can advertise the same guarantee.
+        // CLI routes additionally require an OS-owned process group plus
+        // identity-table observation. This is a cooperative no-daemon
+        // contract, not full process containment; Windows needs a Job Object
+        // before it can advertise even this post-root-close boundary.
         return (
             route.backend !== "openai" &&
-            PROCESS_TREE_CAPABILITIES.ownedProcessGroupQuiescenceCertification
+            PROCESS_TREE_CAPABILITIES.cooperativeQuiescenceObservation
         )
     }
 
@@ -135,6 +143,19 @@ export class LocalStoryExecutor implements StoryExecutor {
         env: AgenticEnvironment,
         opts: StoryExecOpts,
     ): StoryExecution {
+        if (
+            opts.requireProcessQuiescenceCertification === true &&
+            route.backend !== "openai" &&
+            !PROCESS_TREE_CAPABILITIES
+                .cooperativeQuiescenceObservation
+        ) {
+            throw new Error(
+                `collective execution for ${route.backend} requires ` +
+                    `cooperative provider quiescence observation; this ` +
+                    `platform needs Job Object or POSIX process-group plus ` +
+                    `identity-table support before that route can start`,
+            )
+        }
         const correlation = {
             runId: req.runId,
             leaseId: req.leaseId,
@@ -149,6 +170,14 @@ export class LocalStoryExecutor implements StoryExecutor {
                       model: route.model,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
+                      requiresQualityReview: req.requiresQualityReview,
+                      terminalTurnAuthority: opts.terminalTurnAuthority,
+                      turnReviewAuthority: opts.turnReviewAuthority,
+                      turnReviewTimeoutMs: opts.turnReviewTimeoutMs,
+                      handoffInconclusiveToAcceptanceGate:
+                          opts.handoffInconclusiveToAcceptanceGate,
+                      requireProcessQuiescenceCertification:
+                          opts.requireProcessQuiescenceCertification,
                       targetedMessageAuthority: opts.targetedMessageAuthority,
                       ...correlation,
                   })
@@ -160,6 +189,14 @@ export class LocalStoryExecutor implements StoryExecutor {
                       model: route.model,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
+                      requiresQualityReview: req.requiresQualityReview,
+                      terminalTurnAuthority: opts.terminalTurnAuthority,
+                      turnReviewAuthority: opts.turnReviewAuthority,
+                      turnReviewTimeoutMs: opts.turnReviewTimeoutMs,
+                      handoffInconclusiveToAcceptanceGate:
+                          opts.handoffInconclusiveToAcceptanceGate,
+                      requireProcessQuiescenceCertification:
+                          opts.requireProcessQuiescenceCertification,
                       targetedMessageAuthority: opts.targetedMessageAuthority,
                       ...correlation,
                   })
@@ -172,6 +209,14 @@ export class LocalStoryExecutor implements StoryExecutor {
                       model: route.model,
                       retries: req.retries,
                       timeoutSecs: req.timeoutSecs,
+                      requiresQualityReview: req.requiresQualityReview,
+                      terminalTurnAuthority: opts.terminalTurnAuthority,
+                      turnReviewAuthority: opts.turnReviewAuthority,
+                      turnReviewTimeoutMs: opts.turnReviewTimeoutMs,
+                      handoffInconclusiveToAcceptanceGate:
+                          opts.handoffInconclusiveToAcceptanceGate,
+                      requireProcessQuiescenceCertification:
+                          opts.requireProcessQuiescenceCertification,
                       targetedMessageAuthority: opts.targetedMessageAuthority,
                       ...correlation,
                   })
@@ -221,6 +266,8 @@ export class LocalStoryExecutor implements StoryExecutor {
                       turnReviewAuthority: opts.turnReviewAuthority,
                       turnReviewTimeoutMs: opts.turnReviewTimeoutMs,
                       targetedMessageAuthority: opts.targetedMessageAuthority,
+                      requireProcessQuiescenceCertification:
+                          opts.requireProcessQuiescenceCertification,
                       ...correlation,
                   })
 

@@ -188,6 +188,84 @@ describe("StoryFactory — StoryExecutor seam", () => {
         }
     })
 
+    it("LocalStoryExecutor wires exact surgical-review authorities into every one-shot backend", () => {
+        const executor = new LocalStoryExecutor()
+        const env = {} as AgenticEnvironment
+        const projector = source("terminal-projector")
+        const critic = source("critic")
+
+        for (const backend of ["codex", "opencode", "pi"] as const) {
+            for (const timeoutMs of [0, 1_234]) {
+                let inspected = false
+                assert.throws(
+                    () =>
+                        executor.start(
+                        {
+                            storyId: `S-${backend}-${timeoutMs}`,
+                            prompt: "do not run",
+                            model: "fake-model",
+                            retries: 0,
+                            timeoutSecs: 1,
+                            requiresQualityReview: true,
+                        },
+                        { backend, model: "fake-model" },
+                        "/work",
+                        env,
+                        {
+                            terminalTurnAuthority: projector,
+                            turnReviewAuthority: critic,
+                            turnReviewTimeoutMs: timeoutMs,
+                            handoffInconclusiveToAcceptanceGate: true,
+                            requireProcessQuiescenceCertification: true,
+                            registerResultAuthority: (participant) => {
+                                const agent = participant as unknown as {
+                                    spec: {
+                                        requiresQualityReview: boolean
+                                        terminalTurnAuthority: Participant
+                                        turnReviewAuthority: Participant
+                                        turnReviewTimeoutMs: number
+                                        handoffInconclusiveToAcceptanceGate: boolean
+                                        requireProcessQuiescenceCertification: boolean
+                                    }
+                                }
+                                assert.equal(
+                                    agent.spec.requiresQualityReview,
+                                    true,
+                                )
+                                assert.equal(
+                                    agent.spec.terminalTurnAuthority,
+                                    projector,
+                                )
+                                assert.equal(
+                                    agent.spec.turnReviewAuthority,
+                                    critic,
+                                )
+                                assert.equal(
+                                    agent.spec.turnReviewTimeoutMs,
+                                    timeoutMs,
+                                )
+                                assert.equal(
+                                    agent.spec
+                                        .handoffInconclusiveToAcceptanceGate,
+                                    true,
+                                )
+                                assert.equal(
+                                    agent.spec
+                                        .requireProcessQuiescenceCertification,
+                                    true,
+                                )
+                                inspected = true
+                                throw new Error("stop before join")
+                            },
+                        },
+                        ),
+                    /stop before join/,
+                )
+                assert.equal(inspected, true, `${backend}:${timeoutMs}`)
+            }
+        }
+    })
+
     it("LocalStoryExecutor forwards correlated runtime replan context to OpenAI", () => {
         const executor = new LocalStoryExecutor()
         const env = {} as AgenticEnvironment

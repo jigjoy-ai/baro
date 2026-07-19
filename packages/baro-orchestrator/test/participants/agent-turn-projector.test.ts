@@ -8,6 +8,7 @@ import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority
 import {
     AgentTurnCompleted,
     CodexTurnEvent,
+    OneShotAttemptFinalized,
     OpenCodeSystem,
     PiTurnEvent,
     StoryQualityReverificationRequested,
@@ -317,6 +318,201 @@ describe("AgentTurnProjector", () => {
         const projected = env.events.filter(AgentTurnCompleted.is)
         assert.equal(projected.length, 1)
         assert.equal(projected[0]?.data.backend, "codex")
+    })
+
+    it("publishes a collective one-shot candidate only behind the exact quiescence barrier", async () => {
+        const runId = "run-quiescence-barrier"
+        const broker = source("broker")
+        const worker = source("S1")
+        const nativeCli = source("S1")
+        const attacker = source("S1")
+        const authority = new StoryOutcomeAuthority(runId)
+        const correlation = {
+            runId,
+            storyId: "S1",
+            leaseId: "lease-1",
+            generation: 1,
+        }
+        authority.registerResultAuthority(correlation, worker)
+        authority.registerTerminalAuthority(correlation, nativeCli)
+        const projector = new AgentTurnProjector({
+            outcomeAuthority: authority,
+            requireQuiescenceBarrier: true,
+        })
+        projector.setLeaseAuthority(broker)
+        const env = joinWithCapture(projector)
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseGranted.create({
+                runId,
+                offerId: "offer-1",
+                leaseId: correlation.leaseId,
+                workerId: "worker",
+                generation: correlation.generation,
+                request: {
+                    storyId: correlation.storyId,
+                    prompt: "work",
+                    retries: 0,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+
+        await projector.onExternalModelMessage(
+            nativeCli,
+            ModelMessageItem.rehydrate({ text: "stable candidate bytes" }),
+        )
+        await projector.onExternalEvent(
+            nativeCli,
+            CodexTurnEvent.create({
+                agentId: correlation.storyId,
+                phase: "completed",
+                raw: {},
+            }),
+        )
+        assert.equal(env.events.filter(AgentTurnCompleted.is).length, 0)
+
+        const finalized = OneShotAttemptFinalized.create({
+            ...correlation,
+            attempt: 1,
+            disposition: "publish",
+            ownedProcessGroup: true,
+            quiescenceAssurance: "cooperative-observed",
+        })
+        env.deliverSemanticEvent(attacker, finalized)
+        env.deliverSemanticEvent(
+            worker,
+            OneShotAttemptFinalized.create({
+                ...finalized.data,
+                generation: 0,
+            }),
+        )
+        assert.equal(env.events.filter(AgentTurnCompleted.is).length, 0)
+
+        env.deliverSemanticEvent(worker, finalized)
+        env.deliverSemanticEvent(worker, finalized)
+        const projected = env.events.filter(AgentTurnCompleted.is)
+        assert.equal(projected.length, 1)
+        assert.equal(projected[0]?.data.resultText, "stable candidate bytes")
+        assert.equal(
+            projected[0]?.data.terminalId,
+            "quiesced:run-quiescence-barrier:S1:lease-1:1:1",
+        )
+
+        const retryCli = source("S1")
+        authority.registerTerminalAuthority(correlation, retryCli)
+        await projector.onExternalModelMessage(
+            retryCli,
+            ModelMessageItem.rehydrate({ text: "second candidate bytes" }),
+        )
+        await projector.onExternalEvent(
+            retryCli,
+            CodexTurnEvent.create({
+                agentId: correlation.storyId,
+                phase: "completed",
+                raw: {},
+            }),
+        )
+        env.deliverSemanticEvent(worker, finalized)
+        assert.equal(env.events.filter(AgentTurnCompleted.is).length, 1)
+
+        env.deliverSemanticEvent(
+            worker,
+            OneShotAttemptFinalized.create({
+                ...finalized.data,
+                attempt: 2,
+            }),
+        )
+        const retried = env.events.filter(AgentTurnCompleted.is)
+        assert.equal(retried.length, 2)
+        assert.equal(retried[1]?.data.resultText, "second candidate bytes")
+        assert.equal(
+            retried[1]?.data.terminalId,
+            "quiesced:run-quiescence-barrier:S1:lease-1:1:2",
+        )
+    })
+
+    it("does not publish a superseded CLI terminal for a silent retry", async () => {
+        const runId = "run-superseded-terminal"
+        const broker = source("broker")
+        const worker = source("S1")
+        const firstCli = source("S1")
+        const silentRetryCli = source("S1")
+        const authority = new StoryOutcomeAuthority(runId)
+        const correlation = {
+            runId,
+            storyId: "S1",
+            leaseId: "lease-1",
+            generation: 1,
+        }
+        authority.registerResultAuthority(correlation, worker)
+        authority.registerTerminalAuthority(correlation, firstCli)
+        const projector = new AgentTurnProjector({
+            outcomeAuthority: authority,
+            requireQuiescenceBarrier: true,
+        })
+        projector.setLeaseAuthority(broker)
+        const env = joinWithCapture(projector)
+        env.deliverSemanticEvent(
+            broker,
+            WorkLeaseGranted.create({
+                runId,
+                offerId: "offer-1",
+                leaseId: correlation.leaseId,
+                workerId: "worker",
+                generation: correlation.generation,
+                request: {
+                    storyId: correlation.storyId,
+                    prompt: "work",
+                    retries: 1,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+
+        // Attempt one can settle without a projected terminal (for example an
+        // abort won before the provider's buffered terminal reached the bus).
+        env.deliverSemanticEvent(
+            worker,
+            OneShotAttemptFinalized.create({
+                ...correlation,
+                attempt: 1,
+                disposition: "discard",
+                ownedProcessGroup: true,
+                quiescenceAssurance: "cooperative-observed",
+            }),
+        )
+
+        // Its old CLI then races in a buffered terminal while it is still the
+        // registered source, so the projector stages it as attempt two.
+        await projector.onExternalModelMessage(
+            firstCli,
+            ModelMessageItem.rehydrate({ text: "late first-attempt text" }),
+        )
+        await projector.onExternalEvent(
+            firstCli,
+            CodexTurnEvent.create({
+                agentId: correlation.storyId,
+                phase: "completed",
+                raw: {},
+            }),
+        )
+
+        // Registration is the attempt boundary even if the successor emits no
+        // terminal event of its own.
+        authority.registerTerminalAuthority(correlation, silentRetryCli)
+        env.deliverSemanticEvent(
+            worker,
+            OneShotAttemptFinalized.create({
+                ...correlation,
+                attempt: 2,
+                disposition: "publish",
+                ownedProcessGroup: true,
+                quiescenceAssurance: "cooperative-observed",
+            }),
+        )
+
+        assert.equal(env.events.filter(AgentTurnCompleted.is).length, 0)
     })
 
     it("does not mix output across registered CLI retry sources", async () => {

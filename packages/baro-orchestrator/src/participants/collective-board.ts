@@ -77,10 +77,12 @@ import {
     type GoalInvariantRemediationProposedData,
     type GoalLedgerProjectionUpdatedData,
     type RuntimeReplanRejectionCode,
+    type RuntimeReplanMutation,
     type RuntimeReplanProposedData,
     type RunVerificationCompletedData,
     type RunVerificationEvidence,
     type StoryFailureData,
+    type StoryQualityCompletedData,
     type StoryResultData,
     type WorkDiscoveredData,
     type WorkBlockedData,
@@ -109,6 +111,11 @@ import {
     type SerializedObserverFailure,
 } from "../runtime/serialized-observer.js"
 import { runtimeProposalFingerprint } from "../runtime/runtime-replan-fingerprint.js"
+import { reservePolicyReplanBatchIds } from "../runtime/policy-replan-reservation.js"
+import {
+    validateRuntimeReplanMutation,
+    type RuntimeReplanValidationResult,
+} from "../runtime-replan.js"
 
 export interface CollectiveBoardOptions {
     runId: string
@@ -1373,6 +1380,21 @@ export class CollectiveBoard extends SerializedObserver {
                 result.durationSecs,
         )
 
+        if (
+            result.failure?.kind === "infrastructure" &&
+            result.failure.code === "process_quiescence_uncertified"
+        ) {
+            // The worker could not prove that every process which owned this
+            // isolated worktree is gone. Any ordinary cleanup, retry, or
+            // structural recovery could therefore race a surviving writer.
+            this.terminate(
+                false,
+                `${result.storyId} process-tree quiescence was not certified; ` +
+                    `stopped without workspace cleanup`,
+            )
+            return
+        }
+
         if (result.success) {
             if (this.opts.expectQualityDecisions) {
                 this.pendingQuality.set(result.storyId, { ...result })
@@ -1423,35 +1445,37 @@ export class CollectiveBoard extends SerializedObserver {
         )
     }
 
-    private requestIntegration(result: StoryResultData): void {
-            const lease = this.leases.get(result.storyId)
-            if (!lease) {
-                this.failStory(
-                    result.storyId,
-                    "successful execution had no active lease",
-                    true,
-                    "execution",
-                )
-                return
-            }
-            this.emit(
-                StoryIntegrationRequested.create({
-                    runId: this.opts.runId,
-                    leaseId: lease.leaseId,
-                    storyId: result.storyId,
-                    attempts: result.attempts,
-                    durationSecs: result.durationSecs,
-                }),
+    private requestIntegration(
+        result: StoryResultData,
+        quality?: StoryQualityCompletedData,
+    ): void {
+        const lease = this.leases.get(result.storyId)
+        if (!lease) {
+            this.failStory(
+                result.storyId,
+                "successful execution had no active lease",
+                true,
+                "execution",
             )
+            return
+        }
+        const candidateFingerprintRequired =
+            quality !== undefined && quality.targetTurn !== null
+        const candidateFingerprint = quality?.critique?.repositoryFingerprint
+        this.emit(
+            StoryIntegrationRequested.create({
+                runId: this.opts.runId,
+                leaseId: lease.leaseId,
+                storyId: result.storyId,
+                attempts: result.attempts,
+                durationSecs: result.durationSecs,
+                candidateFingerprintRequired,
+                ...(candidateFingerprint ? { candidateFingerprint } : {}),
+            }),
+        )
     }
 
-    private onStoryQuality(data: {
-        storyId: string
-        leaseId: string
-        generation: number
-        status: "passed" | "failed" | "inconclusive"
-        reason: string
-    }): void {
+    private onStoryQuality(data: StoryQualityCompletedData): void {
         if (this.phase !== "running" || !this.wave?.pending.has(data.storyId)) return
         const result = this.pendingQuality.get(data.storyId)
         if (
@@ -1462,7 +1486,7 @@ export class CollectiveBoard extends SerializedObserver {
         ) return
         this.pendingQuality.delete(data.storyId)
         if (data.status === "passed") {
-            this.requestIntegration(result)
+            this.requestIntegration(result, data)
             return
         }
         if (data.status === "inconclusive") {
@@ -1701,57 +1725,156 @@ export class CollectiveBoard extends SerializedObserver {
             return null
         }
 
-        // A safe wave boundary is one logical healing cycle. Check its budget
-        // before draining anything, then finish the whole compatible sequence
-        // against the latest committed graph. Checking between sibling
-        // proposals both amplifies one shared failure into N healing actions
-        // and loses the unvisited tail because the queue was already drained.
-        const hasActionableReplan = this.pendingReplans.some(
-            (replan) =>
-                replan.removedStoryIds.length === 0 ||
-                replan.addedStories.length > 0,
-        )
-        if (hasActionableReplan) {
-            const halt = this.healingHaltReason()
-            if (halt) return halt
+        // Every sibling proposal was authored against this common boundary.
+        // Validate that raw intent before any sibling can make an unknown id
+        // accidentally valid, then reserve aliases only for valid mutations.
+        const boundaryPrd = this.prd
+        const immutableStoryIds = boundaryPrd.userStories
+            .filter((story) => story.passes)
+            .map((story) => story.id)
+        const pending = this.pendingReplans.splice(0)
+        const prepared = pending.map((replan) => {
+            const mutation = policyReplanMutation(replan)
+            return {
+                replan,
+                mutation,
+                validation: validateRuntimeReplanMutation(
+                    boundaryPrd,
+                    mutation,
+                    {
+                        immutableStoryIds,
+                        maxAddedStories: Number.MAX_SAFE_INTEGER,
+                    },
+                ),
+            }
+        })
+        const invalid = prepared.filter((entry) => !entry.validation.ok)
+        for (const entry of invalid) {
+            const proposal = this.policyReplanProposal(
+                entry.replan,
+                entry.mutation,
+                currentLevel,
+            )
+            const outcome = this.runtimeReplans.decide(proposal, {
+                active: this.phase === "running",
+                prd: boundaryPrd,
+                immutableStoryIds,
+                activeLease: undefined,
+                adaptationsSinceProgress: this.runtimeAdaptationsSinceProgress,
+                requireActiveLease: false,
+                storyAccounting: "policy",
+                maxAddedStories: Number.MAX_SAFE_INTEGER,
+            })
+            this.emitRejectedPolicyReplan(entry.replan, outcome, currentLevel)
         }
 
-        const replans = this.pendingReplans.splice(0)
-        let appliedReplans = 0
-        for (const replan of replans) {
-            if (replan.removedStoryIds.length > 0 && replan.addedStories.length === 0) {
-                this.emit(
-                    ConductorState.create({
-                        phase: "running_level",
-                        detail: `collective deferred destructive drop from ${replan.source}: ${replan.reason}`,
-                        currentLevel,
+        const valid = prepared.filter(
+            (entry): entry is typeof entry & {
+                validation: Extract<RuntimeReplanValidationResult, { ok: true }>
+            } => entry.validation.ok,
+        )
+        const siblingWriteConflicts = policySiblingWriteConflicts(
+            valid.map((entry) => entry.mutation),
+        )
+        const compatible = valid.filter((entry, index) => {
+            const targets = siblingWriteConflicts.get(index)
+            if (!targets) return true
+
+            const proposal = this.policyReplanProposal(
+                entry.replan,
+                entry.mutation,
+                currentLevel,
+            )
+            const reason =
+                `policy replan has an order-dependent sibling conflict on ` +
+                `existing story id(s): ${JSON.stringify(targets)}`
+            this.emitRejectedPolicyReplan(
+                entry.replan,
+                {
+                    event: RuntimeReplanRejected.create({
+                        runId: proposal.runId,
+                        proposalId: proposal.proposalId,
+                        sourceStoryId: proposal.sourceStoryId,
+                        leaseId: proposal.leaseId,
+                        generation: proposal.generation,
+                        baseGraphVersion: proposal.baseGraphVersion,
+                        currentGraphVersion: this.runtimeReplans.graphVersion,
+                        code: "invalid_proposal",
+                        reason,
                     }),
-                )
-                continue
-            }
-            const recovery = replan.recovery
-            const proposal: RuntimeReplanProposedData = {
-                runId: this.opts.runId,
-                proposalId:
-                    `${this.opts.runId}:policy-replan:` +
-                    randomUUID(),
-                sourceStoryId:
-                    recovery?.storyId ??
-                    replan.removedStoryIds[0] ??
-                    replan.addedStories[0]?.id ??
-                    `policy:${replan.source}`,
-                leaseId: recovery?.leaseId ?? `${this.opts.runId}:policy`,
-                generation: recovery?.generation ?? currentLevel,
-                // Policy replans are serialized at the safe wave boundary and
-                // intentionally revalidate against the latest durable graph.
-                baseGraphVersion: this.runtimeReplans.graphVersion,
-                reason: replan.reason,
-                mutation: {
-                    addedStories: replan.addedStories,
-                    removedStoryIds: replan.removedStoryIds,
-                    modifiedDeps: replan.modifiedDeps,
                 },
+                currentLevel,
+            )
+            return false
+        })
+        const reservedCandidates = reservePolicyReplanBatchIds(
+            boundaryPrd.userStories.map((story) => story.id),
+            compatible.map((entry) => entry.replan),
+        ).map((reserved, index) => ({
+            reserved,
+            original: compatible[index]!.replan,
+        }))
+        const siblingCycleConflicts = policySiblingDependencyCycleConflicts(
+            boundaryPrd,
+            reservedCandidates.map(({ reserved }) =>
+                policyReplanMutation(reserved.replan),
+            ),
+        )
+        const cycleCompatible = reservedCandidates.filter(
+            ({ reserved }, index) => {
+                const targets = siblingCycleConflicts.get(index)
+                if (!targets) return true
+
+                const proposal = this.policyReplanProposal(
+                    reserved.replan,
+                    policyReplanMutation(reserved.replan),
+                    currentLevel,
+                )
+                const reason =
+                    `policy replan has an order-dependent sibling ` +
+                    `dependency cycle involving story id(s): ` +
+                    `${JSON.stringify(targets)}`
+                this.emitRejectedPolicyReplan(
+                    reserved.replan,
+                    {
+                        event: RuntimeReplanRejected.create({
+                            runId: proposal.runId,
+                            proposalId: proposal.proposalId,
+                            sourceStoryId: proposal.sourceStoryId,
+                            leaseId: proposal.leaseId,
+                            generation: proposal.generation,
+                            baseGraphVersion: proposal.baseGraphVersion,
+                            currentGraphVersion:
+                                this.runtimeReplans.graphVersion,
+                            code: "invalid_proposal",
+                            reason,
+                        }),
+                    },
+                    currentLevel,
+                )
+                return false
+            },
+        )
+        if (cycleCompatible.length > 0) {
+            // A safe wave boundary is one logical healing cycle. Invalid
+            // proposals above never consume or exhaust semantic healing.
+            const halt = this.healingHaltReason()
+            if (halt) {
+                this.pendingReplans.unshift(
+                    ...cycleCompatible.map(({ original }) => original),
+                )
+                return halt
             }
+        }
+
+        let appliedReplans = 0
+        for (const { reserved } of cycleCompatible) {
+            const replan = reserved.replan
+            const proposal = this.policyReplanProposal(
+                replan,
+                policyReplanMutation(replan),
+                currentLevel,
+            )
             const outcome = this.runtimeReplans.decide(proposal, {
                 active: this.phase === "running",
                 prd: this.prd,
@@ -1765,17 +1888,10 @@ export class CollectiveBoard extends SerializedObserver {
                 maxAddedStories: Number.MAX_SAFE_INTEGER,
             })
             if (!outcome.applied || !RuntimeReplanApplied.is(outcome.event)) {
-                const detail = RuntimeReplanRejected.is(outcome.event)
-                    ? outcome.event.data.reason
-                    : "policy mutation was not applied"
-                this.emit(
-                    ConductorState.create({
-                        phase: "running_level",
-                        detail:
-                            `collective rejected replan from ${replan.source}: ` +
-                            detail,
-                        currentLevel,
-                    }),
+                this.emitRejectedPolicyReplan(
+                    replan,
+                    outcome,
+                    currentLevel,
                 )
                 continue
             }
@@ -1810,6 +1926,54 @@ export class CollectiveBoard extends SerializedObserver {
             this.noteHealingAction(currentLevel)
         }
         return null
+    }
+
+    private policyReplanProposal(
+        replan: ReplanData,
+        mutation: RuntimeReplanMutation,
+        currentLevel: number,
+    ): RuntimeReplanProposedData {
+        const recovery = policyRecovery(replan)
+        return {
+            runId: this.opts.runId,
+            proposalId:
+                `${this.opts.runId}:policy-replan:` +
+                randomUUID(),
+            sourceStoryId:
+                recovery.storyId ??
+                firstPolicyTarget(mutation) ??
+                `policy:${policyReplanSource(replan)}`,
+            leaseId: recovery.leaseId ?? `${this.opts.runId}:policy`,
+            generation: recovery.generation ?? currentLevel,
+            // Policy replans are serialized at the safe wave boundary and
+            // intentionally revalidate against the latest durable graph.
+            baseGraphVersion: this.runtimeReplans.graphVersion,
+            reason: policyReplanReason(replan),
+            mutation,
+        }
+    }
+
+    private emitRejectedPolicyReplan(
+        replan: ReplanData,
+        outcome: RuntimeReplanDecisionOutcome,
+        currentLevel: number,
+    ): void {
+        // A policy proposal is still only a proposal. Publish its
+        // authoritative rejection just like every other graph lane so replay,
+        // telemetry, and operators see the same decision.
+        this.emitGraphDecision(outcome.event)
+        const detail = RuntimeReplanRejected.is(outcome.event)
+            ? outcome.event.data.reason
+            : "policy mutation was not applied"
+        this.emit(
+            ConductorState.create({
+                phase: "running_level",
+                detail:
+                    `collective rejected replan from ` +
+                    `${policyReplanSource(replan)}: ${detail}`,
+                currentLevel,
+            }),
+        )
     }
 
     private onRuntimeReplanProposed(
@@ -3599,6 +3763,279 @@ export class CollectiveBoard extends SerializedObserver {
             env.deliverSemanticEvent(this, event)
         }
     }
+}
+
+/**
+ * Concurrent Surgeon proposals share one boundary snapshot. They must not both
+ * write the same existing node, nor may one remove an existing node which a
+ * sibling's added story or dependency rewrite still reads. Applying either
+ * overlap in arrival order would make a different mutation succeed. All
+ * participants in a conflict are rejected so bus order cannot choose the
+ * surviving recovery intent.
+ */
+function policySiblingWriteConflicts(
+    mutations: readonly RuntimeReplanMutation[],
+): ReadonlyMap<number, readonly string[]> {
+    const accesses = mutations.map((mutation) => ({
+        writes: new Set([
+            ...mutation.removedStoryIds,
+            ...Object.keys(mutation.modifiedDeps),
+        ]),
+        removals: new Set(mutation.removedStoryIds),
+        dependencyReads: new Set([
+            ...mutation.addedStories.flatMap((story) => story.dependsOn),
+            ...Object.values(mutation.modifiedDeps).flat(),
+        ]),
+    }))
+
+    const conflicts = new Map<number, Set<string>>()
+    for (let left = 0; left < accesses.length; left += 1) {
+        for (let right = left + 1; right < accesses.length; right += 1) {
+            const leftAccess = accesses[left]!
+            const rightAccess = accesses[right]!
+            const targets = new Set([
+                ...setIntersection(leftAccess.writes, rightAccess.writes),
+                ...setIntersection(
+                    leftAccess.removals,
+                    rightAccess.dependencyReads,
+                ),
+                ...setIntersection(
+                    rightAccess.removals,
+                    leftAccess.dependencyReads,
+                ),
+            ])
+            if (targets.size === 0) continue
+            const leftTargets = conflicts.get(left) ?? new Set<string>()
+            const rightTargets = conflicts.get(right) ?? new Set<string>()
+            for (const storyId of targets) {
+                leftTargets.add(storyId)
+                rightTargets.add(storyId)
+            }
+            conflicts.set(left, leftTargets)
+            conflicts.set(right, rightTargets)
+        }
+    }
+    return new Map(
+        [...conflicts].map(([index, targets]) => [
+            index,
+            [...targets].sort(),
+        ]),
+    )
+}
+
+/**
+ * Individually valid sibling mutations can still compose into a cycle. For
+ * example, two proposals authored against independent A/B may respectively
+ * set A -> B and B -> A. Build the one logical boundary candidate, find exact
+ * cyclic strongly-connected components, and reject only proposals which
+ * introduced an edge inside one of those components. The boundary graph was
+ * already acyclic, so every such cycle necessarily contains proposal work.
+ *
+ * Callers pass mutations after story-id reservation. Proposal-local added ids
+ * are consequently injective and cannot be conflated while composing them.
+ */
+function policySiblingDependencyCycleConflicts(
+    boundaryPrd: PrdFile,
+    mutations: readonly RuntimeReplanMutation[],
+): ReadonlyMap<number, readonly string[]> {
+    const removed = new Set(
+        mutations.flatMap((mutation) => mutation.removedStoryIds),
+    )
+    const dependencies = new Map<string, readonly string[]>()
+    for (const story of boundaryPrd.userStories) {
+        if (!removed.has(story.id)) {
+            dependencies.set(story.id, story.dependsOn)
+        }
+    }
+    for (const mutation of mutations) {
+        for (const [storyId, dependsOn] of Object.entries(
+            mutation.modifiedDeps,
+        )) {
+            dependencies.set(storyId, dependsOn)
+        }
+        for (const story of mutation.addedStories) {
+            dependencies.set(story.id, story.dependsOn)
+        }
+    }
+
+    const cyclicComponentByStory = cyclicStronglyConnectedComponents(
+        dependencies,
+    )
+    if (cyclicComponentByStory.size === 0) return new Map()
+
+    const conflicts = new Map<number, Set<string>>()
+    for (const [proposalIndex, mutation] of mutations.entries()) {
+        const introducedEdges = [
+            ...Object.entries(mutation.modifiedDeps),
+            ...mutation.addedStories.map(
+                (story) => [story.id, story.dependsOn] as const,
+            ),
+        ] as const
+        for (const [storyId, dependsOn] of introducedEdges) {
+            const component = cyclicComponentByStory.get(storyId)
+            if (!component) continue
+            if (!dependsOn.some((dependency) => component.has(dependency))) {
+                continue
+            }
+            const targets = conflicts.get(proposalIndex) ?? new Set<string>()
+            for (const member of component) targets.add(member)
+            conflicts.set(proposalIndex, targets)
+        }
+    }
+
+    return new Map(
+        [...conflicts].map(([index, targets]) => [
+            index,
+            [...targets].sort(),
+        ]),
+    )
+}
+
+/** Map each node in an actual cyclic SCC to that exact component. */
+function cyclicStronglyConnectedComponents(
+    dependencies: ReadonlyMap<string, readonly string[]>,
+): ReadonlyMap<string, ReadonlySet<string>> {
+    let nextIndex = 0
+    const indices = new Map<string, number>()
+    const lowLinks = new Map<string, number>()
+    const stack: string[] = []
+    const onStack = new Set<string>()
+    const cyclic = new Map<string, ReadonlySet<string>>()
+
+    const visit = (storyId: string): void => {
+        const index = nextIndex++
+        indices.set(storyId, index)
+        lowLinks.set(storyId, index)
+        stack.push(storyId)
+        onStack.add(storyId)
+
+        for (const dependency of dependencies.get(storyId) ?? []) {
+            if (!dependencies.has(dependency)) continue
+            if (!indices.has(dependency)) {
+                visit(dependency)
+                lowLinks.set(
+                    storyId,
+                    Math.min(
+                        lowLinks.get(storyId)!,
+                        lowLinks.get(dependency)!,
+                    ),
+                )
+            } else if (onStack.has(dependency)) {
+                lowLinks.set(
+                    storyId,
+                    Math.min(
+                        lowLinks.get(storyId)!,
+                        indices.get(dependency)!,
+                    ),
+                )
+            }
+        }
+
+        if (lowLinks.get(storyId) !== indices.get(storyId)) return
+        const members = new Set<string>()
+        let member: string
+        do {
+            member = stack.pop()!
+            onStack.delete(member)
+            members.add(member)
+        } while (member !== storyId)
+
+        const isCycle =
+            members.size > 1 ||
+            (dependencies.get(storyId) ?? []).includes(storyId)
+        if (!isCycle) return
+        for (const cyclicStoryId of members) {
+            cyclic.set(cyclicStoryId, members)
+        }
+    }
+
+    for (const storyId of dependencies.keys()) {
+        if (!indices.has(storyId)) visit(storyId)
+    }
+    return cyclic
+}
+
+function setIntersection(
+    left: ReadonlySet<string>,
+    right: ReadonlySet<string>,
+): string[] {
+    return [...left].filter((value) => right.has(value))
+}
+
+function policyReplanMutation(replan: ReplanData): RuntimeReplanMutation {
+    const record = replan as unknown as Record<string, unknown>
+    // Keep malformed provider payloads intact: the total runtime validator
+    // turns them into structured rejections before reservation touches them.
+    return {
+        addedStories: record.addedStories,
+        removedStoryIds: record.removedStoryIds,
+        modifiedDeps: record.modifiedDeps,
+    } as RuntimeReplanMutation
+}
+
+function policyRecovery(replan: ReplanData): {
+    storyId?: string
+    leaseId?: string
+    generation?: number
+} {
+    const candidate = (replan as unknown as Record<string, unknown>).recovery
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        return {}
+    }
+    const record = candidate as Record<string, unknown>
+    const storyId = nonEmptyString(record.storyId)
+    const leaseId = nonEmptyString(record.leaseId)
+    const generation = Number.isInteger(record.generation) &&
+        (record.generation as number) >= 0
+        ? record.generation as number
+        : undefined
+    return {
+        ...(storyId ? { storyId } : {}),
+        ...(leaseId ? { leaseId } : {}),
+        ...(generation !== undefined ? { generation } : {}),
+    }
+}
+
+function firstPolicyTarget(mutation: RuntimeReplanMutation): string | null {
+    const record = mutation as unknown as Record<string, unknown>
+    if (Array.isArray(record.removedStoryIds)) {
+        const removed = record.removedStoryIds.find(nonEmptyString)
+        if (typeof removed === "string") return removed
+    }
+    if (Array.isArray(record.addedStories)) {
+        for (const candidate of record.addedStories) {
+            if (!candidate || typeof candidate !== "object") continue
+            const id = nonEmptyString((candidate as Record<string, unknown>).id)
+            if (id) return id
+        }
+    }
+    if (
+        record.modifiedDeps &&
+        typeof record.modifiedDeps === "object" &&
+        !Array.isArray(record.modifiedDeps)
+    ) {
+        const modified = Object.keys(record.modifiedDeps)[0]
+        if (modified) return modified
+    }
+    return null
+}
+
+function policyReplanSource(replan: ReplanData): string {
+    return nonEmptyString(
+        (replan as unknown as Record<string, unknown>).source,
+    ) ?? "unknown"
+}
+
+function policyReplanReason(replan: ReplanData): string {
+    return nonEmptyString(
+        (replan as unknown as Record<string, unknown>).reason,
+    ) ?? `invalid policy replan from ${policyReplanSource(replan)}`
+}
+
+function nonEmptyString(value: unknown): string | null {
+    return typeof value === "string" && value.trim() === value && value
+        ? value
+        : null
 }
 
 function addUnique(values: string[], value: string): void {

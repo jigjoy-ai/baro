@@ -72,6 +72,9 @@ export interface StorySpec {
     /** Collective-only execution handoff. An inconclusive review closes the
      * worker, while AcceptanceGate keeps the candidate pending and rechecks it. */
     handoffInconclusiveToAcceptanceGate?: boolean
+    /** Require a positive process-tree quiescence certificate before a
+     * spawned CLI attempt may succeed, retry, or release its worktree. */
+    requireProcessQuiescenceCertification?: boolean
 }
 
 export interface StoryOutcome {
@@ -100,6 +103,7 @@ export class StoryAgent extends BaseObserver {
             | "requiresQualityReview"
             | "turnReviewTimeoutMs"
             | "handoffInconclusiveToAcceptanceGate"
+            | "requireProcessQuiescenceCertification"
         >
     > &
         StorySpec
@@ -118,6 +122,10 @@ export class StoryAgent extends BaseObserver {
     private readonly retryDelayController = new AbortController()
     private suspension: StorySuspension | null = null
     private processQuiescence: Promise<boolean> | null = null
+    /** Spawn provenance is deliberately separate from POSIX group ownership:
+     * unsupported platforms can return a real PID without a certifiable group. */
+    private currentProcessSpawned = false
+    private currentProcessQuiesced = false
     private resolveDone!: (outcome: StoryOutcome) => void
     public readonly done: Promise<StoryOutcome>
 
@@ -139,6 +147,8 @@ export class StoryAgent extends BaseObserver {
             requiresQualityReview: false,
             handoffInconclusiveToAcceptanceGate: false,
             ...spec,
+            requireProcessQuiescenceCertification:
+                spec.requireProcessQuiescenceCertification ?? false,
             // `StoryFactory` legitimately forwards an optional timeout. Keep
             // an omitted/explicit-undefined value from erasing the default;
             // nullish coalescing deliberately preserves an explicit 0ms test
@@ -332,7 +342,21 @@ export class StoryAgent extends BaseObserver {
                 lastError = result.error
                 lastFailure = result.failure
 
+                if (this.hasUncertifiedRequiredProcess()) {
+                    lastError = this.quiescenceFailureMessage()
+                    lastFailure = quiescenceFailure()
+                    this.suspension = null
+                    break
+                }
                 if (this.stopRequested) break
+                if (hardTimedOut) {
+                    lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
+                    lastFailure = {
+                        kind: "infrastructure",
+                        code: "command_timeout",
+                    }
+                    break
+                }
                 if (result.success) {
                     const durationSecs = Math.round(
                         (Date.now() - (this.startedAt ?? Date.now())) / 1000,
@@ -356,14 +380,6 @@ export class StoryAgent extends BaseObserver {
                 // included here so another route can bid immediately.
                 if (boardOwnsRecovery(result.failure)) break
 
-                if (hardTimedOut) {
-                    lastError = `hard timeout after ${this.spec.hardTimeoutSecs}s`
-                    lastFailure = {
-                        kind: "infrastructure",
-                        code: "command_timeout",
-                    }
-                    break
-                }
             }
         } finally {
             if (hardTimer !== null) clearTimeout(hardTimer)
@@ -371,10 +387,17 @@ export class StoryAgent extends BaseObserver {
 
         await this.processQuiescence
 
-        if (this.suspension) {
+        const quiescenceUncertified = this.hasUncertifiedRequiredProcess()
+        if (quiescenceUncertified) {
+            lastError = this.quiescenceFailureMessage()
+            lastFailure = quiescenceFailure()
+            this.suspension = null
+        }
+
+        if (!quiescenceUncertified && this.suspension) {
             lastError = null
             lastFailure = undefined
-        } else if (this.stopRequested) {
+        } else if (!quiescenceUncertified && this.stopRequested) {
             lastError = "story execution aborted externally"
             lastFailure = undefined
         }
@@ -382,7 +405,9 @@ export class StoryAgent extends BaseObserver {
         const durationSecs = Math.round(
             (Date.now() - (this.startedAt ?? Date.now())) / 1000,
         )
-        if (this.stopRequested) {
+        if (quiescenceUncertified) {
+            this.transition("failed", "process group quiescence uncertified")
+        } else if (this.stopRequested) {
             this.transition(
                 "aborted",
                 this.suspension
@@ -431,6 +456,8 @@ export class StoryAgent extends BaseObserver {
         }
 
         this.processQuiescence = null
+        this.currentProcessSpawned = false
+        this.currentProcessQuiesced = false
         this.transition("running", `attempt ${attempt}`)
         // Capacity evidence is scoped to one CLI process. Never let a late
         // failure from an earlier retry taint a fresh attempt.
@@ -456,6 +483,7 @@ export class StoryAgent extends BaseObserver {
         this.terminalSourceRegistrar?.(claude)
         claude.join(this.envRef)
         claude.start(this.envRef)
+        this.currentProcessSpawned = claude.hasSpawnedProcess()
 
         // Claude --print --input-format stream-json emits nothing until it
         // consumes an input event or stdin closes — waiting on `claude.ready`
@@ -617,10 +645,29 @@ export class StoryAgent extends BaseObserver {
     private quiesceCurrentClaude(): Promise<boolean> {
         const claude = this.currentClaude
         if (!claude) return this.processQuiescence ?? Promise.resolve(true)
+        this.currentProcessSpawned ||= claude.hasSpawnedProcess()
         if (!this.processQuiescence) {
-            this.processQuiescence = claude.abortAndWait()
+            this.processQuiescence = claude.abortAndWait().then((certified) => {
+                this.currentProcessQuiesced = certified
+                return certified
+            })
         }
         return this.processQuiescence
+    }
+
+    private hasUncertifiedRequiredProcess(): boolean {
+        return (
+            this.spec.requireProcessQuiescenceCertification &&
+            this.currentProcessSpawned &&
+            !this.currentProcessQuiesced
+        )
+    }
+
+    private quiescenceFailureMessage(): string {
+        return (
+            "claude process group quiescence could not be certified; " +
+            "stopped without workspace cleanup"
+        )
     }
 
     private async waitForRetryDelay(): Promise<void> {
@@ -694,6 +741,13 @@ function stringField(value: unknown, key: string): string | undefined {
 
 function boardOwnsRecovery(failure: StoryFailureData | undefined): boolean {
     return failure !== undefined && failure.kind !== "execution"
+}
+
+function quiescenceFailure(): StoryFailureData {
+    return {
+        kind: "infrastructure",
+        code: "process_quiescence_uncertified",
+    }
 }
 
 function describeClaudeResultError(result: AgentResultData): string {

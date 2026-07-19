@@ -230,6 +230,7 @@ describe("StoryFactory", () => {
             const broker = source("broker")
             const board = source("board")
             const critic = source("critic")
+            const projector = source("terminal-projector")
             const gate = source("acceptance-gate")
             const collectiveExecutor = new CapturingExecutor()
             const collective = new StoryFactory({
@@ -244,6 +245,7 @@ describe("StoryFactory", () => {
                 ),
                 executor: collectiveExecutor,
                 turnReviewAuthority: critic,
+                terminalTurnAuthority: projector,
                 acceptanceGateAuthority: gate,
             })
             joinWithCapture(collective)
@@ -271,6 +273,10 @@ describe("StoryFactory", () => {
                     .handoffInconclusiveToAcceptanceGate,
                 true,
             )
+            assert.equal(
+                collectiveExecutor.calls[0]?.opts.terminalTurnAuthority,
+                projector,
+            )
 
             const legacyExecutor = new CapturingExecutor()
             const legacy = new StoryFactory({
@@ -296,6 +302,72 @@ describe("StoryFactory", () => {
                 legacyExecutor.calls[0]?.opts
                     .handoffInconclusiveToAcceptanceGate,
                 false,
+            )
+        })
+    })
+
+    it("wires collective terminal projection and process quiescence independently without a Critic", async () => {
+        await withTempDir("story-factory-terminal-only-", async (dir) => {
+            const broker = source("broker")
+            const board = source("board")
+            const projector = source("terminal-projector")
+            const executor = new CapturingExecutor()
+            const factory = new StoryFactory({
+                cwd: dir,
+                coordinationMode: "collective",
+                runId: "run-terminal-only",
+                workerId: "worker-a",
+                leaseAuthority: broker,
+                offerAuthority: board,
+                outcomeAuthority: new StoryOutcomeAuthority(
+                    "run-terminal-only",
+                ),
+                executor,
+                terminalTurnAuthority: projector,
+            })
+            joinWithCapture(factory)
+
+            await factory.onExternalEvent(
+                broker,
+                WorkLeaseGranted.create({
+                    runId: "run-terminal-only",
+                    offerId: "offer-S1",
+                    leaseId: "lease-S1",
+                    workerId: "worker-a",
+                    generation: 1,
+                    request: {
+                        storyId: "S1",
+                        prompt: "Implement S1",
+                        model: "sonnet",
+                        retries: 0,
+                        timeoutSecs: 30,
+                        requiresQualityReview: false,
+                    },
+                }),
+            )
+            await flushBus()
+
+            assert.equal(executor.calls.length, 1)
+            assert.equal(
+                executor.calls[0]?.opts.terminalTurnAuthority,
+                projector,
+            )
+            assert.equal(
+                executor.calls[0]?.opts.turnReviewAuthority,
+                undefined,
+            )
+            assert.equal(
+                executor.calls[0]?.opts
+                    .requireProcessQuiescenceCertification,
+                true,
+            )
+            assert.match(
+                executor.calls[0]?.req.prompt ?? "",
+                /COLLECTIVE PROCESS-LIFECYCLE CONTRACT/,
+            )
+            assert.match(
+                executor.calls[0]?.req.prompt ?? "",
+                /Do not start background, detached, daemonized, or persistent processes/,
             )
         })
     })
@@ -466,6 +538,50 @@ describe("StoryFactory", () => {
                 ["S-sync-abort"],
             )
             assert.equal(env.events.filter(StoryResult.is).length, 1)
+        })
+    })
+
+    it("retains an uncertified terminal worktree after execution disposal", async () => {
+        await withTempDir("story-factory-uncertified-result-", async (dir) => {
+            const resultSource = source("uncertified-result")
+            const executor: StoryExecutor = {
+                start: (req, _route, _cwd, env) => {
+                    env.deliverSemanticEvent(
+                        resultSource,
+                        StoryResult.create({
+                            storyId: req.storyId,
+                            success: false,
+                            attempts: 1,
+                            durationSecs: 0,
+                            error: "process group still alive",
+                            failure: {
+                                kind: "infrastructure",
+                                code: "process_quiescence_uncertified",
+                            },
+                        }),
+                    )
+                    return { dispose: () => {} }
+                },
+            }
+            const factory = new StoryFactory({ cwd: dir, executor })
+            const env = joinWithCapture(factory)
+
+            await factory.onExternalEvent(
+                source("conductor"),
+                StorySpawnRequest.create({
+                    storyId: "S-uncertified",
+                    prompt: "Do not delete this worktree",
+                    model: "sonnet",
+                    retries: 0,
+                    timeoutSecs: 30,
+                }),
+            )
+
+            assert.equal(env.events.filter(StoryResult.is).length, 1)
+            assert.deepEqual(
+                await factory.quiesceForShutdown(0),
+                ["S-uncertified"],
+            )
         })
     })
 

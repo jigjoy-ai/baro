@@ -223,6 +223,12 @@ export class Critic extends BaseObserver {
                 violatedCriteria,
                 turn,
                 modelUsed: this.opts.model,
+                ...(preparation.repositoryFingerprint
+                    ? {
+                          repositoryFingerprint:
+                              preparation.repositoryFingerprint,
+                      }
+                    : {}),
             })
             for (const env of this.getEnvironments()) {
                 env.deliverSemanticEvent(this, critiqueEvent)

@@ -664,7 +664,10 @@ export async function orchestrate(
     // Codex/OpenCode/Pi expose terminal turns through different native events.
     // Project them onto one neutral contract so policy participants such as the
     // Critic depend on semantics rather than a provider-specific stream shape.
-    const agentTurnProjector = new AgentTurnProjector({ outcomeAuthority })
+    const agentTurnProjector = new AgentTurnProjector({
+        outcomeAuthority,
+        requireQuiescenceBarrier: coordinationMode === "collective",
+    })
     agentTurnProjector.join(env)
     const hasOrigin = useGit ? await hasRemoteOrigin(config.cwd) : false
     const pushRemote = publishRemote && hasOrigin
@@ -1364,6 +1367,10 @@ export async function orchestrate(
         runtimeReplanDecisionAuthority: collectiveBoard ?? undefined,
         turnReviewAuthority:
             coordinationMode === "collective" ? critic ?? undefined : undefined,
+        terminalTurnAuthority:
+            coordinationMode === "collective"
+                ? agentTurnProjector
+                : undefined,
         acceptanceGateAuthority:
             coordinationMode === "collective"
                 ? acceptanceGate ?? undefined

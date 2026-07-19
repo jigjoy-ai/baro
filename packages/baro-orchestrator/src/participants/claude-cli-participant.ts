@@ -354,6 +354,11 @@ export class ClaudeCliParticipant extends BaseObserver {
         this.processTree?.terminate(signal)
     }
 
+    /** Whether spawn returned a concrete provider PID on this platform. */
+    hasSpawnedProcess(): boolean {
+        return this.processTree?.hasSpawnedRootProcess() ?? false
+    }
+
     /** True only when the owned POSIX group is authoritatively absent. */
     async abortAndWait(
         signal: NodeJS.Signals = "SIGTERM",

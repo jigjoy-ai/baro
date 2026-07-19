@@ -113,6 +113,18 @@ and backend-specific `critic-*` files.
 Critic evaluates a terminal candidate only when repository and command
 evidence are ready. AcceptanceGate correlates that verdict with the exact
 lease, generation, and terminal identity before permitting integration.
+For one-shot Codex, OpenCode, and Pi workers, AgentTurnProjector stages native
+terminal bytes but does not expose them to Critic until the exact story owner
+publishes a monotonic attempt boundary after a positive cooperative quiescence
+observation: the owned POSIX group and every identity-captured descendant are
+absent. The resulting `quiesced:*` terminal has its own replay identity; stale
+or duplicated attempt boundaries cannot release a later candidate. This is
+explicitly not full OS containment: an unobserved child that daemonizes before
+the first snapshot cannot be disproved. CLI workers therefore operate under a
+no-background-daemon contract; strict untrusted execution still requires an
+immutable candidate checkpoint plus cgroup/container/Job-Object containment.
+A platform without POSIX group + identity observation (or a Job Object)
+rejects these collective routes before spawning the provider.
 Those verdicts remain intentionally story-local; the strict collective
 GoalInvariantReviewer is the separate run-level composition check and does not
 change legacy or non-strict Critic behavior.

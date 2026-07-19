@@ -12,8 +12,8 @@
     "experiment:ab": "tsx scripts/ab-run.ts",
     "test:billing-e2e": "tsx scripts/test-authoritative-billing-e2e.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test \"test/**/*.test.ts\"",
-    "test:participants": "node --import tsx --test \"test/participants/**/*.test.ts\""
+    "test": "node --import tsx --test --test-concurrency=2 \"test/**/*.test.ts\"",
+    "test:participants": "node --import tsx --test --test-concurrency=2 \"test/participants/**/*.test.ts\""
   },
   "dependencies": {
     "@baro/memory": "*",

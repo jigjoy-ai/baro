@@ -14,6 +14,7 @@ import { CodexStoryAgent } from "../../src/participants/codex-story-agent.js"
 import { OpenCodeStoryAgent } from "../../src/participants/opencode-story-agent.js"
 import { PiStoryAgent } from "../../src/participants/pi-story-agent.js"
 import { StoryAgent } from "../../src/participants/story-agent.js"
+import { PROCESS_TREE_CAPABILITIES } from "../../src/process-tree.js"
 import {
     captureEnv,
     type CapturedEnvironment,
@@ -139,6 +140,263 @@ describe("CLI StoryAgent cooperative suspension", () => {
     }
 })
 
+describe("one-shot CLI process ownership provenance", () => {
+    for (const backend of ["codex", "opencode", "pi"] as const) {
+        it(
+            `${backend} does not treat a post-spawn process error as proof that no group exists`,
+            {
+                skip: !PROCESS_TREE_CAPABILITIES
+                    .cooperativeQuiescenceObservation,
+            },
+            async () => {
+                await withTempDir(`baro-${backend}-owned-error-`, async (dir) => {
+                    const storyId = `${backend}-owned-error`
+                    const agent = createAgent(
+                        backend,
+                        storyId,
+                        dir,
+                        "unused",
+                        2,
+                    )
+                    let attempts = 0
+                    ;(agent as unknown as {
+                        runOneAttempt(): Promise<{
+                            success: false
+                            summary: null
+                            error: string
+                            failure: {
+                                kind: "infrastructure"
+                                code: "process_spawn_failed"
+                            }
+                        }>
+                    }).runOneAttempt = async () => {
+                        attempts++
+                        // Model a ChildProcess `error`/close-drain failure
+                        // after the detached group was created, followed by a
+                        // failed authoritative quiescence certificate.
+                        ;(agent as unknown as {
+                            currentProcessOwnedGroup: boolean
+                            currentProcessQuiesced: boolean
+                            processQuiescence: Promise<boolean>
+                        }).currentProcessOwnedGroup = true
+                        ;(agent as unknown as {
+                            currentProcessQuiesced: boolean
+                        }).currentProcessQuiesced = false
+                        ;(agent as unknown as {
+                            processQuiescence: Promise<boolean>
+                        }).processQuiescence = Promise.resolve(false)
+                        return {
+                            success: false,
+                            summary: null,
+                            error: "post-spawn child error",
+                            failure: {
+                                kind: "infrastructure",
+                                code: "process_spawn_failed",
+                            },
+                        }
+                    }
+
+                    const env = captureEnv()
+                    const outcome = await agent.run(env)
+
+                    assert.equal(attempts, 1)
+                    assert.equal(outcome.success, false)
+                    assert.deepEqual(outcome.failure, {
+                        kind: "infrastructure",
+                        code: "process_quiescence_uncertified",
+                    })
+                    assert.match(
+                        outcome.error ?? "",
+                        /quiescence could not be certified/,
+                    )
+                    assert.equal(terminalResults(env, storyId).length, 1)
+                    agent.leave(env)
+                })
+            },
+        )
+
+        it(
+            `${backend} preserves the quiescence failure when externally aborted`,
+            {
+                skip: !PROCESS_TREE_CAPABILITIES
+                    .cooperativeQuiescenceObservation,
+            },
+            async () => {
+                await withTempDir(`baro-${backend}-abort-uncertified-`, async (dir) => {
+                    const fixture = writeBlockingHarness(dir, backend)
+                    const storyId = `${backend}-abort-uncertified`
+                    const agent = createAgent(
+                        backend,
+                        storyId,
+                        dir,
+                        fixture.bin,
+                        2,
+                    )
+                    const env = captureEnv()
+                    agent.join(env)
+                    void agent.run(env)
+                    await waitUntil(() => fixturePid(fixture) !== null, 10_000)
+
+                    const cli = currentOneShotCli(agent, backend)
+                    assert.ok(cli)
+                    const abortAndWait = cli.abortAndWait.bind(cli)
+                    cli.abortAndWait = async (signal) => {
+                        await abortAndWait(signal)
+                        return false
+                    }
+
+                    agent.abort()
+                    const outcome = await agent.done
+                    assert.equal(outcome.attempts, 1)
+                    assert.equal(outcome.success, false)
+                    assert.equal(outcome.suspension, undefined)
+                    assert.deepEqual(outcome.failure, {
+                        kind: "infrastructure",
+                        code: "process_quiescence_uncertified",
+                    })
+                    assert.equal(invocationCount(fixture), 1)
+                    assert.equal(terminalResults(env, storyId).length, 1)
+                    agent.leave(env)
+                })
+            },
+        )
+
+        it(`${backend} strict mode without a terminal projector never retries a spawned group-less process without a certificate`, async () => {
+            await withTempDir(`baro-${backend}-group-less-`, async (dir) => {
+                const storyId = `${backend}-group-less`
+                const agent = createAgent(
+                    backend,
+                    storyId,
+                    dir,
+                    "unused",
+                    2,
+                    { requireProcessQuiescenceCertification: true },
+                )
+                assert.equal(
+                    (agent as unknown as {
+                        spec: { terminalTurnAuthority?: Participant }
+                    }).spec.terminalTurnAuthority,
+                    undefined,
+                )
+                let attempts = 0
+                ;(agent as unknown as {
+                    runOneAttempt(): Promise<{
+                        success: false
+                        summary: null
+                        error: string
+                        failure: {
+                            kind: "execution"
+                            code: "model_error"
+                        }
+                    }>
+                }).runOneAttempt = async () => {
+                    attempts++
+                    Object.assign(agent as object, {
+                        currentProcessSpawned: true,
+                        currentProcessOwnedGroup: false,
+                        currentProcessQuiesced: false,
+                        processQuiescence: Promise.resolve(false),
+                    })
+                    return {
+                        success: false,
+                        summary: null,
+                        error: "failed provider turn",
+                        failure: {
+                            kind: "execution",
+                            code: "model_error",
+                        },
+                    }
+                }
+
+                const env = captureEnv()
+                const outcome = await agent.run(env)
+                assert.equal(attempts, 1)
+                assert.deepEqual(outcome.failure, {
+                    kind: "infrastructure",
+                    code: "process_quiescence_uncertified",
+                })
+                assert.equal(terminalResults(env, storyId).length, 1)
+                agent.leave(env)
+            })
+        })
+
+        it(`${backend} uses the explicit strict flag—not terminal projection—to guard successful settlement`, async () => {
+            await withTempDir(`baro-${backend}-strict-success-`, async (dir) => {
+                const run = async (
+                    storyId: string,
+                    requireCertification: boolean,
+                ) => {
+                    const agent = createAgent(
+                        backend,
+                        storyId,
+                        dir,
+                        "unused",
+                        0,
+                        requireCertification
+                            ? { requireProcessQuiescenceCertification: true }
+                            : {},
+                    )
+                    assert.equal(
+                        (agent as unknown as {
+                            spec: { terminalTurnAuthority?: Participant }
+                        }).spec.terminalTurnAuthority,
+                        undefined,
+                    )
+                    ;(agent as unknown as {
+                        runOneAttempt(): Promise<{
+                            success: true
+                            summary: null
+                            error: null
+                        }>
+                    }).runOneAttempt = async () => {
+                        Object.assign(agent as object, {
+                            currentProcessSpawned: true,
+                            currentProcessOwnedGroup: false,
+                            currentProcessQuiesced: false,
+                            processQuiescence: Promise.resolve(false),
+                        })
+                        return { success: true, summary: null, error: null }
+                    }
+
+                    const env = captureEnv()
+                    const outcome = await agent.run(env)
+                    agent.leave(env)
+                    return outcome
+                }
+
+                const strict = await run(`${backend}-strict-success`, true)
+                assert.equal(strict.success, false)
+                assert.deepEqual(strict.failure, {
+                    kind: "infrastructure",
+                    code: "process_quiescence_uncertified",
+                })
+
+                const legacy = await run(`${backend}-legacy-success`, false)
+                assert.equal(legacy.success, true)
+                assert.equal(legacy.failure, undefined)
+            })
+        })
+    }
+})
+
+interface AbortableOneShotCli {
+    abortAndWait(signal?: NodeJS.Signals): Promise<boolean>
+}
+
+function currentOneShotCli(
+    agent: SuspendableAgent,
+    backend: "codex" | "opencode" | "pi",
+): AbortableOneShotCli | null {
+    switch (backend) {
+        case "codex":
+            return (agent as CodexStoryAgent).getCurrentCodex()
+        case "opencode":
+            return (agent as OpenCodeStoryAgent).getCurrentOpenCode()
+        case "pi":
+            return (agent as PiStoryAgent).getCurrentPi()
+    }
+}
+
 interface BlockingHarness {
     bin: string
     pidPath: string
@@ -151,7 +409,11 @@ function createAgent(
     cwd: string,
     bin: string,
     retries: number,
-    timing: { retryDelayMs?: number; hardTimeoutSecs?: number } = {},
+    timing: {
+        retryDelayMs?: number
+        hardTimeoutSecs?: number
+        requireProcessQuiescenceCertification?: boolean
+    } = {},
 ): SuspendableAgent {
     const common = {
         id: storyId,
@@ -162,6 +424,12 @@ function createAgent(
         ...(timing.hardTimeoutSecs === undefined
             ? {}
             : { hardTimeoutSecs: timing.hardTimeoutSecs }),
+        ...(timing.requireProcessQuiescenceCertification === undefined
+            ? {}
+            : {
+                  requireProcessQuiescenceCertification:
+                      timing.requireProcessQuiescenceCertification,
+              }),
         timeoutSecs: 30,
     }
     switch (backend) {
@@ -197,6 +465,11 @@ async function assertRetryBackoffWake(
     let attempts = 0
     ;(agent as unknown as RetryableAttemptAgent).runOneAttempt = async () => {
         attempts += 1
+        // This seam replaces the complete real attempt, including its
+        // process-tree drain. Model a safely quiesced failed process so this
+        // test remains about the retry-delay lost-wake boundary.
+        ;(agent as unknown as { currentProcessQuiesced: boolean })
+            .currentProcessQuiesced = true
         return {
             success: false,
             summary: null,

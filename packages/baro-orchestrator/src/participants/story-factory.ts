@@ -72,6 +72,12 @@ import type {
     CollaborationLeaseCapabilityRequest,
 } from "./collaboration-bridge.js"
 
+const COLLECTIVE_CLI_PROCESS_CONTRACT = `COLLECTIVE PROCESS-LIFECYCLE CONTRACT:
+- Do not start background, detached, daemonized, or persistent processes.
+- Every command and child process must finish before you report completion.
+- Use bounded foreground test/build commands; stop dev servers and watchers yourself.
+Baro quarantines the story worktree if cooperative process quiescence cannot be observed.`
+
 export interface StoryFactoryOptions {
     cwd: string
     coordinationMode?: "legacy" | "collective"
@@ -93,6 +99,8 @@ export interface StoryFactoryOptions {
     runtimeReplanDecisionAuthority?: Participant
     /** Exact Critic allowed to complete a continuation-capable worker turn. */
     turnReviewAuthority?: Participant
+    /** Exact terminal projector used to correlate one-shot CLI candidates. */
+    terminalTurnAuthority?: Participant
     /** Exact collective AcceptanceGate that remains responsible for quality
      * after an inconclusive continuation-worker handoff. */
     acceptanceGateAuthority?: Participant
@@ -219,6 +227,10 @@ export class StoryFactory extends BaseObserver {
     private readonly spawnDrains = new Map<string, Promise<void>>()
     /** Terminal results delivered synchronously from inside executor.start(). */
     private readonly settledWhileSpawning = new Set<string>()
+    /** Authenticated terminal executions whose owned process group could not
+     * be certified absent. This tombstone survives lease release so the final
+     * repository sweep cannot delete a potentially live process cwd. */
+    private readonly uncertifiedWorktreeIds = new Set<string>()
     /** One-way stop boundary set before repository cleanup. */
     private shuttingDown = false
     private readonly leases = new Map<string, WorkLeaseGrantedData>()
@@ -562,6 +574,13 @@ export class StoryFactory extends BaseObserver {
                     event.data.generation !== lease.generation
                 ) return
             }
+            if (
+                event.data.failure?.kind === "infrastructure" &&
+                event.data.failure.code ===
+                    "process_quiescence_uncertified"
+            ) {
+                this.uncertifiedWorktreeIds.add(event.data.storyId)
+            }
             const exec = this.active.get(event.data.storyId)
             if (exec && this.envRef) {
                 exec.dispose(this.envRef)
@@ -686,6 +705,7 @@ export class StoryFactory extends BaseObserver {
         const initiallyUnsafe = new Set([
             ...this.active.keys(),
             ...this.suspensions.keys(),
+            ...this.uncertifiedWorktreeIds,
         ])
         const abortActive = (): void => {
             const candidates = new Set([
@@ -725,6 +745,7 @@ export class StoryFactory extends BaseObserver {
             ...this.active.keys(),
             ...this.suspensions.keys(),
             ...this.spawning,
+            ...this.uncertifiedWorktreeIds,
         ])
 
         const retained: string[] = []
@@ -971,21 +992,31 @@ export class StoryFactory extends BaseObserver {
                   deliveryMode,
               } as const
             : undefined
-        const executionRequest = collaboration
+        const processContract =
+            this.opts.coordinationMode === "collective" &&
+            route.backend !== "openai"
+                ? COLLECTIVE_CLI_PROCESS_CONTRACT
+                : ""
+        const executionRequest = collaboration || processContract
             ? {
                   ...req,
                   prompt: [
                       req.prompt,
-                      this.initialCollaborationMessages(
-                          issuedCapability!.initialMessages,
-                      ),
-                      this.collaborationInstructions(
-                          collaboration,
-                          req.graphVersion,
-                          route.backend !== "openai",
-                          this.opts.worktrees !== undefined &&
-                              this.supportsCooperativeSuspend(route),
-                      ),
+                      processContract,
+                      ...(collaboration && issuedCapability
+                          ? [
+                                this.initialCollaborationMessages(
+                                    issuedCapability.initialMessages,
+                                ),
+                                this.collaborationInstructions(
+                                    collaboration,
+                                    req.graphVersion,
+                                    route.backend !== "openai",
+                                    this.opts.worktrees !== undefined &&
+                                        this.supportsCooperativeSuspend(route),
+                                ),
+                            ]
+                          : []),
                   ].filter(Boolean).join("\n\n"),
               }
             : req
@@ -1001,6 +1032,9 @@ export class StoryFactory extends BaseObserver {
             openaiModel: this.opts.openaiModel,
             effort: this.opts.effort,
             ...(this.opts.coordinationMode === "collective"
+                ? { requireProcessQuiescenceCertification: true }
+                : {}),
+            ...(this.opts.coordinationMode === "collective"
                 ? {
                       // Missing wiring fails closed: no external participant
                       // can have this exact factory identity. Production
@@ -1014,6 +1048,14 @@ export class StoryFactory extends BaseObserver {
                 ? {
                       runtimeReplanDecisionAuthority:
                           this.opts.runtimeReplanDecisionAuthority,
+                  }
+                : {}),
+            ...(this.opts.terminalTurnAuthority
+                ? {
+                      // Terminal projection remains independent of Critic
+                      // wiring. Process quiescence is enforced separately by
+                      // the explicit collective executor contract above.
+                      terminalTurnAuthority: this.opts.terminalTurnAuthority,
                   }
                 : {}),
             ...(this.opts.turnReviewAuthority

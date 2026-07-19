@@ -1,5 +1,8 @@
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import {
@@ -11,6 +14,7 @@ import {
     parseLinuxProcStat,
     PROCESS_TREE_CAPABILITIES,
     processTreeObserverStats,
+    setProcessTreeOwnershipPublisherForTests,
 } from "../src/process-tree.js"
 
 describe("process-tree discovery", () => {
@@ -117,9 +121,20 @@ describe("process-tree discovery", () => {
         )
         assert.equal(
             PROCESS_TREE_CAPABILITIES
-                .ownedProcessGroupQuiescenceCertification,
+                .cooperativeQuiescenceObservation,
             process.platform === "linux" || process.platform === "darwin",
         )
+        assert.deepEqual(PROCESS_TREE_CAPABILITIES.quiescenceAssurance, {
+            maximum:
+                process.platform === "linux" || process.platform === "darwin"
+                    ? "cooperative-observed"
+                    : "none",
+            mechanism:
+                process.platform === "linux" || process.platform === "darwin"
+                    ? "posix-owned-group-plus-identity-table"
+                    : "uncontained-process-tree",
+            rulesOutUnobservedDetachedDescendants: false,
+        })
         assert.equal(
             PROCESS_TREE_CAPABILITIES
                 .postRootCloseUnobservedDescendantDiscovery,
@@ -189,7 +204,17 @@ describe("process-tree discovery", () => {
             child.once("close", () => tree.markRootClosed())
 
             try {
-                assert.equal(await tree.terminateAndWait("SIGKILL"), true)
+                const [quiesced, observation] = await Promise.all([
+                    tree.terminateAndWait("SIGKILL"),
+                    tree.terminateAndObserve("SIGKILL"),
+                ])
+                assert.equal(quiesced, true)
+                assert.deepEqual(observation, {
+                    assurance: "cooperative-observed",
+                    mechanism: "posix-owned-group-plus-identity-table",
+                    groupAbsent: true,
+                    trackedAbsent: true,
+                })
                 assert.equal(isAlive(child.pid!), false)
             } finally {
                 tree.terminate("SIGKILL")
@@ -526,6 +551,207 @@ describe("process-tree discovery", () => {
                         }
                     }
                 }
+            }
+        },
+    )
+
+    it(
+        "drains an identity-captured descendant that creates a new process group",
+        {
+            skip:
+                process.platform !== "linux" &&
+                process.platform !== "darwin",
+        },
+        async () => {
+            const dir = await mkdtemp(join(tmpdir(), "baro-detached-tree-"))
+            const latePath = join(dir, "late.txt")
+            const writerProgram = [
+                'const fs = require("node:fs");',
+                'process.on("SIGTERM", () => {});',
+                `setTimeout(() => fs.writeFileSync(${JSON.stringify(latePath)}, "late"), 900);`,
+                "setInterval(() => {}, 1000);",
+            ].join("")
+            const shimProgram = [
+                'const { spawn } = require("node:child_process");',
+                `const child = spawn(process.execPath, ["-e", ${JSON.stringify(writerProgram)}], { detached: true, stdio: "ignore" });`,
+                "console.log(child.pid);",
+                "process.stdin.resume();",
+                'process.stdin.once("data", () => process.exit(0));',
+            ].join("")
+            const shim = spawn(process.execPath, ["-e", shimProgram], {
+                detached: true,
+                stdio: ["pipe", "pipe", "ignore"],
+            })
+            const tree = new ManagedProcessTree(shim, {
+                ownsProcessGroup: true,
+                terminationGraceMs: 50,
+                pollIntervalMs: 10,
+                quiescenceTimeoutMs: 500,
+            })
+            const closed = new Promise<void>((resolve) => {
+                shim.once("close", () => {
+                    tree.markRootClosed()
+                    resolve()
+                })
+            })
+            let writerPid: number | undefined
+
+            try {
+                writerPid = await firstNumericLine(shim)
+                const before = processTreeObserverStats()
+                tree.refresh()
+                const requiredCompletions = before.activeScans > 0 ? 2 : 1
+                await waitForCondition(
+                    () =>
+                        processTreeObserverStats().scansCompleted >=
+                        before.scansCompleted + requiredCompletions,
+                    2_000,
+                )
+                assert.ok(
+                    tree.ownershipSnapshots()?.some(
+                        (group) => group.processGroupId === writerPid,
+                    ),
+                    "crash-recovery ownership includes the observed escaped group",
+                )
+
+                shim.stdin!.end("exit\n")
+                await closed
+                assert.equal(await tree.quiescence, true)
+                await waitForExit(writerPid)
+                assert.equal(isAlive(writerPid), false)
+
+                // Prove the positive verdict was not merely early: the
+                // escaped child would have written after the old group-only
+                // certificate had already resolved.
+                await new Promise((resolve) => setTimeout(resolve, 950))
+                await assert.rejects(readFile(latePath, "utf8"), /ENOENT/)
+            } finally {
+                tree.terminate("SIGKILL")
+                try {
+                    process.kill(-shim.pid!, "SIGKILL")
+                } catch {
+                    // already exited
+                }
+                if (writerPid !== undefined) {
+                    try {
+                        process.kill(writerPid, "SIGKILL")
+                    } catch {
+                        // already exited
+                    }
+                }
+                await rm(dir, { recursive: true, force: true })
+            }
+        },
+    )
+
+    it(
+        "fails closed when newly observed ownership membership cannot be published",
+        {
+            skip:
+                process.platform !== "linux" &&
+                process.platform !== "darwin",
+        },
+        async () => {
+            let generation = 0
+            let failedPublications = 0
+            let publicationCalls = 0
+            setProcessTreeOwnershipPublisherForTests((groups) => {
+                publicationCalls++
+                if (groups.length > 2) {
+                    failedPublications++
+                    return {
+                        ok: false,
+                        error: "injected membership publication failure",
+                    }
+                }
+                return { ok: true, generation: ++generation }
+            })
+
+            const stable = spawn(
+                process.execPath,
+                ["-e", "setInterval(() => {}, 1000);"],
+                { detached: true, stdio: "ignore" },
+            )
+            const stableTree = new ManagedProcessTree(stable, {
+                ownsProcessGroup: true,
+                terminationGraceMs: 50,
+                pollIntervalMs: 10,
+                quiescenceTimeoutMs: 500,
+            })
+            stable.once("close", () => stableTree.markRootClosed())
+
+            const childProgram = "setInterval(() => {}, 1000);"
+            const shimProgram = [
+                'const { spawn } = require("node:child_process");',
+                'process.stdin.setEncoding("utf8");',
+                'process.stdin.once("data", () => {',
+                `  const child = spawn(process.execPath, ["-e", ${JSON.stringify(childProgram)}], { detached: true, stdio: "ignore" });`,
+                "  console.log(child.pid);",
+                "});",
+                "setInterval(() => {}, 1000);",
+            ].join("")
+            const shim = spawn(process.execPath, ["-e", shimProgram], {
+                detached: true,
+                stdio: ["pipe", "pipe", "ignore"],
+            })
+            const tree = new ManagedProcessTree(shim, {
+                ownsProcessGroup: true,
+                terminationGraceMs: 50,
+                pollIntervalMs: 10,
+                quiescenceTimeoutMs: 500,
+            })
+            shim.once("close", () => tree.markRootClosed())
+            let childPid: number | undefined
+
+            try {
+                assert.ok(
+                    generation >= 2,
+                    "both root memberships must be durably registered first",
+                )
+                const childPidPromise = firstNumericLine(shim)
+                shim.stdin!.end("spawn\n")
+                childPid = await childPidPromise
+                tree.refresh()
+
+                await tree.done
+                await waitForExit(childPid)
+
+                assert.ok(failedPublications >= 1)
+                assert.equal(isAlive(shim.pid!), false)
+                assert.equal(isAlive(childPid), false)
+                assert.equal(
+                    isAlive(stable.pid!),
+                    true,
+                    "the unchanged, already-published sibling must survive",
+                )
+                assert.equal(activeProcessTreeCount(), 1)
+                assert.ok(
+                    publicationCalls < 10,
+                    "failure handling must not recursively republish ownership",
+                )
+            } finally {
+                tree.terminate("SIGKILL")
+                try {
+                    process.kill(-shim.pid!, "SIGKILL")
+                } catch {
+                    // already exited
+                }
+                if (childPid !== undefined) {
+                    try {
+                        process.kill(childPid, "SIGKILL")
+                    } catch {
+                        // already exited
+                    }
+                }
+                await tree.done
+                stableTree.terminate("SIGKILL")
+                try {
+                    process.kill(-stable.pid!, "SIGKILL")
+                } catch {
+                    // already exited
+                }
+                await stableTree.done
+                setProcessTreeOwnershipPublisherForTests(null)
             }
         },
     )

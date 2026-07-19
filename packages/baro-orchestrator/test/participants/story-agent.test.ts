@@ -358,6 +358,263 @@ process.exit(0)
         })
     })
 
+    it("fails closed without retrying a spawned collective Claude attempt whose quiescence is uncertified", async () => {
+        const env = captureEnv()
+        const agent = new StoryAgent({
+            id: "story-claude-collective-uncertified",
+            prompt: "finish the story",
+            cwd: process.cwd(),
+            retries: 2,
+            retryDelayMs: 0,
+            requireProcessQuiescenceCertification: true,
+        })
+        let invocations = 0
+        const internals = agent as unknown as {
+            currentProcessSpawned: boolean
+            currentProcessQuiesced: boolean
+            processQuiescence: Promise<boolean>
+            runOneAttempt(attempt: number): Promise<{
+                success: false
+                summary: null
+                error: string
+                failure: {
+                    kind: "execution"
+                    code: "model_error"
+                }
+            }>
+        }
+        internals.runOneAttempt = async () => {
+            invocations++
+            // Models a real Windows/group-less spawn: PID provenance exists,
+            // but the process-tree boundary cannot issue a positive verdict.
+            internals.currentProcessSpawned = true
+            internals.currentProcessQuiesced = false
+            internals.processQuiescence = Promise.resolve(false)
+            return {
+                success: false,
+                summary: null,
+                error: "provider turn failed",
+                failure: { kind: "execution", code: "model_error" },
+            }
+        }
+
+        const outcome = await agent.run(env)
+
+        assert.equal(invocations, 1)
+        assert.equal(outcome.success, false)
+        assert.deepEqual(outcome.failure, {
+            kind: "infrastructure",
+            code: "process_quiescence_uncertified",
+        })
+        assert.match(outcome.error ?? "", /stopped without workspace cleanup/)
+        assert.equal(env.events.filter(StoryResult.is).length, 1)
+    })
+
+    it("rejects a successful collective Claude result without a positive quiescence certificate", async () => {
+        const env = captureEnv()
+        const agent = new StoryAgent({
+            id: "story-claude-success-uncertified",
+            prompt: "finish the story",
+            cwd: process.cwd(),
+            retries: 2,
+            requireProcessQuiescenceCertification: true,
+        })
+        let invocations = 0
+        const internals = agent as unknown as {
+            currentProcessSpawned: boolean
+            currentProcessQuiesced: boolean
+            processQuiescence: Promise<boolean>
+            runOneAttempt(attempt: number): Promise<{
+                success: true
+                summary: null
+                error: null
+            }>
+        }
+        internals.runOneAttempt = async () => {
+            invocations++
+            internals.currentProcessSpawned = true
+            internals.currentProcessQuiesced = false
+            internals.processQuiescence = Promise.resolve(false)
+            return { success: true, summary: null, error: null }
+        }
+
+        const outcome = await agent.run(env)
+
+        assert.equal(invocations, 1)
+        assert.equal(outcome.success, false)
+        assert.deepEqual(outcome.failure, {
+            kind: "infrastructure",
+            code: "process_quiescence_uncertified",
+        })
+    })
+
+    it("preserves legacy Claude settlement when strict collective quiescence is not requested", async () => {
+        const env = captureEnv()
+        const agent = new StoryAgent({
+            id: "story-claude-legacy-quiescence",
+            prompt: "finish the story",
+            cwd: process.cwd(),
+            retries: 0,
+        })
+        const internals = agent as unknown as {
+            currentProcessSpawned: boolean
+            currentProcessQuiesced: boolean
+            processQuiescence: Promise<boolean>
+            runOneAttempt(attempt: number): Promise<{
+                success: true
+                summary: null
+                error: null
+            }>
+        }
+        internals.runOneAttempt = async () => {
+            internals.currentProcessSpawned = true
+            internals.currentProcessQuiesced = false
+            internals.processQuiescence = Promise.resolve(false)
+            return { success: true, summary: null, error: null }
+        }
+
+        const outcome = await agent.run(env)
+
+        assert.equal(outcome.success, true)
+        assert.equal(outcome.failure, undefined)
+    })
+
+    it("fails closed when a hard timeout races an uncertified collective Claude process", async () => {
+        const env = captureEnv()
+        const agent = new StoryAgent({
+            id: "story-claude-hard-timeout-uncertified",
+            prompt: "finish the story",
+            cwd: process.cwd(),
+            retries: 2,
+            hardTimeoutSecs: 0.01,
+            requireProcessQuiescenceCertification: true,
+        })
+        const internals = agent as unknown as {
+            currentProcessSpawned: boolean
+            currentProcessQuiesced: boolean
+            processQuiescence: Promise<boolean>
+            runOneAttempt(attempt: number): Promise<{
+                success: true
+                summary: null
+                error: null
+            }>
+        }
+        internals.runOneAttempt = async () => {
+            internals.currentProcessSpawned = true
+            internals.currentProcessQuiesced = false
+            internals.processQuiescence = Promise.resolve(false)
+            await new Promise((resolve) => setTimeout(resolve, 30))
+            return { success: true, summary: null, error: null }
+        }
+
+        const outcome = await agent.run(env)
+
+        assert.equal(outcome.success, false)
+        assert.equal(outcome.attempts, 1)
+        assert.deepEqual(outcome.failure, {
+            kind: "infrastructure",
+            code: "process_quiescence_uncertified",
+        })
+    })
+
+    it("does not publish Claude success when the hard cap wins before certified settlement", async () => {
+        const env = captureEnv()
+        const agent = new StoryAgent({
+            id: "story-claude-hard-timeout-certified",
+            prompt: "finish the story",
+            cwd: process.cwd(),
+            retries: 2,
+            hardTimeoutSecs: 0.01,
+            requireProcessQuiescenceCertification: true,
+        })
+        const internals = agent as unknown as {
+            currentProcessSpawned: boolean
+            currentProcessQuiesced: boolean
+            processQuiescence: Promise<boolean>
+            runOneAttempt(attempt: number): Promise<{
+                success: true
+                summary: null
+                error: null
+            }>
+        }
+        internals.runOneAttempt = async () => {
+            internals.currentProcessSpawned = true
+            internals.currentProcessQuiesced = true
+            internals.processQuiescence = Promise.resolve(true)
+            await new Promise((resolve) => setTimeout(resolve, 30))
+            return { success: true, summary: null, error: null }
+        }
+
+        const outcome = await agent.run(env)
+
+        assert.equal(outcome.success, false)
+        assert.equal(outcome.attempts, 1)
+        assert.deepEqual(outcome.failure, {
+            kind: "infrastructure",
+            code: "command_timeout",
+        })
+        assert.match(outcome.error ?? "", /hard timeout/)
+    })
+
+    it("preserves collective Claude quiescence failure over an external abort", async () => {
+        await withTempDir("story-agent-abort-quiescence-", async (dir) => {
+            const fake = writeReviewClaude(dir, { resultDelayMs: 5_000 })
+            const env = captureEnv()
+            const agent = new StoryAgent({
+                id: "story-claude-abort-quiescence",
+                prompt: "wait for an abort",
+                cwd: fake.cwd,
+                claudeBin: fake.bin,
+                retries: 2,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
+                requireProcessQuiescenceCertification: true,
+            })
+            agent.join(env)
+            const outcomePromise = agent.run(env)
+
+            try {
+                await waitForCondition(
+                    () =>
+                        readLifecycle(fake.lifecyclePath).some(
+                            (entry) => entry.event === "spawn",
+                        ),
+                )
+                const claude = agent.getCurrentClaude()
+                assert.ok(claude)
+                assert.equal(claude.hasSpawnedProcess(), true)
+                const abortAndWait = claude.abortAndWait.bind(claude)
+                claude.abortAndWait = async (signal) => {
+                    await abortAndWait(signal)
+                    return false
+                }
+
+                agent.abort()
+                const outcome = await outcomePromise
+                assert.equal(outcome.success, false)
+                assert.equal(outcome.attempts, 1)
+                assert.equal(outcome.suspension, undefined)
+                assert.deepEqual(outcome.failure, {
+                    kind: "infrastructure",
+                    code: "process_quiescence_uncertified",
+                })
+                assert.match(
+                    outcome.error ?? "",
+                    /stopped without workspace cleanup/,
+                )
+                assert.equal(
+                    readLifecycle(fake.lifecyclePath).filter(
+                        (entry) => entry.event === "spawn",
+                    ).length,
+                    1,
+                )
+            } finally {
+                if (agent.getCurrentClaude()) agent.abort()
+                await outcomePromise
+                agent.leave(env)
+            }
+        })
+    })
+
     it("accepts lifecycle results only from the exact current Claude process", async () => {
         await withTempDir("story-agent-result-authority-", async (dir) => {
             const fake = writeReviewClaude(dir, { resultDelayMs: 80 })

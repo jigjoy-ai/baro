@@ -43,22 +43,49 @@ const pendingEscalations = new Set<ManagedProcessTree>()
 let escalationFlush: ReturnType<typeof setImmediate> | null = null
 let deferOwnershipPublish = false
 let ownershipPublishPending = false
+let ownershipPublisherForTests:
+    | ((groups: readonly ProviderOwnershipGroup[]) => ProviderOwnershipPublishResult)
+    | null = null
+
+export type ProcessQuiescenceAssurance = "cooperative-observed" | "none"
+
+export interface ProcessQuiescenceObservation {
+    /** `cooperative-observed` is not OS containment: an unobserved daemon can
+     * still escape before the first identity snapshot. */
+    assurance: ProcessQuiescenceAssurance
+    mechanism:
+        | "posix-owned-group-plus-identity-table"
+        | "uncontained-process-tree"
+    groupAbsent: boolean
+    trackedAbsent: boolean
+}
 
 /**
  * Platform guarantees exposed for diagnostics.
  *
  * Windows `taskkill /T` can terminate a tree only while its root PID still
  * exists. POSIX callers which spawn the root as a detached process-group
- * leader can close the re-parent-before-observation race without pretending
- * that the descendant was discovered. Windows needs a Job Object before it
- * can offer the same containment/certification guarantee.
+ * leader can retain the ordinary in-group provider after its root exits.
+ * Identity snapshots also drain descendants observed before they leave that
+ * group. This is cooperative observation, not containment: only cgroups,
+ * containers, or a Windows Job Object can rule out an unobserved daemon.
  */
 export const PROCESS_TREE_CAPABILITIES = Object.freeze({
     liveRootTreeTermination: true,
     postRootCloseTrackedTermination: process.platform !== "win32",
     postRootCloseUnobservedDescendantDiscovery: false,
     ownedProcessGroupTermination: POSIX_PROCESS_GROUPS_SUPPORTED,
-    ownedProcessGroupQuiescenceCertification:
+    quiescenceAssurance: Object.freeze({
+        maximum: POSIX_PROCESS_GROUPS_SUPPORTED
+            ? "cooperative-observed" as const
+            : "none" as const,
+        mechanism: POSIX_PROCESS_GROUPS_SUPPORTED
+            ? "posix-owned-group-plus-identity-table" as const
+            : "uncontained-process-tree" as const,
+        rulesOutUnobservedDetachedDescendants: false,
+    }),
+    /** Boolean convenience for the scoped structured assurance above. */
+    cooperativeQuiescenceObservation:
         POSIX_PROCESS_GROUPS_SUPPORTED,
     processIdentityValidation:
         process.platform === "linux" || process.platform === "darwin",
@@ -106,6 +133,23 @@ export interface ProcessTreeObserverStats {
     maxConcurrentScans: number
 }
 
+/** @internal Deterministic ownership-publication failure seam. The active-tree
+ * guard keeps one test from changing the crash boundary underneath another. */
+export function setProcessTreeOwnershipPublisherForTests(
+    publisher:
+        | ((
+              groups: readonly ProviderOwnershipGroup[],
+          ) => ProviderOwnershipPublishResult)
+        | null,
+): void {
+    if (activeProcessTrees.size > 0) {
+        throw new Error(
+            "cannot replace process-tree ownership publisher while trees are active",
+        )
+    }
+    ownershipPublisherForTests = publisher
+}
+
 /** Read-only diagnostics used to verify that discovery never overlaps. */
 export function processTreeObserverStats(): ProcessTreeObserverStats {
     return {
@@ -139,9 +183,18 @@ export class ManagedProcessTree {
         number,
         ProcessIdentitySnapshot
     >()
+    /** Live identity-captured members grouped by their actual PGID, including
+     * observed descendants which escaped the original owned group. */
+    private readonly trackedGroupMembers = new Map<
+        number,
+        Map<number, ProcessIdentitySnapshot>
+    >()
     private ownedGroupIdentitySource: ProviderIdentitySource | null = null
     private ownershipManifestRegistered = false
     private ownershipRegistrationFailed = false
+    /** Exact live membership represented by the last durable manifest
+     * generation. A mismatch means crash recovery has not caught up yet. */
+    private publishedOwnershipFingerprint: string | null = null
     private readonly createdAt = Date.now()
     private terminating = false
     private rootClosed = false
@@ -150,14 +203,22 @@ export class ManagedProcessTree {
     private quiescenceTimer: ReturnType<typeof setTimeout> | null = null
     private resolveDone!: () => void
     private resolveQuiescence!: (certified: boolean) => void
+    private resolveQuiescenceObservation!: (
+        observation: ProcessQuiescenceObservation,
+    ) => void
 
     readonly done: Promise<void>
     /**
      * Resolves true only after an authoritative process-table snapshot finds
-     * no live member of this tree's owned POSIX process group. Legacy trees,
+     * no live member of this tree's owned POSIX process group and no live
+     * identity-captured descendant which escaped that group. Legacy trees,
      * Windows trees, and unsupported platforms resolve false when they settle.
+     * An unobserved daemon remains outside this cooperative POSIX assurance;
+     * only an OS containment primitive can rule that case out completely.
      */
     readonly quiescence: Promise<boolean>
+    /** Structured, honest scope of the same terminal observation. */
+    readonly quiescenceObservation: Promise<ProcessQuiescenceObservation>
 
     constructor(
         private readonly child: ChildProcess,
@@ -206,13 +267,17 @@ export class ManagedProcessTree {
         this.quiescence = new Promise<boolean>((resolve) => {
             this.resolveQuiescence = resolve
         })
+        this.quiescenceObservation =
+            new Promise<ProcessQuiescenceObservation>((resolve) => {
+                this.resolveQuiescenceObservation = resolve
+            })
         activeProcessTrees.add(this)
 
         // Registration is synchronous so a host TERM immediately after spawn
         // cannot miss a newly detached provider group.
         if (
             this.ownedProcessGroupId !== null &&
-            providerOwnershipManifestConfigured()
+            processTreeOwnershipManifestConfigured()
         ) {
             const rootTable = readRootProcessTableSync(this.rootPid)
             this.observe(rootTable)
@@ -262,6 +327,14 @@ export class ManagedProcessTree {
         return this.quiescence
     }
 
+    /** Signal the tree and return the exact scope Baro actually observed. */
+    terminateAndObserve(
+        signal: NodeJS.Signals = "SIGTERM",
+    ): Promise<ProcessQuiescenceObservation> {
+        this.terminate(signal)
+        return this.quiescenceObservation
+    }
+
     [TERMINATE_WITH_TABLE](
         signal: NodeJS.Signals,
         table: ProcessTable | null,
@@ -301,7 +374,7 @@ export class ManagedProcessTree {
         // executable shim may already be gone while its real provider remains
         // in the owned group; waiting for the async observer would leave only
         // the dead shim identity in Rust's crash-recovery manifest. Concurrent
-        // close callbacks share this one bounded table read.
+        // terminal callbacks share this one bounded table read.
         const table =
             this.ownedProcessGroupId === null
                 ? null
@@ -315,21 +388,23 @@ export class ManagedProcessTree {
                 ? null
                 : this.observeOwnedProcessGroup(table)
         this.rootClosed = true
-        if (groupAlive === false) {
+        const trackedAlive = this.hasTrackedProcessAlive(table)
+        if (groupAlive === false && !trackedAlive) {
             // The terminal snapshot itself certifies that the owned group is
-            // empty. This is the ordinary successful one-shot path, not an
-            // ownership-registration failure, and no stale PGID is signalled.
+            // empty and every identity-captured escape is gone. This is the
+            // ordinary successful one-shot path, not an ownership-registration
+            // failure, and no stale PGID is signalled.
             this.settle(true)
             return
         }
         if (
-            groupAlive === true &&
+            (groupAlive === true || trackedAlive) &&
             this.ownedProcessGroupId !== null &&
-            providerOwnershipManifestConfigured()
+            processTreeOwnershipManifestConfigured()
         ) {
             const publication = publishActiveProviderOwnership()
             if (
-                this.ownershipSnapshot() === null ||
+                this.ownershipSnapshots() === null ||
                 publication === null ||
                 !publication.ok
             ) {
@@ -392,7 +467,20 @@ export class ManagedProcessTree {
             }
         }
 
-        this.captureOwnedGroupMembers(table)
+        // A detached executable may be only a short-lived shim. The OS can
+        // reap that root before Node delivers its `close` callback, while the
+        // real provider is already reparented and therefore no longer
+        // discoverable through ancestry. Until that terminal callback, the
+        // exact process group still belongs to this spawned root, so retain
+        // every live identity in it. After `rootClosed`, only previously
+        // captured identities may extend the tracked set; that avoids later
+        // attaching to a numerically reused process group.
+        this.captureOwnedGroupMembers(
+            table,
+            !this.rootClosed &&
+                this.child.exitCode === null &&
+                this.child.signalCode === null,
+        )
     }
 
     /** Internal callback for a completed shared observation. */
@@ -402,6 +490,7 @@ export class ManagedProcessTree {
 
         if (this.ownedProcessGroupId !== null) {
             const groupAlive = this.observeOwnedProcessGroup(table)
+            const trackedAlive = this.hasTrackedProcessAlive(table)
 
             // Unknown is deliberately not absence. Keep ownership and retry;
             // neither `done` nor the positive certification may settle from a
@@ -417,12 +506,12 @@ export class ManagedProcessTree {
             }
 
             if (this.terminating) {
-                if (!groupAlive) this.settle(true)
+                if (!groupAlive && !trackedAlive) this.settle(true)
                 return
             }
 
             if (!this.rootClosed) return
-            if (groupAlive) this.terminate("SIGTERM")
+            if (groupAlive || trackedAlive) this.terminate("SIGTERM")
             else this.settle(true)
             return
         }
@@ -482,21 +571,21 @@ export class ManagedProcessTree {
                 this.child.exitCode === null &&
                 this.child.signalCode === null
             if (
-                !rootStillAnchorsGroup &&
-                !this.hasOwnedGroupIdentityInTable(table)
+                rootStillAnchorsGroup ||
+                this.hasOwnedGroupIdentityInTable(table)
             ) {
-                // Once the root has closed, a numeric PGID alone is not
-                // authority: it can be recycled. TERM and the later KILL each
-                // require a currently matching PID/start-time/PGID identity.
-                return
+                try {
+                    process.kill(-this.ownedProcessGroupId, signal)
+                } catch {
+                    // ESRCH is expected when the group exits between
+                    // observation and delivery. Absence is certified by a
+                    // later table, never inferred from this signal call.
+                }
             }
-            try {
-                process.kill(-this.ownedProcessGroupId, signal)
-            } catch {
-                // ESRCH is expected when the group exits between observation
-                // and delivery. Absence is certified by a later table, never
-                // inferred from this best-effort signal call.
-            }
+            // A provider can call setsid/setpgid and leave the root's group.
+            // Retained PID/start-time identities remain authority for those
+            // observed descendants and must be drained before certification.
+            this.signalTrackedProcessesOutsideOwnedGroup(signal, table)
             return
         }
 
@@ -578,6 +667,28 @@ export class ManagedProcessTree {
                 process.kill(identity.pid, signal)
             } catch {
                 // The process may exit after validation and before the signal.
+            }
+        }
+    }
+
+    private signalTrackedProcessesOutsideOwnedGroup(
+        signal: NodeJS.Signals,
+        table: ProcessTable | null,
+    ): void {
+        for (const identity of this.identities.values()) {
+            const observed = table?.records.get(identity.pid)
+            if (table !== null) {
+                if (!observedProcessIsAlive(identity, observed)) continue
+                if (
+                    observed?.processGroupId === this.ownedProcessGroupId
+                ) continue
+            } else if (!currentIdentityIsAlive(identity)) {
+                continue
+            }
+            try {
+                process.kill(identity.pid, signal)
+            } catch {
+                // The identity may exit after validation and before delivery.
             }
         }
     }
@@ -675,7 +786,14 @@ export class ManagedProcessTree {
             const table = readProcessTableSync()
             this.observe(table)
             const groupAlive = this.observeOwnedProcessGroup(table)
-            this.settle(groupAlive === false)
+            const trackedAlive = this.hasTrackedProcessAlive(table)
+            const groupAbsent = groupAlive === false
+            const trackedAbsent = !trackedAlive
+            this.settle(
+                groupAbsent && trackedAbsent,
+                groupAbsent,
+                trackedAbsent,
+            )
         }, this.quiescenceTimeoutMs)
     }
 
@@ -685,7 +803,11 @@ export class ManagedProcessTree {
         this.quiescenceTimer = null
     }
 
-    private settle(quiescenceCertified = false): void {
+    private settle(
+        quiescenceObserved = false,
+        groupAbsent = quiescenceObserved,
+        trackedAbsent = quiescenceObserved,
+    ): void {
         if (this.settled) return
         this.settled = true
         this.clearEscalationTimer()
@@ -698,34 +820,90 @@ export class ManagedProcessTree {
         activeProcessTrees.delete(this)
         publishActiveProviderOwnership()
         rescheduleSharedObservation()
-        this.resolveQuiescence(quiescenceCertified)
+        const observation: ProcessQuiescenceObservation = {
+            assurance: quiescenceObserved
+                ? "cooperative-observed"
+                : "none",
+            mechanism:
+                this.ownedProcessGroupId !== null
+                    ? "posix-owned-group-plus-identity-table"
+                    : "uncontained-process-tree",
+            groupAbsent,
+            trackedAbsent,
+        }
+        this.resolveQuiescence(quiescenceObserved)
+        this.resolveQuiescenceObservation(observation)
         this.resolveDone()
     }
 
-    ownershipSnapshot(): ProviderOwnershipGroup | null {
+    ownershipSnapshots(): ProviderOwnershipGroup[] | null {
         if (
             this.ownedProcessGroupId === null ||
             this.ownedGroupIdentitySource === null ||
-            this.ownedGroupMembers.size === 0
+            this.trackedGroupMembers.size === 0
         ) {
             return null
         }
-        return {
-            processGroupId: this.ownedProcessGroupId,
-            identitySource: this.ownedGroupIdentitySource,
-            members: [...this.ownedGroupMembers.values()].map((member) => ({
-                pid: member.pid,
-                startTime: member.startTime ?? "",
-            })),
-        }
+        return [...this.trackedGroupMembers]
+            .sort(([left], [right]) => left - right)
+            .map(([processGroupId, members]) => ({
+                processGroupId,
+                identitySource: this.ownedGroupIdentitySource!,
+                members: [...members.values()]
+                    .sort((left, right) => left.pid - right.pid)
+                    .map((member) => ({
+                        pid: member.pid,
+                        startTime: member.startTime ?? "",
+                    })),
+            }))
     }
 
     requiresOwnershipManifestEntry(): boolean {
         return this.ownedProcessGroupId !== null
     }
 
+    /** True when spawn returned a concrete provider PID, on any platform. */
+    hasSpawnedRootProcess(): boolean {
+        return this.rootPid !== undefined &&
+            Number.isSafeInteger(this.rootPid) &&
+            this.rootPid > 0
+    }
+
     markOwnershipManifestRegistered(): void {
         this.ownershipManifestRegistered = true
+        this.publishedOwnershipFingerprint =
+            this.currentOwnershipFingerprint()
+    }
+
+    /** Stop only a tree whose newly observed membership is absent from the
+     * last durable manifest. Called after the shared batch publish returns, so
+     * this path must not attempt another publication recursively. */
+    failClosedUnpublishedOwnershipMembership(
+        reason: string,
+        validatedTable: ProcessTable | null,
+    ): void {
+        if (
+            this.ownershipRegistrationFailed ||
+            !this.hasUnpublishedOwnershipMembership()
+        ) {
+            return
+        }
+        this.failClosedOwnershipRegistration(
+            `updated provider membership could not be durably published: ${reason}`,
+            validatedTable,
+        )
+    }
+
+    private currentOwnershipFingerprint(): string | null {
+        const groups = this.ownershipSnapshots()
+        return groups === null ? null : JSON.stringify(groups)
+    }
+
+    private hasUnpublishedOwnershipMembership(): boolean {
+        return (
+            this.currentOwnershipFingerprint() !==
+            this.publishedOwnershipFingerprint
+        )
     }
 
     private failClosedOwnershipRegistration(
@@ -776,22 +954,31 @@ export class ManagedProcessTree {
             }
         }
         this.ownedGroupMembers.clear()
+        this.trackedGroupMembers.clear()
         for (const identity of this.identities.values()) {
-            if (
-                this.ownedGroupMembers.size >=
-                MAX_PROVIDER_OWNERSHIP_MEMBERS_PER_GROUP
-            ) {
-                break
-            }
             const record = table.records.get(identity.pid)
             if (
                 !observedProcessIsAlive(identity, record) ||
-                record?.processGroupId !== this.ownedProcessGroupId ||
+                record === undefined ||
+                record.processGroupId < 2 ||
                 record.startTime === null
             ) {
                 continue
             }
             this.ownedGroupIdentitySource = identitySource
+            const group =
+                this.trackedGroupMembers.get(record.processGroupId) ??
+                new Map<number, ProcessIdentitySnapshot>()
+            if (
+                group.size < MAX_PROVIDER_OWNERSHIP_MEMBERS_PER_GROUP
+            ) {
+                group.set(record.pid, {
+                    pid: record.pid,
+                    startTime: record.startTime,
+                })
+                this.trackedGroupMembers.set(record.processGroupId, group)
+            }
+            if (record.processGroupId !== this.ownedProcessGroupId) continue
             this.ownedGroupMembers.set(record.pid, {
                 pid: record.pid,
                 startTime: record.startTime,
@@ -801,7 +988,7 @@ export class ManagedProcessTree {
 }
 
 function publishActiveProviderOwnership(): ProviderOwnershipPublishResult | null {
-    if (!providerOwnershipManifestConfigured()) return null
+    if (!processTreeOwnershipManifestConfigured()) return null
     if (deferOwnershipPublish) {
         ownershipPublishPending = true
         return null
@@ -813,8 +1000,8 @@ function publishActiveProviderOwnership(): ProviderOwnershipPublishResult | null
     }> = []
     for (const tree of activeProcessTrees) {
         if (!tree.requiresOwnershipManifestEntry()) continue
-        const group = tree.ownershipSnapshot()
-        if (group === null) {
+        const groups = tree.ownershipSnapshots()
+        if (groups === null) {
             // Preserve the last complete generation. The caller which owns a
             // newly spawned tree will fail it closed; already registered trees
             // remain represented by the previous generation.
@@ -823,15 +1010,24 @@ function publishActiveProviderOwnership(): ProviderOwnershipPublishResult | null
                 error: "an active provider group has no identity-safe ownership snapshot",
             }
         }
-        entries.push({ tree, group })
+        for (const group of groups) entries.push({ tree, group })
     }
-    const result = publishProviderOwnership(entries.map(({ group }) => group))
+    const result = (ownershipPublisherForTests ?? publishProviderOwnership)(
+        entries.map(({ group }) => group),
+    )
     if (result.ok) {
         for (const { tree } of entries) {
             tree.markOwnershipManifestRegistered()
         }
     }
     return result
+}
+
+function processTreeOwnershipManifestConfigured(): boolean {
+    return (
+        ownershipPublisherForTests !== null ||
+        providerOwnershipManifestConfigured()
+    )
 }
 
 function processIdentitySource(): ProviderIdentitySource | null {
@@ -903,6 +1099,13 @@ async function runSharedObservation(): Promise<void> {
     }
     if (activeProcessTrees.size === 0) return
 
+    // A process table is a point-in-time observation of exactly the trees
+    // which existed when its read began. A new tree can be constructed while
+    // an asynchronous `ps` scan is in flight; applying that pre-spawn table to
+    // it would erase the synchronously registered root identity and trigger a
+    // false ownership failure. Its constructor requests an immediate rerun,
+    // so leave it for that fresh observation instead.
+    const observedTrees = [...activeProcessTrees]
     observationInFlight = true
     observationScansStarted += 1
     observationActiveScans += 1
@@ -925,14 +1128,27 @@ async function runSharedObservation(): Promise<void> {
 
     deferOwnershipPublish = true
     try {
-        for (const tree of [...activeProcessTrees]) {
+        for (const tree of observedTrees) {
+            if (!activeProcessTrees.has(tree)) continue
             tree.handleObservation(table)
         }
     } finally {
         deferOwnershipPublish = false
     }
     if (ownershipPublishPending || activeProcessTrees.size > 0) {
-        publishActiveProviderOwnership()
+        const publication = publishActiveProviderOwnership()
+        if (publication !== null && !publication.ok) {
+            // The last durable generation still protects unchanged trees. Kill
+            // only trees whose newly observed membership is missing from it.
+            // This direct fail-closed path deliberately does not publish again;
+            // the next ordinary observer turn will serialize the drained set.
+            for (const tree of [...activeProcessTrees]) {
+                tree.failClosedUnpublishedOwnershipMembership(
+                    publication.error,
+                    table,
+                )
+            }
+        }
     }
 
     if (activeProcessTrees.size === 0) {

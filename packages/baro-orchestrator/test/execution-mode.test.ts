@@ -217,6 +217,158 @@ describe("enforceModeContract", () => {
         assert.equal(isVerificationOnlyStory(fixStory), false)
     })
 
+    it("preserves a verification-titled story that changes streaming behavior", () => {
+        const story = {
+            title: "Verify OpenAI Responses streaming cancellation races",
+            description:
+                "After correcting the SDK boundary, make the Responses " +
+                "streaming path consume the iterable through " +
+                "abortableAsyncIterable and complete deterministic race tests.",
+        }
+        const finalGate = {
+            title: "Run npm test and report results",
+            description: "Execute the existing suite and report the results.",
+        }
+
+        assert.equal(isVerificationOnlyStory(story), false)
+        assert.equal(isVerificationOnlyStory(finalGate), true)
+    })
+
+    it("fails open when a verification-titled story requests substantive code changes", () => {
+        const implementationDescriptions = [
+            "Repair abort propagation across nested workers.",
+            "Replace the legacy cancellation adapter with the shared controller.",
+            "Remove the obsolete process fallback from the execution path.",
+            "Delete the stale signal shim after migrating its callers.",
+            "Correct the SDK boundary so cancellation reaches the response stream.",
+            "Consume the response iterable through abortableAsyncIterable.",
+            "Propagate the terminal signal to every active child process.",
+            "Enforce lease ownership before persisting the result.",
+        ]
+
+        for (const description of implementationDescriptions) {
+            assert.equal(
+                isVerificationOnlyStory({
+                    title: "Verify cancellation tests",
+                    description,
+                }),
+                false,
+                description,
+            )
+        }
+    })
+
+    it("still recognizes pure and bounded-repair final verification gates", () => {
+        const finalGates = [
+            {
+                title: "Run npm test and npm run typecheck",
+                description: "Execute the existing commands and report their results.",
+            },
+            {
+                title: "Run npm run test:unit",
+                description: "Execute the existing command and report the results.",
+            },
+            {
+                title: "Run the test suite and repair failures",
+                description: "Repair any test failures caused by integration issues. Do not replace product behavior.",
+            },
+            {
+                title: "Execute the final build",
+                description: "Check the existing build output; do not modify implementation code.",
+            },
+        ]
+
+        for (const story of finalGates) {
+            assert.equal(isVerificationOnlyStory(story), true, story.title)
+        }
+    })
+
+    it("fails open for ambiguous verification language and product scope", () => {
+        const implementationStories = [
+            {
+                title: "Verify build compatibility",
+                description: "Support Windows and preserve legacy configuration.",
+            },
+            {
+                title: "Check test isolation",
+                description: "Ensure workers cannot read sibling state.",
+            },
+            {
+                title: "Audit the final build",
+                description: "Upgrade the Windows packaging configuration.",
+            },
+            {
+                title: "Run npm test and support Windows",
+                description: "Execute the existing suite after configuring the shim.",
+            },
+            {
+                title: "Run npm test",
+                description: "Use the shared adapter and allow legacy callers.",
+            },
+            {
+                title: "Run tests",
+                description: "Check the existing tests and deploy the package.",
+            },
+            {
+                title: "Execute the final build",
+                description: "Verify the final build and publish artifacts.",
+            },
+            {
+                title: "Run npm test",
+                description: "Check the existing suite and commit generated fixes.",
+            },
+            {
+                title: "Run tests",
+                description: "Report results and deploy the package.",
+            },
+            {
+                title: "Run tests",
+                description: "Summarize outcomes and publish artifacts.",
+            },
+            {
+                title: "Run tests",
+                description: "Record status and ship the release.",
+            },
+            {
+                title: "Run npm run deploy",
+                description: "Execute the existing command and report the results.",
+            },
+            {
+                title: "Execute npm run release",
+                description: "Execute the existing command and report the results.",
+            },
+            {
+                title: "Run pnpm publish",
+                description: "Execute the existing command and report the results.",
+            },
+            {
+                title: "Run cargo fmt",
+                description: "Execute the existing command and report the results.",
+            },
+            ...[
+                "npm run test:deploy",
+                "npm run build:publish",
+                "npm run build-release",
+                "npm run lint:ship",
+                "npm run test:seed",
+                "npm run build:upload",
+                "npm run check:test:deploy",
+                "npm run build (deploy production)",
+                "build (publish artifacts)",
+                "test (ship release)",
+                "cargo build (upload package)",
+                "build (seed database)",
+            ].map((command) => ({
+                title: `Run ${command}`,
+                description: "Execute the existing command and report the results.",
+            })),
+        ]
+
+        for (const story of implementationStories) {
+            assert.equal(isVerificationOnlyStory(story), false, story.title)
+        }
+    })
+
     it("refuses a plan made entirely of final-gate stories", () => {
         assert.throws(
             () => enforceModeContract(

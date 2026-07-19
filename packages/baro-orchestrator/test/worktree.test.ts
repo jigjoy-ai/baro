@@ -6,6 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { GitGate } from "../src/git.js"
+import { captureCriticRepositoryFingerprint } from "../src/participants/critic-evidence.js"
 import { WorktreeManager } from "../src/worktree.js"
 
 // ── helpers ──────────────────────────────────────────────────────────
@@ -91,6 +92,118 @@ describe("WorktreeManager — lifecycle", () => {
         assert.ok(!git(repo, "worktree", "list").includes(path!), "worktree pruned")
         const branches = git(repo, "branch", "--list", `baro-wt/${runId}/S1`)
         assert.equal(branches, "", "branch deleted")
+    })
+})
+
+describe("WorktreeManager — reviewed candidate seal", () => {
+    it("merges the exact reviewed bytes after auto-committing them", async () => {
+        const path = (await mgr.create("S-sealed"))!
+        writeFileSync(join(path, "reviewed.txt"), "reviewed candidate\n")
+        const target = {
+            cwd: path,
+            baseSha: mgr.creationSha("S-sealed"),
+        }
+        const expectedFingerprint =
+            await captureCriticRepositoryFingerprint(target)
+
+        const merged = await mgr.mergeBack("S-sealed", {
+            expectedFingerprint,
+            capture: captureCriticRepositoryFingerprint,
+        })
+
+        assert.equal(merged, true)
+        assert.equal(
+            readFileSync(join(repo, "reviewed.txt"), "utf8"),
+            "reviewed candidate\n",
+        )
+    })
+
+    it("rejects bytes changed after review before they can reach the run branch", async () => {
+        const path = (await mgr.create("S-mutated"))!
+        writeFileSync(join(path, "candidate.txt"), "reviewed bytes\n")
+        const target = {
+            cwd: path,
+            baseSha: mgr.creationSha("S-mutated"),
+        }
+        const expectedFingerprint =
+            await captureCriticRepositoryFingerprint(target)
+
+        // Models a provider child (or any other writer) changing the isolated
+        // worktree after Critic PASS but before integration begins.
+        writeFileSync(join(path, "candidate.txt"), "late unreviewed bytes\n")
+
+        await assert.rejects(
+            mgr.mergeBack("S-mutated", {
+                expectedFingerprint,
+                capture: captureCriticRepositoryFingerprint,
+            }),
+            /reviewed candidate fingerprint mismatch/,
+        )
+        assert.equal(existsSync(join(repo, "candidate.txt")), false)
+        assert.equal(mgr.activePath("S-mutated"), path)
+        assert.equal(git(repo, "status", "--porcelain"), "")
+    })
+
+    it("rejects a writer racing the integration fingerprint recheck", async () => {
+        const path = (await mgr.create("S-racing"))!
+        writeFileSync(join(path, "candidate.txt"), "reviewed bytes\n")
+        const target = {
+            cwd: path,
+            baseSha: mgr.creationSha("S-racing"),
+        }
+        const expectedFingerprint =
+            await captureCriticRepositoryFingerprint(target)
+
+        await assert.rejects(
+            mgr.mergeBack("S-racing", {
+                expectedFingerprint,
+                capture: async (sealedTarget) => {
+                    const fingerprint =
+                        await captureCriticRepositoryFingerprint(sealedTarget)
+                    writeFileSync(
+                        join(path, "candidate.txt"),
+                        "write after fingerprint\n",
+                    )
+                    return fingerprint
+                },
+            }),
+            /reviewed candidate remained dirty after commit/,
+        )
+        assert.equal(existsSync(join(repo, "candidate.txt")), false)
+    })
+
+    it("rejects rewritten history even when it recreates the reviewed final bytes", async () => {
+        writeFileSync(join(repo, "remove-me.txt"), "present at story creation\n")
+        git(repo, "add", "remove-me.txt")
+        git(repo, "commit", "-m", "add file before story")
+
+        const path = (await mgr.create("S-rewritten"))!
+        const baseSha = mgr.creationSha("S-rewritten")
+        assert.ok(baseSha)
+        rmSync(join(path, "remove-me.txt"))
+        const expectedFingerprint =
+            await captureCriticRepositoryFingerprint({ cwd: path, baseSha })
+
+        // The parent tree has the same effective deletion relative to base,
+        // but merging this ancestor into the run branch would be a successful
+        // no-op rather than integrating the reviewed candidate.
+        git(path, "reset", "--hard", `${baseSha}^`)
+        assert.equal(
+            await captureCriticRepositoryFingerprint({ cwd: path, baseSha }),
+            expectedFingerprint,
+        )
+
+        await assert.rejects(
+            mgr.mergeBack("S-rewritten", {
+                expectedFingerprint,
+                capture: captureCriticRepositoryFingerprint,
+            }),
+            /history no longer descends from its creation SHA/,
+        )
+        assert.equal(
+            readFileSync(join(repo, "remove-me.txt"), "utf8"),
+            "present at story creation\n",
+        )
     })
 })
 

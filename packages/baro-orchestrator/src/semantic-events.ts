@@ -531,6 +531,28 @@ export interface AgentTurnCompletedData {
 export const AgentTurnCompleted =
     defineSemanticEvent<AgentTurnCompletedData>("agent_turn_completed")
 
+/**
+ * Authenticated boundary emitted by a one-shot story participant only after
+ * its provider process has settled. The terminal projector uses it to keep
+ * Critic evidence capture behind process-tree quiescence.
+ */
+export interface OneShotAttemptFinalizedData {
+    runId: string
+    storyId: string
+    leaseId: string
+    generation: number
+    /** Monotonic invocation number within this lease generation. */
+    attempt: number
+    disposition: "publish" | "discard"
+    ownedProcessGroup: boolean
+    /** POSIX group + identity-table observation, not full OS containment. */
+    quiescenceAssurance: "cooperative-observed" | "none"
+}
+export const OneShotAttemptFinalized =
+    defineSemanticEvent<OneShotAttemptFinalizedData>(
+        "one_shot_attempt_finalized",
+    )
+
 /** Backend-neutral, replay-safe usage/cost observation for one model call. */
 export const ModelInvocationMeasured =
     defineSemanticEvent<ModelInvocationMeasuredData>("model_invocation_measured")
@@ -606,6 +628,10 @@ export interface CritiqueData {
     violatedCriteria: readonly string[]
     turn: number
     modelUsed: string
+    /** Exact changed-content fingerprint bracketed around the complete Critic
+     * evidence capture. Present only when that live repository snapshot stayed
+     * stable; collective integration rechecks it immediately before merge. */
+    repositoryFingerprint?: string
 }
 export const Critique = defineSemanticEvent<CritiqueData>("critique")
 
@@ -616,6 +642,8 @@ export interface StoryQualityCritiqueSnapshot {
     violatedCriteria: readonly string[]
     turn: number
     modelUsed: string
+    /** Stable repository identity carried from the authoritative Critic. */
+    repositoryFingerprint?: string
 }
 
 export interface StoryQualityCompletedData {
@@ -920,6 +948,11 @@ export interface StoryIntegrationRequestedData {
     storyId: string
     attempts: number
     durationSecs: number
+    /** True only for a Critic-evaluated story candidate. Stories with no
+     * acceptance criteria deliberately do not require a repository seal. */
+    candidateFingerprintRequired?: boolean
+    /** Changed-content fingerprint accepted by Critic for this exact lease. */
+    candidateFingerprint?: string
 }
 export const StoryIntegrationRequested =
     defineSemanticEvent<StoryIntegrationRequestedData>("story_integration_requested")
@@ -1518,6 +1551,7 @@ export type InfrastructureFailureCode =
     | "tool_unavailable"
     | "command_timeout"
     | "process_spawn_failed"
+    | "process_quiescence_uncertified"
     | "worktree_unavailable"
     | "decision_unknown"
     | "authentication_failed"
