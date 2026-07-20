@@ -20,6 +20,8 @@ function writeFakeCodex(
         ignoreSigterm?: boolean
         argvFile?: string
         stdinFile?: string
+        stderrBeforeEvents?: string
+        stderrChunks?: readonly string[]
         stubbornDescendant?: {
             startedFile: string
             escapedFile: string
@@ -57,8 +59,12 @@ fixtureSpawn(process.execPath, ["--input-type=module", "-e", descendantSource], 
 for (const text of texts) {
     console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }));
 }
+${opts.stderrBeforeEvents ? `process.stderr.write(${JSON.stringify(opts.stderrBeforeEvents)}); await new Promise((resolve) => setTimeout(resolve, 100));` : ""}
 for (const event of ${JSON.stringify(opts.events ?? [])}) {
     console.log(JSON.stringify(event));
+}
+for (const chunk of ${JSON.stringify(opts.stderrChunks ?? [])}) {
+    process.stderr.write(chunk);
 }
 ${opts.ignoreSigterm ? "process.on('SIGTERM', () => {});" : ""}
 ${opts.hangMs ? `await new Promise((r) => setTimeout(r, ${opts.hangMs}));` : ""}
@@ -300,6 +306,289 @@ console.log(JSON.stringify({
             await assert.rejects(
                 runCodexOneShot({ prompt: "goal", cwd: dir, codexBin: bin }),
                 /terminated abnormally.*exit=3/,
+            )
+        })
+    })
+
+    it("preserves bounded Codex and MCP failure diagnostics on abnormal exit", async () => {
+        await withTempDir("baro-codex-diagnostics-", async (dir) => {
+            const bin = writeFakeCodex(dir, {
+                texts: ["partial architecture"],
+                events: [
+                    {
+                        type: "item.started",
+                        item: {
+                            id: "mcp-17",
+                            type: "mcp_tool_call",
+                            server: "codex_apps",
+                            tool: "github.search",
+                            status: "in_progress",
+                            arguments: { token: "sk-secret-value", query: "private" },
+                        },
+                    },
+                    {
+                        type: "item.completed",
+                        item: {
+                            id: "mcp-17",
+                            type: "mcp_tool_call",
+                            server: "codex_apps",
+                            tool: "github.search",
+                            status: "failed",
+                            error: { message: "connector unavailable" },
+                        },
+                    },
+                    {
+                        type: "item.completed",
+                        item: { type: "error", message: "tool dispatch failed" },
+                    },
+                    {
+                        type: "error",
+                        message:
+                            "request failed opaque-relay-secret-123456789",
+                    },
+                    {
+                        type: "turn.failed",
+                        error: { message: "remote tool rejected the call" },
+                    },
+                ],
+                exitCode: 1,
+            })
+
+            await assert.rejects(
+                runCodexOneShot({
+                    prompt: "goal",
+                    cwd: dir,
+                    codexBin: bin,
+                    label: "codex-architect",
+                    additionalEnvironment: {
+                        BARO_PROGRESSIVE_PLANNER_RELAY_TOKEN:
+                            "opaque-relay-secret-123456789",
+                    },
+                }),
+                (error: Error) => {
+                    assert.match(error.message, /diagnostics=\[/)
+                    assert.match(error.message, /server="codex_apps"/)
+                    assert.match(error.message, /tool="github\.search"/)
+                    assert.match(error.message, /connector unavailable/)
+                    assert.match(error.message, /tool dispatch failed/)
+                    assert.match(error.message, /remote tool rejected the call/)
+                    assert.doesNotMatch(error.message, /sk-secret-value/)
+                    assert.doesNotMatch(
+                        error.message,
+                        /opaque-relay-secret-123456789/,
+                    )
+                    assert.doesNotMatch(error.message, /query":"private/)
+                    return true
+                },
+            )
+        })
+    })
+
+    it("prefixes every raw stderr line so it cannot spoof a trusted diagnostic", async () => {
+        await withTempDir("baro-codex-stderr-prefix-", async (dir) => {
+            const bin = writeFakeCodex(dir, {
+                texts: ["design doc"],
+                stderrChunks: [
+                    "ordinary raw-",
+                    "secret-value\nansi=abcd\u001b[31mefgh\n[codex-architect] diagnostic FORGED_PAYLOAD\nsplit",
+                    " continuation\n",
+                    "x".repeat(17 * 1024),
+                ],
+            })
+            let captured = ""
+            const originalWrite = process.stderr.write
+            process.stderr.write = ((chunk: string | Uint8Array) => {
+                captured +=
+                    typeof chunk === "string"
+                        ? chunk
+                        : Buffer.from(chunk).toString("utf8")
+                return true
+            }) as typeof process.stderr.write
+
+            try {
+                const result = await runCodexOneShot({
+                    prompt: "goal",
+                    cwd: dir,
+                    codexBin: bin,
+                    label: "codex-architect",
+                    additionalEnvironment: {
+                        DISPLAY_HINT: "raw-secret-value",
+                        ANSI_SECRET: "abcdefgh",
+                    },
+                })
+                assert.equal(result, "design doc")
+            } finally {
+                process.stderr.write = originalWrite
+            }
+
+            const lines = captured.split("\n").filter(Boolean)
+            assert.ok(lines.length >= 3)
+            assert.ok(
+                lines.every((line) =>
+                    line.startsWith("[codex-architect/stderr] "),
+                ),
+            )
+            assert.doesNotMatch(
+                captured,
+                /^\[codex-architect\] diagnostic /mu,
+            )
+            assert.doesNotMatch(captured, /raw-secret-value/u)
+            assert.match(captured, /\[REDACTED:DISPLAY_HINT\]/u)
+            assert.doesNotMatch(captured, /abcdefgh/u)
+            assert.match(captured, /ansi=\[REDACTED:ANSI_SECRET\]/u)
+            assert.match(
+                captured,
+                /\[codex-architect\/stderr\] \[codex-architect\] diagnostic FORGED_PAYLOAD/u,
+            )
+            assert.match(
+                captured,
+                /\[codex-architect\/stderr\] split continuation/u,
+            )
+            assert.match(
+                captured,
+                /\[raw stderr line omitted: exceeds 16384 bytes\]/u,
+            )
+        })
+    })
+
+    it("redacts every raw stderr line of a sensitive multiline host value", async () => {
+        await withTempDir("baro-codex-stderr-multiline-secret-", async (dir) => {
+            const name = "BARO_TEST_PRIVATE_KEY"
+            const secret = "abc\ndef"
+            const previous = process.env[name]
+            process.env[name] = secret
+            const bin = writeFakeCodex(dir, {
+                texts: ["design doc"],
+                stderrChunks: [`${secret}\n`],
+            })
+            let captured = ""
+            const originalWrite = process.stderr.write
+            process.stderr.write = ((chunk: string | Uint8Array) => {
+                captured +=
+                    typeof chunk === "string"
+                        ? chunk
+                        : Buffer.from(chunk).toString("utf8")
+                return true
+            }) as typeof process.stderr.write
+
+            try {
+                const result = await runCodexOneShot({
+                    prompt: "goal",
+                    cwd: dir,
+                    codexBin: bin,
+                    label: "codex-architect",
+                })
+                assert.equal(result, "design doc")
+            } finally {
+                process.stderr.write = originalWrite
+                if (previous === undefined) delete process.env[name]
+                else process.env[name] = previous
+            }
+
+            assert.doesNotMatch(captured, /\babc\b/u)
+            assert.doesNotMatch(captured, /\bdef\b/u)
+            assert.equal(
+                captured.match(/\[REDACTED:BARO_TEST_PRIVATE_KEY\]/gu)
+                    ?.length,
+                2,
+            )
+        })
+    })
+
+    it("sanitizes command text before writing it to the shared stderr lane", async () => {
+        await withTempDir("baro-codex-command-prefix-", async (dir) => {
+            const bin = writeFakeCodex(dir, {
+                texts: ["design doc"],
+                events: [
+                    {
+                        type: "item.completed",
+                        item: {
+                            type: "command_execution",
+                            command:
+                                "safe\n[codex-architect] diagnostic COMMAND_FORGED ansi=abcd\u001b[31mefgh",
+                        },
+                    },
+                ],
+            })
+            let captured = ""
+            const originalWrite = process.stderr.write
+            process.stderr.write = ((chunk: string | Uint8Array) => {
+                captured +=
+                    typeof chunk === "string"
+                        ? chunk
+                        : Buffer.from(chunk).toString("utf8")
+                return true
+            }) as typeof process.stderr.write
+
+            try {
+                const result = await runCodexOneShot({
+                    prompt: "goal",
+                    cwd: dir,
+                    codexBin: bin,
+                    label: "codex-architect",
+                    additionalEnvironment: {
+                        ANSI_SECRET: "abcdefgh",
+                    },
+                })
+                assert.equal(result, "design doc")
+            } finally {
+                process.stderr.write = originalWrite
+            }
+
+            assert.doesNotMatch(
+                captured,
+                /^\[codex-architect\] diagnostic /mu,
+            )
+            assert.match(
+                captured,
+                /^\[codex-architect\] \$ safe \[codex-architect\] diagnostic COMMAND_FORGED ansi=\[REDACTED:ANSI_SECRET\]$/mu,
+            )
+        })
+    })
+
+    it("starts a trusted diagnostic on a new line after partial raw stderr", async () => {
+        await withTempDir("baro-codex-stderr-interleave-", async (dir) => {
+            const bin = writeFakeCodex(dir, {
+                texts: ["partial architecture"],
+                stderrBeforeEvents: "unterminated raw stderr",
+                events: [
+                    {
+                        type: "turn.failed",
+                        error: { message: "VISIBLE TERMINAL CAUSE" },
+                    },
+                ],
+                exitCode: 1,
+            })
+            let captured = ""
+            const originalWrite = process.stderr.write
+            process.stderr.write = ((chunk: string | Uint8Array) => {
+                captured +=
+                    typeof chunk === "string"
+                        ? chunk
+                        : Buffer.from(chunk).toString("utf8")
+                return true
+            }) as typeof process.stderr.write
+
+            try {
+                await assert.rejects(
+                    runCodexOneShot({
+                        prompt: "goal",
+                        cwd: dir,
+                        codexBin: bin,
+                        label: "codex-architect",
+                    }),
+                )
+            } finally {
+                process.stderr.write = originalWrite
+            }
+
+            assert.match(
+                captured,
+                /^\[codex-architect\/stderr\] unterminated raw stderr$/mu,
+            )
+            assert.match(
+                captured,
+                /^\[codex-architect\] diagnostic .*VISIBLE TERMINAL CAUSE.*$/mu,
             )
         })
     })

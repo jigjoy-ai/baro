@@ -131,13 +131,25 @@ pub async fn spawn_and_capture_streaming(
 /// Spawn `cmd` and stream its STDOUT line-by-line to `on_event` — the
 /// planner/architect emit their live BaroEvent JSON there while the RESULT
 /// (PRD / decision doc) goes to a `--result-file` the caller reads afterward.
-/// STDERR (debug logs) is drained on a concurrent task, kept out of the event
-/// stream, and persisted to the log alongside the events. Non-zero exit →
+/// STDERR (debug logs) is drained concurrently, kept out of the event stream,
+/// and persisted to the log alongside the events. Non-zero exit →
 /// ProcessRunError with the stderr tail; the log path survives either way.
 pub async fn spawn_and_stream_events(
+    cmd: Command,
+    log_tag: &str,
+    on_event: impl Fn(&str),
+) -> Result<Option<PathBuf>, ProcessRunError> {
+    spawn_and_stream_events_with_stderr(cmd, log_tag, on_event, |_| {}).await
+}
+
+/// Variant of [`spawn_and_stream_events`] that exposes each stderr line while
+/// the child is still running. Callers must filter/redact before forwarding;
+/// stderr is untrusted diagnostic data and never enters the JSON event lane.
+pub async fn spawn_and_stream_events_with_stderr(
     mut cmd: Command,
     log_tag: &str,
     on_event: impl Fn(&str),
+    on_stderr: impl Fn(&str),
 ) -> Result<Option<PathBuf>, ProcessRunError> {
     cmd.kill_on_drop(true);
     configure_process_tree(&mut cmd);
@@ -157,24 +169,15 @@ pub async fn spawn_and_stream_events(
     let stdout_pipe = child.stdout.take().expect("stdout piped above");
     let stderr_pipe = child.stderr.take().expect("stderr piped above");
 
-    // Drain stderr concurrently so a chatty debug log can't wedge the pipe
-    // while we're parked reading the event stream.
-    let stderr_task = tokio::spawn(async move {
-        let mut acc = String::new();
-        let mut lines = BufReader::new(stderr_pipe).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            acc.push_str(&line);
-            acc.push('\n');
-        }
-        acc
-    });
-
     let mut stdout_acc = String::new();
-    let mut lines = BufReader::new(stdout_pipe).lines();
+    let mut stderr_acc = String::new();
+    let mut stdout_lines = BufReader::new(stdout_pipe).lines();
+    let mut stderr_lines = BufReader::new(stderr_pipe).lines();
     let mut stdout_open = true;
+    let mut stderr_open = true;
     let mut status = None;
     let mut wait = Box::pin(child.wait());
-    while status.is_none() || stdout_open {
+    while status.is_none() || stdout_open || stderr_open {
         tokio::select! {
             wait_result = &mut wait, if status.is_none() => {
                 let observed = wait_result.map_err(|e| ProcessRunError {
@@ -186,7 +189,7 @@ pub async fn spawn_and_stream_events(
                 process_tree.terminate();
                 status = Some(observed);
             }
-            line_result = lines.next_line(), if stdout_open => {
+            line_result = stdout_lines.next_line(), if stdout_open => {
                 match line_result {
                     Ok(Some(line)) => {
                         let trimmed = line.trim();
@@ -199,11 +202,20 @@ pub async fn spawn_and_stream_events(
                     Ok(None) | Err(_) => stdout_open = false,
                 }
             }
+            line_result = stderr_lines.next_line(), if stderr_open => {
+                match line_result {
+                    Ok(Some(line)) => {
+                        on_stderr(&line);
+                        stderr_acc.push_str(&line);
+                        stderr_acc.push('\n');
+                    }
+                    Ok(None) | Err(_) => stderr_open = false,
+                }
+            }
         }
     }
     let status = status.expect("child wait branch must complete");
 
-    let stderr_acc = stderr_task.await.unwrap_or_default();
     let log_path = persist_log(log_tag, &stdout_acc, &stderr_acc);
 
     if !status.success() {
@@ -369,7 +381,11 @@ fn persist_log(tag: &str, stdout: &str, stderr: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
+    use tokio::sync::Notify;
 
     #[cfg(unix)]
     static PROCESS_TREE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -420,6 +436,44 @@ mod tests {
         .await
         .expect("command should succeed");
         assert_eq!(*seen.lock().unwrap(), vec!["EV-1", "EV-2"]);
+    }
+
+    #[tokio::test]
+    async fn stream_events_exposes_selected_stderr_before_child_exit() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("printf 'live-diagnostic\\n' >&2; sleep 1");
+        let observed = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(Notify::new());
+        let callback_observed = Arc::clone(&observed);
+        let callback_notify = Arc::clone(&notify);
+
+        let task = tokio::spawn(async move {
+            spawn_and_stream_events_with_stderr(
+                cmd,
+                "test",
+                |_| {},
+                move |line| {
+                    if line == "live-diagnostic" {
+                        callback_observed.store(true, Ordering::SeqCst);
+                        callback_notify.notify_one();
+                    }
+                },
+            )
+            .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_millis(500), notify.notified())
+            .await
+            .expect("stderr callback was not invoked while the child was live");
+        assert!(observed.load(Ordering::SeqCst));
+        assert!(
+            !task.is_finished(),
+            "stderr callback arrived only after child completion"
+        );
+        task.await
+            .expect("supervision task panicked")
+            .expect("fixture should exit successfully");
     }
 
     #[tokio::test]

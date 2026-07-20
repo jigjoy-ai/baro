@@ -24,6 +24,20 @@ pub use outcome::{
 
 const SCRIPT_REL_PATH: &str = "packages/baro-orchestrator/scripts/run-architect.ts";
 const BUNDLE_NAME: &str = "run-architect.mjs";
+const SAFE_CODEX_DIAGNOSTIC_PREFIX: &str = "[codex-architect] diagnostic ";
+
+fn should_forward_live_architect_diagnostic(llm: LlmProvider, line: &str) -> bool {
+    matches!(llm, LlmProvider::Codex) && line.starts_with(SAFE_CODEX_DIAGNOSTIC_PREFIX)
+}
+
+fn forward_live_architect_diagnostic(llm: LlmProvider, line: &str) {
+    if !should_forward_live_architect_diagnostic(llm, line) {
+        return;
+    }
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "{line}");
+    let _ = stderr.flush();
+}
 
 /// Spawn the TS Architect, return the markdown decision document.
 /// `context` (the project's CLAUDE.md or equivalent) travels via a
@@ -125,7 +139,11 @@ pub async fn run_architect(
     }
 
     // Stdout is now the architect's live BaroEvent stream; forward each line.
-    let log_path = subprocess::spawn_and_stream_events(cmd, "architect", on_event).await?;
+    let log_path =
+        subprocess::spawn_and_stream_events_with_stderr(cmd, "architect", on_event, move |line| {
+            forward_live_architect_diagnostic(llm, line)
+        })
+        .await?;
     drop(ctx_tempfile); // explicit cleanup, paranoid about Drop ordering
     drop(mode_tempfile);
 
@@ -286,7 +304,11 @@ async fn run_architect_outcome_with_entry(
         }
     }
 
-    let log_path = subprocess::spawn_and_stream_events(cmd, "architect", on_event).await?;
+    let log_path =
+        subprocess::spawn_and_stream_events_with_stderr(cmd, "architect", on_event, move |line| {
+            forward_live_architect_diagnostic(llm, line)
+        })
+        .await?;
     drop(ctx_tempfile);
     drop(mode_tempfile);
     drop(goal_envelope_tempfile);
@@ -389,6 +411,27 @@ mod tests {
             |event| events.lock().unwrap().push(event.to_string()),
         )
         .await
+    }
+
+    #[test]
+    fn live_codex_diagnostics_are_never_trusted_for_other_backends() {
+        let diagnostic = "[codex-architect] diagnostic codex_event=turn.failed message=failed";
+        assert!(should_forward_live_architect_diagnostic(
+            LlmProvider::Codex,
+            diagnostic
+        ));
+        for llm in [
+            LlmProvider::Claude,
+            LlmProvider::OpenAI,
+            LlmProvider::OpenCode,
+            LlmProvider::Pi,
+        ] {
+            assert!(!should_forward_live_architect_diagnostic(llm, diagnostic));
+        }
+        assert!(!should_forward_live_architect_diagnostic(
+            LlmProvider::Codex,
+            "[opencode-architect/stderr] ordinary stderr"
+        ));
     }
 
     #[tokio::test]

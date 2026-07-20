@@ -13,6 +13,7 @@ import {
     createGatewayBillingCoordinatorFromEnv,
     reconcileAndCloseGatewayBilling,
 } from "../src/billing/index.js"
+import { sanitizeDiagnosticText } from "../src/codex-failure-diagnostics.js"
 import { runArchitectClaude } from "../src/planning/architect-claude.js"
 import { runArchitectCodex } from "../src/planning/architect-codex.js"
 import { runArchitectOpenAI } from "../src/planning/architect-openai.js"
@@ -359,9 +360,10 @@ async function main(): Promise<void> {
         }
     } catch (e) {
         process.stderr.write(
-            `[run-architect] FAILED after ${Date.now() - t0}ms: ${(e as Error)?.message ?? String(e)}\n`,
+            `[run-architect] FAILED after ${Date.now() - t0}ms: ${safeErrorForStderr(e)}\n`,
         )
-        process.exit(1)
+        process.exitCode = 1
+        return
     }
 
     let outcomeTransport: ReturnType<typeof wrapArchitectOutcome> | undefined
@@ -378,9 +380,10 @@ async function main(): Promise<void> {
             )
         } catch (error) {
             process.stderr.write(
-                `[run-architect] FAILED after ${Date.now() - t0}ms: ${(error as Error)?.message ?? String(error)}\n`,
+                `[run-architect] FAILED after ${Date.now() - t0}ms: ${safeErrorForStderr(error)}\n`,
             )
-            process.exit(1)
+            process.exitCode = 1
+            return
         }
     }
     process.stderr.write(`[run-architect] ok in ${Date.now() - t0}ms (${result.length} chars)\n`)
@@ -397,6 +400,25 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-    process.stderr.write(`[run-architect] crashed: ${e?.stack ?? String(e)}\n`)
-    process.exit(3)
+    process.stderr.write(`[run-architect] crashed: ${safeErrorForStderr(e, true)}\n`)
+    process.exitCode = 3
 })
+
+function safeErrorForStderr(value: unknown, includeStack = false): string {
+    const raw =
+        value instanceof Error
+            ? includeStack
+                ? (value.stack ?? value.message)
+                : value.message
+            : String(value)
+    const sanitized = sanitizeDiagnosticText(raw)
+    const maxBytes = 16 * 1024
+    const bytes = Buffer.from(sanitized, "utf8")
+    if (bytes.length <= maxBytes) return sanitized || "unknown error"
+    const marker = "…[truncated]"
+    const markerBytes = Buffer.byteLength(marker, "utf8")
+    return `${bytes
+        .subarray(0, maxBytes - markerBytes)
+        .toString("utf8")
+        .replace(/\uFFFD$/u, "")}${marker}`
+}

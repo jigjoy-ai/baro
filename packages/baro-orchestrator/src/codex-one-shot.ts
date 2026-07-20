@@ -9,6 +9,10 @@
 import { ChildProcess } from "child_process"
 import spawn from "cross-spawn"
 
+import {
+    CodexFailureDiagnostics,
+    sanitizeDiagnosticText,
+} from "./codex-failure-diagnostics.js"
 import { harnessChildEnvironment } from "./harness-environment.js"
 import {
     ManagedProcessTree,
@@ -129,7 +133,7 @@ export async function runCodexOneShot(
     const additionalEnvironment = validateAdditionalEnvironment(
         opts.additionalEnvironment,
     )
-    const label = opts.label ?? "codex"
+    const label = safeLogLabel(opts.label ?? "codex")
     const args = ["exec", "--json"]
     if (opts.skipGitRepoCheck) args.push("--skip-git-repo-check")
     if (opts.isolateToolFilesystem && opts.bypassSandbox !== false) {
@@ -262,8 +266,20 @@ export async function runCodexOneShot(
         let stdoutBuffer = ""
         let stdoutBufferBytes = 0
         let discardingOversizedStdoutLine = false
-        const eventTypesSeen: string[] = []
-        const itemTypesSeen: string[] = []
+        let eventCount = 0
+        let itemCount = 0
+        const eventTypesSeen = new Set<string>()
+        const itemTypesSeen = new Set<string>()
+        const rawStderr = createPrefixedStderrWriter(
+            label,
+            (chunk) => process.stderr.write(chunk),
+            (line) => sanitizeDiagnosticText(line, additionalEnvironment),
+        )
+        const failureDiagnostics = new CodexFailureDiagnostics(
+            label,
+            (line) => process.stderr.write(line),
+            additionalEnvironment,
+        )
         let timedOut = false
         let aborted = false
         let stdinError: Error | null = null
@@ -293,19 +309,34 @@ export async function runCodexOneShot(
             cleanup()
             const elapsedMs = Date.now() - startedAt
 
+            const abnormal =
+                processError !== null ||
+                stdinError !== null ||
+                timedOut ||
+                aborted ||
+                signal != null ||
+                (code != null && code !== 0)
+            const diagnosticSummary =
+                abnormal || !agentMessage.trim()
+                    ? failureDiagnostics.abnormalSummary()
+                    : ""
+
             const ctx = [
                 `elapsed=${elapsedMs}ms`,
                 `exit=${code}`,
                 signal ? `signal=${signal}` : null,
                 timedOut ? `timedOut=true (cap=${timeoutMs}ms)` : null,
                 aborted ? "aborted=true" : null,
-                `events=${eventTypesSeen.length}`,
-                `items=${itemTypesSeen.length}`,
-                eventTypesSeen.length > 0
-                    ? `event_types=[${[...new Set(eventTypesSeen)].join(",")}]`
+                `events=${eventCount}`,
+                `items=${itemCount}`,
+                eventTypesSeen.size > 0
+                    ? `event_types=[${[...eventTypesSeen].join(",")}]`
                     : null,
-                itemTypesSeen.length > 0
-                    ? `item_types=[${[...new Set(itemTypesSeen)].join(",")}]`
+                itemTypesSeen.size > 0
+                    ? `item_types=[${[...itemTypesSeen].join(",")}]`
+                    : null,
+                diagnosticSummary
+                    ? `diagnostics=[${diagnosticSummary}]`
                     : null,
             ]
                 .filter((x): x is string => x !== null)
@@ -315,14 +346,7 @@ export async function runCodexOneShot(
             // callers feed the string into a markdown/JSON extractor that
             // accepts truncated-but-closed fragments, so partial text on
             // timeout/crash would silently yield an incomplete doc or PRD.
-            if (
-                processError ||
-                stdinError ||
-                timedOut ||
-                aborted ||
-                signal != null ||
-                (code != null && code !== 0)
-            ) {
+            if (abnormal) {
                 if (
                     !invocations.finish(
                         unknownCodexObservation(
@@ -422,7 +446,15 @@ export async function runCodexOneShot(
                 return
             }
             const type = typeof event.type === "string" ? event.type : ""
-            if (type) eventTypesSeen.push(type)
+            if (type) {
+                eventCount += 1
+                recordDiagnosticType(
+                    eventTypesSeen,
+                    type,
+                    additionalEnvironment,
+                )
+            }
+            failureDiagnostics.observe(event)
 
             if (type === "turn.completed") {
                 const usage = record(event.usage)
@@ -450,7 +482,12 @@ export async function runCodexOneShot(
                 if (!item) return
                 const innerType =
                     typeof item.type === "string" ? item.type : "?"
-                itemTypesSeen.push(innerType)
+                itemCount += 1
+                recordDiagnosticType(
+                    itemTypesSeen,
+                    innerType,
+                    additionalEnvironment,
+                )
                 if (
                     item.type === "agent_message" &&
                     typeof item.text === "string"
@@ -461,7 +498,10 @@ export async function runCodexOneShot(
                 } else if (innerType === "command_execution") {
                     const cmd =
                         typeof item.command === "string"
-                            ? item.command.slice(0, 120)
+                            ? sanitizeDiagnosticText(
+                                  item.command,
+                                  additionalEnvironment,
+                              ).slice(0, 120)
                             : "?"
                     process.stderr.write(`[${label}] $ ${cmd}\n`)
                 }
@@ -536,11 +576,9 @@ export async function runCodexOneShot(
         proc.stderr!.setEncoding("utf8")
         proc.stderr!.on("data", (chunk: string) => {
             refreshProcessTree()
-            const trimmed = chunk.trimEnd()
-            if (trimmed) {
-                process.stderr.write(`[${label}/stderr] ${trimmed}\n`)
-            }
+            rawStderr.write(chunk)
         })
+        proc.stderr!.on("end", () => rawStderr.end())
 
         proc.on("error", (err) => {
             if (!timedOut && !aborted) processError ??= err
@@ -819,4 +857,86 @@ function numberForLog(value: unknown): number | "?" {
 
 function nonEmptyString(value: unknown): string | null {
     return typeof value === "string" && value.trim() ? value : null
+}
+
+function createPrefixedStderrWriter(
+    label: string,
+    write: (chunk: string) => void,
+    sanitizeLine: (line: string) => string,
+): { write(chunk: string): void; end(): void } {
+    const prefix = `[${safeLogLabel(label)}/stderr] `
+    const maxLineBytes = 16 * 1024
+    let buffered = ""
+    let bufferedBytes = 0
+    let oversized = false
+
+    const append = (fragment: string): void => {
+        if (!fragment || oversized) return
+        const fragmentBytes = Buffer.byteLength(fragment, "utf8")
+        if (bufferedBytes + fragmentBytes > maxLineBytes) {
+            buffered = ""
+            bufferedBytes = 0
+            oversized = true
+            return
+        }
+        buffered += fragment
+        bufferedBytes += fragmentBytes
+    }
+    const flush = (): void => {
+        const message = oversized
+            ? "[raw stderr line omitted: exceeds 16384 bytes]"
+            : boundLogUtf8(sanitizeLine(buffered), maxLineBytes)
+        write(`${prefix}${message}\n`)
+        buffered = ""
+        bufferedBytes = 0
+        oversized = false
+    }
+
+    return {
+        write(chunk: string): void {
+            let offset = 0
+            while (offset < chunk.length) {
+                const newline = chunk.indexOf("\n", offset)
+                if (newline < 0) {
+                    append(chunk.slice(offset))
+                    return
+                }
+                append(chunk.slice(offset, newline))
+                flush()
+                offset = newline + 1
+            }
+        },
+        end(): void {
+            if (bufferedBytes > 0 || oversized) flush()
+        },
+    }
+}
+
+function safeLogLabel(value: string): string {
+    return value.replace(/[^A-Za-z0-9_.-]+/gu, "_").slice(0, 128) || "codex"
+}
+
+function recordDiagnosticType(
+    target: Set<string>,
+    value: string,
+    redactionEnvironment: Readonly<Record<string, string>>,
+): void {
+    if (target.size >= 16) return
+    const sanitized = sanitizeDiagnosticText(value, redactionEnvironment)
+    target.add(
+        /^[A-Za-z0-9_.:-]{1,64}$/u.test(sanitized)
+            ? sanitized
+            : "(invalid)",
+    )
+}
+
+function boundLogUtf8(value: string, maxBytes: number): string {
+    const bytes = Buffer.from(value, "utf8")
+    if (bytes.length <= maxBytes) return value
+    const marker = "…[truncated]"
+    const markerBytes = Buffer.byteLength(marker, "utf8")
+    return `${bytes
+        .subarray(0, Math.max(0, maxBytes - markerBytes))
+        .toString("utf8")
+        .replace(/\uFFFD$/u, "")}${marker}`
 }
