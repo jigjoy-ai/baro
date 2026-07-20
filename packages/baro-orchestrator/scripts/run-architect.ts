@@ -41,6 +41,8 @@ interface Args {
     llm: "claude" | "openai" | "codex" | "opencode" | "pi"
     model?: string
     effort?: string
+    /** Host-owned wall-clock budget for the provider/harness call. */
+    timeoutMs?: number
     contextFile?: string
     /** Operator-fixed ModeContract. OpenAI uses it instead of running intake again. */
     modeFile?: string
@@ -65,6 +67,7 @@ function parseArgs(argv: string[]): Args {
     let llm: "claude" | "openai" | "codex" | "opencode" | "pi" | undefined
     let model: string | undefined
     let effort: string | undefined
+    let timeoutMs: number | undefined
     let contextFile: string | undefined
     let modeFile: string | undefined
     let goalEnvelopeFile: string | undefined
@@ -101,6 +104,21 @@ function parseArgs(argv: string[]): Args {
             case "--effort":
                 effort = required(argv, ++i, "--effort")
                 break
+            case "--timeout-ms": {
+                const raw = required(argv, ++i, "--timeout-ms")
+                const value = Number(raw)
+                if (
+                    !Number.isSafeInteger(value) ||
+                    value < 1 ||
+                    value > 7_200_000
+                ) {
+                    fatal(
+                        `--timeout-ms must be an integer from 1 to 7200000, got '${raw}'`,
+                    )
+                }
+                timeoutMs = value
+                break
+            }
             case "--context-file":
                 contextFile = required(argv, ++i, "--context-file")
                 break
@@ -172,6 +190,7 @@ function parseArgs(argv: string[]): Args {
         llm: llm!,
         model,
         effort,
+        timeoutMs,
         contextFile,
         modeFile,
         goalEnvelopeFile,
@@ -250,6 +269,7 @@ async function main(): Promise<void> {
     process.stderr.write(
         `[run-architect] llm=${args.llm} model=${args.model ?? "(default)"}` +
             (modeContract ? ` mode=${modeContract.mode} (pre-decided)` : "") +
+            (args.timeoutMs === undefined ? "" : ` timeoutMs=${args.timeoutMs}`) +
             "\n",
     )
 
@@ -279,6 +299,7 @@ async function main(): Promise<void> {
                     outcomeMode,
                     readOnly: outcomeMode,
                     goalEnvelope: trustedGoalEnvelope,
+                    timeoutMs: args.timeoutMs,
                 })
             } finally {
                 const result = await reconcileAndCloseGatewayBilling(billing)
@@ -296,6 +317,7 @@ async function main(): Promise<void> {
                 projectContext,
                 modeContract,
                 codexBin: args.codexBin,
+                timeoutMs: args.timeoutMs,
                 outcomeMode,
                 readOnly: outcomeMode,
             })
@@ -307,6 +329,7 @@ async function main(): Promise<void> {
                 projectContext,
                 modeContract,
                 opencodeBin: args.opencodeBin,
+                timeoutMs: args.timeoutMs,
                 outcomeMode,
             })
         } else if (args.llm === "pi") {
@@ -317,6 +340,7 @@ async function main(): Promise<void> {
                 projectContext,
                 modeContract,
                 piBin: args.piBin,
+                timeoutMs: args.timeoutMs,
                 outcomeMode,
             })
         } else {
@@ -328,6 +352,7 @@ async function main(): Promise<void> {
                 projectContext,
                 modeContract,
                 claudeBin: args.claudeBin,
+                timeoutMs: args.timeoutMs,
                 outcomeMode,
                 readOnly: outcomeMode,
             })

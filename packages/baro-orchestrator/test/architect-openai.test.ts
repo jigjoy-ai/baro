@@ -267,6 +267,62 @@ describe("ArchitectOpenAI bounded finalization", () => {
         }
     })
 
+    it("uses the host-owned timeout instead of the native round default", async () => {
+        const runtime: ArchitectOpenAITestRuntime = {
+            model: new GenericOpenAIModel("glm-5.2"),
+            tools: [fakeTool(async () => "unused")],
+            inferRound: async () => await new Promise<never>(() => {}),
+        }
+
+        await assert.rejects(
+            runArchitectOpenAI({
+                goal: "Validate a complex architecture",
+                cwd: "/unused",
+                model: "glm-5.2",
+                modeContract: PARALLEL_MODE,
+                timeoutMs: 20,
+                testRuntime: runtime,
+            }),
+            /phase timed out after 20ms/,
+        )
+    })
+
+    it("shares one host deadline across multiple inference rounds", async () => {
+        const model = new GenericOpenAIModel("glm-5.2")
+        let round = 0
+        const runtime: ArchitectOpenAITestRuntime = {
+            model,
+            tools: [fakeTool(async () => "file contents")],
+            inferRound: async () => {
+                round += 1
+                if (round === 1) {
+                    await new Promise((resolve) => setTimeout(resolve, 25))
+                    return { items: [call("continue")], usage: undefined }
+                }
+                return await new Promise<never>(() => {})
+            },
+        }
+        const startedAt = Date.now()
+
+        await assert.rejects(
+            runArchitectOpenAI({
+                goal: "Validate a multi-round architecture",
+                cwd: "/unused",
+                model: "glm-5.2",
+                modeContract: PARALLEL_MODE,
+                timeoutMs: 60,
+                testRuntime: runtime,
+            }),
+            /phase timed out after 60ms/,
+        )
+
+        assert.equal(round, 2)
+        assert.ok(
+            Date.now() - startedAt < 250,
+            "each round must not receive a fresh full phase budget",
+        )
+    })
+
     it("refuses post-budget calls without hiding tool schemas, then accepts the document", async () => {
         let invokes = 0
         const tool = fakeTool(async () => {

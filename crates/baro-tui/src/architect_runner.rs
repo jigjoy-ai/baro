@@ -159,6 +159,7 @@ pub async fn run_architect_outcome(
     openai_api_key: Option<&str>,
     openai_base_url: Option<&str>,
     effort: &str,
+    timeout_ms: u64,
     session_id: &str,
     goal_request_id: &str,
     architect_request_id: &str,
@@ -182,6 +183,7 @@ pub async fn run_architect_outcome(
         openai_api_key,
         openai_base_url,
         effort,
+        timeout_ms,
         session_id,
         goal_request_id,
         architect_request_id,
@@ -203,6 +205,7 @@ async fn run_architect_outcome_with_entry(
     openai_api_key: Option<&str>,
     openai_base_url: Option<&str>,
     effort: &str,
+    timeout_ms: u64,
     session_id: &str,
     goal_request_id: &str,
     architect_request_id: &str,
@@ -254,7 +257,10 @@ async fn run_architect_outcome_with_entry(
     if let Some(model) = model {
         cmd.arg("--model").arg(model);
     }
-    cmd.arg("--effort").arg(effort);
+    cmd.arg("--effort")
+        .arg(effort)
+        .arg("--timeout-ms")
+        .arg(timeout_ms.to_string());
     if let Some(ref file) = ctx_tempfile {
         cmd.arg("--context-file").arg(file.path());
     }
@@ -376,6 +382,7 @@ mod tests {
             None,
             None,
             "high",
+            1_800_000,
             "session-1",
             "goal-1",
             "architect-1",
@@ -394,6 +401,7 @@ const get = (flag) => args[args.indexOf(flag) + 1];
 if (get("--conversation-session-id") !== "session-1" ||
     get("--goal-request-id") !== "goal-1" ||
     get("--architect-request-id") !== "architect-1" ||
+    get("--timeout-ms") !== "1800000" ||
     readFileSync(get("--context-file"), "utf8") !== "project context" ||
     readFileSync(get("--mode-file"), "utf8") !== '{"schemaVersion":1}' ||
     JSON.parse(readFileSync(get("--goal-envelope-file"), "utf8")).acceptanceCriteria[0] !== "It works") {

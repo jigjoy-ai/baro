@@ -110,6 +110,42 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
         })
     })
 
+    it("uses the host-owned timeout across every CLI harness adapter", async () => {
+        for (const backend of ["claude", "codex", "opencode", "pi"] as const) {
+            await withTempDir(
+                `baro-architect-outcome-${backend}-timeout-`,
+                async (dir) => {
+                    const binary = writeSlowFakeHarness(
+                        dir,
+                        backend,
+                        NEEDS_INPUT,
+                        500,
+                    )
+                    const binaryFlag = {
+                        claude: "--claude-bin",
+                        codex: "--codex-bin",
+                        opencode: "--opencode-bin",
+                        pi: "--pi-bin",
+                    }[backend]
+                    const run = await runArchitect(dir, backend, [
+                        binaryFlag, binary,
+                        "--timeout-ms", "50",
+                    ])
+
+                    assert.notEqual(run.code, 0, `${backend}: ${run.stderr}`)
+                    assert.match(run.stderr, /timeoutMs=50/)
+                    assert.match(
+                        run.stderr,
+                        backend === "claude"
+                            ? /timed out after 50ms/
+                            : /timedOut=true \(cap=50ms\)/,
+                    )
+                    assert.equal(existsSync(join(dir, "outcome.json")), false)
+                },
+            )
+        }
+    })
+
     it("runs OpenCode and Pi pre-acceptance in isolated no-tool evaluators", async () => {
         for (const backend of ["opencode", "pi"] as const) {
             await withTempDir(`baro-architect-outcome-${backend}-`, async (dir) => {
@@ -276,6 +312,32 @@ writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, schema }));
 console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "Repository inspection is complete; preparing the terminal outcome." } }));
 console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(${JSON.stringify(payload)}) } }));
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } }));
+`)
+}
+
+function writeSlowFakeHarness(
+    dir: string,
+    backend: "claude" | "codex" | "opencode" | "pi",
+    payload: unknown,
+    delayMs: number,
+): string {
+    const output = backend === "claude"
+        ? `console.log(JSON.stringify({ result: JSON.stringify(payload), structured_output: payload }));`
+        : backend === "codex"
+          ? `console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(payload) } }));
+  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } }));`
+          : backend === "opencode"
+            ? `console.log(JSON.stringify({ type: "text", part: { text: JSON.stringify(payload) } }));`
+            : `console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(payload) }] } }));`
+    const readInput = backend === "opencode" || backend === "pi"
+        ? `for await (const _chunk of process.stdin) {}`
+        : ""
+    return executable(dir, `fake-slow-${backend}.mjs`, `
+const payload = ${JSON.stringify(payload)};
+${readInput}
+setTimeout(() => {
+  ${output}
+}, ${delayMs});
 `)
 }
 

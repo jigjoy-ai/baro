@@ -55,6 +55,9 @@ export interface RunArchitectOpenAIOptions {
     maxFinalizationRetries?: number
     /** Default 600 s — reasoning models can need minutes per round. */
     perRoundTimeoutSecs?: number
+    /** Host-owned total phase budget forwarded by run-architect. The Rust
+     * supervisor supplies separate cleanup headroom after this deadline. */
+    timeoutMs?: number
     /** Present only for an explicitly trusted Baro Gateway process. */
     billingCoordinator?: GatewayBillingCoordinator
     /** Deterministic no-network seam used by the architect state-machine tests. */
@@ -93,6 +96,35 @@ function pickModel(name: string): GenerativeModel {
 export async function runArchitectOpenAI(
     opts: RunArchitectOpenAIOptions,
 ): Promise<string> {
+    if (opts.timeoutMs === undefined) {
+        return await runArchitectOpenAIWithinBudget(opts)
+    }
+    if (!Number.isSafeInteger(opts.timeoutMs) || opts.timeoutMs < 1) {
+        throw new RangeError(
+            "ArchitectOpenAI: timeoutMs must be a positive safe integer",
+        )
+    }
+
+    const controller = new AbortController()
+    const phase = runArchitectOpenAIWithinBudget(opts, controller.signal)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+            const error = new Error(
+                `ArchitectOpenAI: phase timed out after ${opts.timeoutMs}ms`,
+            )
+            error.name = "TimeoutError"
+            reject(error)
+            controller.abort(error)
+        }, opts.timeoutMs)
+    })
+    return await Promise.race([phase, timeout]).finally(() => clearTimeout(timer))
+}
+
+async function runArchitectOpenAIWithinBudget(
+    opts: RunArchitectOpenAIOptions,
+    phaseSignal?: AbortSignal,
+): Promise<string> {
     // Intake first (cheap classifier via BARO_INTAKE_MODEL), then route the
     // architect model off the resolved mode — a pre-decided contract skips intake.
     const intake = opts.modeContract ?? await decideExecutionMode(opts, pickModel(opts.model ?? "gpt-5.5")).catch((e) => {
@@ -127,7 +159,12 @@ export async function runArchitectOpenAI(
     ))
     const maxTokens = Math.max(50_000, opts.maxTokens ?? numberEnv("BARO_ARCHITECT_MAX_TOKENS", 150_000))
     const maxFinalizationRetries = Math.max(0, Math.floor(opts.maxFinalizationRetries ?? 2))
-    const perRoundTimeoutMs = (opts.perRoundTimeoutSecs ?? 600) * 1000
+    const perRoundTimeoutMs: number | undefined =
+        opts.perRoundTimeoutSecs !== undefined
+            ? opts.perRoundTimeoutSecs * 1_000
+            : opts.timeoutMs === undefined
+              ? 600_000
+              : undefined
     const usage = new UsageAccumulator()
     let finalRequested = false
     let invalidFinalResponses = 0
@@ -147,10 +184,9 @@ export async function runArchitectOpenAI(
         // stalling `baro --headless`.
         // Do not remove the schemas during finalization. Some compatible
         // models otherwise serialize their next tool call into message text.
-        const roundPromise = inferRound(
-            context,
-            model,
-            opts.billingCoordinator
+        const roundPromise = inferRound(context, model, {
+            ...(phaseSignal ? { signal: phaseSignal } : {}),
+            ...(opts.billingCoordinator
                 ? {
                       billing: {
                           coordinator: opts.billingCoordinator,
@@ -166,13 +202,22 @@ export async function runArchitectOpenAI(
                           },
                       },
                   }
-                : {},
-        )
-        let timer: ReturnType<typeof setTimeout> | undefined
-        const timeoutPromise = new Promise<never>((_, rej) => {
-            timer = setTimeout(() => rej(new Error(`round ${round} timed out after ${perRoundTimeoutMs}ms`)), perRoundTimeoutMs)
+                : {}),
         })
-        const result = await Promise.race([roundPromise, timeoutPromise]).finally(() => clearTimeout(timer))
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const result = perRoundTimeoutMs === undefined
+            ? await roundPromise
+            : await Promise.race([
+                  roundPromise,
+                  new Promise<never>((_, reject) => {
+                      timer = setTimeout(
+                          () => reject(new Error(
+                              `round ${round} timed out after ${perRoundTimeoutMs}ms`,
+                          )),
+                          perRoundTimeoutMs,
+                      )
+                  }),
+              ]).finally(() => clearTimeout(timer))
         usage.add(result.usage)
 
         for (const item of result.items) {
