@@ -8,7 +8,13 @@
 
 import { writeFileSync, writeSync } from "node:fs"
 
-import { normalizePrd, type PrdExecutionMode, type PrdFile } from "../prd.js"
+import {
+    normalizePrd,
+    type PrdExecutionMode,
+    type PrdFile,
+    type PrdStory,
+} from "../prd.js"
+import { deriveGoalContract, type GoalContract } from "../runtime/goal-contract.js"
 import {
     assertCorrelationId,
     type GoalEnvelope,
@@ -17,8 +23,10 @@ import {
 import type { BaroCommand } from "../tui-protocol.js"
 import {
     openProgressivePlanSession,
+    validateProgressivePlanFragment,
     type ProgressivePlanSession,
 } from "./progressive-plan.js"
+import { validateGoalContractCoverage } from "./goal-contract-coverage.js"
 
 export type PlanningOpenWireEvent = Extract<
     BaroCommand,
@@ -53,6 +61,9 @@ export interface ProgressivePlannerConfig {
     runId: string
     planningId: string
     bootstrapFile: string
+    /** Host-authored intent used only to reject unknown invariant claims before
+     * the local immutable-prefix state advances. Missing preserves legacy. */
+    trustedGoalEnvelope?: GoalEnvelope
 }
 
 /**
@@ -112,11 +123,13 @@ export class ProgressivePlannerLifecycle {
     private completePublished = false
     private failedPublished = false
     private readonly planSession: ProgressivePlanSession
+    private readonly goalContract: GoalContract | null
 
     constructor(
         readonly config: ProgressivePlannerConfig,
         private readonly sink: ProgressivePlannerWireSink = writeWireEvent,
     ) {
+        this.goalContract = deriveGoalContract(config.trustedGoalEnvelope)
         this.planSession = openProgressivePlanSession({
             schemaVersion: 1,
             planningSessionId: config.planningId,
@@ -142,16 +155,22 @@ export class ProgressivePlannerLifecycle {
             throw new Error("progressive planning stream is already closed")
         }
         const fragment = validateFragmentWireEvent(event, this.config)
-        // This provider-independent copy of the contract remains open through
-        // post-processing. Native planners validate too, but mode enforcement
-        // runs later and CLI planners may gain fragment support independently.
-        this.planSession.admit({
+        const candidate = validateProgressivePlanFragment({
             schemaVersion: 1,
             planningSessionId: fragment.planning_id,
             fragmentId: fragment.fragment_id,
             ordinal: fragment.ordinal,
             stories: fragment.stories,
         })
+        validateGoalContractCoverage(
+            this.goalContract,
+            goalContractMappings(candidate.stories),
+            "partial",
+        )
+        // This provider-independent copy of the contract remains open through
+        // post-processing. Native planners validate too, but mode enforcement
+        // runs later and CLI planners may gain fragment support independently.
+        this.planSession.admit(candidate)
         this.sink(fragment)
     }
 
@@ -205,6 +224,13 @@ export class ProgressivePlannerLifecycle {
         this.failedPublished = true
         this.sink(event)
     }
+}
+
+function goalContractMappings(stories: readonly PrdStory[]) {
+    return stories.map((story) => ({
+        storyId: story.id,
+        invariantIds: story.goalInvariantIds ?? [],
+    }))
 }
 
 export type ProgressivePlannerResultWriter = (

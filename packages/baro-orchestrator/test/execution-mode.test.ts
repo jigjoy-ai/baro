@@ -387,9 +387,25 @@ describe("enforceModeContract", () => {
     it("collapses a multi-story PRD to ONE story in focused mode", () => {
         const out = JSON.parse(enforceModeContract(
             prd([
-                { id: "S1", title: "step one", acceptance: ["a1"] },
-                { id: "S2", title: "step two", acceptance: ["a2"], dependsOn: ["S1"] },
-                { id: "S3", title: "step three", acceptance: ["a1"] },
+                {
+                    id: "S1",
+                    title: "step one",
+                    acceptance: ["a1"],
+                    goalInvariantIds: ["G-A1"],
+                },
+                {
+                    id: "S2",
+                    title: "step two",
+                    acceptance: ["a2"],
+                    dependsOn: ["S1"],
+                    goalInvariantIds: ["G-A2", "G-C1"],
+                },
+                {
+                    id: "S3",
+                    title: "step three",
+                    acceptance: ["a1"],
+                    goalInvariantIds: ["G-A1"],
+                },
             ]),
             { mode: "focused", confidence: 0.9, reason: "bugfix", maxStories: 1, parallelism: 1, source: "llm" },
             "fix the thing",
@@ -399,6 +415,7 @@ describe("enforceModeContract", () => {
         assert.equal(s.id, "S1")
         assert.deepEqual(s.dependsOn, [])
         assert.deepEqual([...s.acceptance].sort(), ["a1", "a2"])
+        assert.deepEqual(s.goalInvariantIds, ["G-A1", "G-A2", "G-C1"])
         assert.equal(s.model, "heavy")
         assert.match(s.description, /step two/)
         assert.equal(out.executionMode?.mode, "focused")

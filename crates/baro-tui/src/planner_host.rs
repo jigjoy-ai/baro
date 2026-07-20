@@ -29,6 +29,8 @@ pub(crate) struct PlannerRunSpec {
     pub openai_base_url: Option<String>,
     pub effort: String,
     pub mode_json: Option<String>,
+    /** Confirmed host-owned GoalEnvelope JSON; never provider-authored. */
+    pub goal_envelope_json: Option<String>,
 }
 
 pub(crate) struct ProgressivePlannerRuntime {
@@ -130,6 +132,7 @@ pub(crate) async fn run_planner(
         spec.openai_base_url.as_deref(),
         &spec.effort,
         spec.mode_json.as_deref(),
+        spec.goal_envelope_json.as_deref(),
         progressive_invocation.as_ref(),
         event_sink,
     )

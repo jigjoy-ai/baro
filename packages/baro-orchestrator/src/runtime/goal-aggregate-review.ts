@@ -44,6 +44,8 @@ export interface GoalAggregateChallengeBasis {
     reason: string
     storyId?: string
     resolution?: {
+        /** Present on GoalInvariantLedger records; retained for lossless review evidence. */
+        challengeId?: string
         resolution: "resolved" | "rejected"
         reason: string
     }

@@ -77,20 +77,26 @@ GoalGuardian is the independent semantic authority for the accepted
 `GoalContract`. It projects exact story-to-invariant mappings, source-bound
 challenges, durable integrations, and Critic quality tied to the exact lease.
 In strict collective runs, locally passing story shards are necessary but not
-sufficient: after final verification it requests one batched, read-only
-GoalInvariantReviewer evaluation of every invariant against the complete
-integration and verification basis. A pass is reusable only for that exact
-basis fingerprint; changed quality, integration, remediation, protocol, or
-verification evidence requires a new review. Every reconstructed Board uses a
-fresh cryptographic verification epoch, so a persisted review from an older
-coordinator instance cannot match the resumed completion basis. Failed or
-inconclusive aggregate review currently fails the final goal closed rather
-than reopening the graph or scheduling remediation. GoalGuardian may request
-bounded corrective work and attest goal completion, but cannot schedule,
-grant leases, mutate the graph, integrate code, or verify the run. Its
-projection crosses the PRD persistence boundary before Board can accept a
-completion attestation; restart replay cannot infer a green result from an old
-or uncorrelated quality verdict.
+sufficient. GoalGuardian requests one batched, read-only GoalInvariantReviewer
+evaluation of every invariant against the complete integration and
+verification basis. A mixed passed/skipped verifier receipt may enter this
+lane only to find an actionable semantic gap; it can never satisfy completion.
+A concrete aggregate semantic failure becomes an invariant challenge and
+bounded corrective story that Board admits through the normal runtime-replan
+transaction. Verifier-only uncertainty stays inconclusive and does not create
+coding work.
+
+Final success is a correlated quorum: complete objective verification and a
+satisfied semantic attestation must name the same fresh verification epoch. A
+semantic pass is reusable only for that exact basis fingerprint; changed
+quality, integration, remediation, protocol, or verification evidence requires
+a new review. Every reconstructed Board uses a fresh cryptographic verification
+epoch, so a persisted review from an older coordinator instance cannot match
+the resumed completion basis. GoalGuardian may request bounded corrective work
+and attest goal completion, but cannot schedule, grant leases, mutate the graph,
+integrate code, or verify the run. Its projection crosses the PRD persistence
+boundary before Board can accept a completion attestation; restart replay
+cannot infer a green result from old or uncorrelated evidence.
 
 ### LeaseBroker
 

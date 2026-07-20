@@ -17,6 +17,7 @@ import {
     type PlannerOpenAIPlanFragmentEvent,
     type PlannerOpenAITestRuntime,
 } from "../src/planning/planner-openai.js"
+import { createPlannerProgressivePublisher } from "../src/planning/planner-openai-progressive.js"
 
 const PARALLEL_MODE = {
     mode: "parallel" as const,
@@ -90,6 +91,25 @@ describe("PlannerOpenAI fallback PRD", () => {
         assert.equal(prd.userStories[0].model, "heavy")
         assert.ok(prd.userStories[0].description.includes("Planner fallback: test"))
     })
+
+    it("preserves every trusted goal invariant in the fallback story", () => {
+        const prd = JSON.parse(fallbackPrdJson(
+            "Preserve both required behaviors",
+            "test",
+            {
+                objective: "Preserve both required behaviors",
+                acceptanceCriteria: ["First behavior", "Second behavior"],
+                constraints: ["Do not change the public API"],
+                nonGoals: [],
+                assumptions: [],
+            },
+        ))
+
+        assert.deepEqual(
+            prd.userStories[0].goalInvariantIds,
+            ["G-A1", "G-A2", "G-C1"],
+        )
+    })
 })
 
 describe("PlannerOpenAI complexity routing", () => {
@@ -121,6 +141,48 @@ describe("PlannerOpenAI complexity routing", () => {
 })
 
 describe("PlannerOpenAI progressive fragments", () => {
+    it("rejects unknown trusted GoalContract ids before advancing local prefix state", async () => {
+        const published: PlannerOpenAIPlanFragmentEvent[] = []
+        const publisher = createPlannerProgressivePublisher({
+            runId: "run-trusted-goal",
+            planningId: "planning-trusted-goal",
+            trustedGoalEnvelope: {
+                objective: "Preserve both required behaviors.",
+                acceptanceCriteria: ["First behavior", "Second behavior"],
+                constraints: [],
+                nonGoals: [],
+                assumptions: [],
+            },
+            publish: (event) => published.push(event),
+        })
+
+        await assert.rejects(
+            publisher.publish({
+                fragmentId: "foundation",
+                stories: [{
+                    ...FINAL_PRD_PUBLISHED_STORY,
+                    goalInvariantIds: ["G-A99"],
+                }],
+            }),
+            /unknown invariant.*G-A99/i,
+        )
+        assert.equal(publisher.hasEarlyPlan(), false)
+
+        const admission = await publisher.publish({
+            fragmentId: "foundation",
+            stories: [{
+                ...FINAL_PRD_PUBLISHED_STORY,
+                goalInvariantIds: ["G-A1"],
+            }],
+        })
+
+        assert.equal(admission.ordinal, 1)
+        assert.equal(admission.nextOrdinal, 2)
+        assert.equal(publisher.hasEarlyPlan(), true)
+        assert.equal(published.length, 1)
+        assert.deepEqual(published[0]?.stories[0]?.goalInvariantIds, ["G-A1"])
+    })
+
     it("publishes a validated runtime-ordinal fragment before an exact-prefix final", async () => {
         const published: PlannerOpenAIPlanFragmentEvent[] = []
         const tool = fakeTool(async () => "file contents")

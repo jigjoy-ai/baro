@@ -28,6 +28,11 @@ import { parseRequiredModeContract, type ModeContract } from "../src/planning/pl
 import { enforceModeContract } from "../src/planning/mode-enforcement.js"
 import { assertRunnablePlannerPrdJson } from "../src/planning/planner-validation.js"
 import {
+    goalEnvelopeFingerprint,
+    type GoalEnvelope,
+    validateGoalEnvelope,
+} from "../src/session/conversation-contract.js"
+import {
     applyProgressiveBootstrapMetadata,
     parseProgressiveBootstrapMetadata,
     persistProgressivePlannerResult,
@@ -47,6 +52,8 @@ interface Args {
     decisionFile?: string
     /** JSON ModeContract from the run-intake step (user-confirmed); skips planner intake. */
     modeFile?: string
+    /** Host-owned confirmed GoalEnvelope; never sourced from provider JSON. */
+    goalEnvelopeFile?: string
     /** When set, the PRD is written here and stdout is freed for the event stream. */
     resultFile?: string
     progressiveRunId?: string
@@ -66,6 +73,7 @@ function parseArgs(argv: string[]): Args {
     let contextFile: string | undefined
     let decisionFile: string | undefined
     let modeFile: string | undefined
+    let goalEnvelopeFile: string | undefined
     let resultFile: string | undefined
     let progressiveRunId: string | undefined
     let progressivePlanningId: string | undefined
@@ -103,6 +111,13 @@ function parseArgs(argv: string[]): Args {
                 break
             case "--mode-file":
                 modeFile = required(argv, ++i, "--mode-file")
+                break
+            case "--goal-envelope-file":
+                goalEnvelopeFile = required(
+                    argv,
+                    ++i,
+                    "--goal-envelope-file",
+                )
                 break
             case "--result-file":
                 resultFile = required(argv, ++i, "--result-file")
@@ -143,6 +158,7 @@ function parseArgs(argv: string[]): Args {
         contextFile,
         decisionFile,
         modeFile,
+        goalEnvelopeFile,
         resultFile,
         progressiveRunId,
         progressivePlanningId,
@@ -174,6 +190,42 @@ function tryRead(path: string | undefined): string | undefined {
     }
 }
 
+function readTrustedGoalEnvelope(path: string | undefined): GoalEnvelope | undefined {
+    if (!path) return undefined
+    let raw: string
+    try {
+        raw = readFileSync(path, "utf8")
+    } catch (error) {
+        throw new Error(
+            `could not read trusted GoalEnvelope ${path}: ${(error as Error).message}`,
+        )
+    }
+    try {
+        return validateGoalEnvelope(JSON.parse(raw) as unknown)
+    } catch (error) {
+        throw new Error(
+            `trusted GoalEnvelope ${path} is invalid: ${(error as Error).message}`,
+        )
+    }
+}
+
+function reconcileTrustedGoalEnvelope(
+    hostEnvelope: GoalEnvelope | undefined,
+    bootstrapEnvelope: GoalEnvelope | undefined,
+): GoalEnvelope | undefined {
+    if (
+        hostEnvelope &&
+        bootstrapEnvelope &&
+        goalEnvelopeFingerprint(hostEnvelope) !==
+            goalEnvelopeFingerprint(bootstrapEnvelope)
+    ) {
+        throw new Error(
+            "trusted GoalEnvelope conflicts with progressive bootstrap metadata",
+        )
+    }
+    return hostEnvelope ?? bootstrapEnvelope
+}
+
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2))
     let progressiveConfig
@@ -184,20 +236,6 @@ async function main(): Promise<void> {
     }
     // With a result file, stdout is the event stream — let the planner emit.
     if (args.resultFile) process.env.BARO_PLAN_EVENTS = "1"
-    const progressive = progressiveConfig
-        ? new ProgressivePlannerLifecycle(progressiveConfig)
-        : undefined
-    progressive?.open()
-    activeProgressiveLifecycle = progressive
-    const harnessProgressive: PlannerHarnessProgressiveConfig | undefined =
-        progressive && (args.llm === "claude" || args.llm === "codex")
-            ? {
-                  runId: progressive.config.runId,
-                  planningId: progressive.config.planningId,
-                  publish: (event) => progressive.publish(event),
-                  mcpServer: currentPlannerMcpServerCommand(),
-              }
-            : undefined
     let bootstrapMetadata: ProgressiveBootstrapMetadata | undefined
     if (progressiveConfig) {
         try {
@@ -207,10 +245,36 @@ async function main(): Promise<void> {
             )
         } catch (error) {
             const reason = (error as Error)?.message ?? String(error)
-            emitProgressiveFailure(progressive, "invalid_bootstrap", reason)
             fatal(`invalid --progressive-bootstrap-file: ${reason}`)
         }
     }
+    let trustedGoalEnvelope: GoalEnvelope | undefined
+    try {
+        trustedGoalEnvelope = reconcileTrustedGoalEnvelope(
+            readTrustedGoalEnvelope(args.goalEnvelopeFile),
+            bootstrapMetadata?.goalEnvelope,
+        )
+    } catch (error) {
+        fatal((error as Error).message)
+    }
+    const progressive = progressiveConfig
+        ? new ProgressivePlannerLifecycle({
+              ...progressiveConfig,
+              trustedGoalEnvelope,
+          })
+        : undefined
+    progressive?.open()
+    activeProgressiveLifecycle = progressive
+    const harnessProgressive: PlannerHarnessProgressiveConfig | undefined =
+        progressive && (args.llm === "claude" || args.llm === "codex")
+            ? {
+                  runId: progressive.config.runId,
+                  planningId: progressive.config.planningId,
+                  trustedGoalEnvelope,
+                  publish: (event) => progressive.publish(event),
+                  mcpServer: currentPlannerMcpServerCommand(),
+              }
+            : undefined
     const projectContext = tryRead(args.contextFile)
     const decisionDocument = tryRead(args.decisionFile)
     let modeContract: ModeContract | undefined
@@ -256,6 +320,7 @@ async function main(): Promise<void> {
             try {
                 prdJson = await runPlannerOpenAI({
                     goal: args.goal,
+                    goalEnvelope: trustedGoalEnvelope,
                     cwd: args.cwd,
                     model: args.model,
                     projectContext,
@@ -268,6 +333,7 @@ async function main(): Promise<void> {
                               progressive: {
                                   runId: progressive.config.runId,
                                   planningId: progressive.config.planningId,
+                                  trustedGoalEnvelope,
                                   publish: (event: unknown) =>
                                       progressive.publish(event),
                               },
@@ -346,17 +412,26 @@ async function main(): Promise<void> {
     }
 
     try {
-        prdJson = assertRunnablePlannerPrdJson(prdJson)
+        prdJson = assertRunnablePlannerPrdJson(
+            prdJson,
+            trustedGoalEnvelope,
+        )
         if (modeContract) {
             prdJson = enforceModeContract(prdJson, modeContract, args.goal)
         }
-        prdJson = assertRunnablePlannerPrdJson(prdJson)
+        prdJson = assertRunnablePlannerPrdJson(
+            prdJson,
+            trustedGoalEnvelope,
+        )
         if (bootstrapMetadata) {
             prdJson = applyProgressiveBootstrapMetadata(
                 prdJson,
                 bootstrapMetadata,
             )
-            prdJson = assertRunnablePlannerPrdJson(prdJson)
+            prdJson = assertRunnablePlannerPrdJson(
+                prdJson,
+                trustedGoalEnvelope,
+            )
         }
     } catch (e) {
         emitProgressiveFailure(

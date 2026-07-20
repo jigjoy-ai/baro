@@ -342,7 +342,10 @@ pub(super) fn normalized_text(
     value: String,
     max_chars: usize,
 ) -> Result<String, ConversationError> {
-    let normalized = value.trim().to_string();
+    // Match JavaScript's `value.replace(/\r\n?/g, "\n").trim()` exactly at
+    // the Rust/TypeScript GoalEnvelope boundary.
+    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = normalized.trim().to_string();
     validate_text(field, &normalized, max_chars)?;
     Ok(normalized)
 }
@@ -356,7 +359,10 @@ pub(super) fn validate_text(
     if trimmed.is_empty() {
         return Err(ConversationError::MissingRequired(field));
     }
-    let chars = trimmed.chars().count();
+    // TypeScript string limits count UTF-16 code units, not Unicode scalar
+    // values. Use the same unit so Rust cannot accept an emoji-heavy envelope
+    // which the planner then rejects.
+    let chars = trimmed.encode_utf16().count();
     if chars > max_chars {
         return Err(ConversationError::TextTooLong {
             field,
@@ -364,10 +370,21 @@ pub(super) fn validate_text(
             limit: max_chars,
         });
     }
-    if trimmed
-        .chars()
-        .any(|character| character.is_control() && character != '\n' && character != '\t')
-    {
+    if trimmed.chars().any(|character| {
+        (character.is_control() && character != '\n' && character != '\t')
+            || matches!(
+                character,
+                '\u{202a}'
+                    | '\u{202b}'
+                    | '\u{202c}'
+                    | '\u{202d}'
+                    | '\u{202e}'
+                    | '\u{2066}'
+                    | '\u{2067}'
+                    | '\u{2068}'
+                    | '\u{2069}'
+            )
+    }) {
         return Err(ConversationError::UnsafeControlCharacter(field));
     }
     Ok(())
@@ -469,5 +486,28 @@ mod tests {
         let mut no_acceptance = envelope();
         no_acceptance.acceptance_criteria.clear();
         assert!(render_planning_prompt(&no_acceptance).is_err());
+    }
+
+    #[test]
+    fn text_normalization_matches_the_typescript_goal_boundary() {
+        assert_eq!(
+            normalized_text("message", "  first\r\nsecond\rthird  ".to_string(), 100).unwrap(),
+            "first\nsecond\nthird"
+        );
+
+        let emoji_heavy = "😀".repeat(4_001);
+        assert!(matches!(
+            validate_text("goalEnvelope.objective", &emoji_heavy, MAX_OBJECTIVE_CHARS),
+            Err(ConversationError::TextTooLong {
+                actual: 8_002,
+                limit: MAX_OBJECTIVE_CHARS,
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            validate_text("message", "safe\u{202e}unsafe", MAX_MESSAGE_CHARS),
+            Err(ConversationError::UnsafeControlCharacter("message"))
+        ));
     }
 }

@@ -9,6 +9,7 @@ import { GoalInvariantReviewer } from "../../src/participants/goal-invariant-rev
 import { createGoalAggregateReviewBasis } from "../../src/runtime/goal-aggregate-review.js"
 import {
     DialogueResponderInvocationError,
+    DialogueResponderNotDispatchedError,
     type DialogueResponder,
     type DialogueResponderInvocation,
 } from "../../src/participants/dialogue-agent.js"
@@ -20,6 +21,7 @@ import {
     ModelInvocationMeasured,
     RunPrepared,
     RunVerificationCompleted,
+    type RunVerificationCompletedData,
 } from "../../src/semantic-events.js"
 import { joinWithCapture, source } from "./helpers.js"
 
@@ -83,6 +85,193 @@ describe("GoalInvariantReviewer", () => {
                 env.events.filter(GoalAggregateReviewCompleted.is).length,
                 2,
             )
+        } finally {
+            rmSync(repo.path, { recursive: true, force: true })
+        }
+    })
+
+    it("runs diagnostic semantic review for mixed passed/skipped verification evidence", async () => {
+        const repo = createRepository()
+        try {
+            const runId = "run-aggregate-incomplete-verification"
+            let calls = 0
+            let prompt = ""
+            const fixture = reviewerFixture(
+                runId,
+                repo,
+                async (input) => {
+                    calls += 1
+                    prompt = input.userPrompt
+                    return passVerdict()
+                },
+                verificationEvidence(runId, "skipped", [
+                    {
+                        command: "npm test",
+                        status: "passed",
+                        durationMs: 10,
+                        tail: "tests passed",
+                    },
+                    {
+                        command: "npm run lint",
+                        status: "skipped",
+                        durationMs: 0,
+                        tail: "declared verification budget exhausted",
+                    },
+                ]),
+            )
+
+            fixture.env.deliverSemanticEvent(
+                fixture.guardian,
+                aggregateRequest(runId),
+            )
+            await fixture.reviewer.idle()
+
+            const completed = fixture.env.events.find(
+                GoalAggregateReviewCompleted.is,
+            )
+            assert.equal(calls, 1)
+            assert.equal(completed?.data.status, "passed")
+            assert.match(prompt, /"status":"skipped"/)
+            assert.match(prompt, /declared verification budget exhausted/)
+        } finally {
+            rmSync(repo.path, { recursive: true, force: true })
+        }
+    })
+
+    it("keeps verifier-only uncertainty inconclusive instead of creating a semantic failure", async () => {
+        const repo = createRepository()
+        try {
+            const runId = "run-aggregate-verifier-uncertain"
+            let calls = 0
+            let systemPrompt = ""
+            const fixture = reviewerFixture(
+                runId,
+                repo,
+                async (input) => {
+                    calls += 1
+                    systemPrompt = input.systemPrompt
+                    return JSON.stringify({
+                        verdict: "inconclusive",
+                        reasoning:
+                            "the skipped lint command leaves the evidence incomplete",
+                        violated_criteria: [],
+                    })
+                },
+                verificationEvidence(runId, "skipped", [
+                    {
+                        command: "npm test",
+                        status: "passed",
+                        durationMs: 10,
+                    },
+                    {
+                        command: "npm run lint",
+                        status: "skipped",
+                        durationMs: 0,
+                        tail: "tool unavailable",
+                    },
+                ]),
+            )
+
+            fixture.env.deliverSemanticEvent(
+                fixture.guardian,
+                aggregateRequest(runId),
+            )
+            await fixture.reviewer.idle()
+
+            const completed = fixture.env.events.find(
+                GoalAggregateReviewCompleted.is,
+            )
+            assert.equal(calls, 1)
+            assert.equal(completed?.data.status, "inconclusive")
+            assert.equal(completed?.data.invariants[0]?.status, "inconclusive")
+            assert.match(
+                completed?.data.invariants[0]?.reason ?? "",
+                /skipped lint command/,
+            )
+            assert.match(systemPrompt, /not itself a violated goal invariant/)
+        } finally {
+            rmSync(repo.path, { recursive: true, force: true })
+        }
+    })
+
+    it("rejects failed, empty, all-skipped, and partially failed verification evidence", async () => {
+        const repo = createRepository()
+        try {
+            const cases: Array<{
+                name: string
+                evidence: RunVerificationCompletedData
+                reason: RegExp
+            }> = [
+                {
+                    name: "failed receipt",
+                    evidence: verificationEvidence("run-failed", "failed", [{
+                        command: "npm test",
+                        status: "passed",
+                        durationMs: 10,
+                    }]),
+                    reason: /final verification status is failed/,
+                },
+                {
+                    name: "empty skipped receipt",
+                    evidence: verificationEvidence("run-empty", "skipped", []),
+                    reason: /lacks passing command evidence/,
+                },
+                {
+                    name: "all-skipped receipt",
+                    evidence: verificationEvidence("run-all-skipped", "skipped", [{
+                        command: "npm test",
+                        status: "skipped",
+                        durationMs: 0,
+                    }]),
+                    reason: /lacks passing command evidence/,
+                },
+                {
+                    name: "partially failed receipt",
+                    evidence: verificationEvidence("run-partial-failure", "skipped", [
+                        {
+                            command: "npm test",
+                            status: "passed",
+                            durationMs: 10,
+                        },
+                        {
+                            command: "npm run lint",
+                            status: "failed",
+                            durationMs: 10,
+                        },
+                    ]),
+                    reason: /contains a failed command/,
+                },
+            ]
+
+            for (const testCase of cases) {
+                let calls = 0
+                const fixture = reviewerFixture(
+                    testCase.evidence.runId,
+                    repo,
+                    async () => {
+                        calls += 1
+                        return passVerdict()
+                    },
+                    testCase.evidence,
+                )
+                fixture.env.deliverSemanticEvent(
+                    fixture.guardian,
+                    aggregateRequest(testCase.evidence.runId),
+                )
+                await fixture.reviewer.idle()
+
+                const completed = fixture.env.events.find(
+                    GoalAggregateReviewCompleted.is,
+                )
+                assert.equal(calls, 0, testCase.name)
+                assert.equal(completed?.data.status, "inconclusive", testCase.name)
+                assert.equal(completed?.data.attempts, 0, testCase.name)
+                assert.match(
+                    completed?.data.invariants[0]?.reason ?? "",
+                    testCase.reason,
+                    testCase.name,
+                )
+            }
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
         }
@@ -221,6 +410,298 @@ describe("GoalInvariantReviewer", () => {
             assert.equal(measurements.length, 1)
             assert.equal(measurements[0]!.data.status, "timed_out")
             assert.equal(measurements[0]!.data.attempt, 1)
+        } finally {
+            rmSync(repo.path, { recursive: true, force: true })
+        }
+    })
+
+    it("does not retry a responder-attributed provider timeout", async () => {
+        const repo = createRepository()
+        try {
+            let calls = 0
+            const fixture = reviewerFixture(
+                "run-aggregate-provider-timeout",
+                repo,
+                async () => {
+                    calls += 1
+                    throw new DialogueResponderInvocationError(
+                        "Codex exceeded its 105000ms provider deadline",
+                        interruptedInvocation("timed_out"),
+                    )
+                },
+            )
+            fixture.env.deliverSemanticEvent(
+                fixture.guardian,
+                aggregateRequest(fixture.runId),
+            )
+            await fixture.reviewer.idle()
+
+            const completed = fixture.env.events.find(
+                GoalAggregateReviewCompleted.is,
+            )
+            assert.equal(calls, 1)
+            assert.equal(completed?.data.status, "inconclusive")
+            assert.equal(completed?.data.attempts, 1)
+            assert.match(
+                completed?.data.invariants[0]?.reason ?? "",
+                /provider invocation timed out.*105000ms/,
+            )
+            const measurements = fixture.env.events.filter(
+                ModelInvocationMeasured.is,
+            )
+            assert.equal(measurements.length, 1)
+            assert.equal(measurements[0]!.data.status, "timed_out")
+            assert.equal(measurements[0]!.data.attempt, 1)
+        } finally {
+            rmSync(repo.path, { recursive: true, force: true })
+        }
+    })
+
+    it("does not retry a responder-attributed provider cancellation", async () => {
+        const repo = createRepository()
+        try {
+            let calls = 0
+            const fixture = reviewerFixture(
+                "run-aggregate-provider-cancelled",
+                repo,
+                async () => {
+                    calls += 1
+                    throw new DialogueResponderInvocationError(
+                        "provider cancelled the read-only evaluation",
+                        interruptedInvocation("cancelled"),
+                    )
+                },
+            )
+            fixture.env.deliverSemanticEvent(
+                fixture.guardian,
+                aggregateRequest(fixture.runId),
+            )
+            await fixture.reviewer.idle()
+
+            const completed = fixture.env.events.find(
+                GoalAggregateReviewCompleted.is,
+            )
+            assert.equal(calls, 1)
+            assert.equal(completed?.data.status, "inconclusive")
+            assert.equal(completed?.data.attempts, 1)
+            assert.match(
+                completed?.data.invariants[0]?.reason ?? "",
+                /provider invocation was cancelled.*read-only evaluation/,
+            )
+            const measurements = fixture.env.events.filter(
+                ModelInvocationMeasured.is,
+            )
+            assert.equal(measurements.length, 1)
+            assert.equal(measurements[0]!.data.status, "cancelled")
+            assert.equal(measurements[0]!.data.attempt, 1)
+        } finally {
+            rmSync(repo.path, { recursive: true, force: true })
+        }
+    })
+
+    it("does not retry a responder that never dispatched a provider call", async () => {
+        const repo = createRepository()
+        try {
+            let calls = 0
+            const runId = "run-aggregate-not-dispatched"
+            const guardian = source("goal-guardian")
+            const verifier = source("run-verifier")
+            const repository = source("repository")
+            const reviewer = new GoalInvariantReviewer({
+                runId,
+                cwd: repo.path,
+                modelUsed: "missing-local-harness",
+                maxAttempts: 4,
+                responder: async () => {
+                    calls += 1
+                    throw new DialogueResponderNotDispatchedError(
+                        "local evaluator executable is unavailable",
+                    )
+                },
+            })
+            reviewer.setRequestAuthority(guardian)
+            reviewer.setVerificationAuthority(verifier)
+            reviewer.setRepositoryAuthority(repository)
+            const env = joinWithCapture(reviewer)
+            deliverEvidence(env, repository, verifier, runId, repo.baseSha)
+
+            env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+            await reviewer.idle()
+
+            const completed = env.events.find(GoalAggregateReviewCompleted.is)
+            assert.equal(calls, 1)
+            assert.equal(completed?.data.status, "inconclusive")
+            assert.equal(completed?.data.attempts, 1)
+            assert.match(
+                completed?.data.invariants[0]?.reason ?? "",
+                /not dispatched.*executable is unavailable/,
+            )
+            assert.equal(env.events.filter(ModelInvocationMeasured.is).length, 0)
+        } finally {
+            rmSync(repo.path, { recursive: true, force: true })
+        }
+    })
+
+    it("applies the preparation deadline and bounds abandoned filesystem cleanup", async () => {
+        const repo = createRepository()
+        try {
+            const runId = "run-aggregate-preparation-deadline"
+            const guardian = source("goal-guardian")
+            const verifier = source("run-verifier")
+            const repository = source("repository")
+            let calls = 0
+            let announcePreparationEntered!: () => void
+            const preparationEntered = new Promise<void>((resolve) => {
+                announcePreparationEntered = resolve
+            })
+            let releaseCleanup!: () => void
+            const stalledCleanup = new Promise<void>((resolve) => {
+                releaseCleanup = resolve
+            })
+            const reviewer = new GoalInvariantReviewer({
+                runId,
+                cwd: repo.path,
+                modelUsed: "fake-reviewer",
+                timeoutMs: 10_000,
+                maxAttempts: 4,
+                overallTimeoutMs: 20,
+                evidenceAdapter: {
+                    prepare: async (
+                        _cwd,
+                        _baseSha,
+                        _request,
+                        _verification,
+                        deadline,
+                    ) => {
+                        announcePreparationEntered()
+                        deadline.registerCleanup?.(stalledCleanup)
+                        await new Promise<void>((resolve) => {
+                            deadline.signal.addEventListener(
+                                "abort",
+                                () => resolve(),
+                                { once: true },
+                            )
+                            if (deadline.signal.aborted) resolve()
+                        })
+                        throw deadline.signal.reason
+                    },
+                    verifyRepositoryFingerprint: async () => null,
+                },
+                responder: async () => {
+                    calls += 1
+                    return passVerdict()
+                },
+            })
+            reviewer.setRequestAuthority(guardian)
+            reviewer.setVerificationAuthority(verifier)
+            reviewer.setRepositoryAuthority(repository)
+            const env = joinWithCapture(reviewer)
+            deliverEvidence(env, repository, verifier, runId, repo.baseSha)
+
+            env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+            await preparationEntered
+            let safetyTimer: ReturnType<typeof setTimeout> | null = null
+            try {
+                await Promise.race([
+                    reviewer.idle(),
+                    new Promise<never>((_resolve, reject) => {
+                        safetyTimer = setTimeout(() => {
+                            releaseCleanup()
+                            reject(new Error(
+                                "reviewer cleanup drain exceeded its bound",
+                            ))
+                        }, 2_500)
+                    }),
+                ])
+            } finally {
+                if (safetyTimer) clearTimeout(safetyTimer)
+                releaseCleanup()
+            }
+
+            const completed = env.events.find(GoalAggregateReviewCompleted.is)
+            assert.equal(calls, 0)
+            assert.equal(completed?.data.status, "inconclusive")
+            assert.equal(completed?.data.attempts, 0)
+            assert.match(
+                completed?.data.invariants[0]?.reason ?? "",
+                /overall deadline exceeded after 20ms/,
+            )
+            assert.equal(await reviewer.shutdown(), true)
+        } finally {
+            rmSync(repo.path, { recursive: true, force: true })
+        }
+    })
+
+    it("bounds evidence adapters that ignore the review deadline", async () => {
+        const repo = createRepository()
+        try {
+            for (const stalledStage of ["prepare", "verify"] as const) {
+                const runId = `run-aggregate-stalled-${stalledStage}`
+                const guardian = source(`goal-guardian-${stalledStage}`)
+                const verifier = source(`run-verifier-${stalledStage}`)
+                const repository = source(`repository-${stalledStage}`)
+                let calls = 0
+                const never = () => new Promise<never>(() => {})
+                const reviewer = new GoalInvariantReviewer({
+                    runId,
+                    cwd: repo.path,
+                    modelUsed: "fake-reviewer",
+                    overallTimeoutMs: 20,
+                    evidenceAdapter: {
+                        prepare: async () => {
+                            if (stalledStage === "prepare") return await never()
+                            return {
+                                status: "ready" as const,
+                                prompt: "complete exact evidence",
+                                issues: [] as const,
+                                repositoryFingerprint: "a".repeat(64),
+                            }
+                        },
+                        verifyRepositoryFingerprint: async () =>
+                            stalledStage === "verify"
+                                ? await never()
+                                : null,
+                    },
+                    responder: async () => {
+                        calls += 1
+                        return passVerdict()
+                    },
+                })
+                reviewer.setRequestAuthority(guardian)
+                reviewer.setVerificationAuthority(verifier)
+                reviewer.setRepositoryAuthority(repository)
+                const env = joinWithCapture(reviewer)
+                deliverEvidence(env, repository, verifier, runId, repo.baseSha)
+
+                env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+                let safetyTimer: ReturnType<typeof setTimeout> | null = null
+                try {
+                    await Promise.race([
+                        reviewer.idle(),
+                        new Promise<never>((_resolve, reject) => {
+                            safetyTimer = setTimeout(
+                                () => reject(new Error(
+                                    `${stalledStage} adapter escaped the overall deadline`,
+                                )),
+                                2_500,
+                            )
+                        }),
+                    ])
+                } finally {
+                    if (safetyTimer) clearTimeout(safetyTimer)
+                }
+
+                const completed = env.events.find(
+                    GoalAggregateReviewCompleted.is,
+                )
+                assert.equal(calls, 0)
+                assert.equal(completed?.data.status, "inconclusive")
+                assert.match(
+                    completed?.data.invariants[0]?.reason ?? "",
+                    /overall deadline exceeded after 20ms/,
+                )
+                assert.equal(await reviewer.shutdown(), true)
+            }
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
         }
@@ -519,12 +1000,12 @@ describe("GoalInvariantReviewer", () => {
                 "remediation integrated",
                 "proposal-exact",
                 "S9",
-                '"graphVersion": 11',
+                '"graphVersion":11',
                 '"revalidates"',
                 "lease-S8",
                 "protocol-key-exact",
                 "protocol-reason-exact",
-                '"independentlyPassed": true',
+                '"independentlyPassed":true',
                 '"storyIds"',
             ]) assert.ok(prompt.includes(exact), `missing exact basis field ${exact}`)
         } finally {
@@ -875,6 +1356,12 @@ function deliverEvidence(
     verifier: ReturnType<typeof source>,
     runId: string,
     baseSha: string,
+    verification = verificationEvidence(runId, "passed", [{
+        command: "npm test",
+        status: "passed" as const,
+        durationMs: 10,
+        tail: "all provider cancellation tests passed",
+    }]),
 ): void {
     env.deliverSemanticEvent(
         source("forged-repository"),
@@ -896,18 +1383,7 @@ function deliverEvidence(
     )
     env.deliverSemanticEvent(
         verifier,
-        RunVerificationCompleted.create({
-            runId,
-            verificationId: "verification-a8",
-            status: "passed",
-            commands: [{
-                command: "npm test",
-                status: "passed",
-                durationMs: 10,
-                tail: "all provider cancellation tests passed",
-            }],
-            durationMs: 10,
-        }),
+        RunVerificationCompleted.create(verification),
     )
 }
 
@@ -915,6 +1391,7 @@ function reviewerFixture(
     runId: string,
     repo: { path: string; baseSha: string },
     responder: DialogueResponder,
+    verification?: RunVerificationCompletedData,
 ) {
     const guardian = source("goal-guardian")
     const verifier = source("run-verifier")
@@ -929,8 +1406,25 @@ function reviewerFixture(
     reviewer.setVerificationAuthority(verifier)
     reviewer.setRepositoryAuthority(repository)
     const env = joinWithCapture(reviewer)
-    deliverEvidence(env, repository, verifier, runId, repo.baseSha)
+    deliverEvidence(env, repository, verifier, runId, repo.baseSha, verification)
     return { runId, guardian, verifier, repository, reviewer, env }
+}
+
+function verificationEvidence(
+    runId: string,
+    status: RunVerificationCompletedData["status"],
+    commands: RunVerificationCompletedData["commands"],
+): RunVerificationCompletedData {
+    return {
+        runId,
+        verificationId: "verification-a8",
+        status,
+        commands,
+        durationMs: commands.reduce(
+            (durationMs, command) => durationMs + command.durationMs,
+            0,
+        ),
+    }
 }
 
 function passVerdict(): string {
@@ -963,7 +1457,16 @@ function createRepository(): { path: string; baseSha: string } {
 }
 
 function timedOutInvocation(): DialogueResponderInvocation {
-    const missing = { state: "unknown", reason: "timed_out" } as const
+    return interruptedInvocation("timed_out")
+}
+
+function interruptedInvocation(
+    status: "timed_out" | "cancelled",
+): DialogueResponderInvocation {
+    const missing = {
+        state: "unknown",
+        reason: status === "timed_out" ? "timed_out" : "not_reported",
+    } as const
     const na = { state: "not_applicable" } as const
     return {
         backend: "fake",
@@ -971,7 +1474,7 @@ function timedOutInvocation(): DialogueResponderInvocation {
         observation: {
             sequence: 1,
             granularity: "process",
-            status: "timed_out",
+            status,
             durationMs: missing,
             tokens: {
                 inputTotal: missing,

@@ -6,8 +6,13 @@ import { describe, it } from "node:test"
 import { CollectiveBoard } from "../../src/participants/collective-board.js"
 import { GoalGuardian } from "../../src/participants/goal-guardian.js"
 import { savePrdAtomic, type PrdFile, type PrdStory } from "../../src/prd.js"
-import { deriveGoalContract } from "../../src/runtime/goal-contract.js"
 import {
+    deriveGoalContract,
+    GoalInvariantLedger,
+} from "../../src/runtime/goal-contract.js"
+import {
+    GoalAggregateReviewCompleted,
+    GoalAggregateReviewRequested,
     GoalInvariantChallengeRaised,
     GoalInvariantRemediationAdmitted,
     GoalInvariantRemediationProposed,
@@ -15,11 +20,16 @@ import {
     PlanningStreamClosed,
     PlanningStreamCompleted,
     RunPrepared,
+    RunPushed,
+    RunPushRequested,
     RunStartRequest,
+    RunVerificationCompleted,
+    RunVerificationRequested,
     RuntimeReplanApplied,
     RuntimeReplanRejected,
     StoryIntegrationRequested,
     StoryMerged,
+    StoryQualityCompleted,
     StoryResult,
     WorkContextProvided,
     WorkContextRequested,
@@ -37,6 +47,312 @@ const envelope = {
 } as const
 
 describe("goal remediation graph admission", () => {
+    it("closes an A13-shaped semantic gap through a fresh distributed quorum", async () => {
+        await withTempDir("goal-remediation-a13-closure-", async (dir) => {
+            const runId = "run-goal-remediation-a13-closure"
+            const path = join(dir, "prd.json")
+            const goalEnvelope = {
+                objective: "Preserve cancellation across the provider collective.",
+                constraints: [],
+                acceptanceCriteria: [
+                    "All provider paths close their streams exactly once on cancellation.",
+                ],
+                nonGoals: [],
+                assumptions: [],
+            }
+            const contract = deriveGoalContract(goalEnvelope)!
+            const storyIds = ["S2", "S4", "S5", "S6", "S7"]
+            const mappings = storyIds.map((storyId) => ({
+                storyId,
+                invariantIds: storyId === "S2"
+                    ? contract.invariants.map(({ id }) => id)
+                    : [],
+            }))
+            const completedAt = "2026-01-01T00:00:00.000Z"
+            const prd: PrdFile = {
+                project: "goal-remediation-a13-closure",
+                branchName: "baro/goal-remediation-a13-closure",
+                description: "Exercise cross-shard semantic closure.",
+                goalEnvelope,
+                userStories: storyIds.map((storyId, index) => ({
+                    id: storyId,
+                    priority: index + 1,
+                    title: `Completed shard ${storyId}`,
+                    description: `Implement provider shard ${storyId}.`,
+                    dependsOn: [],
+                    retries: 1,
+                    acceptance: [`Local behavior for ${storyId} passes.`],
+                    tests: [],
+                    goalInvariantIds: mappings[index]!.invariantIds,
+                    passes: true,
+                    completedAt,
+                    durationSecs: 1,
+                    model: "standard",
+                })),
+            }
+            writeFileSync(path, JSON.stringify(prd, null, 2) + "\n")
+
+            const ledger = new GoalInvariantLedger(contract, mappings)
+            for (const storyId of storyIds) {
+                const leaseId = `lease-${storyId}`
+                ledger.recordIntegration({ storyId, leaseId })
+                ledger.recordQuality({
+                    storyId,
+                    leaseId,
+                    evaluationId: `quality-${storyId}`,
+                    status: "passed",
+                    independentlyPassed: true,
+                })
+            }
+            const repository = source("repository")
+            const qualityGate = source("quality-gate")
+            const verifier = source("verifier")
+            const reviewer = source("goal-reviewer")
+            const guardian = new GoalGuardian({
+                runId,
+                goalEnvelope,
+                storyMappings: mappings,
+                projection: ledger.snapshot(1),
+                requireIndependentQuality: true,
+                requireAggregateReview: true,
+            })
+            const board = new CollectiveBoard({
+                runId,
+                prdPath: path,
+                cwd: dir,
+                timeoutSecs: 60,
+                verifyBeforePush: true,
+                expectQualityDecisions: true,
+                integrationAuthority: repository,
+                qualityAuthority: qualityGate,
+                verifierAuthority: verifier,
+                goalCompletionAuthority: guardian,
+            })
+            guardian.setRequestAuthority(board)
+            guardian.setIntegrationAuthority(repository)
+            guardian.setQualityAuthority(qualityGate)
+            guardian.setAggregateReviewAuthority(reviewer)
+            const env = captureEnv()
+            guardian.join(env)
+            board.join(env)
+
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "test" }),
+            )
+            env.deliverSemanticEvent(
+                repository,
+                RunPrepared.create({ runId, baseSha: null }),
+            )
+            const firstVerification = await waitFor(
+                env.events,
+                RunVerificationRequested.is,
+            )
+            env.deliverSemanticEvent(
+                verifier,
+                RunVerificationCompleted.create({
+                    runId,
+                    verificationId: firstVerification.data.verificationId,
+                    status: "skipped",
+                    commands: [
+                        {
+                            command: "npm run typecheck",
+                            status: "passed",
+                            durationMs: 10,
+                        },
+                        {
+                            command: "npm run test",
+                            status: "skipped",
+                            durationMs: 1,
+                            tail: "declared command budget exceeded",
+                        },
+                    ],
+                    durationMs: 11,
+                }),
+            )
+            const firstReview = await waitFor(
+                env.events,
+                GoalAggregateReviewRequested.is,
+            )
+            assert.deepEqual(firstReview.data.basis.storyIds, [...storyIds].sort())
+            assert.deepEqual(
+                firstReview.data.basis.invariants.find(
+                    ({ invariantId }) => invariantId === "G-A1",
+                )?.mappedStoryIds,
+                ["S2"],
+            )
+
+            env.deliverSemanticEvent(
+                reviewer,
+                aggregateReviewCompletion(firstReview.data, "failed", "G-A1"),
+            )
+            const admission = await waitFor(
+                env.events,
+                GoalInvariantRemediationAdmitted.is,
+            )
+            assert.equal(env.events.some(RuntimeReplanApplied.is), true)
+            assert.equal(env.events.some(RunPushRequested.is), false)
+
+            const context = await waitFor(
+                env.events,
+                (event) =>
+                    WorkContextRequested.is(event) &&
+                    event.data.storyId === admission.data.storyId,
+            )
+            env.deliverSemanticEvent(
+                source("context"),
+                WorkContextProvided.create({
+                    runId,
+                    requestId: context.data.requestId,
+                    storyId: admission.data.storyId,
+                    context: null,
+                }),
+            )
+            const offer = await waitFor(
+                env.events,
+                (event) =>
+                    WorkOffered.is(event) &&
+                    event.data.request.storyId === admission.data.storyId,
+            )
+            const leaseId = `lease-${admission.data.storyId}`
+            env.deliverSemanticEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId,
+                    offerId: offer.data.offerId,
+                    leaseId,
+                    workerId: "remediation-worker",
+                    generation: offer.data.generation,
+                    request: offer.data.request,
+                }),
+            )
+            env.deliverSemanticEvent(
+                source("remediation-worker"),
+                StoryResult.create({
+                    runId,
+                    storyId: admission.data.storyId,
+                    leaseId,
+                    generation: offer.data.generation,
+                    success: true,
+                    attempts: 1,
+                    durationSecs: 1,
+                    error: null,
+                }),
+            )
+            env.deliverSemanticEvent(
+                qualityGate,
+                StoryQualityCompleted.create({
+                    runId,
+                    evaluationId: `${admission.data.storyId}:quality`,
+                    storyId: admission.data.storyId,
+                    leaseId,
+                    generation: offer.data.generation,
+                    status: "passed",
+                    targetTurn: 1,
+                    reason: "independent Critic passed the remediation",
+                    critique: {
+                        status: "evaluated",
+                        verdict: "pass",
+                        reasoning: "the cancellation regression passes",
+                        violatedCriteria: [],
+                        turn: 1,
+                        modelUsed: "critic-model",
+                        repositoryFingerprint: "a".repeat(64),
+                    },
+                }),
+            )
+            await waitFor(
+                env.events,
+                (event) =>
+                    StoryIntegrationRequested.is(event) &&
+                    event.data.storyId === admission.data.storyId,
+            )
+            env.deliverSemanticEvent(
+                repository,
+                StoryMerged.create({
+                    runId,
+                    storyId: admission.data.storyId,
+                    leaseId,
+                    mode: "worktree",
+                }),
+            )
+
+            const secondVerification = await waitFor(
+                env.events,
+                (event) =>
+                    RunVerificationRequested.is(event) &&
+                    event.data.verificationId !==
+                        firstVerification.data.verificationId,
+            )
+            const reviewCountBeforeReplay = env.events.filter(
+                GoalAggregateReviewRequested.is,
+            ).length
+            env.deliverSemanticEvent(
+                verifier,
+                RunVerificationCompleted.create({
+                    runId,
+                    verificationId: firstVerification.data.verificationId,
+                    status: "passed",
+                    commands: [{
+                        command: "npm run test",
+                        status: "passed",
+                        durationMs: 1,
+                    }],
+                    durationMs: 1,
+                }),
+            )
+            await board.idle()
+            assert.equal(
+                env.events.filter(GoalAggregateReviewRequested.is).length,
+                reviewCountBeforeReplay,
+            )
+
+            env.deliverSemanticEvent(
+                verifier,
+                RunVerificationCompleted.create({
+                    runId,
+                    verificationId: secondVerification.data.verificationId,
+                    status: "passed",
+                    commands: [{
+                        command: "npm run test",
+                        status: "passed",
+                        durationMs: 1,
+                    }],
+                    durationMs: 1,
+                }),
+            )
+            const secondReview = await waitFor(
+                env.events,
+                (event) =>
+                    GoalAggregateReviewRequested.is(event) &&
+                    event.data.basis.verificationId ===
+                        secondVerification.data.verificationId,
+            )
+            assert.deepEqual(
+                secondReview.data.basis.invariants.find(
+                    ({ invariantId }) => invariantId === "G-A1",
+                )?.mappedStoryIds,
+                [admission.data.storyId, "S2"].sort(),
+            )
+            env.deliverSemanticEvent(
+                reviewer,
+                aggregateReviewCompletion(secondReview.data, "passed"),
+            )
+            await waitFor(env.events, RunPushRequested.is)
+            env.deliverSemanticEvent(
+                repository,
+                RunPushed.create({ runId, pushed: false }),
+            )
+            const summary = await board.done
+            assert.equal(summary.success, true)
+            assert.equal(summary.verificationStatus, "passed")
+            assert.notEqual(
+                firstVerification.data.verificationId,
+                secondVerification.data.verificationId,
+            )
+        })
+    })
+
     it("reopens an early verification snapshot and retries transient admission without another merge", async () => {
         await withTempDir("goal-remediation-finalization-race-", async (dir) => {
             const runId = "run-goal-remediation-finalization-race"
@@ -565,6 +881,39 @@ describe("goal remediation graph admission", () => {
         })
     })
 })
+
+function aggregateReviewCompletion(
+    request: ReturnType<typeof GoalAggregateReviewRequested.create>["data"],
+    status: "passed" | "failed",
+    failedInvariantId?: string,
+) {
+    return GoalAggregateReviewCompleted.create({
+        runId: request.runId,
+        checkId: request.checkId,
+        contractId: request.basis.contractId,
+        goalRevision: request.goalRevision,
+        reviewId: request.reviewId,
+        basisFingerprint: request.basis.fingerprint,
+        verificationId: request.basis.verificationId,
+        repositoryFingerprint: "a".repeat(64),
+        status,
+        attempts: 1,
+        modelUsed: "fake-goal-reviewer",
+        invariants: request.basis.invariants.map(({ invariantId }) => {
+            const invariantStatus =
+                status === "failed" && invariantId === failedInvariantId
+                    ? "failed"
+                    : "passed"
+            return {
+                invariantId,
+                status: invariantStatus,
+                reason: invariantStatus === "passed"
+                    ? "the merged run satisfies the invariant"
+                    : "provider streams do not close exactly once",
+            }
+        }),
+    })
+}
 
 async function waitFor<T>(
     events: readonly unknown[],

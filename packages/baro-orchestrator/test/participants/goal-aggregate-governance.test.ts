@@ -2,12 +2,17 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import { GoalGuardian } from "../../src/participants/goal-guardian.js"
-import { deriveGoalContract } from "../../src/runtime/goal-contract.js"
+import {
+    deriveGoalContract,
+    GoalInvariantLedger,
+    type GoalLedgerProjection,
+} from "../../src/runtime/goal-contract.js"
 import {
     GoalAggregateReviewCompleted,
     GoalAggregateReviewRequested,
     GoalCompletionAttested,
     GoalCompletionCheckRequested,
+    GoalInvariantRemediationProposed,
     GoalLedgerProjectionUpdated,
     StoryMerged,
     StoryQualityCompleted,
@@ -232,7 +237,7 @@ describe("aggregate goal governance", () => {
         )
     })
 
-    it("fails an A8-shaped completion when aggregate composition is rejected", () => {
+    it("turns an aggregate semantic rejection into invariant-scoped remediation", () => {
         const fixture = aggregateFixture("run-aggregate-rejected")
         fixture.env.deliverSemanticEvent(
             fixture.board,
@@ -245,17 +250,166 @@ describe("aggregate goal governance", () => {
             aggregateCompletion(request.data, "failed"),
         )
 
+        assert.equal(
+            fixture.env.events.some(GoalCompletionAttested.is),
+            false,
+            "actionable semantic failure reopens work instead of terminating completion",
+        )
+        const remediation = fixture.env.events.find(
+            GoalInvariantRemediationProposed.is,
+        )
+        assert.ok(remediation)
+        assert.equal(remediation.data.invariantId, "G-A1")
+        assert.deepEqual(remediation.data.story.goalInvariantIds, ["G-A1"])
+        assert.equal(
+            remediation.data.story.acceptance[0],
+            `[G-A1] ${request.data.basis.invariants[0]!.text}`,
+        )
+        assert.match(remediation.data.reason, /run-level semantic review/i)
+        assert.match(remediation.data.reason, /does not prove the invariant/)
+        assert.equal(
+            fixture.env.events
+                .filter(GoalLedgerProjectionUpdated.is)
+                .at(-1)?.data.projection.aggregateReviews.length,
+            1,
+        )
+    })
+
+    it("keeps infrastructure-inconclusive aggregate review fail-closed without coding remediation", () => {
+        const fixture = aggregateFixture("run-aggregate-inconclusive")
+        fixture.env.deliverSemanticEvent(
+            fixture.board,
+            completionRequest(fixture, "check-inconclusive"),
+        )
+        const request = fixture.env.events.find(GoalAggregateReviewRequested.is)
+        assert.ok(request)
+        fixture.env.deliverSemanticEvent(
+            fixture.reviewer,
+            aggregateCompletion(request.data, "inconclusive"),
+        )
+
+        assert.equal(
+            fixture.env.events.some(GoalInvariantRemediationProposed.is),
+            false,
+        )
+        const attestation = fixture.env.events.find(GoalCompletionAttested.is)
+        assert.equal(attestation?.data.status, "incomplete")
+        assert.deepEqual(attestation?.data.openInvariantIds, ["G-A1"])
+    })
+
+    it("bounds repeated semantic remediation and eventually returns the rejected attestation", () => {
+        const contract = deriveGoalContract({
+            objective: "Compose provider cancellation.",
+            constraints: [],
+            acceptanceCriteria: [
+                "All four provider shards jointly preserve cooperative cancellation.",
+            ],
+            nonGoals: [],
+            assumptions: [],
+        })!
+        const prior = new GoalInvariantLedger(contract)
+        for (let ordinal = 1; ordinal <= 3; ordinal += 1) {
+            const challengeId = `aggregate-g-a1-prior-${ordinal}`
+            prior.raiseChallenge({
+                challengeId,
+                invariantId: "G-A1",
+                raisedBy: "goal-guardian",
+                reason: `prior aggregate rejection ${ordinal}`,
+            })
+            prior.bindChallengeRemediation(challengeId, {
+                proposalId: `aggregate-proposal-${ordinal}`,
+                storyId: `GREM-prior-${ordinal}`,
+                status: "requested",
+            })
+            prior.resolveChallenge({
+                challengeId,
+                resolution: "resolved",
+                reason: `prior remediation ${ordinal} integrated`,
+            })
+        }
+        const fixture = aggregateFixture(
+            "run-aggregate-remediation-bounded",
+            prior.snapshot(1),
+        )
+        fixture.env.deliverSemanticEvent(
+            fixture.board,
+            completionRequest(fixture, "check-bounded"),
+        )
+        const request = fixture.env.events.find(GoalAggregateReviewRequested.is)
+        assert.ok(request)
+        fixture.env.deliverSemanticEvent(
+            fixture.reviewer,
+            aggregateCompletion(request.data, "failed"),
+        )
+
+        assert.equal(
+            fixture.env.events.some(GoalInvariantRemediationProposed.is),
+            false,
+        )
         const attestation = fixture.env.events.find(GoalCompletionAttested.is)
         assert.equal(attestation?.data.status, "incomplete")
         assert.deepEqual(attestation?.data.rejectedInvariantIds, ["G-A1"])
-        assert.equal(
-            attestation?.data.invariants[0]?.aggregateReviewStatus,
-            "failed",
+    })
+
+    it("does not let worker-controlled aggregate-like ids consume the remediation cap", () => {
+        const contract = deriveGoalContract({
+            objective: "Compose provider cancellation.",
+            constraints: [],
+            acceptanceCriteria: [
+                "All four provider shards jointly preserve cooperative cancellation.",
+            ],
+            nonGoals: [],
+            assumptions: [],
+        })!
+        const prior = new GoalInvariantLedger(contract)
+        for (let ordinal = 1; ordinal <= 3; ordinal += 1) {
+            const challengeId = `aggregate-g-a1-worker-${ordinal}`
+            prior.raiseChallenge({
+                challengeId,
+                invariantId: "G-A1",
+                raisedBy: `worker-S${ordinal}`,
+                reason: `worker-owned challenge ${ordinal}`,
+            })
+            prior.bindChallengeRemediation(challengeId, {
+                proposalId: `worker-proposal-${ordinal}`,
+                storyId: `GREM-worker-${ordinal}`,
+                status: "requested",
+            })
+            prior.resolveChallenge({
+                challengeId,
+                resolution: "resolved",
+                reason: `worker remediation ${ordinal} integrated`,
+            })
+        }
+        const fixture = aggregateFixture(
+            "run-aggregate-worker-prefix-spoof",
+            prior.snapshot(1),
         )
+        fixture.env.deliverSemanticEvent(
+            fixture.board,
+            completionRequest(fixture, "check-worker-prefix"),
+        )
+        const request = fixture.env.events.find(GoalAggregateReviewRequested.is)
+        assert.ok(request)
+        fixture.env.deliverSemanticEvent(
+            fixture.reviewer,
+            aggregateCompletion(request.data, "failed"),
+        )
+
+        const remediation = fixture.env.events.find(
+            GoalInvariantRemediationProposed.is,
+        )
+        assert.ok(remediation)
+        assert.equal(remediation.data.invariantId, "G-A1")
+        assert.match(remediation.data.challengeId, /^aggregate-g-a1-/)
+        assert.equal(fixture.env.events.some(GoalCompletionAttested.is), false)
     })
 })
 
-function aggregateFixture(runId: string) {
+function aggregateFixture(
+    runId: string,
+    projection?: GoalLedgerProjection,
+) {
     const goalEnvelope = {
         objective: "Compose provider cancellation.",
         constraints: [],
@@ -280,6 +434,7 @@ function aggregateFixture(runId: string) {
         })),
         requireIndependentQuality: true,
         requireAggregateReview: true,
+        ...(projection ? { projection } : {}),
     })
     guardian.setRequestAuthority(board)
     guardian.setIntegrationAuthority(repository)

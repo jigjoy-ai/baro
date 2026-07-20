@@ -54,6 +54,14 @@ export function translateDeclaredTests(
         if (/^(npm|pnpm|yarn)$/.test(tool ?? "")) {
             return translatePackage(cwd, requirement, parsed, packageManagers)
         }
+        if (tool === "npx") {
+            return translateNpxRstest(
+                cwd,
+                requirement,
+                parsed,
+                packageManagers,
+            )
+        }
         if (tool === "cargo") return translateCargo(cwd, requirement, parsed)
         if (tool === "node") return translateNode(cwd, requirement, parsed)
         if (
@@ -70,7 +78,7 @@ export function translateDeclaredTests(
         }
         return incomplete(
             requirement,
-            "unsupported declared test; allowed tools are npm/pnpm/yarn, cargo, node, and git diff --check",
+            "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, and git diff --check",
         )
     })
 }
@@ -164,6 +172,62 @@ function packageCommand(
     }
 }
 
+function exactRstestScript(value: unknown): boolean {
+    return (
+        typeof value === "string" &&
+        !/[\r\n]/.test(value) &&
+        value.trim() === "rstest run"
+    )
+}
+
+function translateNpxRstest(
+    cwd: string,
+    requirement: DeclaredTestRequirement,
+    parsed: DeclaredTokens,
+    managers: readonly VerifyJavaScriptPackageManager[],
+): VerifyCommandSpec {
+    const [, executable, operation, ...focusedPaths] = parsed.tokens
+    if (
+        executable !== "rstest" ||
+        operation !== "run" ||
+        focusedPaths.length === 0
+    ) {
+        return incomplete(
+            requirement,
+            "npx declarations are limited to 'npx rstest run <relative test path...>'",
+        )
+    }
+    if (focusedPaths.some((value) => !safeRstestFocusPath(cwd, value))) {
+        return incomplete(
+            requirement,
+            "npx rstest focus paths contain an unsafe, non-path, or escaping value",
+        )
+    }
+
+    const manifestPath = join(cwd, "package.json")
+    const manifest = existsSync(manifestPath) ? readManifest(manifestPath) : null
+    if (!manifest || !exactRstestScript(manifest.scripts?.test)) {
+        return incomplete(
+            requirement,
+            "npx rstest translation requires root package.json scripts.test to be exactly 'rstest run'",
+        )
+    }
+    const authority = managers.find((manager) => manager.cwd === undefined)
+    if (!authority) {
+        return incomplete(
+            requirement,
+            "root package-manager authority could not be resolved safely",
+        )
+    }
+    const trailingArgs = ["--", ...focusedPaths]
+    return {
+        label: [authority.manager, "run", "test", ...trailingArgs].join(" "),
+        ...packageCommand(authority, "test", trailingArgs),
+        containedPaths: focusedPaths.map(focusedPathRequirement),
+        canonicalDeclaredFocus: "rstest",
+    }
+}
+
 function translatePackage(
     cwd: string,
     requirement: DeclaredTestRequirement,
@@ -238,6 +302,12 @@ function translatePackage(
         label: [authority.manager, "run", script, ...trailingArgs].join(" "),
         ...packageCommand(authority, script, trailingArgs),
         ...(containedPaths.length > 0 ? { containedPaths } : {}),
+        ...(script === "test" &&
+        exactRstestScript(manifest.scripts?.test) &&
+        focusedArgs.length > 0 &&
+        focusedArgs.every((value) => safeRstestFocusPath(cwd, value))
+            ? { canonicalDeclaredFocus: "rstest" as const }
+            : {}),
     }
 }
 
@@ -321,6 +391,19 @@ function safeFocusedArg(cwd: string, value: string): boolean {
         possiblePath.startsWith(".") ||
         existsSync(resolve(cwd, possiblePath))
     return !(pathLike && escapesRoot(cwd, possiblePath))
+}
+
+function safeRstestFocusPath(cwd: string, value: string): boolean {
+    if (
+        value.startsWith("-") ||
+        value.includes("=") ||
+        !safeFocusedArg(cwd, value)
+    ) return false
+    return (
+        value.includes("/") ||
+        value.startsWith(".") ||
+        /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$/.test(value)
+    )
 }
 
 function focusedPathRequirement(value: string): VerifyContainedPath {

@@ -70,6 +70,8 @@ Creating or materially changing test code is real implementation work and may
 be its own story — merely running existing test/build/lint commands is not.
 Repository-specific invariants that those commands do not cover (for example,
 an exact public-export or dependency policy) remain substantive acceptance work.
+Use repository-owned package scripts for focused JavaScript tests, for example
+\`npm test -- tests/path.test.ts\`; never emit \`npx\` or another package downloader.
 
 When in doubt, prefer FEWER stories over more. A single 2-file story is better
 than two artificially-split 1-file stories.

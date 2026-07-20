@@ -11,14 +11,24 @@ import type {
     GoalAggregateReviewRequestedData,
     RunVerificationCompletedData,
 } from "../semantic-events.js"
+import type { GoalAggregateReviewBasis } from "../runtime/goal-aggregate-review.js"
 
 const GIT_TIMEOUT_MS = 10_000
 const MAX_REPOSITORY_EVIDENCE_BYTES = 256 * 1024
 const MAX_UNTRACKED_FILE_BYTES = 64 * 1024
 const MAX_UNTRACKED_TOTAL_BYTES = 128 * 1024
 const MAX_UNTRACKED_FILES = 128
-const MAX_BASIS_AND_VERIFICATION_CHARS = 256 * 1024
+export const GOAL_REVIEW_MAX_BASIS_AND_VERIFICATION_CHARS = 256 * 1024
 export const GOAL_REVIEW_MAX_PROMPT_CHARS = 512 * 1024
+/** One complete before/after stable repository snapshot, including bounded FS work. */
+export const GOAL_REVIEW_STABLE_CAPTURE_BUDGET_MS = 30_000
+
+export interface GoalInvariantReviewDeadline {
+    signal: AbortSignal
+    deadlineAt: number
+    /** Reviewer-owned drain for operations that acquire resources after abort. */
+    registerCleanup?(cleanup: Promise<unknown>): void
+}
 
 export type GoalInvariantReviewPreparation =
     | {
@@ -45,6 +55,7 @@ export async function prepareGoalInvariantReview(
     baseSha: string,
     request: GoalAggregateReviewRequestedData,
     verification: RunVerificationCompletedData,
+    deadline: GoalInvariantReviewDeadline,
 ): Promise<GoalInvariantReviewPreparation> {
     try {
         const criteria = request.basis.invariants.map(
@@ -54,16 +65,18 @@ export async function prepareGoalInvariantReview(
             return inconclusive("aggregate review basis has no invariants")
         }
 
-        const basis = JSON.stringify(request.basis, null, 2)
+        const basis = JSON.stringify(
+            normalizeGoalInvariantReviewBasisEvidence(request.basis),
+        )
         const commandEvidence = JSON.stringify({
             verificationId: verification.verificationId,
             status: verification.status,
             commands: verification.commands,
             durationMs: verification.durationMs,
-        }, null, 2)
+        })
         if (
             basis.length + commandEvidence.length >
-                MAX_BASIS_AND_VERIFICATION_CHARS
+                GOAL_REVIEW_MAX_BASIS_AND_VERIFICATION_CHARS
         ) {
             return inconclusive(
                 "the exact goal basis and verification evidence exceed the aggregate review budget",
@@ -73,6 +86,7 @@ export async function prepareGoalInvariantReview(
         const repositorySnapshot = await collectStableRepositoryEvidence(
             cwd,
             baseSha,
+            deadline,
         )
         const prompt = [
             "## Evidence policy",
@@ -84,7 +98,8 @@ export async function prepareGoalInvariantReview(
             "## Exact acceptance criteria",
             criteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n"),
             "",
-            "## Exact source-bound goal basis (lossless JSON)",
+            "## Exact source-bound goal basis (lossless normalized JSON)",
+            "Each contributionRefs entry is a zero-based index into contributionTable. Each challenge reasonRef and resolution.reasonRef is a zero-based index into reasonTable. Expanding those references and removing the encoding marker reconstructs the protocol basis without omitted fields.",
             basis,
             "",
             "## Exact source-bound final verification (lossless JSON)",
@@ -111,6 +126,90 @@ export async function prepareGoalInvariantReview(
     }
 }
 
+type GoalContribution = GoalAggregateReviewBasis["invariants"][number]["contributions"][number]
+type GoalChallenge = GoalAggregateReviewBasis["challenges"][number]
+
+export function normalizeGoalInvariantReviewBasisEvidence(
+    basis: GoalAggregateReviewBasis,
+) {
+    const contributionTable: GoalContribution[] = []
+    const contributionIndexes = new Map<string, number>()
+    const reasonTable: string[] = []
+    const reasonIndexes = new Map<string, number>()
+    const reasonRef = (reason: string): number => {
+        const existing = reasonIndexes.get(reason)
+        if (existing !== undefined) return existing
+        const index = reasonTable.length
+        reasonTable.push(reason)
+        reasonIndexes.set(reason, index)
+        return index
+    }
+    const invariants = basis.invariants.map((invariant) => {
+        const contributionRefs = invariant.contributions.map((contribution) => {
+            const key = JSON.stringify(contribution)
+            const existing = contributionIndexes.get(key)
+            if (existing !== undefined) return existing
+            const index = contributionTable.length
+            contributionTable.push(contribution)
+            contributionIndexes.set(key, index)
+            return index
+        })
+        return {
+            invariantId: invariant.invariantId,
+            text: invariant.text,
+            mappedStoryIds: invariant.mappedStoryIds,
+            contributionRefs,
+        }
+    })
+    const challenges = basis.challenges.map((challenge) =>
+        normalizeChallengeEvidence(challenge, reasonRef))
+    return {
+        encoding: "baro-goal-aggregate-review-basis-normalized-v1" as const,
+        fingerprint: basis.fingerprint,
+        contractId: basis.contractId,
+        objective: basis.objective,
+        nonGoals: basis.nonGoals,
+        assumptions: basis.assumptions,
+        verificationId: basis.verificationId,
+        storyIds: basis.storyIds,
+        contributionTable,
+        reasonTable,
+        invariants,
+        challenges,
+        protocolIssues: basis.protocolIssues,
+    }
+}
+
+function normalizeChallengeEvidence(
+    challenge: GoalChallenge,
+    reasonRef: (reason: string) => number,
+) {
+    const {
+        reason,
+        resolution,
+        ...identityAndRemediation
+    } = challenge
+    return {
+        ...identityAndRemediation,
+        reasonRef: reasonRef(reason),
+        ...(resolution
+            ? {
+                  resolution: {
+                      ...withoutReason(resolution),
+                      reasonRef: reasonRef(resolution.reason),
+                  },
+              }
+            : {}),
+    }
+}
+
+function withoutReason<T extends { reason: string }>(
+    value: T,
+): Omit<T, "reason"> {
+    const { reason: _reason, ...rest } = value
+    return rest
+}
+
 /**
  * Re-capture the complete bounded delta and require the same exact bytes used
  * by the model. A changed or unstable worktree is a terminal inconclusive
@@ -120,9 +219,14 @@ export async function verifyGoalInvariantReviewRepositoryFingerprint(
     cwd: string,
     baseSha: string,
     expectedFingerprint: string,
+    deadline: GoalInvariantReviewDeadline,
 ): Promise<string | null> {
     try {
-        const current = await collectStableRepositoryEvidence(cwd, baseSha)
+        const current = await collectStableRepositoryEvidence(
+            cwd,
+            baseSha,
+            deadline,
+        )
         return current.fingerprint === expectedFingerprint
             ? null
             : "the repository changed after aggregate review evidence was captured"
@@ -139,12 +243,21 @@ interface StableRepositoryEvidence {
 async function collectStableRepositoryEvidence(
     cwd: string,
     baseSha: string,
+    deadline: GoalInvariantReviewDeadline,
 ): Promise<StableRepositoryEvidence> {
     // Git has no read transaction spanning index, worktree, and untracked
     // bytes. Two complete bounded captures are the before/after certificate:
     // any mixed or changing view fails closed without a model call.
-    const before = await collectLosslessRepositoryEvidence(cwd, baseSha)
-    const after = await collectLosslessRepositoryEvidence(cwd, baseSha)
+    const before = await collectLosslessRepositoryEvidence(
+        cwd,
+        baseSha,
+        deadline,
+    )
+    const after = await collectLosslessRepositoryEvidence(
+        cwd,
+        baseSha,
+        deadline,
+    )
     if (before !== after) {
         throw new Error(
             "repository changed while exact aggregate evidence was captured",
@@ -162,9 +275,10 @@ async function collectStableRepositoryEvidence(
 async function collectLosslessRepositoryEvidence(
     cwdValue: string,
     baseShaValue: string,
+    deadline: GoalInvariantReviewDeadline,
 ): Promise<string> {
     const cwd = resolve(cwdValue)
-    const cwdStat = await lstat(cwd)
+    const cwdStat = await deadlineOperation(lstat(cwd), deadline)
     if (!cwdStat.isDirectory() || cwdStat.isSymbolicLink()) {
         throw new Error("aggregate repository target is not a real directory")
     }
@@ -172,10 +286,14 @@ async function collectLosslessRepositoryEvidence(
     if (!baseSha) throw new Error("immutable run base SHA is unavailable")
 
     const [inside, base, status, paths, diff, check, untracked] =
-        await Promise.all([
-            runGit(cwd, ["rev-parse", "--is-inside-work-tree"]),
-            runGit(cwd, ["cat-file", "-e", `${baseSha}^{commit}`]),
-            runGit(cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+        await settledRepositoryOperations([
+            runGit(cwd, ["rev-parse", "--is-inside-work-tree"], deadline),
+            runGit(cwd, ["cat-file", "-e", `${baseSha}^{commit}`], deadline),
+            runGit(
+                cwd,
+                ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                deadline,
+            ),
             runGit(cwd, [
                 "diff",
                 "--no-ext-diff",
@@ -185,7 +303,7 @@ async function collectLosslessRepositoryEvidence(
                 "-z",
                 baseSha,
                 "--",
-            ]),
+            ], deadline),
             runGit(cwd, [
                 "diff",
                 "--no-ext-diff",
@@ -196,7 +314,7 @@ async function collectLosslessRepositoryEvidence(
                 "--find-renames",
                 baseSha,
                 "--",
-            ]),
+            ], deadline),
             runGit(cwd, [
                 "diff",
                 "--no-ext-diff",
@@ -204,8 +322,12 @@ async function collectLosslessRepositoryEvidence(
                 "--check",
                 baseSha,
                 "--",
-            ], true),
-            runGit(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]),
+            ], deadline, true),
+            runGit(
+                cwd,
+                ["ls-files", "--others", "--exclude-standard", "-z"],
+                deadline,
+            ),
         ])
 
     if (strictUtf8(inside.stdout, "git worktree response").trim() !== "true") {
@@ -231,7 +353,11 @@ async function collectLosslessRepositoryEvidence(
         )
     }
 
-    const untrackedEvidence = await captureUntrackedFiles(cwd, untracked.stdout)
+    const untrackedEvidence = await captureUntrackedFiles(
+        cwd,
+        untracked.stdout,
+        deadline,
+    )
     const evidence = JSON.stringify({
         comparisonBase: baseSha,
         encoding: "utf8-lossless",
@@ -267,6 +393,7 @@ interface CapturedUntrackedFile {
 async function captureUntrackedFiles(
     cwd: string,
     value: Buffer,
+    deadline: GoalInvariantReviewDeadline,
 ): Promise<readonly CapturedUntrackedFile[]> {
     const paths = decodeNulTerminatedPaths(value)
     if (paths.length > MAX_UNTRACKED_FILES) {
@@ -277,11 +404,15 @@ async function captureUntrackedFiles(
     let totalBytes = 0
     const captured: CapturedUntrackedFile[] = []
     for (const path of paths.sort(compareStrings)) {
+        assertReviewDeadline(deadline)
         const absolute = safePath(cwd, path)
-        await assertNoSymlinkParents(cwd, absolute)
-        const stat = await lstat(absolute)
+        await assertNoSymlinkParents(cwd, absolute, deadline)
+        const stat = await deadlineOperation(lstat(absolute), deadline)
         if (stat.isSymbolicLink()) {
-            const target = await readlink(absolute, { encoding: "buffer" })
+            const target = await deadlineOperation(
+                readlink(absolute, { encoding: "buffer" }),
+                deadline,
+            )
             const targetUtf8 = tryStrictUtf8(target)
             captured.push({
                 path,
@@ -305,11 +436,17 @@ async function captureUntrackedFiles(
         if (totalBytes + stat.size > MAX_UNTRACKED_TOTAL_BYTES) {
             throw new Error("untracked file contents exceed the lossless total budget")
         }
-        await assertCanonicalPathInside(cwd, absolute)
+        await assertCanonicalPathInside(cwd, absolute, deadline)
         const noFollow = constants.O_NOFOLLOW ?? 0
-        const handle = await open(absolute, constants.O_RDONLY | noFollow)
+        const handle = await deadlineOperation(
+            open(absolute, constants.O_RDONLY | noFollow),
+            deadline,
+            async (opened) => {
+                await opened.close()
+            },
+        )
         try {
-            const opened = await handle.stat()
+            const opened = await deadlineOperation(handle.stat(), deadline)
             if (
                 !opened.isFile() ||
                 opened.dev !== stat.dev ||
@@ -318,19 +455,11 @@ async function captureUntrackedFiles(
             ) {
                 throw new Error(`untracked file ${JSON.stringify(path)} changed during capture`)
             }
-            const bytes = Buffer.alloc(opened.size)
-            let offset = 0
-            while (offset < bytes.length) {
-                const { bytesRead } = await handle.read(
-                    bytes,
-                    offset,
-                    bytes.length - offset,
-                    offset,
-                )
-                if (bytesRead === 0) break
-                offset += bytesRead
-            }
-            if (offset !== opened.size) {
+            const bytes = await deadlineOperation(
+                handle.readFile({ signal: deadline.signal }),
+                deadline,
+            )
+            if (bytes.length !== opened.size) {
                 throw new Error(`untracked file ${JSON.stringify(path)} changed size during capture`)
             }
             const contentUtf8 = tryStrictUtf8(bytes)
@@ -345,9 +474,20 @@ async function captureUntrackedFiles(
             })
             totalBytes += opened.size
         } finally {
-            await handle.close()
+            const close = handle.close()
+            if (
+                deadline.signal.aborted ||
+                Date.now() >= deadline.deadlineAt
+            ) {
+                // The reviewer drains this outside the work deadline with a
+                // separate bound; a late close remains rejection-safe.
+                registerDeadlineCleanup(deadline, close)
+            } else {
+                await deadlineOperation(close, deadline)
+            }
         }
     }
+    assertReviewDeadline(deadline)
     return captured
 }
 
@@ -357,9 +497,42 @@ interface GitResult {
     stderr: Buffer
 }
 
+type RepositoryEvidenceResults = [
+    GitResult,
+    GitResult,
+    GitResult,
+    GitResult,
+    GitResult,
+    GitResult,
+    GitResult,
+]
+
+async function settledRepositoryOperations(
+    operations: readonly [
+        Promise<GitResult>,
+        Promise<GitResult>,
+        Promise<GitResult>,
+        Promise<GitResult>,
+        Promise<GitResult>,
+        Promise<GitResult>,
+        Promise<GitResult>,
+    ],
+): Promise<RepositoryEvidenceResults> {
+    const settled = await Promise.allSettled(operations)
+    const failure = settled.find(
+        (result): result is PromiseRejectedResult =>
+            result.status === "rejected",
+    )
+    if (failure) throw failure.reason
+    return settled.map(
+        (result) => (result as PromiseFulfilledResult<GitResult>).value,
+    ) as RepositoryEvidenceResults
+}
+
 async function runGit(
     cwd: string,
     args: readonly string[],
+    deadline: GoalInvariantReviewDeadline,
     allowCheckFailure = false,
 ): Promise<GitResult> {
     const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null"
@@ -377,8 +550,12 @@ async function runGit(
             ],
             {
                 cwd,
-                timeoutMs: GIT_TIMEOUT_MS,
+                timeoutMs: Math.min(
+                    GIT_TIMEOUT_MS,
+                    remainingReviewDeadlineMs(deadline),
+                ),
                 terminationGraceMs: 1_000,
+                signal: deadline.signal,
                 maxBuffer: MAX_REPOSITORY_EVIDENCE_BYTES + 1,
                 env: {
                     ...process.env,
@@ -392,6 +569,7 @@ async function runGit(
         )
         return { exitCode: 0, stdout: result.stdout, stderr: result.stderr }
     } catch (error) {
+        assertReviewDeadline(deadline)
         if (error instanceof RepositoryCommandError) {
             const exitCode = typeof error.code === "number" ? error.code : null
             if (allowCheckFailure && exitCode === 1) {
@@ -475,23 +653,136 @@ function safePath(cwd: string, path: string): string {
     return absolute
 }
 
-async function assertNoSymlinkParents(cwd: string, absolute: string): Promise<void> {
+async function assertNoSymlinkParents(
+    cwd: string,
+    absolute: string,
+    deadline: GoalInvariantReviewDeadline,
+): Promise<void> {
     const parts = relative(cwd, absolute).split(sep)
     let current = resolve(cwd)
     for (const part of parts.slice(0, -1)) {
         current = resolve(current, part)
-        const stat = await lstat(current)
+        const stat = await deadlineOperation(lstat(current), deadline)
         if (stat.isSymbolicLink() || !stat.isDirectory()) {
             throw new Error("untracked path has a symlink or non-directory parent")
         }
     }
 }
 
-async function assertCanonicalPathInside(cwd: string, absolute: string): Promise<void> {
-    const [root, path] = await Promise.all([realpath(cwd), realpath(absolute)])
+async function assertCanonicalPathInside(
+    cwd: string,
+    absolute: string,
+    deadline: GoalInvariantReviewDeadline,
+): Promise<void> {
+    const [root, path] = await Promise.all([
+        deadlineOperation(realpath(cwd), deadline),
+        deadlineOperation(realpath(absolute), deadline),
+    ])
     const rel = relative(root, path)
     if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
         throw new Error("untracked path resolves outside the repository")
+    }
+}
+
+function remainingReviewDeadlineMs(
+    deadline: GoalInvariantReviewDeadline,
+): number {
+    assertReviewDeadline(deadline)
+    return Math.max(1, Math.ceil(deadline.deadlineAt - Date.now()))
+}
+
+function assertReviewDeadline(deadline: GoalInvariantReviewDeadline): void {
+    if (deadline.signal.aborted) throw reviewDeadlineError(deadline)
+    if (Date.now() >= deadline.deadlineAt) {
+        throw new Error("aggregate review overall deadline expired")
+    }
+}
+
+function reviewDeadlineError(deadline: GoalInvariantReviewDeadline): Error {
+    return deadline.signal.reason instanceof Error
+        ? deadline.signal.reason
+        : new Error("aggregate review cancelled")
+}
+
+async function deadlineOperation<T>(
+    operation: Promise<T>,
+    deadline: GoalInvariantReviewDeadline,
+    disposeAbandoned?: (value: T) => void | Promise<void>,
+): Promise<T> {
+    try {
+        assertReviewDeadline(deadline)
+    } catch (error) {
+        registerDeadlineCleanup(
+            deadline,
+            operation.then(
+                async (value) => {
+                    if (disposeAbandoned) await disposeAbandoned(value)
+                },
+                () => undefined,
+            ),
+        )
+        throw error
+    }
+    return await new Promise<T>((resolveOperation, rejectOperation) => {
+        let finished = false
+        const dispose = (value: T): void => {
+            if (!disposeAbandoned) return
+            registerDeadlineCleanup(
+                deadline,
+                Promise.resolve(disposeAbandoned(value)),
+            )
+        }
+        const onAbort = (): void => {
+            if (finished) return
+            finished = true
+            registerDeadlineCleanup(
+                deadline,
+                operation.then(
+                    async (value) => {
+                        if (disposeAbandoned) await disposeAbandoned(value)
+                    },
+                    () => undefined,
+                ),
+            )
+            rejectOperation(reviewDeadlineError(deadline))
+        }
+        deadline.signal.addEventListener("abort", onAbort, { once: true })
+        if (deadline.signal.aborted) onAbort()
+        operation.then(
+            (value) => {
+                if (finished) return
+                finished = true
+                deadline.signal.removeEventListener("abort", onAbort)
+                try {
+                    assertReviewDeadline(deadline)
+                    resolveOperation(value)
+                } catch (error) {
+                    dispose(value)
+                    rejectOperation(error)
+                }
+            },
+            (error: unknown) => {
+                if (finished) return
+                finished = true
+                deadline.signal.removeEventListener("abort", onAbort)
+                rejectOperation(error)
+            },
+        )
+    })
+}
+
+function registerDeadlineCleanup(
+    deadline: GoalInvariantReviewDeadline,
+    cleanup: Promise<unknown>,
+): void {
+    const settled = cleanup.then(
+        () => undefined,
+        () => undefined,
+    )
+    if (deadline.registerCleanup) {
+        deadline.registerCleanup(settled)
+    } else {
+        void settled
     }
 }
 

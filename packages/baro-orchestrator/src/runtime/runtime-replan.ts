@@ -7,11 +7,13 @@ import {
     type PrdStory,
 } from "../prd.js"
 import { isVerificationOnlyStory } from "../planning/verification-stories.js"
+import { validateGoalContractCoverage } from "../planning/goal-contract-coverage.js"
 import type {
     ReplanStoryAdd,
     RuntimeReplanMutation,
     RuntimeReplanRejectionCode,
 } from "../semantic-events.js"
+import { deriveGoalContract } from "./goal-contract.js"
 
 export interface RuntimeReplanValidationOptions {
     /** Running, leased, or otherwise already-started stories are immutable. */
@@ -215,7 +217,7 @@ export function validateRuntimeReplanMutation(
         candidate.userStories.push(toPrdStory(added))
     }
 
-    const graphFailure = validateCandidateGraph(candidate)
+    const graphFailure = validateCandidateGraph(prd, candidate)
     if (graphFailure) return graphFailure
 
     return {
@@ -303,6 +305,7 @@ function validateInputs(
 }
 
 function validateCandidateGraph(
+    current: PrdFile,
     candidate: PrdFile,
 ): RuntimeReplanValidationFailure | null {
     const storyIds = new Set(candidate.userStories.map((story) => story.id))
@@ -339,7 +342,43 @@ function validateCandidateGraph(
             "runtime replan candidate contains a dependency cycle",
         )
     }
+
+    try {
+        const contract = deriveGoalContract(current.goalEnvelope)
+        const currentCoverage = validateGoalContractCoverage(
+            contract,
+            goalContractMappings(current.userStories),
+            "partial",
+        )
+        const candidateCoverage = validateGoalContractCoverage(
+            contract,
+            goalContractMappings(candidate.userStories),
+            "partial",
+        )
+        const currentlyMissing = new Set(currentCoverage.missingInvariantIds)
+        const newlyMissing = candidateCoverage.missingInvariantIds.filter(
+            (invariantId) => !currentlyMissing.has(invariantId),
+        )
+        if (newlyMissing.length > 0) {
+            return reject(
+                "invalid_proposal",
+                `runtime replan would remove the last story owner for GoalContract invariant(s): ${newlyMissing.join(", ")}`,
+            )
+        }
+    } catch (error) {
+        return reject(
+            "invalid_proposal",
+            error instanceof Error ? error.message : String(error),
+        )
+    }
     return null
+}
+
+function goalContractMappings(stories: readonly PrdStory[]) {
+    return stories.map((story) => ({
+        storyId: story.id,
+        invariantIds: story.goalInvariantIds ?? [],
+    }))
 }
 
 function validateAddedStoryShape(story: ReplanStoryAdd): string | null {

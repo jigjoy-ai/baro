@@ -76,7 +76,11 @@ import {
 } from "./participants/dialogue-responder.js"
 import { Finalizer } from "./participants/finalizer.js"
 import { GitCoordinator } from "./participants/git-coordinator.js"
-import { GoalInvariantReviewer } from "./participants/goal-invariant-reviewer.js"
+import {
+    GOAL_REVIEW_BOARD_SLACK_MS,
+    GoalInvariantReviewer,
+    goalReviewRoundTimeoutMs,
+} from "./participants/goal-invariant-reviewer.js"
 import { DialogueForwarder } from "./participants/forwarders/dialogue.js"
 import { joinBaroEventForwarders } from "./participants/forwarders/index.js"
 import { Librarian } from "./participants/librarian.js"
@@ -406,6 +410,17 @@ export function storyTimeoutSecs(
         default:
             return 600
     }
+}
+
+export function resolveGoalReviewTimeoutMs(
+    configured: number | undefined,
+    effectiveStoryTimeoutSecs: number,
+): number {
+    if (configured !== undefined) return configured
+    return Math.min(
+        2_147_483_647,
+        Math.ceil(effectiveStoryTimeoutSecs * 1_000),
+    )
 }
 
 export interface OrchestrateResult {
@@ -1056,12 +1071,16 @@ export async function orchestrate(
     let dialogueAgent: DialogueAgent | null = null
     let planningFeed: PlanningFeed | null = null
     let collectiveBoard: CollectiveBoard | null = null
+    const effectiveStoryTimeoutSecs = storyTimeoutSecs(
+        config.timeoutSecs,
+        config.effort,
+    )
     if (coordinationMode === "legacy") {
         const conductor = new Conductor({
             prdPath: config.prdPath,
             cwd: config.cwd,
             parallel: effectiveParallel,
-            timeoutSecs: storyTimeoutSecs(config.timeoutSecs, config.effort),
+            timeoutSecs: effectiveStoryTimeoutSecs,
             overrideModel: config.overrideModel ?? undefined,
             defaultModel: defaultStorySelector,
             intraLevelDelaySecs: config.intraLevelDelaySecs,
@@ -1176,10 +1195,18 @@ export async function orchestrate(
         }
         if (acceptanceGate) leaseBroker.setQualityAuthority(acceptanceGate)
         const collectivePrd = loadPrd(config.prdPath)
-        const goalReviewTimeoutMs = config.collectiveGoalReviewTimeoutMs ?? 120_000
+        const goalReviewTimeoutMs = resolveGoalReviewTimeoutMs(
+            config.collectiveGoalReviewTimeoutMs,
+            effectiveStoryTimeoutSecs,
+        )
         const goalReviewMaxAttempts =
             config.collectiveGoalReviewMaxAttempts ?? 2
+        let goalReviewOverallTimeoutMs: number | undefined
         if (acceptanceGate) {
+            goalReviewOverallTimeoutMs = goalReviewRoundTimeoutMs(
+                goalReviewTimeoutMs,
+                goalReviewMaxAttempts,
+            )
             let responder = config.goalReviewResponder
             if (!responder) {
                 goalReviewRuntimeCwd = mkdtempSync(
@@ -1207,6 +1234,7 @@ export async function orchestrate(
                 modelUsed: goalReviewModelName(criticLlm, config.criticModel),
                 timeoutMs: goalReviewTimeoutMs,
                 maxAttempts: goalReviewMaxAttempts,
+                overallTimeoutMs: goalReviewOverallTimeoutMs,
             })
             goalInvariantReviewer.setVerificationAuthority(runVerifier)
             goalInvariantReviewer.setRepositoryAuthority(repositoryAuthority)
@@ -1244,7 +1272,7 @@ export async function orchestrate(
             runId,
             prdPath: config.prdPath,
             cwd: config.cwd,
-            timeoutSecs: storyTimeoutSecs(config.timeoutSecs, config.effort),
+            timeoutSecs: effectiveStoryTimeoutSecs,
             overrideModel: config.overrideModel ?? undefined,
             defaultModel: defaultStorySelector,
             expectRecoveryDecisions: config.withSurgeon ?? false,
@@ -1271,10 +1299,11 @@ export async function orchestrate(
             verificationTimeoutMs:
                 config.collectiveVerificationTimeoutMs ??
                 recommendedMergedVerifyTimeoutMs(verifyPlan),
-            goalCompletionTimeoutMs: goalInvariantReviewer
+            goalCompletionTimeoutMs:
+                goalInvariantReviewer &&
+                goalReviewOverallTimeoutMs !== undefined
                 ? aggregateReviewBudgetMs(
-                      goalReviewTimeoutMs,
-                      goalReviewMaxAttempts,
+                      goalReviewOverallTimeoutMs,
                   )
                 : undefined,
         })
@@ -1760,15 +1789,14 @@ function goalReviewModelName(
     return `${backend}-default`
 }
 
-function aggregateReviewBudgetMs(
-    perAttemptTimeoutMs: number,
-    maxAttempts: number,
+export function aggregateReviewBudgetMs(
+    reviewRoundTimeoutMs: number,
 ): number {
     // One exact quality-only basis refresh is allowed. Include both complete
-    // review rounds plus abort-to-settlement slack in the Board watchdog.
+    // rounds plus their bounded post-abort drains and event/persistence slack.
     return Math.min(
         2_147_483_647,
-        2 * perAttemptTimeoutMs * maxAttempts + 2 * 10_000 + 30_000,
+        2 * reviewRoundTimeoutMs + GOAL_REVIEW_BOARD_SLACK_MS,
     )
 }
 

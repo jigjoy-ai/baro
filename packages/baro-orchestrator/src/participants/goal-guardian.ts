@@ -34,6 +34,8 @@ import {
 import { goalAggregateStableBasisFingerprint } from "../runtime/goal-aggregate-review.js"
 import type { GoalEnvelope } from "../session/conversation-contract.js"
 
+const MAX_AGGREGATE_REMEDIATIONS_PER_INVARIANT = 3
+
 export interface GoalGuardianOptions {
     runId: string
     /** Missing/null preserves legacy behavior: no contract is synthesized. */
@@ -473,13 +475,18 @@ export class GoalGuardian extends BaseObserver {
     }
 
     private raiseSyntheticChallenge(
-        kind: "coverage" | "revalidation",
+        kind: "coverage" | "revalidation" | "aggregate",
         invariantId: string,
         reason: string,
         revalidates?: readonly GoalIntegrationEvidence[],
-    ): void {
-        if (!this.contract || !this.ledger) return
-        if (this.ledger.hasOpenChallenge(invariantId)) return
+    ): boolean {
+        if (!this.contract || !this.ledger) return false
+        if (this.ledger.hasOpenChallenge(invariantId)) return false
+        if (
+            kind === "aggregate" &&
+            this.ledger.aggregateRemediationCount(invariantId) >=
+                MAX_AGGREGATE_REMEDIATIONS_PER_INVARIANT
+        ) return false
         const ordinal = this.ledger.challengeCount(invariantId) + 1
         const digest = createHash("sha256")
             .update(this.contract.contractId)
@@ -502,6 +509,7 @@ export class GoalGuardian extends BaseObserver {
             undefined,
             revalidates,
         )
+        return true
     }
 
     private emitPendingRemediations(): void {
@@ -736,6 +744,33 @@ export class GoalGuardian extends BaseObserver {
             })
             this.emit(GoalCompletionAttested.create(data))
             return
+        }
+
+        const rejected = review.invariants.filter(
+            ({ status }) => status === "failed",
+        )
+        if (review.status === "failed" && rejected.length > 0) {
+            let remediationRequested = false
+            for (const invariant of rejected) {
+                remediationRequested =
+                    this.raiseSyntheticChallenge(
+                        "aggregate",
+                        invariant.invariantId,
+                        `Run-level semantic review ${review.reviewId} rejected ` +
+                            `the invariant: ${invariant.reason}`,
+                    ) || remediationRequested
+            }
+            if (remediationRequested) {
+                // A semantic rejection is actionable repository work, not a
+                // terminal coordinator verdict. Publish the rejected evidence
+                // and its exact invariant-scoped challenges before asking
+                // Board to reopen scheduling. The remediation integration
+                // changes the source-bound basis, so completion requires a
+                // fresh verifier receipt and aggregate review.
+                this.publishProjection(true)
+                this.emitPendingRemediations()
+                return
+            }
         }
         this.publishProjection(true)
         const data = this.attest(pending.request, currentBasis)

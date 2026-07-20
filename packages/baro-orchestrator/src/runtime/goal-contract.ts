@@ -564,6 +564,23 @@ export class GoalInvariantLedger {
         ).length
     }
 
+    /**
+     * Durable count for Guardian-owned semantic-review healing cycles.
+     * Challenge ids are worker-controlled at the collaboration boundary, so a
+     * namespace prefix alone must never consume the aggregate-remediation cap.
+     */
+    aggregateRemediationCount(invariantIdValue: string): number {
+        const invariantId = nonEmpty(invariantIdValue)
+        const namespace = `aggregate-${invariantId.toLowerCase()}-`
+        return [...this.challenges.values()].filter(
+            (challenge) =>
+                challenge.invariantId === invariantId &&
+                challenge.raisedBy === "goal-guardian" &&
+                challenge.challengeId.startsWith(namespace) &&
+                challenge.remediation !== undefined,
+        ).length
+    }
+
     recordIntegration(evidence: GoalIntegrationEvidence): void {
         const storyId = nonEmpty(evidence.storyId)
         this.integrations.set(

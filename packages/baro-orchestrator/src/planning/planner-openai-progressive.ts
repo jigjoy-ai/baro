@@ -1,7 +1,10 @@
 import { type Tool } from "@mozaik-ai/core"
 
 import type { PrdStory } from "../prd.js"
+import { deriveGoalContract } from "../runtime/goal-contract.js"
+import type { GoalEnvelope } from "../session/conversation-contract.js"
 import type { BaroCommand } from "../tui-protocol.js"
+import { validateGoalContractCoverage } from "./goal-contract-coverage.js"
 import {
     openProgressivePlanSession,
     validateProgressivePlanFragment,
@@ -16,6 +19,9 @@ export type PlannerOpenAIPlanFragmentEvent = Extract<
 export interface PlannerOpenAIProgressiveConfig {
     runId: string
     planningId: string
+    /** Host-authored intent used only to reject unknown invariant claims before
+     * the local immutable-prefix state advances. Missing preserves legacy. */
+    trustedGoalEnvelope?: GoalEnvelope
     publish(
         event: PlannerOpenAIPlanFragmentEvent,
     ): void | Promise<void>
@@ -159,6 +165,7 @@ export function createPlannerProgressivePublisher(
     config: PlannerOpenAIProgressiveConfig,
 ): PlannerProgressivePublisher {
     const session = openPlannerProgressiveSession(config)
+    const goalContract = deriveGoalContract(config.trustedGoalEnvelope)
     return {
         async publish(args: unknown) {
             if (!isExactToolArgs(args)) {
@@ -176,6 +183,11 @@ export function createPlannerProgressivePublisher(
                 ordinal: remembered?.ordinal ?? session.nextOrdinal,
                 stories: normalizePublishedStories(args.stories),
             })
+            validateGoalContractCoverage(
+                goalContract,
+                goalContractMappings(fragment.stories),
+                "partial",
+            )
             const admission = session.admit(fragment)
             const event: PlannerOpenAIPlanFragmentEvent = {
                 type: "plan_fragment",
@@ -203,6 +215,13 @@ export function createPlannerProgressivePublisher(
             return session.snapshot().stories.length > 0
         },
     }
+}
+
+function goalContractMappings(stories: readonly PrdStory[]) {
+    return stories.map((story) => ({
+        storyId: story.id,
+        invariantIds: story.goalInvariantIds ?? [],
+    }))
 }
 
 function openPlannerProgressiveSession(

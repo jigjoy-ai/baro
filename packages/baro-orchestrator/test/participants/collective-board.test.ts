@@ -13,6 +13,8 @@ import {
     ConductorState,
     GoalCompletionAttested,
     GoalCompletionCheckRequested,
+    GoalInvariantRemediationAdmitted,
+    GoalInvariantRemediationProposed,
     GoalLedgerProjectionUpdated,
     RecoveryDecision,
     RecoveryEvaluationStarted,
@@ -26,6 +28,7 @@ import {
     RunVerificationCompleted,
     RunVerificationRequested,
     RunVerificationTimedOut,
+    RuntimeReplanApplied,
     StoryIntegrationRequested,
     StoryMergeFailed,
     StoryMerged,
@@ -444,6 +447,265 @@ describe("CollectiveBoard", () => {
             const completed = env.events.find(RunCompleted.is)
             assert.equal(completed?.data.success, false)
             assert.equal(completed?.data.verificationStatus, "skipped")
+        })
+    })
+
+    it("uses partial verification for semantic diagnosis but never for success", async () => {
+        await withTempDir("collective-verify-diagnostic-", async (dir) => {
+            const runId = "run-verify-diagnostic"
+            const prdPath = join(dir, "prd.json")
+            const goalEnvelope = {
+                objective: "Keep provider cleanup correct.",
+                constraints: [],
+                acceptanceCriteria: [
+                    "Every provider path preserves stream cancellation.",
+                ],
+                nonGoals: [],
+                assumptions: [],
+            }
+            const contract = deriveGoalContract(goalEnvelope)!
+            const input = prd()
+            input.goalEnvelope = goalEnvelope
+            input.userStories[0] = {
+                ...input.userStories[0]!,
+                goalInvariantIds: ["G-A1"],
+            }
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            const verifier = source("verifier")
+            const guardian = source("goal-guardian")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                verifyBeforePush: true,
+                verifierAuthority: verifier,
+                goalCompletionAuthority: guardian,
+            })
+            const env = joinWithCapture(board)
+            const request = await integrateSingleStory(env, runId)
+
+            env.deliverSemanticEvent(
+                verifier,
+                RunVerificationCompleted.create({
+                    runId,
+                    verificationId: request.data.verificationId,
+                    status: "skipped",
+                    commands: [
+                        {
+                            command: "npm run typecheck",
+                            status: "passed",
+                            durationMs: 10,
+                        },
+                        {
+                            command: "npm run test",
+                            status: "skipped",
+                            durationMs: 1,
+                            tail: "declared command budget exceeded",
+                        },
+                    ],
+                    durationMs: 11,
+                }),
+            )
+
+            const check = await waitFor(
+                env.events,
+                GoalCompletionCheckRequested.is,
+            )
+            assert.equal(env.events.some(RunPushRequested.is), false)
+            assert.equal(check.data.verificationId, request.data.verificationId)
+            assert.equal(
+                env.events
+                    .filter(ConductorState.is)
+                    .some(({ data }) =>
+                        data.detail?.includes("actionable remediation"),
+                    ),
+                true,
+            )
+
+            const ledger = new GoalInvariantLedger(contract, [{
+                storyId: "S1",
+                invariantIds: ["G-A1"],
+            }])
+            ledger.recordIntegration({ storyId: "S1" })
+            const projection = ledger.snapshot(1)
+            env.deliverSemanticEvent(
+                guardian,
+                GoalLedgerProjectionUpdated.create({
+                    runId,
+                    contractId: contract.contractId,
+                    revision: projection.revision,
+                    projection,
+                }),
+            )
+            env.deliverSemanticEvent(
+                guardian,
+                GoalCompletionAttested.create({
+                    runId,
+                    checkId: check.data.checkId,
+                    contractId: contract.contractId,
+                    goalRevision: projection.revision,
+                    verificationId: check.data.verificationId,
+                    status: "satisfied",
+                    satisfiedInvariantIds: ["G-A1"],
+                    openInvariantIds: [],
+                    rejectedInvariantIds: [],
+                    invariants: [{
+                        invariantId: "G-A1",
+                        status: "satisfied",
+                        mappedStoryIds: ["S1"],
+                        integratedStoryIds: ["S1"],
+                        independentlyReviewedStoryIds: [],
+                        reason: "semantic review passed",
+                    }],
+                    reason: "all goal invariants have semantic evidence",
+                }),
+            )
+            await waitFor(env.events, RunPushRequested.is)
+
+            const saved = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
+            assert.equal(saved.runtimeGraph?.protocol?.completion, undefined)
+            env.deliverSemanticEvent(
+                source("repo"),
+                RunPushed.create({ runId, pushed: false }),
+            )
+            const summary = await board.done
+            assert.equal(summary.success, false)
+            assert.equal(summary.verificationStatus, "skipped")
+            assert.match(
+                summary.abortReason ?? "",
+                /objective verification incomplete: skipped npm run test/,
+            )
+        })
+    })
+
+    it("reopens the DAG when partial verification exposes semantic remediation", async () => {
+        await withTempDir("collective-verify-remediation-", async (dir) => {
+            const runId = "run-verify-remediation"
+            const prdPath = join(dir, "prd.json")
+            const goalEnvelope = {
+                objective: "Keep provider cleanup correct.",
+                constraints: [],
+                acceptanceCriteria: [
+                    "Every provider path preserves stream cancellation.",
+                ],
+                nonGoals: [],
+                assumptions: [],
+            }
+            const contract = deriveGoalContract(goalEnvelope)!
+            const input = prd()
+            input.goalEnvelope = goalEnvelope
+            input.userStories[0] = {
+                ...input.userStories[0]!,
+                goalInvariantIds: ["G-A1"],
+            }
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            const verifier = source("verifier")
+            const guardian = source("goal-guardian")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                verifyBeforePush: true,
+                verifierAuthority: verifier,
+                goalCompletionAuthority: guardian,
+            })
+            const env = joinWithCapture(board)
+            const verification = await integrateSingleStory(env, runId)
+            env.deliverSemanticEvent(
+                verifier,
+                RunVerificationCompleted.create({
+                    runId,
+                    verificationId: verification.data.verificationId,
+                    status: "skipped",
+                    commands: [
+                        {
+                            command: "npm run typecheck",
+                            status: "passed",
+                            durationMs: 10,
+                        },
+                        {
+                            command: "npm run test",
+                            status: "skipped",
+                            durationMs: 1,
+                            tail: "declared command budget exceeded",
+                        },
+                    ],
+                    durationMs: 11,
+                }),
+            )
+            const oldCheck = await waitFor(
+                env.events,
+                GoalCompletionCheckRequested.is,
+            )
+
+            const remediationStoryId = "GREM-a13-cleanup"
+            env.deliverSemanticEvent(
+                guardian,
+                GoalInvariantRemediationProposed.create({
+                    runId,
+                    contractId: contract.contractId,
+                    challengeId: "aggregate-g-a1-a13",
+                    invariantId: "G-A1",
+                    proposalId: "goal-remediation-a13",
+                    reason: "provider streams do not close on cancellation",
+                    story: {
+                        id: remediationStoryId,
+                        priority: -1,
+                        title: "Repair provider cleanup invariant",
+                        description:
+                            "Fix cancellation cleanup across provider paths.",
+                        dependsOn: [],
+                        retries: 2,
+                        acceptance: [
+                            "[G-A1] Every provider path preserves stream cancellation.",
+                            "Focused regression evidence covers provider cleanup.",
+                        ],
+                        tests: ["git diff --check"],
+                        model: "heavy",
+                        goalInvariantIds: ["G-A1"],
+                    },
+                }),
+            )
+
+            const applied = await waitFor(env.events, RuntimeReplanApplied.is)
+            const admitted = await waitFor(
+                env.events,
+                GoalInvariantRemediationAdmitted.is,
+            )
+            assert.equal(applied.data.mutation.addedStories[0]?.id, remediationStoryId)
+            assert.equal(admitted.data.storyId, remediationStoryId)
+            assert.equal(env.events.some(RunPushRequested.is), false)
+
+            env.deliverSemanticEvent(
+                guardian,
+                GoalCompletionAttested.create({
+                    runId,
+                    checkId: oldCheck.data.checkId,
+                    contractId: contract.contractId,
+                    goalRevision: 1,
+                    verificationId: oldCheck.data.verificationId,
+                    status: "satisfied",
+                    satisfiedInvariantIds: ["G-A1"],
+                    openInvariantIds: [],
+                    rejectedInvariantIds: [],
+                    invariants: [],
+                    reason: "stale semantic pass",
+                }),
+            )
+            await flush()
+            assert.equal(env.events.some(RunPushRequested.is), false)
+
+            await provideContext(env, runId, 2)
+            const offers = await waitForCount(env.events, WorkOffered.is, 2)
+            assert.equal(offers[1]?.data.request.storyId, remediationStoryId)
+            const durable = JSON.parse(readFileSync(prdPath, "utf8")) as PrdFile
+            assert.equal(
+                durable.userStories.some(({ id }) => id === remediationStoryId),
+                true,
+            )
+            assert.equal(durable.runtimeGraph?.protocol?.completion, undefined)
         })
     })
 

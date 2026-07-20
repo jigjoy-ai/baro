@@ -441,8 +441,12 @@ mod tests {
         session.transition_to(ConversationPhase::Executing).unwrap();
         session.begin_request("request-emoji", "Question").unwrap();
         session
-            .apply_runtime_answer("request-emoji", "😀".repeat(8_000))
+            .apply_runtime_answer("request-emoji", "Answer")
             .unwrap();
+        // Simulate a legacy snapshot written before the Rust intake boundary
+        // adopted JavaScript's UTF-16 limit. Runtime projection must still
+        // bound it without splitting a surrogate pair.
+        session.transcript.last_mut().unwrap().text = "😀".repeat(8_000);
 
         let snapshot = session
             .conversation_context_snapshot(None)

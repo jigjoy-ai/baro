@@ -7,12 +7,14 @@ import {
     type DialogueResponderInvocation,
 } from "./dialogue-agent.js"
 import {
-    VERDICT_SYSTEM_PROMPT,
     extractVerdictJson,
+    verdictSystemPrompt,
 } from "./critic.js"
 import {
+    GOAL_REVIEW_STABLE_CAPTURE_BUDGET_MS,
     prepareGoalInvariantReview,
     verifyGoalInvariantReviewRepositoryFingerprint,
+    type GoalInvariantReviewDeadline,
 } from "./goal-invariant-review-evidence.js"
 import {
     GoalAggregateReviewCompleted,
@@ -41,14 +43,65 @@ import { createGoalAggregateReviewBasis } from "../runtime/goal-aggregate-review
 const DEFAULT_TIMEOUT_MS = 120_000
 const DEFAULT_MAX_ATTEMPTS = 2
 const DEFAULT_SETTLEMENT_TIMEOUT_MS = 10_000
+/** Bound local-FS drain; registered late disposers continue safely afterward. */
+const GOAL_REVIEW_FILESYSTEM_CLEANUP_DRAIN_MS = 1_000
 const MAX_REVIEWER_CACHE_ENTRIES = 16
+const MAX_TIMER_MS = 2_147_483_647
+/** Board permits one refresh plus bounded post-abort cleanup and event slack. */
+export const GOAL_REVIEW_BOARD_SLACK_MS = 30_000
+const MAX_GOAL_REVIEW_ROUND_TIMEOUT_MS = Math.floor(
+    (MAX_TIMER_MS - GOAL_REVIEW_BOARD_SLACK_MS) / 2,
+)
 
-export const GOAL_AGGREGATE_REVIEW_SYSTEM_PROMPT = `${VERDICT_SYSTEM_PROMPT}
+/**
+ * One abortable review-round budget spanning exact evidence capture, every
+ * provider attempt and provider settlement. The capture allowance covers the
+ * initial stable snapshot plus one pre/post stable snapshot per attempt.
+ */
+export function goalReviewRoundTimeoutMs(
+    perAttemptTimeoutMs: number,
+    maxAttempts: number,
+    settlementTimeoutMs = DEFAULT_SETTLEMENT_TIMEOUT_MS,
+): number {
+    const attemptTimeout = nonNegativeInteger(
+        perAttemptTimeoutMs,
+        "goal reviewer per-attempt timeoutMs",
+    )
+    const attempts = positiveInteger(
+        maxAttempts,
+        "goal reviewer maxAttempts",
+    )
+    const settlement = positiveInteger(
+        settlementTimeoutMs,
+        "goal reviewer settlementTimeoutMs",
+    )
+    const stableCaptures = 1 + 2 * attempts
+    return Math.min(
+        MAX_GOAL_REVIEW_ROUND_TIMEOUT_MS,
+        Math.max(1, attemptTimeout) * attempts +
+            GOAL_REVIEW_STABLE_CAPTURE_BUDGET_MS * stableCaptures +
+            settlement,
+    )
+}
+
+export const GOAL_AGGREGATE_REVIEW_SYSTEM_PROMPT = `${verdictSystemPrompt({
+    allowInconclusive: true,
+})}
 
 This is a run-level composition review, not a review of one worker. Evaluate every exact
 [G-*] criterion against the complete merged-run repository and verification evidence. A local
 story pass is evidence about that shard only; independently check the interaction of all mapped
-contributions. violated_criteria must contain only exact criterion strings from the prompt.`
+contributions. violated_criteria must contain only exact criterion strings from the prompt.
+
+A skipped or missing command is control-plane incompleteness, not itself a violated goal invariant.
+Return "fail" only when repository evidence establishes a concrete semantic defect independently
+of the skipped evidence; return "pass" only when the available evidence still proves every invariant.`
+
+export interface GoalInvariantReviewEvidenceAdapter {
+    prepare: typeof prepareGoalInvariantReview
+    verifyRepositoryFingerprint:
+        typeof verifyGoalInvariantReviewRepositoryFingerprint
+}
 
 export interface GoalInvariantReviewerOptions {
     runId: string
@@ -59,6 +112,10 @@ export interface GoalInvariantReviewerOptions {
     maxAttempts?: number
     /** TERM/abort-to-settled budget after the outer evaluator watchdog wins. */
     settlementTimeoutMs?: number
+    /** Test/embedding override for the complete evidence+provider round. */
+    overallTimeoutMs?: number
+    /** Deterministic test/embedding seam; production uses exact Git evidence. */
+    evidenceAdapter?: GoalInvariantReviewEvidenceAdapter
 }
 
 interface CachedReview {
@@ -71,6 +128,8 @@ export class GoalInvariantReviewer extends SerializedObserver {
     private readonly timeoutMs: number
     private readonly maxAttempts: number
     private readonly settlementTimeoutMs: number
+    private readonly overallTimeoutMs: number
+    private readonly evidenceAdapter: GoalInvariantReviewEvidenceAdapter
     private readonly verifications = new Map<string, RunVerificationCompletedData>()
     private readonly completed = new Map<string, CachedReview>()
     private readonly active = new Map<string, AbortController>()
@@ -89,7 +148,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
             opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
             "goal reviewer timeoutMs",
         )
-        if (this.timeoutMs > 2_147_483_647) {
+        if (this.timeoutMs > MAX_TIMER_MS) {
             throw new RangeError("goal reviewer timeoutMs exceeds timer range")
         }
         this.maxAttempts = positiveInteger(
@@ -103,8 +162,24 @@ export class GoalInvariantReviewer extends SerializedObserver {
             opts.settlementTimeoutMs ?? DEFAULT_SETTLEMENT_TIMEOUT_MS,
             "goal reviewer settlementTimeoutMs",
         )
-        if (this.settlementTimeoutMs > 2_147_483_647) {
+        if (this.settlementTimeoutMs > MAX_TIMER_MS) {
             throw new RangeError("goal reviewer settlementTimeoutMs exceeds timer range")
+        }
+        this.overallTimeoutMs = nonNegativeInteger(
+            opts.overallTimeoutMs ?? goalReviewRoundTimeoutMs(
+                this.timeoutMs,
+                this.maxAttempts,
+                this.settlementTimeoutMs,
+            ),
+            "goal reviewer overallTimeoutMs",
+        )
+        if (this.overallTimeoutMs > MAX_GOAL_REVIEW_ROUND_TIMEOUT_MS) {
+            throw new RangeError("goal reviewer overallTimeoutMs exceeds round timer range")
+        }
+        this.evidenceAdapter = opts.evidenceAdapter ?? {
+            prepare: prepareGoalInvariantReview,
+            verifyRepositoryFingerprint:
+                verifyGoalInvariantReviewRepositoryFingerprint,
         }
     }
 
@@ -230,8 +305,13 @@ export class GoalInvariantReviewer extends SerializedObserver {
                 key: event.data.reviewId,
             },
             async () => {
+                const deadline = createGoalReviewDeadline(
+                    controller.signal,
+                    this.overallTimeoutMs,
+                )
                 try {
-                    const data = await this.evaluate(event.data, controller.signal)
+                    const data = await this.evaluate(event.data, deadline)
+                    await deadline.close()
                     if (controller.signal.aborted) return
                     setBounded(
                         this.completed,
@@ -245,6 +325,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
                     }
                     throw error
                 } finally {
+                    await deadline.close()
                     if (this.active.get(event.data.reviewId) === controller) {
                         this.active.delete(event.data.reviewId)
                     }
@@ -266,16 +347,20 @@ export class GoalInvariantReviewer extends SerializedObserver {
                 key: request.reviewId,
             },
             async () => {
+                const deadline = createGoalReviewDeadline(
+                    controller.signal,
+                    this.overallTimeoutMs,
+                )
                 try {
                     let issue = this.currentEvidenceIssue(request)
                     if (!issue) {
-                        issue = await verifyGoalInvariantReviewRepositoryFingerprint(
-                            this.opts.cwd,
-                            this.baseSha!,
+                        issue = await this.verifyRepositoryFingerprint(
                             cached.data.repositoryFingerprint!,
+                            deadline,
                         )
                     }
                     issue ??= this.currentEvidenceIssue(request)
+                    await deadline.close()
                     if (controller.signal.aborted) return
                     this.emit(
                         GoalAggregateReviewCompleted.create(
@@ -289,6 +374,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
                         ),
                     )
                 } finally {
+                    await deadline.close()
                     if (this.active.get(request.reviewId) === controller) {
                         this.active.delete(request.reviewId)
                     }
@@ -299,8 +385,9 @@ export class GoalInvariantReviewer extends SerializedObserver {
 
     private async evaluate(
         request: GoalAggregateReviewRequestedData,
-        signal: AbortSignal,
+        deadline: ActiveGoalReviewDeadline,
     ): Promise<GoalAggregateReviewCompletedData> {
+        const signal = deadline.signal
         const { fingerprint: _claimedFingerprint, ...basisInput } = request.basis
         let calculatedFingerprint: string
         try {
@@ -338,11 +425,15 @@ export class GoalInvariantReviewer extends SerializedObserver {
         )
         let preparation: Awaited<ReturnType<typeof prepareGoalInvariantReview>>
         try {
-            preparation = await prepareGoalInvariantReview(
-                this.opts.cwd,
-                this.baseSha!,
-                request,
-                verification!,
+            preparation = await awaitGoalReviewEvidenceOperation(
+                deadline,
+                () => this.evidenceAdapter.prepare(
+                    this.opts.cwd,
+                    this.baseSha!,
+                    request,
+                    verification!,
+                    deadline,
+                ),
             )
         } catch (error) {
             return this.inconclusive(
@@ -377,14 +468,13 @@ export class GoalInvariantReviewer extends SerializedObserver {
                 return this.inconclusive(
                     request,
                     attempt - 1,
-                    "aggregate review cancelled",
+                    goalReviewInterruptionReason(signal),
                 )
             }
             const preInvocationRepositoryIssue =
-                await verifyGoalInvariantReviewRepositoryFingerprint(
-                    this.opts.cwd,
-                    this.baseSha!,
+                await this.verifyRepositoryFingerprint(
                     preparation.repositoryFingerprint,
+                    deadline,
                 )
             if (preInvocationRepositoryIssue) {
                 return this.inconclusive(
@@ -405,7 +495,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
                 return this.inconclusive(
                     request,
                     attempt - 1,
-                    "aggregate review cancelled",
+                    goalReviewInterruptionReason(signal),
                 )
             }
             let attemptMeasured = false
@@ -421,7 +511,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
                         systemPrompt: GOAL_AGGREGATE_REVIEW_SYSTEM_PROMPT,
                         userPrompt: preparation.prompt,
                     },
-                    signal,
+                    deadline,
                     this.timeoutMs,
                     this.settlementTimeoutMs,
                 )
@@ -442,10 +532,9 @@ export class GoalInvariantReviewer extends SerializedObserver {
                     )
                 }
                 const repositoryIssue =
-                    await verifyGoalInvariantReviewRepositoryFingerprint(
-                        this.opts.cwd,
-                        this.baseSha!,
+                    await this.verifyRepositoryFingerprint(
                         preparation.repositoryFingerprint,
+                        deadline,
                     )
                 repositoryFreshnessChecked = true
                 if (repositoryIssue) {
@@ -484,7 +573,8 @@ export class GoalInvariantReviewer extends SerializedObserver {
                 lastError = messageOf(error)
                 const invocation = invocationFromError(error) ??
                     (!attemptMeasured &&
-                    !(error instanceof DialogueResponderNotDispatchedError)
+                    !(error instanceof DialogueResponderNotDispatchedError) &&
+                    !(error instanceof GoalReviewDispatchPrevented)
                         ? this.opts.responder.telemetry?.failureInvocation(
                               error instanceof GoalReviewInvocationTimeout
                                   || (error instanceof GoalReviewProviderUnsettled &&
@@ -519,12 +609,35 @@ export class GoalInvariantReviewer extends SerializedObserver {
                 if (error instanceof GoalReviewInvocationTimeout) {
                     return this.inconclusive(request, attempt, lastError)
                 }
+                if (error instanceof GoalReviewDispatchPrevented) {
+                    return this.inconclusive(request, attempt - 1, lastError)
+                }
+                if (signal.aborted) {
+                    return this.inconclusive(
+                        request,
+                        attempt,
+                        goalReviewInterruptionReason(signal),
+                    )
+                }
+                if (error instanceof DialogueResponderNotDispatchedError) {
+                    return this.inconclusive(
+                        request,
+                        attempt,
+                        `aggregate evaluator was not dispatched: ${lastError}`,
+                    )
+                }
+                const interruption = invocationInterruptionReason(
+                    error,
+                    invocation,
+                )
+                if (interruption) {
+                    return this.inconclusive(request, attempt, interruption)
+                }
                 if (!repositoryFreshnessChecked) {
                     const repositoryIssue =
-                        await verifyGoalInvariantReviewRepositoryFingerprint(
-                            this.opts.cwd,
-                            this.baseSha!,
+                        await this.verifyRepositoryFingerprint(
                             preparation.repositoryFingerprint,
+                            deadline,
                         )
                     if (repositoryIssue) {
                         return this.inconclusive(
@@ -541,6 +654,25 @@ export class GoalInvariantReviewer extends SerializedObserver {
             }
         }
         return this.inconclusive(request, this.maxAttempts, lastError)
+    }
+
+    private async verifyRepositoryFingerprint(
+        expectedFingerprint: string,
+        deadline: ActiveGoalReviewDeadline,
+    ): Promise<string | null> {
+        try {
+            return await awaitGoalReviewEvidenceOperation(
+                deadline,
+                () => this.evidenceAdapter.verifyRepositoryFingerprint(
+                    this.opts.cwd,
+                    this.baseSha!,
+                    expectedFingerprint,
+                    deadline,
+                ),
+            )
+        } catch (error) {
+            return `aggregate repository freshness check failed closed: ${messageOf(error)}`
+        }
     }
 
     private currentEvidenceIssue(
@@ -612,19 +744,175 @@ export class GoalInvariantReviewer extends SerializedObserver {
     }
 }
 
+interface ActiveGoalReviewDeadline extends GoalInvariantReviewDeadline {
+    readonly timeoutMs: number
+    registerCleanup(cleanup: Promise<unknown>): void
+    close(): Promise<void>
+}
+
+class GoalReviewOverallDeadlineExceeded extends Error {
+    constructor(timeoutMs: number) {
+        super(`aggregate review overall deadline exceeded after ${timeoutMs}ms`)
+        this.name = "GoalReviewOverallDeadlineExceeded"
+    }
+}
+
+function createGoalReviewDeadline(
+    parentSignal: AbortSignal,
+    timeoutMs: number,
+): ActiveGoalReviewDeadline {
+    const effectiveTimeoutMs = Math.max(1, timeoutMs)
+    const controller = new AbortController()
+    const cleanup = new Set<Promise<unknown>>()
+    const propagateParentAbort = (): void => {
+        controller.abort(
+            parentSignal.reason ?? new Error("aggregate review cancelled"),
+        )
+    }
+    parentSignal.addEventListener("abort", propagateParentAbort, { once: true })
+    if (parentSignal.aborted) propagateParentAbort()
+    const timer = setTimeout(() => {
+        controller.abort(
+            new GoalReviewOverallDeadlineExceeded(effectiveTimeoutMs),
+        )
+    }, effectiveTimeoutMs)
+    const deadlineAt = Date.now() + effectiveTimeoutMs
+    let closePromise: Promise<void> | null = null
+    const close = (): Promise<void> => {
+        closePromise ??= (async () => {
+            clearTimeout(timer)
+            parentSignal.removeEventListener("abort", propagateParentAbort)
+            await drainGoalReviewCleanup(cleanup)
+        })()
+        return closePromise
+    }
+    return {
+        signal: controller.signal,
+        deadlineAt,
+        timeoutMs: effectiveTimeoutMs,
+        registerCleanup: (operation) => {
+            const settled = Promise.resolve(operation).then(
+                () => undefined,
+                () => undefined,
+            )
+            cleanup.add(settled)
+            void settled.then(() => cleanup.delete(settled))
+        },
+        close,
+    }
+}
+
+async function drainGoalReviewCleanup(
+    cleanup: ReadonlySet<Promise<unknown>>,
+): Promise<void> {
+    const deadlineAt = Date.now() + GOAL_REVIEW_FILESYSTEM_CLEANUP_DRAIN_MS
+    while (cleanup.size > 0) {
+        const remainingMs = deadlineAt - Date.now()
+        if (remainingMs <= 0) return
+        let timer: ReturnType<typeof setTimeout> | null = null
+        try {
+            const drained = await Promise.race([
+                Promise.all([...cleanup]).then(() => true),
+                new Promise<false>((resolveTimeout) => {
+                    timer = setTimeout(
+                        () => resolveTimeout(false),
+                        remainingMs,
+                    )
+                }),
+            ])
+            if (!drained) return
+        } finally {
+            if (timer) clearTimeout(timer)
+        }
+    }
+}
+
+function goalReviewInterruptionReason(signal: AbortSignal): string {
+    return signal.reason instanceof GoalReviewOverallDeadlineExceeded
+        ? signal.reason.message
+        : "aggregate review cancelled"
+}
+
+async function awaitGoalReviewEvidenceOperation<T>(
+    deadline: ActiveGoalReviewDeadline,
+    operation: () => Promise<T>,
+): Promise<T> {
+    if (deadline.signal.aborted) throw goalReviewDeadlineError(deadline)
+    if (Date.now() >= deadline.deadlineAt) {
+        throw new GoalReviewOverallDeadlineExceeded(deadline.timeoutMs)
+    }
+
+    const pending = Promise.resolve().then(operation)
+    // The deadline bounds the review even when an embedding adapter ignores
+    // AbortSignal. Keep the late promise rejection-safe and give cooperative
+    // cleanup the same bounded drain as the production filesystem adapter.
+    deadline.registerCleanup(pending)
+
+    let rejectAbort!: (reason: unknown) => void
+    const aborted = new Promise<never>((_resolve, reject) => {
+        rejectAbort = reject
+    })
+    const abort = (): void => rejectAbort(goalReviewDeadlineError(deadline))
+    deadline.signal.addEventListener("abort", abort, { once: true })
+    if (deadline.signal.aborted) abort()
+    try {
+        return await Promise.race([pending, aborted])
+    } finally {
+        deadline.signal.removeEventListener("abort", abort)
+    }
+}
+
+function goalReviewDeadlineError(deadline: ActiveGoalReviewDeadline): Error {
+    return deadline.signal.reason instanceof Error
+        ? deadline.signal.reason
+        : new Error(goalReviewInterruptionReason(deadline.signal))
+}
+
+function assertGoalReviewCanDispatch(
+    deadline: ActiveGoalReviewDeadline,
+): void {
+    if (deadline.signal.aborted) {
+        throw new GoalReviewDispatchPrevented(
+            goalReviewInterruptionReason(deadline.signal),
+        )
+    }
+    if (Date.now() >= deadline.deadlineAt) {
+        throw new GoalReviewDispatchPrevented(
+            new GoalReviewOverallDeadlineExceeded(deadline.timeoutMs).message,
+        )
+    }
+}
+
 function verificationIssue(
     verification: RunVerificationCompletedData | undefined,
     baseSha: string | null,
 ): string | null {
     if (!baseSha) return "the immutable run base SHA is unavailable"
     if (!verification) return "source-bound final verification evidence is unavailable"
-    if (verification.status !== "passed") {
+    if (
+        verification.status !== "passed" &&
+        verification.status !== "skipped"
+    ) {
         return `final verification status is ${verification.status}`
     }
-    if (
-        verification.commands.length === 0 ||
-        verification.commands.some(({ status }) => status !== "passed")
-    ) {
+    if (verification.status === "passed") {
+        if (
+            verification.commands.length === 0 ||
+            verification.commands.some(({ status }) => status !== "passed")
+        ) {
+            return "final verification lacks a complete set of passing commands"
+        }
+        return null
+    }
+    if (verification.commands.some(({ status }) => status === "failed")) {
+        return "incomplete final verification contains a failed command"
+    }
+    if (!verification.commands.some(({ status }) => status === "passed")) {
+        return "incomplete final verification lacks passing command evidence"
+    }
+    if (verification.commands.some(
+        ({ status }) => status !== "passed" && status !== "skipped",
+    )) {
         return "final verification lacks a complete set of passing commands"
     }
     return null
@@ -633,10 +921,11 @@ function verificationIssue(
 async function invokeResponder(
     responder: DialogueResponder,
     input: Parameters<DialogueResponder>[0],
-    outerSignal: AbortSignal,
+    deadline: ActiveGoalReviewDeadline,
     timeoutMs: number,
     settlementTimeoutMs: number,
 ): Promise<{ text: string; invocation?: DialogueResponderInvocation }> {
+    const outerSignal = deadline.signal
     const controller = new AbortController()
     let notifyAbort: (() => void) | null = null
     const abort = () => {
@@ -646,22 +935,17 @@ async function invokeResponder(
         notifyAbort?.()
     }
     outerSignal.addEventListener("abort", abort, { once: true })
-    type Settlement =
-        | {
-              kind: "fulfilled"
-              value: string | Awaited<ReturnType<DialogueResponder>>
-          }
-        | { kind: "rejected"; error: unknown }
-    const responderSettlement: Promise<Settlement> = Promise.resolve()
-        .then(() => responder(input, controller.signal))
-        .then(
-            (value) => ({ kind: "fulfilled" as const, value }),
-            (error: unknown) => ({ kind: "rejected" as const, error }),
-        )
-
     let watchdog: ReturnType<typeof setTimeout> | null = null
     let settlementTimer: ReturnType<typeof setTimeout> | null = null
     try {
+        if (outerSignal.aborted) abort()
+        assertGoalReviewCanDispatch(deadline)
+        type Settlement =
+            | {
+                  kind: "fulfilled"
+                  value: string | Awaited<ReturnType<DialogueResponder>>
+              }
+            | { kind: "rejected"; error: unknown }
         const timeout = new Promise<"timeout">((resolveTimeout) => {
             watchdog = setTimeout(() => {
                 // Preserve timeout attribution through the responder and the
@@ -672,8 +956,24 @@ async function invokeResponder(
         })
         const cancelled = new Promise<"cancelled">((resolveCancelled) => {
             notifyAbort = () => resolveCancelled("cancelled")
-            if (outerSignal.aborted) abort()
+            if (outerSignal.aborted) notifyAbort()
         })
+        // Arm both interruption paths before dispatch, then check once more.
+        // The async IIFE invokes the adapter synchronously while still
+        // converting both sync throws and async rejection into one settlement
+        // promise. No queued microtask can dispatch a provider after an
+        // already-expired review deadline.
+        assertGoalReviewCanDispatch(deadline)
+        const responderSettlement: Promise<Settlement> = (async () => {
+            try {
+                return {
+                    kind: "fulfilled" as const,
+                    value: await responder(input, controller.signal),
+                }
+            } catch (error) {
+                return { kind: "rejected" as const, error }
+            }
+        })()
         const first = await Promise.race([
             responderSettlement,
             timeout,
@@ -784,6 +1084,13 @@ class GoalReviewInvocationTimeout extends Error {
     }
 }
 
+class GoalReviewDispatchPrevented extends Error {
+    constructor(message: string) {
+        super(message)
+        this.name = "GoalReviewDispatchPrevented"
+    }
+}
+
 class GoalReviewInvocationCancelled extends Error {
     constructor(
         message: string,
@@ -813,7 +1120,9 @@ function parseInvariantReviews(
     const reasoning = parsed.reasoning
     const violated = parsed.violated_criteria
     if (
-        (verdict !== "pass" && verdict !== "fail") ||
+        (verdict !== "pass" &&
+            verdict !== "fail" &&
+            verdict !== "inconclusive") ||
         typeof reasoning !== "string" ||
         reasoning.trim().length === 0 ||
         reasoning.length > 2_000 ||
@@ -827,9 +1136,17 @@ function parseInvariantReviews(
         new Set(violatedCriteria).size !== violatedCriteria.length ||
         violatedCriteria.some((criterion) => !criteria.includes(criterion)) ||
         (verdict === "pass" && violatedCriteria.length > 0) ||
-        (verdict === "fail" && violatedCriteria.length === 0)
+        (verdict === "fail" && violatedCriteria.length === 0) ||
+        (verdict === "inconclusive" && violatedCriteria.length > 0)
     ) {
         throw new Error("aggregate evaluator violated the exact criterion contract")
+    }
+    if (verdict === "inconclusive") {
+        return criteria.map((_criterion, index) => ({
+            invariantId: invariantIds[index]!,
+            status: "inconclusive",
+            reason: reasoning.trim(),
+        }))
     }
     const failed = new Set(violatedCriteria)
     return criteria.map((criterion, index) => ({
@@ -857,6 +1174,19 @@ function invocationFromError(error: unknown): DialogueResponderInvocation | null
         error instanceof GoalReviewInvocationTimeout ||
         error instanceof GoalReviewInvocationCancelled
     ) return error.invocation ?? null
+    return null
+}
+
+function invocationInterruptionReason(
+    error: unknown,
+    invocation: DialogueResponderInvocation | null | undefined,
+): string | null {
+    if (invocation?.observation.status === "timed_out") {
+        return `aggregate evaluator provider invocation timed out: ${messageOf(error)}`
+    }
+    if (invocation?.observation.status === "cancelled") {
+        return `aggregate evaluator provider invocation was cancelled: ${messageOf(error)}`
+    }
     return null
 }
 

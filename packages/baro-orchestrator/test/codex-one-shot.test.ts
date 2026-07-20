@@ -78,6 +78,23 @@ async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
     assert.fail(`fixture did not become ready within ${timeoutMs}ms: ${path}`)
 }
 
+async function waitForProcessExit(pid: number, timeoutMs = 2_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (processIsAlive(pid) && Date.now() < deadline) {
+        await delay(10)
+    }
+    assert.equal(processIsAlive(pid), false, `process ${pid} remained alive`)
+}
+
+function processIsAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0)
+        return true
+    } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "EPERM"
+    }
+}
+
 describe("runCodexOneShot exit contract", () => {
     it("resolves the agent message on a clean exit", async () => {
         await withTempDir("baro-codex-exit-", async (dir) => {
@@ -432,17 +449,17 @@ console.log(JSON.stringify({
     it("honors an abort that arrives after the direct Codex root exits", async () => {
         await withTempDir("baro-codex-late-abort-", async (dir) => {
             const rootExited = join(dir, "root-exited")
-            const escaped = join(dir, "descendant-escaped")
+            const descendantStarted = join(dir, "descendant-started")
             const bin = join(dir, "late-abort-codex.mjs")
             writeFileSync(
                 bin,
                 `#!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 const descendantSource = ${JSON.stringify(`
 import { writeFileSync } from "node:fs";
 process.on("SIGTERM", () => {});
-setTimeout(() => writeFileSync(${JSON.stringify(escaped)}, "yes"), 1_300);
+writeFileSync(${JSON.stringify(descendantStarted)}, String(process.pid));
 setInterval(() => {}, 10_000);
 `)};
 const descendant = spawn(process.execPath, ["--input-type=module", "-e", descendantSource], {
@@ -453,7 +470,9 @@ console.log(JSON.stringify({
     type: "item.completed",
     item: { type: "agent_message", text: "premature success" },
 }));
-await new Promise((resolve) => setTimeout(resolve, 150));
+while (!existsSync(${JSON.stringify(descendantStarted)})) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+}
 writeFileSync(${JSON.stringify(rootExited)}, "yes");
 process.exit(0);
 `,
@@ -469,6 +488,10 @@ process.exit(0);
             })
 
             await waitForFile(rootExited)
+            const descendantPid = Number(
+                readFileSync(descendantStarted, "utf8"),
+            )
+            assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0)
             await delay(75)
             const abortedAt = Date.now()
             controller.abort()
@@ -478,12 +501,7 @@ process.exit(0);
                 Date.now() - abortedAt < 2_500,
                 "late abort exceeded the bounded cleanup window",
             )
-            await delay(350)
-            assert.equal(
-                existsSync(escaped),
-                false,
-                "Codex descendant survived late-abort cleanup",
-            )
+            await waitForProcessExit(descendantPid)
         })
     })
 

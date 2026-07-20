@@ -30,10 +30,13 @@ export { MAX_DECLARED_VERIFY_COMMANDS } from "./declared-verification.js"
 const TIMEOUT_MS = 5 * 60_000
 const COMMAND_SETTLEMENT_GRACE_MS = 5_000
 const COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS = 3_000
-const MAX_DECLARED_TRANSLATION_INPUTS = 64
 const TAIL_BYTES = 1500
 /** Includes conventional commands added at runtime as well as PRD declarations. */
 export const MAX_FINAL_ADDED_VERIFY_COMMANDS = 8
+const MAX_COMPACTED_RSTEST_PATHS = 64
+const MAX_COMPACTED_DECLARED_COMMAND_CHARS = 1_000
+const MAX_DECLARED_TRANSLATION_INPUTS =
+    MAX_COMPACTED_RSTEST_PATHS * MAX_DECLARED_VERIFY_COMMANDS
 
 export interface VerifyResult {
     ran: boolean
@@ -62,6 +65,8 @@ export interface VerifyCommandSpec {
     incompleteReason?: string
     /** Canonical identity for duplicate incomplete PRD requirements. */
     declaredRequirementKey?: string
+    /** Strict local-runner alias eligible for bounded path batching. */
+    canonicalDeclaredFocus?: "rstest"
     /** Paths that must still resolve beneath command cwd immediately pre-spawn. */
     containedPaths?: readonly VerifyContainedPath[]
 }
@@ -454,6 +459,110 @@ function dedupeVerifyCommands(
     return deduped
 }
 
+interface CanonicalRstestFocus {
+    key: string
+    baseArgs: readonly string[]
+    baseLabel: string
+    paths: readonly string[]
+}
+
+function canonicalRstestFocus(
+    command: VerifyCommandSpec,
+): CanonicalRstestFocus | null {
+    if (command.canonicalDeclaredFocus !== "rstest") return null
+    const details = javascriptCommandDetails(command)
+    if (
+        !details ||
+        details.script !== "test" ||
+        details.trailingArgs[0] !== "--"
+    ) return null
+    const paths = details.trailingArgs.slice(1)
+    if (
+        paths.length === 0 ||
+        paths.some((value) => value.startsWith("-") || value.includes("=")) ||
+        command.containedPaths?.length !== paths.length ||
+        paths.some(
+            (value, index) => command.containedPaths?.[index]?.path !== value,
+        )
+    ) return null
+    const delimiter = " -- "
+    const delimiterAt = command.label.indexOf(delimiter)
+    if (delimiterAt < 0) return null
+    const baseArgs = command.args.slice(
+        0,
+        command.args.length - details.trailingArgs.length,
+    )
+    return {
+        key: JSON.stringify([command.tool, command.cwd ?? null, baseArgs]),
+        baseArgs,
+        baseLabel: command.label.slice(0, delimiterAt),
+        paths,
+    }
+}
+
+function withRstestFocusPaths(
+    command: VerifyCommandSpec,
+    focus: CanonicalRstestFocus,
+    paths: readonly string[],
+): VerifyCommandSpec | null {
+    if (paths.length > MAX_COMPACTED_RSTEST_PATHS) return null
+    const label = `${focus.baseLabel} -- ${paths.join(" ")}`
+    const args = [...focus.baseArgs, "--", ...paths]
+    if (
+        label.length > MAX_COMPACTED_DECLARED_COMMAND_CHARS ||
+        [command.tool, ...args].join(" ").length >
+            MAX_COMPACTED_DECLARED_COMMAND_CHARS
+    ) return null
+    return {
+        ...command,
+        label,
+        args,
+        containedPaths: paths.map((path) => ({
+            path,
+            requireFile: false,
+            allowMissing: true,
+        })),
+    }
+}
+
+function compactCanonicalRstestCommands(
+    commands: readonly VerifyCommandSpec[],
+): VerifyCommandSpec[] {
+    const compacted: VerifyCommandSpec[] = []
+    const latestBatchIndex = new Map<string, number>()
+    for (const command of commands) {
+        const focus = canonicalRstestFocus(command)
+        if (!focus) {
+            compacted.push(command)
+            continue
+        }
+        const existingIndex = latestBatchIndex.get(focus.key)
+        const existing = existingIndex === undefined
+            ? undefined
+            : compacted[existingIndex]
+        const existingFocus = existing
+            ? canonicalRstestFocus(existing)
+            : null
+        if (existing && existingFocus) {
+            const paths = [...new Set([
+                ...existingFocus.paths,
+                ...focus.paths,
+            ])]
+            const merged = withRstestFocusPaths(existing, existingFocus, paths)
+            if (merged) {
+                compacted[existingIndex!] = merged
+                continue
+            }
+        }
+        const normalized = withRstestFocusPaths(command, focus, [
+            ...new Set(focus.paths),
+        ])
+        compacted.push(normalized ?? command)
+        latestBatchIndex.set(focus.key, compacted.length - 1)
+    }
+    return compacted
+}
+
 function boundedDeclaredCommands(
     automatic: readonly VerifyCommandSpec[],
     declared: readonly VerifyCommandSpec[],
@@ -462,7 +571,7 @@ function boundedDeclaredCommands(
     const seen = new Set(commands.map(verifyCommandIdentity))
     let admitted = 0
     let omitted = 0
-    for (const command of declared) {
+    for (const command of compactCanonicalRstestCommands(declared)) {
         const identity = verifyCommandIdentity(command)
         if (seen.has(identity)) continue
         seen.add(identity)
@@ -486,13 +595,32 @@ function boundedDeclaredCommands(
     return commands
 }
 
+function dedupeDeclaredTranslationInputs(
+    inputs: readonly DeclaredTestRequirement[],
+): DeclaredTestRequirement[] {
+    const deduped: DeclaredTestRequirement[] = []
+    const seen = new Set<string>()
+    for (const input of inputs) {
+        const key = JSON.stringify([
+            input.command,
+            input.declarationError ?? null,
+        ])
+        if (seen.has(key)) continue
+        seen.add(key)
+        deduped.push(input)
+    }
+    return deduped
+}
+
 /** Freeze command discovery before workers can edit manifests or remove scripts. */
 export function createVerifyPlan(
     cwd: string,
     options: VerifyPlanOptions = {},
 ): VerifyPlan {
     const detected = detectCommands(cwd)
-    const declaredInputs = options.declaredTests ?? []
+    const declaredInputs = dedupeDeclaredTranslationInputs(
+        options.declaredTests ?? [],
+    )
     const declaredCommands = translateDeclaredTests(
         cwd,
         declaredInputs.slice(0, MAX_DECLARED_TRANSLATION_INPUTS),

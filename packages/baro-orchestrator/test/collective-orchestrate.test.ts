@@ -15,7 +15,17 @@ import {
     type SemanticEvent,
 } from "@mozaik-ai/core"
 
-import { orchestrate } from "../src/orchestrate.js"
+import {
+    aggregateReviewBudgetMs,
+    orchestrate,
+    resolveGoalReviewTimeoutMs,
+    storyTimeoutSecs,
+} from "../src/orchestrate.js"
+import { GOAL_REVIEW_STABLE_CAPTURE_BUDGET_MS } from "../src/participants/goal-invariant-review-evidence.js"
+import {
+    GOAL_REVIEW_BOARD_SLACK_MS,
+    goalReviewRoundTimeoutMs,
+} from "../src/participants/goal-invariant-reviewer.js"
 import type {
     StoryExecution,
     StoryExecOpts,
@@ -986,6 +996,46 @@ class DialogueRunTrigger extends BaseObserver {
 }
 
 describe("orchestrate collective mode", () => {
+    it("derives the default goal-review timeout from the effective story timeout", () => {
+        for (const [effort, expectedSecs] of [
+            [undefined, 600],
+            ["high", 900],
+            ["xhigh", 1_200],
+            ["max", 1_500],
+        ] as const) {
+            const storyTimeout = storyTimeoutSecs(undefined, effort)
+            assert.equal(storyTimeout, expectedSecs)
+            assert.equal(
+                resolveGoalReviewTimeoutMs(undefined, storyTimeout),
+                expectedSecs * 1_000,
+            )
+            const roundTimeout = goalReviewRoundTimeoutMs(
+                expectedSecs * 1_000,
+                2,
+            )
+            assert.equal(
+                roundTimeout,
+                expectedSecs * 2_000 +
+                    GOAL_REVIEW_STABLE_CAPTURE_BUDGET_MS * 5 +
+                    10_000,
+            )
+            assert.equal(
+                aggregateReviewBudgetMs(roundTimeout),
+                2 * roundTimeout + GOAL_REVIEW_BOARD_SLACK_MS,
+            )
+        }
+
+        const explicitStoryTimeout = storyTimeoutSecs(1_800, "high")
+        assert.equal(
+            resolveGoalReviewTimeoutMs(undefined, explicitStoryTimeout),
+            1_800_000,
+        )
+        assert.equal(
+            resolveGoalReviewTimeoutMs(123_456, explicitStoryTimeout),
+            123_456,
+        )
+    })
+
     it("keeps the existing Conductor as the default", async () => {
         await withTempDir("legacy-default-", async (dir) => {
             const prdPath = join(dir, "prd.json")

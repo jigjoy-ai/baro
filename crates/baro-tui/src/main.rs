@@ -2949,6 +2949,10 @@ fn spawn_planner(
     let openai_api_key = app.openai_api_key.clone();
     let openai_base_url = app.openai_base_url.clone();
     let effort = app.effort.clone();
+    let goal_envelope_json = app.conversation.goal_envelope().map(|envelope| {
+        serde_json::to_string(envelope)
+            .expect("GoalEnvelope contains only JSON-serializable fields")
+    });
 
     tokio::spawn(async move {
         // Resolve operator-fixed contracts before the Architect so the
@@ -3063,6 +3067,7 @@ fn spawn_planner(
             openai_base_url,
             effort,
             mode_json,
+            goal_envelope_json,
         };
         if progressive_planning_enabled(headless) {
             let _ = tx.send(AppEvent::ProgressivePlanningPrepared(spec)).await;
@@ -3099,6 +3104,10 @@ fn spawn_planner_stage_b(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, mode
     let openai_api_key = app.openai_api_key.clone();
     let openai_base_url = app.openai_base_url.clone();
     let effort = app.effort.clone();
+    let goal_envelope_json = app.conversation.goal_envelope().map(|envelope| {
+        serde_json::to_string(envelope)
+            .expect("GoalEnvelope contains only JSON-serializable fields")
+    });
     tokio::spawn(async move {
         run_planner_and_report(
             PlannerRunSpec {
@@ -3113,6 +3122,7 @@ fn spawn_planner_stage_b(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, mode
                 openai_base_url,
                 effort,
                 mode_json: Some(mode_json),
+                goal_envelope_json,
             },
             tx,
             false, // stage B only runs interactively (the picker never shows headless)

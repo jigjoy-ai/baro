@@ -17,6 +17,7 @@ const TERMINATION_OBSERVATION_FLOOR_MS = 100
 const STEADY_OBSERVATION_MS = 2_000
 const BOOTSTRAP_WINDOW_MS = 2_000
 const DEFAULT_QUIESCENCE_TIMEOUT_MS = 2_250
+const DEFAULT_NATURAL_EXIT_DRAIN_GRACE_MS = 250
 
 let observationTimer: ReturnType<typeof setTimeout> | null = null
 let observationDueAt = Number.POSITIVE_INFINITY
@@ -119,6 +120,11 @@ export interface ManagedProcessTreeOptions {
     ownsProcessGroup?: boolean
     /** Maximum post-SIGKILL wait for a positive process-table certificate. */
     quiescenceTimeoutMs?: number
+    /**
+     * Bounded grace for an owned helper to flush inherited stdio after its
+     * direct CLI root exits naturally. Explicit termination bypasses it.
+     */
+    naturalExitDrainGraceMs?: number
     /** @internal Deterministic process-table failure seam for tests. */
     processGroupObservation?: (
         processGroupId: number,
@@ -172,6 +178,7 @@ export class ManagedProcessTree {
     private readonly terminationGraceMs: number
     private readonly pollIntervalMs: number
     private readonly quiescenceTimeoutMs: number
+    private readonly naturalExitDrainGraceMs: number
     private readonly processGroupObservation: NonNullable<
         ManagedProcessTreeOptions["processGroupObservation"]
     >
@@ -198,6 +205,7 @@ export class ManagedProcessTree {
     private readonly createdAt = Date.now()
     private terminating = false
     private rootClosed = false
+    private naturalExitDrainUntil = 0
     private settled = false
     private escalationTimer: ReturnType<typeof setTimeout> | null = null
     private quiescenceTimer: ReturnType<typeof setTimeout> | null = null
@@ -228,6 +236,9 @@ export class ManagedProcessTree {
         this.pollIntervalMs = options.pollIntervalMs ?? 100
         this.quiescenceTimeoutMs =
             options.quiescenceTimeoutMs ?? DEFAULT_QUIESCENCE_TIMEOUT_MS
+        this.naturalExitDrainGraceMs =
+            options.naturalExitDrainGraceMs ??
+            DEFAULT_NATURAL_EXIT_DRAIN_GRACE_MS
         this.processGroupObservation =
             options.processGroupObservation ?? observedProcessGroupIsAlive
         if (
@@ -249,6 +260,14 @@ export class ManagedProcessTree {
         ) {
             throw new RangeError(
                 "ManagedProcessTree quiescenceTimeoutMs must be positive",
+            )
+        }
+        if (
+            !Number.isFinite(this.naturalExitDrainGraceMs) ||
+            this.naturalExitDrainGraceMs < 0
+        ) {
+            throw new RangeError(
+                "ManagedProcessTree naturalExitDrainGraceMs must be non-negative",
             )
         }
 
@@ -415,6 +434,8 @@ export class ManagedProcessTree {
                 this.failClosedOwnershipRegistration(reason, table)
             }
         }
+        this.naturalExitDrainUntil =
+            Date.now() + this.naturalExitDrainGraceMs
         requestSharedObservation(0)
     }
 
@@ -500,6 +521,7 @@ export class ManagedProcessTree {
                 // signalling is safe even though enumeration failed. This
                 // also starts the bounded TERM/KILL fail-closed deadline.
                 if (this.rootClosed && !this.terminating) {
+                    if (this.naturalExitDrainPending()) return
                     this.terminate("SIGTERM")
                 }
                 return
@@ -511,8 +533,10 @@ export class ManagedProcessTree {
             }
 
             if (!this.rootClosed) return
-            if (groupAlive || trackedAlive) this.terminate("SIGTERM")
-            else this.settle(true)
+            if (groupAlive || trackedAlive) {
+                if (this.naturalExitDrainPending()) return
+                this.terminate("SIGTERM")
+            } else this.settle(true)
             return
         }
 
@@ -524,6 +548,7 @@ export class ManagedProcessTree {
         if (!this.rootClosed) return
 
         if (this.hasLiveDescendant(table)) {
+            if (this.naturalExitDrainPending()) return
             this.terminate("SIGTERM")
         } else {
             // If no earlier snapshot observed the relationship, a child which
@@ -551,6 +576,14 @@ export class ManagedProcessTree {
 
     observerMustKeepEventLoopAlive(): boolean {
         return this.terminating || this.rootClosed
+    }
+
+    private naturalExitDrainPending(now = Date.now()): boolean {
+        return (
+            this.rootClosed &&
+            !this.terminating &&
+            now < this.naturalExitDrainUntil
+        )
     }
 
     private capture(record: ProcessStateSnapshot): void {

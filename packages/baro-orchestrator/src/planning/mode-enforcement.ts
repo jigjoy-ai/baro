@@ -64,6 +64,11 @@ export function enforceModeContract(prdJson: string, contract: ModeContract, goa
                 dependsOn: [],
                 acceptance: [...new Set(stories.flatMap((s) => s.acceptance ?? []))],
                 tests: [...new Set(stories.flatMap((s) => s.tests ?? []))],
+                goalInvariantIds: [
+                    ...new Set(
+                        stories.flatMap((s) => s.goalInvariantIds ?? []),
+                    ),
+                ],
                 model: first.model ?? "heavy",
             },
         ]

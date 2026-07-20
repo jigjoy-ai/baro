@@ -31,6 +31,8 @@ import {
     reconcileProgressivePlanStories,
     validateProgressivePlanFragment,
 } from "../planning/progressive-plan.js"
+import { validateGoalContractCoverage } from "../planning/goal-contract-coverage.js"
+import { deriveGoalContract } from "../runtime/goal-contract.js"
 import type { RuntimeReplanDecisionOutcome } from "./runtime-replan-coordinator.js"
 
 export type ProgressivePlanningBoardPhase =
@@ -266,6 +268,11 @@ export class ProgressivePlanningCoordinator {
                 stories: fragment.stories,
             }
             validated = validateProgressivePlanFragment(envelope)
+            validateGoalContractCoverage(
+                deriveGoalContract(state.prd.goalEnvelope),
+                goalContractMappings(validated.stories),
+                "partial",
+            )
             fingerprint = progressivePlanFragmentFingerprint(envelope)
         } catch (error) {
             this.rejectPlanFragment(fragment, "invalid_fragment", messageOf(error))
@@ -451,6 +458,15 @@ export class ProgressivePlanningCoordinator {
                 admittedStories,
                 finalPrd,
             ).finalStories
+            validateGoalContractCoverage(
+                deriveGoalContract(state.prd.goalEnvelope),
+                goalContractMappings(finalStories),
+                // Unknown claims are never admissible. Incomplete coverage is
+                // intentionally allowed at this live boundary: closing the
+                // planning latch lets GoalGuardian publish exact missing-
+                // invariant remediation through the normal Mozaik DAG path.
+                "partial",
+            )
             if (
                 planning.status === "completed" &&
                 finalStories.length !== planning.admittedStoryIds.length
@@ -678,4 +694,11 @@ function progressiveFinalFingerprint(stories: readonly PrdStory[]): string {
     return createHash("sha256")
         .update(JSON.stringify(stories), "utf8")
         .digest("hex")
+}
+
+function goalContractMappings(stories: readonly PrdStory[]) {
+    return stories.map((story) => ({
+        storyId: story.id,
+        invariantIds: story.goalInvariantIds ?? [],
+    }))
 }

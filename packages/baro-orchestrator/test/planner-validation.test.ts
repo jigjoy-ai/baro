@@ -130,4 +130,57 @@ describe("shared Planner PRD validation", () => {
             /dependency cycle/,
         )
     })
+
+    it("binds mappings to the trusted GoalContract and leaves missing work for Guardian", () => {
+        const governed = validPrd()
+        const trustedGoalEnvelope = {
+            objective: "Preserve both required behaviors.",
+            acceptanceCriteria: ["Foundation works", "Consumer works"],
+            constraints: ["Compatibility is preserved"],
+            nonGoals: [],
+            assumptions: [],
+        }
+        governed.goalEnvelope = {
+            ...trustedGoalEnvelope,
+            acceptanceCriteria: ["Provider-authored replacement contract"],
+        }
+        const stories = governed.userStories as Record<string, unknown>[]
+        stories[0]!.goalInvariantIds = ["G-A1", "G-C1"]
+        stories[1]!.goalInvariantIds = ["G-A2"]
+
+        const json = JSON.stringify(governed)
+        assert.equal(
+            assertRunnablePlannerPrdJson(json, trustedGoalEnvelope),
+            json,
+        )
+
+        stories[1]!.goalInvariantIds = ["G-A99"]
+        assert.throws(
+            () => assertRunnablePlannerPrdJson(
+                JSON.stringify(governed),
+                trustedGoalEnvelope,
+            ),
+            /unknown invariant.*G-A99/i,
+        )
+
+        stories[1]!.goalInvariantIds = []
+        const incomplete = JSON.stringify(governed)
+        assert.equal(
+            assertRunnablePlannerPrdJson(incomplete, trustedGoalEnvelope),
+            incomplete,
+            "missing ownership is repaired by GoalGuardian rather than aborting planning",
+        )
+        const providerOnly = JSON.stringify({
+            ...governed,
+            userStories: [
+                { ...stories[0], goalInvariantIds: ["G-A99"] },
+                stories[1],
+            ],
+        })
+        assert.equal(
+            assertRunnablePlannerPrdJson(providerOnly),
+            providerOnly,
+            "provider-owned envelope fields never manufacture trusted authority",
+        )
+    })
 })

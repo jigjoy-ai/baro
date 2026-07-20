@@ -81,14 +81,17 @@ function writeFakeCodexWithPostExitStdio(dir: string): string {
 import { spawn } from "node:child_process";
 const follower = spawn("/bin/sh", [
   "-c",
-  "while kill -0 \\\"$1\\\" 2>/dev/null; do :; done; printf '%s' \\\"$2\\\"; printf '%s' \\\"$3\\\" >&2",
+  "printf ready >&3; while kill -0 \\\"$1\\\" 2>/dev/null; do :; done; sleep 0.15; printf '%s' \\\"$2\\\"; printf '%s' \\\"$3\\\" >&2",
   "baro-stdio-follower",
   String(process.pid),
   ${JSON.stringify(stdout)},
   "codex terminal diagnostic",
-], { stdio: ["ignore", "inherit", "inherit"] });
-follower.unref();
-process.exit(0);
+], { stdio: ["ignore", "inherit", "inherit", "pipe"] });
+follower.stdio[3].once("data", () => {
+  follower.stdio[3].destroy();
+  follower.unref();
+  process.exit(0);
+});
 `,
     )
     chmodSync(bin, 0o755)

@@ -3,6 +3,9 @@ import {
     MAX_STORY_RETRIES,
     MIN_STORY_PRIORITY,
 } from "../prd.js"
+import { deriveGoalContract } from "../runtime/goal-contract.js"
+import type { GoalEnvelope } from "../session/conversation-contract.js"
+import { validateGoalContractCoverage } from "./goal-contract-coverage.js"
 
 const STORY_TIERS = new Set(["light", "standard", "heavy"])
 
@@ -11,7 +14,10 @@ const STORY_TIERS = new Set(["light", "standard", "heavy"])
  * parsers may extract JSON differently, but no plan reaches mode enforcement
  * or execution without satisfying the same runnable contract.
  */
-export function assertRunnablePlannerPrdJson(json: string): string {
+export function assertRunnablePlannerPrdJson(
+    json: string,
+    trustedGoalEnvelope?: GoalEnvelope | null,
+): string {
     const parsed = JSON.parse(json) as unknown
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("final PRD must be a JSON object")
@@ -33,6 +39,10 @@ export function assertRunnablePlannerPrdJson(json: string): string {
     const stories = prd.userStories as unknown[]
     const ids = new Set<string>()
     const dependencies = new Map<string, string[]>()
+    const goalMappings: Array<{
+        storyId: string
+        invariantIds: string[]
+    }> = []
     for (const [index, value] of stories.entries()) {
         if (!value || typeof value !== "object" || Array.isArray(value)) {
             throw new Error(`final PRD story ${index + 1} is not an object`)
@@ -82,8 +92,9 @@ export function assertRunnablePlannerPrdJson(json: string): string {
         const dependsOn = requireStringArray(story, id, "dependsOn", true)
         requireStringArray(story, id, "acceptance", false)
         requireStringArray(story, id, "tests", false)
+        let goalInvariantIds: string[] = []
         if (story.goalInvariantIds !== undefined) {
-            const goalInvariantIds = requireStringArray(
+            goalInvariantIds = requireStringArray(
                 story,
                 id,
                 "goalInvariantIds",
@@ -104,6 +115,7 @@ export function assertRunnablePlannerPrdJson(json: string): string {
                 )
             }
         }
+        goalMappings.push({ storyId: id, invariantIds: goalInvariantIds })
         if (new Set(dependsOn).size !== dependsOn.length) {
             throw new Error(`invalid planner DAG: story '${id}' has duplicate dependencies`)
         }
@@ -123,6 +135,16 @@ export function assertRunnablePlannerPrdJson(json: string): string {
         }
     }
     assertAcyclic(dependencies)
+    validateGoalContractCoverage(
+        // The provider JSON is not authority for the run contract. Rust (or
+        // another trusted host) supplies the confirmed envelope separately.
+        deriveGoalContract(trustedGoalEnvelope),
+        goalMappings,
+        // Unknown claims fail here. Missing ownership remains actionable:
+        // GoalGuardian adds exact invariant-scoped work through Mozaik after
+        // planning closes, and final attestation still fails closed.
+        "partial",
+    )
     return json
 }
 

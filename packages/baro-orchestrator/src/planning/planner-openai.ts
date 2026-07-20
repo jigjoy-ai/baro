@@ -24,6 +24,8 @@ import {
     runInferenceRound,
 } from "./openai-runtime.js"
 import type { GatewayBillingCoordinator } from "../billing/index.js"
+import { deriveGoalContract } from "../runtime/goal-contract.js"
+import type { GoalEnvelope } from "../session/conversation-contract.js"
 
 import { createCodebaseTools } from "./codebase-tools.js"
 import { emitPlanLine, emitToolCall } from "./plan-events.js"
@@ -52,6 +54,8 @@ export type {
 
 export interface RunPlannerOpenAIOptions {
     goal: string
+    /** Confirmed host-owned contract; provider JSON never supplies authority. */
+    goalEnvelope?: GoalEnvelope
     cwd: string
     model?: string
     projectContext?: string
@@ -266,7 +270,11 @@ export async function runPlannerOpenAI(
             if (!raw) throw new Error("PlannerOpenAI: empty final response")
             process.stderr.write(`[planner-openai] ${usage.summary()}\n`)
             try {
-                return extractRunnablePlannerPrd(raw, progressive)
+                return extractRunnablePlannerPrd(
+                    raw,
+                    progressive,
+                    opts.goalEnvelope,
+                )
             } catch (e) {
                 invalidFinalResponses += 1
                 const reason = (e as Error)?.message ?? String(e)
@@ -293,8 +301,10 @@ export async function runPlannerOpenAI(
                     fallbackPrdJson(
                         opts.goal,
                         "Planner returned invalid JSON after bounded repair attempts.",
+                        opts.goalEnvelope,
                     ),
                     progressive,
+                    opts.goalEnvelope,
                 )
             }
         }
@@ -310,14 +320,17 @@ export async function runPlannerOpenAI(
         fallbackPrdJson(
             opts.goal,
             `Planner exceeded maxRounds=${maxRounds} without producing a final plan.`,
+            opts.goalEnvelope,
         ),
         progressive,
+        opts.goalEnvelope,
     )
 }
 
 function extractRunnablePlannerPrd(
     raw: string,
     progressive: PlannerOpenAIProgressiveSupport,
+    goalEnvelope?: GoalEnvelope,
 ): string {
     const candidates = extractJsonObjects(raw)
     if (candidates.length === 0) {
@@ -326,7 +339,7 @@ function extractRunnablePlannerPrd(
     let lastError: unknown
     for (const candidate of candidates) {
         try {
-            assertRunnablePlannerPrdJson(candidate)
+            assertRunnablePlannerPrdJson(candidate, goalEnvelope)
             progressive.reconcileFinalCandidate(candidate)
             return candidate
         } catch (error) {
@@ -429,8 +442,14 @@ function closedToolOutput(): string {
     return "Tool exploration budget is closed. This call was not executed. Output the final PRD JSON now."
 }
 
-export function fallbackPrdJson(goal: string, reason: string): string {
+export function fallbackPrdJson(
+    goal: string,
+    reason: string,
+    goalEnvelope?: GoalEnvelope,
+): string {
     const title = oneLine(goal).slice(0, 80) || "Implement requested change"
+    const goalInvariantIds = deriveGoalContract(goalEnvelope)
+        ?.invariants.map(({ id }) => id) ?? []
     return JSON.stringify({
         project: "baro-run",
         branchName: `baro/${slug(title)}`,
@@ -445,6 +464,7 @@ export function fallbackPrdJson(goal: string, reason: string): string {
                 retries: 2,
                 acceptance: ["The requested change is implemented without regressing existing behavior."],
                 tests: ["echo \"planner fallback: run the project's relevant checks\""],
+                goalInvariantIds,
                 model: "heavy",
             },
         ],

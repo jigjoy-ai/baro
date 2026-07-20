@@ -47,6 +47,43 @@ function prd(stories: PrdStory[] = [
     }
 }
 
+function governedPrd(
+    stories: PrdStory[],
+    progressivePlanningOpen = false,
+    acceptanceCriteria = ["Acceptance one", "Acceptance two"],
+): PrdFile {
+    const current: PrdFile = {
+        ...prd(stories),
+        goalEnvelope: {
+            objective: "Preserve every mapped behavior.",
+            acceptanceCriteria,
+            constraints: [],
+            nonGoals: [],
+            assumptions: [],
+        },
+    }
+    if (!progressivePlanningOpen) return current
+    return {
+        ...current,
+        runtimeGraph: {
+            runId: "run-progressive",
+            version: 1,
+            dynamicStories: 0,
+            policyStories: 0,
+            appliedDecisions: [],
+            planning: {
+                schemaVersion: 1,
+                runId: "run-progressive",
+                planningId: "planning-1",
+                status: "open",
+                nextOrdinal: 2,
+                admittedStoryIds: stories.map(({ id }) => id),
+                fragments: [],
+            },
+        },
+    }
+}
+
 function add(
     id: string,
     dependsOn: string[] = [],
@@ -468,5 +505,95 @@ describe("validateRuntimeReplanMutation", () => {
 
         expectCode(result, "dependency_cycle")
         assert.deepEqual(current, before)
+    })
+
+    it("rejects unknown GoalContract mappings in the candidate graph", () => {
+        const current = governedPrd([
+            story("S1", { goalInvariantIds: ["G-A1"] }),
+            story("S2", { goalInvariantIds: ["G-A2"] }),
+        ])
+        const result = validate(
+            current,
+            mutation({
+                addedStories: [{
+                    ...add("S3"),
+                    goalInvariantIds: ["G-A99"],
+                }],
+            }),
+        )
+
+        expectCode(result, "invalid_proposal")
+        if (!result.ok) assert.match(result.reason, /unknown invariant.*G-A99/i)
+    })
+
+    it("rejects removing the last owner of a GoalContract invariant", () => {
+        const current = governedPrd([
+            story("S1", { goalInvariantIds: ["G-A1"] }),
+            story("S2", { goalInvariantIds: ["G-A2"] }),
+        ])
+        const replacement = (goalInvariantIds: string[]) => mutation({
+            addedStories: [{
+                ...add("S3"),
+                goalInvariantIds,
+            }],
+            removedStoryIds: ["S2"],
+        })
+
+        const rejected = validate(current, replacement(["G-A1"]))
+        expectCode(rejected, "invalid_proposal")
+        if (!rejected.ok) {
+            assert.match(rejected.reason, /last story owner.*G-A2/i)
+        }
+
+        const accepted = validate(current, replacement(["G-A2"]))
+        assert.equal(accepted.ok, true)
+    })
+
+    it("allows GoalGuardian to repair incomplete coverage one invariant at a time", () => {
+        const current = governedPrd([
+            story("S1", { goalInvariantIds: ["G-A1"] }),
+        ], false, ["Acceptance one", "Acceptance two", "Acceptance three"])
+        const firstRepair = validate(
+            current,
+            mutation({
+                addedStories: [{
+                    ...add("S2"),
+                    goalInvariantIds: ["G-A2"],
+                }],
+            }),
+        )
+        assert.equal(firstRepair.ok, true)
+        if (!firstRepair.ok) return
+
+        const secondRepair = validate(
+            firstRepair.prd,
+            mutation({
+                addedStories: [{
+                    ...add("S3"),
+                    goalInvariantIds: ["G-A3"],
+                }],
+            }),
+        )
+
+        assert.equal(secondRepair.ok, true)
+    })
+
+    it("rejects swapping a covered invariant for a previously missing one", () => {
+        const current = governedPrd([
+            story("S1", { goalInvariantIds: ["G-A1"] }),
+        ], true, ["Acceptance one", "Acceptance two", "Acceptance three"])
+        const result = validate(
+            current,
+            mutation({
+                addedStories: [{
+                    ...add("S2"),
+                    goalInvariantIds: ["G-A2"],
+                }],
+                removedStoryIds: ["S1"],
+            }),
+        )
+
+        expectCode(result, "invalid_proposal")
+        if (!result.ok) assert.match(result.reason, /last story owner.*G-A1/i)
     })
 })

@@ -69,6 +69,62 @@ describe("progressive planner flag contract", () => {
 })
 
 describe("progressive planner lifecycle wire", () => {
+    it("rejects unknown trusted GoalContract ids before advancing its local session", () => {
+        const events: ProgressivePlannerWireEvent[] = []
+        const lifecycle = new ProgressivePlannerLifecycle(
+            {
+                runId: "run-trusted-goal",
+                planningId: "planning-trusted-goal",
+                bootstrapFile: "/tmp/bootstrap.json",
+                trustedGoalEnvelope: {
+                    objective: "Preserve both required behaviors.",
+                    acceptanceCriteria: ["First behavior", "Second behavior"],
+                    constraints: [],
+                    nonGoals: [],
+                    assumptions: [],
+                },
+            },
+            (event) => events.push(event),
+        )
+        lifecycle.open()
+
+        assert.throws(
+            () => lifecycle.publish({
+                type: "plan_fragment",
+                run_id: "run-trusted-goal",
+                planning_id: "planning-trusted-goal",
+                fragment_id: "foundation",
+                ordinal: 1,
+                stories: [{
+                    ...STORY_S1,
+                    goalInvariantIds: ["G-A99"],
+                }],
+            }),
+            /unknown invariant.*G-A99/i,
+        )
+
+        lifecycle.publish({
+            type: "plan_fragment",
+            run_id: "run-trusted-goal",
+            planning_id: "planning-trusted-goal",
+            fragment_id: "foundation",
+            ordinal: 1,
+            stories: [{
+                ...STORY_S1,
+                goalInvariantIds: ["G-A1"],
+            }],
+        })
+
+        assert.deepEqual(events.map((event) => event.type), [
+            "planning_open",
+            "plan_fragment",
+        ])
+        const fragment = events[1]
+        assert.ok(fragment?.type === "plan_fragment")
+        assert.equal(fragment.ordinal, 1)
+        assert.deepEqual(fragment.stories[0]?.goalInvariantIds, ["G-A1"])
+    })
+
     it("publishes one correlated open, direct fragment, and complete", () => {
         const events: ProgressivePlannerWireEvent[] = []
         const lifecycle = new ProgressivePlannerLifecycle(

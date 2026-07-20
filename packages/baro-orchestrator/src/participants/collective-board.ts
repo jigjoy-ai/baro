@@ -409,6 +409,7 @@ export class CollectiveBoard extends SerializedObserver {
         checkId: string
         contractId: string | null
         verificationId: string
+        verificationIncompleteReason: string | null
     } | null = null
     private verificationStatus: "passed" | "failed" | "skipped" | undefined
     private verification: RunVerificationEvidence | undefined
@@ -3323,19 +3324,34 @@ export class CollectiveBoard extends SerializedObserver {
         }
         if (effectiveStatus === "skipped") {
             const incoherentPass = result.status === "passed"
-            this.requestPush(
-                incoherentPass
-                    ? "objective verification incomplete: verifier reported passed without complete passing command evidence"
-                    : skippedCommands.length > 0
-                    ? `objective verification incomplete: skipped ${skippedCommands.join(", ")}`
-                    : "objective verification incomplete: no applicable build/test/typecheck/lint commands ran",
+            const reason = incoherentPass
+                ? "objective verification incomplete: verifier reported passed without complete passing command evidence"
+                : skippedCommands.length > 0
+                  ? `objective verification incomplete: skipped ${skippedCommands.join(", ")}`
+                  : hasPassedCommand
+                    ? "objective verification incomplete: verifier reported skipped despite passing command evidence"
+                  : "objective verification incomplete: no applicable build/test/typecheck/lint commands ran"
+            const hasGoalContract = Boolean(
+                this.prd && deriveGoalContract(this.prd.goalEnvelope),
             )
+            if (
+                hasPassedCommand &&
+                hasGoalContract &&
+                this.opts.goalCompletionAuthority
+            ) {
+                this.requestGoalCompletion(result.verificationId, reason)
+                return
+            }
+            this.requestPush(reason)
             return
         }
         this.requestGoalCompletion(result.verificationId)
     }
 
-    private requestGoalCompletion(verificationId: string): void {
+    private requestGoalCompletion(
+        verificationId: string,
+        verificationIncompleteReason: string | null = null,
+    ): void {
         if (!this.prd) return
         if (!this.opts.goalCompletionAuthority) {
             this.requestPush(null)
@@ -3351,14 +3367,17 @@ export class CollectiveBoard extends SerializedObserver {
             checkId,
             contractId: contract?.contractId ?? null,
             verificationId,
+            verificationIncompleteReason,
         }
         this.armGoalCompletionTimer(this.pendingGoalCheck)
         this.emit(
             ConductorState.create({
                 phase: "level_complete",
-                detail: contract
-                    ? "objective verification passed; checking global goal invariants"
-                    : "objective verification passed; goal governance is disabled for this legacy PRD",
+                detail: verificationIncompleteReason
+                    ? "objective verification is incomplete; checking global goal invariants for actionable remediation"
+                    : contract
+                      ? "objective verification passed; checking global goal invariants"
+                      : "objective verification passed; goal governance is disabled for this legacy PRD",
                 currentLevel: this.waveOrdinal,
             }),
         )
@@ -3397,29 +3416,34 @@ export class CollectiveBoard extends SerializedObserver {
                     "goal attestation does not match its durable ledger projection",
                 )
             }
-            this.persistGoalProtocol({
-                ...protocol,
-                completion: structuredClone(attestation),
-            })
+            if (pending.verificationIncompleteReason === null) {
+                this.persistGoalProtocol({
+                    ...protocol,
+                    completion: structuredClone(attestation),
+                })
+            }
         }
         this.pendingGoalCheck = null
         if (
             attestation.status === "satisfied" ||
             attestation.status === "disabled"
         ) {
-            this.requestPush(null)
+            this.requestPush(pending.verificationIncompleteReason)
             return
         }
         const unresolved = [
             ...attestation.openInvariantIds,
             ...attestation.rejectedInvariantIds,
         ]
-        this.requestPush(
-            `global goal is not satisfied${
+        const goalReason = `global goal is not satisfied${
                 unresolved.length > 0
                     ? ` (${unresolved.join(", ")})`
                     : ""
-            }: ${attestation.reason}`,
+            }: ${attestation.reason}`
+        this.requestPush(
+            pending.verificationIncompleteReason
+                ? `${pending.verificationIncompleteReason}; ${goalReason}`
+                : goalReason,
         )
     }
 

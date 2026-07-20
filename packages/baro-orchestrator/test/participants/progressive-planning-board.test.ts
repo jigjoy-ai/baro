@@ -23,6 +23,7 @@ import {
     Replan,
     RuntimeReplanApplied,
     RuntimeReplanProposed,
+    RuntimeReplanRejected,
     RunPrepared,
     RunPushed,
     RunPushRequested,
@@ -123,6 +124,168 @@ describe("CollectiveBoard progressive planning", () => {
             undefined,
         )
         assert.equal(initialized.runtimeGraph?.planning?.status, "open")
+    })
+
+    it("admits incomplete fragment coverage but rejects unknown GoalContract ids", () => {
+        const runId = "run-progressive-goal-fragment"
+        const planningId = "planning-goal-fragment"
+        const goalEnvelope = {
+            objective: "Cover both progressive requirements.",
+            acceptanceCriteria: ["First behavior", "Second behavior"],
+            constraints: [],
+            nonGoals: [],
+            assumptions: [],
+        }
+        const currentPrd: PrdFile = {
+            ...bootstrapPrd(),
+            goalEnvelope,
+            runtimeGraph: {
+                runId,
+                version: 1,
+                dynamicStories: 0,
+                policyStories: 0,
+                appliedDecisions: [],
+                planning: {
+                    schemaVersion: 1,
+                    runId,
+                    planningId,
+                    status: "open",
+                    nextOrdinal: 1,
+                    admittedStoryIds: [],
+                    fragments: [],
+                },
+            },
+        }
+        const events: Array<SemanticEvent<unknown>> = []
+        let graphAdmissions = 0
+        const coordinator = new ProgressivePlanningCoordinator({
+            runId,
+            planningId,
+            host: {
+                snapshot: () => ({
+                    phase: "running",
+                    prd: currentPrd,
+                    graphVersion: 1,
+                    wave: null,
+                }),
+                commitPrd: () => undefined,
+                admitGraph: ({ proposal }) => {
+                    graphAdmissions += 1
+                    return {
+                        event: RuntimeReplanRejected.create({
+                            runId,
+                            proposalId: proposal.proposalId,
+                            sourceStoryId: proposal.sourceStoryId,
+                            leaseId: proposal.leaseId,
+                            generation: proposal.generation,
+                            baseGraphVersion: proposal.baseGraphVersion,
+                            currentGraphVersion: 1,
+                            code: "invalid_proposal",
+                            reason: "test stopped at graph admission",
+                        }),
+                    }
+                },
+                emit: (event) => events.push(event),
+                afterAdmission: () => undefined,
+                afterClose: () => undefined,
+                terminate: () => undefined,
+            },
+        })
+
+        coordinator.handleEvent(
+            fragment(runId, planningId, "partial", 1, [
+                story("S1", [], { goalInvariantIds: ["G-A1"] }),
+            ]),
+        )
+        assert.equal(graphAdmissions, 1, "partial union reached graph admission")
+
+        coordinator.handleEvent(
+            fragment(runId, planningId, "unknown", 1, [
+                story("S2", [], { goalInvariantIds: ["G-A99"] }),
+            ]),
+        )
+        assert.equal(graphAdmissions, 1, "unknown mapping was rejected before admission")
+        const rejected = events.filter(PlanFragmentRejected.is).at(-1)
+        assert.equal(rejected?.data.code, "invalid_fragment")
+        assert.match(rejected?.data.reason ?? "", /unknown invariant.*G-A99/i)
+    })
+
+    it("closes an incomplete final union so GoalGuardian can remediate it", () => {
+        const runId = "run-progressive-goal-complete"
+        const planningId = "planning-goal-complete"
+        const goalEnvelope = {
+            objective: "Cover both final requirements.",
+            acceptanceCriteria: ["First behavior", "Second behavior"],
+            constraints: [],
+            nonGoals: [],
+            assumptions: [],
+        }
+        const onlyStory = story("S1", [], {
+            goalInvariantIds: ["G-A1"],
+        })
+        let currentPrd: PrdFile = {
+            ...bootstrapPrd([onlyStory]),
+            goalEnvelope,
+            runtimeGraph: {
+                runId,
+                version: 1,
+                dynamicStories: 0,
+                policyStories: 0,
+                appliedDecisions: [],
+                planning: {
+                    schemaVersion: 1,
+                    runId,
+                    planningId,
+                    status: "open",
+                    nextOrdinal: 2,
+                    admittedStoryIds: ["S1"],
+                    fragments: [],
+                },
+            },
+        }
+        const events: Array<SemanticEvent<unknown>> = []
+        let afterCloseCalls = 0
+        const coordinator = new ProgressivePlanningCoordinator({
+            runId,
+            planningId,
+            host: {
+                snapshot: () => ({
+                    phase: "running",
+                    prd: currentPrd,
+                    graphVersion: 1,
+                    wave: null,
+                }),
+                commitPrd: (prd) => {
+                    currentPrd = prd
+                },
+                admitGraph: () => {
+                    throw new Error("final plan has no tail")
+                },
+                emit: (event) => events.push(event),
+                afterAdmission: () => undefined,
+                afterClose: () => {
+                    afterCloseCalls += 1
+                },
+                terminate: () => undefined,
+            },
+        })
+
+        coordinator.handleEvent(
+            PlanningStreamCompleted.create({
+                runId,
+                planningId,
+                finalPrd: {
+                    ...bootstrapPrd([onlyStory]),
+                    goalEnvelope,
+                },
+            }),
+        )
+
+        assert.equal(currentPrd.runtimeGraph?.planning?.status, "completed")
+        assert.equal(afterCloseCalls, 1)
+        const closed = events.find(PlanningStreamClosed.is)
+        assert.equal(closed?.data.status, "completed")
+        assert.equal(closed?.data.reason, undefined)
     })
 
     it("accepts planning events only from the exact bound feed object", async () => {

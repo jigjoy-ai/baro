@@ -32,6 +32,10 @@ pub(crate) fn spawn_refiner(
     let quick = app.quick;
     let is_resume = app.is_resume;
     let mode_json = refinement_mode_contract(app);
+    let goal_envelope_json = app.conversation.goal_envelope().map(|envelope| {
+        serde_json::to_string(envelope)
+            .expect("GoalEnvelope contains only JSON-serializable fields")
+    });
     let plan = review_plan_json(app);
     let plan = serde_json::to_string_pretty(&plan).unwrap_or_default();
 
@@ -59,6 +63,7 @@ pub(crate) fn spawn_refiner(
             openai_base_url.as_deref(),
             &effort,
             mode_json.as_deref(),
+            goal_envelope_json.as_deref(),
             None,
             plan_event_sink(false, tx.clone()),
         )
@@ -136,6 +141,7 @@ fn review_plan_json(app: &App) -> serde_json::Value {
                 "retries": story.retries,
                 "acceptance": story.acceptance,
                 "tests": story.tests,
+                "goalInvariantIds": story.goal_invariant_ids,
                 "passes": story.completed,
                 "model": story.model,
             })
@@ -152,6 +158,7 @@ fn review_plan_json(app: &App) -> serde_json::Value {
                 "description": story.description,
                 "acceptance": story.acceptance,
                 "tests": story.tests,
+                "goalInvariantIds": story.goal_invariant_ids,
                 "passes": true,
             })
         })
@@ -163,6 +170,10 @@ fn review_plan_json(app: &App) -> serde_json::Value {
         "userStories": stories,
         "executionMode": app.execution_mode,
     });
+    if let Some(goal_envelope) = app.conversation.goal_envelope() {
+        plan["goalEnvelope"] = serde_json::to_value(goal_envelope)
+            .expect("GoalEnvelope contains only JSON-serializable fields");
+    }
     if app.is_resume {
         plan["completedHistory"] = serde_json::Value::Array(completed_history);
     }
@@ -220,6 +231,7 @@ pub(crate) fn preserve_completed_review_stories(
 mod tests {
     use super::{preserve_completed_review_stories, refinement_mode_contract, review_plan_json};
     use crate::app::{App, ReviewStory};
+    use crate::conversation::{ConversationKind, ConversationWireResponse, GoalEnvelope};
 
     fn story(id: &str, completed: bool) -> ReviewStory {
         ReviewStory {
@@ -251,6 +263,27 @@ mod tests {
             "source": "user",
         }));
         app.review_stories.push(story("S7", false));
+        let session_id = app.conversation.session_id().to_string();
+        app.conversation
+            .begin_request("request-refine", "Keep the complete contract")
+            .unwrap();
+        app.conversation
+            .apply_response(ConversationWireResponse {
+                schema_version: 1,
+                session_id,
+                request_id: "request-refine".into(),
+                kind: ConversationKind::Ready,
+                message: "The goal is ready for planning.".into(),
+                questions: vec![],
+                goal_envelope: Some(GoalEnvelope {
+                    objective: "Keep the complete contract".into(),
+                    constraints: vec!["Preserve public compatibility".into()],
+                    acceptance_criteria: vec!["Metadata remains observable".into()],
+                    non_goals: vec![],
+                    assumptions: vec![],
+                }),
+            })
+            .unwrap();
 
         let snapshot = review_plan_json(&app);
         let story = &snapshot["userStories"][0];
@@ -260,9 +293,20 @@ mod tests {
         assert_eq!(story["retries"], 4);
         assert_eq!(story["acceptance"][0], "Metadata remains observable");
         assert_eq!(story["tests"][0], "cargo test -p baro-tui");
+        assert_eq!(story["goalInvariantIds"][0], "G-A1");
         assert_eq!(story["model"], "heavy");
         assert_eq!(story["passes"], false);
         assert_eq!(snapshot["executionMode"]["mode"], "parallel");
+        assert_eq!(
+            snapshot["goalEnvelope"],
+            serde_json::json!({
+                "objective": "Keep the complete contract",
+                "constraints": ["Preserve public compatibility"],
+                "acceptanceCriteria": ["Metadata remains observable"],
+                "nonGoals": [],
+                "assumptions": [],
+            }),
+        );
     }
 
     #[test]
@@ -305,6 +349,10 @@ mod tests {
             serde_json::json!([]),
         );
         assert_eq!(projection["completedHistory"][0]["id"], "S1");
+        assert_eq!(
+            projection["completedHistory"][0]["goalInvariantIds"][0],
+            "G-A1",
+        );
         assert_eq!(refinement_mode_contract(&app), None);
 
         app.execution_mode = Some(serde_json::json!({

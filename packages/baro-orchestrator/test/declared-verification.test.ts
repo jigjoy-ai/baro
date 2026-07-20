@@ -1,4 +1,10 @@
-import { existsSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs"
+import {
+    existsSync,
+    mkdirSync,
+    symlinkSync,
+    unlinkSync,
+    writeFileSync,
+} from "node:fs"
 import { join } from "node:path"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
@@ -313,6 +319,197 @@ describe("declared verification policy", () => {
                 "skipped",
             )
             assert.equal(existsSync(exfiltrated), false)
+        })
+    })
+
+    it("canonicalizes and batches A13-shaped npx rstest declarations", async () => {
+        await withTempDir("baro-verify-rstest-batch-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "v",
+                    scripts: {
+                        build: "exit 0",
+                        typecheck: "exit 0",
+                        test: "rstest run",
+                        lint: "exit 0",
+                    },
+                }),
+            )
+            mkdirSync(join(dir, "tests"))
+            const paths = Array.from(
+                { length: MAX_DECLARED_VERIFY_COMMANDS + 1 },
+                (_unused, index) => `tests/case-${index}.test.ts`,
+            )
+            for (const path of paths) {
+                writeFileSync(join(dir, path), "export {}\n")
+            }
+
+            const plan = createVerifyPlan(dir, {
+                declaredTests: [
+                    ...paths.map((path, index) => ({
+                        storyId: `S${index + 1}`,
+                        command: `npx rstest run ${path}`,
+                    })),
+                    {
+                        storyId: "S-duplicate",
+                        command: `npx rstest run ${paths[0]}`,
+                    },
+                ],
+            })
+
+            assert.equal(
+                plan.commands.some((command) => command.tool === "npx"),
+                false,
+            )
+            assert.equal(
+                plan.commands.some((command) => command.incompleteReason),
+                false,
+            )
+            const focused = plan.commands.filter(
+                (command) => command.canonicalDeclaredFocus === "rstest",
+            )
+            assert.equal(focused.length, 1)
+            assert.equal(focused[0]?.tool, "npm")
+            assert.deepEqual(focused[0]?.args, [
+                "run",
+                "test",
+                "--",
+                ...paths,
+            ])
+            assert.deepEqual(
+                focused[0]?.containedPaths?.map(({ path }) => path),
+                paths,
+            )
+            for (const script of ["build", "typecheck", "test", "lint"]) {
+                assert.equal(
+                    plan.commands.filter(
+                        (command) => command.label === `npm run ${script}`,
+                    ).length,
+                    1,
+                )
+            }
+        })
+    })
+
+    it("deduplicates before translation and chunks every safely admissible rstest path", async () => {
+        await withTempDir("baro-verify-rstest-translation-budget-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "v",
+                    scripts: { test: "rstest run" },
+                }),
+            )
+            mkdirSync(join(dir, "tests"))
+            const paths = Array.from(
+                { length: MAX_DECLARED_VERIFY_COMMANDS * 8 + 1 },
+                (_unused, index) => `tests/case-${index}.test.ts`,
+            )
+            const repeated = Array.from({ length: 600 }, (_unused, index) => ({
+                storyId: `duplicate-${index}`,
+                command: `npx rstest run ${paths[0]}`,
+            }))
+            const plan = createVerifyPlan(dir, {
+                declaredTests: [
+                    ...repeated,
+                    ...paths.map((path, index) => ({
+                        storyId: `unique-${index}`,
+                        command: `npx rstest run ${path}`,
+                    })),
+                ],
+            })
+
+            assert.equal(
+                plan.commands.some((command) => command.incompleteReason),
+                false,
+            )
+            const focused = plan.commands.filter(
+                (command) => command.canonicalDeclaredFocus === "rstest",
+            )
+            assert.equal(focused.length, 2)
+            assert.deepEqual(
+                focused.flatMap((command) =>
+                    command.containedPaths?.map(({ path }) => path) ?? []),
+                paths,
+            )
+        })
+    })
+
+    it("rejects every non-exact npx alias and mismatched test script", async () => {
+        await withTempDir("baro-verify-rstest-reject-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "v",
+                    scripts: { test: "node --test" },
+                }),
+            )
+            mkdirSync(join(dir, "tests"))
+            writeFileSync(join(dir, "tests/case.test.ts"), "export {}\n")
+            const plan = createVerifyPlan(dir, {
+                declaredTests: [
+                    {
+                        storyId: "S1",
+                        command: "npx rstest run tests/case.test.ts",
+                    },
+                    {
+                        storyId: "S2",
+                        command: "npx vitest run tests/case.test.ts",
+                    },
+                    {
+                        storyId: "S3",
+                        command: "npx -y rstest run tests/case.test.ts",
+                    },
+                    {
+                        storyId: "S4",
+                        command: "npx rstest run ../case.test.ts",
+                    },
+                    {
+                        storyId: "S5",
+                        command: "npx rstest run --watch",
+                    },
+                    {
+                        storyId: "S6",
+                        command: "npx rstest@latest run tests/case.test.ts",
+                    },
+                    {
+                        storyId: "S7",
+                        command: "npx --package rstest run tests/case.test.ts",
+                    },
+                    {
+                        storyId: "S8",
+                        command: "npx rstest run tests/case.test.ts --config",
+                    },
+                ],
+            })
+            const declared = plan.commands.filter((command) =>
+                command.label.startsWith("PRD test"))
+            assert.equal(declared.length, 8)
+            assert.equal(
+                declared.every((command) => command.incompleteReason),
+                true,
+            )
+            assert.equal(plan.commands.some(({ tool }) => tool === "npx"), false)
+
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "v",
+                    scripts: { test: "rstest\nrun" },
+                }),
+            )
+            const multilineAlias = createVerifyPlan(dir, {
+                declaredTests: [{
+                    storyId: "S9",
+                    command: "npx rstest run tests/case.test.ts",
+                }],
+            })
+            assert.match(
+                multilineAlias.commands.find((command) =>
+                    command.label.startsWith("PRD test"))?.incompleteReason ?? "",
+                /exactly 'rstest run'/,
+            )
         })
     })
 

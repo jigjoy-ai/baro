@@ -1,5 +1,10 @@
 import assert from "node:assert/strict"
-import { existsSync, writeFileSync } from "node:fs"
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    writeFileSync,
+} from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
@@ -300,6 +305,83 @@ describe("RunVerifier", () => {
             )
             assert.equal(existsSync(addedMarker), true)
             assert.equal(existsSync(removedMarker), false)
+        })
+    })
+
+    it("passes an A13-shaped final plan without executing npx or overflowing", async () => {
+        await withTempDir("baro-run-verifier-a13-", async (dir) => {
+            const binDir = join(dir, "node_modules", ".bin")
+            mkdirSync(binDir, { recursive: true })
+            const rstestBin = join(binDir, "rstest")
+            writeFileSync(rstestBin, "#!/usr/bin/env node\nprocess.exit(0)\n")
+            chmodSync(rstestBin, 0o755)
+            writeFileSync(
+                join(binDir, "rstest.cmd"),
+                "@node -e \"process.exit(0)\" %*\r\n",
+            )
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "a13-verifier-fixture",
+                    private: true,
+                    packageManager: "npm@10.9.0",
+                    scripts: {
+                        build: "node -e \"process.exit(0)\"",
+                        typecheck: "node -e \"process.exit(0)\"",
+                        test: "rstest run",
+                        lint: "node -e \"process.exit(0)\"",
+                    },
+                }),
+            )
+            const testPaths = Array.from(
+                { length: 9 },
+                (_unused, index) => `tests/a13-provider-${index + 1}.test.ts`,
+            )
+            const declaredTests = [
+                ...testPaths.map((testPath, index) => ({
+                    storyId: `S${index + 1}`,
+                    command: `npx rstest run ${testPath}`,
+                })),
+                {
+                    storyId: "S9",
+                    command: `npx rstest run ${testPaths[8]}`,
+                },
+            ]
+            const verifier = new RunVerifier({
+                runId: "run-a13-final-plan",
+                cwd: dir,
+                createFinalPlan: (cwd) =>
+                    createVerifyPlan(cwd, { declaredTests }),
+            })
+            verifier.setRequestAuthority(BOARD)
+            const env = joinWithCapture(verifier)
+            env.deliverSemanticEvent(
+                BOARD,
+                RunVerificationRequested.create({
+                    runId: "run-a13-final-plan",
+                    verificationId: "verify-a13-final-plan",
+                }),
+            )
+            await verifier.idle()
+
+            const completed = env.events.find(RunVerificationCompleted.is)
+            assert.equal(completed?.data.status, "passed")
+            assert.equal(completed?.data.commands.length, 5)
+            assert.equal(
+                completed?.data.commands.every(({ status }) => status === "passed"),
+                true,
+            )
+            assert.equal(
+                completed?.data.commands.some(({ command }) =>
+                    command.startsWith("npx ")),
+                false,
+            )
+            const focused = completed?.data.commands.find(({ command }) =>
+                command.startsWith("npm run test -- "))
+            assert.ok(focused)
+            for (const testPath of testPaths) {
+                assert.match(focused.command, new RegExp(testPath.replaceAll(".", "\\.")))
+            }
         })
     })
 

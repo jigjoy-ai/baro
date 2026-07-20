@@ -46,6 +46,26 @@ describe("script entrypoints run their main()", () => {
         assert.match(r.stderr, /--mode-file requires a value/)
     })
 
+    it("run-planner fails closed on an invalid trusted GoalEnvelope before provider startup", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "baro-invalid-goal-envelope-"))
+        try {
+            const envelopeFile = join(dir, "goal-envelope.json")
+            writeFileSync(envelopeFile, JSON.stringify({ objective: "missing fields" }))
+            const r = await runScript("run-planner.ts", [
+                "--goal", "test",
+                "--cwd", dir,
+                "--llm", "openai",
+                "--goal-envelope-file", envelopeFile,
+            ])
+
+            assert.equal(r.code, 2)
+            assert.match(r.stderr, /trusted GoalEnvelope .* is invalid/)
+            assert.doesNotMatch(r.stderr, /OPENAI_API_KEY/)
+        } finally {
+            rmSync(dir, { recursive: true, force: true })
+        }
+    })
+
     it("run-planner enforces the private progressive flag group before provider startup", async () => {
         const partial = await runScript("run-planner.ts", [
             "--goal", "test",
