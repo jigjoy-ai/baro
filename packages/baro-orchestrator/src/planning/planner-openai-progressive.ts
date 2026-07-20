@@ -4,6 +4,11 @@ import type { PrdStory } from "../prd.js"
 import { deriveGoalContract } from "../runtime/goal-contract.js"
 import type { GoalEnvelope } from "../session/conversation-contract.js"
 import type { BaroCommand } from "../tui-protocol.js"
+import {
+    architectureObligationsFromDecision,
+    obligationMappingsForStories,
+    validateArchitectureObligationCoverage,
+} from "./architecture-obligation-contract.js"
 import { validateGoalContractCoverage } from "./goal-contract-coverage.js"
 import {
     openProgressivePlanSession,
@@ -22,6 +27,8 @@ export interface PlannerOpenAIProgressiveConfig {
     /** Host-authored intent used only to reject unknown invariant claims before
      * the local immutable-prefix state advances. Missing preserves legacy. */
     trustedGoalEnvelope?: GoalEnvelope
+    /** Architect-authored document used only with the host-owned goal. */
+    trustedDecisionDocument?: string
     publish(
         event: PlannerOpenAIPlanFragmentEvent,
     ): void | Promise<void>
@@ -166,6 +173,10 @@ export function createPlannerProgressivePublisher(
 ): PlannerProgressivePublisher {
     const session = openPlannerProgressiveSession(config)
     const goalContract = deriveGoalContract(config.trustedGoalEnvelope)
+    const obligationContract = architectureObligationsFromDecision(
+        config.trustedDecisionDocument,
+        goalContract,
+    )
     return {
         async publish(args: unknown) {
             if (!isExactToolArgs(args)) {
@@ -186,6 +197,24 @@ export function createPlannerProgressivePublisher(
             validateGoalContractCoverage(
                 goalContract,
                 goalContractMappings(fragment.stories),
+                "partial",
+            )
+            const fragmentStoryIds = new Set(
+                fragment.stories.map(({ id }) => id),
+            )
+            validateArchitectureObligationCoverage(
+                obligationContract,
+                obligationMappingsForStories([
+                    // Exact fragment replay is part of the progressive
+                    // protocol. Replace its remembered projection here so a
+                    // canonical obligation is not mistaken for two owners;
+                    // session.admit remains the authority that rejects a
+                    // conflicting replay.
+                    ...session.snapshot().stories.filter(
+                        ({ id }) => !fragmentStoryIds.has(id),
+                    ),
+                    ...fragment.stories,
+                ]),
                 "partial",
             )
             const admission = session.admit(fragment)
@@ -209,7 +238,13 @@ export function createPlannerProgressivePublisher(
             }
         },
         reconcileFinalCandidate(candidate: string) {
-            session.reconcile(progressiveFinalPrd(candidate))
+            const finalPrd = progressiveFinalPrd(candidate)
+            validateArchitectureObligationCoverage(
+                obligationContract,
+                obligationMappingsForStories(finalPrd.userStories),
+                "complete",
+            )
+            session.reconcile(finalPrd)
         },
         hasEarlyPlan() {
             return session.snapshot().stories.length > 0

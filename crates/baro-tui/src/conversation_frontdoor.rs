@@ -244,6 +244,8 @@ pub(crate) fn spawn_conversation_architect_validation(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "ready candidate produced no planning handoff".to_string())?;
 
+    let goal_envelope_json = serde_json::to_string(&handoff.goal_envelope)
+        .map_err(|error| format!("could not serialize trusted goal envelope: {error}"))?;
     let goal = handoff.planning_prompt;
     if goal.len() > MAX_PREACCEPT_GOAL_BYTES {
         return Err(format!(
@@ -292,6 +294,7 @@ pub(crate) fn spawn_conversation_architect_validation(
                     architect_model.as_deref(),
                     Some(&repository_context),
                     fixed_mode_json.as_deref(),
+                    &goal_envelope_json,
                     openai_api_key.as_deref(),
                     openai_base_url.as_deref(),
                     &effort,
@@ -603,11 +606,8 @@ mod tests {
         )
         .unwrap();
 
-        let context = build_preaccept_repository_context(
-            directory.path(),
-            &repository_brief(),
-        )
-        .unwrap();
+        let context =
+            build_preaccept_repository_context(directory.path(), &repository_brief()).unwrap();
 
         let deep = context.find("src/runtime/cancellation.ts").unwrap();
         let instructions = context

@@ -43,6 +43,8 @@ import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
 
 import { AgenticEnvironment } from "@mozaik-ai/core"
 import { buildDag } from "../dag.js"
+import { validatePrdArchitectureObligationCoverage } from "../planning/architecture-obligation-contract.js"
+import { deriveGoalContract } from "../runtime/goal-contract.js"
 import {
     PrdFile,
     PrdStory,
@@ -325,6 +327,19 @@ export class Conductor extends BaseObserver {
         this.startedAt = Date.now()
 
         this.prd = loadPrd(this.opts.prdPath)
+        try {
+            validatePrdArchitectureObligationCoverage(
+                this.prd,
+                deriveGoalContract(this.prd.goalEnvelope),
+                "complete",
+            )
+        } catch (error) {
+            this.terminateRun(
+                false,
+                `persisted architecture obligation contract is invalid: ${errorMessage(error)}`,
+            )
+            return
+        }
         this.emit(
             ConductorState.create({
                 phase: "loading",
@@ -987,8 +1002,8 @@ export class Conductor extends BaseObserver {
             prompt = buildDefaultStoryPrompt(story)
         }
 
-        // Prepend Architect's DecisionDocument so the agent sees the
-        // authoritative design spec before its task description. This
+        // Prepend Architect's DecisionDocument so the agent sees the shared
+        // evidence-backed design baseline before its task description. This
         // is the single biggest lever against per-story decision drift
         // (column names, file paths, API shapes, dependency choices,
         // …): every agent receives the same upstream-pinned answers
@@ -996,13 +1011,13 @@ export class Conductor extends BaseObserver {
         const doc = this.prd?.decisionDocument
         if (doc && doc.trim().length > 0) {
             const header = [
-                "## Design spec (authoritative — already decided)",
+                "## Design baseline (evidence-backed and revisable)",
                 "",
-                "The Architect made these decisions before any story started.",
-                "Treat them as fixed: use these exact file paths, names,",
-                "schemas, API shapes, and dependency choices. Do NOT",
-                "improvise alternatives — your siblings are working from",
-                "the same spec and divergence breaks the build.",
+                "The Architect made these decisions from repository evidence before any story started.",
+                "Preserve their file paths, names, schemas, API shapes, and dependency choices",
+                "unless newer concrete repository evidence disproves an assumption. Never silently",
+                "diverge: stop affected work, report the evidence, and use the collective runtime",
+                "replan path when it is available so every sibling receives the accepted amendment.",
                 "",
                 doc.trim(),
                 "",

@@ -1,3 +1,8 @@
+import {
+    parseArchitectureObligationContract,
+    renderArchitectureObligationCriterion,
+} from "./architecture-obligation-contract.js"
+
 /**
  * Planner system prompt, shared by all planner backends so providers
  * produce comparable DAGs. The triage block collapses trivial goals to a
@@ -60,6 +65,15 @@ items that its implementation and acceptance evidence address. Every G-A/G-C id
 must be assigned to at least one story; do not claim an id merely because a
 nearby story sounds related. For goals without a confirmed Goal envelope, use
 an empty \`goalInvariantIds\` array.
+
+When the Architect handoff contains a Semantic obligation contract, its exact
+canonical [O-NNN] criteria are a non-narrowable minimum contract. Copy every
+canonical criterion byte-for-byte into the \`acceptance\` array of exactly one
+implementation story. That story's \`goalInvariantIds\` must include every
+parent G-A/G-C id shown for the obligation. You may add stricter or more local
+criteria, but never paraphrase, split, weaken, duplicate, or omit a canonical
+criterion. If one owner cannot produce all required evidence, split the
+obligations across appropriately scoped implementation stories.
 
 For every run, do NOT create a final verification-only story whose job is to
 run tests, typecheck, build, or lint after the
@@ -420,6 +434,26 @@ export function buildPlannerUserMessage(args: {
         sections.push("")
         sections.push("---")
         sections.push("")
+
+        const obligationContract = parseArchitectureObligationContract(
+            args.decisionDocument,
+        )
+        if (obligationContract) {
+            sections.push("ARCHITECT SEMANTIC OBLIGATIONS (exact, non-narrowable):")
+            sections.push("")
+            sections.push(
+                "Copy every exact canonical criterion below byte-for-byte into exactly one story acceptance array. The owner story must also list every parent GoalContract id. Additional local acceptance is allowed; changing or omitting these lines is not.",
+            )
+            sections.push("")
+            for (const obligation of obligationContract.obligations) {
+                sections.push(
+                    `Parents ${obligation.invariantIds.join(", ")}: ${renderArchitectureObligationCriterion(obligation)}`,
+                )
+            }
+            sections.push("")
+            sections.push("---")
+            sections.push("")
+        }
     }
 
     const modeContract = typeof args.modeContract === "string"

@@ -1,4 +1,5 @@
 import type { Participant, SemanticEvent } from "@mozaik-ai/core"
+import { createHash } from "node:crypto"
 
 import {
     DialogueResponderInvocationError,
@@ -86,6 +87,7 @@ export function goalReviewRoundTimeoutMs(
 
 export const GOAL_AGGREGATE_REVIEW_SYSTEM_PROMPT = `${verdictSystemPrompt({
     allowInconclusive: true,
+    remediationGroups: true,
 })}
 
 This is a run-level composition review, not a review of one worker. Evaluate every exact
@@ -95,7 +97,11 @@ contributions. violated_criteria must contain only exact criterion strings from 
 
 A skipped or missing command is control-plane incompleteness, not itself a violated goal invariant.
 Return "fail" only when repository evidence establishes a concrete semantic defect independently
-of the skipped evidence; return "pass" only when the available evidence still proves every invariant.`
+of the skipped evidence; return "pass" only when the available evidence still proves every invariant.
+
+Put multiple failed criteria in one remediation group only when one coherent implementation change
+can repair their shared root cause; otherwise use separate groups. The grouping is diagnostic, not
+permission to weaken any individual invariant.`
 
 export interface GoalInvariantReviewEvidenceAdapter {
     prepare: typeof prepareGoalInvariantReview
@@ -553,6 +559,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
                     result.text,
                     criteria,
                     request.basis.invariants.map(({ invariantId }) => invariantId),
+                    request.basis.fingerprint,
                 )
                 const status = aggregateStatus(invariants)
                 return {
@@ -1113,12 +1120,14 @@ function parseInvariantReviews(
     text: string,
     criteria: readonly string[],
     invariantIds: readonly string[],
+    groupNamespace: string,
 ): readonly GoalAggregateInvariantReview[] {
     const parsed: unknown = JSON.parse(extractVerdictJson(text.trim()))
     if (!plainRecord(parsed)) throw new Error("aggregate evaluator returned no verdict object")
     const verdict = parsed.verdict
     const reasoning = parsed.reasoning
     const violated = parsed.violated_criteria
+    const remediationGroups = parsed.remediation_groups
     if (
         (verdict !== "pass" &&
             verdict !== "fail" &&
@@ -1142,6 +1151,13 @@ function parseInvariantReviews(
         throw new Error("aggregate evaluator violated the exact criterion contract")
     }
     if (verdict === "inconclusive") {
+        parseRemediationGroups(
+            remediationGroups,
+            verdict,
+            violatedCriteria,
+            groupNamespace,
+            new Map(),
+        )
         return criteria.map((_criterion, index) => ({
             invariantId: invariantIds[index]!,
             status: "inconclusive",
@@ -1149,13 +1165,133 @@ function parseInvariantReviews(
         }))
     }
     const failed = new Set(violatedCriteria)
+    const invariantByCriterion = new Map(
+        criteria.map((criterion, index) => [criterion, invariantIds[index]!] as const),
+    )
+    const groupByCriterion = parseRemediationGroups(
+        remediationGroups,
+        verdict,
+        violatedCriteria,
+        groupNamespace,
+        invariantByCriterion,
+    )
     return criteria.map((criterion, index) => ({
         invariantId: invariantIds[index]!,
         status: failed.has(criterion) ? "failed" : "passed",
         reason: failed.has(criterion)
-            ? reasoning.trim()
-            : "run-level evaluator found no violation for this invariant",
+            ? groupByCriterion.get(criterion)!.rootCause
+            : reasoning.trim(),
+        ...(failed.has(criterion)
+            ? {
+                  remediationGroupId:
+                      groupByCriterion.get(criterion)!.groupId,
+              }
+            : {}),
     }))
+}
+
+interface ParsedRemediationGroup {
+    groupId: string
+    rootCause: string
+}
+
+function parseRemediationGroups(
+    value: unknown,
+    verdict: "pass" | "fail" | "inconclusive",
+    violatedCriteria: readonly string[],
+    groupNamespace: string,
+    invariantByCriterion: ReadonlyMap<string, string>,
+): ReadonlyMap<string, ParsedRemediationGroup> {
+    if (verdict !== "fail") {
+        if (
+            value !== undefined &&
+            (!Array.isArray(value) || value.length !== 0)
+        ) {
+            throw new Error(
+                "aggregate evaluator returned remediation groups for a non-failing verdict",
+            )
+        }
+        return new Map()
+    }
+
+    if (value === undefined) {
+        throw new Error(
+            "aggregate evaluator did not provide remediation_groups for a failing verdict",
+        )
+    }
+    if (!Array.isArray(value) || value.length === 0) {
+        throw new Error(
+            "aggregate evaluator did not group every failed criterion",
+        )
+    }
+
+    const expected = new Set(violatedCriteria)
+    const assigned = new Set<string>()
+    const parsed = new Map<string, ParsedRemediationGroup>()
+    for (const item of value) {
+        if (
+            !plainRecord(item) ||
+            typeof item.root_cause !== "string" ||
+            item.root_cause.trim().length === 0 ||
+            item.root_cause.length > 2_000 ||
+            !Array.isArray(item.violated_criteria) ||
+            item.violated_criteria.length === 0 ||
+            item.violated_criteria.some(
+                (criterion) => typeof criterion !== "string",
+            )
+        ) {
+            throw new Error(
+                "aggregate evaluator returned a malformed remediation group",
+            )
+        }
+        const groupCriteria = item.violated_criteria as string[]
+        if (
+            new Set(groupCriteria).size !== groupCriteria.length ||
+            groupCriteria.some(
+                (criterion) =>
+                    !expected.has(criterion) || assigned.has(criterion),
+            )
+        ) {
+            throw new Error(
+                "aggregate evaluator remediation groups do not partition failed criteria",
+            )
+        }
+        const group: ParsedRemediationGroup = {
+            groupId: deterministicRemediationGroupId(
+                groupCriteria.map((criterion) =>
+                    invariantByCriterion.get(criterion)!),
+                groupNamespace,
+            ),
+            rootCause: item.root_cause.trim(),
+        }
+        for (const criterion of groupCriteria) {
+            assigned.add(criterion)
+            parsed.set(criterion, group)
+        }
+    }
+    if (
+        assigned.size !== expected.size ||
+        [...expected].some((criterion) => !assigned.has(criterion))
+    ) {
+        throw new Error(
+            "aggregate evaluator remediation groups do not partition failed criteria",
+        )
+    }
+    return parsed
+}
+
+export function deterministicRemediationGroupId(
+    invariantIds: readonly string[],
+    namespace = "legacy",
+): string {
+    const canonical = [...invariantIds].sort()
+    const digest = createHash("sha256")
+        .update("baro-goal-remediation-group-v1\0")
+        .update(namespace)
+        .update("\0")
+        .update(canonical.join("\0"))
+        .digest("hex")
+    return `goal-remediation-group-${digest.slice(0, 24)}`
 }
 
 function aggregateStatus(

@@ -10,6 +10,12 @@ export interface GoalAggregateInvariantReview {
     invariantId: string
     status: GoalAggregateReviewStatus
     reason: string
+    /**
+     * Reviewer-derived identity for failed invariants that share one concrete
+     * root cause and can therefore be repaired by one coherent story. Older
+     * projections omit this field and retain singleton-remediation semantics.
+     */
+    remediationGroupId?: string
 }
 
 export interface GoalAggregateReviewEvidence {
@@ -52,6 +58,7 @@ export interface GoalAggregateChallengeBasis {
     remediation?: {
         proposalId: string
         storyId: string
+        remediationGroupId?: string
         status: "requested" | "admitted"
         graphVersion?: number
         revalidates?: readonly { storyId: string; leaseId?: string }[]
@@ -152,12 +159,18 @@ export function normalizeGoalAggregateReviewEvidence(
             !boundedString(item.invariantId, 128) ||
             !reviewStatus(item.status) ||
             !boundedString(item.reason, 2_000) ||
+            (item.remediationGroupId !== undefined &&
+                (!boundedString(item.remediationGroupId, 128) ||
+                    item.status !== "failed")) ||
             (knownInvariantIds && !knownInvariantIds.has(item.invariantId))
         ) throw new Error("aggregate invariant review is malformed")
         return {
             invariantId: item.invariantId,
             status: item.status,
             reason: item.reason,
+            ...(item.remediationGroupId
+                ? { remediationGroupId: item.remediationGroupId }
+                : {}),
         } as GoalAggregateInvariantReview
     })
     assertUnique(invariants.map(({ invariantId }) => invariantId))

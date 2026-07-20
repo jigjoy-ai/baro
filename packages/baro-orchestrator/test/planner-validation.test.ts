@@ -2,6 +2,10 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import { assertRunnablePlannerPrdJson } from "../src/planning/planner-validation.js"
+import {
+    parseArchitectureObligationContract,
+    renderArchitectureObligationCriterion,
+} from "../src/planning/architecture-obligation-contract.js"
 
 function validPrd(): Record<string, unknown> {
     return {
@@ -181,6 +185,94 @@ describe("shared Planner PRD validation", () => {
             assertRunnablePlannerPrdJson(providerOnly),
             providerOnly,
             "provider-owned envelope fields never manufacture trusted authority",
+        )
+    })
+
+    it("strictly preserves Architect obligations when the trusted handoff opts in", () => {
+        const trustedGoalEnvelope = {
+            objective: "Preserve behavior at both owned boundaries.",
+            acceptanceCriteria: ["The requested behavior is observable."],
+            constraints: ["Existing callers remain compatible."],
+            nonGoals: [],
+            assumptions: [],
+        }
+        const decisionDocument = `## Existing context
+Two boundaries implement the behavior.
+
+## ADR-001: Preserve both boundaries
+**Status:** Accepted
+**Context:** They can be invoked independently.
+**Decision:** Give each boundary explicit evidence.
+**Consequences:** Planning cannot collapse their semantic ownership.
+
+## Semantic obligation contract
+
+\`\`\`baro-obligations-v1
+{"schemaVersion":1,"obligations":[{"id":"O-001","invariantIds":["G-A1"],"subject":"the direct boundary","scenario":"it is invoked independently","expectedOutcome":"the requested behavior is observable","evidence":["a direct-boundary test"]},{"id":"O-002","invariantIds":["G-C1"],"subject":"existing callers","scenario":"they omit the new option","expectedOutcome":"their behavior remains compatible","evidence":["typecheck"]}]}
+\`\`\``
+        const obligations = parseArchitectureObligationContract(decisionDocument)!
+        const prd = validPrd()
+        const stories = prd.userStories as Record<string, unknown>[]
+        stories[0]!.goalInvariantIds = ["G-A1"]
+        stories[0]!.acceptance = [
+            renderArchitectureObligationCriterion(obligations.obligations[0]!),
+        ]
+        stories[1]!.goalInvariantIds = ["G-C1"]
+        stories[1]!.acceptance = [
+            renderArchitectureObligationCriterion(obligations.obligations[1]!),
+        ]
+        const json = JSON.stringify(prd)
+        assert.equal(
+            assertRunnablePlannerPrdJson(
+                json,
+                trustedGoalEnvelope,
+                decisionDocument,
+            ),
+            json,
+        )
+
+        stories[1]!.acceptance = ["consumer preserves compatibility"]
+        assert.throws(
+            () => assertRunnablePlannerPrdJson(
+                JSON.stringify(prd),
+                trustedGoalEnvelope,
+                decisionDocument,
+            ),
+            /coverage is incomplete.*O-002/u,
+        )
+
+        stories[1]!.acceptance = [
+            `${renderArchitectureObligationCriterion(obligations.obligations[1]!)} narrowed`,
+        ]
+        assert.throws(
+            () => assertRunnablePlannerPrdJson(
+                JSON.stringify(prd),
+                trustedGoalEnvelope,
+                decisionDocument,
+            ),
+            /altered canonical.*O-002/u,
+        )
+
+        stories[1]!.acceptance = [
+            renderArchitectureObligationCriterion(obligations.obligations[1]!),
+        ]
+        stories[1]!.goalInvariantIds = []
+        assert.throws(
+            () => assertRunnablePlannerPrdJson(
+                JSON.stringify(prd),
+                trustedGoalEnvelope,
+                decisionDocument,
+            ),
+            /omits parent.*G-C1/u,
+        )
+
+        assert.equal(
+            assertRunnablePlannerPrdJson(
+                JSON.stringify(validPrd()),
+                trustedGoalEnvelope,
+                "## ADR-001: Legacy document without an obligation marker",
+            ),
+            JSON.stringify(validPrd()),
         )
     })
 })

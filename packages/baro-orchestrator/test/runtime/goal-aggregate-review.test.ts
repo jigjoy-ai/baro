@@ -73,7 +73,12 @@ describe("goal aggregate review contract", () => {
             modelUsed: "fake",
             invariants: [
                 { invariantId: "G-A1", status: "passed" as const, reason: "ok" },
-                { invariantId: "G-C1", status: "failed" as const, reason: "bad" },
+                {
+                    invariantId: "G-C1",
+                    status: "failed" as const,
+                    reason: "bad",
+                    remediationGroupId: "goal-remediation-group-1",
+                },
             ],
         }
         assert.deepEqual(
@@ -108,12 +113,33 @@ describe("goal aggregate review contract", () => {
                 ...value,
                 repositoryFingerprint: null,
                 status: "passed",
+                invariants: value.invariants.map(({
+                    remediationGroupId: _remediationGroupId,
+                    ...invariant
+                }) => ({ ...invariant, status: "passed" })),
+            }, known),
+            /no repository fingerprint/,
+        )
+        assert.throws(
+            () => normalizeGoalAggregateReviewEvidence({
+                ...value,
+                invariants: value.invariants.map((invariant) => ({
+                    ...invariant,
+                    remediationGroupId: "x".repeat(129),
+                })),
+            }, known),
+            /malformed/,
+        )
+        assert.throws(
+            () => normalizeGoalAggregateReviewEvidence({
+                ...value,
                 invariants: value.invariants.map((invariant) => ({
                     ...invariant,
                     status: "passed",
+                    remediationGroupId: "goal-remediation-group-forged-pass",
                 })),
             }, known),
-            /no repository fingerprint/,
+            /malformed/,
         )
     })
 })

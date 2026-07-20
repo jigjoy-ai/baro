@@ -213,12 +213,21 @@ async function runArchitect(
     backend: "claude" | "codex" | "opencode" | "pi",
     backendArgs: string[],
 ): Promise<ScriptResult> {
+    const goalEnvelopeFile = join(dir, "goal-envelope.json")
+    writeFileSync(goalEnvelopeFile, JSON.stringify({
+        objective: "Validate the candidate goal against the repository",
+        acceptanceCriteria: ["Repository validation is complete."],
+        constraints: [],
+        nonGoals: [],
+        assumptions: [],
+    }))
     return runScript([
         "--goal", "Validate the candidate goal against the repository",
         "--cwd", dir,
         "--llm", backend,
         ...backendArgs,
         "--outcome-file", join(dir, "outcome.json"),
+        "--goal-envelope-file", goalEnvelopeFile,
         "--conversation-session-id", "session-trusted",
         "--goal-request-id", "goal-request-trusted",
         "--architect-request-id", "architect-request-trusted",

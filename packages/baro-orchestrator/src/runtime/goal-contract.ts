@@ -88,6 +88,8 @@ export interface GoalInvariantChallengeRecord
 export interface GoalInvariantRemediationBinding {
     proposalId: string
     storyId: string
+    /** Shared aggregate-review root cause; absent for legacy/singleton work. */
+    remediationGroupId?: string
     status: "requested" | "admitted"
     graphVersion?: number
     /** Exact integration attempts whose missing quality this work revalidates. */
@@ -98,6 +100,7 @@ export interface DisplacedGoalRemediation {
     challengeId: string
     invariantId: string
     previousProposalId: string
+    remediationGroupId?: string
     revalidates?: readonly GoalIntegrationEvidence[]
 }
 
@@ -411,6 +414,12 @@ export class GoalInvariantLedger {
                 challengeId,
                 invariantId: challenge.invariantId,
                 previousProposalId: challenge.remediation.proposalId,
+                ...(challenge.remediation.remediationGroupId
+                    ? {
+                          remediationGroupId:
+                              challenge.remediation.remediationGroupId,
+                      }
+                    : {}),
                 ...(challenge.remediation.revalidates
                     ? { revalidates: challenge.remediation.revalidates }
                     : {}),
@@ -530,6 +539,9 @@ export class GoalInvariantLedger {
                 challengeId,
                 invariantId: challenge.invariantId,
                 previousProposalId: remediation.proposalId,
+                ...(remediation.remediationGroupId
+                    ? { remediationGroupId: remediation.remediationGroupId }
+                    : {}),
                 ...(remediation.revalidates
                     ? { revalidates: remediation.revalidates }
                     : {}),
@@ -555,6 +567,61 @@ export class GoalInvariantLedger {
     hasChallengeRemediation(challengeIdValue: string): boolean {
         const challenge = this.challenges.get(nonEmpty(challengeIdValue))
         return challenge?.remediation !== undefined
+    }
+
+    /** Exact positional challenge/invariant/group correlation for Board receipts. */
+    matchesChallengeRemediationTargets(
+        challengeIdValues: readonly string[],
+        invariantIdValues: readonly string[],
+        proposalIdValue: string,
+        storyIdValue: string,
+        remediationGroupId?: string,
+    ): boolean {
+        if (
+            challengeIdValues.length === 0 ||
+            challengeIdValues.length !== invariantIdValues.length ||
+            new Set(challengeIdValues).size !== challengeIdValues.length ||
+            new Set(invariantIdValues).size !== invariantIdValues.length ||
+            proposalIdValue.trim().length === 0 ||
+            proposalIdValue !== proposalIdValue.trim() ||
+            storyIdValue.trim().length === 0 ||
+            storyIdValue !== storyIdValue.trim()
+        ) return false
+        const supplied = challengeIdValues.map((challengeId, index) => ({
+            challengeId,
+            invariantId: invariantIdValues[index]!,
+        }))
+        if (supplied.some(({ challengeId, invariantId }) =>
+            challengeId.trim().length === 0 ||
+            challengeId !== challengeId.trim() ||
+            invariantId.trim().length === 0 ||
+            invariantId !== invariantId.trim())) return false
+
+        const seed = this.challenges.get(supplied[0]!.challengeId)?.remediation
+        if (
+            !seed ||
+            seed.proposalId !== proposalIdValue ||
+            seed.storyId !== storyIdValue ||
+            seed.remediationGroupId !== remediationGroupId
+        ) return false
+
+        const expected = this.challengesForRemediation(seed)
+        return expected.length === supplied.length &&
+            expected.every((challenge, index) =>
+                challenge.challengeId === supplied[index]!.challengeId &&
+                challenge.invariantId === supplied[index]!.invariantId)
+    }
+
+    private challengesForRemediation(
+        remediation: GoalInvariantRemediationBinding,
+    ): GoalInvariantChallenge[] {
+        return [...this.challenges.values()]
+            .filter((challenge) =>
+                challenge.remediation !== undefined &&
+                sameRemediationIdentity(challenge.remediation, remediation))
+            .sort((left, right) =>
+                left.invariantId.localeCompare(right.invariantId) ||
+                left.challengeId.localeCompare(right.challengeId))
     }
 
     challengeCount(invariantIdValue: string): number {
@@ -821,29 +888,55 @@ export class GoalInvariantLedger {
         challengeIdValue: string,
         remediation: GoalInvariantRemediationBinding,
     ): void {
-        const challengeId = nonEmpty(challengeIdValue)
-        const challenge = this.challenges.get(challengeId)
-        if (!challenge) {
-            this.challengeIssues.set(
-                challengeId,
-                `remediation references unknown challenge ${challengeId}`,
-            )
-            return
-        }
+        this.bindChallengeRemediationGroup([challengeIdValue], remediation)
+    }
+
+    /**
+     * Bind one remediation identity to a complete root-cause group. Validation
+     * happens before any challenge is changed, so a malformed replay cannot
+     * leave a half-bound group in the durable projection.
+     */
+    bindChallengeRemediationGroup(
+        challengeIdValues: readonly string[],
+        remediation: GoalInvariantRemediationBinding,
+    ): boolean {
+        const challengeIds = canonicalChallengeIds(challengeIdValues)
         const normalized = normalizeRemediationBinding(remediation)
-        if (challenge.remediation) {
-            if (!sameRemediationIdentity(challenge.remediation, normalized)) {
-                this.challengeIssues.set(
+        const challenges = challengeIds.map((challengeId) => ({
+            challengeId,
+            challenge: this.challenges.get(challengeId),
+        }))
+        const invalid = challenges.find(
+            ({ challenge }) =>
+                !challenge ||
+                (challenge.remediation !== undefined &&
+                    !sameRemediationIdentity(
+                        challenge.remediation,
+                        normalized,
+                    )),
+        )
+        if (invalid) {
+            const reason = invalid.challenge
+                ? `challenge ${invalid.challengeId} was bound to conflicting remediation work`
+                : `remediation references unknown challenge ${invalid.challengeId}`
+            for (const challengeId of challengeIds) {
+                this.challengeIssues.set(challengeId, reason)
+            }
+            return false
+        }
+        for (const { challengeId, challenge } of challenges) {
+            this.challengeIssues.delete(challengeId)
+            if (!challenge!.remediation) {
+                this.challenges.set(
                     challengeId,
-                    `challenge ${challengeId} was bound to conflicting remediation work`,
+                    Object.freeze({
+                        ...challenge!,
+                        remediation: normalized,
+                    }),
                 )
             }
-            return
         }
-        this.challenges.set(
-            challengeId,
-            Object.freeze({ ...challenge, remediation: normalized }),
-        )
+        return true
     }
 
     admitChallengeRemediation(
@@ -852,35 +945,81 @@ export class GoalInvariantLedger {
         storyIdValue: string,
         graphVersion: number,
     ): void {
-        const challengeId = nonEmpty(challengeIdValue)
-        const challenge = this.challenges.get(challengeId)
+        this.admitChallengeRemediationGroup(
+            [challengeIdValue],
+            proposalIdValue,
+            storyIdValue,
+            graphVersion,
+        )
+    }
+
+    /** Atomically admit every challenge bound to one grouped remediation. */
+    admitChallengeRemediationGroup(
+        challengeIdValues: readonly string[],
+        proposalIdValue: string,
+        storyIdValue: string,
+        graphVersion: number,
+    ): boolean {
+        const challengeIds = canonicalChallengeIds(challengeIdValues)
         const proposalId = nonEmpty(proposalIdValue)
         const storyId = nonEmpty(storyIdValue)
+        const challenges = challengeIds.map((challengeId) => ({
+            challengeId,
+            challenge: this.challenges.get(challengeId),
+        }))
+        const seed = challenges[0]?.challenge?.remediation
+        const expectedChallengeIds = seed
+            ? this.challengesForRemediation(seed)
+                .map(({ challengeId }) => challengeId)
+                .sort()
+            : []
+        const completeGroup =
+            expectedChallengeIds.length === challengeIds.length &&
+            expectedChallengeIds.every(
+                (challengeId, index) => challengeId === challengeIds[index],
+            )
+        const invalid = challenges.find(
+            ({ challenge }) =>
+                !challenge?.remediation ||
+                challenge.remediation.proposalId !== proposalId ||
+                challenge.remediation.storyId !== storyId ||
+                (challenge.remediation.status === "admitted" &&
+                    challenge.remediation.graphVersion !== graphVersion),
+        )
         if (
-            !challenge?.remediation ||
-            challenge.remediation.proposalId !== proposalId ||
-            challenge.remediation.storyId !== storyId ||
+            !completeGroup ||
+            invalid ||
             !Number.isSafeInteger(graphVersion) ||
             graphVersion < 1
         ) {
-            this.challengeIssues.set(
-                challengeId,
-                `challenge ${challengeId} received mismatched remediation admission`,
-            )
-            return
+            const reason =
+                !completeGroup
+                    ? `remediation admission did not contain its complete challenge group`
+                    : `challenge ${invalid?.challengeId ?? challengeIds[0]} ` +
+                      "received mismatched remediation admission"
+            for (const challengeId of new Set([
+                ...challengeIds,
+                ...expectedChallengeIds,
+            ])) {
+                this.challengeIssues.set(challengeId, reason)
+            }
+            return false
         }
-        this.challengeIssues.delete(challengeId)
-        this.challenges.set(
-            challengeId,
-            Object.freeze({
-                ...challenge,
-                remediation: Object.freeze({
-                    ...challenge.remediation,
-                    status: "admitted" as const,
-                    graphVersion,
+        for (const { challengeId, challenge } of challenges) {
+            this.challengeIssues.delete(challengeId)
+            this.challenges.set(
+                challengeId,
+                Object.freeze({
+                    ...challenge!,
+                    remediation: Object.freeze({
+                        ...challenge!.remediation!,
+                        status: "admitted" as const,
+                        graphVersion,
+                    }),
                 }),
-            }),
-        )
+            )
+        }
+        return true
     }
 
     pendingRemediations(): readonly {
@@ -906,6 +1045,47 @@ export class GoalInvariantLedger {
                 },
                 remediation: { ...challenge.remediation! },
             }))
+    }
+
+    /** Pending work grouped by its shared proposal/story identity. */
+    pendingRemediationGroups(): readonly {
+        challenges: readonly GoalInvariantChallenge[]
+        remediation: GoalInvariantRemediationBinding
+    }[] {
+        const byProposal = new Map<
+            string,
+            {
+                challenges: GoalInvariantChallenge[]
+                remediation: GoalInvariantRemediationBinding
+            }
+        >()
+        for (const { challenge, remediation } of this.pendingRemediations()) {
+            const key = JSON.stringify({
+                proposalId: remediation.proposalId,
+                storyId: remediation.storyId,
+                remediationGroupId: remediation.remediationGroupId ?? null,
+                revalidates: remediation.revalidates ?? [],
+            })
+            const group = byProposal.get(key)
+            if (group) group.challenges.push(challenge)
+            else {
+                byProposal.set(key, {
+                    challenges: [challenge],
+                    remediation,
+                })
+            }
+        }
+        return [...byProposal.values()]
+            .map(({ challenges, remediation }) => ({
+                challenges: challenges.sort((left, right) =>
+                    left.invariantId.localeCompare(right.invariantId) ||
+                    left.challengeId.localeCompare(right.challengeId)),
+                remediation,
+            }))
+            .sort((left, right) =>
+                left.remediation.proposalId.localeCompare(
+                    right.remediation.proposalId,
+                ))
     }
 
     resolveSatisfiedRemediations(
@@ -1350,6 +1530,20 @@ export function normalizeGoalLedgerProjection(
         challenges.map(({ challengeId }) => challengeId),
         "goal ledger challenge",
     )
+    const remediationByProposal = new Map<
+        string,
+        GoalInvariantRemediationBinding
+    >()
+    for (const { remediation } of challenges) {
+        if (!remediation) continue
+        const previous = remediationByProposal.get(remediation.proposalId)
+        if (previous && JSON.stringify(previous) !== JSON.stringify(remediation)) {
+            throw new Error(
+                `goal remediation proposal ${remediation.proposalId} has inconsistent grouped bindings`,
+            )
+        }
+        remediationByProposal.set(remediation.proposalId, remediation)
+    }
 
     const protocolIssues = value.protocolIssues.map((item, index) => {
         if (
@@ -1396,6 +1590,15 @@ function unique(values: readonly string[]): string[] {
     return [...new Set(values)]
 }
 
+function canonicalChallengeIds(values: readonly string[]): string[] {
+    if (values.length === 0) {
+        throw new Error("goal remediation challenge group cannot be empty")
+    }
+    const normalized = values.map(nonEmpty)
+    assertUnique(normalized, "goal remediation challenge group")
+    return normalized.sort()
+}
+
 function sameChallenge(left: StoredChallenge, right: StoredChallenge): boolean {
     return (
         left.challengeId === right.challengeId &&
@@ -1414,6 +1617,9 @@ function normalizeRemediationBinding(
         !nonBlank(value.proposalId) ||
         !nonBlank(value.storyId) ||
         (value.status !== "requested" && value.status !== "admitted") ||
+        (value.remediationGroupId !== undefined &&
+            (!nonBlank(value.remediationGroupId) ||
+                value.remediationGroupId.length > 128)) ||
         (value.status === "requested" && value.graphVersion !== undefined) ||
         (value.status === "admitted" &&
             (!Number.isSafeInteger(value.graphVersion) ||
@@ -1451,6 +1657,9 @@ function normalizeRemediationBinding(
     return Object.freeze({
         proposalId: value.proposalId,
         storyId: value.storyId,
+        ...(value.remediationGroupId
+            ? { remediationGroupId: value.remediationGroupId }
+            : {}),
         status: value.status,
         ...(value.status === "admitted"
             ? { graphVersion: Number(value.graphVersion) }
@@ -1472,6 +1681,7 @@ function sameRemediationIdentity(
     return (
         left.proposalId === right.proposalId &&
         left.storyId === right.storyId &&
+        left.remediationGroupId === right.remediationGroupId &&
         leftTargets.length === rightTargets.length &&
         leftTargets.every(
             (target, index) =>

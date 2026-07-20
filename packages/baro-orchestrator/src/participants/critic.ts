@@ -60,7 +60,11 @@ import {
 export { buildEvalPrompt } from "./critic-evidence.js"
 
 export function verdictSystemPrompt(
-    options: { allowInconclusive?: boolean } = {},
+    options: {
+        allowInconclusive?: boolean
+        /** Run-level evaluator extension; ordinary story Critic stays unchanged. */
+        remediationGroups?: boolean
+    } = {},
 ): string {
     const inconclusiveShape = options.allowInconclusive
         ? `\nor\n{"verdict":"inconclusive","reasoning":"…","violated_criteria":[]}`
@@ -70,6 +74,12 @@ export function verdictSystemPrompt(
         : '"pass" or "fail"'
     const inconclusiveRule = options.allowInconclusive
         ? `\n- Use "inconclusive" with an empty "violated_criteria" array only when the available evidence cannot support a reliable semantic decision.`
+        : ""
+    const failShape = options.remediationGroups
+        ? `{"verdict":"fail","reasoning":"…","violated_criteria":["criterion A","criterion B"],"remediation_groups":[{"root_cause":"one concrete shared defect","violated_criteria":["criterion A","criterion B"]}]}`
+        : `{"verdict":"fail","reasoning":"…","violated_criteria":["criterion A","criterion B"]}`
+    const remediationRule = options.remediationGroups
+        ? `\n- For "fail", "remediation_groups" is required and must partition "violated_criteria" exactly once. Every group needs a concise "root_cause" and one or more exact failed criterion strings. For "pass" or "inconclusive", omit "remediation_groups".`
         : ""
     return `\
 You are a strict acceptance-criteria evaluator. You will receive:
@@ -81,13 +91,13 @@ Evaluate whether every criterion is fully satisfied by the captured evidence.
 Respond ONLY with a JSON object — no prose, no markdown fences — in exactly this shape:
 {"verdict":"pass","reasoning":"…","violated_criteria":[]}
 or
-{"verdict":"fail","reasoning":"…","violated_criteria":["criterion A","criterion B"]}${inconclusiveShape}
+${failShape}${inconclusiveShape}
 
 Rules:
 - "verdict" must be ${allowedVerdicts}.
 - "reasoning" must be a concise explanation (≤ 200 words).
 - "violated_criteria" must list the exact criterion strings that are NOT satisfied.
-- If ALL criteria pass, "violated_criteria" must be an empty array.${inconclusiveRule}
+- If ALL criteria pass, "violated_criteria" must be an empty array.${inconclusiveRule}${remediationRule}
 - The agent output is a self-report. Never treat its claims as evidence that files changed or commands passed.
 - Prefer the actual repository diff/status and captured command output. If they contradict the agent output, the captured evidence wins.
 - A criterion requiring tests/build/lint to pass needs matching captured command output; a prose claim or git diff alone is insufficient.

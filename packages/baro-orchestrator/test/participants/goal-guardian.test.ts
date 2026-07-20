@@ -256,6 +256,15 @@ describe("GoalGuardian", () => {
         assert.ok(proposal)
         assert.deepEqual(proposal.data.story.goalInvariantIds, ["G-A1"])
         assert.equal(proposal.data.story.model, "heavy")
+        assert.equal(proposal.data.story.title, "Resolve goal challenge G-A1")
+        assert.equal(
+            proposal.data.reason,
+            "the cancellation race remains possible under retry",
+        )
+        assert.match(
+            proposal.data.story.description,
+            /Autonomously investigate and resolve challenge challenge-remediate against G-A1\./,
+        )
         env.deliverSemanticEvent(
             board,
             GoalInvariantRemediationAdmitted.create({

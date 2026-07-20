@@ -35,6 +35,7 @@ import { buildDag } from "../dag.js"
 import { getHeadSha } from "../git.js"
 import { BARO_COAUTHOR_TRAILER, loadPrd, type PrdFile, type PrdStory } from "../prd.js"
 import { readAuthoritativeDeclaredTests } from "../prd-declared-tests.js"
+import { renderRuntimeAmendments } from "../planning/runtime-amendments.js"
 import { runRepositoryCommand as execFileAsync } from "../repository-command.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import {
@@ -574,31 +575,65 @@ export class Finalizer extends BaseObserver {
 
     /**
      * Split the Architect's decision document into individual ADRs and write
-     * each as adr/NNNN-slug.md, then commit them so they ship in the PR. The
-     * trivial "no cross-cutting decisions needed" placeholder is skipped, and
-     * an unchanged adr/ (re-run) produces no empty commit. Best-effort: any
-     * failure is logged and never aborts finalization.
+     * each as adr/NNNN-slug.md. Accepted runtime graph decisions are newer
+     * evidence than that baseline, so persist their bounded amendment history
+     * beside the ADRs instead of shipping the original decisions as
+     * unqualified final truth. An unchanged adr/ produces no empty commit.
+     * Best-effort: any failure is logged and never aborts finalization.
      */
     private async writeAndCommitAdrs(prd: PrdFile | null): Promise<void> {
         const doc = prd?.decisionDocument
-        if (!doc || !doc.trim()) return
-        const adrs = parseAdrs(doc)
-        if (adrs.length === 0) return
+        const adrs = doc?.trim() ? parseAdrs(doc) : []
+        const runtimeAmendments = renderRuntimeAmendments(prd)
+        if (adrs.length === 0 && !runtimeAmendments) return
         try {
             const dir = join(this.opts.cwd, "adr")
             mkdirSync(dir, { recursive: true })
+            const generatedPaths: string[] = []
             for (const a of adrs) {
                 const num = a.num.padStart(4, "0")
-                writeFileSync(join(dir, `${num}-${slugify(a.title)}.md`), `# ADR-${num}: ${a.title}\n\n${a.body}\n`)
+                const fileName = `${num}-${slugify(a.title)}.md`
+                writeFileSync(
+                    join(dir, fileName),
+                    `# ADR-${num}: ${a.title}\n\n${a.body}\n`,
+                )
+                generatedPaths.push(`adr/${fileName}`)
             }
-            await execFileAsync("git", ["add", "adr"], { cwd: this.opts.cwd })
+            if (runtimeAmendments) {
+                writeFileSync(
+                    join(dir, "runtime-amendments.md"),
+                    runtimeAmendments,
+                )
+                generatedPaths.push("adr/runtime-amendments.md")
+            }
+            // GitCoordinator deliberately ignores the untracked adr/ run
+            // artifact directory. Force-stage only the exact files generated
+            // above; never force-add unrelated user files from that directory.
+            await execFileAsync(
+                "git",
+                ["add", "-f", "--", ...generatedPaths],
+                { cwd: this.opts.cwd },
+            )
             try {
+                const subject = runtimeAmendments
+                    ? `docs: architecture decisions and runtime amendments`
+                    : `docs: architecture decision records (${adrs.length})`
                 await execFileAsync(
                     "git",
-                    ["commit", "-m", `docs: architecture decision records (${adrs.length})\n\n${BARO_COAUTHOR_TRAILER}`],
+                    [
+                        "commit",
+                        "--only",
+                        "-m",
+                        `${subject}\n\n${BARO_COAUTHOR_TRAILER}`,
+                        "--",
+                        ...generatedPaths,
+                    ],
                     { cwd: this.opts.cwd },
                 )
-                this.log(`[finalizer] wrote ${adrs.length} ADR(s) to adr/`)
+                this.log(
+                    `[finalizer] wrote ${adrs.length} ADR(s)` +
+                        `${runtimeAmendments ? " plus runtime amendments" : ""} to adr/`,
+                )
             } catch {
                 // Nothing staged (identical adr/ already committed) — fine.
             }

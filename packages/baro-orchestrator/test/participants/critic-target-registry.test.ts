@@ -13,6 +13,21 @@ import {
 import { source } from "./helpers.js"
 
 describe("CriticTargetRegistry runtime replans", () => {
+    it("delivers canonical Architect obligations to the collective Critic unchanged", () => {
+        const obligation =
+            "[O-004]; Subject: direct public adapter boundary; Scenario: the adapter is invoked without its outer wrapper; Required outcome: the contract remains independently observable; Required evidence: focused direct-boundary regression test"
+        const targets = buildCriticTargets([{
+            id: "S-provider",
+            acceptance: [obligation, "The provider preserves its request fields"],
+            goalInvariantIds: ["G-A1", "G-C1"],
+        }])
+
+        assert.deepEqual(targets.get("S-provider"), [
+            obligation,
+            "The provider preserves its request fields",
+        ])
+    })
+
     it("keeps collective targets local while legacy retains goal invariants", () => {
         const crossProviderInvariantId = "G-A6"
         const stories = [

@@ -5,6 +5,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import { Finalizer } from "../../src/participants/finalizer.js"
+import type { PrdFile } from "../../src/prd.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import {
     FinalizeStarted,
@@ -21,6 +22,107 @@ import {
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
 
 describe("Finalizer", () => {
+    it("ships accepted runtime amendments beside the Architect ADR baseline", async () => {
+        await withTempDir("baro-finalizer-amendments-", async (dir) => {
+            const git = (...args: string[]) =>
+                execFileSync("git", args, {
+                    cwd: dir,
+                    encoding: "utf8",
+                }).trim()
+            git("init", "-q")
+            git("config", "user.email", "t@baro.test")
+            git("config", "user.name", "baro test")
+            writeFileSync(join(dir, ".git", "info", "exclude"), "adr/\n")
+            mkdirSync(join(dir, "adr"), { recursive: true })
+            writeFileSync(
+                join(dir, "adr", "user-note.md"),
+                "This ignored user file must not be force-added.\n",
+            )
+            mkdirSync(join(dir, "src"), { recursive: true })
+            writeFileSync(
+                join(dir, "src", "user-staged.ts"),
+                "export const userOwned = true\n",
+            )
+            git("add", "src/user-staged.ts")
+
+            const logs: string[] = []
+            const finalizer = new Finalizer({
+                cwd: dir,
+                prdPath: join(dir, "prd.json"),
+                createPr: false,
+                onLog: (line) => logs.push(line),
+            })
+            const prd: PrdFile = {
+                project: "Runtime amendments",
+                branchName: "baro/runtime-amendments",
+                description: "Keep accepted graph corrections auditable.",
+                userStories: [],
+                decisionDocument:
+                    "## ADR-001: Keep old transport\n\n**Status:** Accepted\n\nUse the original transport.",
+                runtimeGraph: {
+                    runId: "run-amendments",
+                    version: 2,
+                    dynamicStories: 1,
+                    policyStories: 0,
+                    appliedDecisions: [
+                        {
+                            fingerprint: "fixture-fingerprint",
+                            applied: {
+                                runId: "run-amendments",
+                                proposalId: "proposal-2",
+                                sourceStoryId: "S1",
+                                leaseId: "lease-1",
+                                generation: 1,
+                                baseGraphVersion: 1,
+                                previousGraphVersion: 1,
+                                graphVersion: 2,
+                                reason:
+                                    "Repository evidence supersedes the baseline ``` do not execute this",
+                                mutation: {
+                                    addedStories: [],
+                                    removedStoryIds: ["S-obsolete"],
+                                    modifiedDeps: { S2: ["S1"] },
+                                },
+                            },
+                        },
+                    ],
+                },
+            }
+            const writer = finalizer as unknown as {
+                writeAndCommitAdrs(value: PrdFile | null): Promise<void>
+            }
+
+            await writer.writeAndCommitAdrs(prd)
+
+            assert.ok(existsSync(join(dir, "adr", "0001-keep-old-transport.md")))
+            const amendments = readFileSync(
+                join(dir, "adr", "runtime-amendments.md"),
+                "utf8",
+            )
+            assert.match(amendments, /Graph version 2/)
+            assert.match(amendments, /supersedes the baseline/)
+            assert.match(amendments, /"removedStoryIds": \[/)
+            assert.match(amendments, /untrusted model\/repository data/)
+            assert.equal((amendments.match(/```/gu) ?? []).length, 2)
+            assert.match(amendments, /\\u0060\\u0060\\u0060/)
+            assert.match(git("log", "-1", "--format=%s"), /runtime amendments/)
+            assert.deepEqual(git("ls-files", "adr").split("\n"), [
+                "adr/0001-keep-old-transport.md",
+                "adr/runtime-amendments.md",
+            ])
+            assert.equal(git("ls-files", "adr/user-note.md"), "")
+            assert.doesNotMatch(
+                git("show", "--pretty=", "--name-only", "HEAD"),
+                /src\/user-staged\.ts/u,
+            )
+            assert.equal(
+                git("diff", "--cached", "--name-only"),
+                "src/user-staged.ts",
+            )
+            assert.ok(logs.some((line) => line.includes("plus runtime amendments")))
+        })
+    })
+
     it("accepts lifecycle, repository, verifier, and story events only from bound authorities", async () => {
         await withTempDir("baro-finalizer-authority-", async (dir) => {
             const runId = "run-finalizer-authority"

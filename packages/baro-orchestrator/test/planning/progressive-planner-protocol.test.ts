@@ -9,6 +9,10 @@ import {
     resolveProgressivePlannerConfig,
     type ProgressivePlannerWireEvent,
 } from "../../src/planning/progressive-planner-protocol.js"
+import {
+    parseArchitectureObligationContract,
+    renderArchitectureObligationCriterion,
+} from "../../src/planning/architecture-obligation-contract.js"
 
 const STORY_S1 = {
     id: "S1",
@@ -24,6 +28,33 @@ const STORY_S1 = {
     durationSecs: null,
     model: "standard",
 }
+
+const OBLIGATION_GOAL = {
+    objective: "Preserve one behavior at its direct boundary.",
+    acceptanceCriteria: ["The direct behavior remains observable."],
+    constraints: [],
+    nonGoals: [],
+    assumptions: [],
+}
+
+const OBLIGATION_DOCUMENT = `## Existing context
+The boundary can be invoked independently.
+
+## ADR-001: Preserve direct behavior
+**Status:** Accepted
+**Context:** Outer composition is not the only caller.
+**Decision:** Require direct evidence.
+**Consequences:** One implementation story owns the proof.
+
+## Semantic obligation contract
+
+\`\`\`baro-obligations-v1
+{"schemaVersion":1,"obligations":[{"id":"O-001","invariantIds":["G-A1"],"subject":"the direct boundary","scenario":"it is invoked independently","expectedOutcome":"the required behavior remains observable","evidence":["a direct-boundary test"]}]}
+\`\`\``
+
+const OBLIGATION_CRITERION = renderArchitectureObligationCriterion(
+    parseArchitectureObligationContract(OBLIGATION_DOCUMENT)!.obligations[0]!,
+)
 
 describe("progressive planner flag contract", () => {
     it("keeps a no-flag invocation on the legacy path", () => {
@@ -69,6 +100,116 @@ describe("progressive planner flag contract", () => {
 })
 
 describe("progressive planner lifecycle wire", () => {
+    it("allows partial fragments but requires exact complete obligation ownership before closing", () => {
+        const events: ProgressivePlannerWireEvent[] = []
+        const lifecycle = new ProgressivePlannerLifecycle(
+            {
+                runId: "run-obligations",
+                planningId: "planning-obligations",
+                bootstrapFile: "/tmp/bootstrap.json",
+                trustedGoalEnvelope: OBLIGATION_GOAL,
+                trustedDecisionDocument: OBLIGATION_DOCUMENT,
+            },
+            (event) => events.push(event),
+        )
+        lifecycle.open()
+        lifecycle.publish({
+            type: "plan_fragment",
+            run_id: "run-obligations",
+            planning_id: "planning-obligations",
+            fragment_id: "foundation",
+            ordinal: 1,
+            stories: [{ ...STORY_S1, goalInvariantIds: [] }],
+        })
+
+        assert.throws(
+            () => lifecycle.complete({ project: "p", userStories: [STORY_S1] }),
+            /coverage is incomplete.*O-001/u,
+        )
+        assert.deepEqual(events.map(({ type }) => type), [
+            "planning_open",
+            "plan_fragment",
+        ])
+
+        const owner = {
+            ...STORY_S1,
+            id: "S2",
+            title: "Own direct behavior",
+            acceptance: [OBLIGATION_CRITERION],
+            goalInvariantIds: ["G-A1"],
+        }
+        lifecycle.complete({
+            project: "p",
+            userStories: [STORY_S1, owner],
+        })
+        assert.equal(events.at(-1)?.type, "plan_complete")
+    })
+
+    it("rejects altered obligation criteria before admitting a fragment", () => {
+        const lifecycle = new ProgressivePlannerLifecycle(
+            {
+                runId: "run-obligation-tamper",
+                planningId: "planning-obligation-tamper",
+                bootstrapFile: "/tmp/bootstrap.json",
+                trustedGoalEnvelope: OBLIGATION_GOAL,
+                trustedDecisionDocument: OBLIGATION_DOCUMENT,
+            },
+            () => undefined,
+        )
+        lifecycle.open()
+        assert.throws(
+            () => lifecycle.publish({
+                type: "plan_fragment",
+                run_id: "run-obligation-tamper",
+                planning_id: "planning-obligation-tamper",
+                fragment_id: "tampered",
+                ordinal: 1,
+                stories: [{
+                    ...STORY_S1,
+                    acceptance: [`${OBLIGATION_CRITERION} narrowed`],
+                    goalInvariantIds: ["G-A1"],
+                }],
+            }),
+            /altered canonical.*O-001/u,
+        )
+    })
+
+    it("accepts an exact replay of a fragment that owns an obligation", () => {
+        const events: ProgressivePlannerWireEvent[] = []
+        const lifecycle = new ProgressivePlannerLifecycle(
+            {
+                runId: "run-obligation-replay",
+                planningId: "planning-obligation-replay",
+                bootstrapFile: "/tmp/bootstrap.json",
+                trustedGoalEnvelope: OBLIGATION_GOAL,
+                trustedDecisionDocument: OBLIGATION_DOCUMENT,
+            },
+            (event) => events.push(event),
+        )
+        const fragment = {
+            type: "plan_fragment" as const,
+            run_id: "run-obligation-replay",
+            planning_id: "planning-obligation-replay",
+            fragment_id: "owner",
+            ordinal: 1,
+            stories: [{
+                ...STORY_S1,
+                acceptance: [OBLIGATION_CRITERION],
+                goalInvariantIds: ["G-A1"],
+            }],
+        }
+
+        lifecycle.open()
+        lifecycle.publish(fragment)
+        lifecycle.publish(fragment)
+
+        assert.deepEqual(events.map(({ type }) => type), [
+            "planning_open",
+            "plan_fragment",
+            "plan_fragment",
+        ])
+    })
+
     it("rejects unknown trusted GoalContract ids before advancing its local session", () => {
         const events: ProgressivePlannerWireEvent[] = []
         const lifecycle = new ProgressivePlannerLifecycle(

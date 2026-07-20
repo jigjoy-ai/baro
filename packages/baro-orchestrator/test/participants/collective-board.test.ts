@@ -47,6 +47,103 @@ import {
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
 
 describe("CollectiveBoard", () => {
+    it("fails closed before execution when a resumed full plan lost an obligation owner", async () => {
+        await withTempDir("collective-obligation-resume-", async (dir) => {
+            const runId = "run-obligation-resume"
+            const prdPath = join(dir, "prd.json")
+            const input = prd()
+            input.goalEnvelope = {
+                objective: "Preserve the direct boundary.",
+                acceptanceCriteria: ["The boundary remains observable."],
+                constraints: [],
+                nonGoals: [],
+                assumptions: [],
+            }
+            input.decisionDocument = obligationDecisionDocument()
+            input.userStories[0] = {
+                ...input.userStories[0]!,
+                goalInvariantIds: ["G-A1"],
+            }
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+            })
+            const env = joinWithCapture(board)
+
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "resume" }),
+            )
+
+            await waitFor(env.events, RunCompleted.is)
+            const summary = await board.done
+            assert.equal(summary.success, false)
+            assert.match(
+                summary.abortReason ?? "",
+                /obligation coverage is incomplete.*O-001/i,
+            )
+            assert.equal(env.events.some(WorkContextRequested.is), false)
+        })
+    })
+
+    it("places accepted runtime amendments after the Architect baseline in later worker prompts", () => {
+        const board = new CollectiveBoard({
+            runId: "run-amendment-prompt",
+            prdPath: "/tmp/unused-prd.json",
+            cwd: "/tmp",
+            timeoutSecs: 60,
+        })
+        const input = prd()
+        input.decisionDocument =
+            "## ADR-001: Start with the old adapter\n\nUse the old adapter."
+        input.runtimeGraph = {
+            runId: "run-amendment-prompt",
+            version: 2,
+            dynamicStories: 1,
+            policyStories: 0,
+            appliedDecisions: [{
+                fingerprint: "fixture-fingerprint",
+                applied: {
+                    runId: "run-amendment-prompt",
+                    proposalId: "proposal-2",
+                    sourceStoryId: "S-source",
+                    leaseId: "lease-source",
+                    generation: 1,
+                    baseGraphVersion: 1,
+                    previousGraphVersion: 1,
+                    graphVersion: 2,
+                    reason: "Repository evidence requires the new adapter.",
+                    mutation: {
+                        addedStories: [],
+                        removedStoryIds: [],
+                        modifiedDeps: {},
+                    },
+                },
+            }],
+        }
+        const internal = board as unknown as {
+            prd: PrdFile
+            storyPrompt(story: PrdFile["userStories"][number]): string
+        }
+        internal.prd = input
+
+        const prompt = internal.storyPrompt(input.userStories[0]!)
+
+        const baselineAt = prompt.indexOf("## Current shared design decision")
+        const amendmentAt = prompt.indexOf(
+            "## Accepted runtime architecture and plan amendments",
+        )
+        const taskAt = prompt.indexOf("You are working on story S1")
+        assert.ok(baselineAt >= 0)
+        assert.ok(amendmentAt > baselineAt)
+        assert.ok(taskAt > amendmentAt)
+        assert.match(prompt, /Repository evidence requires the new adapter/)
+        assert.match(prompt, /unrelated earlier amendments remain active/)
+    })
+
     it("cannot finish green after goal evidence advances during push", async () => {
         await withTempDir("collective-late-goal-evidence-", async (dir) => {
             const runId = "run-late-goal-evidence"
@@ -588,6 +685,7 @@ describe("CollectiveBoard", () => {
                 constraints: [],
                 acceptanceCriteria: [
                     "Every provider path preserves stream cancellation.",
+                    "Every provider path closes its owned source iterator.",
                 ],
                 nonGoals: [],
                 assumptions: [],
@@ -597,7 +695,7 @@ describe("CollectiveBoard", () => {
             input.goalEnvelope = goalEnvelope
             input.userStories[0] = {
                 ...input.userStories[0]!,
-                goalInvariantIds: ["G-A1"],
+                goalInvariantIds: ["G-A1", "G-A2"],
             }
             writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
             const verifier = source("verifier")
@@ -641,34 +739,54 @@ describe("CollectiveBoard", () => {
             )
 
             const remediationStoryId = "GREM-a13-cleanup"
+            const groupedRemediation = {
+                runId,
+                contractId: contract.contractId,
+                challengeId: "aggregate-g-a1-a13",
+                challengeIds: ["aggregate-g-a1-a13", "aggregate-g-a2-a13"],
+                invariantId: "G-A1",
+                invariantIds: ["G-A1", "G-A2"],
+                remediationGroupId: "goal-remediation-group-a13-cleanup",
+                proposalId: "goal-remediation-a13",
+                reason: "one provider adapter owns both broken cleanup paths",
+                story: {
+                    id: remediationStoryId,
+                    priority: -1,
+                    title: "Repair provider cleanup invariants",
+                    description:
+                        "Fix cancellation cleanup across provider paths.",
+                    dependsOn: [],
+                    retries: 2,
+                    acceptance: [
+                        "[G-A1] Every provider path preserves stream cancellation.",
+                        "[G-A2] Every provider path closes its owned source iterator.",
+                        "Focused regression evidence covers provider cleanup.",
+                    ],
+                    tests: ["git diff --check"],
+                    model: "heavy" as const,
+                    goalInvariantIds: ["G-A1", "G-A2"],
+                },
+            }
             env.deliverSemanticEvent(
                 guardian,
                 GoalInvariantRemediationProposed.create({
-                    runId,
-                    contractId: contract.contractId,
-                    challengeId: "aggregate-g-a1-a13",
-                    invariantId: "G-A1",
-                    proposalId: "goal-remediation-a13",
-                    reason: "provider streams do not close on cancellation",
+                    ...groupedRemediation,
                     story: {
-                        id: remediationStoryId,
-                        priority: -1,
-                        title: "Repair provider cleanup invariant",
-                        description:
-                            "Fix cancellation cleanup across provider paths.",
-                        dependsOn: [],
-                        retries: 2,
-                        acceptance: [
-                            "[G-A1] Every provider path preserves stream cancellation.",
-                            "Focused regression evidence covers provider cleanup.",
-                        ],
-                        tests: ["git diff --check"],
-                        model: "heavy",
+                        ...groupedRemediation.story,
                         goalInvariantIds: ["G-A1"],
                     },
                 }),
             )
-
+            await flush()
+            assert.equal(
+                env.events.some(RuntimeReplanApplied.is),
+                false,
+                "Board rejects a grouped story whose target set is incomplete",
+            )
+            env.deliverSemanticEvent(
+                guardian,
+                GoalInvariantRemediationProposed.create(groupedRemediation),
+            )
             const applied = await waitFor(env.events, RuntimeReplanApplied.is)
             const admitted = await waitFor(
                 env.events,
@@ -676,6 +794,11 @@ describe("CollectiveBoard", () => {
             )
             assert.equal(applied.data.mutation.addedStories[0]?.id, remediationStoryId)
             assert.equal(admitted.data.storyId, remediationStoryId)
+            assert.deepEqual(admitted.data.invariantIds, ["G-A1", "G-A2"])
+            assert.deepEqual(
+                admitted.data.challengeIds,
+                ["aggregate-g-a1-a13", "aggregate-g-a2-a13"],
+            )
             assert.equal(env.events.some(RunPushRequested.is), false)
 
             env.deliverSemanticEvent(
@@ -687,7 +810,7 @@ describe("CollectiveBoard", () => {
                     goalRevision: 1,
                     verificationId: oldCheck.data.verificationId,
                     status: "satisfied",
-                    satisfiedInvariantIds: ["G-A1"],
+                    satisfiedInvariantIds: ["G-A1", "G-A2"],
                     openInvariantIds: [],
                     rejectedInvariantIds: [],
                     invariants: [],
@@ -2406,6 +2529,21 @@ function prd(): PrdFile {
             },
         ],
     }
+}
+
+function obligationDecisionDocument(): string {
+    return `## Existing context
+The direct boundary is independently callable.
+
+## ADR-001: Preserve direct behavior
+**Status:** Accepted
+**Context:** An outer wrapper is not the only caller.
+**Decision:** Keep direct behavior observable.
+**Consequences:** One implementation story must own focused evidence.
+
+\`\`\`baro-obligations-v1
+{"schemaVersion":1,"obligations":[{"id":"O-001","invariantIds":["G-A1"],"subject":"the direct boundary","scenario":"it is invoked independently","expectedOutcome":"the required behavior remains observable","evidence":["a focused direct-boundary test"]}]}
+\`\`\``
 }
 
 function pass(runId: string, storyId: string, leaseId: string, generation: number) {

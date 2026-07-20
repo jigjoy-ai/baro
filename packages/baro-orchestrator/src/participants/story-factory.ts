@@ -1266,6 +1266,8 @@ export class StoryFactory extends BaseObserver {
             "  These event commands generate a stable id. If one returns `outcome_unknown`, retry the exact same payload with its returned `--event-id`; never mint a replacement id.",
             `- If repository evidence shows a global invariant is unsatisfied or contradicted, fail closed for the collective: ${command} emit ${capability} --kind challenge --invariant G-A1 --reason ${JSON.stringify("CONCRETE EVIDENCE / MISSING WORK")}`,
             "  A challenge blocks green completion until corrective work supplies evidence and the governance authority resolves it. Use the exact G-A/G-C id from the Global goal contract, not for routine uncertainty.",
+            "  The Architect decision document is a revisable evidence-backed baseline. Before writing, validate the ADR facts and semantic obligations this story depends on. If direct repository evidence disproves an ADR, boundary assumption, or caller inventory, do not silently obey it and do not silently diverge.",
+            "  Share the corrected architectural fact as a note so later workers inherit it; use help when currently active peers may also be affected. Choose one corrective control path for the same root cause: raise a goal challenge only when a G-A/G-C invariant itself is endangered (Guardian creates corrective work), otherwise submit one evidence-rich scoped runtime replan for affected future work or dependencies. Do not create competing challenge and replan repairs for one defect.",
             "  If a challenge returns `outcome_unknown`, retry the exact same payload with its returned `--challenge-id`; never mint a replacement challenge.",
             ...(collaboration.deliveryMode === "poll"
                 ? [

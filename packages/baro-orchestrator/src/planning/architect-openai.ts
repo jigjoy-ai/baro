@@ -25,6 +25,7 @@ import {
     runInferenceRound,
 } from "./openai-runtime.js"
 import type { GatewayBillingCoordinator } from "../billing/index.js"
+import type { GoalEnvelope } from "../session/conversation-contract.js"
 
 import {
     ARCHITECT_OUTCOME_SYSTEM_PROMPT,
@@ -59,6 +60,8 @@ export interface RunArchitectOpenAIOptions {
     /** Deterministic no-network seam used by the architect state-machine tests. */
     testRuntime?: ArchitectOpenAITestRuntime
     outcomeMode?: boolean
+    /** Host-owned goal used to bind the Architect's obligation parent ids. */
+    goalEnvelope?: GoalEnvelope
     /** Excludes the bash tool; remaining tools are project-contained reads. */
     readOnly?: boolean
 }
@@ -250,7 +253,10 @@ export async function runArchitectOpenAI(
                 invalidReason = "The previous response contained a literal <tool_call> instead of the final architecture result."
             } else if (opts.outcomeMode) {
                 try {
-                    normalizedOutcome = JSON.stringify(parseArchitectOutcome(doc))
+                    normalizedOutcome = JSON.stringify(parseArchitectOutcome(doc, {
+                        requireObligations: true,
+                        trustedGoalEnvelope: opts.goalEnvelope,
+                    }))
                 } catch (error) {
                     invalidReason = `The previous response violated ArchitectOutcomeV1: ${(error as Error).message}`
                 }

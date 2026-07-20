@@ -46,6 +46,10 @@ import {
     type ModeContract,
 } from "./planner-prompts.js"
 import { assertRunnablePlannerPrdJson } from "./planner-validation.js"
+import {
+    parseArchitectureObligationContract,
+    renderArchitectureObligationCriterion,
+} from "./architecture-obligation-contract.js"
 
 export type {
     PlannerOpenAIPlanFragmentEvent,
@@ -274,6 +278,7 @@ export async function runPlannerOpenAI(
                     raw,
                     progressive,
                     opts.goalEnvelope,
+                    opts.decisionDocument,
                 )
             } catch (e) {
                 invalidFinalResponses += 1
@@ -302,9 +307,11 @@ export async function runPlannerOpenAI(
                         opts.goal,
                         "Planner returned invalid JSON after bounded repair attempts.",
                         opts.goalEnvelope,
+                        opts.decisionDocument,
                     ),
                     progressive,
                     opts.goalEnvelope,
+                    opts.decisionDocument,
                 )
             }
         }
@@ -321,9 +328,11 @@ export async function runPlannerOpenAI(
             opts.goal,
             `Planner exceeded maxRounds=${maxRounds} without producing a final plan.`,
             opts.goalEnvelope,
+            opts.decisionDocument,
         ),
         progressive,
         opts.goalEnvelope,
+        opts.decisionDocument,
     )
 }
 
@@ -331,6 +340,7 @@ function extractRunnablePlannerPrd(
     raw: string,
     progressive: PlannerOpenAIProgressiveSupport,
     goalEnvelope?: GoalEnvelope,
+    decisionDocument?: string,
 ): string {
     const candidates = extractJsonObjects(raw)
     if (candidates.length === 0) {
@@ -339,7 +349,11 @@ function extractRunnablePlannerPrd(
     let lastError: unknown
     for (const candidate of candidates) {
         try {
-            assertRunnablePlannerPrdJson(candidate, goalEnvelope)
+            assertRunnablePlannerPrdJson(
+                candidate,
+                goalEnvelope,
+                decisionDocument,
+            )
             progressive.reconcileFinalCandidate(candidate)
             return candidate
         } catch (error) {
@@ -446,10 +460,14 @@ export function fallbackPrdJson(
     goal: string,
     reason: string,
     goalEnvelope?: GoalEnvelope,
+    decisionDocument?: string,
 ): string {
     const title = oneLine(goal).slice(0, 80) || "Implement requested change"
     const goalInvariantIds = deriveGoalContract(goalEnvelope)
         ?.invariants.map(({ id }) => id) ?? []
+    const obligationAcceptance = parseArchitectureObligationContract(
+        decisionDocument,
+    )?.obligations.map(renderArchitectureObligationCriterion) ?? []
     return JSON.stringify({
         project: "baro-run",
         branchName: `baro/${slug(title)}`,
@@ -462,7 +480,10 @@ export function fallbackPrdJson(
                 description: `${goal.trim()}\n\nPlanner fallback: ${reason}`,
                 dependsOn: [],
                 retries: 2,
-                acceptance: ["The requested change is implemented without regressing existing behavior."],
+                acceptance: [
+                    "The requested change is implemented without regressing existing behavior.",
+                    ...obligationAcceptance,
+                ],
                 tests: ["echo \"planner fallback: run the project's relevant checks\""],
                 goalInvariantIds,
                 model: "heavy",

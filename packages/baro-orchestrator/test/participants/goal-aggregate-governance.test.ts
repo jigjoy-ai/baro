@@ -12,6 +12,7 @@ import {
     GoalAggregateReviewRequested,
     GoalCompletionAttested,
     GoalCompletionCheckRequested,
+    GoalInvariantRemediationAdmitted,
     GoalInvariantRemediationProposed,
     GoalLedgerProjectionUpdated,
     StoryMerged,
@@ -272,6 +273,123 @@ describe("aggregate goal governance", () => {
                 .filter(GoalLedgerProjectionUpdated.is)
                 .at(-1)?.data.projection.aggregateReviews.length,
             1,
+        )
+    })
+
+    it("dispatches one story for a shared root cause and admits the challenge group atomically", () => {
+        const fixture = singleStoryFixture("run-aggregate-grouped-remediation")
+        fixture.env.deliverSemanticEvent(
+            fixture.board,
+            completionRequest(fixture, "check-grouped-remediation"),
+        )
+        const request = fixture.env.events.find(GoalAggregateReviewRequested.is)
+        assert.ok(request)
+        const groupId = "goal-remediation-group-shared-root"
+        const failed = aggregateCompletion(request.data, "failed")
+        fixture.env.deliverSemanticEvent(
+            fixture.reviewer,
+            GoalAggregateReviewCompleted.create({
+                ...failed.data,
+                invariants: failed.data.invariants.map((invariant) => ({
+                    ...invariant,
+                    remediationGroupId: groupId,
+                })),
+            }),
+        )
+
+        const proposals = fixture.env.events.filter(
+            GoalInvariantRemediationProposed.is,
+        )
+        assert.equal(proposals.length, 1)
+        const proposal = proposals[0]!
+        assert.equal(proposal.data.remediationGroupId, groupId)
+        assert.deepEqual(proposal.data.invariantIds, ["G-A1", "G-C1"])
+        assert.equal(proposal.data.challengeIds?.length, 2)
+        assert.deepEqual(
+            proposal.data.story.goalInvariantIds,
+            ["G-A1", "G-C1"],
+        )
+
+        fixture.env.deliverSemanticEvent(
+            fixture.board,
+            GoalInvariantRemediationAdmitted.create({
+                runId: fixture.runId,
+                contractId: fixture.contractId,
+                challengeId: proposal.data.challengeIds![0]!,
+                challengeIds: [proposal.data.challengeIds![0]!],
+                invariantId: proposal.data.invariantIds![0]!,
+                invariantIds: [proposal.data.invariantIds![0]!],
+                remediationGroupId: groupId,
+                proposalId: proposal.data.proposalId,
+                storyId: proposal.data.story.id,
+                graphVersion: 2,
+                disposition: "applied",
+            }),
+        )
+        let projection = fixture.env.events
+            .filter(GoalLedgerProjectionUpdated.is)
+            .at(-1)!.data.projection
+        assert.equal(
+            projection.challenges.every(
+                ({ remediation }) => remediation?.status === "requested",
+            ),
+            true,
+            "a valid subset receipt admits none of the group",
+        )
+
+        fixture.env.deliverSemanticEvent(
+            fixture.board,
+            GoalInvariantRemediationAdmitted.create({
+                runId: fixture.runId,
+                contractId: fixture.contractId,
+                challengeId: proposal.data.challengeId,
+                challengeIds: proposal.data.challengeIds!,
+                invariantId: "G-C1",
+                invariantIds: ["G-C1", "G-A1"],
+                remediationGroupId: groupId,
+                proposalId: proposal.data.proposalId,
+                storyId: proposal.data.story.id,
+                graphVersion: 2,
+                disposition: "applied",
+            }),
+        )
+        projection = fixture.env.events
+            .filter(GoalLedgerProjectionUpdated.is)
+            .at(-1)!.data.projection
+        assert.equal(
+            projection.challenges.every(
+                ({ remediation }) => remediation?.status === "requested",
+            ),
+            true,
+            "a misordered receipt admits none of the group",
+        )
+
+        fixture.env.deliverSemanticEvent(
+            fixture.board,
+            GoalInvariantRemediationAdmitted.create({
+                runId: fixture.runId,
+                contractId: fixture.contractId,
+                challengeId: proposal.data.challengeId,
+                challengeIds: proposal.data.challengeIds!,
+                invariantId: proposal.data.invariantId,
+                invariantIds: proposal.data.invariantIds!,
+                remediationGroupId: groupId,
+                proposalId: proposal.data.proposalId,
+                storyId: proposal.data.story.id,
+                graphVersion: 2,
+                disposition: "applied",
+            }),
+        )
+        projection = fixture.env.events
+            .filter(GoalLedgerProjectionUpdated.is)
+            .at(-1)!.data.projection
+        assert.equal(
+            projection.challenges.every(
+                ({ remediation }) =>
+                    remediation?.status === "admitted" &&
+                    remediation.storyId === proposal.data.story.id,
+            ),
+            true,
         )
     })
 

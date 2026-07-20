@@ -1361,8 +1361,16 @@ export const GoalInvariantChallengeResolved =
 export interface GoalInvariantRemediationProposedData {
     runId: string
     contractId: string
+    /** Canonical first target retained for legacy consumers. */
     challengeId: string
+    /** Complete root-cause group. Missing means the legacy singleton above. */
+    challengeIds?: readonly string[]
+    /** Canonical first target retained for legacy consumers. */
     invariantId: string
+    /** Complete invariant target set. Missing means the legacy singleton above. */
+    invariantIds?: readonly string[]
+    /** Reviewer-derived root-cause identity, when aggregate review grouped it. */
+    remediationGroupId?: string
     proposalId: string
     reason: string
     story: ReplanStoryAdd
@@ -1376,8 +1384,15 @@ export const GoalInvariantRemediationProposed =
 export interface GoalInvariantRemediationAdmittedData {
     runId: string
     contractId: string
+    /** Canonical first target retained for legacy consumers. */
     challengeId: string
+    /** Atomically admitted challenge set; missing means legacy singleton. */
+    challengeIds?: readonly string[]
+    /** Canonical first target retained for legacy consumers. */
     invariantId: string
+    /** Exact story target set; missing means legacy singleton. */
+    invariantIds?: readonly string[]
+    remediationGroupId?: string
     proposalId: string
     storyId: string
     graphVersion: number

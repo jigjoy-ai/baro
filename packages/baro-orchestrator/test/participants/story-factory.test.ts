@@ -738,6 +738,18 @@ describe("StoryFactory", () => {
                 },
             )
             assert.match(executor.calls[0].req.prompt, /--kind help/)
+            assert.match(
+                executor.calls[0].req.prompt,
+                /Architect decision document is a revisable evidence-backed baseline/,
+            )
+            assert.match(
+                executor.calls[0].req.prompt,
+                /Before writing, validate the ADR facts and semantic obligations/,
+            )
+            assert.match(
+                executor.calls[0].req.prompt,
+                /Do not create competing challenge and replan repairs for one defect/,
+            )
             assert.doesNotMatch(executor.calls[0].req.prompt, /inbox --endpoint/)
             assert.match(executor.calls[0].req.prompt, /--endpoint "http:\/\/127\.0\.0\.1:4242"/)
             assert.match(executor.calls[0].req.prompt, /--token "a{43}"/)

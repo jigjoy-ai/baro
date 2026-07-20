@@ -257,10 +257,15 @@ async function main(): Promise<void> {
     } catch (error) {
         fatal((error as Error).message)
     }
+    const projectContext = tryRead(args.contextFile)
+    const decisionDocument = tryRead(args.decisionFile)
+    const progressiveDecisionDocument =
+        bootstrapMetadata?.decisionDocument ?? decisionDocument
     const progressive = progressiveConfig
         ? new ProgressivePlannerLifecycle({
               ...progressiveConfig,
               trustedGoalEnvelope,
+              trustedDecisionDocument: progressiveDecisionDocument,
           })
         : undefined
     progressive?.open()
@@ -271,12 +276,11 @@ async function main(): Promise<void> {
                   runId: progressive.config.runId,
                   planningId: progressive.config.planningId,
                   trustedGoalEnvelope,
+                  trustedDecisionDocument: progressiveDecisionDocument,
                   publish: (event) => progressive.publish(event),
                   mcpServer: currentPlannerMcpServerCommand(),
               }
             : undefined
-    const projectContext = tryRead(args.contextFile)
-    const decisionDocument = tryRead(args.decisionFile)
     let modeContract: ModeContract | undefined
     if (args.modeFile) {
         try {
@@ -334,6 +338,8 @@ async function main(): Promise<void> {
                                   runId: progressive.config.runId,
                                   planningId: progressive.config.planningId,
                                   trustedGoalEnvelope,
+                                  trustedDecisionDocument:
+                                      progressiveDecisionDocument,
                                   publish: (event: unknown) =>
                                       progressive.publish(event),
                               },
@@ -415,6 +421,7 @@ async function main(): Promise<void> {
         prdJson = assertRunnablePlannerPrdJson(
             prdJson,
             trustedGoalEnvelope,
+            decisionDocument,
         )
         if (modeContract) {
             prdJson = enforceModeContract(prdJson, modeContract, args.goal)
@@ -422,6 +429,7 @@ async function main(): Promise<void> {
         prdJson = assertRunnablePlannerPrdJson(
             prdJson,
             trustedGoalEnvelope,
+            decisionDocument,
         )
         if (bootstrapMetadata) {
             prdJson = applyProgressiveBootstrapMetadata(
@@ -431,6 +439,7 @@ async function main(): Promise<void> {
             prdJson = assertRunnablePlannerPrdJson(
                 prdJson,
                 trustedGoalEnvelope,
+                bootstrapMetadata.decisionDocument ?? decisionDocument,
             )
         }
     } catch (e) {

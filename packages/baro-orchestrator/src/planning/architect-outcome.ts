@@ -6,6 +6,13 @@
  * caller correlation in a separate transport envelope.
  */
 
+import type { GoalEnvelope } from "../session/conversation-contract.js"
+import { deriveGoalContract } from "../runtime/goal-contract.js"
+import {
+    bindArchitectureObligationContract,
+    parseArchitectureObligationContract,
+} from "./architecture-obligation-contract.js"
+
 export const ARCHITECT_OUTCOME_SCHEMA_VERSION = 1 as const
 export const MAX_ARCHITECT_OUTCOME_BYTES = 128 * 1024
 
@@ -137,7 +144,16 @@ export const ARCHITECT_OUTCOME_JSON_SCHEMA = deepFreeze({
         },
         decisionDocument: {
             anyOf: [
-                { type: "string", minLength: 1, maxLength: MAX_DECISION_DOCUMENT_LENGTH },
+                {
+                    type: "string",
+                    minLength: 1,
+                    maxLength: MAX_DECISION_DOCUMENT_LENGTH,
+                    // Strict outcome mode always carries the host-owned goal
+                    // into a machine-checkable obligation appendix. A model
+                    // must not gain authority to bypass that binding merely
+                    // by labelling its own answer "trivial".
+                    pattern: "```baro-obligations-v1(?:\\r?\\n)",
+                },
                 { type: "null" },
             ],
         },
@@ -145,7 +161,10 @@ export const ARCHITECT_OUTCOME_JSON_SCHEMA = deepFreeze({
 })
 
 /** Parse exact JSON. Markdown fences, leading prose and unknown keys fail. */
-export function parseArchitectOutcome(raw: string): ArchitectOutcomeV1 {
+export function parseArchitectOutcome(
+    raw: string,
+    options: ArchitectOutcomeValidationOptions = {},
+): ArchitectOutcomeV1 {
     if (typeof raw !== "string") {
         throw new ArchitectOutcomeContractError("architect outcome must be text")
     }
@@ -161,10 +180,13 @@ export function parseArchitectOutcome(raw: string): ArchitectOutcomeV1 {
     } catch {
         throw new ArchitectOutcomeContractError("architect outcome is not valid JSON")
     }
-    return validateArchitectOutcome(value)
+    return validateArchitectOutcome(value, options)
 }
 
-export function validateArchitectOutcome(value: unknown): ArchitectOutcomeV1 {
+export function validateArchitectOutcome(
+    value: unknown,
+    options: ArchitectOutcomeValidationOptions = {},
+): ArchitectOutcomeV1 {
     if (!exactRecord(value, [
         "schemaVersion",
         "kind",
@@ -196,6 +218,11 @@ export function validateArchitectOutcome(value: unknown): ArchitectOutcomeV1 {
             "architect decisionDocument",
         )
         assertArchitectureDocument(decisionDocument)
+        validateArchitectureObligations(
+            decisionDocument,
+            options.requireObligations === true,
+            options.trustedGoalEnvelope,
+        )
         return deepFreeze({
             schemaVersion: ARCHITECT_OUTCOME_SCHEMA_VERSION,
             kind: "ready" as const,
@@ -233,6 +260,31 @@ export function validateArchitectOutcome(value: unknown): ArchitectOutcomeV1 {
     }
 
     throw new ArchitectOutcomeContractError("architect outcome kind is invalid")
+}
+
+function validateArchitectureObligations(
+    decisionDocument: string,
+    requireObligations: boolean,
+    trustedGoalEnvelope?: GoalEnvelope | null,
+): void {
+    const obligations = parseArchitectureObligationContract(decisionDocument)
+    if (requireObligations && !obligations) {
+        throw new ArchitectOutcomeContractError(
+            "ready architect outcome requires a baro-obligations-v1 appendix",
+        )
+    }
+    if (obligations && trustedGoalEnvelope) {
+        bindArchitectureObligationContract(
+            obligations,
+            deriveGoalContract(trustedGoalEnvelope),
+        )
+    }
+}
+
+export interface ArchitectOutcomeValidationOptions {
+    requireObligations?: boolean
+    /** Host-owned goal used to reject unknown or missing parent ids. */
+    trustedGoalEnvelope?: GoalEnvelope | null
 }
 
 export function wrapArchitectOutcome(

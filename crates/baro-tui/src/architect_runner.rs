@@ -155,6 +155,7 @@ pub async fn run_architect_outcome(
     model: Option<&str>,
     context: Option<&str>,
     mode_json: Option<&str>,
+    goal_envelope_json: &str,
     openai_api_key: Option<&str>,
     openai_base_url: Option<&str>,
     effort: &str,
@@ -177,6 +178,7 @@ pub async fn run_architect_outcome(
         model,
         context,
         mode_json,
+        goal_envelope_json,
         openai_api_key,
         openai_base_url,
         effort,
@@ -197,6 +199,7 @@ async fn run_architect_outcome_with_entry(
     model: Option<&str>,
     context: Option<&str>,
     mode_json: Option<&str>,
+    goal_envelope_json: &str,
     openai_api_key: Option<&str>,
     openai_base_url: Option<&str>,
     effort: &str,
@@ -218,6 +221,13 @@ async fn run_architect_outcome_with_entry(
 
     let ctx_tempfile = outcome_input_tempfile("architect context", context)?;
     let mode_tempfile = outcome_input_tempfile("architect mode", mode_json)?;
+    let goal_envelope_tempfile =
+        outcome_input_tempfile("architect goal envelope", Some(goal_envelope_json))?.ok_or_else(
+            || ProcessRunError {
+                message: "architect goal envelope cannot be empty".to_string(),
+                log_path: None,
+            },
+        )?;
     let outcome_tempfile = tempfile::NamedTempFile::new().map_err(|error| ProcessRunError {
         message: format!("could not create architect outcome tempfile: {error}"),
         log_path: None,
@@ -251,6 +261,8 @@ async fn run_architect_outcome_with_entry(
     if let Some(ref file) = mode_tempfile {
         cmd.arg("--mode-file").arg(file.path());
     }
+    cmd.arg("--goal-envelope-file")
+        .arg(goal_envelope_tempfile.path());
     cmd.arg("--outcome-file")
         .arg(outcome_tempfile.path())
         .arg("--conversation-session-id")
@@ -271,6 +283,7 @@ async fn run_architect_outcome_with_entry(
     let log_path = subprocess::spawn_and_stream_events(cmd, "architect", on_event).await?;
     drop(ctx_tempfile);
     drop(mode_tempfile);
+    drop(goal_envelope_tempfile);
 
     let metadata = std::fs::metadata(outcome_tempfile.path()).map_err(|error| ProcessRunError {
         message: format!("could not inspect architect outcome file: {error}"),
@@ -359,6 +372,7 @@ mod tests {
             None,
             Some(context),
             Some(r#"{"schemaVersion":1}"#),
+            r#"{"objective":"Implement it","constraints":[],"acceptanceCriteria":["It works"],"nonGoals":[],"assumptions":[]}"#,
             None,
             None,
             "high",
@@ -381,7 +395,8 @@ if (get("--conversation-session-id") !== "session-1" ||
     get("--goal-request-id") !== "goal-1" ||
     get("--architect-request-id") !== "architect-1" ||
     readFileSync(get("--context-file"), "utf8") !== "project context" ||
-    readFileSync(get("--mode-file"), "utf8") !== '{"schemaVersion":1}') {
+    readFileSync(get("--mode-file"), "utf8") !== '{"schemaVersion":1}' ||
+    JSON.parse(readFileSync(get("--goal-envelope-file"), "utf8")).acceptanceCriteria[0] !== "It works") {
   process.exit(9);
 }
 writeFileSync(get("--outcome-file"), JSON.stringify({
@@ -413,12 +428,9 @@ process.stdout.write('{"type":"agent_status","status":"working"}\n');
             r#"{{"schemaVersion":1,"sessionId":"session-1","requestId":"goal-1","repositoryBrief":{{"schemaVersion":1,"snapshotId":"sha256:{}","summary":"The deep abort coordinator was inspected.","facts":[{{"statement":"The coordinator contains baro-sidecar-deep-evidence.","evidencePath":"src/runtime/cancellation/abort-coordinator.ts","line":1,"confidence":"high"}}],"relevantPaths":["src/runtime/cancellation/abort-coordinator.ts"],"unknowns":[],"truncated":false}}}}"#,
             "a".repeat(64),
         );
-        let brief = crate::repository_brief::parse_repository_brief_sidecar(
-            &raw,
-            "session-1",
-            "goal-1",
-        )
-        .unwrap();
+        let brief =
+            crate::repository_brief::parse_repository_brief_sidecar(&raw, "session-1", "goal-1")
+                .unwrap();
         let context = brief.render_architect_context().unwrap();
         let (_directory, entry) = fake_node_script(
             r#"
@@ -448,7 +460,9 @@ writeFileSync(get("--outcome-file"), JSON.stringify({
         );
         let events = Mutex::new(Vec::new());
 
-        let outcome = run_fake_with_context(entry, &events, &context).await.unwrap();
+        let outcome = run_fake_with_context(entry, &events, &context)
+            .await
+            .unwrap();
 
         assert_eq!(outcome.outcome.kind, ArchitectOutcomeKindV1::NeedsInput);
     }

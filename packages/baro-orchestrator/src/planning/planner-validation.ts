@@ -5,6 +5,11 @@ import {
 } from "../prd.js"
 import { deriveGoalContract } from "../runtime/goal-contract.js"
 import type { GoalEnvelope } from "../session/conversation-contract.js"
+import {
+    architectureObligationsFromDecision,
+    validateArchitectureObligationCoverage,
+    type StoryObligationMapping,
+} from "./architecture-obligation-contract.js"
 import { validateGoalContractCoverage } from "./goal-contract-coverage.js"
 
 const STORY_TIERS = new Set(["light", "standard", "heavy"])
@@ -17,6 +22,7 @@ const STORY_TIERS = new Set(["light", "standard", "heavy"])
 export function assertRunnablePlannerPrdJson(
     json: string,
     trustedGoalEnvelope?: GoalEnvelope | null,
+    trustedDecisionDocument?: string | null,
 ): string {
     const parsed = JSON.parse(json) as unknown
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -43,6 +49,7 @@ export function assertRunnablePlannerPrdJson(
         storyId: string
         invariantIds: string[]
     }> = []
+    const obligationMappings: StoryObligationMapping[] = []
     for (const [index, value] of stories.entries()) {
         if (!value || typeof value !== "object" || Array.isArray(value)) {
             throw new Error(`final PRD story ${index + 1} is not an object`)
@@ -90,7 +97,7 @@ export function assertRunnablePlannerPrdJson(
         }
 
         const dependsOn = requireStringArray(story, id, "dependsOn", true)
-        requireStringArray(story, id, "acceptance", false)
+        const acceptance = requireStringArray(story, id, "acceptance", false)
         requireStringArray(story, id, "tests", false)
         let goalInvariantIds: string[] = []
         if (story.goalInvariantIds !== undefined) {
@@ -116,6 +123,11 @@ export function assertRunnablePlannerPrdJson(
             }
         }
         goalMappings.push({ storyId: id, invariantIds: goalInvariantIds })
+        obligationMappings.push({
+            storyId: id,
+            acceptance,
+            invariantIds: goalInvariantIds,
+        })
         if (new Set(dependsOn).size !== dependsOn.length) {
             throw new Error(`invalid planner DAG: story '${id}' has duplicate dependencies`)
         }
@@ -135,15 +147,24 @@ export function assertRunnablePlannerPrdJson(
         }
     }
     assertAcyclic(dependencies)
+    const goalContract = deriveGoalContract(trustedGoalEnvelope)
     validateGoalContractCoverage(
         // The provider JSON is not authority for the run contract. Rust (or
         // another trusted host) supplies the confirmed envelope separately.
-        deriveGoalContract(trustedGoalEnvelope),
+        goalContract,
         goalMappings,
         // Unknown claims fail here. Missing ownership remains actionable:
         // GoalGuardian adds exact invariant-scoped work through Mozaik after
         // planning closes, and final attestation still fails closed.
         "partial",
+    )
+    validateArchitectureObligationCoverage(
+        architectureObligationsFromDecision(
+            trustedDecisionDocument,
+            goalContract,
+        ),
+        obligationMappings,
+        "complete",
     )
     return json
 }

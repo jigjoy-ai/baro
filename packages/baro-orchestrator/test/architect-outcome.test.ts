@@ -18,6 +18,29 @@ The repository uses a strict provider-neutral planning contract.
 **Decision:** Attach session and request correlation only after strict parsing.
 **Consequences:** Malformed or foreign model output cannot advance planning.`
 
+const OBLIGATION_DOCUMENT = `${DECISION_DOCUMENT}
+
+## Semantic obligation contract
+
+\`\`\`baro-obligations-v1
+{"schemaVersion":1,"obligations":[{"id":"O-001","invariantIds":["G-A1"],"subject":"the provider-neutral planning boundary","scenario":"a non-trivial goal advances to planning","expectedOutcome":"the exact validated goal remains observable to downstream planning","evidence":["a focused outcome-contract test"]}]}
+\`\`\``
+
+const GOAL_ENVELOPE = {
+    objective: "Keep authority outside model output.",
+    acceptanceCriteria: ["The validated goal remains observable."],
+    constraints: [],
+    nonGoals: [],
+    assumptions: [],
+}
+
+const TRIVIAL_DECISION_DOCUMENT = `## ADR-001: No cross-cutting decisions needed
+**Status:** Accepted
+**Context:** The requested change is one isolated repository edit.
+**Decision:** This goal is trivial; no cross-cutting decisions are needed. Follow the
+user's goal as stated and the conventions already in the repo.
+**Consequences:** None of note.`
+
 function ready() {
     return {
         schemaVersion: 1,
@@ -84,6 +107,89 @@ describe("ArchitectOutcomeV1", () => {
         assert.match(
             ARCHITECT_OUTCOME_SYSTEM_PROMPT,
             /not a\s+valid reason for needsInput/u,
+        )
+        assert.match(ARCHITECT_OUTCOME_SYSTEM_PROMPT, /baro-obligations-v1/u)
+        assert.match(ARCHITECT_OUTCOME_SYSTEM_PROMPT, /directly callable/u)
+    })
+
+    it("requires obligations for every outcome-mode document without breaking legacy parsing", () => {
+        assert.equal(parseArchitectOutcome(JSON.stringify(ready())).kind, "ready")
+        assert.throws(
+            () => parseArchitectOutcome(JSON.stringify(ready()), {
+                requireObligations: true,
+            }),
+            /requires a baro-obligations-v1 appendix/u,
+        )
+        assert.equal(
+            parseArchitectOutcome(JSON.stringify({
+                ...ready(),
+                decisionDocument: OBLIGATION_DOCUMENT,
+            }), {
+                requireObligations: true,
+                trustedGoalEnvelope: GOAL_ENVELOPE,
+            }).kind,
+            "ready",
+        )
+        assert.throws(
+            () => parseArchitectOutcome(JSON.stringify({
+                ...ready(),
+                decisionDocument: OBLIGATION_DOCUMENT.replace("G-A1", "G-A2"),
+            }), {
+                requireObligations: true,
+                trustedGoalEnvelope: GOAL_ENVELOPE,
+            }),
+            /unknown GoalContract invariant.*G-A2/u,
+        )
+        assert.throws(
+            () => parseArchitectOutcome(JSON.stringify({
+                ...ready(),
+                decisionDocument: OBLIGATION_DOCUMENT,
+            }), {
+                requireObligations: true,
+                trustedGoalEnvelope: {
+                    ...GOAL_ENVELOPE,
+                    constraints: ["Existing callers remain compatible."],
+                },
+            }),
+            /does not refine.*G-C1/u,
+        )
+        assert.throws(
+            () => parseArchitectOutcome(JSON.stringify({
+                ...ready(),
+                decisionDocument: TRIVIAL_DECISION_DOCUMENT,
+            }), {
+                requireObligations: true,
+                trustedGoalEnvelope: {
+                    objective: "Preserve cancellation across every provider.",
+                    acceptanceCriteria: [
+                        "Every provider closes its stream.",
+                        "Direct adapter callers observe cancellation.",
+                        "Retry cleanup remains idempotent.",
+                    ],
+                    constraints: [
+                        "Keep the public API compatible.",
+                        "Do not centralize provider ownership.",
+                    ],
+                    nonGoals: [],
+                    assumptions: [],
+                },
+            }),
+            /requires a baro-obligations-v1 appendix/u,
+        )
+        assert.throws(
+            () => parseArchitectOutcome(JSON.stringify({
+                ...ready(),
+                decisionDocument: `${TRIVIAL_DECISION_DOCUMENT}
+
+## ADR-002: Add a real cross-cutting design
+**Status:** Accepted
+**Context:** Multiple providers need a shared contract.
+**Decision:** Introduce a provider-neutral boundary.
+**Consequences:** Every provider must implement it.`,
+            }), {
+                requireObligations: true,
+            }),
+            /requires a baro-obligations-v1 appendix/u,
         )
     })
 

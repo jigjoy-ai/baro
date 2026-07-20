@@ -23,6 +23,95 @@ import {
 import { joinWithCapture, source, withTempDir } from "./helpers.js"
 
 describe("Conductor", () => {
+    it("fails a legacy resume before dispatch when obligation ownership is incomplete", async () => {
+        await withTempDir("conductor-obligation-resume-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            const prd = oneStoryPrd()
+            prd.goalEnvelope = {
+                objective: "Preserve the direct boundary.",
+                acceptanceCriteria: ["The boundary remains observable."],
+                constraints: [],
+                nonGoals: [],
+                assumptions: [],
+            }
+            prd.decisionDocument = `## Existing context
+The boundary is independently callable.
+
+## ADR-001: Preserve direct behavior
+**Status:** Accepted
+**Context:** The boundary has direct callers.
+**Decision:** Keep the behavior observable.
+**Consequences:** Focused evidence is required.
+
+\`\`\`baro-obligations-v1
+{"schemaVersion":1,"obligations":[{"id":"O-001","invariantIds":["G-A1"],"subject":"the direct boundary","scenario":"it is invoked independently","expectedOutcome":"the behavior remains observable","evidence":["a focused test"]}]}
+\`\`\``
+            prd.userStories[0] = {
+                ...prd.userStories[0]!,
+                goalInvariantIds: ["G-A1"],
+            }
+            writeFileSync(prdPath, JSON.stringify(prd, null, 2) + "\n")
+            const conductor = new Conductor({
+                prdPath,
+                cwd: dir,
+                parallel: 1,
+                timeoutSecs: 45,
+                defaultModel: "sonnet",
+                intraLevelDelaySecs: 0,
+            })
+            const env = joinWithCapture(conductor)
+
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "resume" }),
+            )
+
+            const summary = await conductor.done
+            assert.equal(summary.success, false)
+            assert.match(
+                summary.abortReason ?? "",
+                /obligation coverage is incomplete.*O-001/i,
+            )
+            assert.equal(env.events.some(StorySpawnRequest.is), false)
+        })
+    })
+
+    it("presents Architect decisions as an evidence-backed revisable baseline", async () => {
+        await withTempDir("conductor-baseline-test-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            const prd = oneStoryPrd()
+            prd.decisionDocument =
+                "## ADR-001: Keep the adapter\n\nUse src/adapter.ts."
+            writeFileSync(prdPath, JSON.stringify(prd, null, 2) + "\n")
+
+            const conductor = new Conductor({
+                prdPath,
+                cwd: dir,
+                parallel: 1,
+                timeoutSecs: 45,
+                defaultModel: "sonnet",
+                intraLevelDelaySecs: 0,
+            })
+            const env = joinWithCapture(conductor)
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "unit test" }),
+            )
+
+            const spawn = await waitForEvent(env.events, StorySpawnRequest.is)
+            assert.match(
+                spawn.data.prompt,
+                /Design baseline \(evidence-backed and revisable\)/,
+            )
+            assert.match(spawn.data.prompt, /newer concrete repository evidence/)
+            assert.match(spawn.data.prompt, /collective runtime\s+replan path/)
+            assert.doesNotMatch(spawn.data.prompt, /authoritative — already decided/)
+
+            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            await waitForEvent(env.events, RunCompleted.is)
+        })
+    })
+
     it("emits run, level, spawn, and completion events for a passing story", async () => {
         await withTempDir("conductor-test-", async (dir) => {
             const prdPath = join(dir, "prd.json")

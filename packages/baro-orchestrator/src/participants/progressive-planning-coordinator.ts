@@ -32,6 +32,11 @@ import {
     validateProgressivePlanFragment,
 } from "../planning/progressive-plan.js"
 import { validateGoalContractCoverage } from "../planning/goal-contract-coverage.js"
+import {
+    architectureObligationsFromDecision,
+    obligationMappingsForStories,
+    validateArchitectureObligationCoverage,
+} from "../planning/architecture-obligation-contract.js"
 import { deriveGoalContract } from "../runtime/goal-contract.js"
 import type { RuntimeReplanDecisionOutcome } from "./runtime-replan-coordinator.js"
 
@@ -268,9 +273,24 @@ export class ProgressivePlanningCoordinator {
                 stories: fragment.stories,
             }
             validated = validateProgressivePlanFragment(envelope)
+            const goalContract = deriveGoalContract(state.prd.goalEnvelope)
             validateGoalContractCoverage(
-                deriveGoalContract(state.prd.goalEnvelope),
+                goalContract,
                 goalContractMappings(validated.stories),
+                "partial",
+            )
+            const fragmentIds = new Set(validated.stories.map(({ id }) => id))
+            validateArchitectureObligationCoverage(
+                architectureObligationsFromDecision(
+                    state.prd.decisionDocument,
+                    goalContract,
+                ),
+                obligationMappingsForStories([
+                    ...state.prd.userStories.filter(
+                        ({ id }) => !fragmentIds.has(id),
+                    ),
+                    ...validated.stories,
+                ]),
                 "partial",
             )
             fingerprint = progressivePlanFragmentFingerprint(envelope)
@@ -458,14 +478,23 @@ export class ProgressivePlanningCoordinator {
                 admittedStories,
                 finalPrd,
             ).finalStories
+            const goalContract = deriveGoalContract(state.prd.goalEnvelope)
             validateGoalContractCoverage(
-                deriveGoalContract(state.prd.goalEnvelope),
+                goalContract,
                 goalContractMappings(finalStories),
                 // Unknown claims are never admissible. Incomplete coverage is
                 // intentionally allowed at this live boundary: closing the
                 // planning latch lets GoalGuardian publish exact missing-
                 // invariant remediation through the normal Mozaik DAG path.
                 "partial",
+            )
+            validateArchitectureObligationCoverage(
+                architectureObligationsFromDecision(
+                    state.prd.decisionDocument,
+                    goalContract,
+                ),
+                obligationMappingsForStories(finalStories),
+                "complete",
             )
             if (
                 planning.status === "completed" &&

@@ -14,6 +14,11 @@ import type {
     RuntimeReplanRejectionCode,
 } from "../semantic-events.js"
 import { deriveGoalContract } from "./goal-contract.js"
+import {
+    architectureObligationsFromDecision,
+    obligationMappingsForStories,
+    validateArchitectureObligationCoverage,
+} from "../planning/architecture-obligation-contract.js"
 
 export interface RuntimeReplanValidationOptions {
     /** Running, leased, or otherwise already-started stories are immutable. */
@@ -363,6 +368,35 @@ function validateCandidateGraph(
             return reject(
                 "invalid_proposal",
                 `runtime replan would remove the last story owner for GoalContract invariant(s): ${newlyMissing.join(", ")}`,
+            )
+        }
+
+        const obligationContract = architectureObligationsFromDecision(
+            current.decisionDocument,
+            contract,
+        )
+        const currentObligations = validateArchitectureObligationCoverage(
+            obligationContract,
+            obligationMappingsForStories(current.userStories),
+            "partial",
+        )
+        const candidateObligations = validateArchitectureObligationCoverage(
+            obligationContract,
+            obligationMappingsForStories(candidate.userStories),
+            "partial",
+        )
+        const currentlyMissingObligations = new Set(
+            currentObligations.missingObligationIds,
+        )
+        const newlyMissingObligations =
+            candidateObligations.missingObligationIds.filter(
+                (obligationId) =>
+                    !currentlyMissingObligations.has(obligationId),
+            )
+        if (newlyMissingObligations.length > 0) {
+            return reject(
+                "invalid_proposal",
+                `runtime replan would remove the last evidence owner for architecture obligation(s): ${newlyMissingObligations.join(", ")}`,
             )
         }
     } catch (error) {

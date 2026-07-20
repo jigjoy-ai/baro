@@ -22,6 +22,12 @@ import {
 } from "../session/conversation-contract.js"
 import type { BaroCommand } from "../tui-protocol.js"
 import {
+    architectureObligationsFromDecision,
+    obligationMappingsForStories,
+    validateArchitectureObligationCoverage,
+    type ArchitectureObligationContractV1,
+} from "./architecture-obligation-contract.js"
+import {
     openProgressivePlanSession,
     validateProgressivePlanFragment,
     type ProgressivePlanSession,
@@ -64,6 +70,8 @@ export interface ProgressivePlannerConfig {
     /** Host-authored intent used only to reject unknown invariant claims before
      * the local immutable-prefix state advances. Missing preserves legacy. */
     trustedGoalEnvelope?: GoalEnvelope
+    /** Architect document from the trusted progressive bootstrap. */
+    trustedDecisionDocument?: string
 }
 
 /**
@@ -124,12 +132,17 @@ export class ProgressivePlannerLifecycle {
     private failedPublished = false
     private readonly planSession: ProgressivePlanSession
     private readonly goalContract: GoalContract | null
+    private readonly obligationContract: ArchitectureObligationContractV1 | null
 
     constructor(
         readonly config: ProgressivePlannerConfig,
         private readonly sink: ProgressivePlannerWireSink = writeWireEvent,
     ) {
         this.goalContract = deriveGoalContract(config.trustedGoalEnvelope)
+        this.obligationContract = architectureObligationsFromDecision(
+            config.trustedDecisionDocument,
+            this.goalContract,
+        )
         this.planSession = openProgressivePlanSession({
             schemaVersion: 1,
             planningSessionId: config.planningId,
@@ -167,6 +180,22 @@ export class ProgressivePlannerLifecycle {
             goalContractMappings(candidate.stories),
             "partial",
         )
+        const candidateStoryIds = new Set(
+            candidate.stories.map(({ id }) => id),
+        )
+        validateArchitectureObligationCoverage(
+            this.obligationContract,
+            obligationMappingsForStories([
+                // Replayed fragments replace their remembered projection for
+                // coverage purposes. The plan session below still performs
+                // the exact fingerprint/conflict check.
+                ...this.planSession.snapshot().stories.filter(
+                    ({ id }) => !candidateStoryIds.has(id),
+                ),
+                ...candidate.stories,
+            ]),
+            "partial",
+        )
         // This provider-independent copy of the contract remains open through
         // post-processing. Native planners validate too, but mode enforcement
         // runs later and CLI planners may gain fragment support independently.
@@ -185,12 +214,16 @@ export class ProgressivePlannerLifecycle {
         // (passes/completedAt/durationSecs). Reconcile the same canonical
         // projection the Board loads, otherwise every real provider fragment
         // would succeed in-adapter and then fail again at result persistence.
-        this.planSession.reconcile(
-            normalizePrd(
-                finalPrd as Partial<PrdFile>,
-                "progressive planner final candidate",
-            ),
+        const normalized = normalizePrd(
+            finalPrd as Partial<PrdFile>,
+            "progressive planner final candidate",
         )
+        validateArchitectureObligationCoverage(
+            this.obligationContract,
+            obligationMappingsForStories(normalized.userStories),
+            "complete",
+        )
+        this.planSession.reconcile(normalized)
     }
 
     complete(finalPrd: unknown): void {

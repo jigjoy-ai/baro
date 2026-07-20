@@ -29,6 +29,10 @@ import {
     type ModeContract,
 } from "../src/planning/planner-prompts.js"
 import { emit } from "../src/tui-protocol.js"
+import {
+    validateGoalEnvelope,
+    type GoalEnvelope,
+} from "../src/session/conversation-contract.js"
 
 interface Args {
     goal: string
@@ -40,6 +44,8 @@ interface Args {
     contextFile?: string
     /** Operator-fixed ModeContract. OpenAI uses it instead of running intake again. */
     modeFile?: string
+    /** Host-owned GoalEnvelope used to bind Architect obligation ids. */
+    goalEnvelopeFile?: string
     /** When set, the doc is written here and stdout is freed for the event stream. */
     resultFile?: string
     /** Opt-in strict ArchitectOutcomeV1 transport. Mutually exclusive with resultFile. */
@@ -61,6 +67,7 @@ function parseArgs(argv: string[]): Args {
     let effort: string | undefined
     let contextFile: string | undefined
     let modeFile: string | undefined
+    let goalEnvelopeFile: string | undefined
     let resultFile: string | undefined
     let outcomeFile: string | undefined
     let sessionId: string | undefined
@@ -99,6 +106,13 @@ function parseArgs(argv: string[]): Args {
                 break
             case "--mode-file":
                 modeFile = required(argv, ++i, "--mode-file")
+                break
+            case "--goal-envelope-file":
+                goalEnvelopeFile = required(
+                    argv,
+                    ++i,
+                    "--goal-envelope-file",
+                )
                 break
             case "--result-file":
                 resultFile = required(argv, ++i, "--result-file")
@@ -143,6 +157,12 @@ function parseArgs(argv: string[]): Args {
             "--outcome-file requires --conversation-session-id, --goal-request-id, and --architect-request-id",
         )
     }
+    if (outcomeFile && !goalEnvelopeFile) {
+        fatal("--outcome-file requires --goal-envelope-file")
+    }
+    if (!outcomeFile && goalEnvelopeFile) {
+        fatal("--goal-envelope-file requires --outcome-file")
+    }
     if (!outcomeFile && correlationFlags.some((value) => value !== undefined)) {
         fatal("architect correlation flags require --outcome-file")
     }
@@ -154,6 +174,7 @@ function parseArgs(argv: string[]): Args {
         effort,
         contextFile,
         modeFile,
+        goalEnvelopeFile,
         resultFile,
         outcomeFile,
         sessionId,
@@ -215,6 +236,17 @@ async function main(): Promise<void> {
         }
     }
 
+    let trustedGoalEnvelope: GoalEnvelope | undefined
+    if (args.goalEnvelopeFile) {
+        try {
+            trustedGoalEnvelope = validateGoalEnvelope(
+                JSON.parse(readFileSync(args.goalEnvelopeFile, "utf-8")),
+            )
+        } catch (e) {
+            fatal(`invalid --goal-envelope-file: ${(e as Error).message}`)
+        }
+    }
+
     process.stderr.write(
         `[run-architect] llm=${args.llm} model=${args.model ?? "(default)"}` +
             (modeContract ? ` mode=${modeContract.mode} (pre-decided)` : "") +
@@ -246,6 +278,7 @@ async function main(): Promise<void> {
                     billingCoordinator: billing ?? undefined,
                     outcomeMode,
                     readOnly: outcomeMode,
+                    goalEnvelope: trustedGoalEnvelope,
                 })
             } finally {
                 const result = await reconcileAndCloseGatewayBilling(billing)
@@ -312,7 +345,10 @@ async function main(): Promise<void> {
         // this runner can attach the caller correlation after strict parsing.
         try {
             outcomeTransport = wrapArchitectOutcome(
-                parseArchitectOutcome(result),
+                parseArchitectOutcome(result, {
+                    requireObligations: true,
+                    trustedGoalEnvelope,
+                }),
                 correlation!,
             )
         } catch (error) {

@@ -13,6 +13,36 @@ import {
     snapshotRuntimeReplanMutation,
     validateRuntimeReplanMutation,
 } from "../../src/runtime-replan.js"
+import { renderArchitectureObligationCriterion } from "../../src/planning/architecture-obligation-contract.js"
+
+const RUNTIME_OBLIGATION = {
+    id: "O-001",
+    invariantIds: ["G-A1"],
+    subject: "the direct runtime boundary",
+    scenario: "the adapted graph executes",
+    expectedOutcome: "the required behavior remains owned and evidenced",
+    evidence: ["a focused direct-boundary test"],
+} as const
+
+const RUNTIME_OBLIGATION_CRITERION =
+    renderArchitectureObligationCriterion(RUNTIME_OBLIGATION)
+
+function obligationDecisionDocument(): string {
+    return `## Existing context
+The runtime graph may adapt.
+
+## ADR-001: Preserve semantic ownership
+**Status:** Accepted
+**Context:** Runtime changes must retain evidence owners.
+**Decision:** Keep every semantic obligation owned.
+**Consequences:** Replacements inherit exact criteria.
+
+## Semantic obligation contract
+
+\`\`\`baro-obligations-v1
+${JSON.stringify({ schemaVersion: 1, obligations: [RUNTIME_OBLIGATION] })}
+\`\`\``
+}
 
 function story(id: string, overrides: Partial<PrdStory> = {}): PrdStory {
     return {
@@ -547,6 +577,59 @@ describe("validateRuntimeReplanMutation", () => {
 
         const accepted = validate(current, replacement(["G-A2"]))
         assert.equal(accepted.ok, true)
+    })
+
+    it("preserves exact Architect obligation ownership across runtime DAG adaptation", () => {
+        const current = governedPrd([
+            story("S1", {
+                acceptance: [RUNTIME_OBLIGATION_CRITERION],
+                goalInvariantIds: ["G-A1"],
+            }),
+        ], false, ["Acceptance one"])
+        current.decisionDocument = obligationDecisionDocument()
+
+        const missingOwner = validate(
+            current,
+            mutation({
+                addedStories: [{
+                    ...add("S2"),
+                    goalInvariantIds: ["G-A1"],
+                }],
+                removedStoryIds: ["S1"],
+            }),
+        )
+        expectCode(missingOwner, "invalid_proposal")
+        if (!missingOwner.ok) {
+            assert.match(missingOwner.reason, /last evidence owner.*O-001/i)
+        }
+
+        const replacementOwner = validate(
+            current,
+            mutation({
+                addedStories: [{
+                    ...add("S2"),
+                    acceptance: [RUNTIME_OBLIGATION_CRITERION],
+                    goalInvariantIds: ["G-A1"],
+                }],
+                removedStoryIds: ["S1"],
+            }),
+        )
+        assert.equal(replacementOwner.ok, true)
+
+        const tamperedClaim = validate(
+            current,
+            mutation({
+                addedStories: [{
+                    ...add("S2"),
+                    acceptance: [`${RUNTIME_OBLIGATION_CRITERION} narrowed`],
+                    goalInvariantIds: ["G-A1"],
+                }],
+            }),
+        )
+        expectCode(tamperedClaim, "invalid_proposal")
+        if (!tamperedClaim.ok) {
+            assert.match(tamperedClaim.reason, /altered canonical.*O-001/i)
+        }
     })
 
     it("allows GoalGuardian to repair incomplete coverage one invariant at a time", () => {

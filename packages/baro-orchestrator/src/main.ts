@@ -98,6 +98,24 @@ export {
 } from "./runtime/goal-contract.js"
 
 export {
+    ARCHITECTURE_OBLIGATION_SCHEMA_VERSION,
+    ARCHITECTURE_OBLIGATION_FENCE,
+    ArchitectureObligationContractError,
+    parseArchitectureObligationContract,
+    bindArchitectureObligationContract,
+    architectureObligationsFromDecision,
+    renderArchitectureObligationCriterion,
+    validateArchitectureObligationCoverage,
+    validatePrdArchitectureObligationCoverage,
+    obligationMappingsForStories,
+    type ArchitectureObligationV1,
+    type ArchitectureObligationContractV1,
+    type StoryObligationMapping,
+    type ArchitectureObligationCoverageMode,
+    type ArchitectureObligationCoverageResult,
+} from "./planning/architecture-obligation-contract.js"
+
+export {
     createGoalAggregateReviewBasis,
     normalizeGoalAggregateReviewEvidence,
     type GoalAggregateInvariantBasis,

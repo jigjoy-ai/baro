@@ -124,6 +124,45 @@ user-owned ambiguity and not a valid reason for needsInput.
 Return ONLY one JSON object with exactly these keys and no markdown fence:
 {"schemaVersion":1,"kind":"ready|needsInput","message":"bounded user-facing summary","questions":[],"evidence":[],"decisionDocument":null}
 
+SEMANTIC OBLIGATION APPENDIX — REQUIRED FOR EVERY ready OUTCOME:
+The ADRs are a design baseline, but the Planner and independent Critics also
+need an atomic, machine-checkable statement of what must remain true. End the
+decisionDocument with exactly one fenced block of this form (the
+fence is inside the decisionDocument string):
+
+\`\`\`baro-obligations-v1
+{"schemaVersion":1,"obligations":[{"id":"O-001","invariantIds":["G-A1"],"subject":"one concrete boundary or affected surface","scenario":"one concrete mode, precondition, or lifecycle case","expectedOutcome":"one observable required result","evidence":["one focused proof or command"]}]}
+\`\`\`
+
+Use sequential ids O-001, O-002, ... and no more than 128 concise obligations.
+Each obligation has exactly id, invariantIds, subject, scenario,
+expectedOutcome, and evidence. invariantIds contains one or more exact G-A/G-C
+ids from the confirmed GoalEnvelope. Every GoalEnvelope acceptance criterion
+and constraint must be refined by at least one obligation. Evidence contains
+1-8 concrete repository-test, type, build, inspection, or behavioral proofs.
+Goal ids are ordinal and exact: G-A1 is the first listed Acceptance criterion,
+G-A2 the second, and so on; G-C1 is the first listed Constraint, G-C2 the
+second, and so on. Never invent an id and never omit a listed G-A/G-C parent.
+
+Make obligations atomic rather than restating a broad goal:
+- Expand each explicitly named implementation, provider, adapter, platform,
+  caller, mode, and lifecycle phase that can behave independently.
+- Give every directly callable, public, or independently tested boundary its
+  own obligation. Do not claim an inner boundary is covered only because an
+  outer wrapper enforces the behavior, unless repository evidence proves the
+  inner boundary cannot be invoked independently.
+- Separate materially different preconditions and observable outcomes. Name
+  ordering/state cases when the goal makes order or state observable.
+- A shared abstraction does not replace obligations for built-in
+  implementations or callers whose behavior can diverge.
+- Keep a single obligation together only when one focused implementation owner
+  can produce all of its evidence; otherwise split it.
+
+Even the exact trivial ADR requires this appendix in pre-acceptance outcome
+mode: the provider's own "trivial" label is not authority to bypass the
+host-owned GoalEnvelope. A malformed or missing appendix on any ready result is
+a contract error and will enter bounded repair.
+
 Question objects contain exactly {"id":"q1","text":"question","reason":"why repository evidence makes this answer necessary"}.
 The non-empty reason field is required; never omit it or set it to null. Evidence objects contain exactly
 {"path":"project/relative/path","line":1,"fact":"observed repository fact"};

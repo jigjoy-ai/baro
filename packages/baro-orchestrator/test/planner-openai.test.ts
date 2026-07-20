@@ -141,6 +141,52 @@ describe("PlannerOpenAI complexity routing", () => {
 })
 
 describe("PlannerOpenAI progressive fragments", () => {
+    it("replays an obligation-owning fragment without inventing a duplicate owner", async () => {
+        const document = `## Existing context
+One public boundary exists.
+
+## ADR-001: Preserve the public boundary
+**Status:** Accepted
+**Context:** The boundary is independently callable.
+**Decision:** Preserve its observable behavior.
+**Consequences:** A focused test owns the evidence.
+
+\`\`\`baro-obligations-v1
+{"schemaVersion":1,"obligations":[{"id":"O-001","invariantIds":["G-A1"],"subject":"the public boundary","scenario":"it is invoked directly","expectedOutcome":"its behavior remains observable","evidence":["a focused boundary test"]}]}
+\`\`\``
+        const criterion =
+            "[O-001]; Subject: the public boundary; Scenario: it is invoked directly; Required outcome: its behavior remains observable; Required evidence: a focused boundary test"
+        const published: PlannerOpenAIPlanFragmentEvent[] = []
+        const publisher = createPlannerProgressivePublisher({
+            runId: "run-obligation-replay",
+            planningId: "planning-obligation-replay",
+            trustedGoalEnvelope: {
+                objective: "Preserve the public boundary.",
+                acceptanceCriteria: ["Its behavior remains observable."],
+                constraints: [],
+                nonGoals: [],
+                assumptions: [],
+            },
+            trustedDecisionDocument: document,
+            publish: (event) => published.push(event),
+        })
+        const fragment = {
+            fragmentId: "owner",
+            stories: [{
+                ...FINAL_PRD_PUBLISHED_STORY,
+                acceptance: [criterion],
+                goalInvariantIds: ["G-A1"],
+            }],
+        }
+
+        const first = await publisher.publish(fragment)
+        const replay = await publisher.publish(fragment)
+
+        assert.equal(first.disposition, "admitted")
+        assert.equal(replay.disposition, "replayed")
+        assert.equal(published.length, 2)
+    })
+
     it("rejects unknown trusted GoalContract ids before advancing local prefix state", async () => {
         const published: PlannerOpenAIPlanFragmentEvent[] = []
         const publisher = createPlannerProgressivePublisher({

@@ -17,6 +17,8 @@ import {
     type PrdFile,
     type PrdStory,
 } from "../prd.js"
+import { renderRuntimeAmendmentsForPrompt } from "../planning/runtime-amendments.js"
+import { validatePrdArchitectureObligationCoverage } from "../planning/architecture-obligation-contract.js"
 import {
     defineSemanticEvent,
     ConductorState,
@@ -1025,6 +1027,13 @@ export class CollectiveBoard extends SerializedObserver {
         this.phase = "preparing"
         this.startedAt = Date.now()
         this.prd = this.progressivePlanning.initialize(loadPrd(this.opts.prdPath))
+        validatePrdArchitectureObligationCoverage(
+            this.prd,
+            deriveGoalContract(this.prd.goalEnvelope),
+            this.prd.runtimeGraph?.planning?.status === "open"
+                ? "partial"
+                : "complete",
+        )
         this.armSoftDeadlineTimer()
         // A run starts a fresh optimistic-concurrency domain. PRD contents are
         // durable; outstanding proposals never survive across run identities.
@@ -2051,15 +2060,42 @@ export class CollectiveBoard extends SerializedObserver {
                 this.phase !== "verifying")
         ) return
         const contract = deriveGoalContract(this.prd.goalEnvelope)
-        const invariant = contract?.invariants.find(
-            ({ id }) => id === remediation.invariantId,
-        )
+        const challengeIds = remediation.challengeIds ?? [remediation.challengeId]
+        const invariantIds = remediation.invariantIds ?? [remediation.invariantId]
+        const storyInvariantIds = remediation.story.goalInvariantIds ?? []
+        const targetPairs = challengeIds.map((challengeId, index) => ({
+            challengeId,
+            invariantId: invariantIds[index] ?? "",
+        }))
+        const canonicalTargetPairs = [...targetPairs].sort((left, right) =>
+            left.invariantId.localeCompare(right.invariantId) ||
+            left.challengeId.localeCompare(right.challengeId))
         if (
             !contract ||
             remediation.contractId !== contract.contractId ||
-            !invariant ||
-            remediation.story.goalInvariantIds?.length !== 1 ||
-            remediation.story.goalInvariantIds[0] !== invariant.id
+            challengeIds.length === 0 ||
+            challengeIds.length !== invariantIds.length ||
+            new Set(challengeIds).size !== challengeIds.length ||
+            new Set(invariantIds).size !== invariantIds.length ||
+            challengeIds.some(
+                (id) => id.trim().length === 0 || id !== id.trim(),
+            ) ||
+            invariantIds.some(
+                (id) => id.trim().length === 0 || id !== id.trim(),
+            ) ||
+            remediation.challengeId !== challengeIds[0] ||
+            remediation.invariantId !== invariantIds[0] ||
+            (invariantIds.length > 1 && !remediation.remediationGroupId) ||
+            (remediation.remediationGroupId !== undefined &&
+                (remediation.remediationGroupId.trim().length === 0 ||
+                    remediation.remediationGroupId.length > 128)) ||
+            targetPairs.some((target, index) =>
+                target.challengeId !== canonicalTargetPairs[index]?.challengeId ||
+                target.invariantId !== canonicalTargetPairs[index]?.invariantId) ||
+            invariantIds.some(
+                (id) => !contract.invariants.some((invariant) => invariant.id === id),
+            ) ||
+            !sameStrings(storyInvariantIds, invariantIds)
         ) return
 
         const existing = this.prd.userStories.find(
@@ -2129,7 +2165,7 @@ export class CollectiveBoard extends SerializedObserver {
             generation: 0,
             baseGraphVersion: this.runtimeReplans.graphVersion,
             reason:
-                `autonomous remediation for ${remediation.invariantId}: ` +
+                `autonomous remediation for ${invariantIds.join(", ")}: ` +
                 remediation.reason,
             mutation: {
                 addedStories: [remediation.story],
@@ -2206,7 +2242,16 @@ export class CollectiveBoard extends SerializedObserver {
                 runId: this.opts.runId,
                 contractId: remediation.contractId,
                 challengeId: remediation.challengeId,
+                ...(remediation.challengeIds
+                    ? { challengeIds: [...remediation.challengeIds] }
+                    : {}),
                 invariantId: remediation.invariantId,
+                ...(remediation.invariantIds
+                    ? { invariantIds: [...remediation.invariantIds] }
+                    : {}),
+                ...(remediation.remediationGroupId
+                    ? { remediationGroupId: remediation.remediationGroupId }
+                    : {}),
                 proposalId: remediation.proposalId,
                 storyId: remediation.story.id,
                 graphVersion,
@@ -3169,6 +3214,15 @@ export class CollectiveBoard extends SerializedObserver {
                 "This is the Architect's evidence-backed baseline, not an override of the global goal. Preserve it unless repository evidence proves an amendment is required; propose that amendment through the collective rather than silently diverging.",
                 "",
                 document,
+                "",
+                "---",
+                "",
+            )
+        }
+        const runtimeAmendments = renderRuntimeAmendmentsForPrompt(this.prd)
+        if (runtimeAmendments) {
+            sections.push(
+                runtimeAmendments.trim(),
                 "",
                 "---",
                 "",

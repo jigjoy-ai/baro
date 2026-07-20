@@ -277,7 +277,7 @@ describe("GoalInvariantReviewer", () => {
         }
     })
 
-    it("returns exact negative evidence without retrying", async () => {
+    it("repairs a fresh fail that omits its required remediation partition", async () => {
         const repo = createRepository()
         try {
             const runId = "run-aggregate-fail"
@@ -297,6 +297,16 @@ describe("GoalInvariantReviewer", () => {
                         violated_criteria: [
                             "[G-A1] All four provider shards jointly preserve cooperative cancellation.",
                         ],
+                        ...(calls > 1
+                            ? {
+                                  remediation_groups: [{
+                                      root_cause: "S8 drops the shared signal",
+                                      violated_criteria: [
+                                          "[G-A1] All four provider shards jointly preserve cooperative cancellation.",
+                                      ],
+                                  }],
+                              }
+                            : {}),
                     })
                 },
             })
@@ -309,10 +319,120 @@ describe("GoalInvariantReviewer", () => {
             await reviewer.idle()
 
             const completed = env.events.find(GoalAggregateReviewCompleted.is)
-            assert.equal(calls, 1)
+            assert.equal(calls, 2)
             assert.equal(completed?.data.status, "failed")
             assert.equal(completed?.data.invariants[0]?.status, "failed")
             assert.match(completed?.data.invariants[0]?.reason ?? "", /S8/)
+            assert.match(
+                completed?.data.invariants[0]?.remediationGroupId ?? "",
+                /^goal-remediation-group-[0-9a-f]{24}$/,
+            )
+        } finally {
+            rmSync(repo.path, { recursive: true, force: true })
+        }
+    })
+
+    it("requires an exact failed-criterion partition and preserves one shared root cause", async () => {
+        const repo = createRepository()
+        try {
+            const runId = "run-aggregate-grouped-fail"
+            const guardian = source("goal-guardian")
+            const verifier = source("run-verifier")
+            const repository = source("repository")
+            const request = aggregateRequestWithInvariants(runId, [
+                ["G-A1", "Every provider aborts its network stream."],
+                ["G-C1", "Every provider closes its source iterator."],
+            ])
+            const criteria = request.data.basis.invariants.map(
+                ({ invariantId, text }) => `[${invariantId}] ${text}`,
+            )
+            let systemPrompt = ""
+            const reviewer = new GoalInvariantReviewer({
+                runId,
+                cwd: repo.path,
+                modelUsed: "fake-reviewer",
+                responder: async (input) => {
+                    systemPrompt = input.systemPrompt
+                    return JSON.stringify({
+                        verdict: "fail",
+                        reasoning: "one missing cancellation bridge breaks both obligations",
+                        violated_criteria: criteria,
+                        remediation_groups: [{
+                            root_cause:
+                                "the provider adapter never forwards cancellation to its owned iterator",
+                            violated_criteria: criteria,
+                        }],
+                    })
+                },
+            })
+            reviewer.setRequestAuthority(guardian)
+            reviewer.setVerificationAuthority(verifier)
+            reviewer.setRepositoryAuthority(repository)
+            const env = joinWithCapture(reviewer)
+            deliverEvidence(env, repository, verifier, runId, repo.baseSha)
+            env.deliverSemanticEvent(guardian, request)
+            await reviewer.idle()
+
+            const completed = env.events.find(GoalAggregateReviewCompleted.is)
+            assert.equal(completed?.data.status, "failed")
+            assert.equal(completed?.data.invariants.length, 2)
+            assert.equal(
+                completed?.data.invariants[0]?.remediationGroupId,
+                completed?.data.invariants[1]?.remediationGroupId,
+            )
+            assert.match(
+                completed?.data.invariants[0]?.reason ?? "",
+                /never forwards cancellation/,
+            )
+            assert.match(systemPrompt, /remediation_groups.*required/s)
+        } finally {
+            rmSync(repo.path, { recursive: true, force: true })
+        }
+    })
+
+    it("fails closed when remediation groups omit a failed criterion", async () => {
+        const repo = createRepository()
+        try {
+            const runId = "run-aggregate-invalid-group-partition"
+            const guardian = source("goal-guardian")
+            const verifier = source("run-verifier")
+            const repository = source("repository")
+            const request = aggregateRequestWithInvariants(runId, [
+                ["G-A1", "Every provider aborts its network stream."],
+                ["G-C1", "Every provider closes its source iterator."],
+            ])
+            const criteria = request.data.basis.invariants.map(
+                ({ invariantId, text }) => `[${invariantId}] ${text}`,
+            )
+            const reviewer = new GoalInvariantReviewer({
+                runId,
+                cwd: repo.path,
+                modelUsed: "fake-reviewer",
+                maxAttempts: 1,
+                responder: async () => JSON.stringify({
+                    verdict: "fail",
+                    reasoning: "two obligations fail",
+                    violated_criteria: criteria,
+                    remediation_groups: [{
+                        root_cause: "only one criterion was assigned",
+                        violated_criteria: [criteria[0]],
+                    }],
+                }),
+            })
+            reviewer.setRequestAuthority(guardian)
+            reviewer.setVerificationAuthority(verifier)
+            reviewer.setRepositoryAuthority(repository)
+            const env = joinWithCapture(reviewer)
+            deliverEvidence(env, repository, verifier, runId, repo.baseSha)
+            env.deliverSemanticEvent(guardian, request)
+            await reviewer.idle()
+
+            const completed = env.events.find(GoalAggregateReviewCompleted.is)
+            assert.equal(completed?.data.status, "inconclusive")
+            assert.match(
+                completed?.data.invariants[0]?.reason ?? "",
+                /do not partition failed criteria/,
+            )
         } finally {
             rmSync(repo.path, { recursive: true, force: true })
         }
@@ -1311,6 +1431,16 @@ describe("GoalInvariantReviewer", () => {
 })
 
 function aggregateRequest(runId: string) {
+    return aggregateRequestWithInvariants(runId, [[
+        "G-A1",
+        "All four provider shards jointly preserve cooperative cancellation.",
+    ]])
+}
+
+function aggregateRequestWithInvariants(
+    runId: string,
+    invariantEntries: readonly (readonly [string, string])[],
+) {
     const storyIds = ["S5", "S6", "S7", "S8"]
     const basis = createGoalAggregateReviewBasis({
         contractId: "goal:a8",
@@ -1319,9 +1449,9 @@ function aggregateRequest(runId: string) {
         assumptions: [],
         verificationId: "verification-a8",
         storyIds,
-        invariants: [{
-            invariantId: "G-A1",
-            text: "All four provider shards jointly preserve cooperative cancellation.",
+        invariants: invariantEntries.map(([invariantId, text]) => ({
+            invariantId,
+            text,
             mappedStoryIds: storyIds,
             contributions: storyIds.map((storyId) => ({
                 storyId,
@@ -1330,7 +1460,7 @@ function aggregateRequest(runId: string) {
                 qualityStatus: "passed" as const,
                 independentlyPassed: true,
             })),
-        }],
+        })),
         challenges: [],
         protocolIssues: [],
     })

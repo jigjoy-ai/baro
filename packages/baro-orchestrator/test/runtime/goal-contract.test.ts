@@ -713,6 +713,19 @@ describe("GoalInvariantLedger", () => {
             }, contract),
             /revalidation target contains duplicate keys/,
         )
+        assert.throws(
+            () => normalizeGoalLedgerProjection({
+                ...canonical,
+                challenges: [{
+                    ...challenge,
+                    remediation: {
+                        ...challenge.remediation!,
+                        remediationGroupId: "x".repeat(129),
+                    },
+                }],
+            }, contract),
+            /remediation binding is malformed/,
+        )
     })
 
     it("reconciles restored mappings and evidence to the exact admitted graph", () => {

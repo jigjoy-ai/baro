@@ -41,6 +41,14 @@ Mozaik already exposes AbortSignal in its inference parameters.
 **Decision:** Pass the same AbortSignal through every provider boundary.
 **Consequences:** Existing calls without a signal remain unchanged.`
 
+const OBLIGATION_DOCUMENT = `${DECISION_DOCUMENT}
+
+## Semantic obligation contract
+
+\`\`\`baro-obligations-v1
+{"schemaVersion":1,"obligations":[{"id":"O-001","invariantIds":["G-A1"],"subject":"each directly callable affected boundary","scenario":"the changed operation is invoked","expectedOutcome":"the required behavior is observable without relying on an outer wrapper","evidence":["focused direct-boundary tests"]}]}
+\`\`\``
+
 function namedTool(tools: Tool[], name: string): Tool {
     const tool = tools.find((candidate) => candidate.name === name)
     assert.ok(tool, `missing ${name} tool`)
@@ -82,6 +90,89 @@ describe("ArchitectOpenAI bounded finalization", () => {
         assert.deepEqual(
             createCodebaseTools("/unused", { includeBash: false }).map((item) => item.name),
             ["read_file", "list_files", "file_tree", "grep", "glob"],
+        )
+    })
+
+    it("repairs a non-trivial ready outcome that omits semantic obligations", async () => {
+        const withoutObligations = {
+            schemaVersion: 1,
+            kind: "ready",
+            message: "Planning may proceed.",
+            questions: [],
+            evidence: [],
+            decisionDocument: DECISION_DOCUMENT,
+        }
+        const withObligations = {
+            ...withoutObligations,
+            decisionDocument: OBLIGATION_DOCUMENT,
+        }
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence([
+            [message(JSON.stringify(withoutObligations))],
+            [message(JSON.stringify(withObligations))],
+        ], tool)
+
+        const result = await runArchitectOpenAI({
+            goal: "Implement a non-trivial cross-boundary behavior",
+            cwd: "/unused",
+            model: "glm-5.2",
+            modeContract: PARALLEL_MODE,
+            outcomeMode: true,
+            readOnly: true,
+            maxRounds: 3,
+            maxFinalizationRetries: 1,
+            testRuntime: sequence.runtime,
+        })
+
+        assert.deepEqual(JSON.parse(result), withObligations)
+        assert.match(
+            JSON.stringify(sequence.contexts[1]!.toJSON()),
+            /requires a baro-obligations-v1 appendix/u,
+        )
+    })
+
+    it("repairs obligation parents that do not bind to the trusted goal", async () => {
+        const wrongParents = {
+            schemaVersion: 1,
+            kind: "ready",
+            message: "Planning may proceed.",
+            questions: [],
+            evidence: [],
+            decisionDocument: OBLIGATION_DOCUMENT.replace("G-A1", "G-A2"),
+        }
+        const corrected = {
+            ...wrongParents,
+            decisionDocument: OBLIGATION_DOCUMENT,
+        }
+        const tool = fakeTool(async () => "file contents")
+        const sequence = fakeSequence([
+            [message(JSON.stringify(wrongParents))],
+            [message(JSON.stringify(corrected))],
+        ], tool)
+
+        const result = await runArchitectOpenAI({
+            goal: "Implement a non-trivial cross-boundary behavior",
+            goalEnvelope: {
+                objective: "Preserve the affected boundary.",
+                acceptanceCriteria: ["The behavior remains observable."],
+                constraints: [],
+                nonGoals: [],
+                assumptions: [],
+            },
+            cwd: "/unused",
+            model: "glm-5.2",
+            modeContract: PARALLEL_MODE,
+            outcomeMode: true,
+            readOnly: true,
+            maxRounds: 3,
+            maxFinalizationRetries: 1,
+            testRuntime: sequence.runtime,
+        })
+
+        assert.deepEqual(JSON.parse(result), corrected)
+        assert.match(
+            JSON.stringify(sequence.contexts[1]!.toJSON()),
+            /unknown GoalContract invariant.*G-A2/u,
         )
     })
 
