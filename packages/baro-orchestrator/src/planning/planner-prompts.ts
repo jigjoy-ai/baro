@@ -70,10 +70,12 @@ When the Architect handoff contains a Semantic obligation contract, its exact
 canonical [O-NNN] criteria are a non-narrowable minimum contract. Copy every
 canonical criterion byte-for-byte into the \`acceptance\` array of exactly one
 implementation story. That story's \`goalInvariantIds\` must include every
-parent G-A/G-C id shown for the obligation. You may add stricter or more local
-criteria, but never paraphrase, split, weaken, duplicate, or omit a canonical
-criterion. If one owner cannot produce all required evidence, split the
-obligations across appropriately scoped implementation stories.
+parent G-A/G-C id shown for the obligation. Parent metadata is not acceptance
+text and must never be prefixed or appended to the canonical criterion. You may
+add stricter or more local criteria, but never paraphrase, split, weaken,
+duplicate, or omit a canonical criterion. If one owner cannot produce all
+required evidence, split the obligations across appropriately scoped
+implementation stories.
 
 For every run, do NOT create a final verification-only story whose job is to
 run tests, typecheck, build, or lint after the
@@ -442,15 +444,16 @@ export function buildPlannerUserMessage(args: {
             sections.push("ARCHITECT SEMANTIC OBLIGATIONS (exact, non-narrowable):")
             sections.push("")
             sections.push(
-                "Copy every exact canonical criterion below byte-for-byte into exactly one story acceptance array. The owner story must also list every parent GoalContract id. Additional local acceptance is allowed; changing or omitting these lines is not.",
+                "Copy every exact canonical criterion below byte-for-byte into exactly one story acceptance array. The owner story must also list every parent GoalContract id in goalInvariantIds. Parent metadata is never acceptance text. Additional local acceptance is allowed; changing or omitting canonical criterion lines is not.",
             )
             sections.push("")
             for (const obligation of obligationContract.obligations) {
                 sections.push(
-                    `Parents ${obligation.invariantIds.join(", ")}: ${renderArchitectureObligationCriterion(obligation)}`,
+                    `Parent GoalContract ids for ${obligation.id} (goalInvariantIds only; never acceptance text): ${obligation.invariantIds.join(", ")}`,
                 )
+                sections.push(renderArchitectureObligationCriterion(obligation))
+                sections.push("")
             }
-            sections.push("")
             sections.push("---")
             sections.push("")
         }

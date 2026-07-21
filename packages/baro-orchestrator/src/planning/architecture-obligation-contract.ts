@@ -19,10 +19,10 @@ const MAX_FIELD_CHARS = 2_000
 const MAX_EVIDENCE_CHARS = 1_000
 const OBLIGATION_ID = /^O-(\d{3})$/u
 const GOAL_INVARIANT_ID = /^G-[AC][1-9]\d*$/u
-// Reserve the complete [O-*] namespace. Any claimed obligation that is not
-// byte-for-byte canonical must fail closed, regardless of the punctuation a
-// provider puts after the closing bracket.
-const OBLIGATION_CRITERION_PREFIX = /^\[O-[^\]]+\]/u
+// Reserve the complete [O-*] namespace anywhere in an acceptance string. Any
+// claimed obligation that is not byte-for-byte canonical must fail closed,
+// including provider-added prose before or after the canonical criterion.
+const OBLIGATION_CRITERION_CLAIM = /\[(O-[^\]]+)\]/u
 
 export interface ArchitectureObligationV1 {
     id: string
@@ -207,8 +207,9 @@ export function validateArchitectureObligationCoverage(
         for (const criterion of mapping.acceptance) {
             const exact = byCriterion.get(criterion)
             if (!exact) {
-                if (OBLIGATION_CRITERION_PREFIX.test(criterion)) {
-                    const id = criterion.match(/^\[([^\]]+)\]/u)?.[1] ?? "unknown"
+                const claim = OBLIGATION_CRITERION_CLAIM.exec(criterion)
+                if (claim) {
+                    const id = claim[1] ?? "unknown"
                     throw new ArchitectureObligationContractError(
                         byId.has(id)
                             ? `story ${mapping.storyId} altered canonical architecture obligation ${id}`

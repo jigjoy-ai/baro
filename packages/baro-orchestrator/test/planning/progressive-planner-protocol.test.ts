@@ -13,6 +13,7 @@ import {
     parseArchitectureObligationContract,
     renderArchitectureObligationCriterion,
 } from "../../src/planning/architecture-obligation-contract.js"
+import { buildPlannerUserMessage } from "../../src/planning/planner-prompts.js"
 
 const STORY_S1 = {
     id: "S1",
@@ -100,6 +101,52 @@ describe("progressive planner flag contract", () => {
 })
 
 describe("progressive planner lifecycle wire", () => {
+    it("carries an exact obligation from the real Planner handoff through fragment and completion", () => {
+        const prompt = buildPlannerUserMessage({
+            goal: OBLIGATION_GOAL.objective,
+            decisionDocument: OBLIGATION_DOCUMENT,
+        })
+        const criterion = prompt
+            .split("\n")
+            .find((line) => line.startsWith("[O-001]; "))
+        assert.ok(criterion)
+        assert.equal(criterion, OBLIGATION_CRITERION)
+
+        const events: ProgressivePlannerWireEvent[] = []
+        const lifecycle = new ProgressivePlannerLifecycle(
+            {
+                runId: "run-obligation-handoff",
+                planningId: "planning-obligation-handoff",
+                bootstrapFile: "/tmp/bootstrap.json",
+                trustedGoalEnvelope: OBLIGATION_GOAL,
+                trustedDecisionDocument: OBLIGATION_DOCUMENT,
+            },
+            (event) => events.push(event),
+        )
+        const owner = {
+            ...STORY_S1,
+            acceptance: [criterion],
+            goalInvariantIds: ["G-A1"],
+        }
+
+        lifecycle.open()
+        lifecycle.publish({
+            type: "plan_fragment",
+            run_id: "run-obligation-handoff",
+            planning_id: "planning-obligation-handoff",
+            fragment_id: "owner",
+            ordinal: 1,
+            stories: [owner],
+        })
+        lifecycle.complete({ project: "p", userStories: [owner] })
+
+        assert.deepEqual(events.map(({ type }) => type), [
+            "planning_open",
+            "plan_fragment",
+            "plan_complete",
+        ])
+    })
+
     it("allows partial fragments but requires exact complete obligation ownership before closing", () => {
         const events: ProgressivePlannerWireEvent[] = []
         const lifecycle = new ProgressivePlannerLifecycle(
@@ -172,6 +219,38 @@ describe("progressive planner lifecycle wire", () => {
             }),
             /altered canonical.*O-001/u,
         )
+    })
+
+    it("rejects an A19-style prefixed obligation claim before admitting a fragment", () => {
+        const events: ProgressivePlannerWireEvent[] = []
+        const lifecycle = new ProgressivePlannerLifecycle(
+            {
+                runId: "run-obligation-prefix",
+                planningId: "planning-obligation-prefix",
+                bootstrapFile: "/tmp/bootstrap.json",
+                trustedGoalEnvelope: OBLIGATION_GOAL,
+                trustedDecisionDocument: OBLIGATION_DOCUMENT,
+            },
+            (event) => events.push(event),
+        )
+        lifecycle.open()
+
+        assert.throws(
+            () => lifecycle.publish({
+                type: "plan_fragment",
+                run_id: "run-obligation-prefix",
+                planning_id: "planning-obligation-prefix",
+                fragment_id: "prefixed",
+                ordinal: 1,
+                stories: [{
+                    ...STORY_S1,
+                    acceptance: [`Parents G-A1: ${OBLIGATION_CRITERION}`],
+                    goalInvariantIds: ["G-A1"],
+                }],
+            }),
+            /altered canonical.*O-001/u,
+        )
+        assert.deepEqual(events.map(({ type }) => type), ["planning_open"])
     })
 
     it("accepts an exact replay of a fragment that owns an obligation", () => {

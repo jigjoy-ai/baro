@@ -135,12 +135,23 @@ describe("Architecture obligation contract", () => {
             decisionDocument: decision(),
         })
         for (const obligation of contract.obligations) {
+            const criterion = renderArchitectureObligationCriterion(obligation)
+            const parentMetadata =
+                `Parent GoalContract ids for ${obligation.id} ` +
+                `(goalInvariantIds only; never acceptance text): ` +
+                obligation.invariantIds.join(", ")
             assert.match(
                 prompt,
-                new RegExp(escapeRegex(renderArchitectureObligationCriterion(obligation)), "u"),
+                new RegExp(
+                    `${escapeRegex(parentMetadata)}\\n${escapeRegex(criterion)}(?:\\n|$)`,
+                    "u",
+                ),
             )
+            assert.ok(prompt.split("\n").includes(criterion))
         }
         assert.match(prompt, /byte-for-byte into exactly one story acceptance/u)
+        assert.match(prompt, /Parent metadata is never acceptance text/u)
+        assert.doesNotMatch(prompt, /Parents G-[AC]\d+: \[O-\d{3}\]/u)
     })
 
     it("fails closed for malformed, repeated, non-contiguous and unbound contracts", () => {
@@ -233,7 +244,23 @@ describe("Architecture obligation contract", () => {
         assert.throws(
             () => validateArchitectureObligationCoverage(contract, [{
                 storyId: "S1",
+                acceptance: [`Parents G-A1: ${first}`],
+                invariantIds: ["G-A1"],
+            }], "partial"),
+            /altered canonical.*O-001/u,
+        )
+        assert.throws(
+            () => validateArchitectureObligationCoverage(contract, [{
+                storyId: "S1",
                 acceptance: ["[O-099]; invented"],
+                invariantIds: ["G-A1"],
+            }], "partial"),
+            /unknown architecture obligation O-099/u,
+        )
+        assert.throws(
+            () => validateArchitectureObligationCoverage(contract, [{
+                storyId: "S1",
+                acceptance: ["Planner note: [O-099]; invented"],
                 invariantIds: ["G-A1"],
             }], "partial"),
             /unknown architecture obligation O-099/u,
