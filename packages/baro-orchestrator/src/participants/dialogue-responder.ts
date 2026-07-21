@@ -24,6 +24,7 @@ import { harnessChildEnvironment } from "../harness-environment.js"
 import { runOpenCodeOneShot } from "../opencode-one-shot.js"
 import { runPiOneShot } from "../pi-one-shot.js"
 import {
+    createOpenAIModel,
     GenericOpenAIModel,
     isProviderCallTimeout,
     providerCallTimeoutError,
@@ -58,11 +59,17 @@ export type DialogueBackend =
     | "opencode"
     | "pi"
 
+export type DialogueEffort = "low" | "medium" | "high" | "xhigh" | "max"
+
 export interface CreateDialogueResponderOptions {
     backend: DialogueBackend
     cwd: string
     model?: string
+    /** Optional reasoning effort forwarded by harnesses that support it. */
+    effort?: DialogueEffort
     timeoutMs?: number
+    /** Safe stderr label for callers reusing this text-only transport outside Dialogue. */
+    diagnosticLabel?: string
     /** Testable TERM-to-KILL grace shared by local CLI dialogue backends. */
     terminationGraceMs?: number
     claudeBin?: string
@@ -83,6 +90,9 @@ export interface CreateDialogueResponderOptions {
 export function createDialogueResponder(
     opts: CreateDialogueResponderOptions,
 ): DialogueResponder {
+    if (opts.diagnosticLabel !== undefined) {
+        resolvedDiagnosticLabel(opts.diagnosticLabel, "dialogue")
+    }
     if (opts.backend === "openai") return createOpenAIResponder(opts)
     if (opts.backend === "codex") return createCodexResponder(opts)
     if (opts.backend === "opencode") return createOpenCodeResponder(opts)
@@ -94,6 +104,10 @@ function createOpenCodeResponder(
     opts: CreateDialogueResponderOptions,
 ): DialogueResponder {
     const requestedModel = opts.model ?? "opencode-default"
+    const diagnosticLabel = resolvedDiagnosticLabel(
+        opts.diagnosticLabel,
+        "opencode-dialogue",
+    )
     const telemetry = localHarnessTelemetryDescriptor(
         "opencode",
         requestedModel,
@@ -110,7 +124,7 @@ function createOpenCodeResponder(
                     opencodeBin: opts.opencodeBin,
                     timeoutMs: opts.timeoutMs ?? 60_000,
                     terminationGraceMs: opts.terminationGraceMs,
-                    label: "opencode-dialogue",
+                    label: diagnosticLabel,
                     safeEvaluatorSystemPrompt: input.systemPrompt,
                     signal,
                     onInvocation: (item) => {
@@ -140,7 +154,8 @@ function createOpenCodeResponder(
             const failure = dialogueFailureAttribution(error, signal)
             throw new DialogueResponderInvocationError(
                 "OpenCode dialogue provider failed",
-                failure.status !== "cancelled" && observation
+                failure.status !== "cancelled" &&
+                    observation?.status === failure.status
                     ? localHarnessInvocation(
                           "opencode",
                           requestedModel,
@@ -150,6 +165,7 @@ function createOpenCodeResponder(
                           failure.status,
                           failure.reason,
                       ),
+                { cause: error },
             )
         }
     }
@@ -160,6 +176,10 @@ function createPiResponder(
     opts: CreateDialogueResponderOptions,
 ): DialogueResponder {
     const requestedModel = opts.model ?? "pi-default"
+    const diagnosticLabel = resolvedDiagnosticLabel(
+        opts.diagnosticLabel,
+        "pi-dialogue",
+    )
     const telemetry = localHarnessTelemetryDescriptor("pi", requestedModel)
     const responder: DialogueResponder = async (input, signal) => {
         let observation: RunnerInvocationObservation | undefined
@@ -173,7 +193,7 @@ function createPiResponder(
                     piBin: opts.piBin,
                     timeoutMs: opts.timeoutMs ?? 60_000,
                     terminationGraceMs: opts.terminationGraceMs,
-                    label: "pi-dialogue",
+                    label: diagnosticLabel,
                     safeEvaluatorSystemPrompt: input.systemPrompt,
                     signal,
                     onInvocation: (item) => {
@@ -203,7 +223,8 @@ function createPiResponder(
             const failure = dialogueFailureAttribution(error, signal)
             throw new DialogueResponderInvocationError(
                 "Pi dialogue provider failed",
-                failure.status !== "cancelled" && observation
+                failure.status !== "cancelled" &&
+                    observation?.status === failure.status
                     ? localHarnessInvocation(
                           "pi",
                           requestedModel,
@@ -213,6 +234,7 @@ function createPiResponder(
                           failure.status,
                           failure.reason,
                       ),
+                { cause: error },
             )
         }
     }
@@ -223,6 +245,10 @@ function createCodexResponder(
     opts: CreateDialogueResponderOptions,
 ): DialogueResponder {
     const requestedModel = opts.model ?? "codex-default"
+    const diagnosticLabel = resolvedDiagnosticLabel(
+        opts.diagnosticLabel,
+        "codex-dialogue",
+    )
     const telemetry = codexTelemetryDescriptor(requestedModel)
     const responder: DialogueResponder = async (input, signal) => {
         let observation: RunnerInvocationObservation | undefined
@@ -232,10 +258,11 @@ function createCodexResponder(
                 promptViaStdin: true,
                 cwd: opts.cwd,
                 model: opts.model,
+                reasoningEffort: opts.effort,
                 codexBin: opts.codexBin,
                 timeoutMs: opts.timeoutMs ?? 60_000,
                 terminationGraceMs: opts.terminationGraceMs,
-                label: "codex-dialogue",
+                label: diagnosticLabel,
                 // Conversation is an intent/status surface. It has no reason
                 // to mutate a checkout, inherit local instructions/policies,
                 // or retain a separate Codex thread. Codex has no tool-less
@@ -279,12 +306,14 @@ function createCodexResponder(
             const failure = dialogueFailureAttribution(error, signal)
             throw new DialogueResponderInvocationError(
                 "Codex dialogue provider failed",
-                failure.status !== "cancelled" && observation
+                failure.status !== "cancelled" &&
+                    observation?.status === failure.status
                     ? codexInvocation(requestedModel, observation)
                     : telemetry.failureInvocation(
                           failure.status,
                           failure.reason,
                       ),
+                { cause: error },
             )
         }
     }
@@ -307,10 +336,23 @@ function createClaudeResponder(
                     "json",
                     "--model",
                     requestedModel,
+                    ...(opts.effort ? ["--effort", opts.effort] : []),
                     // Dialogue is communication-only. An empty tool allow-list
                     // prevents the backing CLI from editing or shelling out.
                     "--tools",
                     "",
+                    ...(opts.safeReadOnlyEvaluator
+                        ? [
+                              "--safe-mode",
+                              "--disable-slash-commands",
+                              "--strict-mcp-config",
+                              "--mcp-config",
+                              "{}",
+                              "--no-session-persistence",
+                              "--permission-mode",
+                              "dontAsk",
+                          ]
+                        : []),
                     "--system-prompt",
                     input.systemPrompt,
                 ],
@@ -337,6 +379,7 @@ function createClaudeResponder(
                     failure.status,
                     failure.reason,
                 ),
+                { cause: error },
             )
         }
 
@@ -345,13 +388,14 @@ function createClaudeResponder(
             const value: unknown = JSON.parse(stdout)
             if (!isRecord(value)) throw new Error("wrapper is not an object")
             wrapper = value
-        } catch {
+        } catch (error) {
             throw new DialogueResponderInvocationError(
                 "Claude dialogue returned malformed JSON",
                 claudeInvocation(
                     requestedModel,
                     succeededUnknownObservation("parse_error", "claude"),
                 ),
+                { cause: error },
             )
         }
 
@@ -374,12 +418,12 @@ function createOpenAIResponder(
     opts: CreateDialogueResponderOptions,
 ): DialogueResponder {
     const requestedModel = opts.model ?? "gpt-5.4-mini"
-    const model = new GenericOpenAIModel(
-        requestedModel,
-        opts.openaiConnection,
-    )
+    const model = createOpenAIModel(requestedModel, {
+        connection: opts.openaiConnection,
+        reasoningEffort: opts.effort,
+    })
     model.setTools([])
-    const genericEndpoint = Boolean(opts.openaiConnection?.baseURL)
+    const genericEndpoint = model instanceof GenericOpenAIModel
     const billingEnabled = Boolean(
         opts.billingCoordinator?.trustsEndpoint(
             opts.openaiConnection?.baseURL ?? process.env.OPENAI_BASE_URL,
@@ -441,6 +485,7 @@ function createOpenAIResponder(
                     failure.status,
                     failure.reason,
                 ),
+                { cause: error },
             )
         } finally {
             providerCall.close()
@@ -680,6 +725,17 @@ function claudeObservation(
     }
 }
 
+/** Shared Claude CLI normalization for other text-only model phases. */
+export const normalizeClaudeRunnerObservation = claudeObservation
+
+/** Shared bounded fallback for a Claude process whose wrapper is unavailable. */
+export function unknownClaudeRunnerObservation(
+    status: ModelInvocationStatus,
+    reason: UnknownMetricReason,
+): RunnerInvocationObservation {
+    return unknownObservation(status, reason, "claude")
+}
+
 function openAIObservation(
     usage: TokenUsage | undefined,
     requestedModel: string,
@@ -698,6 +754,21 @@ function openAIObservation(
         provider: null,
         resolvedModel: requestedModel,
         providerRequestId: null,
+    }
+}
+
+/** Shared Mozaik/OpenAI usage normalization for other text-only model phases. */
+export const normalizeOpenAIRunnerObservation = openAIObservation
+
+/** Shared failed-round fallback for OpenAI phases without provider usage. */
+export function unknownOpenAIRunnerObservation(
+    status: ModelInvocationStatus,
+    reason: UnknownMetricReason,
+    requestedModel: string,
+): RunnerInvocationObservation {
+    return {
+        ...unknownObservation(status, reason, "openai"),
+        resolvedModel: requestedModel,
     }
 }
 
@@ -893,6 +964,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value)
 }
 
+function resolvedDiagnosticLabel(
+    configured: string | undefined,
+    fallback: string,
+): string {
+    if (configured === undefined) return fallback
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(configured)) {
+        throw new TypeError(
+            "dialogue diagnosticLabel must be 1-128 safe label characters",
+        )
+    }
+    return configured
+}
+
 function isTimeout(error: unknown): boolean {
     if (!isRecord(error)) return false
     if (
@@ -903,6 +987,9 @@ function isTimeout(error: unknown): boolean {
     return typeof error.message === "string"
         && /(?:abort|timed?\s*out|timeout)/i.test(error.message)
 }
+
+/** Shared timeout classification for wrappers that use the same CLI runtime. */
+export const isRunnerTimeoutError = isTimeout
 
 type DialogueFailureStatus = Extract<
     ModelInvocationStatus,

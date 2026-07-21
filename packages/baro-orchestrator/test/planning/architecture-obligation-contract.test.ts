@@ -3,9 +3,12 @@ import { describe, it } from "node:test"
 
 import {
     ArchitectureObligationContractError,
+    MAX_ARCHITECTURE_DECISION_DOCUMENT_BYTES,
     architectureObligationsFromDecision,
+    attachArchitectureObligationContract,
     parseArchitectureObligationContract,
     renderArchitectureObligationCriterion,
+    validateArchitectureObligationContract,
     validateArchitectureObligationCoverage,
 } from "../../src/planning/architecture-obligation-contract.js"
 import { deriveGoalContract } from "../../src/runtime/goal-contract.js"
@@ -66,6 +69,12 @@ describe("Architecture obligation contract", () => {
             parseArchitectureObligationContract("## ADR-001: Legacy\n**Status:** Accepted"),
             null,
         )
+        assert.equal(
+            parseArchitectureObligationContract(
+                "The ADR discusses baro-obligations-v1 as plain prose.",
+            ),
+            null,
+        )
     })
 
     it("parses, binds, freezes and renders a stable canonical criterion", () => {
@@ -76,6 +85,46 @@ describe("Architecture obligation contract", () => {
         assert.equal(
             renderArchitectureObligationCriterion(contract.obligations[0]!),
             "[O-001]; Subject: the direct public boundary; Scenario: the changed operation is invoked directly; Required outcome: the required behavior remains observable; Required evidence: a focused direct-boundary test",
+        )
+    })
+
+    it("attaches exactly one canonical fence and rejects a pre-existing marker", () => {
+        const contract = validateArchitectureObligationContract(obligationJson())
+        const attached = attachArchitectureObligationContract(
+            `## ADR-001: Preserve behavior\n**Status:** Accepted   \n`,
+            contract,
+        )
+        assert.equal(
+            attached.split("baro-obligations-v1").length - 1,
+            1,
+        )
+        assert.match(
+            attached,
+            /\*\*Status:\*\* Accepted\s+```baro-obligations-v1\n\{"schemaVersion":1,"obligations":/u,
+        )
+        assert.deepEqual(parseArchitectureObligationContract(attached), contract)
+        const referenced = attachArchitectureObligationContract(
+            "## ADR-001: Document the protocol\n" +
+                "**Status:** Accepted\n" +
+                "**Context:** The protocol is public.\n" +
+                "**Decision:** Keep the existing wire name.\n" +
+                "**Consequences:** Documentation may name baro-obligations-v1 in prose.",
+            contract,
+        )
+        assert.deepEqual(
+            parseArchitectureObligationContract(referenced),
+            contract,
+        )
+        assert.throws(
+            () => attachArchitectureObligationContract(decision(), contract),
+            /already contains the reserved/u,
+        )
+        assert.throws(
+            () => attachArchitectureObligationContract(
+                `## ADR-001: Oversized\n${"x".repeat(MAX_ARCHITECTURE_DECISION_DOCUMENT_BYTES)}`,
+                contract,
+            ),
+            /bytes after attaching obligations; limit/u,
         )
     })
 

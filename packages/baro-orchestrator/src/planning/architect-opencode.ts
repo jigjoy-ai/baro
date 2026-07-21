@@ -10,10 +10,17 @@ import { join } from "node:path"
 
 import { runOpenCodeOneShot } from "../opencode-one-shot.js"
 import {
+    ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_SYSTEM_PROMPT,
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
+import {
+    bufferedArchitectRunnerObserver,
+    isArchitectProcessLaunchFailure,
+    type ArchitectInvocationObserver,
+} from "./architect-invocation.js"
+import type { ArchitectOutcomeContractMode } from "./architect-outcome.js"
 import type { ModeContract } from "./planner-prompts.js"
 
 export interface RunArchitectOpenCodeOptions {
@@ -28,12 +35,19 @@ export interface RunArchitectOpenCodeOptions {
      *  3-minute timeout mid-exploration. */
     timeoutMs?: number
     outcomeMode?: boolean
+    /** Strict outcome phase. Defaults to the complete ADR + obligations contract. */
+    outcomeContractMode?: ArchitectOutcomeContractMode
+    /** Optional observational telemetry for this one-shot Architect process. */
+    onInvocation?: ArchitectInvocationObserver
 }
 
 export async function runArchitectOpenCode(
     opts: RunArchitectOpenCodeOptions,
 ): Promise<string> {
     const userMessage = buildArchitectUserMessage(opts.goal, opts.projectContext, opts.modeContract)
+    const outcomePrompt = (opts.outcomeContractMode ?? "complete") === "decision"
+        ? ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT
+        : ARCHITECT_OUTCOME_SYSTEM_PROMPT
     const prompt = opts.outcomeMode
         ? userMessage
         : `${ARCHITECT_SYSTEM_PROMPT}\n\n${userMessage}`
@@ -43,6 +57,7 @@ export async function runArchitectOpenCode(
     const isolatedCwd = opts.outcomeMode
         ? mkdtempSync(join(tmpdir(), "baro-architect-opencode-"))
         : undefined
+    const invocationTelemetry = bufferedArchitectRunnerObserver(opts.onInvocation)
 
     let text: string
     try {
@@ -53,10 +68,21 @@ export async function runArchitectOpenCode(
             opencodeBin: opts.opencodeBin,
             timeoutMs: opts.timeoutMs ?? 600_000,
             label: "opencode-architect",
+            ...(invocationTelemetry.onInvocation
+                ? { onInvocation: invocationTelemetry.onInvocation }
+                : {}),
             ...(opts.outcomeMode
-                ? { safeEvaluatorSystemPrompt: ARCHITECT_OUTCOME_SYSTEM_PROMPT }
+                ? { safeEvaluatorSystemPrompt: outcomePrompt }
                 : {}),
         })
+        invocationTelemetry.flush()
+    } catch (error) {
+        if (isArchitectProcessLaunchFailure(error)) {
+            invocationTelemetry.discard()
+        } else {
+            invocationTelemetry.flush()
+        }
+        throw error
     } finally {
         if (isolatedCwd) rmSync(isolatedCwd, { recursive: true, force: true })
     }

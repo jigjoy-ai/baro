@@ -19,9 +19,11 @@ import {
 } from "@mozaik-ai/core"
 
 import {
+    createOpenAIModel,
     GenericOpenAIModel,
     UsageAccumulator,
     runInferenceRound,
+    type InferenceRound,
 } from "./openai-runtime.js"
 import type { GatewayBillingCoordinator } from "../billing/index.js"
 import { deriveGoalContract } from "../runtime/goal-contract.js"
@@ -373,6 +375,7 @@ export async function runOpenAIIntake(
 export async function decideExecutionMode(
     opts: Pick<RunPlannerOpenAIOptions, "goal" | "quick" | "projectContext" | "decisionDocument" | "billingCoordinator">,
     plannerModel: GenerativeModel,
+    runtime: DecideExecutionModeRuntime = {},
 ): Promise<ModeContract> {
     if (opts.quick) {
         return {
@@ -384,26 +387,81 @@ export async function decideExecutionMode(
         }
     }
 
-    const intakeModel = pickModel(process.env.BARO_INTAKE_MODEL || plannerModel.specification.name)
+    const intakeOverride = process.env.BARO_INTAKE_MODEL?.trim()
+    const plannerConnection = (plannerModel as Partial<GenericOpenAIModel>)
+        .connection
+    const intakeModel = intakeOverride
+        ? createOpenAIModel(intakeOverride, {
+              connection: plannerConnection,
+              reasoningEffort: plannerModel.getReasoningEffort(),
+          })
+        : plannerModel
     setModelTools(intakeModel, [])
     const prompt = buildIntakePrompt(opts)
 
     const context = ModelContext.create("intake")
         .addContextItem(SystemMessageItem.create("You classify software tasks for an autonomous PR workflow. Output JSON only."))
         .addContextItem(UserMessageItem.create(prompt))
-    const result = await runInferenceRound(
-        context,
-        intakeModel,
-        opts.billingCoordinator
-            ? billingRoundOptions(opts.billingCoordinator, "intake", 1)
-            : {},
-    )
+    let result: InferenceRound
+    try {
+        result = await (runtime.inferRound ?? runInferenceRound)(
+            context,
+            intakeModel,
+            {
+                ...(opts.billingCoordinator
+                    ? billingRoundOptions(opts.billingCoordinator, "intake", 1)
+                    : {}),
+                ...(runtime.signal ? { signal: runtime.signal } : {}),
+            },
+        )
+        observeIntakeInvocation(runtime.onInvocation, {
+            status: "succeeded",
+            model: intakeModel,
+            result,
+        })
+    } catch (error) {
+        observeIntakeInvocation(runtime.onInvocation, {
+            status: "failed",
+            model: intakeModel,
+            error,
+        })
+        throw error
+    }
     const raw = result.items
         .filter((i) => i.type === "message")
         .map((i) => ((i.toJSON() as { content?: Array<{ text?: string }> }).content?.[0]?.text ?? ""))
         .join("\n")
         .trim()
     return parseModeContract(raw)
+}
+
+export type OpenAIIntakeInvocationEvent =
+    | Readonly<{
+          status: "succeeded"
+          model: GenerativeModel
+          result: InferenceRound
+      }>
+    | Readonly<{
+          status: "failed"
+          model: GenerativeModel
+          error: unknown
+      }>
+
+export interface DecideExecutionModeRuntime {
+    readonly signal?: AbortSignal
+    readonly inferRound?: typeof runInferenceRound
+    readonly onInvocation?: (event: OpenAIIntakeInvocationEvent) => void
+}
+
+function observeIntakeInvocation(
+    observer: DecideExecutionModeRuntime["onInvocation"],
+    event: OpenAIIntakeInvocationEvent,
+): void {
+    try {
+        observer?.(event)
+    } catch {
+        // Intake telemetry is observational and cannot alter routing.
+    }
 }
 
 function billingRoundOptions(

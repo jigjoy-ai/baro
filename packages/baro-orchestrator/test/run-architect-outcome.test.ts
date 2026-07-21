@@ -52,6 +52,31 @@ interface ScriptResult {
     stderr: string
 }
 
+interface ModelUsageEvent {
+    type: "model_usage"
+    measurement: {
+        backend: string
+        requestedModel: string | null
+        status: string
+        invocationId: string
+    }
+}
+
+function modelUsageEvents(stdout: string): ModelUsageEvent[] {
+    return stdout
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as {
+            type?: unknown
+            measurement?: unknown
+        })
+        .filter((event): event is ModelUsageEvent =>
+            event.type === "model_usage" &&
+            typeof event.measurement === "object" &&
+            event.measurement !== null
+        )
+}
+
 describe("run-architect ArchitectOutcomeV1 mode", () => {
     it("wraps fake Claude output with trusted correlation and read-only flags", async () => {
         await withTempDir("baro-architect-outcome-claude-", async (dir) => {
@@ -60,7 +85,15 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
             const run = await runArchitect(dir, "claude", ["--claude-bin", binary])
 
             assert.equal(run.code, 0, run.stderr)
-            assert.equal(run.stdout, "")
+            const [usage] = modelUsageEvents(run.stdout)
+            assert.ok(usage)
+            assert.equal(usage.measurement.backend, "claude")
+            assert.equal(usage.measurement.requestedModel, "opus")
+            assert.equal(usage.measurement.status, "succeeded")
+            assert.match(
+                usage.measurement.invocationId,
+                /architect-decision:1:provider:1$/u,
+            )
             assertTransport(dir)
 
             const argv = readJson<string[]>(capture)
@@ -110,6 +143,137 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
         })
     })
 
+    it("assembles a ready Codex decision from a separate bounded obligation call", async () => {
+        await withTempDir("baro-architect-outcome-codex-ready-", async (dir) => {
+            const capture = join(dir, "codex-phases.jsonl")
+            const binary = writePhasedFakeCodex(dir, capture)
+            const run = await runArchitect(dir, "codex", [
+                "--codex-bin", binary,
+                "--effort", "high",
+            ])
+
+            assert.equal(run.code, 0, run.stderr)
+            const transport = readJson<{
+                outcome: {
+                    kind: string
+                    decisionDocument: string
+                }
+            }>(join(dir, "outcome.json"))
+            assert.equal(transport.outcome.kind, "ready")
+            assert.match(
+                transport.outcome.decisionDocument,
+                /```baro-obligations-v1\n/u,
+            )
+            assert.match(transport.outcome.decisionDocument, /"id":"O-001"/u)
+            assert.match(
+                transport.outcome.decisionDocument,
+                /"invariantIds":\["G-A1"\]/u,
+            )
+
+            const invocations = readFileSync(capture, "utf8")
+                .trim()
+                .split("\n")
+                .map((line) => JSON.parse(line) as {
+                    argv: string[]
+                    input: string
+                })
+            assert.equal(invocations.length, 2)
+            assert.ok(invocations[0]!.argv.includes("--output-schema"))
+            assert.equal(invocations[1]!.argv.includes("--output-schema"), false)
+            for (const invocation of invocations) {
+                assert.ok(
+                    invocation.argv.includes('model_reasoning_effort="high"'),
+                )
+            }
+            assert.match(invocations[1]!.input, /G-A1/u)
+            assert.match(invocations[1]!.input, /ADR-001/u)
+
+            const usages = modelUsageEvents(run.stdout)
+            assert.equal(usages.length, 2)
+            assert.deepEqual(
+                usages.map((event) => event.measurement.requestedModel),
+                ["codex-default", "codex-default"],
+            )
+            assert.match(
+                usages[0]!.measurement.invocationId,
+                /architect-decision:1:provider:1$/u,
+            )
+            assert.match(
+                usages[1]!.measurement.invocationId,
+                /architect-obligations:1:provider:1$/u,
+            )
+        })
+    })
+
+    it("assembles a ready Claude decision with the same model and effort in both phases", async () => {
+        await withTempDir("baro-architect-outcome-claude-ready-", async (dir) => {
+            const capture = join(dir, "claude-phases.jsonl")
+            const binary = writePhasedFakeClaude(dir, capture)
+            const run = await runArchitect(dir, "claude", [
+                "--claude-bin", binary,
+                "--effort", "max",
+            ])
+
+            assert.equal(run.code, 0, run.stderr)
+            const transport = readJson<{
+                outcome: { kind: string; decisionDocument: string }
+            }>(join(dir, "outcome.json"))
+            assert.equal(transport.outcome.kind, "ready")
+            assert.match(transport.outcome.decisionDocument, /"id":"O-001"/u)
+
+            const invocations = readFileSync(capture, "utf8")
+                .trim()
+                .split("\n")
+                .map((line) => JSON.parse(line) as string[])
+            assert.equal(invocations.length, 2)
+            assert.ok(invocations[0]!.includes("--json-schema"))
+            assert.equal(invocations[1]!.includes("--json-schema"), false)
+            assert.equal(valueAfter(invocations[0]!, "--tools"), "Read,Glob,Grep")
+            assert.equal(valueAfter(invocations[1]!, "--tools"), "")
+            assert.ok(invocations[1]!.includes("--safe-mode"))
+            assert.ok(invocations[1]!.includes("--disable-slash-commands"))
+            assert.ok(invocations[1]!.includes("--strict-mcp-config"))
+            assert.ok(invocations[1]!.includes("--no-session-persistence"))
+            assert.equal(valueAfter(invocations[1]!, "--mcp-config"), "{}")
+            assert.equal(valueAfter(invocations[1]!, "--permission-mode"), "dontAsk")
+            for (const argv of invocations) {
+                assert.equal(valueAfter(argv, "--model"), "opus")
+                assert.equal(valueAfter(argv, "--effort"), "max")
+            }
+            assert.deepEqual(
+                modelUsageEvents(run.stdout).map((event) =>
+                    event.measurement.requestedModel
+                ),
+                ["opus", "opus"],
+            )
+        })
+    })
+
+    it("shares one wall-clock budget across Codex decision and obligation phases", async () => {
+        await withTempDir("baro-architect-outcome-codex-budget-", async (dir) => {
+            const capture = join(dir, "codex-phases.jsonl")
+            const binary = writePhasedFakeCodex(dir, capture, {
+                decision: 100,
+                obligation: 800,
+            })
+            const run = await runArchitect(dir, "codex", [
+                "--codex-bin", binary,
+                "--timeout-ms", "1200",
+            ])
+
+            assert.notEqual(run.code, 0, run.stderr)
+            assert.match(run.stderr, /shared 1200ms phase budget/u)
+            assert.equal(existsSync(join(dir, "outcome.json")), false)
+            assert.ok(
+                modelUsageEvents(run.stdout).some((event) =>
+                    event.measurement.status === "timed_out" &&
+                    /architect-obligations/u.test(event.measurement.invocationId)
+                ),
+                run.stdout,
+            )
+        })
+    })
+
     it("uses the host-owned timeout across every CLI harness adapter", async () => {
         for (const backend of ["claude", "codex", "opencode", "pi"] as const) {
             await withTempDir(
@@ -141,6 +305,16 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
                             : /timedOut=true \(cap=50ms\)/,
                     )
                     assert.equal(existsSync(join(dir, "outcome.json")), false)
+                    assert.ok(
+                        modelUsageEvents(run.stdout).some((event) =>
+                            event.measurement.backend === backend &&
+                            event.measurement.status === "timed_out" &&
+                            /architect-decision/u.test(
+                                event.measurement.invocationId,
+                            )
+                        ),
+                        `${backend}: ${run.stdout}`,
+                    )
                 },
             )
         }
@@ -209,14 +383,76 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
         }
     })
 
+    it("assembles ready OpenCode and Pi decisions through their isolated obligation phase", async () => {
+        for (const backend of ["opencode", "pi"] as const) {
+            await withTempDir(`baro-architect-${backend}-ready-`, async (dir) => {
+                const capture = join(dir, `${backend}-phases.jsonl`)
+                const binary = writePhasedFakeLocalHarness(
+                    dir,
+                    backend,
+                    capture,
+                )
+                const run = await runArchitect(dir, backend, [
+                    backend === "opencode" ? "--opencode-bin" : "--pi-bin",
+                    binary,
+                ])
+
+                assert.equal(run.code, 0, `${backend}: ${run.stderr}`)
+                const transport = readJson<{
+                    outcome: { kind: string; decisionDocument: string }
+                }>(join(dir, "outcome.json"))
+                assert.equal(transport.outcome.kind, "ready")
+                assert.match(transport.outcome.decisionDocument, /"id":"O-001"/u)
+
+                const invocations = readFileSync(capture, "utf8")
+                    .trim()
+                    .split("\n")
+                    .map((line) => JSON.parse(line) as {
+                        cwd: string
+                        input: string
+                    })
+                assert.equal(invocations.length, 2)
+                assert.doesNotMatch(invocations[0]!.input, /targetInvariantIds/u)
+                assert.match(invocations[1]!.input, /targetInvariantIds/u)
+                assert.notEqual(invocations[0]!.cwd, dir)
+                assert.notEqual(invocations[1]!.cwd, dir)
+                assert.deepEqual(
+                    modelUsageEvents(run.stdout).map((event) =>
+                        event.measurement.requestedModel
+                    ),
+                    [`${backend}-default`, `${backend}-default`],
+                )
+            })
+        }
+    })
+
     it("fails closed before writing transport when a provider forges authority", async () => {
         await withTempDir("baro-architect-outcome-forged-", async (dir) => {
             const forged = { ...NEEDS_INPUT, sessionId: "model-session" }
             const binary = writeFakeClaude(dir, forged, join(dir, "capture.json"))
+            const outcomePath = join(dir, "outcome.json")
+            writeFileSync(outcomePath, "pre-existing-sentinel")
             const run = await runArchitect(dir, "claude", ["--claude-bin", binary])
 
             assert.notEqual(run.code, 0)
             assert.match(run.stderr, /exact v1 schema/)
+            assert.equal(readFileSync(outcomePath, "utf8"), "pre-existing-sentinel")
+        })
+    })
+
+    it("contains Gateway billing configuration errors in the normal failure path", async () => {
+        await withTempDir("baro-architect-outcome-billing-config-", async (dir) => {
+            const run = await runArchitect(dir, "openai", [], {
+                ...process.env,
+                BARO_GATEWAY_BILLING_URL: "http://127.0.0.1:8787",
+                BARO_GATEWAY_BILLING_API_KEY: "",
+                JIGJOY_API_KEY: "",
+                OPENAI_API_KEY: "",
+            })
+
+            assert.equal(run.code, 1, run.stderr)
+            assert.match(run.stderr, /\[run-architect\] FAILED after/u)
+            assert.doesNotMatch(run.stderr, /\[run-architect\] crashed:/u)
             assert.equal(existsSync(join(dir, "outcome.json")), false)
         })
     })
@@ -278,8 +514,9 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
 
 async function runArchitect(
     dir: string,
-    backend: "claude" | "codex" | "opencode" | "pi",
+    backend: "claude" | "openai" | "codex" | "opencode" | "pi",
     backendArgs: string[],
+    environment: NodeJS.ProcessEnv = process.env,
 ): Promise<ScriptResult> {
     const goalEnvelopeFile = join(dir, "goal-envelope.json")
     writeFileSync(goalEnvelopeFile, JSON.stringify({
@@ -299,7 +536,7 @@ async function runArchitect(
         "--conversation-session-id", "session-trusted",
         "--goal-request-id", "goal-request-trusted",
         "--architect-request-id", "architect-request-trusted",
-    ])
+    ], environment)
 }
 
 function assertTransport(dir: string): void {
@@ -334,6 +571,42 @@ console.log(JSON.stringify({ result: ${JSON.stringify(raw)} }));
 `)
 }
 
+function writePhasedFakeClaude(dir: string, capture: string): string {
+    const ready = {
+        schemaVersion: 1,
+        kind: "ready",
+        message: "Repository validation is complete.",
+        questions: [],
+        evidence: [],
+        decisionDocument: DECISION_DOCUMENT,
+    }
+    const segment = {
+        schemaVersion: 1,
+        obligations: [{
+            adrIds: ["ADR-001"],
+            invariantIds: ["G-A1"],
+            subject: "the strict outcome boundary",
+            scenario: "the validated goal advances to planning",
+            expectedOutcome: "the repository validation remains observable",
+            evidence: ["a focused outcome transport test"],
+        }],
+    }
+    return executable(dir, "fake-phased-claude.mjs", `
+import { appendFileSync } from "node:fs";
+const argv = process.argv.slice(2);
+appendFileSync(${JSON.stringify(capture)}, JSON.stringify(argv) + "\\n");
+const decisionPhase = argv.includes("--json-schema");
+const payload = decisionPhase
+  ? ${JSON.stringify(ready)}
+  : ${JSON.stringify(segment)};
+console.log(JSON.stringify({
+  result: JSON.stringify(payload),
+  ...(decisionPhase ? { structured_output: payload } : {}),
+  usage: { input_tokens: 10, output_tokens: 5 },
+}));
+`)
+}
+
 function writeFakeCodex(dir: string, payload: unknown, capture: string): string {
     return executable(dir, "fake-codex.mjs", `
 import { readFileSync, writeFileSync } from "node:fs";
@@ -344,6 +617,97 @@ writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, schema }));
 console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "Repository inspection is complete; preparing the terminal outcome." } }));
 console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(${JSON.stringify(payload)}) } }));
 console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } }));
+`)
+}
+
+function writePhasedFakeCodex(
+    dir: string,
+    capture: string,
+    delay: number | { decision: number; obligation: number } = 0,
+): string {
+    const decisionDelay = typeof delay === "number" ? delay : delay.decision
+    const obligationDelay = typeof delay === "number" ? delay : delay.obligation
+    const ready = {
+        schemaVersion: 1,
+        kind: "ready",
+        message: "Repository validation is complete.",
+        questions: [],
+        evidence: [],
+        decisionDocument: DECISION_DOCUMENT,
+    }
+    const segment = {
+        schemaVersion: 1,
+        obligations: [{
+            adrIds: ["ADR-001"],
+            invariantIds: ["G-A1"],
+            subject: "the strict outcome boundary",
+            scenario: "the validated goal advances to planning",
+            expectedOutcome: "the repository validation remains observable",
+            evidence: ["a focused outcome transport test"],
+        }],
+    }
+    return executable(dir, "fake-phased-codex.mjs", `
+import { appendFileSync } from "node:fs";
+const argv = process.argv.slice(2);
+let input = "";
+if (argv.includes("-")) {
+  for await (const chunk of process.stdin) input += chunk;
+} else {
+  input = argv.at(-1) ?? "";
+}
+appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, input }) + "\\n");
+const payload = argv.includes("--output-schema")
+  ? ${JSON.stringify(ready)}
+  : ${JSON.stringify(segment)};
+const delayMs = argv.includes("--output-schema")
+  ? ${decisionDelay}
+  : ${obligationDelay};
+setTimeout(() => {
+  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(payload) } }));
+  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } }));
+}, delayMs);
+`)
+}
+
+function writePhasedFakeLocalHarness(
+    dir: string,
+    backend: "opencode" | "pi",
+    capture: string,
+): string {
+    const ready = {
+        schemaVersion: 1,
+        kind: "ready",
+        message: "Repository validation is complete.",
+        questions: [],
+        evidence: [],
+        decisionDocument: DECISION_DOCUMENT,
+    }
+    const segment = {
+        schemaVersion: 1,
+        obligations: [{
+            adrIds: ["ADR-001"],
+            invariantIds: ["G-A1"],
+            subject: "the strict outcome boundary",
+            scenario: "the validated goal advances to planning",
+            expectedOutcome: "the repository validation remains observable",
+            evidence: ["a focused outcome transport test"],
+        }],
+    }
+    const output = backend === "opencode"
+        ? `console.log(JSON.stringify({ type: "text", part: { text: JSON.stringify(payload) } }));`
+        : `console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(payload) }] } }));`
+    return executable(dir, `fake-phased-${backend}.mjs`, `
+import { appendFileSync } from "node:fs";
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+appendFileSync(${JSON.stringify(capture)}, JSON.stringify({
+  cwd: process.cwd(),
+  input,
+}) + "\\n");
+const payload = input.includes("targetInvariantIds")
+  ? ${JSON.stringify(segment)}
+  : ${JSON.stringify(ready)};
+${output}
 `)
 }
 
@@ -422,11 +786,14 @@ function executable(dir: string, name: string, body: string): string {
     return path
 }
 
-function runScript(args: string[]): Promise<ScriptResult> {
+function runScript(
+    args: string[],
+    environment: NodeJS.ProcessEnv = process.env,
+): Promise<ScriptResult> {
     return new Promise((resolve, reject) => {
         const child = spawn(TSX, [RUN_ARCHITECT, ...args], {
             cwd: REPO_ROOT,
-            env: process.env,
+            env: environment,
             stdio: ["ignore", "pipe", "pipe"],
         })
         let stdout = ""

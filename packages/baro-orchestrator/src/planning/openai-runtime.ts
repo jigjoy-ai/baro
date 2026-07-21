@@ -10,6 +10,10 @@
 
 import {
     ContextItem,
+    Gpt54,
+    Gpt54Mini,
+    Gpt54Nano,
+    Gpt55,
     InferenceRequest,
     OpenAICompatibleChatCompletions,
     OpenAIResponses,
@@ -83,6 +87,20 @@ export interface OpenAIConnection {
     extraBody?: Record<string, unknown>
 }
 
+export type OpenAIReasoningEffort =
+    | "xhigh"
+    | "high"
+    | "medium"
+    | "low"
+    | "none"
+
+export interface CreateOpenAIModelOptions {
+    /** A non-OpenAI endpoint must use the redirectable generic adapter. */
+    readonly connection?: OpenAIConnection
+    /** Applied only to Mozaik-native OpenAI models that support this field. */
+    readonly reasoningEffort?: string
+}
+
 /**
  * Minimal `GenerativeModel` for names Mozaik doesn't ship — forwarded
  * as-is, which makes any OpenAI-compatible endpoint usable via
@@ -135,6 +153,80 @@ export class GenericOpenAIModel implements GenerativeModel {
     getStreaming(): boolean {
         return this._streaming
     }
+}
+
+/**
+ * Shared model selection for Architect and its text-only continuation phase.
+ * Recognized OpenAI models use Mozaik's native Responses-capable classes on
+ * the default endpoint; redirected endpoints and all other model names remain
+ * generic Chat Completions models. Generic models deliberately never receive
+ * an unsupported reasoning-effort request field.
+ */
+export function createOpenAIModel(
+    name: string,
+    options: CreateOpenAIModelOptions = {},
+): GenerativeModel {
+    if (
+        options.connection &&
+        (options.connection.baseURL !== undefined ||
+            options.connection.apiKey !== undefined ||
+            options.connection.extraBody !== undefined)
+    ) {
+        return new GenericOpenAIModel(name, options.connection)
+    }
+
+    const model = nativeOpenAIModel(name)
+    if (!model) {
+        process.stderr.write(
+            `[createOpenAIModel] Using model "${name}" as-is with the OpenAI API.\n`,
+        )
+        return new GenericOpenAIModel(name, options.connection)
+    }
+    if (options.reasoningEffort !== undefined) {
+        if (!isOpenAIReasoningEffort(options.reasoningEffort)) {
+            throw new RangeError(
+                `OpenAI reasoning effort must be one of xhigh, high, medium, low, none; received ${JSON.stringify(options.reasoningEffort)}`,
+            )
+        }
+        model.setReasoningEffort(options.reasoningEffort)
+    }
+    return model
+}
+
+function nativeOpenAIModel(
+    name: string,
+): Gpt55 | Gpt54 | Gpt54Mini | Gpt54Nano | null {
+    switch (name) {
+        case "gpt-5.5":
+            return new Gpt55()
+        case "gpt-5.4":
+            return new Gpt54()
+        case "gpt-5.4-mini":
+            return new Gpt54Mini()
+        case "gpt-5.4-nano":
+            return new Gpt54Nano()
+        default:
+            return null
+    }
+}
+
+function isOpenAIReasoningEffort(
+    value: string,
+): value is OpenAIReasoningEffort {
+    return value === "xhigh" || value === "high" || value === "medium" ||
+        value === "low" || value === "none"
+}
+
+// Failed billed requests have no InferenceRound result carrying their
+// correlation id. Retain exact, identity-based evidence on the thrown provider
+// error so higher-level observers do not publish the same runner measurement.
+const billedInferenceFailures = new WeakSet<object>()
+
+export function inferenceFailureMeasurementPublished(error: unknown): boolean {
+    return (typeof error === "object" && error !== null) ||
+        typeof error === "function"
+        ? billedInferenceFailures.has(error)
+        : false
 }
 
 // One runtime per distinct endpoint: the vendor SDK client binds key +
@@ -267,6 +359,12 @@ export async function runInferenceRound(
                 durationMs: Date.now() - startedAt,
                 missingReason: failure.reason,
             })
+            if (
+                (typeof error === "object" && error !== null) ||
+                typeof error === "function"
+            ) {
+                billedInferenceFailures.add(error)
+            }
         }
         throw error
     }

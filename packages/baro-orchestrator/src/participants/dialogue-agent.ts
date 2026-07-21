@@ -141,8 +141,9 @@ export class DialogueResponderInvocationError extends Error {
     constructor(
         message: string,
         invocation: DialogueResponderInvocation,
+        options?: ErrorOptions,
     ) {
-        super(message)
+        super(message, options)
         this.name = "DialogueResponderInvocationError"
         this.invocation = invocation
     }

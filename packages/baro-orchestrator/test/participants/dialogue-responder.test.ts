@@ -18,6 +18,7 @@ import {
 import { GatewayBillingCoordinator } from "../../src/billing/index.js"
 import { DialogueResponderInvocationError } from "../../src/participants/dialogue-agent.js"
 import { createDialogueResponder } from "../../src/participants/dialogue-responder.js"
+import { providerCallTimeoutError } from "../../src/planning/openai-runtime.js"
 import { ConversationIntake } from "../../src/session/conversation-intake.js"
 import {
     assertHarnessEnvironmentWasSanitized,
@@ -132,6 +133,7 @@ process.stdout.write(JSON.stringify({ result: "{\\\"message\\\":\\\"Ready.\\\",\
                     false,
                 )
                 assert.equal(args.includes("--permission-mode"), false)
+                assert.equal(args.includes("--effort"), false)
             } finally {
                 if (previous === undefined) {
                     delete process.env.BARO_DIALOGUE_ARGV
@@ -139,6 +141,54 @@ process.stdout.write(JSON.stringify({ result: "{\\\"message\\\":\\\"Ready.\\\",\
                     process.env.BARO_DIALOGUE_ARGV = previous
                 }
             }
+        })
+    })
+
+    it("hardens Claude when reused as a safe read-only evaluator", async () => {
+        await withTempDir("dialogue-claude-safe-evaluator-", async (dir) => {
+            const capture = join(dir, "argv.json")
+            const binary = join(dir, "claude-safe.mjs")
+            writeFileSync(binary, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+for await (const _chunk of process.stdin) {}
+writeFileSync(${JSON.stringify(capture)}, JSON.stringify(process.argv.slice(2)));
+process.stdout.write(JSON.stringify({
+  result: ${JSON.stringify(JSON.stringify({ message: "Ready.", messages: [] }))},
+  usage: { input_tokens: 1, output_tokens: 1 }
+}));
+`)
+            chmodSync(binary, 0o755)
+            const responder = createDialogueResponder({
+                backend: "claude",
+                cwd: dir,
+                claudeBin: binary,
+                safeReadOnlyEvaluator: true,
+            })
+            await responder(
+                {
+                    runId: "safe-claude-evaluator",
+                    messageId: "obligations-1",
+                    systemPrompt: "Evaluate only the supplied text.",
+                    userPrompt: "Return JSON.",
+                },
+                new AbortController().signal,
+            )
+
+            const argv = JSON.parse(readFileSync(capture, "utf8")) as string[]
+            for (const flag of [
+                "--safe-mode",
+                "--disable-slash-commands",
+                "--strict-mcp-config",
+                "--no-session-persistence",
+            ]) {
+                assert.equal(argv.includes(flag), true, `missing ${flag}`)
+            }
+            assert.equal(argv[argv.indexOf("--tools") + 1], "")
+            assert.equal(argv[argv.indexOf("--mcp-config") + 1], "{}")
+            assert.equal(
+                argv[argv.indexOf("--permission-mode") + 1],
+                "dontAsk",
+            )
         })
     })
 
@@ -264,11 +314,120 @@ console.log(JSON.stringify({ type: "turn.completed", model: "gpt-codex-test", us
                 assert.equal(argv.includes(value), true, `missing ${value}`)
             }
             assert.equal(argv.filter((value) => value === "--strict-config").length, 1)
+            assert.equal(
+                argv.some((value) => value.startsWith("model_reasoning_effort=")),
+                false,
+            )
             assert.equal(argv.includes("--sandbox"), false)
             assert.equal(argv.includes("--dangerously-bypass-approvals-and-sandbox"), false)
             assert.equal(argv.at(-1), "-")
             assert.equal(readFileSync(`${argvPath}.stdin`, "utf8"), "system\n\nstatus")
             assertHarnessEnvironmentWasSanitized(capture)
+        })
+    })
+
+    it("forwards optional effort and a safe diagnostic label to text-only harnesses", async () => {
+        await withTempDir("dialogue-responder-options-", async (dir) => {
+            const claudeArgv = join(dir, "claude-argv.json")
+            const claude = join(dir, "claude-options.mjs")
+            writeFileSync(claude, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(claudeArgv)}, JSON.stringify(process.argv.slice(2)));
+process.stdout.write(JSON.stringify({ result: "ready", usage: { input_tokens: 1, output_tokens: 1 } }));
+`)
+            chmodSync(claude, 0o755)
+            const claudeResponder = createDialogueResponder({
+                backend: "claude",
+                cwd: dir,
+                claudeBin: claude,
+                effort: "high",
+            })
+            await claudeResponder({
+                runId: "run-claude-options",
+                messageId: "message-claude-options",
+                systemPrompt: "system",
+                userPrompt: "status",
+            }, new AbortController().signal)
+            const claudeArgs = JSON.parse(
+                readFileSync(claudeArgv, "utf8"),
+            ) as string[]
+            assert.equal(
+                claudeArgs[claudeArgs.indexOf("--effort") + 1],
+                "high",
+            )
+
+            const codexArgv = join(dir, "codex-argv.json")
+            const codex = join(dir, "codex-options.mjs")
+            writeFileSync(codex, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+writeFileSync(${JSON.stringify(codexArgv)}, JSON.stringify(process.argv.slice(2)));
+process.stderr.write("provider diagnostic marker\\n");
+console.log(JSON.stringify({ type: "turn.failed", error: { code: "max_output_tokens", message: "maximum output tokens reached" } }));
+process.exitCode = 1;
+`)
+            chmodSync(codex, 0o755)
+            const stderrWrite = process.stderr.write
+            let capturedStderr = ""
+            process.stderr.write = ((chunk: string | Uint8Array) => {
+                capturedStderr += typeof chunk === "string"
+                    ? chunk
+                    : Buffer.from(chunk).toString("utf8")
+                return true
+            }) as typeof process.stderr.write
+            try {
+                const codexResponder = createDialogueResponder({
+                    backend: "codex",
+                    cwd: dir,
+                    codexBin: codex,
+                    codexSkipGitRepoCheck: true,
+                    diagnosticLabel: "codex-architect",
+                    effort: "xhigh",
+                })
+                await assert.rejects(
+                    codexResponder({
+                        runId: "run-codex-options",
+                        messageId: "message-codex-options",
+                        systemPrompt: "system",
+                        userPrompt: "status",
+                    }, new AbortController().signal),
+                    (error: unknown) => {
+                        assert.ok(
+                            error instanceof DialogueResponderInvocationError,
+                        )
+                        assert.ok(error.cause instanceof Error)
+                        assert.match(error.cause.message, /max_output_tokens/u)
+                        return true
+                    },
+                )
+            } finally {
+                process.stderr.write = stderrWrite
+            }
+            const codexArgs = JSON.parse(
+                readFileSync(codexArgv, "utf8"),
+            ) as string[]
+            assert.equal(
+                codexArgs.includes('model_reasoning_effort="xhigh"'),
+                true,
+            )
+            assert.match(
+                capturedStderr,
+                /\[codex-architect\/stderr\] provider diagnostic marker/u,
+            )
+            assert.match(
+                capturedStderr,
+                /\[codex-architect\] diagnostic .*max_output_tokens/u,
+            )
+
+            assert.throws(
+                () => createDialogueResponder({
+                    backend: "openai",
+                    cwd: dir,
+                    diagnosticLabel: "unsafe\nlabel",
+                }),
+                /diagnosticLabel must be 1-128 safe label characters/u,
+            )
         })
     })
 
@@ -747,6 +906,51 @@ setInterval(() => {}, 10_000);
         })
     })
 
+    it("keeps a typed caller timeout authoritative over local runner cancellation", async () => {
+        await withTempDir("dialogue-local-typed-timeout-", async (dir) => {
+            const binary = join(dir, "hanging-provider.mjs")
+            writeFileSync(binary, `#!/usr/bin/env node
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 10_000);
+`)
+            chmodSync(binary, 0o755)
+
+            for (const backend of ["codex", "opencode", "pi"] as const) {
+                const responder = createDialogueResponder({
+                    backend,
+                    cwd: dir,
+                    terminationGraceMs: 50,
+                    ...(backend === "codex"
+                        ? { codexBin: binary, codexSkipGitRepoCheck: true }
+                        : backend === "opencode"
+                          ? { opencodeBin: binary }
+                          : { piBin: binary }),
+                })
+                const controller = new AbortController()
+                const pending = responder(
+                    {
+                        runId: `run-${backend}-typed-timeout`,
+                        messageId: `message-${backend}-typed-timeout`,
+                        systemPrompt: "No tools.",
+                        userPrompt: "status",
+                    },
+                    controller.signal,
+                )
+                controller.abort(providerCallTimeoutError(20))
+
+                await assert.rejects(pending, (error: unknown) => {
+                    assert.ok(error instanceof DialogueResponderInvocationError)
+                    assert.equal(error.invocation.observation.status, "timed_out")
+                    assert.deepEqual(
+                        error.invocation.observation.tokens.total,
+                        unknownMetric("timed_out"),
+                    )
+                    return true
+                })
+            }
+        })
+    })
+
     it("times out one OpenAI provider call without aborting the caller turn", async () => {
         const caller = new AbortController()
         let providerSignal: AbortSignal | undefined
@@ -938,6 +1142,41 @@ setInterval(() => {}, 10_000);
                 assert.deepEqual(
                     error.invocation.observation.durationMs,
                     unknownMetric("timed_out"),
+                )
+                return true
+            },
+        )
+    })
+
+    it("preserves the exact provider cause through invocation telemetry wrappers", async () => {
+        const providerError = Object.assign(
+            new Error("response failed because max_output_tokens was reached"),
+            { code: "max_output_tokens" },
+        )
+        const responder = createDialogueResponder({
+            backend: "openai",
+            cwd: process.cwd(),
+            openaiRunRound: async () => {
+                throw providerError
+            },
+        })
+
+        await assert.rejects(
+            responder(
+                {
+                    runId: "run-provider-cause",
+                    messageId: "message-provider-cause",
+                    systemPrompt: "system",
+                    userPrompt: "status",
+                },
+                new AbortController().signal,
+            ),
+            (error: unknown) => {
+                assert.ok(error instanceof DialogueResponderInvocationError)
+                assert.equal(error.cause, providerError)
+                assert.equal(
+                    (error.cause as { code?: unknown }).code,
+                    "max_output_tokens",
                 )
                 return true
             },

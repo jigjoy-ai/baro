@@ -2,12 +2,18 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
+    ARCHITECT_DECISION_OUTCOME_JSON_SCHEMA,
+    ARCHITECT_OUTCOME_JSON_SCHEMA,
+    MAX_ARCHITECT_DECISION_OUTCOME_BYTES,
     MAX_ARCHITECT_OUTCOME_BYTES,
     ArchitectOutcomeContractError,
     parseArchitectOutcome,
     wrapArchitectOutcome,
 } from "../src/planning/architect-outcome.js"
-import { ARCHITECT_OUTCOME_SYSTEM_PROMPT } from "../src/planning/architect-prompts.js"
+import {
+    ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
+    ARCHITECT_OUTCOME_SYSTEM_PROMPT,
+} from "../src/planning/architect-prompts.js"
 
 const DECISION_DOCUMENT = `## Existing context
 The repository uses a strict provider-neutral planning contract.
@@ -112,6 +118,149 @@ describe("ArchitectOutcomeV1", () => {
         assert.match(ARCHITECT_OUTCOME_SYSTEM_PROMPT, /directly callable/u)
     })
 
+    it("uses a separate bounded ADR-only contract for phase one", () => {
+        assert.match(
+            ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
+            /DECISION PHASE — ADRs ONLY/u,
+        )
+        assert.match(
+            ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
+            /Do not generate a semantic obligation/u,
+        )
+        assert.doesNotMatch(
+            ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
+            /SEMANTIC OBLIGATION APPENDIX — REQUIRED/u,
+        )
+
+        const decisionDocumentSchema = ARCHITECT_DECISION_OUTCOME_JSON_SCHEMA
+            .properties.decisionDocument.anyOf[0]
+        const completeDocumentSchema = ARCHITECT_OUTCOME_JSON_SCHEMA
+            .properties.decisionDocument.anyOf[0]
+        assert.equal(
+            decisionDocumentSchema.maxLength,
+            MAX_ARCHITECT_DECISION_OUTCOME_BYTES,
+        )
+        assert.equal("pattern" in decisionDocumentSchema, false)
+        assert.match(completeDocumentSchema.pattern ?? "", /baro-obligations-v1/u)
+
+        assert.equal(
+            parseArchitectOutcome(JSON.stringify(ready()), {
+                decisionOnly: true,
+            }).kind,
+            "ready",
+        )
+        assert.throws(
+            () => parseArchitectOutcome(JSON.stringify({
+                ...ready(),
+                decisionDocument: OBLIGATION_DOCUMENT,
+            }), {
+                decisionOnly: true,
+            }),
+            /decision-only.*obligation marker/u,
+        )
+        assert.throws(
+            () => parseArchitectOutcome(JSON.stringify(ready()), {
+                decisionOnly: true,
+                requireObligations: true,
+            }),
+            /cannot both be enabled/u,
+        )
+
+        const oversizedDecision = JSON.stringify({
+            ...ready(),
+            decisionDocument: `${DECISION_DOCUMENT}\n${"x".repeat(
+                MAX_ARCHITECT_DECISION_OUTCOME_BYTES,
+            )}`,
+        })
+        assert.ok(
+            Buffer.byteLength(oversizedDecision, "utf8") < MAX_ARCHITECT_OUTCOME_BYTES,
+        )
+        assert.throws(
+            () => parseArchitectOutcome(oversizedDecision, {
+                decisionOnly: true,
+            }),
+            new RegExp(`bytes; limit is ${MAX_ARCHITECT_DECISION_OUTCOME_BYTES}`, "u"),
+        )
+        assert.equal(
+            parseArchitectOutcome(oversizedDecision).kind,
+            "ready",
+            "the 48 KiB phase-one cap must not shrink the complete/default parser",
+        )
+    })
+
+    it("requires contiguous accepted ADRs with complete fields outside code fences", () => {
+        const secondAdrWithoutConsequences = `${DECISION_DOCUMENT}
+
+## ADR-002: Keep the second boundary explicit
+**Status:** Accepted
+**Context:** A second caller has an independent compatibility boundary.
+**Decision:** Preserve that caller through the same provider-neutral contract.`
+        const internalGap = `${DECISION_DOCUMENT}
+
+## ADR-003: Skip the second identifier
+**Status:** Accepted
+**Context:** This otherwise complete record has the wrong identifier.
+**Decision:** Keep its contents irrelevant to the numbering check.
+**Consequences:** The host must reject the missing ADR-002.`
+        const duplicateAdr = `${DECISION_DOCUMENT}
+
+${DECISION_DOCUMENT.slice(DECISION_DOCUMENT.indexOf("## ADR-001"))}`
+        const invalidDocuments: Array<[string, string, RegExp]> = [
+            [
+                "rejected status",
+                DECISION_DOCUMENT.replace("**Status:** Accepted", "**Status:** Rejected"),
+                /ADR-001.*Status.*Accepted/u,
+            ],
+            [
+                "numbering gap",
+                internalGap,
+                /expected ADR-002 but found ADR-003/u,
+            ],
+            [
+                "duplicate id",
+                duplicateAdr,
+                /duplicate ADR id ADR-001/u,
+            ],
+            [
+                "missing field on one ADR",
+                secondAdrWithoutConsequences,
+                /ADR-002 requires a non-empty \*\*Consequences:\*\*/u,
+            ],
+            [
+                "required field only inside a fence",
+                DECISION_DOCUMENT.replace(
+                    "**Context:** Provider text is untrusted.",
+                    "```markdown\n**Context:** Fenced examples are not ADR fields.\n```",
+                ),
+                /ADR-001 requires a non-empty \*\*Context:\*\*/u,
+            ],
+        ]
+
+        for (const [label, decisionDocument, expected] of invalidDocuments) {
+            assert.throws(
+                () => parseArchitectOutcome(JSON.stringify({
+                    ...ready(),
+                    decisionDocument,
+                }), { decisionOnly: true }),
+                expected,
+                label,
+            )
+        }
+
+        assert.equal(
+            parseArchitectOutcome(JSON.stringify({
+                ...ready(),
+                decisionDocument: `${DECISION_DOCUMENT}
+
+\`\`\`markdown
+## ADR-999: This fenced example is not a decision
+**Status:** Rejected
+\`\`\``,
+            }), { decisionOnly: true }).kind,
+            "ready",
+        )
+    })
+
     it("requires obligations for every outcome-mode document without breaking legacy parsing", () => {
         assert.equal(parseArchitectOutcome(JSON.stringify(ready())).kind, "ready")
         assert.throws(
@@ -179,7 +328,10 @@ describe("ArchitectOutcomeV1", () => {
         assert.throws(
             () => parseArchitectOutcome(JSON.stringify({
                 ...ready(),
-                decisionDocument: `${TRIVIAL_DECISION_DOCUMENT}
+                decisionDocument: `## Existing context
+The second decision makes this a non-trivial architecture document.
+
+${TRIVIAL_DECISION_DOCUMENT}
 
 ## ADR-002: Add a real cross-cutting design
 **Status:** Accepted

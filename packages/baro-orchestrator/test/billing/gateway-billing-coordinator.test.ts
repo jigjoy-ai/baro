@@ -661,6 +661,80 @@ describe("planning phase billing wiring", () => {
         )
         gateway.close()
     })
+
+    it("marks a failed Architect round already measured by the trusted Gateway", async () => {
+        let providerCalls = 0
+        const baseUrl = await listen(async (request, response) => {
+            if (request.method === "POST") {
+                providerCalls += 1
+                return json(response, 500, {
+                    error: { message: "architect provider failed" },
+                })
+            }
+            json(response, 404, { error: "not found" })
+        })
+        const published: Array<{ status: string; producer: string }> = []
+        let gateway!: GatewayBillingCoordinator
+        gateway = new GatewayBillingCoordinator({
+            runId: "architect-failed-round",
+            gatewayBaseUrl: `${baseUrl}/v1`,
+            apiKey: "tenant-a",
+            publishMeasurement: (measurement) => {
+                published.push({
+                    status: measurement.status,
+                    producer: measurement.evidence.producer,
+                })
+            },
+            fetchImpl: async () =>
+                jsonResponse(page(gateway.billingSessionId, [], "cursor")),
+            feedMaxRetries: 0,
+            drainTimeoutMs: 0,
+        })
+        const observations: Array<{
+            status: string
+            measurementPublished: boolean
+        }> = []
+        try {
+            await assert.rejects(
+                runArchitectOpenAI({
+                    goal: "Observe the failed trusted provider round",
+                    cwd: "/unused",
+                    model: "deepseek-v4-pro",
+                    openaiConnection: {
+                        baseURL: `${baseUrl}/v1`,
+                        apiKey: "tenant-a",
+                    },
+                    modeContract: {
+                        mode: "parallel",
+                        confidence: 1,
+                        reason: "test",
+                        source: "user",
+                    },
+                    billingCoordinator: gateway,
+                    timeoutMs: 2_000,
+                    onInvocation: (observation, metadata) => {
+                        observations.push({
+                            status: observation.status,
+                            measurementPublished:
+                                metadata.measurementPublished,
+                        })
+                    },
+                }),
+                /architect provider failed|500/u,
+            )
+            assert.equal(providerCalls, 1)
+            assert.deepEqual(observations, [{
+                status: "failed",
+                measurementPublished: true,
+            }])
+            assert.deepEqual(
+                published.filter((item) => item.producer === "runner"),
+                [{ status: "failed", producer: "runner" }],
+            )
+        } finally {
+            gateway.close()
+        }
+    })
 })
 
 function coordinator(gatewayBaseUrl: string, apiKey: string) {

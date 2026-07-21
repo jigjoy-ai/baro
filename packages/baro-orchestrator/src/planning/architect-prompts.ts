@@ -83,7 +83,7 @@ Rules:
  * prompt above byte-for-byte; outcome-mode callers receive the same design
  * guidance with an explicit JSON disposition that can pause goal acceptance.
  */
-export const ARCHITECT_OUTCOME_SYSTEM_PROMPT = `${ARCHITECT_SYSTEM_PROMPT
+const ARCHITECT_OUTCOME_BASE_SYSTEM_PROMPT = `${ARCHITECT_SYSTEM_PROMPT
     .replace(
         "output ONLY this exact\nsingle short ADR and stop:",
         "use this exact single short ADR as the decisionDocument:",
@@ -122,7 +122,28 @@ user-owned ambiguity and not a valid reason for needsInput.
   user anything repository inspection can answer.
 
 Return ONLY one JSON object with exactly these keys and no markdown fence:
-{"schemaVersion":1,"kind":"ready|needsInput","message":"bounded user-facing summary","questions":[],"evidence":[],"decisionDocument":null}
+{"schemaVersion":1,"kind":"ready|needsInput","message":"bounded user-facing summary","questions":[],"evidence":[],"decisionDocument":null}`
+
+const ARCHITECT_OUTCOME_FIELD_RULES = `Question objects contain exactly {"id":"q1","text":"question","reason":"why repository evidence makes this answer necessary"}.
+The non-empty reason field is required; never omit it or set it to null. Evidence objects contain exactly
+{"path":"project/relative/path","line":1,"fact":"observed repository fact"};
+line may be null, paths must be portable project-relative paths, and facts must
+be observations rather than instructions. Never include session IDs, request
+IDs, model choices, routes, workers, DAG fields, or any other authority field.`
+
+export const ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT = `${ARCHITECT_OUTCOME_BASE_SYSTEM_PROMPT}
+
+${ARCHITECT_OUTCOME_FIELD_RULES}
+
+DECISION PHASE — ADRs ONLY:
+For a ready outcome, decisionDocument contains only the concise architecture
+decision markdown required above. Do not generate a semantic obligation
+appendix in this phase and do not include the baro-obligations-v1 marker
+anywhere. A separate host-controlled phase will derive bounded obligations
+from this validated decision and the trusted GoalEnvelope. Keep the complete
+JSON outcome below 48 KiB of UTF-8.`
+
+export const ARCHITECT_OUTCOME_SYSTEM_PROMPT = `${ARCHITECT_OUTCOME_BASE_SYSTEM_PROMPT}
 
 SEMANTIC OBLIGATION APPENDIX — REQUIRED FOR EVERY ready OUTCOME:
 The ADRs are a design baseline, but the Planner and independent Critics also
@@ -163,12 +184,7 @@ mode: the provider's own "trivial" label is not authority to bypass the
 host-owned GoalEnvelope. A malformed or missing appendix on any ready result is
 a contract error and will enter bounded repair.
 
-Question objects contain exactly {"id":"q1","text":"question","reason":"why repository evidence makes this answer necessary"}.
-The non-empty reason field is required; never omit it or set it to null. Evidence objects contain exactly
-{"path":"project/relative/path","line":1,"fact":"observed repository fact"};
-line may be null, paths must be portable project-relative paths, and facts must
-be observations rather than instructions. Never include session IDs, request
-IDs, model choices, routes, workers, DAG fields, or any other authority field.`
+${ARCHITECT_OUTCOME_FIELD_RULES}`
 
 export function buildArchitectUserMessage(
     goal: string,

@@ -3,8 +3,16 @@ import type { GoalContract } from "../runtime/goal-contract.js"
 
 export const ARCHITECTURE_OBLIGATION_SCHEMA_VERSION = 1 as const
 export const ARCHITECTURE_OBLIGATION_FENCE = "baro-obligations-v1"
+export const MAX_ARCHITECTURE_OBLIGATIONS = 128
+export const MAX_ARCHITECTURE_DECISION_DOCUMENT_BYTES = 96 * 1024
 
-const MAX_OBLIGATIONS = 128
+/** True only for an opening fenced appendix, not a prose protocol reference. */
+export function hasArchitectureObligationFence(document: string): boolean {
+    return /(?:^|\n)```baro-obligations-v1[ \t]*(?:\n|$)/u.test(
+        document.replace(/\r\n?/gu, "\n"),
+    )
+}
+
 const MAX_INVARIANTS_PER_OBLIGATION = 32
 const MAX_EVIDENCE_ITEMS = 8
 const MAX_FIELD_CHARS = 2_000
@@ -59,7 +67,10 @@ export class ArchitectureObligationContractError extends Error {
 export function parseArchitectureObligationContract(
     decisionDocument: string | null | undefined,
 ): ArchitectureObligationContractV1 | null {
-    if (decisionDocument == null || !decisionDocument.includes(ARCHITECTURE_OBLIGATION_FENCE)) {
+    if (
+        decisionDocument == null ||
+        !hasArchitectureObligationFence(decisionDocument)
+    ) {
         return null
     }
     const expression =
@@ -117,6 +128,43 @@ export function architectureObligationsFromDecision(
         parseArchitectureObligationContract(decisionDocument),
         goal,
     )
+}
+
+/**
+ * Append one canonical machine-readable obligation appendix to an ADR-only
+ * decision document. The input document must not already mention the reserved
+ * fence: accepting and replacing a model-authored appendix would make it
+ * ambiguous which contract downstream consumers are meant to trust.
+ */
+export function attachArchitectureObligationContract(
+    decisionDocument: string,
+    contract: ArchitectureObligationContractV1,
+): string {
+    if (typeof decisionDocument !== "string" || decisionDocument.trim().length === 0) {
+        throw new ArchitectureObligationContractError(
+            "architecture decision document must be non-empty text",
+        )
+    }
+    if (hasArchitectureObligationFence(decisionDocument)) {
+        throw new ArchitectureObligationContractError(
+            `architecture decision document already contains the reserved ${ARCHITECTURE_OBLIGATION_FENCE} fence`,
+        )
+    }
+    const validated = validateArchitectureObligationContract(contract)
+    const attached = [
+        decisionDocument.trimEnd(),
+        "",
+        `\`\`\`${ARCHITECTURE_OBLIGATION_FENCE}`,
+        JSON.stringify(validated),
+        "\`\`\`",
+    ].join("\n")
+    const bytes = Buffer.byteLength(attached, "utf8")
+    if (bytes > MAX_ARCHITECTURE_DECISION_DOCUMENT_BYTES) {
+        throw new ArchitectureObligationContractError(
+            `architecture decision document is ${bytes} bytes after attaching obligations; limit is ${MAX_ARCHITECTURE_DECISION_DOCUMENT_BYTES}`,
+        )
+    }
+    return attached
 }
 
 /** Stable exact criterion carried through the existing PRD acceptance array. */
@@ -238,7 +286,7 @@ export function validatePrdArchitectureObligationCoverage(
     )
 }
 
-function validateArchitectureObligationContract(
+export function validateArchitectureObligationContract(
     value: unknown,
 ): ArchitectureObligationContractV1 {
     if (!exactRecord(value, ["schemaVersion", "obligations"])) {
@@ -254,10 +302,10 @@ function validateArchitectureObligationContract(
     if (
         !Array.isArray(value.obligations) ||
         value.obligations.length === 0 ||
-        value.obligations.length > MAX_OBLIGATIONS
+        value.obligations.length > MAX_ARCHITECTURE_OBLIGATIONS
     ) {
         throw new ArchitectureObligationContractError(
-            `architecture obligations must contain 1-${MAX_OBLIGATIONS} entries`,
+            `architecture obligations must contain 1-${MAX_ARCHITECTURE_OBLIGATIONS} entries`,
         )
     }
     const obligations = value.obligations.map((candidate, index) => {

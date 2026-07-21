@@ -8,10 +8,6 @@
 
 import {
     FunctionCallOutputItem,
-    Gpt54,
-    Gpt54Mini,
-    Gpt54Nano,
-    Gpt55,
     ModelContext,
     SystemMessageItem,
     UserMessageItem,
@@ -20,19 +16,37 @@ import {
 } from "@mozaik-ai/core"
 
 import {
+    createOpenAIModel,
     GenericOpenAIModel,
+    inferenceFailureMeasurementPublished,
     UsageAccumulator,
     runInferenceRound,
+    type OpenAIConnection,
+    type OpenAIReasoningEffort,
 } from "./openai-runtime.js"
 import type { GatewayBillingCoordinator } from "../billing/index.js"
+import {
+    isRunnerTimeoutError,
+    normalizeOpenAIRunnerObservation,
+    unknownOpenAIRunnerObservation,
+} from "../participants/dialogue-responder.js"
 import type { GoalEnvelope } from "../session/conversation-contract.js"
 
 import {
+    ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_SYSTEM_PROMPT,
     buildArchitectUserMessage,
 } from "./architect-prompts.js"
-import { parseArchitectOutcome } from "./architect-outcome.js"
+import {
+    parseArchitectOutcome,
+    type ArchitectOutcomeContractMode,
+} from "./architect-outcome.js"
+import {
+    observeArchitectInvocation,
+    observeArchitectModelResolved,
+    type ArchitectInvocationObserver,
+} from "./architect-invocation.js"
 import { createCodebaseTools } from "./codebase-tools.js"
 import { emitPlanLine, emitToolCall } from "./plan-events.js"
 import { decideExecutionMode, resolvePlannerModelName } from "./planner-openai.js"
@@ -42,6 +56,10 @@ export interface RunArchitectOpenAIOptions {
     goal: string
     cwd: string
     model?: string
+    /** Optional Mozaik-native OpenAI reasoning effort. */
+    effort?: OpenAIReasoningEffort
+    /** Explicit compatible endpoint; forces the redirectable generic adapter. */
+    openaiConnection?: OpenAIConnection
     projectContext?: string
     /** Pre-decided contract (user pick or run-intake step); skips this architect's own intake. */
     modeContract?: ModeContract
@@ -62,7 +80,13 @@ export interface RunArchitectOpenAIOptions {
     billingCoordinator?: GatewayBillingCoordinator
     /** Deterministic no-network seam used by the architect state-machine tests. */
     testRuntime?: ArchitectOpenAITestRuntime
+    /** Host continuation hook for reusing the exact phase-one model. */
+    onArchitectModelResolved?: (modelName: string) => void
+    /** Optional observational telemetry emitted once per completed inference round. */
+    onInvocation?: ArchitectInvocationObserver
     outcomeMode?: boolean
+    /** Strict outcome phase. Defaults to the complete ADR + obligations contract. */
+    outcomeContractMode?: ArchitectOutcomeContractMode
     /** Host-owned goal used to bind the Architect's obligation parent ids. */
     goalEnvelope?: GoalEnvelope
     /** Excludes the bash tool; remaining tools are project-contained reads. */
@@ -70,27 +94,10 @@ export interface RunArchitectOpenAIOptions {
 }
 
 export interface ArchitectOpenAITestRuntime {
-    model: GenerativeModel
+    /** Omit to exercise production model selection without provider I/O. */
+    model?: GenerativeModel
     tools: Tool[]
     inferRound: typeof runInferenceRound
-}
-
-function pickModel(name: string): GenerativeModel {
-    switch (name) {
-        case "gpt-5.5":
-            return new Gpt55()
-        case "gpt-5.4":
-            return new Gpt54()
-        case "gpt-5.4-mini":
-            return new Gpt54Mini()
-        case "gpt-5.4-nano":
-            return new Gpt54Nano()
-        default:
-            process.stderr.write(
-                `[pickModel] Using model "${name}" as-is with the OpenAI API.\n`,
-            )
-            return new GenericOpenAIModel(name)
-    }
 }
 
 export async function runArchitectOpenAI(
@@ -105,37 +112,110 @@ export async function runArchitectOpenAI(
         )
     }
 
+    const startedAt = Date.now()
+    const deadlineAt = startedAt + opts.timeoutMs
     const controller = new AbortController()
-    const phase = runArchitectOpenAIWithinBudget(opts, controller.signal)
+    const phase = runArchitectOpenAIWithinBudget(
+        opts,
+        controller.signal,
+        deadlineAt,
+    )
+    const timeoutError = architectPhaseTimeoutError(opts.timeoutMs)
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-            const error = new Error(
-                `ArchitectOpenAI: phase timed out after ${opts.timeoutMs}ms`,
-            )
-            error.name = "TimeoutError"
-            reject(error)
-            controller.abort(error)
-        }, opts.timeoutMs)
+            reject(timeoutError)
+            controller.abort(timeoutError)
+        }, Math.max(0, deadlineAt - Date.now()))
     })
-    return await Promise.race([phase, timeout]).finally(() => clearTimeout(timer))
+    const result = await Promise.race([phase, timeout]).finally(() =>
+        clearTimeout(timer),
+    )
+    // Promise timers cannot fire while a synchronous adapter blocks the event
+    // loop. The absolute clock remains authoritative after either branch wins.
+    if (controller.signal.aborted || Date.now() >= deadlineAt) {
+        controller.abort(timeoutError)
+        throw timeoutError
+    }
+    return result
 }
 
 async function runArchitectOpenAIWithinBudget(
     opts: RunArchitectOpenAIOptions,
     phaseSignal?: AbortSignal,
+    phaseDeadlineAt?: number,
 ): Promise<string> {
     // Intake first (cheap classifier via BARO_INTAKE_MODEL), then route the
     // architect model off the resolved mode — a pre-decided contract skips intake.
-    const intake = opts.modeContract ?? await decideExecutionMode(opts, pickModel(opts.model ?? "gpt-5.5")).catch((e) => {
+    let invocationSequence = 0
+    const intake = opts.modeContract ?? await decideExecutionMode(
+        opts,
+        createOpenAIModel(opts.model ?? "gpt-5.5", {
+            connection: opts.openaiConnection,
+            reasoningEffort: opts.effort,
+        }),
+        {
+            ...(phaseSignal ? { signal: phaseSignal } : {}),
+            ...(opts.testRuntime?.inferRound
+                ? { inferRound: opts.testRuntime.inferRound }
+                : {}),
+            onInvocation: (event) => {
+                const requestedModel = event.model.specification.name
+                const sequence = ++invocationSequence
+                if (event.status === "succeeded") {
+                    observeArchitectInvocation(
+                        opts.onInvocation,
+                        {
+                            ...normalizeOpenAIRunnerObservation(
+                                event.result.usage,
+                                requestedModel,
+                                event.model instanceof GenericOpenAIModel,
+                            ),
+                            sequence,
+                        },
+                        event.result.billingInvocationId !== null,
+                        { phase: "intake", requestedModel },
+                    )
+                    return
+                }
+                const timedOut = isRunnerTimeoutError(event.error) ||
+                    (phaseSignal?.aborted === true &&
+                        isRunnerTimeoutError(phaseSignal.reason))
+                observeArchitectInvocation(
+                    opts.onInvocation,
+                    {
+                        ...unknownOpenAIRunnerObservation(
+                            timedOut ? "timed_out" : "failed",
+                            timedOut ? "timed_out" : "not_reported",
+                            requestedModel,
+                        ),
+                        sequence,
+                    },
+                    inferenceFailureMeasurementPublished(event.error),
+                    { phase: "intake", requestedModel },
+                )
+            },
+        },
+    ).catch((e) => {
+        if (phaseSignal?.aborted) throw e
         process.stderr.write(`[architect-openai] intake failed (${(e as Error)?.message ?? String(e)}) — using heuristic mode contract\n`)
         return heuristicModeContract(opts)
     })
     const architectModelName = resolvePlannerModelName(intake.mode, opts.model)
+    observeArchitectModelResolved(
+        opts.onArchitectModelResolved,
+        architectModelName,
+    )
     process.stderr.write(`[architect-openai] architect model=${architectModelName} (${intake.mode === "focused" ? "floor" : "ceiling"}, mode=${intake.mode})\n`)
     emitPlanLine("designing the architecture")
 
-    const model = opts.testRuntime?.model ?? pickModel(architectModelName)
+    const model = opts.testRuntime?.model ?? createOpenAIModel(
+        architectModelName,
+        {
+            connection: opts.openaiConnection,
+            reasoningEffort: opts.effort,
+        },
+    )
     const tools = opts.testRuntime?.tools ?? createCodebaseTools(opts.cwd, {
         includeBash: opts.readOnly !== true,
     })
@@ -145,7 +225,9 @@ async function runArchitectOpenAIWithinBudget(
     let context = ModelContext.create("architect")
         .addContextItem(SystemMessageItem.create(
             opts.outcomeMode
-                ? ARCHITECT_OUTCOME_SYSTEM_PROMPT
+                ? (opts.outcomeContractMode ?? "complete") === "decision"
+                    ? ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT
+                    : ARCHITECT_OUTCOME_SYSTEM_PROMPT
                 : ARCHITECT_SYSTEM_PROMPT,
         ))
         .addContextItem(
@@ -184,41 +266,75 @@ async function runArchitectOpenAIWithinBudget(
         // stalling `baro --headless`.
         // Do not remove the schemas during finalization. Some compatible
         // models otherwise serialize their next tool call into message text.
-        const roundPromise = inferRound(context, model, {
-            ...(phaseSignal ? { signal: phaseSignal } : {}),
-            ...(opts.billingCoordinator
-                ? {
-                      billing: {
-                          coordinator: opts.billingCoordinator,
-                          context: {
-                              runId: null,
-                              phase: "architect",
-                              storyId: null,
-                              leaseId: null,
-                              generation: null,
-                              attempt: 1,
-                              turn: round,
-                              round,
+        let result: Awaited<ReturnType<typeof inferRound>>
+        try {
+            const roundPromise = inferRound(context, model, {
+                ...(phaseSignal ? { signal: phaseSignal } : {}),
+                ...(opts.billingCoordinator
+                    ? {
+                          billing: {
+                              coordinator: opts.billingCoordinator,
+                              context: {
+                                  runId: null,
+                                  phase: "architect",
+                                  storyId: null,
+                                  leaseId: null,
+                                  generation: null,
+                                  attempt: 1,
+                                  turn: round,
+                                  round,
+                              },
                           },
-                      },
-                  }
-                : {}),
-        })
-        let timer: ReturnType<typeof setTimeout> | undefined
-        const result = perRoundTimeoutMs === undefined
-            ? await roundPromise
-            : await Promise.race([
-                  roundPromise,
-                  new Promise<never>((_, reject) => {
-                      timer = setTimeout(
-                          () => reject(new Error(
-                              `round ${round} timed out after ${perRoundTimeoutMs}ms`,
-                          )),
-                          perRoundTimeoutMs,
-                      )
-                  }),
-              ]).finally(() => clearTimeout(timer))
+                      }
+                    : {}),
+            })
+            let timer: ReturnType<typeof setTimeout> | undefined
+            result = perRoundTimeoutMs === undefined
+                ? await roundPromise
+                : await Promise.race([
+                      roundPromise,
+                      new Promise<never>((_, reject) => {
+                          timer = setTimeout(
+                              () => reject(new Error(
+                                  `round ${round} timed out after ${perRoundTimeoutMs}ms`,
+                              )),
+                              perRoundTimeoutMs,
+                          )
+                      }),
+                  ]).finally(() => clearTimeout(timer))
+            assertArchitectPhaseDeadline(opts.timeoutMs, phaseDeadlineAt)
+        } catch (error) {
+            const timedOut = isRunnerTimeoutError(error) ||
+                (phaseSignal?.aborted === true &&
+                    isRunnerTimeoutError(phaseSignal.reason))
+            observeArchitectInvocation(
+                opts.onInvocation,
+                {
+                    ...unknownOpenAIRunnerObservation(
+                        timedOut ? "timed_out" : "failed",
+                        timedOut ? "timed_out" : "not_reported",
+                        architectModelName,
+                    ),
+                    sequence: ++invocationSequence,
+                },
+                inferenceFailureMeasurementPublished(error),
+            )
+            throw error
+        }
         usage.add(result.usage)
+        observeArchitectInvocation(
+            opts.onInvocation,
+            {
+                ...normalizeOpenAIRunnerObservation(
+                    result.usage,
+                    architectModelName,
+                    model instanceof GenericOpenAIModel,
+                ),
+                sequence: ++invocationSequence,
+            },
+            typeof result.billingInvocationId === "string"
+                && result.billingInvocationId.length > 0,
+        )
 
         for (const item of result.items) {
             if (item.type === "function_call") {
@@ -298,8 +414,11 @@ async function runArchitectOpenAIWithinBudget(
                 invalidReason = "The previous response contained a literal <tool_call> instead of the final architecture result."
             } else if (opts.outcomeMode) {
                 try {
+                    const decisionOnly =
+                        (opts.outcomeContractMode ?? "complete") === "decision"
                     normalizedOutcome = JSON.stringify(parseArchitectOutcome(doc, {
-                        requireObligations: true,
+                        requireObligations: !decisionOnly,
+                        decisionOnly,
                         trustedGoalEnvelope: opts.goalEnvelope,
                     }))
                 } catch (error) {
@@ -337,6 +456,27 @@ async function runArchitectOpenAIWithinBudget(
 function numberEnv(name: string, fallback: number): number {
     const n = Number(process.env[name])
     return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
+function architectPhaseTimeoutError(timeoutMs: number): Error {
+    const error = new Error(
+        `ArchitectOpenAI: phase timed out after ${timeoutMs}ms`,
+    )
+    error.name = "TimeoutError"
+    return error
+}
+
+function assertArchitectPhaseDeadline(
+    timeoutMs: number | undefined,
+    deadlineAt: number | undefined,
+): void {
+    if (
+        timeoutMs !== undefined &&
+        deadlineAt !== undefined &&
+        Date.now() >= deadlineAt
+    ) {
+        throw architectPhaseTimeoutError(timeoutMs)
+    }
 }
 
 function finalArchitectInstruction(summary: string, round: number, maxExplorationRounds: number, maxTokens: number, outcomeMode: boolean): string {

@@ -9,12 +9,20 @@
 import type { GoalEnvelope } from "../session/conversation-contract.js"
 import { deriveGoalContract } from "../runtime/goal-contract.js"
 import {
+    ArchitectureDecisionDocumentError,
+    parseArchitectureDecisionDocument,
+} from "./architecture-decision-document.js"
+import {
     bindArchitectureObligationContract,
+    hasArchitectureObligationFence,
     parseArchitectureObligationContract,
 } from "./architecture-obligation-contract.js"
 
 export const ARCHITECT_OUTCOME_SCHEMA_VERSION = 1 as const
 export const MAX_ARCHITECT_OUTCOME_BYTES = 128 * 1024
+export const MAX_ARCHITECT_DECISION_OUTCOME_BYTES = 48 * 1024
+
+export type ArchitectOutcomeContractMode = "complete" | "decision"
 
 const MAX_MESSAGE_LENGTH = 8_000
 const MAX_DECISION_DOCUMENT_LENGTH = 96 * 1024
@@ -89,76 +97,88 @@ export class ArchitectOutcomeContractError extends Error {
  * The strict parser below remains authoritative because the discriminator's
  * cross-field rules are intentionally provider independent.
  */
-export const ARCHITECT_OUTCOME_JSON_SCHEMA = deepFreeze({
-    type: "object",
-    additionalProperties: false,
-    required: [
-        "schemaVersion",
-        "kind",
-        "message",
-        "questions",
-        "evidence",
-        "decisionDocument",
-    ],
-    properties: {
-        schemaVersion: { type: "integer", const: 1 },
-        kind: { type: "string", enum: ["ready", "needsInput"] },
-        message: { type: "string", minLength: 1, maxLength: MAX_MESSAGE_LENGTH },
-        questions: {
-            type: "array",
-            maxItems: MAX_QUESTIONS,
-            items: {
-                type: "object",
-                additionalProperties: false,
-                // Codex/OpenAI strict structured outputs require every
-                // declared object property to be listed in `required`.
-                // The provider schema can require `reason` while the
-                // provider-neutral parser remains backward-compatible with
-                // Claude/OpenCode/Pi outputs that omit it.
-                required: ["id", "text", "reason"],
-                properties: {
-                    id: { type: "string", minLength: 1, maxLength: MAX_CORRELATION_ID_LENGTH },
-                    text: { type: "string", minLength: 1, maxLength: MAX_QUESTION_TEXT_LENGTH },
-                    reason: { type: "string", minLength: 1, maxLength: MAX_QUESTION_REASON_LENGTH },
-                },
-            },
-        },
-        evidence: {
-            type: "array",
-            maxItems: MAX_EVIDENCE,
-            items: {
-                type: "object",
-                additionalProperties: false,
-                required: ["path", "line", "fact"],
-                properties: {
-                    path: { type: "string", minLength: 1, maxLength: MAX_EVIDENCE_PATH_LENGTH },
-                    line: {
-                        anyOf: [
-                            { type: "integer", minimum: 1, maximum: MAX_LINE_NUMBER },
-                            { type: "null" },
-                        ],
+function architectOutcomeJsonSchema(decisionOnly: boolean) {
+    return deepFreeze({
+        type: "object",
+        additionalProperties: false,
+        required: [
+            "schemaVersion",
+            "kind",
+            "message",
+            "questions",
+            "evidence",
+            "decisionDocument",
+        ],
+        properties: {
+            schemaVersion: { type: "integer", const: 1 },
+            kind: { type: "string", enum: ["ready", "needsInput"] },
+            message: { type: "string", minLength: 1, maxLength: MAX_MESSAGE_LENGTH },
+            questions: {
+                type: "array",
+                maxItems: MAX_QUESTIONS,
+                items: {
+                    type: "object",
+                    additionalProperties: false,
+                    // Codex/OpenAI strict structured outputs require every
+                    // declared object property to be listed in `required`.
+                    // The provider schema can require `reason` while the
+                    // provider-neutral parser remains backward-compatible with
+                    // Claude/OpenCode/Pi outputs that omit it.
+                    required: ["id", "text", "reason"],
+                    properties: {
+                        id: { type: "string", minLength: 1, maxLength: MAX_CORRELATION_ID_LENGTH },
+                        text: { type: "string", minLength: 1, maxLength: MAX_QUESTION_TEXT_LENGTH },
+                        reason: { type: "string", minLength: 1, maxLength: MAX_QUESTION_REASON_LENGTH },
                     },
-                    fact: { type: "string", minLength: 1, maxLength: MAX_EVIDENCE_FACT_LENGTH },
                 },
             },
-        },
-        decisionDocument: {
-            anyOf: [
-                {
-                    type: "string",
-                    minLength: 1,
-                    maxLength: MAX_DECISION_DOCUMENT_LENGTH,
-                    // Strict outcome mode always carries the host-owned goal
-                    // into a machine-checkable obligation appendix. A model
-                    // must not gain authority to bypass that binding merely
-                    // by labelling its own answer "trivial".
-                    pattern: "```baro-obligations-v1(?:\\r?\\n)",
+            evidence: {
+                type: "array",
+                maxItems: MAX_EVIDENCE,
+                items: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: ["path", "line", "fact"],
+                    properties: {
+                        path: { type: "string", minLength: 1, maxLength: MAX_EVIDENCE_PATH_LENGTH },
+                        line: {
+                            anyOf: [
+                                { type: "integer", minimum: 1, maximum: MAX_LINE_NUMBER },
+                                { type: "null" },
+                            ],
+                        },
+                        fact: { type: "string", minLength: 1, maxLength: MAX_EVIDENCE_FACT_LENGTH },
+                    },
                 },
-                { type: "null" },
-            ],
+            },
+            decisionDocument: {
+                anyOf: [
+                    {
+                        type: "string",
+                        minLength: 1,
+                        maxLength: decisionOnly
+                            ? MAX_ARCHITECT_DECISION_OUTCOME_BYTES
+                            : MAX_DECISION_DOCUMENT_LENGTH,
+                        ...(decisionOnly
+                            ? {}
+                            : {
+                                  // Complete outcome mode always carries the
+                                  // host-owned goal into a machine-checkable
+                                  // obligation appendix.
+                                  pattern: "```baro-obligations-v1(?:\\r?\\n)",
+                              }),
+                    },
+                    { type: "null" },
+                ],
+            },
         },
-    },
-})
+    })
+}
+
+export const ARCHITECT_DECISION_OUTCOME_JSON_SCHEMA =
+    architectOutcomeJsonSchema(true)
+
+export const ARCHITECT_OUTCOME_JSON_SCHEMA = architectOutcomeJsonSchema(false)
 
 /** Parse exact JSON. Markdown fences, leading prose and unknown keys fail. */
 export function parseArchitectOutcome(
@@ -168,10 +188,14 @@ export function parseArchitectOutcome(
     if (typeof raw !== "string") {
         throw new ArchitectOutcomeContractError("architect outcome must be text")
     }
+    assertCompatibleValidationOptions(options)
     const bytes = Buffer.byteLength(raw, "utf8")
-    if (bytes > MAX_ARCHITECT_OUTCOME_BYTES) {
+    const byteLimit = options.decisionOnly === true
+        ? MAX_ARCHITECT_DECISION_OUTCOME_BYTES
+        : MAX_ARCHITECT_OUTCOME_BYTES
+    if (bytes > byteLimit) {
         throw new ArchitectOutcomeContractError(
-            `architect outcome is ${bytes} bytes; limit is ${MAX_ARCHITECT_OUTCOME_BYTES}`,
+            `architect outcome is ${bytes} bytes; limit is ${byteLimit}`,
         )
     }
     let value: unknown
@@ -187,6 +211,7 @@ export function validateArchitectOutcome(
     value: unknown,
     options: ArchitectOutcomeValidationOptions = {},
 ): ArchitectOutcomeV1 {
+    assertCompatibleValidationOptions(options)
     if (!exactRecord(value, [
         "schemaVersion",
         "kind",
@@ -214,15 +239,27 @@ export function validateArchitectOutcome(
         }
         const decisionDocument = boundedText(
             value.decisionDocument,
-            MAX_DECISION_DOCUMENT_LENGTH,
+            options.decisionOnly === true
+                ? MAX_ARCHITECT_DECISION_OUTCOME_BYTES
+                : MAX_DECISION_DOCUMENT_LENGTH,
             "architect decisionDocument",
         )
         assertArchitectureDocument(decisionDocument)
-        validateArchitectureObligations(
-            decisionDocument,
-            options.requireObligations === true,
-            options.trustedGoalEnvelope,
-        )
+        if (
+            options.decisionOnly === true &&
+            hasArchitectureObligationFence(decisionDocument)
+        ) {
+            throw new ArchitectOutcomeContractError(
+                "decision-only architect outcome cannot contain an architecture obligation marker",
+            )
+        }
+        if (options.decisionOnly !== true) {
+            validateArchitectureObligations(
+                decisionDocument,
+                options.requireObligations === true,
+                options.trustedGoalEnvelope,
+            )
+        }
         return deepFreeze({
             schemaVersion: ARCHITECT_OUTCOME_SCHEMA_VERSION,
             kind: "ready" as const,
@@ -283,8 +320,20 @@ function validateArchitectureObligations(
 
 export interface ArchitectOutcomeValidationOptions {
     requireObligations?: boolean
+    /** Phase-one validation: bounded ADR-only ready documents, never appendices. */
+    decisionOnly?: boolean
     /** Host-owned goal used to reject unknown or missing parent ids. */
     trustedGoalEnvelope?: GoalEnvelope | null
+}
+
+function assertCompatibleValidationOptions(
+    options: ArchitectOutcomeValidationOptions,
+): void {
+    if (options.decisionOnly === true && options.requireObligations === true) {
+        throw new ArchitectOutcomeContractError(
+            "decisionOnly and requireObligations cannot both be enabled",
+        )
+    }
 }
 
 export function wrapArchitectOutcome(
@@ -453,13 +502,22 @@ function boundedText(value: unknown, maximum: number, label: string): string {
 }
 
 function assertArchitectureDocument(text: string): void {
-    const hasAdr = /^## ADR-\d{3}:\s+.+$/m.test(text)
-    const hasFields = ["Status", "Context", "Decision", "Consequences"].every(
-        (field) => new RegExp(`^\\*\\*${field}:\\*\\*`, "m").test(text),
-    )
-    const isTrivial = /^## ADR-001: No cross-cutting decisions needed$/m.test(text)
-    const hasExistingContext = /^## Existing context$/m.test(text)
-    if (!hasAdr || !hasFields || (!isTrivial && !hasExistingContext)) {
+    let parsed: ReturnType<typeof parseArchitectureDecisionDocument>
+    try {
+        parsed = parseArchitectureDecisionDocument(text)
+    } catch (error) {
+        if (error instanceof ArchitectureDecisionDocumentError) {
+            throw new ArchitectOutcomeContractError(
+                `ready architect outcome requires a valid ADR decisionDocument: ${error.message}`,
+            )
+        }
+        throw error
+    }
+    const isTrivial =
+        parsed.decisions.length === 1 &&
+        parsed.decisions[0]!.id === "ADR-001" &&
+        parsed.decisions[0]!.title === "No cross-cutting decisions needed"
+    if (!isTrivial && !parsed.hasExistingContext) {
         throw new ArchitectOutcomeContractError(
             "ready architect outcome requires a valid ADR decisionDocument",
         )
