@@ -357,12 +357,58 @@ pub enum BaroEvent {
     },
 }
 
+/// Headless stdout is a machine-readable JSONL stream. A subprocess that
+/// dies mid-write, or a 64 KiB pipe read clipped at EOF, hands the echo
+/// path a partial JSON line; echoing it verbatim corrupts the stream, so a
+/// non-JSON line is wrapped into a bounded, valid `story_log` envelope.
+pub fn jsonl_safe_line<'a>(raw: &'a str, wrap_id: &str) -> std::borrow::Cow<'a, str> {
+    if serde_json::from_str::<serde_json::Value>(raw).is_ok() {
+        return std::borrow::Cow::Borrowed(raw);
+    }
+    let bounded: String = raw.chars().take(2_000).collect();
+    std::borrow::Cow::Owned(
+        serde_json::json!({
+            "type": "story_log",
+            "id": wrap_id,
+            "line": format!(
+                "[non-json line, {} bytes] {}",
+                raw.len(),
+                bounded,
+            ),
+        })
+        .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse(json: &str) -> BaroEvent {
         serde_json::from_str(json).expect(json)
+    }
+
+    #[test]
+    fn safe_line_passes_valid_json_through_unchanged() {
+        let raw = r#"{"type":"plan_complete_summary","stories":8}"#;
+        assert_eq!(jsonl_safe_line(raw, "plan"), raw);
+    }
+
+    #[test]
+    fn safe_line_wraps_a_clipped_json_line_into_valid_jsonl() {
+        // A 64 KiB pipe clip ends mid-string with no closing quote/brace.
+        let clipped = format!(
+            r#"{{"type":"plan_complete","final_prd":{{"description":"{}"#,
+            "x".repeat(70_000),
+        );
+        let wrapped = jsonl_safe_line(&clipped, "plan");
+        let value: serde_json::Value =
+            serde_json::from_str(&wrapped).expect("wrapped line must be valid JSON");
+        assert_eq!(value["type"], "story_log");
+        assert_eq!(value["id"], "plan");
+        let line = value["line"].as_str().unwrap();
+        assert!(line.starts_with("[non-json line,"));
+        assert!(line.len() < 3_000, "wrapped line must stay bounded");
     }
 
     #[test]

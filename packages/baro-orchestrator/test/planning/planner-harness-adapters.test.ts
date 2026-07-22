@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { execFile } from "node:child_process"
+import { createHash } from "node:crypto"
 import { chmodSync, readFileSync, writeFileSync } from "node:fs"
 import { delimiter, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -360,13 +361,21 @@ describe("subscription planner progressive harness adapters", () => {
                     .map((line) => JSON.parse(line) as Record<string, unknown>)
                 assert.deepEqual(
                     events.map((event) => event.type),
-                    ["planning_open", "plan_fragment", "plan_complete"],
+                    ["planning_open", "plan_fragment", "plan_complete_summary"],
                 )
                 assert.equal(events[1]!.run_id, `run-entry-${harness}`)
                 assert.equal(events[1]!.planning_id, `planning-entry-${harness}`)
-                assert.deepEqual(
-                    JSON.parse(readFileSync(resultFile, "utf8")),
-                    events[2]!.final_prd,
+                // stdout only announces the plan; the result file carries it.
+                const persisted = readFileSync(resultFile, "utf8")
+                assert.equal(events[2]!.final_prd_chars, persisted.length)
+                assert.equal(
+                    events[2]!.final_prd_sha256,
+                    createHash("sha256").update(persisted, "utf8").digest("hex"),
+                )
+                assert.equal(
+                    events[2]!.stories,
+                    (JSON.parse(persisted) as { userStories: unknown[] })
+                        .userStories.length,
                 )
             })
         })

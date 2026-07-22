@@ -195,7 +195,7 @@ async fn run(
                 continue;
             }
             if echo_raw {
-                println!("{}", trimmed);
+                println!("{}", crate::events::jsonl_safe_line(trimmed, "_orchestrator"));
             }
             match serde_json::from_str::<BaroEvent>(trimmed) {
                 Ok(ev) => {

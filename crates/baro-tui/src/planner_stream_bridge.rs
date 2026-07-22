@@ -257,6 +257,57 @@ mod tests {
     }
 
     #[test]
+    fn ignores_bounded_plan_complete_summary_announcements() {
+        // The planner announces completion on stdout only as a bounded
+        // summary; the full PRD reaches the host through the result file.
+        let summary = r#"{"type":"plan_complete_summary","run_id":"run-1","planning_id":"planning-1","stories":8,"final_prd_chars":90000,"final_prd_sha256":"abc"}"#;
+        assert!(parse_progressive_planner_event(summary).unwrap().is_none());
+        assert!(planner_stdout_line_to_command(summary).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn relays_a_plan_complete_larger_than_the_64kib_pipe_capacity() {
+        let final_prd = serde_json::json!({
+            "project": "target",
+            "description": "d".repeat(80 * 1024),
+            "userStories": [{"id": "S1"}],
+        });
+        let line = serde_json::json!({
+            "type": "plan_complete",
+            "run_id": "run-1",
+            "planning_id": "planning-1",
+            "final_prd": final_prd,
+        })
+        .to_string();
+        assert!(line.len() > 64 * 1024);
+
+        let (mut planner_stdout, rust_reader) = tokio::io::duplex(8 * 1024);
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(4);
+        let relay = tokio::spawn(relay_progressive_planner_stdout(rust_reader, command_tx));
+
+        let writer = tokio::spawn(async move {
+            planner_stdout.write_all(line.as_bytes()).await.unwrap();
+            planner_stdout.write_all(b"\n").await.unwrap();
+            planner_stdout.flush().await.unwrap();
+            drop(planner_stdout);
+        });
+
+        let command = timeout(Duration::from_secs(5), command_rx.recv())
+            .await
+            .expect("oversized record must still arrive")
+            .expect("command lane remains open");
+        let value: serde_json::Value = serde_json::from_str(&command)
+            .expect("relayed oversized record must be complete valid JSON");
+        assert_eq!(value["type"], "plan_complete");
+        assert_eq!(
+            value["final_prd"]["description"].as_str().unwrap().len(),
+            80 * 1024,
+        );
+        writer.await.unwrap();
+        assert_eq!(relay.await.unwrap().unwrap(), 1);
+    }
+
+    #[test]
     fn rejects_zero_fragment_ordinal() {
         let zero = FRAGMENT.replace(r#""ordinal":1"#, r#""ordinal":0"#);
         let error = parse_progressive_planner_event(&zero).unwrap_err();

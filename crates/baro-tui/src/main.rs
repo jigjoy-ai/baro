@@ -2919,7 +2919,7 @@ fn plan_progress_sink(headless: bool, tx: mpsc::Sender<AppEvent>) -> impl Fn(&st
 fn plan_event_sink(headless: bool, tx: mpsc::Sender<AppEvent>) -> impl Fn(&str) {
     move |raw: &str| {
         if headless {
-            println!("{}", raw);
+            println!("{}", events::jsonl_safe_line(raw, "plan"));
         } else if let Some(line) = planner_host::line_from_event(raw) {
             let _ = tx.try_send(AppEvent::PlanProgress(line));
         }

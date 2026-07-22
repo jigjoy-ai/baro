@@ -6,6 +6,7 @@
  * Planner backends only decide whether they can publish provisional stories.
  */
 
+import { createHash } from "node:crypto"
 import { writeFileSync, writeSync } from "node:fs"
 
 import {
@@ -50,10 +51,25 @@ export type PlanFailedWireEvent = Extract<
     BaroCommand,
     { type: "plan_failed" }
 >
+/**
+ * Bounded stdout announcement of a completed plan. The complete PRD travels
+ * only through the validated `--result-file`, from which the trusted host
+ * builds the private `plan_complete` orchestrator command. Echoing the full
+ * PRD here produced multi-hundred-KB stdout lines that a 64 KiB pipe write
+ * could silently clip into invalid JSONL.
+ */
+export interface PlanCompleteSummaryWireEvent {
+    type: "plan_complete_summary"
+    run_id: string
+    planning_id: string
+    stories: number
+    final_prd_chars: number
+    final_prd_sha256: string
+}
 export type ProgressivePlannerWireEvent =
     | PlanningOpenWireEvent
     | PlanFragmentWireEvent
-    | PlanCompleteWireEvent
+    | PlanCompleteSummaryWireEvent
     | PlanFailedWireEvent
 
 export interface ProgressivePlannerFlagInput {
@@ -226,7 +242,7 @@ export class ProgressivePlannerLifecycle {
         this.planSession.reconcile(normalized)
     }
 
-    complete(finalPrd: unknown): void {
+    complete(finalPrd: unknown, finalPrdJson?: string): void {
         if (!this.opened) {
             throw new Error("progressive planning must open before completion")
         }
@@ -236,11 +252,17 @@ export class ProgressivePlannerLifecycle {
         // post-processor could have removed or mutated an admitted prefix.
         this.validateFinalCandidate(finalPrd)
         if (this.completePublished) return
+        const canonical = finalPrdJson ?? JSON.stringify(finalPrd)
+        const stories = (finalPrd as Partial<PrdFile>).userStories
         this.sink({
-            type: "plan_complete",
+            type: "plan_complete_summary",
             run_id: this.config.runId,
             planning_id: this.config.planningId,
-            final_prd: finalPrd,
+            stories: Array.isArray(stories) ? stories.length : 0,
+            final_prd_chars: canonical.length,
+            final_prd_sha256: createHash("sha256")
+                .update(canonical, "utf8")
+                .digest("hex"),
         })
         this.completePublished = true
     }
@@ -286,7 +308,7 @@ export function persistProgressivePlannerResult(
     const finalPrd = JSON.parse(prdJson) as unknown
     lifecycle.validateFinalCandidate(finalPrd)
     writeResult(resultFile, prdJson)
-    lifecycle.complete(finalPrd)
+    lifecycle.complete(finalPrd, prdJson)
 }
 
 function validateFragmentWireEvent(
@@ -322,7 +344,32 @@ function validateFragmentWireEvent(
 function writeWireEvent(event: ProgressivePlannerWireEvent): void {
     // Failure paths may terminate immediately after publishing. A synchronous
     // fd write guarantees the private lifecycle record reached the pipe first.
-    writeSync(process.stdout.fd, JSON.stringify(event) + "\n")
+    writeAllSync(process.stdout.fd, JSON.stringify(event) + "\n")
+}
+
+const EAGAIN_BACKOFF = new Int32Array(new SharedArrayBuffer(4))
+
+/**
+ * A pipe fd holds 64 KiB and stdout pipes are non-blocking, so one writeSync
+ * may clip a record mid-byte (its return value is bytes written) or throw
+ * EAGAIN. Either way an event line would reach the reader as invalid JSONL,
+ * and a clipped plan_fragment would be silently dropped by the host bridge.
+ */
+export function writeAllSync(
+    fd: number,
+    text: string,
+    write: typeof writeSync = writeSync,
+): void {
+    const buffer = Buffer.from(text, "utf8")
+    let offset = 0
+    while (offset < buffer.length) {
+        try {
+            offset += write(fd, buffer, offset, buffer.length - offset)
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EAGAIN") throw error
+            Atomics.wait(EAGAIN_BACKOFF, 0, 0, 2)
+        }
+    }
 }
 
 export interface ProgressiveBootstrapMetadata {

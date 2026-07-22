@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import { describe, it } from "node:test"
 
 import {
@@ -7,6 +8,7 @@ import {
     persistProgressivePlannerResult,
     ProgressivePlannerLifecycle,
     resolveProgressivePlannerConfig,
+    writeAllSync,
     type ProgressivePlannerWireEvent,
 } from "../../src/planning/progressive-planner-protocol.js"
 import {
@@ -143,7 +145,7 @@ describe("progressive planner lifecycle wire", () => {
         assert.deepEqual(events.map(({ type }) => type), [
             "planning_open",
             "plan_fragment",
-            "plan_complete",
+            "plan_complete_summary",
         ])
     })
 
@@ -189,7 +191,7 @@ describe("progressive planner lifecycle wire", () => {
             project: "p",
             userStories: [STORY_S1, owner],
         })
-        assert.equal(events.at(-1)?.type, "plan_complete")
+        assert.equal(events.at(-1)?.type, "plan_complete_summary")
     })
 
     it("rejects altered obligation criteria before admitting a fragment", () => {
@@ -366,10 +368,12 @@ describe("progressive planner lifecycle wire", () => {
             ordinal: 1,
             stories: [STORY_S1],
         })
-        lifecycle.complete({ project: "trusted", userStories: [STORY_S1] })
+        const finalPrd = { project: "trusted", userStories: [STORY_S1] }
+        lifecycle.complete(finalPrd)
         // Once completed, the same stream cannot also fail.
         lifecycle.fail("result_write_failed", "disk became read-only")
 
+        const canonical = JSON.stringify(finalPrd)
         assert.deepEqual(events, [
             {
                 type: "planning_open",
@@ -385,13 +389,14 @@ describe("progressive planner lifecycle wire", () => {
                 stories: [STORY_S1],
             },
             {
-                type: "plan_complete",
+                type: "plan_complete_summary",
                 run_id: "run-1",
                 planning_id: "planning-1",
-                final_prd: {
-                    project: "trusted",
-                    userStories: [STORY_S1],
-                },
+                stories: 1,
+                final_prd_chars: canonical.length,
+                final_prd_sha256: createHash("sha256")
+                    .update(canonical, "utf8")
+                    .digest("hex"),
             },
         ])
     })
@@ -418,7 +423,7 @@ describe("progressive planner lifecycle wire", () => {
         assert.deepEqual(order, [
             "planning_open",
             "result_written",
-            "plan_complete",
+            "plan_complete_summary",
         ])
     })
 
@@ -464,7 +469,7 @@ describe("progressive planner lifecycle wire", () => {
         assert.deepEqual(events.map((event) => event.type), [
             "planning_open",
             "plan_fragment",
-            "plan_complete",
+            "plan_complete_summary",
         ])
     })
 
@@ -595,6 +600,85 @@ describe("progressive planner lifecycle wire", () => {
             /does not exactly match admitted prefix/u,
         )
         assert.equal(writes, 0)
+    })
+
+    it("announces a >64 KiB final PRD as one bounded, valid JSONL summary line", () => {
+        const events: ProgressivePlannerWireEvent[] = []
+        const lifecycle = new ProgressivePlannerLifecycle(
+            {
+                runId: "run-1",
+                planningId: "planning-1",
+                bootstrapFile: "/tmp/bootstrap.json",
+            },
+            (event) => events.push(event),
+        )
+        lifecycle.open()
+
+        const oversized = {
+            project: "trusted",
+            description: "d".repeat(80 * 1024),
+            userStories: [STORY_S1],
+        }
+        const prdJson = JSON.stringify(oversized)
+        assert.ok(prdJson.length > 64 * 1024)
+        let persisted: string | null = null
+        persistProgressivePlannerResult(
+            "/tmp/result.json",
+            prdJson,
+            lifecycle,
+            (_path, contents) => {
+                persisted = contents
+            },
+        )
+
+        // The full plan reaches the host only through the result file.
+        assert.equal(persisted, prdJson)
+        const summary = events.at(-1)
+        assert.ok(summary && summary.type === "plan_complete_summary")
+        const line = JSON.stringify(summary)
+        assert.ok(
+            line.length < 4_096,
+            "the stdout announcement must fit one pipe write with room to spare",
+        )
+        assert.deepEqual(JSON.parse(line), {
+            type: "plan_complete_summary",
+            run_id: "run-1",
+            planning_id: "planning-1",
+            stories: 1,
+            final_prd_chars: prdJson.length,
+            final_prd_sha256: createHash("sha256")
+                .update(prdJson, "utf8")
+                .digest("hex"),
+        })
+    })
+
+    it("completes clipped pipe writes so no wire record is ever truncated", () => {
+        const record = `${JSON.stringify({
+            type: "plan_fragment",
+            payload: "p".repeat(150 * 1024),
+        })}\n`
+        const chunks: Buffer[] = []
+        let callsUntilEagain = 2
+        writeAllSync(1, record, (_fd, buffer, offset, length) => {
+            if (callsUntilEagain === 0) {
+                callsUntilEagain = 3
+                const error = new Error("EAGAIN") as NodeJS.ErrnoException
+                error.code = "EAGAIN"
+                throw error
+            }
+            callsUntilEagain -= 1
+            // A pipe accepts at most its free capacity per write(2) call.
+            const written = Math.min(length!, 64 * 1024)
+            chunks.push(Buffer.from(buffer as Buffer).subarray(
+                offset!,
+                offset! + written,
+            ))
+            return written
+        })
+
+        const delivered = Buffer.concat(chunks).toString("utf8")
+        assert.equal(delivered, record)
+        assert.doesNotThrow(() => JSON.parse(delivered.trimEnd()))
     })
 })
 
