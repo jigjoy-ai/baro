@@ -2,6 +2,10 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import { RuntimeReplanCoordinator } from "../../src/participants/runtime-replan-coordinator.js"
+import {
+    renderRuntimeAmendments,
+    renderRuntimeAmendmentsForPrompt,
+} from "../../src/planning/runtime-amendments.js"
 import type { PrdFile } from "../../src/prd.js"
 import {
     deriveGoalContract,
@@ -81,11 +85,13 @@ describe("RuntimeReplanCoordinator", () => {
                     fingerprint:
                         writes[1]!.runtimeGraph!.appliedDecisions[0]!.fingerprint,
                     applied: first.event.data,
+                    origin: "worker",
                 },
                 {
                     fingerprint:
                         writes[1]!.runtimeGraph!.appliedDecisions[1]!.fingerprint,
                     applied: second.event.data,
+                    origin: "worker",
                 },
             ],
         })
@@ -540,7 +546,164 @@ describe("RuntimeReplanCoordinator", () => {
         )
         assert.equal(outcome.applied.prd.runtimeGraph?.runId, "run-2")
     })
+
+    it("rejects a runtime adaptation whose prompt projection would overflow, transactionally", () => {
+        const writes: PrdFile[] = []
+        const coordinator = new RuntimeReplanCoordinator({
+            runId: "run-1",
+            prdPath: "/unused/prd.json",
+            maxDynamicStories: 3,
+            adaptationBudget: 3,
+            persist: (_path, value) => writes.push(structuredClone(value)),
+        })
+        coordinator.start(initialPrd())
+
+        const oversized: RuntimeReplanProposedData = {
+            ...addProposal(),
+            proposalId: "proposal-oversized",
+            reason: `evidence requires a correction ${"x".repeat(30_000)}`,
+        }
+        const rejected = coordinator.decide(oversized, decisionState())
+        assert.ok(RuntimeReplanRejected.is(rejected.event))
+        if (RuntimeReplanRejected.is(rejected.event)) {
+            assert.equal(rejected.event.data.code, "prompt_projection_overflow")
+            assert.equal(rejected.event.data.currentGraphVersion, 1)
+        }
+        assert.equal(coordinator.graphVersion, 1)
+        assert.equal(writes.length, 0)
+
+        const replay = coordinator.decide(
+            structuredClone(oversized),
+            decisionState(),
+        )
+        assert.ok(RuntimeReplanRejected.is(replay.event))
+        assert.equal(writes.length, 0)
+
+        // The graph, version, and ledger stay consistent for later decisions.
+        const accepted = coordinator.decide(addProposal(), decisionState())
+        assert.ok(RuntimeReplanApplied.is(accepted.event))
+        assert.equal(coordinator.graphVersion, 2)
+        assert.equal(writes.length, 1)
+        assert.equal(
+            writes[0]?.runtimeGraph?.appliedDecisions.length,
+            1,
+        )
+    })
+
+    it("admits oversized planner fragments and keeps them out of the prompt projection", () => {
+        let durable = initialPrd()
+        const coordinator = new RuntimeReplanCoordinator({
+            runId: "run-1",
+            prdPath: "/unused/prd.json",
+            maxDynamicStories: 3,
+            adaptationBudget: 3,
+            persist: (_path, value) => {
+                durable = structuredClone(value)
+            },
+        })
+        coordinator.start(durable)
+
+        // Three fragments mirroring the A20 shape: combined exact mutations
+        // far beyond the 24k prompt budget, admitted while planning streams.
+        for (const [index, dependsOn] of [[], ["SP1"], ["SP2"]].entries()) {
+            const proposal = plannerFragmentProposal(
+                index + 1,
+                coordinator.graphVersion,
+                dependsOn as string[],
+            )
+            assert.ok(
+                JSON.stringify(proposal.mutation).length > 8_000,
+                "each fragment must be individually large",
+            )
+            const outcome = coordinator.decide(proposal, {
+                ...decisionState(durable),
+                requireActiveLease: false,
+                activeLease: undefined,
+                storyAccounting: "planner",
+                maxAddedStories: 8,
+            })
+            assert.ok(RuntimeReplanApplied.is(outcome.event))
+        }
+        assert.equal(coordinator.graphVersion, 4)
+        assert.deepEqual(
+            durable.runtimeGraph?.appliedDecisions.map(
+                (decision) => decision.origin,
+            ),
+            ["planner", "planner", "planner"],
+        )
+
+        // Bootstrap history stays auditable but never re-enters the worker
+        // prompt, so later story offers cannot overflow the projection.
+        assert.equal(renderRuntimeAmendmentsForPrompt(durable), null)
+        assert.ok(renderRuntimeAmendments(durable))
+
+        const workerOutcome = coordinator.decide(
+            {
+                ...addProposal(),
+                proposalId: "proposal-after-planning",
+                baseGraphVersion: 4,
+                mutation: {
+                    addedStories: [
+                        {
+                            id: "S2",
+                            priority: 9,
+                            title: "Runtime adaptation",
+                            description: "A genuine post-plan correction.",
+                            dependsOn: ["SP3"],
+                            acceptance: ["The correction is applied."],
+                            tests: ["npm test"],
+                        },
+                    ],
+                    removedStoryIds: [],
+                    modifiedDeps: {},
+                },
+            },
+            decisionState(durable),
+        )
+        assert.ok(RuntimeReplanApplied.is(workerOutcome.event))
+        const projected = renderRuntimeAmendmentsForPrompt(durable)
+        assert.ok(projected)
+        assert.ok(projected.length <= 24_000)
+        assert.match(projected, /proposal-after-planning/)
+        assert.doesNotMatch(projected, /canonical obligation criterion text/)
+    })
 })
+
+function plannerFragmentProposal(
+    ordinal: number,
+    baseGraphVersion: number,
+    dependsOn: string[],
+): RuntimeReplanProposedData {
+    return {
+        runId: "run-1",
+        proposalId: `run-1:planner:fragment-${ordinal}`,
+        sourceStoryId: "planner:planning-1",
+        leaseId: "run-1:planning:planning-1",
+        generation: ordinal,
+        baseGraphVersion,
+        reason: `progressive planner admitted fragment fragment-${ordinal}`,
+        mutation: {
+            addedStories: [
+                {
+                    id: `SP${ordinal}`,
+                    priority: ordinal,
+                    title: `Planner fragment story ${ordinal}`,
+                    description: "Progressively planned story.",
+                    dependsOn,
+                    acceptance: Array.from(
+                        { length: 24 },
+                        (_, index) =>
+                            `O-${String(index + 1).padStart(3, "0")}: ` +
+                            `${"canonical obligation criterion text ".repeat(12)}`,
+                    ),
+                    tests: ["npm test"],
+                },
+            ],
+            removedStoryIds: [],
+            modifiedDeps: {},
+        },
+    }
+}
 
 function decisionState(prd: PrdFile = initialPrd()) {
     return {

@@ -2,7 +2,13 @@ import {
     savePrdAtomic,
     type PrdFile,
     type PrdRuntimeGraphState,
+    type PrdRuntimeReplanOrigin,
 } from "../prd.js"
+import {
+    RUNTIME_AMENDMENT_PROMPT_MAX_CHARS,
+    decisionOriginOf,
+    runtimeAmendmentPromptProjectionChars,
+} from "../planning/runtime-amendments.js"
 import {
     RuntimeReplanApplied,
     RuntimeReplanRejected,
@@ -65,6 +71,8 @@ export interface RuntimeReplanDecisionOutcome {
 interface RememberedDecision {
     fingerprint: string
     event: RuntimeReplanDecisionEvent
+    /** Present only for Applied decisions; rejections have no lifecycle. */
+    origin?: PrdRuntimeReplanOrigin
 }
 
 /**
@@ -116,6 +124,7 @@ export class RuntimeReplanCoordinator {
             this.decisions.set(event.data.proposalId, {
                 fingerprint: decision.fingerprint,
                 event,
+                origin: decisionOriginOf(decision, durable.planning),
             })
         }
     }
@@ -220,6 +229,28 @@ export class RuntimeReplanCoordinator {
             )
         }
 
+        const origin = originOfAccounting(state.storyAccounting)
+        // Planner-bootstrap fragments are excluded from the worker prompt
+        // projection (their semantics live in the authoritative PRD stories),
+        // so only genuine runtime adaptations are measured against the budget.
+        if (origin !== "planner") {
+            const projectedChars = runtimeAmendmentPromptProjectionChars([
+                ...this.appliedAdaptations(),
+                appliedSnapshotOf(proposal),
+            ])
+            if (projectedChars > RUNTIME_AMENDMENT_PROMPT_MAX_CHARS) {
+                return this.rememberRejected(
+                    proposal,
+                    fingerprint,
+                    "prompt_projection_overflow",
+                    `accepting this decision would grow the runtime amendment ` +
+                        `prompt projection to ${projectedChars} characters, ` +
+                        `beyond the ${RUNTIME_AMENDMENT_PROMPT_MAX_CHARS} ` +
+                        `budget every later story offer must satisfy`,
+                )
+            }
+        }
+
         const previousGraphVersion = this.graphVersionValue
         const graphVersion = previousGraphVersion + 1
         const dynamicStories =
@@ -254,6 +285,7 @@ export class RuntimeReplanCoordinator {
                 policyStories,
                 fingerprint,
                 event.data,
+                origin,
                 state.planningState ?? state.prd.runtimeGraph?.planning,
                 protocolForRun(state.prd, this.opts.runId),
             ),
@@ -274,7 +306,7 @@ export class RuntimeReplanCoordinator {
         this.graphVersionValue = graphVersion
         this.dynamicStories = dynamicStories
         this.policyStories = policyStories
-        this.decisions.set(proposal.proposalId, { fingerprint, event })
+        this.decisions.set(proposal.proposalId, { fingerprint, event, origin })
         return {
             event,
             applied: {
@@ -308,6 +340,7 @@ export class RuntimeReplanCoordinator {
         policyStories: number,
         fingerprint: string,
         applied: RuntimeReplanAppliedData,
+        origin: PrdRuntimeReplanOrigin,
         planning: PrdRuntimeGraphState["planning"],
         protocol: PrdRuntimeGraphState["protocol"],
     ): PrdRuntimeGraphState {
@@ -317,11 +350,13 @@ export class RuntimeReplanCoordinator {
             appliedDecisions.push({
                 fingerprint: decision.fingerprint,
                 applied: structuredClone(decision.event.data),
+                ...(decision.origin ? { origin: decision.origin } : {}),
             })
         }
         appliedDecisions.push({
             fingerprint,
             applied: structuredClone(applied),
+            origin,
         })
         return {
             runId: this.opts.runId,
@@ -332,6 +367,21 @@ export class RuntimeReplanCoordinator {
             ...(planning ? { planning: structuredClone(planning) } : {}),
             ...(protocol ? { protocol: structuredClone(protocol) } : {}),
         }
+    }
+
+    /** Runtime adaptations already accepted this run, in projection order. */
+    private appliedAdaptations(): RuntimeReplanAppliedData[] {
+        const applieds: RuntimeReplanAppliedData[] = []
+        for (const decision of this.decisions.values()) {
+            if (!RuntimeReplanApplied.is(decision.event)) continue
+            if (decision.origin === "planner") continue
+            applieds.push(decision.event.data)
+        }
+        return applieds.sort(
+            (left, right) =>
+                left.graphVersion - right.graphVersion ||
+                left.proposalId.localeCompare(right.proposalId),
+        )
     }
 
     private rememberRejected(
@@ -363,6 +413,32 @@ export class RuntimeReplanCoordinator {
             code,
             reason,
         })
+    }
+}
+
+function originOfAccounting(
+    accounting: RuntimeReplanDecisionState["storyAccounting"],
+): PrdRuntimeReplanOrigin {
+    if (accounting === "planner") return "planner"
+    if (accounting === "policy") return "policy"
+    return "worker"
+}
+
+/** Measurement stand-in with the exact fields the prompt projection renders. */
+function appliedSnapshotOf(
+    proposal: RuntimeReplanProposedData,
+): RuntimeReplanAppliedData {
+    return {
+        runId: proposal.runId,
+        proposalId: proposal.proposalId,
+        sourceStoryId: proposal.sourceStoryId,
+        leaseId: proposal.leaseId,
+        generation: proposal.generation,
+        baseGraphVersion: proposal.baseGraphVersion,
+        previousGraphVersion: proposal.baseGraphVersion,
+        graphVersion: proposal.baseGraphVersion + 1,
+        reason: proposal.reason,
+        mutation: snapshotRuntimeReplanMutation(proposal.mutation),
     }
 }
 

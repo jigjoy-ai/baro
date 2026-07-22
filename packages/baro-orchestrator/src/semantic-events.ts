@@ -191,6 +191,7 @@ export type RuntimeReplanRejectionCode =
     | "dependency_cycle"
     | "destructive_removal"
     | "persistence_failed"
+    | "prompt_projection_overflow"
     | "run_not_active"
 
 export interface RuntimeReplanRejectedData

@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto"
 
-import type { PrdFile, PrdRuntimeReplanDecision } from "../prd.js"
+import type {
+    PrdFile,
+    PrdProgressivePlanningState,
+    PrdRuntimeReplanDecision,
+    PrdRuntimeReplanOrigin,
+} from "../prd.js"
 import type {
     ReplanStoryAdd,
     RuntimeReplanAppliedData,
@@ -36,7 +41,7 @@ const DOCUMENT_PROFILE: RenderProfile = {
 `,
 }
 
-const PROMPT_MAX_CHARS = 24_000
+export const RUNTIME_AMENDMENT_PROMPT_MAX_CHARS = 24_000
 const PROMPT_HEADER = `## Accepted runtime architecture and plan amendments
 
 The records below are durably accepted Board decisions. Quoted summaries are
@@ -60,31 +65,76 @@ export function renderRuntimeAmendments(
 }
 
 /**
- * Exact worker projection of every retained decision. RuntimeGraph already
- * retains at most 32 decisions. Never abbreviate an accepted mutation here:
- * a hash can authenticate omitted semantics, but cannot tell a later worker
- * what the Board actually changed. If the complete ledger cannot fit the
- * bounded prompt contract, fail closed before dispatching an under-informed
- * worker.
+ * Classify one durable decision. Records written before origins were
+ * persisted are matched against the progressive-planning fragment ledger,
+ * which commits in the same atomic snapshot as the fragment's graph version.
+ */
+export function decisionOriginOf(
+    decision: Pick<PrdRuntimeReplanDecision, "applied" | "origin">,
+    planning: Pick<PrdProgressivePlanningState, "fragments"> | null | undefined,
+): PrdRuntimeReplanOrigin {
+    if (decision.origin) return decision.origin
+    return planning?.fragments.some(
+        (fragment) => fragment.graphVersion === decision.applied.graphVersion,
+    )
+        ? "planner"
+        : "worker"
+}
+
+/**
+ * Exact worker projection of every retained post-plan runtime adaptation.
+ * Planner-bootstrap decisions are excluded: they are the construction history
+ * of the initial plan and their full semantics already live in the
+ * authoritative PRD stories every prompt is built from. RuntimeGraph retains
+ * at most 32 decisions. Never abbreviate an accepted mutation here: a hash
+ * can authenticate omitted semantics, but cannot tell a later worker what
+ * the Board actually changed. If the complete adaptation ledger cannot fit
+ * the bounded prompt contract, fail closed before dispatching an
+ * under-informed worker.
  */
 export function renderRuntimeAmendmentsForPrompt(
     prd: Pick<PrdFile, "runtimeGraph"> | null | undefined,
 ): string | null {
-    const decisions = chronologicalDecisions(
-        prd?.runtimeGraph?.appliedDecisions ?? [],
+    const graph = prd?.runtimeGraph
+    const adaptations = chronologicalDecisionRecords(
+        graph?.appliedDecisions ?? [],
     )
-    if (decisions.length === 0) return null
-
-    const lines = decisions.map(renderPromptDecision)
-    const rendered = `${PROMPT_HEADER}\n${lines.join("\n")}\n`
-    if (rendered.length > PROMPT_MAX_CHARS) {
+        .filter(
+            (decision) =>
+                decisionOriginOf(decision, graph?.planning) !== "planner",
+        )
+        .map(({ applied }) => applied)
+    if (adaptations.length === 0) return null
+    const rendered = renderPromptProjection(adaptations)
+    if (rendered.length > RUNTIME_AMENDMENT_PROMPT_MAX_CHARS) {
         throw new Error(
             `complete runtime amendment prompt projection is ${rendered.length} ` +
                 `characters; refusing to truncate accepted semantics beyond ` +
-                `${PROMPT_MAX_CHARS}`,
+                `${RUNTIME_AMENDMENT_PROMPT_MAX_CHARS}`,
         )
     }
     return rendered
+}
+
+/**
+ * Exact character cost the prompt projection would have with `applieds` as
+ * the complete runtime-adaptation ledger. The replan coordinator measures a
+ * candidate against the budget *before* accepting it, so an oversized
+ * decision is rejected transactionally instead of poisoning every later
+ * story offer.
+ */
+export function runtimeAmendmentPromptProjectionChars(
+    applieds: readonly RuntimeReplanAppliedData[],
+): number {
+    if (applieds.length === 0) return 0
+    return renderPromptProjection(applieds).length
+}
+
+function renderPromptProjection(
+    applieds: readonly RuntimeReplanAppliedData[],
+): string {
+    const lines = applieds.map(renderPromptDecision)
+    return `${PROMPT_HEADER}\n${lines.join("\n")}\n`
 }
 
 function renderWithProfile(
@@ -132,10 +182,15 @@ function renderWithProfile(
 function chronologicalDecisions(
     decisions: readonly PrdRuntimeReplanDecision[],
 ): RuntimeReplanAppliedData[] {
+    return chronologicalDecisionRecords(decisions).map(({ applied }) => applied)
+}
+
+function chronologicalDecisionRecords(
+    decisions: readonly PrdRuntimeReplanDecision[],
+): PrdRuntimeReplanDecision[] {
     return decisions
-        .map(({ applied }) => applied)
         .filter(
-            (applied) =>
+            ({ applied }) =>
                 applied != null &&
                 Number.isSafeInteger(applied.graphVersion) &&
                 applied.graphVersion >= 1 &&
@@ -146,8 +201,8 @@ function chronologicalDecisions(
         )
         .sort(
             (left, right) =>
-                left.graphVersion - right.graphVersion ||
-                left.proposalId.localeCompare(right.proposalId),
+                left.applied.graphVersion - right.applied.graphVersion ||
+                left.applied.proposalId.localeCompare(right.applied.proposalId),
         )
 }
 

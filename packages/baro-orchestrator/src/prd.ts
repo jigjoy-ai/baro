@@ -74,9 +74,15 @@ export interface PrdFile {
     runtimeGraph?: PrdRuntimeGraphState
 }
 
+/** Progressive plan construction vs. genuine post-plan runtime adaptation. */
+export type PrdRuntimeReplanOrigin = "planner" | "worker" | "policy"
+
 export interface PrdRuntimeReplanDecision {
     fingerprint: string
     applied: RuntimeReplanAppliedData
+    /** Absent on records written before origins were persisted; the planning
+     * fragment ledger then classifies planner-bootstrap decisions. */
+    origin?: PrdRuntimeReplanOrigin
 }
 
 export interface PrdRuntimeGraphState {
@@ -516,6 +522,10 @@ function validRuntimeDecision(
     return (
         typeof decision.fingerprint === "string" &&
         decision.fingerprint.length > 0 &&
+        (decision.origin === undefined ||
+            decision.origin === "planner" ||
+            decision.origin === "worker" ||
+            decision.origin === "policy") &&
         !!applied &&
         applied.runId === durableRunId &&
         nonBlank(applied.proposalId) &&

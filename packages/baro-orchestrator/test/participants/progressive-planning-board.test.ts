@@ -432,6 +432,81 @@ describe("CollectiveBoard progressive planning", () => {
         })
     })
 
+    it("keeps offering stories after large planner fragments exceed the prompt projection budget", async () => {
+        await withTempDir("progressive-board-large-", async (dir) => {
+            const runId = "run-progressive-large"
+            const planningId = "planning-progressive-large"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(bootstrapPrd(), null, 2) + "\n")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                progressivePlanningId: planningId,
+                unsafeAllowUnboundPlanningAuthority: true,
+            })
+            const env = joinWithCapture(board)
+            await start(env, runId)
+            await flush()
+
+            const canonicalCriteria = Array.from(
+                { length: 24 },
+                (_, index) =>
+                    `O-${String(index + 1).padStart(3, "0")}: ` +
+                    `${"canonical obligation criterion text ".repeat(12)}`,
+            )
+            const largeStory = (id: string, dependsOn: string[] = []) =>
+                story(id, dependsOn, { acceptance: canonicalCriteria })
+
+            env.deliverSemanticEvent(
+                source("planner"),
+                fragment(runId, planningId, "prefix", 1, [largeStory("S1")]),
+            )
+            await waitFor(env.events, PlanFragmentAdmitted.is)
+            env.deliverSemanticEvent(
+                source("planner"),
+                fragment(runId, planningId, "suffix", 2, [
+                    largeStory("S2", ["S1"]),
+                    largeStory("S3", ["S2"]),
+                ]),
+            )
+            await waitForCount(env.events, PlanFragmentAdmitted.is, 2)
+
+            const persisted = readPrd(prdPath)
+            const combinedMutationChars = persisted.runtimeGraph!
+                .appliedDecisions.map(
+                    ({ applied }) => JSON.stringify(applied.mutation).length,
+                )
+                .reduce((sum, length) => sum + length, 0)
+            assert.ok(
+                combinedMutationChars > 24_000,
+                `bootstrap fragments must exceed the 24k prompt budget, got ${combinedMutationChars}`,
+            )
+            assert.deepEqual(
+                persisted.runtimeGraph?.appliedDecisions.map(
+                    ({ origin }) => origin,
+                ),
+                ["planner", "planner"],
+            )
+
+            // The A20 regression: this next offer used to throw inside
+            // storyPrompt() and terminate the whole collective run.
+            const s1Offer = await offerFor(env, runId, "S1")
+            assert.doesNotMatch(
+                s1Offer.request.prompt,
+                /Accepted runtime architecture and plan amendments/,
+            )
+            await completeStory(env, runId, s1Offer, "lease-s1-large")
+            const s2Offer = await offerFor(env, runId, "S2")
+            assert.doesNotMatch(
+                s2Offer.request.prompt,
+                /Accepted runtime architecture and plan amendments/,
+            )
+            assert.match(s2Offer.request.prompt, /O-001/)
+        })
+    })
+
     it("rejects unsafe fragments atomically and replays an admitted fragment idempotently", async () => {
         await withTempDir("progressive-rejection-", async (dir) => {
             const runId = "run-progressive-reject"

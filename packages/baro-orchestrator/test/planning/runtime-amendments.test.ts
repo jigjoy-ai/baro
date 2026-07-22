@@ -145,6 +145,83 @@ describe("runtime amendment rendering", () => {
         assert.doesNotMatch(prompt, /\+\d+/u)
     })
 
+    it("keeps planner-bootstrap decisions auditable but out of the worker prompt", () => {
+        const large = () => largePlannerMutation()
+        const prd = prdWith([
+            { ...decision(2, "planner fragment 1", large()), origin: "planner" },
+            { ...decision(3, "planner fragment 2", large()), origin: "planner" },
+            { ...decision(4, "planner fragment 3", large()), origin: "planner" },
+        ])
+        assert.ok(
+            prd.runtimeGraph!.appliedDecisions
+                .map(({ applied }) => JSON.stringify(applied.mutation).length)
+                .reduce((sum, length) => sum + length, 0) > 24_000,
+            "combined fragments must exceed the prompt budget",
+        )
+
+        // The A20 failure shape: the full bootstrap replay used to overflow
+        // the 24k projection and poison every later story offer.
+        assert.equal(renderRuntimeAmendmentsForPrompt(prd), null)
+        const document = renderRuntimeAmendments(prd)
+        assert.ok(document)
+        assert.match(document, /planner fragment 1/)
+        assert.match(document, /planner fragment 3/)
+    })
+
+    it("projects runtime adaptations while excluding bootstrap decisions", () => {
+        const prompt = renderRuntimeAmendmentsForPrompt(
+            prdWith([
+                {
+                    ...decision(2, "planner fragment", largePlannerMutation()),
+                    origin: "planner",
+                },
+                {
+                    ...decision(3, "worker adaptation", emptyMutation()),
+                    origin: "worker",
+                },
+                {
+                    ...decision(4, "policy recovery", emptyMutation()),
+                    origin: "policy",
+                },
+            ]),
+        )
+
+        assert.ok(prompt)
+        assert.match(prompt, /worker adaptation/)
+        assert.match(prompt, /policy recovery/)
+        assert.doesNotMatch(prompt, /planner fragment/)
+        assert.doesNotMatch(prompt, /O-001/)
+    })
+
+    it("classifies legacy records through the planning fragment ledger", () => {
+        const prd = prdWith([
+            decision(2, "pre-origin planner fragment", largePlannerMutation()),
+            decision(3, "pre-origin worker adaptation", emptyMutation()),
+        ])
+        prd.runtimeGraph!.planning = {
+            schemaVersion: 1,
+            runId: "run-amendments",
+            planningId: "planning-1",
+            status: "completed",
+            nextOrdinal: 2,
+            admittedStoryIds: ["SP1"],
+            fragments: [
+                {
+                    fragmentId: "fragment-1",
+                    ordinal: 1,
+                    fingerprint: "fingerprint-1",
+                    storyIds: ["SP1"],
+                    graphVersion: 2,
+                },
+            ],
+        }
+
+        const prompt = renderRuntimeAmendmentsForPrompt(prd)
+        assert.ok(prompt)
+        assert.match(prompt, /pre-origin worker adaptation/)
+        assert.doesNotMatch(prompt, /pre-origin planner fragment/)
+    })
+
     it("bounds the audit document and refuses an incomplete worker projection", () => {
         const mutation: RuntimeReplanMutation = {
             addedStories: Array.from({ length: 100 }, (_, index) => ({
@@ -232,6 +309,30 @@ function decision(
 function emptyMutation(): RuntimeReplanMutation {
     return {
         addedStories: [],
+        removedStoryIds: [],
+        modifiedDeps: {},
+    }
+}
+
+/** One progressive fragment with long canonical O-xxx acceptance criteria. */
+function largePlannerMutation(): RuntimeReplanMutation {
+    return {
+        addedStories: [
+            {
+                id: "SP1",
+                priority: 1,
+                title: "Progressively planned story",
+                description: "Story admitted while the planner streamed.",
+                dependsOn: [],
+                acceptance: Array.from(
+                    { length: 24 },
+                    (_, index) =>
+                        `O-${String(index + 1).padStart(3, "0")}: ` +
+                        `${"canonical obligation criterion text ".repeat(12)}`,
+                ),
+                tests: ["npm test"],
+            },
+        ],
         removedStoryIds: [],
         modifiedDeps: {},
     }
