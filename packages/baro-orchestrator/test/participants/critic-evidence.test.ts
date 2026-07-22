@@ -198,6 +198,78 @@ describe("Critic repository evidence", () => {
         assert.match(evidencePrompt, /counterexample\/event ordering/)
     })
 
+    it("grounds the verdict in the Architect decision contract when one exists", async () => {
+        const adr = [
+            "## ADR-007: Propagate signals in each provider's native request shape",
+            "**Status:** Accepted",
+            "**Decision:** In every case use the exact `request.signal` object.",
+        ].join("\n")
+
+        const prompt = buildEvalPrompt(
+            ["With a signal, the SDK call receives exact signal identity."],
+            "implemented per ADR-007",
+            "17 tests passed",
+            "diff --git a/adapter.ts b/adapter.ts",
+            adr,
+        )
+        assert.match(
+            prompt,
+            /## Accepted architecture decisions \(authoritative design contract\)/,
+        )
+        assert.match(prompt, /exact `request\.signal` object/)
+        assert.match(
+            prompt,
+            /Do NOT invent additional API requirements, parameter-precedence rules/,
+        )
+        assert.match(prompt, /never a violation merely because a different approach/)
+        assert.ok(
+            prompt.indexOf("Accepted architecture decisions") <
+                prompt.indexOf("## Acceptance criteria"),
+            "the contract precedes the criteria it scopes",
+        )
+        assert.match(
+            VERDICT_SYSTEM_PROMPT,
+            /they and the criteria are the complete contract/,
+        )
+        assert.match(VERDICT_SYSTEM_PROMPT, /inventing an extra API requirement/)
+
+        // Without a document the section disappears entirely.
+        const ungrounded = buildEvalPrompt(["criterion"], "output")
+        assert.doesNotMatch(ungrounded, /Accepted architecture decisions/)
+
+        // The wired source flows into preparation, stays bounded, and a
+        // failing reader degrades to a criteria-only evaluation.
+        const preparation = await prepareCriticEvaluation(
+            ["criterion"],
+            "output",
+            "agent-a",
+            {
+                resolveRepositoryTarget: () => null,
+                decisionDocument: () => `${adr}\n${"filler ".repeat(20_000)}`,
+            },
+        )
+        assert.match(preparation.prompt, /exact `request\.signal` object/)
+        assert.match(
+            preparation.prompt,
+            /characters omitted by Critic evidence bound/,
+        )
+        const failingReader = await prepareCriticEvaluation(
+            ["criterion"],
+            "output",
+            "agent-a",
+            {
+                resolveRepositoryTarget: () => null,
+                decisionDocument: () => {
+                    throw new Error("prd unreadable")
+                },
+            },
+        )
+        assert.doesNotMatch(
+            failingReader.prompt,
+            /Accepted architecture decisions/,
+        )
+    })
+
     it("marks evaluation inconclusive when configured repository evidence is missing", async () => {
         const preparation = await prepareCriticEvaluation(
             ["implementation exists"],

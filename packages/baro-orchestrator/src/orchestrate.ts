@@ -950,6 +950,15 @@ export async function orchestrate(
             resolveRepositoryTarget: resolveCriticTarget,
             commandEvidence: (storyId) =>
                 commandEvidence.snapshotForEvaluation(storyId),
+            // Read at evaluation time: a progressive run receives its
+            // Architect document after this observer wiring completes.
+            decisionDocument: () => {
+                try {
+                    return loadPrd(config.prdPath).decisionDocument ?? null
+                } catch {
+                    return null
+                }
+            },
         }
         const prd = loadPrd(config.prdPath)
         const legacyGoalInvariantText = new Map(
