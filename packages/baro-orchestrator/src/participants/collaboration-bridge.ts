@@ -17,7 +17,7 @@ import {
     type ServerResponse,
 } from "node:http"
 import { basename, join } from "node:path"
-import type { Participant } from "@mozaik-ai/core"
+import type { Participant } from "../runtime/mozaik.js"
 
 import { inboxFilenameForAgentId } from "../../scripts/collaboration-inbox-path.mjs"
 

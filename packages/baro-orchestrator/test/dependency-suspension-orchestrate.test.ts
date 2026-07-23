@@ -11,7 +11,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import type { AgenticEnvironment, Participant } from "@mozaik-ai/core"
+import type { AgenticEnvironment, Participant } from "../src/runtime/mozaik.js"
 
 import { orchestrate } from "../src/orchestrate.js"
 import type {

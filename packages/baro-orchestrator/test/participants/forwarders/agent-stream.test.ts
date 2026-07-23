@@ -5,7 +5,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
-} from "@mozaik-ai/core"
+} from "../../../src/runtime/mozaik.js"
 
 import type { BaroEvent } from "../../../src/tui-protocol.js"
 import { AgentStreamForwarder } from "../../../src/participants/forwarders/agent-stream.js"

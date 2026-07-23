@@ -30,7 +30,7 @@ import {
     type GenerativeModel,
     type Participant,
     type TokenUsage,
-} from "@mozaik-ai/core"
+} from "../runtime/mozaik.js"
 
 import type { GatewayBillingCoordinator } from "../billing/index.js"
 import {

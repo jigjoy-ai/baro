@@ -24,7 +24,7 @@
 import type { SpawnOptions } from "child_process"
 import spawn from "cross-spawn"
 
-import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
+import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
 
 import { harnessChildEnvironment } from "../harness-environment.js"
 import {

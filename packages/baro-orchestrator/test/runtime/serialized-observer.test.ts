@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { SemanticEvent } from "@mozaik-ai/core"
+import { SemanticEvent } from "../../src/runtime/mozaik.js"
 
 import {
     SerializedObserver,

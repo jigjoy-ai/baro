@@ -10,7 +10,7 @@
  * Library-grade: no imports from prd.ts, story-agent.ts, or conductor.ts.
  */
 
-import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
+import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
 
 import { runCodexOneShot } from "../codex-one-shot.js"
 import { runnerMeasurement } from "../runner-measurement.js"

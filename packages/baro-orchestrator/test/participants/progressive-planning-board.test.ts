@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import type { SemanticEvent } from "@mozaik-ai/core"
+import type { SemanticEvent } from "../../src/runtime/mozaik.js"
 
 import { CollectiveBoard } from "../../src/participants/collective-board.js"
 import { ProgressivePlanningCoordinator } from "../../src/participants/progressive-planning-coordinator.js"

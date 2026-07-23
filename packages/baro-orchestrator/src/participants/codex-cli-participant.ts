@@ -15,9 +15,9 @@ import {
     ModelMessageItem,
     Participant,
     SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../runtime/mozaik.js"
 
-import { AgenticEnvironment } from "@mozaik-ai/core"
+import { AgenticEnvironment } from "../runtime/mozaik.js"
 import { harnessChildEnvironment } from "../harness-environment.js"
 import {
     ManagedProcessTree,

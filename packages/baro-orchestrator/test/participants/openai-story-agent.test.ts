@@ -9,7 +9,7 @@ import {
     ModelMessageItem,
     type ModelContext,
     type Tool,
-} from "@mozaik-ai/core"
+} from "../../src/runtime/mozaik.js"
 
 import { OpenAIStoryAgent } from "../../src/participants/openai-story-agent.js"
 import {

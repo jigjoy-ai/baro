@@ -16,7 +16,7 @@ import {
     UserMessageItem,
     type GenerativeModel,
     type Tool,
-} from "@mozaik-ai/core"
+} from "../runtime/mozaik.js"
 
 import {
     createOpenAIModel,

@@ -6,7 +6,7 @@ import {
     FunctionCallOutputItem,
     ModelMessageItem,
     SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../src/runtime/mozaik.js"
 
 import { mapPiEvent } from "../src/pi-stream-mapper.js"
 import {

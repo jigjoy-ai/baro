@@ -16,7 +16,7 @@ import {
     FunctionCallOutputItem,
     type Participant,
     type SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../../src/runtime/mozaik.js"
 
 import {
     CRITIC_MAX_PROMPT_CHARS,

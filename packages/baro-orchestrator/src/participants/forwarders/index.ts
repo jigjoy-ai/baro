@@ -1,4 +1,4 @@
-import { AgenticEnvironment, type Participant } from "@mozaik-ai/core"
+import { AgenticEnvironment, type Participant } from "../../runtime/mozaik.js"
 
 import type { ModelInvocationPhase } from "../../model-telemetry.js"
 import type { StoryOutcomeAuthority } from "../../runtime/story-outcome-authority.js"

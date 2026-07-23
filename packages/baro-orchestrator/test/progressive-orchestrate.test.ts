@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import type { AgenticEnvironment } from "@mozaik-ai/core"
+import type { AgenticEnvironment } from "../src/runtime/mozaik.js"
 
 import { orchestrate } from "../src/orchestrate.js"
 import type { PlanningFeed } from "../src/participants/planning-feed.js"

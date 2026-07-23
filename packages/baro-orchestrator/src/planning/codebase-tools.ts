@@ -11,7 +11,7 @@ import * as fs from "fs"
 import * as os from "os"
 import * as path from "path"
 
-import { type Tool } from "@mozaik-ai/core"
+import { type Tool } from "../runtime/mozaik.js"
 
 import { execFileCli } from "../exec-file-cli.js"
 

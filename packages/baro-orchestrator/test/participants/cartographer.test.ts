@@ -1,7 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import { ModelMessageItem } from "@mozaik-ai/core"
+import { ModelMessageItem } from "../../src/runtime/mozaik.js"
 
 import { AgentState, ClaudeStreamChunk } from "../../src/semantic-events.js"
 import { Cartographer, type Frame } from "../../src/participants/cartographer.js"

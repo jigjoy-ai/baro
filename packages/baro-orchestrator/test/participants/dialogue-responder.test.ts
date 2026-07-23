@@ -8,7 +8,7 @@ import {
     InputTokenDetails,
     OutputTokenDetails,
     TokenUsage,
-} from "@mozaik-ai/core"
+} from "../../src/runtime/mozaik.js"
 
 import {
     knownMetric,

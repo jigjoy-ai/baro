@@ -5,7 +5,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     type Participant,
-} from "@mozaik-ai/core"
+} from "../../src/runtime/mozaik.js"
 
 import {
     AgentTargetedMessage,

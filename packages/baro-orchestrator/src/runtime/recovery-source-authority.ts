@@ -1,4 +1,4 @@
-import type { Participant, SemanticEvent } from "@mozaik-ai/core"
+import type { Participant, SemanticEvent } from "./mozaik.js"
 
 import {
     Critique,

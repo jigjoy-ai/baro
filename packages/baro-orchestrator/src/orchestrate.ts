@@ -13,7 +13,7 @@ import { dirname, join } from "path"
 import { fileURLToPath } from "url"
 import { randomUUID } from "node:crypto"
 
-import { AgenticEnvironment } from "@mozaik-ai/core"
+import { AgenticEnvironment } from "./runtime/mozaik.js"
 
 import {
     GatewayBillingCoordinator,
@@ -366,7 +366,7 @@ export interface OrchestrateConfig {
     /** Called only after the Board has opened/persisted the planning latch. */
     onPlanningFeedReady?: (feed: PlanningFeed) => void
     /** Extra participants to attach to the bus before the run starts. */
-    extraParticipants?: import("@mozaik-ai/core").Participant[]
+    extraParticipants?: import("./runtime/mozaik.js").Participant[]
 }
 
 export function resolveOrchestrationRunId(

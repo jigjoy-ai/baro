@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { AgenticEnvironment } from "@mozaik-ai/core"
+import { AgenticEnvironment } from "../../src/runtime/mozaik.js"
 
 import {
     FrontDoorConversationCompleted,

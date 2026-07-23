@@ -14,7 +14,7 @@
  * source of truth for the contract.
  */
 
-import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
+import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
 
 import { runOpenCodeOneShot } from "../opencode-one-shot.js"
 import { runnerMeasurement } from "../runner-measurement.js"

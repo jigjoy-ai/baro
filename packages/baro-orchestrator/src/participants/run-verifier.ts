@@ -1,4 +1,4 @@
-import type { Participant, SemanticEvent } from "@mozaik-ai/core"
+import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
 
 import {
     RunVerificationCompleted,

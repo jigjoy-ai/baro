@@ -1,4 +1,4 @@
-import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
+import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
 
 import {
     Coordination,

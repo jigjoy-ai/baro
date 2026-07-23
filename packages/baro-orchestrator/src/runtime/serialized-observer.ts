@@ -4,7 +4,7 @@ import {
     BaseObserver,
     type Participant,
     type SemanticEvent,
-} from "@mozaik-ai/core"
+} from "./mozaik.js"
 
 export interface BackgroundTaskOptions {
     label: string

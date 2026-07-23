@@ -10,7 +10,7 @@
  * round-trips (audit log → reload, WebSocket → reload); a `type` check does.
  */
 
-import { SemanticEvent } from "@mozaik-ai/core"
+import { SemanticEvent } from "./runtime/mozaik.js"
 
 import type { WorkBidEstimate } from "./work-market.js"
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { ModelMessageItem } from "@mozaik-ai/core"
+import { ModelMessageItem } from "../../src/runtime/mozaik.js"
 
 import { AgentTurnProjector } from "../../src/participants/agent-turn-projector.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"

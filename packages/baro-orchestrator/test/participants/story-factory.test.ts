@@ -2,7 +2,7 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import { join } from "node:path"
 
-import type { AgenticEnvironment } from "@mozaik-ai/core"
+import type { AgenticEnvironment } from "../../src/runtime/mozaik.js"
 
 import { StoryFactory } from "../../src/participants/story-factory.js"
 import type {

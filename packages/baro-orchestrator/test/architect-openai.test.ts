@@ -19,7 +19,7 @@ import {
     type ContextItem,
     type ModelContext,
     type Tool,
-} from "@mozaik-ai/core"
+} from "../src/runtime/mozaik.js"
 
 import {
     runArchitectOpenAI,

@@ -10,7 +10,7 @@ import {
     FunctionCallOutputItem,
     ModelMessageItem,
     SemanticEvent,
-} from "@mozaik-ai/core"
+} from "./runtime/mozaik.js"
 
 import {
     CodexItemEvent,

@@ -5,7 +5,7 @@ import {
     BaseObserver,
     type Participant,
     type SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../src/runtime/mozaik.js"
 
 import {
     ConversationDelegationProposed,

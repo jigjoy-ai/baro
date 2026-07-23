@@ -11,7 +11,7 @@ import {
     ModelMessageItem,
     Participant,
     SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../runtime/mozaik.js"
 
 import {
     AgentResult,

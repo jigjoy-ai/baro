@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 
-import type { SemanticEvent } from "@mozaik-ai/core"
+import type { SemanticEvent } from "../runtime/mozaik.js"
 
 import {
     AgentResult,

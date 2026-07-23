@@ -1,7 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import type { Participant } from "@mozaik-ai/core"
+import type { Participant } from "../../src/runtime/mozaik.js"
 
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 

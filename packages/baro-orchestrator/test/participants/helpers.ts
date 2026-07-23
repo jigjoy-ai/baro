@@ -7,7 +7,7 @@ import {
     AgenticEnvironment,
     type Participant,
     type SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../../src/runtime/mozaik.js"
 
 export type CapturedEnvironment = AgenticEnvironment & {
     events: SemanticEvent<unknown>[]

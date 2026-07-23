@@ -15,7 +15,7 @@ import { setTimeout as delay } from "node:timers/promises"
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import { type Tool } from "@mozaik-ai/core"
+import { type Tool } from "../src/runtime/mozaik.js"
 
 import { createStoryTools } from "../src/planning/story-tools.js"
 

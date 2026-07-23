@@ -6,7 +6,7 @@ import {
     ModelMessageItem,
     OutputTokenDetails,
     TokenUsage,
-} from "@mozaik-ai/core"
+} from "../../src/runtime/mozaik.js"
 
 import { knownMetric, unknownMetric } from "../../src/model-telemetry.js"
 import { AgentTurnProjector } from "../../src/participants/agent-turn-projector.js"

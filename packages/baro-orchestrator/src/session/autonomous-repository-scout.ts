@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer"
 import { createHash, type Hash } from "node:crypto"
 
-import type { Tool } from "@mozaik-ai/core"
+import type { Tool } from "../runtime/mozaik.js"
 
 import { assertCorrelationId } from "./conversation-contract.js"
 import type { ConversationResponderBackend } from "./conversation-intake.js"

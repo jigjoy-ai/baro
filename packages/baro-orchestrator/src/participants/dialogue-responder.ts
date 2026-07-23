@@ -15,7 +15,7 @@ import {
     SystemMessageItem,
     UserMessageItem,
     type TokenUsage,
-} from "@mozaik-ai/core"
+} from "../runtime/mozaik.js"
 
 import type { GatewayBillingCoordinator } from "../billing/index.js"
 import { runCodexOneShot } from "../codex-one-shot.js"

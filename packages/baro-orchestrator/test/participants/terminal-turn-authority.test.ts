@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import type { Participant, SemanticEvent } from "@mozaik-ai/core"
+import type { Participant, SemanticEvent } from "../../src/runtime/mozaik.js"
 
 import { Critic } from "../../src/participants/critic.js"
 import { CriticCodex } from "../../src/participants/critic-codex.js"

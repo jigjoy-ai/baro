@@ -4,7 +4,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
-} from "@mozaik-ai/core"
+} from "../src/runtime/mozaik.js"
 
 import { mapClaudeEvent } from "../src/stream-json-mapper.js"
 import {

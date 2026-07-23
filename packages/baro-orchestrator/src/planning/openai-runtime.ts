@@ -21,7 +21,7 @@ import {
     type GenerativeModel,
     type ModelContext,
     type Tool,
-} from "@mozaik-ai/core"
+} from "../runtime/mozaik.js"
 
 import type {
     BillingInvocationContext,

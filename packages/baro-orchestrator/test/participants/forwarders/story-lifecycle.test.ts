@@ -1,7 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import { FunctionCallItem } from "@mozaik-ai/core"
+import { FunctionCallItem } from "../../../src/runtime/mozaik.js"
 
 import {
     AgentState,

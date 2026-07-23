@@ -39,9 +39,9 @@
 import { existsSync, readFileSync } from "fs"
 import { join } from "path"
 
-import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
+import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
 
-import { AgenticEnvironment } from "@mozaik-ai/core"
+import { AgenticEnvironment } from "../runtime/mozaik.js"
 import { buildDag } from "../dag.js"
 import { validatePrdArchitectureObligationCoverage } from "../planning/architecture-obligation-contract.js"
 import { deriveGoalContract } from "../runtime/goal-contract.js"

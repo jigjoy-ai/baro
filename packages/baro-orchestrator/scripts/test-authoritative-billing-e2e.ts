@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import {
     ModelContext,
     SystemMessageItem,
-} from "@mozaik-ai/core"
+} from "../src/runtime/mozaik.js"
 
 import {
     GatewayBillingCoordinator,

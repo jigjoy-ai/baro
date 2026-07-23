@@ -5,7 +5,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
-} from "@mozaik-ai/core"
+} from "../src/runtime/mozaik.js"
 
 import { mapCodexEvent } from "../src/codex-stream-mapper.js"
 import {

@@ -7,7 +7,7 @@ import {
     BaseObserver,
     type Participant,
     type SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../../src/runtime/mozaik.js"
 
 import { AgentState, StoryResult } from "../../src/semantic-events.js"
 import { CodexStoryAgent } from "../../src/participants/codex-story-agent.js"

@@ -20,7 +20,7 @@ import {
 } from "node:path"
 import { setImmediate as yieldToEventLoop } from "node:timers/promises"
 
-import type { Tool } from "@mozaik-ai/core"
+import type { Tool } from "../runtime/mozaik.js"
 
 import { validateRepositoryEvidencePath } from "./repository-brief.js"
 import {

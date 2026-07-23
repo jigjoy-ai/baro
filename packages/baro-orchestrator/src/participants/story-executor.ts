@@ -6,7 +6,7 @@
  * `generation` from the request into that terminal result.
  */
 
-import { AgenticEnvironment, type Participant } from "@mozaik-ai/core"
+import { AgenticEnvironment, type Participant } from "../runtime/mozaik.js"
 
 import type { GatewayBillingCoordinator } from "../billing/index.js"
 import type { StorySpawnRequestData } from "../semantic-events.js"

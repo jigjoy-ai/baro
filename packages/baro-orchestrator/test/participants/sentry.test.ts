@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { FunctionCallItem } from "@mozaik-ai/core"
+import { FunctionCallItem } from "../../src/runtime/mozaik.js"
 
 import { Sentry } from "../../src/participants/sentry.js"
 import { Coordination } from "../../src/semantic-events.js"

@@ -11,7 +11,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import type { Tool } from "@mozaik-ai/core"
+import type { Tool } from "../../src/runtime/mozaik.js"
 
 import {
     AutonomousRepositoryScanner,

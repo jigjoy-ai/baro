@@ -9,7 +9,7 @@
  * participants and source-bound by the collective control plane.
  */
 
-import { type Participant } from "@mozaik-ai/core"
+import { type Participant } from "../runtime/mozaik.js"
 
 import {
     AgentState,

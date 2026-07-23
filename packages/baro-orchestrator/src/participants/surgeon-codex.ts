@@ -13,7 +13,7 @@
  * source of truth for the contract.
  */
 
-import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
+import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
 
 import { runCodexOneShot } from "../codex-one-shot.js"
 import { runnerMeasurement } from "../runner-measurement.js"

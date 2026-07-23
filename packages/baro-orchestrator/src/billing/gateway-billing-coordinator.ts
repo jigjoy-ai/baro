@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto"
 
-import type { TokenUsage } from "@mozaik-ai/core"
+import type { TokenUsage } from "../runtime/mozaik.js"
 
 import {
     knownMetric,

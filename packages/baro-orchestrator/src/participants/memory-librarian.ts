@@ -11,7 +11,7 @@ import {
     FunctionCallOutputItem,
     Participant,
     SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../runtime/mozaik.js"
 
 import type { MemoryStore } from "@baro/memory"
 

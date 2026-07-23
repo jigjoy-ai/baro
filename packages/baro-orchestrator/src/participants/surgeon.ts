@@ -28,7 +28,7 @@
 
 import { execFileCli } from "../exec-file-cli.js"
 
-import { BaseObserver, Participant, SemanticEvent } from "@mozaik-ai/core"
+import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
 
 import { harnessChildEnvironment } from "../harness-environment.js"
 import {

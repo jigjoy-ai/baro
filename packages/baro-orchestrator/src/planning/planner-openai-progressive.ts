@@ -1,4 +1,4 @@
-import { type Tool } from "@mozaik-ai/core"
+import { type Tool } from "../runtime/mozaik.js"
 
 import type { PrdStory } from "../prd.js"
 import { deriveGoalContract } from "../runtime/goal-contract.js"

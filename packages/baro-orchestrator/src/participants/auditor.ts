@@ -15,7 +15,7 @@ import {
     Participant,
     ReasoningItem,
     SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../runtime/mozaik.js"
 
 import { ClaudeStreamChunk } from "../semantic-events.js"
 

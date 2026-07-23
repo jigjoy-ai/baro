@@ -7,7 +7,7 @@
  * validation, persistence and scheduling.
  */
 
-import { BaseObserver, type SemanticEvent } from "@mozaik-ai/core"
+import { BaseObserver, type SemanticEvent } from "../runtime/mozaik.js"
 
 import {
     PlanFragmentProposed,

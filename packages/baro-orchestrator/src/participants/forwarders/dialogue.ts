@@ -1,4 +1,4 @@
-import { BaseObserver, type Participant, type SemanticEvent } from "@mozaik-ai/core"
+import { BaseObserver, type Participant, type SemanticEvent } from "../../runtime/mozaik.js"
 
 import {
     ConversationFailed,

@@ -1,4 +1,4 @@
-import type { SemanticEvent } from "@mozaik-ai/core"
+import type { SemanticEvent } from "./mozaik.js"
 
 import {
     WorkLeaseGranted,

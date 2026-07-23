@@ -1,4 +1,4 @@
-import type { Tool } from "@mozaik-ai/core"
+import type { Tool } from "../runtime/mozaik.js"
 
 import {
     MAX_STORY_PRIORITY,

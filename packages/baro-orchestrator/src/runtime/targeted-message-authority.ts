@@ -1,4 +1,4 @@
-import type { Participant } from "@mozaik-ai/core"
+import type { Participant } from "./mozaik.js"
 
 import type { AgentTargetedMessageData } from "../semantic-events.js"
 

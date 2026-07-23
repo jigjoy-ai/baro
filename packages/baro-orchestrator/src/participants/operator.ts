@@ -9,7 +9,7 @@
  * canonical command shape and how to express it as bus events.
  */
 
-import { AgenticEnvironment, BaseObserver, SemanticEvent } from "@mozaik-ai/core"
+import { AgenticEnvironment, BaseObserver, SemanticEvent } from "../runtime/mozaik.js"
 
 import {
     AgentTargetedMessage,

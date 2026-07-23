@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import type { Participant } from "@mozaik-ai/core"
+import type { Participant } from "../../src/runtime/mozaik.js"
 
 import { OpenCodeStoryAgent } from "../../src/participants/opencode-story-agent.js"
 import { PROCESS_TREE_CAPABILITIES } from "../../src/process-tree.js"

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import type { Participant } from "@mozaik-ai/core"
+import type { Participant } from "../../src/runtime/mozaik.js"
 
 import {
     knownMetric,

@@ -26,7 +26,7 @@ import {
     FunctionCallItem,
     Participant,
     SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../runtime/mozaik.js"
 
 import { AgentState, Coordination } from "../semantic-events.js"
 

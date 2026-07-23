@@ -8,7 +8,7 @@ import {
     type AgenticEnvironment,
     type Participant,
     type SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../src/runtime/mozaik.js"
 
 import { orchestrate } from "../src/orchestrate.js"
 import type {

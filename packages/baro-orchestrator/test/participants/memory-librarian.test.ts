@@ -5,7 +5,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     type Participant,
-} from "@mozaik-ai/core"
+} from "../../src/runtime/mozaik.js"
 import type { Finding, MemoryStore } from "@baro/memory"
 
 import { MemoryLibrarian } from "../../src/participants/memory-librarian.js"

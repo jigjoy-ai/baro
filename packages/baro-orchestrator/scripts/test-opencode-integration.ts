@@ -16,7 +16,7 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
-} from "@mozaik-ai/core"
+} from "../src/runtime/mozaik.js"
 
 import { mapOpenCodeEvent } from "../src/opencode-stream-mapper.js"
 import { OpenCodeCliParticipant } from "../src/participants/opencode-cli-participant.js"

@@ -8,7 +8,7 @@
 import * as fs from "fs"
 import * as path from "path"
 
-import { type Tool } from "@mozaik-ai/core"
+import { type Tool } from "../runtime/mozaik.js"
 
 import {
     createCodebaseTools,

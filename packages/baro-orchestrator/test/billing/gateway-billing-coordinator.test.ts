@@ -6,7 +6,7 @@ import {
     ModelContext,
     ModelMessageItem,
     SystemMessageItem,
-} from "@mozaik-ai/core"
+} from "../../src/runtime/mozaik.js"
 
 import {
     BILLING_MONEY_SCALE,

@@ -5,7 +5,7 @@ import type {
     AgenticEnvironment,
     Participant,
     SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../src/runtime/mozaik.js"
 
 import {
     StoryResult,

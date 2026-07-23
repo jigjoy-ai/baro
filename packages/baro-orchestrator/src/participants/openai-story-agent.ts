@@ -24,9 +24,9 @@ import {
     UserMessageItem,
     type GenerativeModel,
     type Tool,
-} from "@mozaik-ai/core"
+} from "../runtime/mozaik.js"
 
-import { AgenticEnvironment } from "@mozaik-ai/core"
+import { AgenticEnvironment } from "../runtime/mozaik.js"
 import type { GatewayBillingCoordinator } from "../billing/index.js"
 import {
     GenericOpenAIModel,

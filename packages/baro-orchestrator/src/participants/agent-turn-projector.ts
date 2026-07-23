@@ -3,7 +3,7 @@ import {
     type ModelMessageItem,
     type Participant,
     type SemanticEvent,
-} from "@mozaik-ai/core"
+} from "../runtime/mozaik.js"
 
 import {
     AgentResult,
