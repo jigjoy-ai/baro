@@ -93,7 +93,7 @@ export async function runArchitectClaude(
                           "--disable-slash-commands",
                           "--strict-mcp-config",
                           "--mcp-config",
-                          "{}",
+                          '{"mcpServers":{}}',
                           "--no-session-persistence",
                           "--permission-mode",
                           "dontAsk",

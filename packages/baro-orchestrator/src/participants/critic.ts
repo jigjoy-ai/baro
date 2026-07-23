@@ -356,7 +356,7 @@ export class Critic extends BaseObserver {
                         "--disable-slash-commands",
                         "--strict-mcp-config",
                         "--mcp-config",
-                        "{}",
+                        '{"mcpServers":{}}',
                         "--no-session-persistence",
                         "--system-prompt",
                         VERDICT_SYSTEM_PROMPT,

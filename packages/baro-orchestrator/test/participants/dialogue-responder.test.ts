@@ -184,7 +184,10 @@ process.stdout.write(JSON.stringify({
                 assert.equal(argv.includes(flag), true, `missing ${flag}`)
             }
             assert.equal(argv[argv.indexOf("--tools") + 1], "")
-            assert.equal(argv[argv.indexOf("--mcp-config") + 1], "{}")
+            assert.equal(
+                argv[argv.indexOf("--mcp-config") + 1],
+                '{"mcpServers":{}}',
+            )
             assert.equal(
                 argv[argv.indexOf("--permission-mode") + 1],
                 "dontAsk",

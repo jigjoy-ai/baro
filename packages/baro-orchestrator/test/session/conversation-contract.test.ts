@@ -72,10 +72,28 @@ describe("conversation wire contract", () => {
         assert.equal(answer.kind, "answer")
     })
 
-    it("fails closed on prose, unknown keys, foreign correlation, and broadened control", () => {
+    it("unwraps chat framing but fails closed on unknown keys, foreign correlation, and broadened control", () => {
+        // Chat harnesses nondeterministically add prose/fence framing around
+        // the requested object; the framed object still passes the exact
+        // schema and correlation validation below.
+        assert.equal(
+            parseConversationResponse(
+                `Here is the result: ${JSON.stringify(readyWire())}`,
+                correlation,
+            ).kind,
+            readyWire().kind,
+        )
+        assert.equal(
+            parseConversationResponse(
+                "```json\n" + JSON.stringify(readyWire()) + "\n```",
+                correlation,
+            ).kind,
+            readyWire().kind,
+        )
+        // Prose without any JSON object still fails closed.
         assert.throws(
             () => parseConversationResponse(
-                `Here is the result: ${JSON.stringify(readyWire())}`,
+                "I cannot produce the requested object.",
                 correlation,
             ),
             ConversationContractError,

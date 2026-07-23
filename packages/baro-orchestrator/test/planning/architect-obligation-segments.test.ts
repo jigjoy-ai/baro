@@ -138,6 +138,33 @@ describe("segmented Architect obligation compiler", () => {
         assert.equal(JSON.stringify(progress).includes("decisionDocument"), false)
     })
 
+    it("unwraps fenced or prose-framed segment JSON without loosening validation", async () => {
+        const framings: Array<(json: string) => string> = [
+            (json) => "```json\n" + json + "\n```",
+            (json) =>
+                `Here is the obligation contract you asked for:\n\n${json}\n\nLet me know if you need adjustments.`,
+        ]
+        for (const frame of framings) {
+            const result = await compileArchitectObligationSegments({
+                decisionDocument: DECISION_DOCUMENT,
+                goalEnvelope: goalEnvelope(),
+                respond: async (request) =>
+                    frame(responseFor(request.invariantIds)),
+            })
+            assert.equal(result.contract.obligations.length, 7)
+        }
+
+        // Prose alone (no JSON object at all) still fails closed.
+        await assert.rejects(
+            compileArchitectObligationSegments({
+                decisionDocument: DECISION_DOCUMENT,
+                goalEnvelope: goalEnvelope(),
+                respond: async () => "I cannot produce the contract.",
+            }),
+            /not valid JSON/u,
+        )
+    })
+
     it("sends only target invariant records without repeating unrelated goal context", async () => {
         const requests: ArchitectObligationSegmentRequest[] = []
         const envelope = {

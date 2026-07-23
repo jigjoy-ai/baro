@@ -1,3 +1,4 @@
+import { extractModelJsonObject } from "../model-json.js"
 import { Buffer } from "node:buffer"
 import { createHash, type Hash } from "node:crypto"
 
@@ -618,7 +619,7 @@ function parseResearchDecision(
     ) throw new TypeError("repository scout response is missing or oversized")
     let value: unknown
     try {
-        value = JSON.parse(raw.trim())
+        value = JSON.parse(extractModelJsonObject(raw))
     } catch {
         throw new TypeError("repository scout response is not valid JSON")
     }

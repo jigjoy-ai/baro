@@ -333,8 +333,15 @@ describe("run-conversation isolated turn", () => {
     it("fails closed on malformed and mismatched provider responses", async () => {
         const cases = [
             {
+                // Framing is unwrapped; the empty object then fails the
+                // exact schema, not the JSON parse.
                 name: "malformed",
                 raw: "```json\n{}\n```",
+                error: /conversation response must use the exact v1 schema/,
+            },
+            {
+                name: "no-json-at-all",
+                raw: "I refuse to answer with JSON.",
                 error: /conversation response is not valid JSON/,
             },
             {

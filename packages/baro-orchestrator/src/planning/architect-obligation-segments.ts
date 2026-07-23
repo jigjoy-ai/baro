@@ -1,3 +1,4 @@
+import { extractModelJsonObject } from "../model-json.js"
 import type { GoalEnvelope } from "../session/conversation-contract.js"
 import {
     deriveGoalContract,
@@ -350,7 +351,7 @@ function parseSegmentResponse(
     }
     let value: unknown
     try {
-        value = JSON.parse(raw.trim())
+        value = JSON.parse(extractModelJsonObject(raw))
     } catch {
         throw new ArchitectObligationSegmentError(
             "architect obligation segment is not valid JSON",

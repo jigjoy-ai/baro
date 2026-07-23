@@ -234,7 +234,10 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
             assert.ok(invocations[1]!.includes("--disable-slash-commands"))
             assert.ok(invocations[1]!.includes("--strict-mcp-config"))
             assert.ok(invocations[1]!.includes("--no-session-persistence"))
-            assert.equal(valueAfter(invocations[1]!, "--mcp-config"), "{}")
+            assert.equal(
+                valueAfter(invocations[1]!, "--mcp-config"),
+                '{"mcpServers":{}}',
+            )
             assert.equal(valueAfter(invocations[1]!, "--permission-mode"), "dontAsk")
             for (const argv of invocations) {
                 assert.equal(valueAfter(argv, "--model"), "opus")

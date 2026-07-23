@@ -1,3 +1,4 @@
+import { extractModelJsonObject } from "../model-json.js"
 import { createHash } from "node:crypto"
 
 export const CONVERSATION_SCHEMA_VERSION = 1 as const
@@ -59,8 +60,9 @@ export class ConversationContractError extends Error {
 
 /**
  * Parse one strict JSON response and bind it to trusted caller correlation.
- * Provider prose, markdown fences, unknown keys and echoed foreign IDs fail
- * closed instead of being silently repaired.
+ * A single fence/prose-wrapped object is unwrapped first (chat harnesses add
+ * framing nondeterministically); unknown keys and echoed foreign IDs still
+ * fail closed instead of being silently repaired.
  */
 export function parseConversationResponse(
     raw: string,
@@ -71,7 +73,7 @@ export function parseConversationResponse(
 
     let parsed: unknown
     try {
-        parsed = JSON.parse(raw.trim())
+        parsed = JSON.parse(extractModelJsonObject(raw))
     } catch {
         throw new ConversationContractError("conversation response is not valid JSON")
     }
