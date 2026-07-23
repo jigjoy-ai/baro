@@ -903,9 +903,9 @@ process.exit(0)
                     skipGitRepoCheck: true,
                 })
                 const internals = agent as unknown as {
-                    quiesceCurrentCodex(): Promise<boolean>
+                    quiesceCurrentRunner(): Promise<boolean>
                 }
-                internals.quiesceCurrentCodex = async () => false
+                internals.quiesceCurrentRunner = async () => false
 
                 const outcome = await agent.run(env)
                 const result = env.events.find(StoryResult.is)
