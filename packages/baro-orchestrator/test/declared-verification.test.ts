@@ -21,6 +21,43 @@ import { readAuthoritativeDeclaredTests } from "../src/prd-declared-tests.js"
 import { withTempDir } from "./participants/helpers.js"
 
 describe("declared verification policy", () => {
+    it("routes a declaration matching a trusted script body through that script", async () => {
+        await withTempDir("baro-verify-script-alias-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "alias-repo",
+                    scripts: { test: "node test.js" },
+                }),
+            )
+            writeFileSync(join(dir, "test.js"), "console.log('ok')\n")
+            const plan = createVerifyPlan(dir, {
+                declaredTests: [
+                    { storyId: "S1", command: "node test.js" },
+                    { storyId: "S1", command: "node  test.js" },
+                    // Not a trusted script body — still skipped, fail-closed.
+                    { storyId: "S1", command: "node other.js" },
+                ],
+            })
+            const incomplete = plan.commands.filter(
+                (command) => command.incompleteReason !== undefined,
+            )
+            // Only the non-script declaration stays skipped; both spellings
+            // of the trusted script body alias (and dedupe) into `run test`.
+            assert.equal(incomplete.length, 1)
+            assert.match(incomplete[0]?.incompleteReason ?? "", /node declarations/)
+            assert.match(incomplete[0]?.label ?? "", /node other\.js/)
+            assert.ok(
+                plan.commands.some(
+                    (command) =>
+                        command.incompleteReason === undefined &&
+                        command.args[0] === "run" &&
+                        command.args[1] === "test",
+                ),
+            )
+        })
+    })
+
     it("turns shell syntax into incomplete evidence without executing it", async () => {
         await withTempDir("baro-verify-declared-injection-", async (dir) => {
             const escapedMarker = join(dir, "escaped")

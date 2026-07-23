@@ -10,7 +10,7 @@ import {
     renderModeContract,
 } from "../src/planning/planner-prompts.js"
 import { buildArchitectUserMessage } from "../src/planning/architect-prompts.js"
-import { enforceModeContract, resolveEffectiveParallel, widestDagLevel } from "../src/planning/mode-enforcement.js"
+import { completeSoleStoryOwnership, enforceModeContract, resolveEffectiveParallel, widestDagLevel } from "../src/planning/mode-enforcement.js"
 import { isVerificationOnlyStory } from "../src/planning/verification-stories.js"
 import type { PrdExecutionMode, PrdFile, PrdStory } from "../src/prd.js"
 
@@ -541,5 +541,80 @@ describe("resolveEffectiveParallel", () => {
         assert.equal(resolveEffectiveParallel(undefined, 10), 10)
         assert.equal(resolveEffectiveParallel(undefined, 0), 0)
         assert.equal(resolveEffectiveParallel(mode({ mode: "sequential", source: "llm" }), undefined), 0)
+    })
+})
+
+describe("completeSoleStoryOwnership", () => {
+    const goalEnvelope = {
+        objective: "Preserve the boundary behavior.",
+        acceptanceCriteria: ["The behavior stays observable."],
+        constraints: [],
+        nonGoals: [],
+        assumptions: [],
+    }
+    const decisionDocument = `## ADR-001: Keep the boundary
+**Status:** Accepted
+**Context:** ctx
+**Decision:** keep
+**Consequences:** none
+
+## Semantic obligation contract
+
+\`\`\`baro-obligations-v1
+{"schemaVersion":1,"obligations":[{"id":"O-001","invariantIds":["G-A1"],"subject":"the boundary","scenario":"it is invoked","expectedOutcome":"behavior preserved","evidence":["a direct test"]}]}
+\`\`\``
+    const story = (overrides: Partial<PrdStory> = {}): PrdStory => ({
+        id: "S1",
+        priority: 1,
+        title: "Implement",
+        description: "Implement the change.",
+        dependsOn: [],
+        retries: 2,
+        acceptance: ["works"],
+        tests: ["npm test"],
+        passes: false,
+        completedAt: null,
+        durationSecs: null,
+        ...overrides,
+    })
+    const prdJson = (stories: PrdStory[]) =>
+        JSON.stringify({ project: "p", userStories: stories })
+
+    it("appends missing canonical criteria and invariants to a sole story", () => {
+        const completed = JSON.parse(
+            completeSoleStoryOwnership(
+                prdJson([story()]),
+                decisionDocument,
+                goalEnvelope,
+            ),
+        ) as PrdFile
+        const sole = completed.userStories[0]!
+        assert.equal(sole.acceptance[0], "works")
+        assert.match(sole.acceptance[1]!, /^\[O-001\]; Subject: the boundary;/)
+        assert.deepEqual(sole.goalInvariantIds, ["G-A1"])
+
+        // Idempotent: a second pass changes nothing.
+        const again = completeSoleStoryOwnership(
+            JSON.stringify(completed),
+            decisionDocument,
+            goalEnvelope,
+        )
+        assert.deepEqual(JSON.parse(again), completed)
+    })
+
+    it("never rewrites multi-story plans — allocation stays a planner decision", () => {
+        const multi = prdJson([story(), story({ id: "S2", dependsOn: ["S1"] })])
+        assert.equal(
+            completeSoleStoryOwnership(multi, decisionDocument, goalEnvelope),
+            multi,
+        )
+    })
+
+    it("is a no-op without a goal contract", () => {
+        const lone = prdJson([story()])
+        assert.equal(
+            completeSoleStoryOwnership(lone, decisionDocument, undefined),
+            lone,
+        )
     })
 })

@@ -50,6 +50,22 @@ export function translateDeclaredTests(
         }
         const parsed = tokenize(requirement.command)
         if (typeof parsed === "string") return incomplete(requirement, parsed)
+        // A declaration that is byte-identical to a trusted package script's
+        // body IS that script (planners often copy "node test.js" out of
+        // package.json). Route it through the script policy instead of
+        // skipping semantics the manifest already declares runnable.
+        const aliasScript = trustedScriptAlias(cwd, parsed.tokens)
+        if (aliasScript) {
+            const aliasTokens = tokenize(`npm run ${aliasScript}`)
+            if (typeof aliasTokens !== "string") {
+                return translatePackage(
+                    cwd,
+                    requirement,
+                    aliasTokens,
+                    packageManagers,
+                )
+            }
+        }
         const tool = parsed.tokens[0]
         if (/^(npm|pnpm|yarn)$/.test(tool ?? "")) {
             return translatePackage(cwd, requirement, parsed, packageManagers)
@@ -226,6 +242,27 @@ function translateNpxRstest(
         containedPaths: focusedPaths.map(focusedPathRequirement),
         canonicalDeclaredFocus: "rstest",
     }
+}
+
+function trustedScriptAlias(
+    cwd: string,
+    tokens: readonly string[],
+): string | null {
+    const manifestPath = join(cwd, "package.json")
+    if (!existsSync(manifestPath)) return null
+    const manifest = readManifest(manifestPath)
+    if (!manifest?.scripts) return null
+    const normalized = tokens.join(" ")
+    for (const script of TRUSTED_PACKAGE_SCRIPTS) {
+        const body = manifest.scripts[script]
+        if (
+            typeof body === "string" &&
+            body.trim().split(/\s+/u).join(" ") === normalized
+        ) {
+            return script
+        }
+    }
+    return null
 }
 
 function translatePackage(

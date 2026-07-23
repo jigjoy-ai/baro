@@ -25,7 +25,10 @@ import {
     type PlannerHarnessProgressiveConfig,
 } from "../src/planning/planner-harness-progressive.js"
 import { parseRequiredModeContract, type ModeContract } from "../src/planning/planner-prompts.js"
-import { enforceModeContract } from "../src/planning/mode-enforcement.js"
+import {
+    completeSoleStoryOwnership,
+    enforceModeContract,
+} from "../src/planning/mode-enforcement.js"
 import { assertRunnablePlannerPrdJson } from "../src/planning/planner-validation.js"
 import {
     goalEnvelopeFingerprint,
@@ -418,6 +421,11 @@ async function main(): Promise<void> {
     }
 
     try {
+        prdJson = completeSoleStoryOwnership(
+            prdJson,
+            decisionDocument,
+            trustedGoalEnvelope,
+        )
         prdJson = assertRunnablePlannerPrdJson(
             prdJson,
             trustedGoalEnvelope,
@@ -426,6 +434,12 @@ async function main(): Promise<void> {
         if (modeContract) {
             prdJson = enforceModeContract(prdJson, modeContract, args.goal)
         }
+        // A focused collapse can only now have produced the sole story.
+        prdJson = completeSoleStoryOwnership(
+            prdJson,
+            decisionDocument,
+            trustedGoalEnvelope,
+        )
         prdJson = assertRunnablePlannerPrdJson(
             prdJson,
             trustedGoalEnvelope,

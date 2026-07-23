@@ -8,6 +8,12 @@
  */
 
 import type { PrdExecutionMode, PrdFile, PrdStory } from "../prd.js"
+import { deriveGoalContract } from "../runtime/goal-contract.js"
+import type { GoalEnvelope } from "../session/conversation-contract.js"
+import {
+    architectureObligationsFromDecision,
+    renderArchitectureObligationCriterion,
+} from "./architecture-obligation-contract.js"
 import type { ModeContract } from "./planner-prompts.js"
 import { pruneVerificationOnlyStories } from "./verification-stories.js"
 
@@ -115,6 +121,65 @@ export function enforceModeContract(prdJson: string, contract: ModeContract, goa
         parallelism: contract.parallelism,
         source: contract.source ?? "contract",
     }
+    return JSON.stringify(prd)
+}
+
+/**
+ * A one-story plan has exactly one possible owner for every canonical
+ * obligation and goal invariant, so ownership is a host fact, not a model
+ * transcription task. Chat planners routinely paraphrase or omit the
+ * verbatim criteria (the A19/A21 failure class); completing the sole story
+ * deterministically keeps the fail-closed coverage validation meaningful
+ * for real allocation decisions in multi-story plans.
+ */
+export function completeSoleStoryOwnership(
+    prdJson: string,
+    decisionDocument: string | null | undefined,
+    goalEnvelope: GoalEnvelope | null | undefined,
+): string {
+    let prd: Partial<PrdFile>
+    try {
+        prd = JSON.parse(prdJson) as Partial<PrdFile>
+    } catch {
+        return prdJson // invalid JSON fails downstream with a better error
+    }
+    if (!Array.isArray(prd.userStories) || prd.userStories.length !== 1) {
+        return prdJson
+    }
+    const goal = deriveGoalContract(goalEnvelope ?? undefined)
+    if (!goal) return prdJson
+    const story = prd.userStories[0] as PrdStory
+    const acceptance = [...(story.acceptance ?? [])]
+    const contract = architectureObligationsFromDecision(
+        decisionDocument ?? prd.decisionDocument,
+        goal,
+    )
+    let appended = 0
+    if (contract) {
+        for (const obligation of contract.obligations) {
+            const criterion = renderArchitectureObligationCriterion(obligation)
+            if (!acceptance.includes(criterion)) {
+                acceptance.push(criterion)
+                appended += 1
+            }
+        }
+    }
+    const invariantIds = new Set(story.goalInvariantIds ?? [])
+    const missingInvariants = goal.invariants
+        .map(({ id }) => id)
+        .filter((id) => !invariantIds.has(id))
+    if (appended === 0 && missingInvariants.length === 0) return prdJson
+    process.stderr.write(
+        `[run-planner] sole story ${story.id} owns the complete contract by construction; ` +
+            `appended ${appended} canonical criteria and ${missingInvariants.length} invariant ids\n`,
+    )
+    prd.userStories = [
+        {
+            ...story,
+            acceptance,
+            goalInvariantIds: [...invariantIds, ...missingInvariants],
+        },
+    ]
     return JSON.stringify(prd)
 }
 
