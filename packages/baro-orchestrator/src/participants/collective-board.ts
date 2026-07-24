@@ -23,10 +23,13 @@ import {
     goalCompletionFailure,
 } from "../runtime/run-completion.js"
 import { NamedTimers } from "../runtime/named-timers.js"
+import { WorkOfferDesk } from "../market/work-offer-desk.js"
 import {
-    WorkOfferDesk,
-    sameOfferRetractionCorrelation,
-} from "../market/work-offer-desk.js"
+    RuntimeReplanRetractionTimedOut,
+    StagedReplanGate,
+    runtimeReplanTargetIds,
+    type QueuedRuntimeReplan,
+} from "../replan/staged-replan-gate.js"
 import {
     GoalCompletionCheckTimedOut,
     VerificationGoalGate,
@@ -80,7 +83,6 @@ import {
     WorkContextProvided,
     WorkContextRequested,
     WorkOfferExpired,
-    WorkOfferRetractionRequested,
     WorkOfferRetractionResolved,
     WorkOffered,
     WorkspaceCleanupCompleted,
@@ -101,7 +103,6 @@ import {
     type WorkBlockedData,
     type WorkBlockRejectionCode,
     type WorkLeaseGrantedData,
-    type WorkOfferRetractionRequestedData,
     type WorkOfferRetractionResolvedData,
 } from "../semantic-events.js"
 import type { ConductorRunSummary } from "./conductor.js"
@@ -122,7 +123,6 @@ import {
     type SerializedEventContext,
     type SerializedObserverFailure,
 } from "../runtime/serialized-observer.js"
-import { runtimeProposalFingerprint } from "../runtime/runtime-replan-fingerprint.js"
 import { reservePolicyReplanBatchIds } from "../runtime/policy-replan-reservation.js"
 import {
     validateRuntimeReplanMutation,
@@ -232,34 +232,6 @@ interface RememberedWorkBlockDecision {
 
 
 
-interface QueuedRuntimeReplan {
-    proposal: RuntimeReplanProposedData
-    fingerprint: string
-    requireActiveLease: boolean
-}
-
-interface StagedRuntimeReplan extends QueuedRuntimeReplan {
-    stageId: string
-    retractions: Map<
-        string,
-        {
-            request: WorkOfferRetractionRequestedData
-            resolution?: WorkOfferRetractionResolvedData
-        }
-    >
-}
-
-interface RuntimeReplanRetractionTimedOutData {
-    runId: string
-    stageId: string
-    proposalId: string
-}
-
-const RuntimeReplanRetractionTimedOut =
-    defineSemanticEvent<RuntimeReplanRetractionTimedOutData>(
-        "runtime_replan_retraction_timed_out",
-    )
-
 interface SoftDeadlineReachedData {
     runId: string
     startedAt: number
@@ -279,8 +251,6 @@ export class CollectiveBoard extends SerializedObserver {
     private startedAt = 0
     private wave: WaveState | null = null
     private waveOrdinal = 0
-
-    private runtimeReplanStageSequence = 0
 
     private cleanupSequence = 0
     private discoverySequence = 0
@@ -311,8 +281,7 @@ export class CollectiveBoard extends SerializedObserver {
         }
     >()
     private readonly offers: WorkOfferDesk
-    private readonly runtimeReplanQueue: QueuedRuntimeReplan[] = []
-    private stagedRuntimeReplan: StagedRuntimeReplan | null = null
+    private readonly replanGate: StagedReplanGate
 
     private readonly settledLeaseResults = new Set<string>()
     private readonly pendingQuality = new Map<string, StoryResultData>()
@@ -413,6 +382,53 @@ export class CollectiveBoard extends SerializedObserver {
                 persistGoalProtocol: (protocol) =>
                     this.persistGoalProtocol(protocol),
                 waveOrdinal: () => this.waveOrdinal,
+            },
+        })
+        this.replanGate = new StagedReplanGate(opts.runId, this.offers, {
+            emit: (event) => this.emit(event),
+            planningFailed: () => this.progressivePlanning.isFailed(),
+            graphVersion: () => this.runtimeReplans.graphVersion,
+            execute: (queued, leasedStoryIds, retractedStoryIds) => {
+                this.executeRuntimeReplan(
+                    queued,
+                    leasedStoryIds,
+                    retractedStoryIds,
+                )
+            },
+            armRetractionTimer: (fire) => {
+                const configured = this.opts.offerRetractionTimeoutMs ?? 5_000
+                const timeoutMs =
+                    Number.isFinite(configured) && configured > 0
+                        ? Math.max(1, Math.floor(configured))
+                        : 5_000
+                this.timers.arm("offerRetraction", timeoutMs, fire)
+            },
+            clearRetractionTimer: () => this.timers.clear("offerRetraction"),
+            rejectRetractionTimeout: (proposal, retractedStoryIds) => {
+                const reason =
+                    `offer retraction timed out before the Broker resolved ` +
+                    `every targeted story; the runtime graph was not changed`
+                this.emitGraphDecision(
+                    RuntimeReplanRejected.create({
+                        runId: proposal.runId,
+                        proposalId: proposal.proposalId,
+                        sourceStoryId: proposal.sourceStoryId,
+                        leaseId: proposal.leaseId,
+                        generation: proposal.generation,
+                        baseGraphVersion: proposal.baseGraphVersion,
+                        currentGraphVersion: this.runtimeReplans.graphVersion,
+                        code: "offer_retraction_failed",
+                        reason,
+                    }),
+                )
+                this.emitRuntimeReplanRejectionState(
+                    proposal.proposalId,
+                    reason,
+                )
+                this.restoreRetractedStories([
+                    ...runtimeReplanTargetIds(proposal),
+                    ...retractedStoryIds,
+                ])
             },
         })
         this.marketRouteIds = new Set(opts.marketRouteIds ?? [])
@@ -533,7 +549,7 @@ export class CollectiveBoard extends SerializedObserver {
             context.internal &&
             event.data.runId === this.opts.runId
         ) {
-            this.onRuntimeReplanRetractionTimedOut(event.data)
+            this.replanGate.onRetractionTimedOut(event.data)
             return
         }
         if (
@@ -608,7 +624,7 @@ export class CollectiveBoard extends SerializedObserver {
             if (!story) return
             if (
                 this.wave?.pending.has(story.id) &&
-                !this.runtimeReplanTargetsStory(story.id)
+                !this.replanGate.targetsStory(story.id)
             ) {
                 this.offerStory(story, event.data.context)
             }
@@ -709,7 +725,7 @@ export class CollectiveBoard extends SerializedObserver {
         ) {
             const offer = this.offers.offerFor(event.data.storyId)
             if (!offer || offer.data.offerId !== event.data.offerId) return
-            const stagedRetraction = this.isOfferAwaitingRetraction(
+            const stagedRetraction = this.replanGate.isOfferAwaitingRetraction(
                 event.data.offerId,
             )
             const abandonedRetraction =
@@ -2005,7 +2021,7 @@ export class CollectiveBoard extends SerializedObserver {
         const unboundTestMode =
             this.opts.unsafeAllowUnboundRuntimeReplanAuthority === true
         if (!nativeAuthorized && !bridgeAuthorized && !unboundTestMode) return
-        this.decideRuntimeReplan(proposal)
+        this.replanGate.enqueue(proposal)
     }
 
     private onConversationDelegationProposed(
@@ -2041,7 +2057,7 @@ export class CollectiveBoard extends SerializedObserver {
             )
             return
         }
-        this.decideRuntimeReplan(runtimeProposal, {
+        this.replanGate.enqueue(runtimeProposal, {
             requireActiveLease: false,
         })
     }
@@ -2331,71 +2347,6 @@ export class CollectiveBoard extends SerializedObserver {
         })
     }
 
-    private decideRuntimeReplan(
-        proposal: RuntimeReplanProposedData,
-        options: { requireActiveLease?: boolean } = {},
-    ): void {
-        if (this.progressivePlanning.isFailed()) return
-        const queued: QueuedRuntimeReplan = {
-            proposal: structuredClone(proposal),
-            fingerprint: runtimeProposalFingerprint(proposal),
-            requireActiveLease: options.requireActiveLease !== false,
-        }
-        const duplicate = [
-            ...(this.stagedRuntimeReplan ? [this.stagedRuntimeReplan] : []),
-            ...this.runtimeReplanQueue,
-        ].some(
-            (candidate) =>
-                candidate.proposal.proposalId === proposal.proposalId &&
-                candidate.fingerprint === queued.fingerprint,
-        )
-        if (duplicate) return
-        this.runtimeReplanQueue.push(queued)
-        this.drainRuntimeReplanQueue()
-    }
-
-    private drainRuntimeReplanQueue(): void {
-        if (this.stagedRuntimeReplan || this.progressivePlanning.isFailed()) return
-        for (;;) {
-            const queued = this.runtimeReplanQueue.shift()
-            if (!queued) return
-            const targetIds = runtimeReplanTargetIds(queued.proposal)
-            const offers = this.offers.offersFor(targetIds)
-            if (offers.length === 0) {
-                this.executeRuntimeReplan(queued)
-                continue
-            }
-
-            const stageId =
-                `${this.opts.runId}:runtime-replan-stage:` +
-                `${++this.runtimeReplanStageSequence}`
-            const staged: StagedRuntimeReplan = {
-                ...queued,
-                stageId,
-                retractions: new Map(),
-            }
-            for (const offer of offers) {
-                const data = offer.data
-                const request: WorkOfferRetractionRequestedData = {
-                    runId: this.opts.runId,
-                    proposalId: queued.proposal.proposalId,
-                    retractionId: `${stageId}:${data.offerId}`,
-                    offerId: data.offerId,
-                    storyId: data.request.storyId,
-                    generation: data.generation,
-                    graphVersion: this.runtimeReplans.graphVersion,
-                }
-                staged.retractions.set(request.retractionId, { request })
-            }
-            this.stagedRuntimeReplan = staged
-            this.armOfferRetractionTimer(staged)
-            for (const { request } of staged.retractions.values()) {
-                this.emit(WorkOfferRetractionRequested.create(request))
-            }
-            return
-        }
-    }
-
     private executeRuntimeReplan(
         queued: QueuedRuntimeReplan,
         additionalImmutableStoryIds: Iterable<string> = [],
@@ -2460,120 +2411,11 @@ export class CollectiveBoard extends SerializedObserver {
     private onWorkOfferRetractionResolved(
         resolution: WorkOfferRetractionResolvedData,
     ): void {
-        const staged = this.stagedRuntimeReplan
-        const entry = staged?.retractions.get(resolution.retractionId)
-        if (staged && entry) {
-            if (
-                entry.resolution ||
-                !sameOfferRetractionCorrelation(entry.request, resolution)
-            ) return
-            entry.resolution = structuredClone(resolution)
-            if (resolution.disposition === "retracted") {
-                const active = this.offers.offerFor(resolution.storyId)
-                if (active?.data.offerId === resolution.offerId) {
-                    this.offers.deleteOffer(resolution.storyId)
-                }
-            }
-            if (
-                [...staged.retractions.values()].every(
-                    (candidate) => candidate.resolution !== undefined,
-                )
-            ) {
-                this.finishStagedRuntimeReplan(staged)
-            }
-            return
-        }
-
+        if (this.replanGate.onRetractionResolved(resolution)) return
         const restoreStoryId =
             this.offers.resolveAbandonedRetraction(resolution)
         if (restoreStoryId === null) return
         this.restoreRetractedStories([restoreStoryId])
-    }
-
-    private finishStagedRuntimeReplan(staged: StagedRuntimeReplan): void {
-        if (this.stagedRuntimeReplan !== staged) return
-        this.timers.clear("offerRetraction")
-        this.stagedRuntimeReplan = null
-        const resolutions = [...staged.retractions.values()].map(
-            ({ resolution }) => resolution!,
-        )
-        const retractedStoryIds = resolutions
-            .filter(({ disposition }) => disposition === "retracted")
-            .map(({ storyId }) => storyId)
-        const leasedStoryIds = resolutions
-            .filter(({ disposition }) => disposition === "leased")
-            .map(({ storyId }) => storyId)
-
-        this.executeRuntimeReplan(
-            staged,
-            leasedStoryIds,
-            retractedStoryIds,
-        )
-        this.drainRuntimeReplanQueue()
-    }
-
-    private armOfferRetractionTimer(staged: StagedRuntimeReplan): void {
-        this.timers.clear("offerRetraction")
-        const configured = this.opts.offerRetractionTimeoutMs ?? 5_000
-        const timeoutMs =
-            Number.isFinite(configured) && configured > 0
-                ? Math.max(1, Math.floor(configured))
-                : 5_000
-        this.timers.arm("offerRetraction", timeoutMs, () => {
-            this.emit(
-                RuntimeReplanRetractionTimedOut.create({
-                    runId: this.opts.runId,
-                    stageId: staged.stageId,
-                    proposalId: staged.proposal.proposalId,
-                }),
-            )
-        })
-    }
-
-    private onRuntimeReplanRetractionTimedOut(
-        timeout: RuntimeReplanRetractionTimedOutData,
-    ): void {
-        const staged = this.stagedRuntimeReplan
-        if (
-            !staged ||
-            staged.stageId !== timeout.stageId ||
-            staged.proposal.proposalId !== timeout.proposalId
-        ) return
-        this.timers.clear("offerRetraction")
-        this.stagedRuntimeReplan = null
-        const retractedStoryIds: string[] = []
-        for (const entry of staged.retractions.values()) {
-            if (entry.resolution?.disposition === "retracted") {
-                retractedStoryIds.push(entry.request.storyId)
-            } else if (!entry.resolution) {
-                this.offers.abandonRetraction(entry.request)
-            }
-        }
-        const reason =
-            `offer retraction timed out before the Broker resolved every ` +
-            `targeted story; the runtime graph was not changed`
-        this.emitGraphDecision(
-            RuntimeReplanRejected.create({
-                runId: staged.proposal.runId,
-                proposalId: staged.proposal.proposalId,
-                sourceStoryId: staged.proposal.sourceStoryId,
-                leaseId: staged.proposal.leaseId,
-                generation: staged.proposal.generation,
-                baseGraphVersion: staged.proposal.baseGraphVersion,
-                currentGraphVersion: this.runtimeReplans.graphVersion,
-                code: "offer_retraction_failed",
-                reason,
-            }),
-        )
-        this.emitRuntimeReplanRejectionState(
-            staged.proposal.proposalId,
-            reason,
-        )
-        this.restoreRetractedStories([
-            ...runtimeReplanTargetIds(staged.proposal),
-            ...retractedStoryIds,
-        ])
-        this.drainRuntimeReplanQueue()
     }
 
     private emitRuntimeReplanRejectionState(
@@ -2623,19 +2465,6 @@ export class CollectiveBoard extends SerializedObserver {
         })
     }
 
-    private runtimeReplanTargetsStory(storyId: string): boolean {
-        return runtimeReplanTargetIds(
-            this.stagedRuntimeReplan?.proposal,
-        ).has(storyId)
-    }
-
-    private isOfferAwaitingRetraction(offerId: string): boolean {
-        for (const entry of this.stagedRuntimeReplan?.retractions.values() ?? []) {
-            if (entry.request.offerId === offerId) return true
-        }
-        return false
-    }
-
     private restoreRetractedStories(storyIds: readonly string[]): void {
         if (this.phase !== "running" || !this.prd || !this.wave) return
         const currentById = new Map(
@@ -2650,7 +2479,7 @@ export class CollectiveBoard extends SerializedObserver {
                 this.leases.has(storyId) ||
                 this.offers.hasOffer(storyId) ||
                 this.offers.hasContextRequest(storyId) ||
-                this.runtimeReplanTargetsStory(storyId) ||
+                this.replanGate.targetsStory(storyId) ||
                 !story.dependsOn.every(
                     (dependency) => currentById.get(dependency)?.passes === true,
                 )
@@ -2744,7 +2573,7 @@ export class CollectiveBoard extends SerializedObserver {
             return
         }
         const story = discovery.story
-        this.decideRuntimeReplan({
+        this.replanGate.enqueue({
             runId: this.opts.runId,
             proposalId:
                 `${this.opts.runId}:discovery:${++this.discoverySequence}:` +
@@ -3042,7 +2871,7 @@ export class CollectiveBoard extends SerializedObserver {
             this.offers.hasContextRequest(story.id) ||
             this.offers.hasOffer(story.id) ||
             this.leases.has(story.id) ||
-            this.runtimeReplanTargetsStory(story.id)
+            this.replanGate.targetsStory(story.id)
         ) return
         this.emit(
             WorkContextRequested.create(
@@ -3059,7 +2888,7 @@ export class CollectiveBoard extends SerializedObserver {
             !this.wave?.pending.has(story.id) ||
             this.offers.hasOffer(story.id) ||
             this.leases.has(story.id) ||
-            this.runtimeReplanTargetsStory(story.id)
+            this.replanGate.targetsStory(story.id)
         ) return
         const offerId = this.offers.nextOfferId(story.id)
         const basePrompt = buildStoryOfferPrompt(this.prd, story)
@@ -3677,17 +3506,6 @@ function nonEmptyString(value: unknown): string | null {
 function addUnique(values: string[], value: string): void {
     if (!values.includes(value)) values.push(value)
 }
-
-function runtimeReplanTargetIds(
-    proposal: RuntimeReplanProposedData | undefined,
-): Set<string> {
-    if (!proposal) return new Set()
-    return new Set([
-        ...proposal.mutation.removedStoryIds,
-        ...Object.keys(proposal.mutation.modifiedDeps),
-    ])
-}
-
 
 function sameRemediationStory(
     current: PrdStory,
