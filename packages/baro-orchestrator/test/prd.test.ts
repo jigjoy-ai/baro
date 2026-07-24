@@ -13,11 +13,11 @@ import {
     type PrdFile,
     type PrdStory,
 } from "../src/prd.js"
-import { runtimeAppliedProposalFingerprint } from "../src/runtime/runtime-replan-fingerprint.js"
+import { runtimeAppliedProposalFingerprint } from "../src/runtime-graph/fingerprint.js"
 import {
     deriveGoalContract,
     GoalInvariantLedger,
-} from "../src/runtime/goal-contract.js"
+} from "../src/goal/goal-contract.js"
 import type { RuntimeReplanAppliedData } from "../src/semantic-events.js"
 import { withTempDir } from "./participants/helpers.js"
 

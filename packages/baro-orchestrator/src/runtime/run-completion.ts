@@ -5,7 +5,7 @@
  */
 
 import type { PrdFile } from "../prd.js"
-import { deriveGoalContract } from "./goal-contract.js"
+import { deriveGoalContract } from "../goal/goal-contract.js"
 
 /** Stories that cannot start because a dependency failed (transitively). */
 export function blockedStoryIds(

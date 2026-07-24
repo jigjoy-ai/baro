@@ -37,8 +37,8 @@ import {
     obligationMappingsForStories,
     validateArchitectureObligationCoverage,
 } from "../domain/architecture-obligation-contract.js"
-import { deriveGoalContract } from "../../runtime/goal-contract.js"
-import type { RuntimeReplanDecisionOutcome } from "../../participants/runtime-replan-coordinator.js"
+import { deriveGoalContract } from "../../goal/goal-contract.js"
+import type { RuntimeReplanDecisionOutcome } from "../../runtime-graph/runtime-replan-coordinator.js"
 
 export type ProgressivePlanningBoardPhase =
     | "idle"

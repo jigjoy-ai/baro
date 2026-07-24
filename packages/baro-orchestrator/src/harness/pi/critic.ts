@@ -1,7 +1,7 @@
 /** CriticPi — one-shot acceptance evaluator via the `pi` CLI. */
 
 import { runPiOneShot } from "./one-shot.js"
-import { VERDICT_SYSTEM_PROMPT } from "../../participants/critic-verdict.js"
+import { VERDICT_SYSTEM_PROMPT } from "../../acceptance/critic-verdict.js"
 import {
     OneShotCritic,
     type OneShotCriticCoreOptions,

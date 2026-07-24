@@ -64,15 +64,15 @@ import {
     inconclusiveEvidenceVerdict,
     prepareCriticEvaluation,
     type CriticEvidenceSource,
-} from "../../participants/critic-evidence.js"
-import { criticInput, criticReplayKey } from "../../participants/critic-input.js"
-import { drainCriticPending } from "../../participants/critic-pending.js"
-import type { AgentTurnProjector } from "../../participants/agent-turn-projector.js"
+} from "../../acceptance/critic-evidence.js"
+import { criticInput, criticReplayKey } from "../../acceptance/critic-input.js"
+import { drainCriticPending } from "../../acceptance/critic-pending.js"
+import type { AgentTurnProjector } from "../../acceptance/agent-turn-projector.js"
 import type { StoryResultAuthorityCorrelation } from "../../runtime/story-outcome-authority.js"
 import {
     isAuthorizedTerminalTurn,
     type TerminalTurnAuthorityOptions,
-} from "../../participants/terminal-turn-authority.js"
+} from "../../acceptance/terminal-turn-authority.js"
 
 export interface CriticOpenAIOptions extends TerminalTurnAuthorityOptions {
     /** Map from agentId to its acceptance-criteria strings. */

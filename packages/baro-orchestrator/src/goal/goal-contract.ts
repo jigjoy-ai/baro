@@ -1,0 +1,1735 @@
+import {
+    goalEnvelopeFingerprint,
+    validateGoalEnvelope,
+    type GoalEnvelope,
+} from "../session/conversation-contract.js"
+import {
+    createGoalAggregateReviewBasis,
+    normalizeGoalAggregateReviewEvidence,
+    type GoalAggregateReviewBasis,
+    type GoalAggregateReviewEvidence,
+    type GoalAggregateReviewStatus,
+} from "../runtime/goal-aggregate-review.js"
+
+export const GOAL_CONTRACT_SCHEMA_VERSION = 1 as const
+export const GOAL_AGGREGATE_REVIEW_RETENTION = 16
+
+export type GoalInvariantKind = "acceptance" | "constraint"
+
+export interface GoalInvariant {
+    id: string
+    kind: GoalInvariantKind
+    ordinal: number
+    text: string
+}
+
+/**
+ * Immutable, provider-neutral execution contract derived from exact user
+ * intent.  The contract ID includes the complete GoalEnvelope fingerprint;
+ * concise invariant IDs are always interpreted within that contract, so
+ * evidence for an older intake cannot satisfy a revised goal.
+ */
+export interface GoalContract {
+    schemaVersion: typeof GOAL_CONTRACT_SCHEMA_VERSION
+    contractId: string
+    fingerprint: string
+    objective: string
+    invariants: readonly GoalInvariant[]
+    nonGoals: readonly string[]
+    assumptions: readonly string[]
+}
+
+export interface GoalStoryInvariantMapping {
+    storyId: string
+    invariantIds: readonly string[]
+}
+
+export interface GoalIntegrationEvidence {
+    storyId: string
+    leaseId?: string
+}
+
+export interface GoalQualityEvidence {
+    storyId: string
+    leaseId: string
+    evaluationId: string
+    status: "passed" | "failed" | "inconclusive"
+    /** True only for an evaluated, passing critique from the bound quality gate. */
+    independentlyPassed: boolean
+}
+
+export type {
+    GoalAggregateInvariantReview,
+    GoalAggregateReviewBasis,
+    GoalAggregateReviewEvidence,
+    GoalAggregateReviewStatus,
+} from "../runtime/goal-aggregate-review.js"
+
+export interface GoalInvariantChallenge {
+    challengeId: string
+    invariantId: string
+    raisedBy: string
+    reason: string
+    storyId?: string
+}
+
+export interface GoalInvariantChallengeResolution {
+    challengeId: string
+    resolution: "resolved" | "rejected"
+    reason: string
+}
+
+export interface GoalInvariantChallengeRecord
+    extends GoalInvariantChallenge {
+    resolution?: GoalInvariantChallengeResolution
+    remediation?: GoalInvariantRemediationBinding
+}
+
+export interface GoalInvariantRemediationBinding {
+    proposalId: string
+    storyId: string
+    /** Shared aggregate-review root cause; absent for legacy/singleton work. */
+    remediationGroupId?: string
+    status: "requested" | "admitted"
+    graphVersion?: number
+    /** Exact integration attempts whose missing quality this work revalidates. */
+    revalidates?: readonly GoalIntegrationEvidence[]
+}
+
+export interface DisplacedGoalRemediation {
+    challengeId: string
+    invariantId: string
+    previousProposalId: string
+    remediationGroupId?: string
+    revalidates?: readonly GoalIntegrationEvidence[]
+}
+
+export interface GoalProtocolIssue {
+    scope: "mapping" | "challenge" | "aggregate_review"
+    key: string
+    reason: string
+}
+
+/**
+ * Complete, replayable projection of the goal ledger.  It deliberately stores
+ * semantic evidence rather than a derived green/red answer, so a restarted
+ * Guardian can recompute completion against the exact current story set.
+ */
+export interface GoalLedgerProjection {
+    schemaVersion: typeof GOAL_CONTRACT_SCHEMA_VERSION
+    contractId: string
+    revision: number
+    mappings: readonly GoalStoryInvariantMapping[]
+    integrations: readonly GoalIntegrationEvidence[]
+    qualities: readonly GoalQualityEvidence[]
+    aggregateReviews: readonly GoalAggregateReviewEvidence[]
+    challenges: readonly GoalInvariantChallengeRecord[]
+    protocolIssues: readonly GoalProtocolIssue[]
+}
+
+export type GoalInvariantLedgerStatus = "satisfied" | "open" | "rejected"
+
+export interface GoalInvariantLedgerEntry {
+    invariantId: string
+    status: GoalInvariantLedgerStatus
+    mappedStoryIds: readonly string[]
+    integratedStoryIds: readonly string[]
+    independentlyReviewedStoryIds: readonly string[]
+    aggregateReviewId?: string
+    aggregateReviewStatus?: GoalAggregateReviewStatus
+    reason: string
+}
+
+export interface GoalLedgerAssessment {
+    status: "satisfied" | "incomplete"
+    satisfiedInvariantIds: readonly string[]
+    openInvariantIds: readonly string[]
+    rejectedInvariantIds: readonly string[]
+    invariants: readonly GoalInvariantLedgerEntry[]
+    protocolIssues: readonly string[]
+    reason: string
+}
+
+interface StoredChallenge extends GoalInvariantChallenge {
+    resolution?: GoalInvariantChallengeResolution
+    remediation?: GoalInvariantRemediationBinding
+}
+
+interface StoredQuality extends GoalQualityEvidence {
+    sequence: number
+}
+
+/** Null means governance is deliberately disabled for a legacy/no-envelope run. */
+export function deriveGoalContract(
+    envelope: GoalEnvelope | null | undefined,
+): GoalContract | null {
+    if (envelope == null) return null
+
+    const valid = validateGoalEnvelope(envelope)
+    const fingerprint = goalEnvelopeFingerprint(valid)
+    const contractId = `goal:${fingerprint}`
+    const invariants: GoalInvariant[] = []
+
+    valid.acceptanceCriteria.forEach((text, index) => {
+        invariants.push({
+            id: `G-A${index + 1}`,
+            kind: "acceptance",
+            ordinal: index + 1,
+            text,
+        })
+    })
+    valid.constraints.forEach((text, index) => {
+        invariants.push({
+            id: `G-C${index + 1}`,
+            kind: "constraint",
+            ordinal: index + 1,
+            text,
+        })
+    })
+
+    return deepFreeze({
+        schemaVersion: GOAL_CONTRACT_SCHEMA_VERSION,
+        contractId,
+        fingerprint,
+        objective: valid.objective,
+        invariants,
+        nonGoals: [...valid.nonGoals],
+        assumptions: [...valid.assumptions],
+    })
+}
+
+/**
+ * Deterministic prompt block shared by planner, worker and critic surfaces.
+ * A story-specific view still includes every invariant so local scope never
+ * erases the global contract.
+ */
+export function renderGoalContractPrompt(
+    contract: GoalContract,
+    storyInvariantIds?: readonly string[],
+): string {
+    const knownIds = new Set(contract.invariants.map(({ id }) => id))
+    const assigned = new Set(storyInvariantIds ?? [])
+    const unknown = [...assigned].filter((id) => !knownIds.has(id))
+    if (unknown.length > 0) {
+        throw new Error(
+            `story references unknown goal invariant(s): ${unknown.join(", ")}`,
+        )
+    }
+
+    const lines = [
+        "GOAL CONTRACT (global, immutable)",
+        `Contract: ${contract.contractId}`,
+        `Objective: ${contract.objective}`,
+        "Global invariants:",
+        ...contract.invariants.map((invariant) => {
+            const marker = assigned.has(invariant.id) ? " [ASSIGNED]" : ""
+            return `- [${invariant.id}] (${invariant.kind})${marker} ${invariant.text}`
+        }),
+    ]
+
+    if (storyInvariantIds !== undefined) {
+        lines.push(
+            assigned.size > 0
+                ? `This story owns evidence for: ${[...assigned].join(", ")}`
+                : "This story owns no goal invariant directly; it must still preserve all of them.",
+        )
+    }
+    if (contract.nonGoals.length > 0) {
+        lines.push("Non-goals:", ...contract.nonGoals.map((item) => `- ${item}`))
+    }
+    if (contract.assumptions.length > 0) {
+        lines.push(
+            "Assumptions to verify:",
+            ...contract.assumptions.map((item) => `- ${item}`),
+        )
+    }
+    lines.push(
+        "If local scope cannot satisfy an assigned invariant, raise a goal challenge or discover/replan work; never silently ignore it.",
+    )
+    return lines.join("\n")
+}
+
+/**
+ * Pure event projection for goal coverage.  It owns no scheduler state and
+ * makes no model calls; callers feed it admitted mappings plus independently
+ * sourced integration/quality/challenge facts.
+ */
+export class GoalInvariantLedger {
+    private readonly invariantIds: ReadonlySet<string>
+    private readonly mappings = new Map<string, readonly string[]>()
+    private readonly integrations = new Map<string, GoalIntegrationEvidence>()
+    private readonly qualities = new Map<string, Map<string, StoredQuality>>()
+    private readonly aggregateReviews = new Map<
+        string,
+        GoalAggregateReviewEvidence
+    >()
+    private readonly challenges = new Map<string, StoredChallenge>()
+    private readonly mappingIssues = new Map<string, string>()
+    private readonly challengeIssues = new Map<string, string>()
+    private readonly aggregateReviewIssues = new Map<string, string>()
+    private qualitySequence = 0
+
+    constructor(
+        readonly contract: GoalContract,
+        mappings?: readonly GoalStoryInvariantMapping[],
+        projection?: GoalLedgerProjection,
+    ) {
+        this.invariantIds = new Set(contract.invariants.map(({ id }) => id))
+        if (projection) this.restore(projection)
+        if (mappings !== undefined) {
+            for (const mapping of mappings) this.mapStory(mapping)
+        }
+    }
+
+    snapshot(revision: number): GoalLedgerProjection {
+        const qualities = [...this.qualities.values()]
+            .flatMap((byLease) => [...byLease.values()])
+            .sort(compareQuality)
+            .map(({ sequence: _sequence, ...evidence }) => evidence)
+        const challenges = [...this.challenges.values()]
+            .sort((left, right) => left.challengeId.localeCompare(right.challengeId))
+            .map((challenge) => structuredClone(challenge))
+        const protocolIssues: GoalProtocolIssue[] = [
+            ...[...this.mappingIssues.entries()].map(([key, reason]) => ({
+                scope: "mapping" as const,
+                key,
+                reason,
+            })),
+            ...[...this.challengeIssues.entries()].map(([key, reason]) => ({
+                scope: "challenge" as const,
+                key,
+                reason,
+            })),
+            ...[...this.aggregateReviewIssues.entries()].map(([key, reason]) => ({
+                scope: "aggregate_review" as const,
+                key,
+                reason,
+            })),
+        ].sort(compareProtocolIssue)
+
+        return normalizeGoalLedgerProjection(
+            {
+                schemaVersion: GOAL_CONTRACT_SCHEMA_VERSION,
+                contractId: this.contract.contractId,
+                revision,
+                mappings: [...this.mappings.entries()]
+                    .sort(([left], [right]) => left.localeCompare(right))
+                    .map(([storyId, invariantIds]) => ({
+                        storyId,
+                        invariantIds: [...invariantIds],
+                    })),
+                integrations: [...this.integrations.values()]
+                    .sort((left, right) => left.storyId.localeCompare(right.storyId))
+                    .map((evidence) => ({ ...evidence })),
+                qualities,
+                aggregateReviews: [...this.aggregateReviews.values()]
+                    .sort((left, right) =>
+                        left.reviewId.localeCompare(right.reviewId))
+                    .map((review) => structuredClone(review)),
+                challenges,
+                protocolIssues,
+            },
+            this.contract,
+        )
+    }
+
+    private restore(projection: GoalLedgerProjection): void {
+        const normalized = normalizeGoalLedgerProjection(
+            projection,
+            this.contract,
+        )
+        for (const mapping of normalized.mappings) this.mapStory(mapping)
+        for (const integration of normalized.integrations) {
+            this.recordIntegration(integration)
+        }
+        for (const quality of normalized.qualities) this.recordQuality(quality)
+        for (const review of normalized.aggregateReviews) {
+            this.recordAggregateReview(review)
+        }
+        for (const challenge of normalized.challenges) {
+            this.raiseChallenge(challenge)
+            if (challenge.remediation) {
+                this.bindChallengeRemediation(
+                    challenge.challengeId,
+                    challenge.remediation,
+                )
+                if (challenge.remediation.status === "admitted") {
+                    this.admitChallengeRemediation(
+                        challenge.challengeId,
+                        challenge.remediation.proposalId,
+                        challenge.remediation.storyId,
+                        challenge.remediation.graphVersion!,
+                    )
+                }
+            }
+            if (challenge.resolution) {
+                this.resolveChallenge(challenge.resolution)
+            }
+        }
+        for (const issue of normalized.protocolIssues) {
+            const target = issue.scope === "mapping"
+                ? this.mappingIssues
+                : issue.scope === "challenge"
+                ? this.challengeIssues
+                : this.aggregateReviewIssues
+            target.set(issue.key, issue.reason)
+        }
+    }
+
+    mapStory(mapping: GoalStoryInvariantMapping): void {
+        const storyId = nonEmpty(mapping.storyId)
+        const invariantIds = unique(mapping.invariantIds.map(nonEmpty))
+        const unknown = invariantIds.filter((id) => !this.invariantIds.has(id))
+        if (unknown.length > 0) {
+            this.mappings.delete(storyId)
+            this.mappingIssues.set(
+                storyId,
+                `story ${storyId} maps unknown invariant(s): ${unknown.join(", ")}`,
+            )
+            return
+        }
+        this.mappingIssues.delete(storyId)
+        this.mappings.set(storyId, Object.freeze(invariantIds))
+    }
+
+    unmapStory(storyIdValue: string): void {
+        const storyId = nonEmpty(storyIdValue)
+        this.mappings.delete(storyId)
+        this.mappingIssues.delete(storyId)
+    }
+
+    /** Remove a story from the admitted graph and invalidate all of its proof. */
+    removeStory(storyIdValue: string): readonly DisplacedGoalRemediation[] {
+        const storyId = nonEmpty(storyIdValue)
+        const displaced: DisplacedGoalRemediation[] = []
+        this.unmapStory(storyId)
+        this.integrations.delete(storyId)
+        this.qualities.delete(storyId)
+        for (const [challengeId, challenge] of this.challenges) {
+            if (
+                challenge.remediation?.status !== "admitted" ||
+                challenge.remediation.storyId !== storyId
+            ) continue
+            displaced.push({
+                challengeId,
+                invariantId: challenge.invariantId,
+                previousProposalId: challenge.remediation.proposalId,
+                ...(challenge.remediation.remediationGroupId
+                    ? {
+                          remediationGroupId:
+                              challenge.remediation.remediationGroupId,
+                      }
+                    : {}),
+                ...(challenge.remediation.revalidates
+                    ? { revalidates: challenge.remediation.revalidates }
+                    : {}),
+            })
+            const {
+                remediation: _remediation,
+                resolution: _resolution,
+                ...reopened
+            } = challenge
+            this.challenges.set(
+                challengeId,
+                Object.freeze(reopened),
+            )
+        }
+        return displaced
+    }
+
+    /**
+     * Reconcile a restored projection to the exact currently admitted PRD.
+     * This closes the crash window where a graph commit persisted but its
+     * RuntimeReplanApplied event never reached the Guardian.
+     */
+    reconcileAdmittedStories(
+        mappings: readonly GoalStoryInvariantMapping[],
+    ): readonly DisplacedGoalRemediation[] {
+        const admitted = new Set(mappings.map(({ storyId }) => nonEmpty(storyId)))
+        const known = new Set([
+            ...this.mappings.keys(),
+            ...this.integrations.keys(),
+            ...this.qualities.keys(),
+            ...[...this.challenges.values()].flatMap(({ remediation }) =>
+                remediation?.status === "admitted"
+                    ? [remediation.storyId]
+                    : [],
+            ),
+        ])
+        const displaced: DisplacedGoalRemediation[] = []
+        for (const storyId of known) {
+            if (!admitted.has(storyId)) {
+                displaced.push(...this.removeStory(storyId))
+            }
+        }
+        for (const mapping of mappings) this.mapStory(mapping)
+        return displaced
+    }
+
+    unmappedInvariantIds(): readonly string[] {
+        const mapped = new Set(
+            [...this.mappings.values()].flatMap((ids) => [...ids]),
+        )
+        return this.contract.invariants
+            .map(({ id }) => id)
+            .filter((id) => !mapped.has(id))
+    }
+
+    /**
+     * Invariants whose admitted mapped work is already integrated, but with
+     * at least one contribution lacking a passing independent critique.
+     * Unintegrated mapped stories are excluded because the normal scheduler
+     * can still produce fresh evidence for them.
+     */
+    invariantsNeedingIndependentQuality(): readonly string[] {
+        return this.contract.invariants
+            .filter((invariant) => {
+                return this.qualityRevalidationTargets(invariant.id).length > 0
+            })
+            .map(({ id }) => id)
+    }
+
+    qualityRevalidationTargets(
+        invariantIdValue: string,
+    ): readonly GoalIntegrationEvidence[] {
+        const invariantId = nonEmpty(invariantIdValue)
+        const mappedStoryIds = [...this.mappings.entries()]
+            .filter(([, ids]) => ids.includes(invariantId))
+            .map(([storyId]) => storyId)
+        if (
+            mappedStoryIds.length === 0 ||
+            mappedStoryIds.some((storyId) => !this.integrations.has(storyId))
+        ) return []
+
+        const covered = this.revalidatedIntegrationKeys(
+            invariantId,
+            new Set(mappedStoryIds),
+        )
+        return mappedStoryIds.flatMap((storyId) => {
+            const integration = this.integrations.get(storyId)!
+            if (
+                this.qualityForIntegration(storyId)?.independentlyPassed === true ||
+                covered.has(integrationKey(integration))
+            ) return []
+            return [{ ...integration }]
+        })
+    }
+
+    /**
+     * A requested or admitted remediation restored only from PRD state has no
+     * durable lease identity. In strict quality mode, an older Critic verdict
+     * for the same story ID therefore cannot prove that the restored
+     * integration is the attempt that was reviewed. Reopen that challenge
+     * with a fresh, retry-linked remediation while retaining the old story as
+     * historical graph evidence. Including `requested` closes the crash
+     * window where graph persistence won but the admission event did not
+     * reach Guardian.
+     */
+    displaceUnverifiableRemediations(): readonly DisplacedGoalRemediation[] {
+        const displaced: DisplacedGoalRemediation[] = []
+        for (const [challengeId, challenge] of this.challenges) {
+            const remediation = challenge.remediation
+            if (
+                !remediation ||
+                !this.integrations.has(remediation.storyId) ||
+                this.qualityForIntegration(remediation.storyId)
+                    ?.independentlyPassed === true
+            ) continue
+            displaced.push({
+                challengeId,
+                invariantId: challenge.invariantId,
+                previousProposalId: remediation.proposalId,
+                ...(remediation.remediationGroupId
+                    ? { remediationGroupId: remediation.remediationGroupId }
+                    : {}),
+                ...(remediation.revalidates
+                    ? { revalidates: remediation.revalidates }
+                    : {}),
+            })
+            const {
+                remediation: _remediation,
+                resolution: _resolution,
+                ...reopened
+            } = challenge
+            this.challenges.set(challengeId, Object.freeze(reopened))
+        }
+        return displaced
+    }
+
+    hasOpenChallenge(invariantIdValue: string): boolean {
+        const invariantId = nonEmpty(invariantIdValue)
+        return [...this.challenges.values()].some(
+            (challenge) =>
+                challenge.invariantId === invariantId && !challenge.resolution,
+        )
+    }
+
+    hasChallengeRemediation(challengeIdValue: string): boolean {
+        const challenge = this.challenges.get(nonEmpty(challengeIdValue))
+        return challenge?.remediation !== undefined
+    }
+
+    /** Exact positional challenge/invariant/group correlation for Board receipts. */
+    matchesChallengeRemediationTargets(
+        challengeIdValues: readonly string[],
+        invariantIdValues: readonly string[],
+        proposalIdValue: string,
+        storyIdValue: string,
+        remediationGroupId?: string,
+    ): boolean {
+        if (
+            challengeIdValues.length === 0 ||
+            challengeIdValues.length !== invariantIdValues.length ||
+            new Set(challengeIdValues).size !== challengeIdValues.length ||
+            new Set(invariantIdValues).size !== invariantIdValues.length ||
+            proposalIdValue.trim().length === 0 ||
+            proposalIdValue !== proposalIdValue.trim() ||
+            storyIdValue.trim().length === 0 ||
+            storyIdValue !== storyIdValue.trim()
+        ) return false
+        const supplied = challengeIdValues.map((challengeId, index) => ({
+            challengeId,
+            invariantId: invariantIdValues[index]!,
+        }))
+        if (supplied.some(({ challengeId, invariantId }) =>
+            challengeId.trim().length === 0 ||
+            challengeId !== challengeId.trim() ||
+            invariantId.trim().length === 0 ||
+            invariantId !== invariantId.trim())) return false
+
+        const seed = this.challenges.get(supplied[0]!.challengeId)?.remediation
+        if (
+            !seed ||
+            seed.proposalId !== proposalIdValue ||
+            seed.storyId !== storyIdValue ||
+            seed.remediationGroupId !== remediationGroupId
+        ) return false
+
+        const expected = this.challengesForRemediation(seed)
+        return expected.length === supplied.length &&
+            expected.every((challenge, index) =>
+                challenge.challengeId === supplied[index]!.challengeId &&
+                challenge.invariantId === supplied[index]!.invariantId)
+    }
+
+    private challengesForRemediation(
+        remediation: GoalInvariantRemediationBinding,
+    ): GoalInvariantChallenge[] {
+        return [...this.challenges.values()]
+            .filter((challenge) =>
+                challenge.remediation !== undefined &&
+                sameRemediationIdentity(challenge.remediation, remediation))
+            .sort((left, right) =>
+                left.invariantId.localeCompare(right.invariantId) ||
+                left.challengeId.localeCompare(right.challengeId))
+    }
+
+    challengeCount(invariantIdValue: string): number {
+        const invariantId = nonEmpty(invariantIdValue)
+        return [...this.challenges.values()].filter(
+            (challenge) => challenge.invariantId === invariantId,
+        ).length
+    }
+
+    /**
+     * Durable count for Guardian-owned semantic-review healing cycles.
+     * Challenge ids are worker-controlled at the collaboration boundary, so a
+     * namespace prefix alone must never consume the aggregate-remediation cap.
+     */
+    aggregateRemediationCount(invariantIdValue: string): number {
+        const invariantId = nonEmpty(invariantIdValue)
+        const namespace = `aggregate-${invariantId.toLowerCase()}-`
+        return [...this.challenges.values()].filter(
+            (challenge) =>
+                challenge.invariantId === invariantId &&
+                challenge.raisedBy === "goal-guardian" &&
+                challenge.challengeId.startsWith(namespace) &&
+                challenge.remediation !== undefined,
+        ).length
+    }
+
+    recordIntegration(evidence: GoalIntegrationEvidence): void {
+        const storyId = nonEmpty(evidence.storyId)
+        this.integrations.set(
+            storyId,
+            Object.freeze({
+                storyId,
+                ...(evidence.leaseId
+                    ? { leaseId: nonEmpty(evidence.leaseId) }
+                    : {}),
+            }),
+        )
+    }
+
+    hasIntegration(storyIdValue: string): boolean {
+        return this.integrations.has(nonEmpty(storyIdValue))
+    }
+
+    recordQuality(evidence: GoalQualityEvidence): void {
+        const storyId = nonEmpty(evidence.storyId)
+        const leaseId = nonEmpty(evidence.leaseId)
+        const stored: StoredQuality = Object.freeze({
+            storyId,
+            leaseId,
+            evaluationId: nonEmpty(evidence.evaluationId),
+            status: evidence.status,
+            independentlyPassed:
+                evidence.status === "passed" && evidence.independentlyPassed,
+            sequence: ++this.qualitySequence,
+        })
+        let byLease = this.qualities.get(storyId)
+        if (!byLease) {
+            byLease = new Map()
+            this.qualities.set(storyId, byLease)
+        }
+        byLease.set(leaseId, stored)
+    }
+
+    aggregateReviewBasis(
+        storyIds: readonly string[],
+        verificationIdValue: string,
+    ): GoalAggregateReviewBasis {
+        const verificationId = nonEmpty(verificationIdValue)
+        const selected = new Set(storyIds.map(nonEmpty))
+        const selectedStoryIds = [...selected].sort()
+        const invariants = this.contract.invariants.map((invariant) => {
+            const mappedStoryIds = [...this.mappings.entries()]
+                .filter(
+                    ([storyId, ids]) =>
+                        selected.has(storyId) && ids.includes(invariant.id),
+                )
+                .map(([storyId]) => storyId)
+                .sort()
+            return {
+                invariantId: invariant.id,
+                text: invariant.text,
+                mappedStoryIds,
+                contributions: mappedStoryIds.map((storyId) => {
+                    const integration = this.integrations.get(storyId)
+                    const quality = integration
+                        ? this.qualityForIntegration(storyId)
+                        : undefined
+                    return {
+                        storyId,
+                        ...(integration?.leaseId
+                            ? { leaseId: integration.leaseId }
+                            : {}),
+                        ...(quality
+                            ? {
+                                  evaluationId: quality.evaluationId,
+                                  qualityStatus: quality.status,
+                              }
+                            : {}),
+                        independentlyPassed:
+                            quality?.independentlyPassed === true,
+                    }
+                }),
+            }
+        })
+        const challenges = [...this.challenges.values()]
+            .map((challenge) => structuredClone(challenge))
+            .sort((left, right) =>
+                left.challengeId.localeCompare(right.challengeId))
+        const protocolIssues = [
+            ...[...this.mappingIssues.entries()].map(([key, reason]) => ({
+                scope: "mapping" as const,
+                key,
+                reason,
+            })),
+            ...[...this.challengeIssues.entries()].map(([key, reason]) => ({
+                scope: "challenge" as const,
+                key,
+                reason,
+            })),
+            ...[...this.aggregateReviewIssues.entries()].map(([key, reason]) => ({
+                scope: "aggregate_review" as const,
+                key,
+                reason,
+            })),
+        ].sort(compareProtocolIssue)
+        return createGoalAggregateReviewBasis({
+            contractId: this.contract.contractId,
+            objective: this.contract.objective,
+            nonGoals: this.contract.nonGoals,
+            assumptions: this.contract.assumptions,
+            verificationId,
+            storyIds: selectedStoryIds,
+            invariants,
+            challenges,
+            protocolIssues,
+        })
+    }
+
+    recordAggregateReview(evidence: GoalAggregateReviewEvidence): void {
+        const normalized = normalizeGoalAggregateReviewEvidence(
+            evidence,
+            this.invariantIds,
+        )
+        const existing = this.aggregateReviews.get(normalized.reviewId)
+        if (existing) {
+            if (JSON.stringify(existing) !== JSON.stringify(normalized)) {
+                this.aggregateReviewIssues.set(
+                    normalized.reviewId,
+                    `aggregate review id ${normalized.reviewId} was replayed with different content`,
+                )
+            }
+            return
+        }
+        const sameBasis = [...this.aggregateReviews.values()].find(
+            ({ basisFingerprint }) =>
+                basisFingerprint === normalized.basisFingerprint,
+        )
+        if (sameBasis && JSON.stringify(sameBasis) !== JSON.stringify(normalized)) {
+            this.aggregateReviewIssues.set(
+                normalized.basisFingerprint,
+                "aggregate review basis was evaluated more than once with conflicting content",
+            )
+            return
+        }
+        this.aggregateReviewIssues.delete(normalized.reviewId)
+        while (
+            this.aggregateReviews.size >= GOAL_AGGREGATE_REVIEW_RETENTION
+        ) {
+            const oldest = this.aggregateReviews.keys().next().value as
+                | string
+                | undefined
+            if (oldest === undefined) break
+            this.aggregateReviews.delete(oldest)
+        }
+        this.aggregateReviews.set(normalized.reviewId, normalized)
+    }
+
+    aggregateReviewForBasis(
+        basisFingerprintValue: string,
+        verificationIdValue?: string,
+    ): GoalAggregateReviewEvidence | undefined {
+        const basisFingerprint = nonEmpty(basisFingerprintValue)
+        const verificationId = verificationIdValue === undefined
+            ? undefined
+            : nonEmpty(verificationIdValue)
+        return [...this.aggregateReviews.values()].find(
+            (review) =>
+                review.basisFingerprint === basisFingerprint &&
+                (verificationId === undefined ||
+                    review.verificationId === verificationId),
+        )
+    }
+
+    raiseChallenge(challenge: GoalInvariantChallenge): void {
+        const challengeId = nonEmpty(challenge.challengeId)
+        const invariantId = nonEmpty(challenge.invariantId)
+        if (!this.invariantIds.has(invariantId)) {
+            this.challengeIssues.set(
+                challengeId,
+                `challenge ${challengeId} references unknown invariant ${invariantId}`,
+            )
+            return
+        }
+        const stored: StoredChallenge = Object.freeze({
+            challengeId,
+            invariantId,
+            raisedBy: nonEmpty(challenge.raisedBy),
+            reason: nonEmpty(challenge.reason),
+            ...(challenge.storyId
+                ? { storyId: nonEmpty(challenge.storyId) }
+                : {}),
+        })
+        const previous = this.challenges.get(challengeId)
+        if (previous) {
+            if (!sameChallenge(previous, stored)) {
+                this.challengeIssues.set(
+                    challengeId,
+                    `challenge id ${challengeId} was replayed with different content`,
+                )
+            }
+            return
+        }
+        this.challengeIssues.delete(challengeId)
+        this.challenges.set(challengeId, stored)
+    }
+
+    resolveChallenge(resolution: GoalInvariantChallengeResolution): void {
+        const challengeId = nonEmpty(resolution.challengeId)
+        const challenge = this.challenges.get(challengeId)
+        if (!challenge) {
+            this.challengeIssues.set(
+                challengeId,
+                `resolution references unknown challenge ${challengeId}`,
+            )
+            return
+        }
+        if (challenge.resolution) {
+            if (
+                challenge.resolution.resolution !== resolution.resolution ||
+                challenge.resolution.reason !== resolution.reason
+            ) {
+                this.challengeIssues.set(
+                    challengeId,
+                    `challenge ${challengeId} was resolved more than once with conflicting content`,
+                )
+            }
+            return
+        }
+        this.challengeIssues.delete(challengeId)
+        this.challenges.set(
+            challengeId,
+            Object.freeze({
+                ...challenge,
+                resolution: Object.freeze({
+                    challengeId,
+                    resolution: resolution.resolution,
+                    reason: nonEmpty(resolution.reason),
+                }),
+            }),
+        )
+    }
+
+    bindChallengeRemediation(
+        challengeIdValue: string,
+        remediation: GoalInvariantRemediationBinding,
+    ): void {
+        this.bindChallengeRemediationGroup([challengeIdValue], remediation)
+    }
+
+    /**
+     * Bind one remediation identity to a complete root-cause group. Validation
+     * happens before any challenge is changed, so a malformed replay cannot
+     * leave a half-bound group in the durable projection.
+     */
+    bindChallengeRemediationGroup(
+        challengeIdValues: readonly string[],
+        remediation: GoalInvariantRemediationBinding,
+    ): boolean {
+        const challengeIds = canonicalChallengeIds(challengeIdValues)
+        const normalized = normalizeRemediationBinding(remediation)
+        const challenges = challengeIds.map((challengeId) => ({
+            challengeId,
+            challenge: this.challenges.get(challengeId),
+        }))
+        const invalid = challenges.find(
+            ({ challenge }) =>
+                !challenge ||
+                (challenge.remediation !== undefined &&
+                    !sameRemediationIdentity(
+                        challenge.remediation,
+                        normalized,
+                    )),
+        )
+        if (invalid) {
+            const reason = invalid.challenge
+                ? `challenge ${invalid.challengeId} was bound to conflicting remediation work`
+                : `remediation references unknown challenge ${invalid.challengeId}`
+            for (const challengeId of challengeIds) {
+                this.challengeIssues.set(challengeId, reason)
+            }
+            return false
+        }
+        for (const { challengeId, challenge } of challenges) {
+            this.challengeIssues.delete(challengeId)
+            if (!challenge!.remediation) {
+                this.challenges.set(
+                    challengeId,
+                    Object.freeze({
+                        ...challenge!,
+                        remediation: normalized,
+                    }),
+                )
+            }
+        }
+        return true
+    }
+
+    admitChallengeRemediation(
+        challengeIdValue: string,
+        proposalIdValue: string,
+        storyIdValue: string,
+        graphVersion: number,
+    ): void {
+        this.admitChallengeRemediationGroup(
+            [challengeIdValue],
+            proposalIdValue,
+            storyIdValue,
+            graphVersion,
+        )
+    }
+
+    /** Atomically admit every challenge bound to one grouped remediation. */
+    admitChallengeRemediationGroup(
+        challengeIdValues: readonly string[],
+        proposalIdValue: string,
+        storyIdValue: string,
+        graphVersion: number,
+    ): boolean {
+        const challengeIds = canonicalChallengeIds(challengeIdValues)
+        const proposalId = nonEmpty(proposalIdValue)
+        const storyId = nonEmpty(storyIdValue)
+        const challenges = challengeIds.map((challengeId) => ({
+            challengeId,
+            challenge: this.challenges.get(challengeId),
+        }))
+        const seed = challenges[0]?.challenge?.remediation
+        const expectedChallengeIds = seed
+            ? this.challengesForRemediation(seed)
+                .map(({ challengeId }) => challengeId)
+                .sort()
+            : []
+        const completeGroup =
+            expectedChallengeIds.length === challengeIds.length &&
+            expectedChallengeIds.every(
+                (challengeId, index) => challengeId === challengeIds[index],
+            )
+        const invalid = challenges.find(
+            ({ challenge }) =>
+                !challenge?.remediation ||
+                challenge.remediation.proposalId !== proposalId ||
+                challenge.remediation.storyId !== storyId ||
+                (challenge.remediation.status === "admitted" &&
+                    challenge.remediation.graphVersion !== graphVersion),
+        )
+        if (
+            !completeGroup ||
+            invalid ||
+            !Number.isSafeInteger(graphVersion) ||
+            graphVersion < 1
+        ) {
+            const reason =
+                !completeGroup
+                    ? `remediation admission did not contain its complete challenge group`
+                    : `challenge ${invalid?.challengeId ?? challengeIds[0]} ` +
+                      "received mismatched remediation admission"
+            for (const challengeId of new Set([
+                ...challengeIds,
+                ...expectedChallengeIds,
+            ])) {
+                this.challengeIssues.set(challengeId, reason)
+            }
+            return false
+        }
+        for (const { challengeId, challenge } of challenges) {
+            this.challengeIssues.delete(challengeId)
+            this.challenges.set(
+                challengeId,
+                Object.freeze({
+                    ...challenge!,
+                    remediation: Object.freeze({
+                        ...challenge!.remediation!,
+                        status: "admitted" as const,
+                        graphVersion,
+                    }),
+                }),
+            )
+        }
+        return true
+    }
+
+    pendingRemediations(): readonly {
+        challenge: GoalInvariantChallenge
+        remediation: GoalInvariantRemediationBinding
+    }[] {
+        return [...this.challenges.values()]
+            .filter(
+                (challenge) =>
+                    !challenge.resolution &&
+                    challenge.remediation?.status === "requested",
+            )
+            .sort((left, right) => left.challengeId.localeCompare(right.challengeId))
+            .map((challenge) => ({
+                challenge: {
+                    challengeId: challenge.challengeId,
+                    invariantId: challenge.invariantId,
+                    raisedBy: challenge.raisedBy,
+                    reason: challenge.reason,
+                    ...(challenge.storyId
+                        ? { storyId: challenge.storyId }
+                        : {}),
+                },
+                remediation: { ...challenge.remediation! },
+            }))
+    }
+
+    /** Pending work grouped by its shared proposal/story identity. */
+    pendingRemediationGroups(): readonly {
+        challenges: readonly GoalInvariantChallenge[]
+        remediation: GoalInvariantRemediationBinding
+    }[] {
+        const byProposal = new Map<
+            string,
+            {
+                challenges: GoalInvariantChallenge[]
+                remediation: GoalInvariantRemediationBinding
+            }
+        >()
+        for (const { challenge, remediation } of this.pendingRemediations()) {
+            const key = JSON.stringify({
+                proposalId: remediation.proposalId,
+                storyId: remediation.storyId,
+                remediationGroupId: remediation.remediationGroupId ?? null,
+                revalidates: remediation.revalidates ?? [],
+            })
+            const group = byProposal.get(key)
+            if (group) group.challenges.push(challenge)
+            else {
+                byProposal.set(key, {
+                    challenges: [challenge],
+                    remediation,
+                })
+            }
+        }
+        return [...byProposal.values()]
+            .map(({ challenges, remediation }) => ({
+                challenges: challenges.sort((left, right) =>
+                    left.invariantId.localeCompare(right.invariantId) ||
+                    left.challengeId.localeCompare(right.challengeId)),
+                remediation,
+            }))
+            .sort((left, right) =>
+                left.remediation.proposalId.localeCompare(
+                    right.remediation.proposalId,
+                ))
+    }
+
+    resolveSatisfiedRemediations(
+        requireIndependentQuality: boolean,
+    ): readonly GoalInvariantChallengeResolution[] {
+        const resolved: GoalInvariantChallengeResolution[] = []
+        for (const challenge of this.challenges.values()) {
+            const remediation = challenge.remediation
+            if (
+                challenge.resolution ||
+                remediation?.status !== "admitted" ||
+                !this.integrations.has(remediation.storyId)
+            ) continue
+            const quality = this.qualityForIntegration(remediation.storyId)
+            if (
+                requireIndependentQuality &&
+                quality?.independentlyPassed !== true
+            ) continue
+            const resolution = {
+                challengeId: challenge.challengeId,
+                resolution: "resolved" as const,
+                reason:
+                    `remediation story ${remediation.storyId} integrated` +
+                    (requireIndependentQuality
+                        ? " with an independent passing critique"
+                        : " with goal-mapped evidence"),
+            }
+            this.resolveChallenge(resolution)
+            resolved.push(resolution)
+        }
+        return resolved
+    }
+
+    assess(
+        storyIds: readonly string[],
+        requireIndependentQuality: boolean,
+        aggregateBasis?: GoalAggregateReviewBasis,
+    ): GoalLedgerAssessment {
+        const selectedStories = new Set(storyIds.map(nonEmpty))
+        const aggregateReview = aggregateBasis
+            ? this.aggregateReviewForBasis(
+                  aggregateBasis.fingerprint,
+                  aggregateBasis.verificationId,
+              )
+            : undefined
+        const invariants = this.contract.invariants.map((invariant) =>
+            this.assessInvariant(
+                invariant,
+                selectedStories,
+                requireIndependentQuality,
+                aggregateBasis !== undefined,
+                aggregateReview,
+            ),
+        )
+        const satisfiedInvariantIds = invariants
+            .filter(({ status }) => status === "satisfied")
+            .map(({ invariantId }) => invariantId)
+        const openInvariantIds = invariants
+            .filter(({ status }) => status === "open")
+            .map(({ invariantId }) => invariantId)
+        const rejectedInvariantIds = invariants
+            .filter(({ status }) => status === "rejected")
+            .map(({ invariantId }) => invariantId)
+        const protocolIssues = [
+            ...this.mappingIssues.values(),
+            ...this.challengeIssues.values(),
+            ...this.aggregateReviewIssues.values(),
+        ].sort()
+        const satisfied =
+            openInvariantIds.length === 0 &&
+            rejectedInvariantIds.length === 0 &&
+            protocolIssues.length === 0
+        const reason = satisfied
+            ? `all ${invariants.length} goal invariants have integrated${requireIndependentQuality ? ", independently reviewed" : ""} evidence`
+            : [
+                  openInvariantIds.length > 0
+                      ? `${openInvariantIds.length} open invariant(s)`
+                      : "",
+                  rejectedInvariantIds.length > 0
+                      ? `${rejectedInvariantIds.length} rejected invariant(s)`
+                      : "",
+                  protocolIssues.length > 0
+                      ? `${protocolIssues.length} ledger protocol issue(s)`
+                      : "",
+              ]
+                  .filter(Boolean)
+                  .join(", ")
+
+        return deepFreeze({
+            status: satisfied ? "satisfied" : "incomplete",
+            satisfiedInvariantIds,
+            openInvariantIds,
+            rejectedInvariantIds,
+            invariants,
+            protocolIssues,
+            reason,
+        })
+    }
+
+    private assessInvariant(
+        invariant: GoalInvariant,
+        selectedStories: ReadonlySet<string>,
+        requireIndependentQuality: boolean,
+        requireAggregateReview: boolean,
+        aggregateReview: GoalAggregateReviewEvidence | undefined,
+    ): GoalInvariantLedgerEntry {
+        const mappedStoryIds = [...this.mappings.entries()]
+            .filter(
+                ([storyId, ids]) =>
+                    selectedStories.has(storyId) && ids.includes(invariant.id),
+            )
+            .map(([storyId]) => storyId)
+            .sort()
+        const integratedStoryIds = mappedStoryIds.filter((storyId) =>
+            this.integrations.has(storyId),
+        )
+        const quality = integratedStoryIds.map((storyId) => ({
+            storyId,
+            evidence: this.qualityForIntegration(storyId),
+        }))
+        const independentlyReviewedStoryIds = quality
+            .filter(({ evidence }) => evidence?.independentlyPassed === true)
+            .map(({ storyId }) => storyId)
+            .sort()
+        const revalidated = this.revalidatedIntegrationKeys(
+            invariant.id,
+            selectedStories,
+        )
+        const qualityWithoutRevalidation = quality.filter(({ storyId, evidence }) => {
+            if (evidence?.independentlyPassed === true) return false
+            return !revalidated.has(
+                integrationKey(this.integrations.get(storyId)!),
+            )
+        })
+        const challenges = [...this.challenges.values()].filter(
+            ({ invariantId }) => invariantId === invariant.id,
+        )
+        const rejectedChallenge = challenges.find(
+            ({ resolution }) => resolution?.resolution === "rejected",
+        )
+        const openChallenge = challenges.find(({ resolution }) => !resolution)
+        const aggregateInvariantReview = aggregateReview?.invariants.find(
+            ({ invariantId }) => invariantId === invariant.id,
+        )
+
+        let status: GoalInvariantLedgerStatus
+        let reason: string
+        if (rejectedChallenge) {
+            status = "rejected"
+            reason = `challenge ${rejectedChallenge.challengeId} rejected the invariant: ${rejectedChallenge.resolution?.reason ?? rejectedChallenge.reason}`
+        } else if (
+            requireIndependentQuality &&
+            qualityWithoutRevalidation.some(
+                ({ evidence }) =>
+                    evidence?.status === "failed" ||
+                    evidence?.status === "inconclusive",
+            )
+        ) {
+            status = "rejected"
+            reason = "integrated mapped evidence failed independent quality review"
+        } else if (openChallenge) {
+            status = "open"
+            reason = `open challenge ${openChallenge.challengeId}: ${openChallenge.reason}`
+        } else if (integratedStoryIds.length === 0) {
+            status = "open"
+            reason = "no mapped story in the completion set has integrated evidence"
+        } else if (
+            integratedStoryIds.length < mappedStoryIds.length
+        ) {
+            status = "open"
+            reason =
+                `${integratedStoryIds.length}/${mappedStoryIds.length} mapped ` +
+                "story contributions have integrated evidence"
+        } else if (
+            requireIndependentQuality &&
+            qualityWithoutRevalidation.length > 0
+        ) {
+            status = "open"
+            reason = independentlyReviewedStoryIds.length === 0
+                ? "integrated mapped evidence lacks a passed independent critique"
+                : `${independentlyReviewedStoryIds.length}/${integratedStoryIds.length} ` +
+                    "integrated mapped contributions have a passed independent critique"
+        } else if (
+            requireAggregateReview &&
+            aggregateInvariantReview?.status === "failed"
+        ) {
+            status = "rejected"
+            reason =
+                `run-level semantic review rejected the invariant: ` +
+                aggregateInvariantReview.reason
+        } else if (
+            requireAggregateReview &&
+            aggregateInvariantReview?.status === "inconclusive"
+        ) {
+            status = "open"
+            reason =
+                `run-level semantic review was inconclusive: ` +
+                aggregateInvariantReview.reason
+        } else if (requireAggregateReview && !aggregateInvariantReview) {
+            status = "open"
+            reason = "integrated mapped evidence lacks a run-level semantic review"
+        } else {
+            status = "satisfied"
+            reason = requireIndependentQuality && revalidated.size > 0
+                ? "mapped story evidence is integrated and independently revalidated"
+                : requireIndependentQuality
+                ? "mapped story evidence is integrated and independently reviewed"
+                : "mapped story evidence is integrated"
+        }
+
+        return deepFreeze({
+            invariantId: invariant.id,
+            status,
+            mappedStoryIds,
+            integratedStoryIds,
+            independentlyReviewedStoryIds,
+            ...(aggregateReview
+                ? {
+                      aggregateReviewId: aggregateReview.reviewId,
+                      aggregateReviewStatus:
+                          aggregateInvariantReview?.status ?? "inconclusive",
+                  }
+                : {}),
+            reason,
+        })
+    }
+
+    private qualityForIntegration(storyId: string): StoredQuality | undefined {
+        const integration = this.integrations.get(storyId)
+        if (!integration) return undefined
+        if (!integration.leaseId) return undefined
+        return this.qualities.get(storyId)?.get(integration.leaseId)
+    }
+
+    private revalidatedIntegrationKeys(
+        invariantId: string,
+        selectedStories: ReadonlySet<string>,
+    ): ReadonlySet<string> {
+        const covered = new Set<string>()
+        for (const challenge of this.challenges.values()) {
+            const remediation = challenge.remediation
+            const remediationQuality = remediation
+                ? this.qualityForIntegration(remediation.storyId)
+                : undefined
+            if (
+                challenge.invariantId !== invariantId ||
+                challenge.resolution?.resolution !== "resolved" ||
+                remediation?.status !== "admitted" ||
+                !remediation.revalidates ||
+                !selectedStories.has(remediation.storyId) ||
+                !this.mappings.get(remediation.storyId)?.includes(invariantId) ||
+                remediationQuality?.independentlyPassed !== true
+            ) continue
+            for (const integration of remediation.revalidates) {
+                if (!selectedStories.has(integration.storyId)) continue
+                const targetQuality = this.qualityForIntegration(
+                    integration.storyId,
+                )
+                if (
+                    targetQuality &&
+                    targetQuality.sequence >= remediationQuality.sequence
+                ) continue
+                covered.add(integrationKey(integration))
+            }
+        }
+        return covered
+    }
+}
+
+/** Strict persistence boundary for runtimeGraph.protocol.goal. */
+export function normalizeGoalLedgerProjection(
+    value: unknown,
+    expectedContract?: GoalContract,
+): GoalLedgerProjection {
+    if (!plainRecord(value)) {
+        throw new Error("goal ledger projection is not an object")
+    }
+    if (
+        value.schemaVersion !== GOAL_CONTRACT_SCHEMA_VERSION ||
+        !nonBlank(value.contractId) ||
+        !Number.isSafeInteger(value.revision) ||
+        Number(value.revision) < 0 ||
+        !Array.isArray(value.mappings) ||
+        !Array.isArray(value.integrations) ||
+        !Array.isArray(value.qualities) ||
+        (value.aggregateReviews !== undefined &&
+            !Array.isArray(value.aggregateReviews)) ||
+        !Array.isArray(value.challenges) ||
+        !Array.isArray(value.protocolIssues)
+    ) {
+        throw new Error("goal ledger projection is malformed")
+    }
+    if (
+        expectedContract &&
+        value.contractId !== expectedContract.contractId
+    ) {
+        throw new Error("goal ledger projection contract does not match GoalEnvelope")
+    }
+
+    const knownInvariantIds = expectedContract
+        ? new Set(expectedContract.invariants.map(({ id }) => id))
+        : null
+    const mappings = value.mappings.map((item, index) => {
+        if (
+            !plainRecord(item) ||
+            !nonBlank(item.storyId) ||
+            !stringArray(item.invariantIds) ||
+            new Set(item.invariantIds).size !== item.invariantIds.length ||
+            (knownInvariantIds &&
+                item.invariantIds.some((id) => !knownInvariantIds.has(id)))
+        ) {
+            throw new Error(`goal ledger mapping ${index} is malformed`)
+        }
+        return {
+            storyId: item.storyId,
+            invariantIds: [...item.invariantIds],
+        }
+    })
+    assertUnique(mappings.map(({ storyId }) => storyId), "goal ledger story mapping")
+
+    const integrations = value.integrations.map((item, index) => {
+        if (
+            !plainRecord(item) ||
+            !nonBlank(item.storyId) ||
+            (item.leaseId !== undefined && !nonBlank(item.leaseId))
+        ) {
+            throw new Error(`goal ledger integration ${index} is malformed`)
+        }
+        return {
+            storyId: item.storyId,
+            ...(item.leaseId ? { leaseId: item.leaseId } : {}),
+        }
+    })
+    assertUnique(
+        integrations.map(({ storyId }) => storyId),
+        "goal ledger integration",
+    )
+
+    const qualities = value.qualities.map((item, index) => {
+        if (
+            !plainRecord(item) ||
+            !nonBlank(item.storyId) ||
+            !nonBlank(item.leaseId) ||
+            !nonBlank(item.evaluationId) ||
+            (item.status !== "passed" &&
+                item.status !== "failed" &&
+                item.status !== "inconclusive") ||
+            typeof item.independentlyPassed !== "boolean" ||
+            (item.independentlyPassed && item.status !== "passed")
+        ) {
+            throw new Error(`goal ledger quality ${index} is malformed`)
+        }
+        return {
+            storyId: item.storyId,
+            leaseId: item.leaseId,
+            evaluationId: item.evaluationId,
+            status: item.status,
+            independentlyPassed: item.independentlyPassed,
+        } as GoalQualityEvidence
+    })
+    assertUnique(
+        qualities.map(({ storyId, leaseId }) => `${storyId}\u0000${leaseId}`),
+        "goal ledger story/lease quality",
+    )
+
+    if (
+        (value.aggregateReviews?.length ?? 0) >
+            GOAL_AGGREGATE_REVIEW_RETENTION
+    ) {
+        throw new Error("goal ledger aggregate review retention bound exceeded")
+    }
+    const aggregateReviews = (value.aggregateReviews ?? []).map(
+        (item: unknown, index: number) => {
+            try {
+                return normalizeGoalAggregateReviewEvidence(
+                    item,
+                    knownInvariantIds,
+                )
+            } catch (error) {
+                throw new Error(
+                    `goal ledger aggregate review ${index} is malformed: ${
+                        error instanceof Error ? error.message : String(error)
+                    }`,
+                )
+            }
+        },
+    )
+    assertUnique(
+        aggregateReviews.map(({ reviewId }) => reviewId),
+        "goal ledger aggregate review",
+    )
+    assertUnique(
+        aggregateReviews.map(({ basisFingerprint }) => basisFingerprint),
+        "goal ledger aggregate review basis",
+    )
+
+    const challenges = value.challenges.map((item, index) => {
+        if (
+            !plainRecord(item) ||
+            !nonBlank(item.challengeId) ||
+            !nonBlank(item.invariantId) ||
+            !nonBlank(item.raisedBy) ||
+            !nonBlank(item.reason) ||
+            (item.storyId !== undefined && !nonBlank(item.storyId)) ||
+            (knownInvariantIds && !knownInvariantIds.has(item.invariantId))
+        ) {
+            throw new Error(`goal ledger challenge ${index} is malformed`)
+        }
+        let resolution: GoalInvariantChallengeResolution | undefined
+        if (item.resolution !== undefined) {
+            if (
+                !plainRecord(item.resolution) ||
+                item.resolution.challengeId !== item.challengeId ||
+                (item.resolution.resolution !== "resolved" &&
+                    item.resolution.resolution !== "rejected") ||
+                !nonBlank(item.resolution.reason)
+            ) {
+                throw new Error(
+                    `goal ledger challenge resolution ${index} is malformed`,
+                )
+            }
+            resolution = {
+                challengeId: item.challengeId,
+                resolution: item.resolution.resolution,
+                reason: item.resolution.reason,
+            }
+        }
+        const remediation = item.remediation === undefined
+            ? undefined
+            : normalizeRemediationBinding(item.remediation)
+        return {
+            challengeId: item.challengeId,
+            invariantId: item.invariantId,
+            raisedBy: item.raisedBy,
+            reason: item.reason,
+            ...(item.storyId ? { storyId: item.storyId } : {}),
+            ...(remediation ? { remediation } : {}),
+            ...(resolution ? { resolution } : {}),
+        }
+    })
+    assertUnique(
+        challenges.map(({ challengeId }) => challengeId),
+        "goal ledger challenge",
+    )
+    const remediationByProposal = new Map<
+        string,
+        GoalInvariantRemediationBinding
+    >()
+    for (const { remediation } of challenges) {
+        if (!remediation) continue
+        const previous = remediationByProposal.get(remediation.proposalId)
+        if (previous && JSON.stringify(previous) !== JSON.stringify(remediation)) {
+            throw new Error(
+                `goal remediation proposal ${remediation.proposalId} has inconsistent grouped bindings`,
+            )
+        }
+        remediationByProposal.set(remediation.proposalId, remediation)
+    }
+
+    const protocolIssues = value.protocolIssues.map((item, index) => {
+        if (
+            !plainRecord(item) ||
+            (item.scope !== "mapping" &&
+                item.scope !== "challenge" &&
+                item.scope !== "aggregate_review") ||
+            !nonBlank(item.key) ||
+            !nonBlank(item.reason)
+        ) {
+            throw new Error(`goal ledger protocol issue ${index} is malformed`)
+        }
+        return {
+            scope: item.scope,
+            key: item.key,
+            reason: item.reason,
+        } as GoalProtocolIssue
+    })
+    assertUnique(
+        protocolIssues.map(({ scope, key }) => `${scope}\u0000${key}`),
+        "goal ledger protocol issue",
+    )
+
+    return deepFreeze({
+        schemaVersion: GOAL_CONTRACT_SCHEMA_VERSION,
+        contractId: value.contractId,
+        revision: Number(value.revision),
+        mappings,
+        integrations,
+        qualities,
+        aggregateReviews,
+        challenges,
+        protocolIssues,
+    })
+}
+
+function nonEmpty(value: string): string {
+    const normalized = value.trim()
+    if (normalized.length === 0) throw new Error("goal ledger ids and text cannot be empty")
+    return normalized
+}
+
+function unique(values: readonly string[]): string[] {
+    return [...new Set(values)]
+}
+
+function canonicalChallengeIds(values: readonly string[]): string[] {
+    if (values.length === 0) {
+        throw new Error("goal remediation challenge group cannot be empty")
+    }
+    const normalized = values.map(nonEmpty)
+    assertUnique(normalized, "goal remediation challenge group")
+    return normalized.sort()
+}
+
+function sameChallenge(left: StoredChallenge, right: StoredChallenge): boolean {
+    return (
+        left.challengeId === right.challengeId &&
+        left.invariantId === right.invariantId &&
+        left.raisedBy === right.raisedBy &&
+        left.reason === right.reason &&
+        left.storyId === right.storyId
+    )
+}
+
+function normalizeRemediationBinding(
+    value: unknown,
+): GoalInvariantRemediationBinding {
+    if (
+        !plainRecord(value) ||
+        !nonBlank(value.proposalId) ||
+        !nonBlank(value.storyId) ||
+        (value.status !== "requested" && value.status !== "admitted") ||
+        (value.remediationGroupId !== undefined &&
+            (!nonBlank(value.remediationGroupId) ||
+                value.remediationGroupId.length > 128)) ||
+        (value.status === "requested" && value.graphVersion !== undefined) ||
+        (value.status === "admitted" &&
+            (!Number.isSafeInteger(value.graphVersion) ||
+                Number(value.graphVersion) < 1))
+    ) {
+        throw new Error("goal challenge remediation binding is malformed")
+    }
+    let revalidates: readonly GoalIntegrationEvidence[] | undefined
+    if (value.revalidates !== undefined) {
+        if (!Array.isArray(value.revalidates) || value.revalidates.length === 0) {
+            throw new Error("goal challenge remediation binding is malformed")
+        }
+        revalidates = value.revalidates
+            .map((item) => {
+                if (
+                    !plainRecord(item) ||
+                    !nonBlank(item.storyId) ||
+                    (item.leaseId !== undefined && !nonBlank(item.leaseId))
+                ) {
+                    throw new Error("goal challenge remediation binding is malformed")
+                }
+                return Object.freeze({
+                    storyId: item.storyId,
+                    ...(item.leaseId ? { leaseId: item.leaseId } : {}),
+                })
+            })
+            .sort((left, right) =>
+                integrationKey(left).localeCompare(integrationKey(right)))
+        assertUnique(
+            revalidates.map(integrationKey),
+            "goal remediation revalidation target",
+        )
+        revalidates = Object.freeze(revalidates)
+    }
+    return Object.freeze({
+        proposalId: value.proposalId,
+        storyId: value.storyId,
+        ...(value.remediationGroupId
+            ? { remediationGroupId: value.remediationGroupId }
+            : {}),
+        status: value.status,
+        ...(value.status === "admitted"
+            ? { graphVersion: Number(value.graphVersion) }
+            : {}),
+        ...(revalidates ? { revalidates } : {}),
+    })
+}
+
+function integrationKey(evidence: GoalIntegrationEvidence): string {
+    return `${evidence.storyId}\u0000${evidence.leaseId ?? ""}`
+}
+
+function sameRemediationIdentity(
+    left: GoalInvariantRemediationBinding,
+    right: GoalInvariantRemediationBinding,
+): boolean {
+    const leftTargets = left.revalidates ?? []
+    const rightTargets = right.revalidates ?? []
+    return (
+        left.proposalId === right.proposalId &&
+        left.storyId === right.storyId &&
+        left.remediationGroupId === right.remediationGroupId &&
+        leftTargets.length === rightTargets.length &&
+        leftTargets.every(
+            (target, index) =>
+                integrationKey(target) === integrationKey(rightTargets[index]!),
+        )
+    )
+}
+
+function compareQuality(left: StoredQuality, right: StoredQuality): number {
+    return (
+        left.storyId.localeCompare(right.storyId) ||
+        left.leaseId.localeCompare(right.leaseId) ||
+        left.evaluationId.localeCompare(right.evaluationId)
+    )
+}
+
+function compareProtocolIssue(
+    left: GoalProtocolIssue,
+    right: GoalProtocolIssue,
+): number {
+    return left.scope.localeCompare(right.scope) || left.key.localeCompare(right.key)
+}
+
+function plainRecord(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+function nonBlank(value: unknown): value is string {
+    return typeof value === "string" && value.trim().length > 0
+}
+
+function stringArray(value: unknown): value is string[] {
+    return Array.isArray(value) && value.every((item) => typeof item === "string")
+}
+
+function assertUnique(values: readonly string[], label: string): void {
+    if (new Set(values).size !== values.length) {
+        throw new Error(`${label} contains duplicate keys`)
+    }
+}
+
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+    if (value === null || typeof value !== "object") return value
+    const object = value as object
+    if (seen.has(object)) return value
+    seen.add(object)
+    for (const key of Reflect.ownKeys(object)) {
+        deepFreeze((object as Record<PropertyKey, unknown>)[key], seen)
+    }
+    return Object.freeze(value)
+}

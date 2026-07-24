@@ -5,7 +5,7 @@ import {
     GoalContractCoverageError,
     validateGoalContractCoverage,
 } from "../../../src/planning/domain/goal-contract-coverage.js"
-import { deriveGoalContract } from "../../../src/runtime/goal-contract.js"
+import { deriveGoalContract } from "../../../src/goal/goal-contract.js"
 
 const contract = deriveGoalContract({
     objective: "Preserve the complete goal.",

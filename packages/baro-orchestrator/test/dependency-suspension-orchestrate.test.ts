@@ -20,7 +20,7 @@ import type {
     StoryExecutor,
 } from "../src/participants/story-executor.js"
 import type { PrdFile } from "../src/prd.js"
-import type { StoryRoute } from "../src/routing.js"
+import type { StoryRoute } from "../src/market/routing.js"
 import {
     StoryResult,
     type StorySpawnRequestData,

@@ -3,7 +3,7 @@ import {
     MAX_STORY_RETRIES,
     MIN_STORY_PRIORITY,
 } from "../../prd.js"
-import { deriveGoalContract } from "../../runtime/goal-contract.js"
+import { deriveGoalContract } from "../../goal/goal-contract.js"
 import type { GoalEnvelope } from "../../session/conversation-contract.js"
 import {
     architectureObligationsFromDecision,

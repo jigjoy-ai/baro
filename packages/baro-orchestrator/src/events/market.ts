@@ -1,7 +1,7 @@
 /** Work market: capabilities, offers, bids, leases, and work context. Wire `type` strings are frozen (see ../semantic-events.ts). */
 
 import { defineSemanticEvent } from "./define.js"
-import type { WorkBidEstimate } from "../work-market.js"
+import type { WorkBidEstimate } from "../market/work-market.js"
 import type { StorySpawnRequestData } from "./execution.js"
 
 export type CoordinationMode = "legacy" | "collective"

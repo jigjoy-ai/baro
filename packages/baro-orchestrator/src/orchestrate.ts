@@ -30,24 +30,24 @@ import {
     getHeadSha,
     hasRemoteOrigin,
     isInsideGitRepo,
-} from "./git.js"
-import { WorktreeManager } from "./worktree.js"
+} from "./integration/git.js"
+import { WorktreeManager } from "./integration/worktree.js"
 import { StoryOutcomeAuthority } from "./runtime/story-outcome-authority.js"
-import { deriveGoalContract } from "./runtime/goal-contract.js"
-import { buildDag } from "./dag.js"
+import { deriveGoalContract } from "./goal/goal-contract.js"
+import { buildDag } from "./runtime-graph/dag.js"
 import {
     canonicalTier,
     formatRoute,
     resolveStoryRoute,
     type ResolveOpts,
     type TierMap,
-} from "./routing.js"
+} from "./market/routing.js"
 import { Auditor } from "./participants/auditor.js"
-import { AcceptanceGate } from "./participants/acceptance-gate.js"
-import { AgentTurnProjector } from "./participants/agent-turn-projector.js"
+import { AcceptanceGate } from "./acceptance/acceptance-gate.js"
+import { AgentTurnProjector } from "./acceptance/agent-turn-projector.js"
 import { CollaborationBridge } from "./participants/collaboration-bridge.js"
 import { CollectiveBoard } from "./participants/collective-board.js"
-import { GoalGuardian } from "./participants/goal-guardian.js"
+import { GoalGuardian } from "./goal/goal-guardian.js"
 import {
     Conductor,
     ConductorRunSummary,
@@ -57,11 +57,11 @@ import {
     CriticCommandEvidenceCollector,
     type CriticRepositoryTarget,
     type CriticEvidenceSource,
-} from "./participants/critic-evidence.js"
+} from "./acceptance/critic-evidence.js"
 import {
     CriticTargetRegistry,
     buildCriticTargets,
-} from "./participants/critic-target-registry.js"
+} from "./acceptance/critic-target-registry.js"
 import { CriticCodex } from "./harness/codex/critic.js"
 import { CriticOpenAI } from "./harness/openai/critic.js"
 import { CriticOpenCode } from "./harness/opencode/critic.js"
@@ -74,26 +74,26 @@ import {
     createDialogueResponder,
     type DialogueBackend,
 } from "./participants/dialogue-responder.js"
-import { Finalizer } from "./participants/finalizer.js"
-import { GitCoordinator } from "./participants/git-coordinator.js"
+import { Finalizer } from "./integration/finalizer.js"
+import { GitCoordinator } from "./integration/git-coordinator.js"
 import {
     GOAL_REVIEW_BOARD_SLACK_MS,
     GoalInvariantReviewer,
     goalReviewRoundTimeoutMs,
-} from "./participants/goal-invariant-reviewer.js"
+} from "./goal/goal-invariant-reviewer.js"
 import { DialogueForwarder } from "./participants/forwarders/dialogue.js"
 import { joinBaroEventForwarders } from "./participants/forwarders/index.js"
 import { Librarian } from "./participants/librarian.js"
-import { LeaseBroker } from "./participants/lease-broker.js"
-import { LocalRepositoryAgent } from "./participants/local-repository-agent.js"
+import { LeaseBroker } from "./market/lease-broker.js"
+import { LocalRepositoryAgent } from "./integration/local-repository-agent.js"
 import { MemoryLibrarian } from "./participants/memory-librarian.js"
 import { ModelTelemetryCollector } from "./participants/model-telemetry-collector.js"
 import { Operator } from "./participants/operator.js"
 import { PlanningFeed } from "./participants/planning-feed.js"
-import { RunVerifier } from "./participants/run-verifier.js"
+import { RunVerifier } from "./verification/run-verifier.js"
 import { Sentry } from "./participants/sentry.js"
-import { StoryFactory } from "./participants/story-factory.js"
-import { WorkContextProvider } from "./participants/work-context-provider.js"
+import { StoryFactory } from "./market/story-factory.js"
+import { WorkContextProvider } from "./market/work-context-provider.js"
 import { type StoryAgent } from "./harness/claude/story-agent.js"
 import {
     Surgeon,
@@ -107,7 +107,7 @@ import { SurgeonPi } from "./harness/pi/surgeon.js"
 import { Supervisor } from "./participants/supervisor.js"
 import { resolveEffectiveParallel } from "./planning/domain/mode-enforcement.js"
 import { PrdFile, loadPrd, savePrd } from "./prd.js"
-import { readAuthoritativeDeclaredTests } from "./prd-declared-tests.js"
+import { readAuthoritativeDeclaredTests } from "./verification/prd-declared-tests.js"
 import {
     ModelInvocationMeasured,
     RunStartRequest,
@@ -118,7 +118,7 @@ import { emit } from "./tui-protocol.js"
 import {
     createVerifyPlan,
     recommendedMergedVerifyTimeoutMs,
-} from "./verify.js"
+} from "./verification/verify.js"
 import {
     assertConversationContextBinding,
     validateConversationContextSnapshot,
@@ -128,7 +128,7 @@ import {
     isValidWorkBidEstimate,
     selectWorkBid,
     type WorkBidPolicy,
-} from "./work-market.js"
+} from "./market/work-market.js"
 
 export interface CollectiveWorkerCandidateConfig {
     workerId: string
@@ -329,13 +329,13 @@ export interface OrchestrateConfig {
      * the Planner's per-story blast-radius tier to a concrete backend+model.
      * Absent → per-story tiers resolve on the phase `llm`.
      */
-    tierMap?: import("./routing.js").TierMap
+    tierMap?: import("./market/routing.js").TierMap
     /**
      * Named OpenAI-compatible endpoints (`--openai-endpoint`). Routes of the
      * form `openai:model@name` resolve their base URL + key here, so one DAG
      * can hit several endpoints at once.
      */
-    openaiEndpoints?: import("./routing.js").EndpointMap
+    openaiEndpoints?: import("./market/routing.js").EndpointMap
     /**
      * Where story agents run. Default: in-process (`LocalStoryExecutor`);
      * pass a custom StoryExecutor (mock, out-of-process, remote) without

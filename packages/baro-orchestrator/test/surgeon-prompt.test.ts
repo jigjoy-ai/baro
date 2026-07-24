@@ -7,7 +7,7 @@ import {
     SURGEON_SYSTEM_PROMPT,
     type PrdSnapshot,
 } from "../src/participants/surgeon.js"
-import { formatRoute, resolveStoryRoute } from "../src/routing.js"
+import { formatRoute, resolveStoryRoute } from "../src/market/routing.js"
 import {
     resolveSurgeonEscalationRoute,
     validateCollectiveWorkers,

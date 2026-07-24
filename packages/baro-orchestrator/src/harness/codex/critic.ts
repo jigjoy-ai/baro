@@ -9,7 +9,7 @@
  */
 
 import { runCodexOneShot } from "./one-shot.js"
-import { VERDICT_SYSTEM_PROMPT, extractVerdictJson } from "../../participants/critic-verdict.js"
+import { VERDICT_SYSTEM_PROMPT, extractVerdictJson } from "../../acceptance/critic-verdict.js"
 import {
     OneShotCritic,
     type OneShotCriticCoreOptions,

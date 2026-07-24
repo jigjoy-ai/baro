@@ -11,7 +11,7 @@ import {
     validateArchitectureObligationContract,
     validateArchitectureObligationCoverage,
 } from "../../../src/planning/domain/architecture-obligation-contract.js"
-import { deriveGoalContract } from "../../../src/runtime/goal-contract.js"
+import { deriveGoalContract } from "../../../src/goal/goal-contract.js"
 import { buildPlannerUserMessage } from "../../../src/planning/domain/planner-prompts.js"
 
 const goal = deriveGoalContract({

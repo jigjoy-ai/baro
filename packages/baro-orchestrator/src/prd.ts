@@ -12,13 +12,13 @@ import type {
     ReplanStoryAdd,
     RuntimeReplanAppliedData,
 } from "./semantic-events.js"
-import { runtimeDecisionFingerprintMatches } from "./runtime/runtime-replan-fingerprint.js"
+import { runtimeDecisionFingerprintMatches } from "./runtime-graph/fingerprint.js"
 import {
     deriveGoalContract,
     normalizeGoalLedgerProjection,
     type GoalContract,
     type GoalLedgerProjection,
-} from "./runtime/goal-contract.js"
+} from "./goal/goal-contract.js"
 import {
     assertCorrelationId,
     type GoalEnvelope,

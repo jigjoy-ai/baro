@@ -1,5 +1,5 @@
 import type { PrdFile, PrdStory } from "../../prd.js"
-import type { GoalContract } from "../../runtime/goal-contract.js"
+import type { GoalContract } from "../../goal/goal-contract.js"
 
 export const ARCHITECTURE_OBLIGATION_SCHEMA_VERSION = 1 as const
 export const ARCHITECTURE_OBLIGATION_FENCE = "baro-obligations-v1"

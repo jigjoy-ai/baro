@@ -12,14 +12,14 @@ import {
     StorySpawnRequest,
     StorySpawned,
 } from "../src/semantic-events.js"
-import { StoryFactory } from "../src/participants/story-factory.js"
+import { StoryFactory } from "../src/market/story-factory.js"
 import { LocalStoryExecutor } from "../src/participants/story-executor.js"
 import type {
     StoryExecOpts,
     StoryExecution,
     StoryExecutor,
 } from "../src/participants/story-executor.js"
-import type { StoryRoute } from "../src/routing.js"
+import type { StoryRoute } from "../src/market/routing.js"
 
 function source(id: string): Participant {
     return { agentId: id } as unknown as Participant

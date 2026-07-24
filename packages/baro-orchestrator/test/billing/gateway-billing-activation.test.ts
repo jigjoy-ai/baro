@@ -4,7 +4,7 @@ import { describe, it } from "node:test"
 import {
     resolveGatewayBillingForRoutes,
 } from "../../src/billing/index.js"
-import type { StoryRoute } from "../../src/routing.js"
+import type { StoryRoute } from "../../src/market/routing.js"
 
 const gateway = "https://gateway.example/v1"
 

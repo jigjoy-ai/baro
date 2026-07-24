@@ -4,12 +4,12 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import { CollectiveBoard } from "../../src/participants/collective-board.js"
-import { GoalGuardian } from "../../src/participants/goal-guardian.js"
+import { GoalGuardian } from "../../src/goal/goal-guardian.js"
 import { savePrdAtomic, type PrdFile, type PrdStory } from "../../src/prd.js"
 import {
     deriveGoalContract,
     GoalInvariantLedger,
-} from "../../src/runtime/goal-contract.js"
+} from "../../src/goal/goal-contract.js"
 import {
     GoalAggregateReviewCompleted,
     GoalAggregateReviewRequested,

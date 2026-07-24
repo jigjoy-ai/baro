@@ -44,7 +44,7 @@ import {
     type RuntimeReplanMutation,
     type WorkBlockedData,
 } from "../semantic-events.js"
-import { snapshotRuntimeReplanMutation } from "../runtime-replan.js"
+import { snapshotRuntimeReplanMutation } from "../runtime-graph/runtime-replan.js"
 import { correlatedTargetedMessage } from "../runtime/targeted-message-authority.js"
 import {
     SerializedObserver,

@@ -64,13 +64,13 @@ import {
     validGraphVersion,
     type PendingRuntimeReplan,
     type RuntimeReplanDecision,
-} from "../../participants/runtime-replan-tool.js"
+} from "../../runtime-graph/runtime-replan-tool.js"
 import {
     TurnMessageMailbox,
     TurnReviewMailbox,
     turnReviewDisposition,
     turnReviewTimeoutFailure,
-} from "../../participants/turn-review.js"
+} from "../../acceptance/turn-review.js"
 
 const STORY_SYSTEM_PROMPT = `\
 You are an autonomous coding agent. The user will hand you exactly one

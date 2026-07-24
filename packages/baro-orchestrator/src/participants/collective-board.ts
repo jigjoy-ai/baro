@@ -1,11 +1,11 @@
 import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
 import { randomUUID } from "node:crypto"
 
-import { buildDag } from "../dag.js"
+import { buildDag } from "../runtime-graph/dag.js"
 import {
     deriveGoalContract,
     normalizeGoalLedgerProjection,
-} from "../runtime/goal-contract.js"
+} from "../goal/goal-contract.js"
 import {
     loadPrd,
     markStoryPassed,
@@ -29,7 +29,7 @@ import {
     StagedReplanGate,
     runtimeReplanTargetIds,
     type QueuedRuntimeReplan,
-} from "../replan/staged-replan-gate.js"
+} from "../runtime-graph/staged-replan-gate.js"
 import {
     GoalCompletionCheckTimedOut,
     VerificationGoalGate,
@@ -113,7 +113,7 @@ import {
 import {
     RuntimeReplanCoordinator,
     type RuntimeReplanDecisionOutcome,
-} from "./runtime-replan-coordinator.js"
+} from "../runtime-graph/runtime-replan-coordinator.js"
 import { ProgressivePlanningCoordinator } from "../planning/application/progressive-planning-coordinator.js"
 import { OperationalRecoveryPolicy } from "./operational-recovery.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
@@ -123,11 +123,11 @@ import {
     type SerializedEventContext,
     type SerializedObserverFailure,
 } from "../runtime/serialized-observer.js"
-import { reservePolicyReplanBatchIds } from "../runtime/policy-replan-reservation.js"
+import { reservePolicyReplanBatchIds } from "../runtime-graph/policy-replan-reservation.js"
 import {
     validateRuntimeReplanMutation,
     type RuntimeReplanValidationResult,
-} from "../runtime-replan.js"
+} from "../runtime-graph/runtime-replan.js"
 
 export interface CollectiveBoardOptions {
     runId: string

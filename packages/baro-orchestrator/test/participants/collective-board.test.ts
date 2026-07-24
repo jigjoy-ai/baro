@@ -9,7 +9,7 @@ import { CollectiveBoard } from "../../src/participants/collective-board.js"
 import {
     deriveGoalContract,
     GoalInvariantLedger,
-} from "../../src/runtime/goal-contract.js"
+} from "../../src/goal/goal-contract.js"
 import {
     ConductorState,
     GoalCompletionAttested,

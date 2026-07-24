@@ -39,8 +39,8 @@ import {
     type StorySpec,
     type StorySuspension,
 } from "../story-contract.js"
-import { criticInput } from "../../participants/critic-input.js"
-import { StreamingTurnLifecycle } from "../../participants/turn-review.js"
+import { criticInput } from "../../acceptance/critic-input.js"
+import { StreamingTurnLifecycle } from "../../acceptance/turn-review.js"
 
 export class StoryAgent extends BaseObserver {
     private readonly spec: Required<

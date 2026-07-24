@@ -1,12 +1,12 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { GoalGuardian } from "../../src/participants/goal-guardian.js"
+import { GoalGuardian } from "../../src/goal/goal-guardian.js"
 import {
     deriveGoalContract,
     GoalInvariantLedger,
     type GoalLedgerProjection,
-} from "../../src/runtime/goal-contract.js"
+} from "../../src/goal/goal-contract.js"
 import {
     GoalAggregateReviewCompleted,
     GoalAggregateReviewRequested,

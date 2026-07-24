@@ -14,7 +14,7 @@ import {
 import {
     deriveGoalContract,
     renderGoalContractPrompt,
-} from "../../runtime/goal-contract.js"
+} from "../../goal/goal-contract.js"
 import { renderRuntimeAmendmentsForPrompt } from "./runtime-amendments.js"
 
 export function buildStoryOfferPrompt(

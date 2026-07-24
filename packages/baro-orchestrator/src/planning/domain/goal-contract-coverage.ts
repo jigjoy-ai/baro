@@ -1,7 +1,7 @@
 import type {
     GoalContract,
     GoalStoryInvariantMapping,
-} from "../../runtime/goal-contract.js"
+} from "../../goal/goal-contract.js"
 
 export type GoalContractCoverageMode = "partial" | "complete"
 

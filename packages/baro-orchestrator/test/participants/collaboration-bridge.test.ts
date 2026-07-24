@@ -12,9 +12,9 @@ import { describe, it } from "node:test"
 import { inboxFilenameForAgentId } from "../../scripts/collaboration-inbox-path.mjs"
 import { CollaborationBridge } from "../../src/participants/collaboration-bridge.js"
 import { CollectiveBoard } from "../../src/participants/collective-board.js"
-import { GoalGuardian } from "../../src/participants/goal-guardian.js"
+import { GoalGuardian } from "../../src/goal/goal-guardian.js"
 import type { PrdFile } from "../../src/prd.js"
-import { deriveGoalContract } from "../../src/runtime/goal-contract.js"
+import { deriveGoalContract } from "../../src/goal/goal-contract.js"
 import {
     AgentTargetedMessage,
     CollaborationNote,

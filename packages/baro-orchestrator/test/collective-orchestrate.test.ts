@@ -21,17 +21,17 @@ import {
     resolveGoalReviewTimeoutMs,
     storyTimeoutSecs,
 } from "../src/orchestrate.js"
-import { GOAL_REVIEW_STABLE_CAPTURE_BUDGET_MS } from "../src/participants/goal-invariant-review-evidence.js"
+import { GOAL_REVIEW_STABLE_CAPTURE_BUDGET_MS } from "../src/goal/goal-invariant-review-evidence.js"
 import {
     GOAL_REVIEW_BOARD_SLACK_MS,
     goalReviewRoundTimeoutMs,
-} from "../src/participants/goal-invariant-reviewer.js"
+} from "../src/goal/goal-invariant-reviewer.js"
 import type {
     StoryExecution,
     StoryExecOpts,
     StoryExecutor,
 } from "../src/participants/story-executor.js"
-import type { StoryRoute } from "../src/routing.js"
+import type { StoryRoute } from "../src/market/routing.js"
 import {
     AgentState,
     AgentTargetedMessage,

@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import type { PrdFile } from "../../src/prd.js"
-import { AcceptanceGate } from "../../src/participants/acceptance-gate.js"
+import { AcceptanceGate } from "../../src/acceptance/acceptance-gate.js"
 import { CollectiveBoard } from "../../src/participants/collective-board.js"
 import { Supervisor } from "../../src/participants/supervisor.js"
 import {

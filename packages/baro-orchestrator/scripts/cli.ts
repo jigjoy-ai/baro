@@ -31,7 +31,7 @@ import {
     type EndpointMap,
     type StoryRoute,
     type TierMap,
-} from "../src/routing.js"
+} from "../src/market/routing.js"
 
 const ownershipManifestPath = process.env.BARO_INTERNAL_PROVIDER_OWNERSHIP_MANIFEST
 const ownershipManifestToken = process.env.BARO_INTERNAL_PROVIDER_OWNERSHIP_TOKEN

@@ -11,7 +11,7 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import { CriticCodex } from "../../src/harness/codex/critic.js"
-import type { CriticEvidenceSource } from "../../src/participants/critic-evidence.js"
+import type { CriticEvidenceSource } from "../../src/acceptance/critic-evidence.js"
 import { CriticOpenCode } from "../../src/harness/opencode/critic.js"
 import { CriticPi } from "../../src/harness/pi/critic.js"
 import {

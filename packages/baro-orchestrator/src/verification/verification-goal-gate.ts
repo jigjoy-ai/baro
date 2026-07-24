@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto"
 import type { SemanticEvent } from "../runtime/mozaik.js"
 
 import type { PrdCollectiveProtocolState, PrdFile } from "../prd.js"
-import { deriveGoalContract } from "../runtime/goal-contract.js"
+import { deriveGoalContract } from "../goal/goal-contract.js"
 import { envNonNegativeInt } from "../runtime/env-int.js"
 import { NamedTimers } from "../runtime/named-timers.js"
 import {

@@ -110,7 +110,7 @@ export interface GoalLedgerProjectionUpdatedData {
     runId: string
     contractId: string
     revision: number
-    projection: import("../runtime/goal-contract.js").GoalLedgerProjection
+    projection: import("../goal/goal-contract.js").GoalLedgerProjection
 }
 
 export const GoalLedgerProjectionUpdated =

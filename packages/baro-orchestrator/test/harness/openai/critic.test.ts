@@ -9,7 +9,7 @@ import {
 } from "../../../src/runtime/mozaik.js"
 
 import { knownMetric, unknownMetric } from "../../../src/model-telemetry.js"
-import { AgentTurnProjector } from "../../../src/participants/agent-turn-projector.js"
+import { AgentTurnProjector } from "../../../src/acceptance/agent-turn-projector.js"
 import { CriticOpenAI } from "../../../src/harness/openai/critic.js"
 import { StoryOutcomeAuthority } from "../../../src/runtime/story-outcome-authority.js"
 import {

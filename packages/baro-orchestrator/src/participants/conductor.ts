@@ -42,10 +42,10 @@ import { join } from "path"
 import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
 
 import { AgenticEnvironment } from "../runtime/mozaik.js"
-import { buildDag } from "../dag.js"
+import { buildDag } from "../runtime-graph/dag.js"
 import { envNonNegativeInt } from "../runtime/env-int.js"
 import { validatePrdArchitectureObligationCoverage } from "../planning/domain/architecture-obligation-contract.js"
-import { deriveGoalContract } from "../runtime/goal-contract.js"
+import { deriveGoalContract } from "../goal/goal-contract.js"
 import {
     PrdFile,
     PrdStory,
@@ -70,7 +70,7 @@ import {
     type RunVerificationEvidence,
     type StoryResultData,
 } from "../semantic-events.js"
-import { validateLegacyReplan } from "../runtime/legacy-replan.js"
+import { validateLegacyReplan } from "../runtime-graph/legacy-replan.js"
 
 export { applyReplan } from "../prd.js"
 

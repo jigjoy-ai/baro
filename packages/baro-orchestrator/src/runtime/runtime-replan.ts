@@ -1,4 +1,4 @@
-import { buildDag } from "../dag.js"
+import { buildDag } from "../runtime-graph/dag.js"
 import {
     MAX_STORY_RETRIES,
     MAX_STORY_PRIORITY,
@@ -13,7 +13,7 @@ import type {
     RuntimeReplanMutation,
     RuntimeReplanRejectionCode,
 } from "../semantic-events.js"
-import { deriveGoalContract } from "./goal-contract.js"
+import { deriveGoalContract } from "../goal/goal-contract.js"
 import {
     architectureObligationsFromDecision,
     obligationMappingsForStories,

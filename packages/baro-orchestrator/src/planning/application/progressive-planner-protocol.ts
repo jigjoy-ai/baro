@@ -15,7 +15,7 @@ import {
     type PrdFile,
     type PrdStory,
 } from "../../prd.js"
-import { deriveGoalContract, type GoalContract } from "../../runtime/goal-contract.js"
+import { deriveGoalContract, type GoalContract } from "../../goal/goal-contract.js"
 import {
     assertCorrelationId,
     type GoalEnvelope,

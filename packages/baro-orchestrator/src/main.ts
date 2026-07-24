@@ -67,13 +67,13 @@ export {
     GoalGuardian,
     CollectiveGoalLedger,
     type GoalGuardianOptions,
-} from "./participants/goal-guardian.js"
+} from "./goal/goal-guardian.js"
 
 export {
     GoalInvariantReviewer,
     GOAL_AGGREGATE_REVIEW_SYSTEM_PROMPT,
     type GoalInvariantReviewerOptions,
-} from "./participants/goal-invariant-reviewer.js"
+} from "./goal/goal-invariant-reviewer.js"
 
 export {
     GOAL_CONTRACT_SCHEMA_VERSION,
@@ -95,7 +95,7 @@ export {
     type GoalInvariantRemediationBinding,
     type DisplacedGoalRemediation,
     type GoalProtocolIssue,
-} from "./runtime/goal-contract.js"
+} from "./goal/goal-contract.js"
 
 export {
     ARCHITECTURE_OBLIGATION_SCHEMA_VERSION,
@@ -143,13 +143,13 @@ export { DialogueForwarder } from "./participants/forwarders/dialogue.js"
 
 export {
     AgentTurnProjector,
-} from "./participants/agent-turn-projector.js"
+} from "./acceptance/agent-turn-projector.js"
 
 export {
     AcceptanceGate,
     DEFAULT_ACCEPTANCE_REVERIFICATIONS,
     type AcceptanceGateOptions,
-} from "./participants/acceptance-gate.js"
+} from "./acceptance/acceptance-gate.js"
 
 export {
     knownMetric,
@@ -201,7 +201,7 @@ export {
     type VerifyPlanOptions,
     type VerifyResult,
     type VerifyJavaScriptPackageManager,
-} from "./verify.js"
+} from "./verification/verify.js"
 
 export {
     mapCodexEvent,
@@ -299,7 +299,7 @@ export {
     type StoryExecution,
     type StoryExecOpts,
 } from "./participants/story-executor.js"
-export { type StoryRoute, type Backend } from "./routing.js"
+export { type StoryRoute, type Backend } from "./market/routing.js"
 export { type StorySpawnRequestData } from "./semantic-events.js"
 
 export {
@@ -376,7 +376,7 @@ export {
     validateRuntimeReplanMutation,
     type RuntimeReplanValidationOptions,
     type RuntimeReplanValidationResult,
-} from "./runtime-replan.js"
+} from "./runtime-graph/runtime-replan.js"
 export {
     CollectiveBoard,
     type CollectiveBoardOptions,
@@ -384,7 +384,7 @@ export {
 export {
     LeaseBroker,
     type LeaseBrokerOptions,
-} from "./participants/lease-broker.js"
+} from "./market/lease-broker.js"
 export {
     expectedVerifiedCostUsd,
     isValidWorkBidEstimate,
@@ -392,11 +392,11 @@ export {
     type WorkBidCandidate,
     type WorkBidEstimate,
     type WorkBidPolicy,
-} from "./work-market.js"
+} from "./market/work-market.js"
 export {
     RunVerifier,
     type RunVerifierOptions,
-} from "./participants/run-verifier.js"
+} from "./verification/run-verifier.js"
 export {
     RunVerificationRequested,
     RunVerificationCompleted,
@@ -437,7 +437,7 @@ export {
     type DagNode,
     type DagLevel,
     type BuildOptions as DagBuildOptions,
-} from "./dag.js"
+} from "./runtime-graph/dag.js"
 
 export {
     GitGate,
@@ -450,7 +450,7 @@ export {
     safePullRebase,
     type GitFileStats,
     type GitPushOptions,
-} from "./git.js"
+} from "./integration/git.js"
 
 export {
     orchestrate,

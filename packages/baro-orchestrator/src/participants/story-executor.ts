@@ -10,7 +10,7 @@ import { AgenticEnvironment, type Participant } from "../runtime/mozaik.js"
 
 import type { GatewayBillingCoordinator } from "../billing/index.js"
 import type { StorySpawnRequestData } from "../semantic-events.js"
-import type { StoryRoute } from "../routing.js"
+import type { StoryRoute } from "../market/routing.js"
 import type { CollaborationDeliveryMode } from "./collaboration-bridge.js"
 import { PROCESS_TREE_CAPABILITIES } from "../process-tree.js"
 import { CodexStoryAgent } from "../harness/codex/story-agent.js"

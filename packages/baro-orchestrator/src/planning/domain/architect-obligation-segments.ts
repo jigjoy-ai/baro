@@ -4,7 +4,7 @@ import {
     deriveGoalContract,
     type GoalContract,
     type GoalInvariant,
-} from "../../runtime/goal-contract.js"
+} from "../../goal/goal-contract.js"
 import {
     ArchitectureDecisionDocumentError,
     parseArchitectureDecisionDocument,

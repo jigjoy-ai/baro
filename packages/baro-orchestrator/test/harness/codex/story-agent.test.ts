@@ -9,7 +9,7 @@ import {
     type SemanticEvent,
 } from "../../../src/runtime/mozaik.js"
 
-import { AgentTurnProjector } from "../../../src/participants/agent-turn-projector.js"
+import { AgentTurnProjector } from "../../../src/acceptance/agent-turn-projector.js"
 import { CodexStoryAgent } from "../../../src/harness/codex/story-agent.js"
 import { PROCESS_TREE_CAPABILITIES } from "../../../src/process-tree.js"
 import { StoryOutcomeAuthority } from "../../../src/runtime/story-outcome-authority.js"

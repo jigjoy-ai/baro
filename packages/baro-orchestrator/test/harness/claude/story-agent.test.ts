@@ -21,7 +21,7 @@ import {
     Critique,
     StoryResult,
 } from "../../../src/semantic-events.js"
-import { criticInput } from "../../../src/participants/critic-input.js"
+import { criticInput } from "../../../src/acceptance/critic-input.js"
 import { StoryAgent } from "../../../src/harness/claude/story-agent.js"
 import {
     captureEnv,

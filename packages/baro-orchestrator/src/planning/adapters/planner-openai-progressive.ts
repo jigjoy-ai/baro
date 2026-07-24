@@ -1,7 +1,7 @@
 import { type Tool } from "../../runtime/mozaik.js"
 
 import type { PrdStory } from "../../prd.js"
-import { deriveGoalContract } from "../../runtime/goal-contract.js"
+import { deriveGoalContract } from "../../goal/goal-contract.js"
 import type { GoalEnvelope } from "../../session/conversation-contract.js"
 import type { BaroCommand } from "../../tui-protocol.js"
 import {

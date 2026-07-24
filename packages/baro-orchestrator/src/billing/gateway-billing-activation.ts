@@ -1,4 +1,4 @@
-import type { StoryRoute } from "../routing.js"
+import type { StoryRoute } from "../market/routing.js"
 import {
     resolveGatewayBillingEnvironment,
     type GatewayBillingEnvironment,

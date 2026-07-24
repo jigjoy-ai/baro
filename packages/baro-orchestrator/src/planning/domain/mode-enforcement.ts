@@ -8,7 +8,7 @@
  */
 
 import type { PrdExecutionMode, PrdFile, PrdStory } from "../../prd.js"
-import { deriveGoalContract } from "../../runtime/goal-contract.js"
+import { deriveGoalContract } from "../../goal/goal-contract.js"
 import type { GoalEnvelope } from "../../session/conversation-contract.js"
 import {
     architectureObligationsFromDecision,

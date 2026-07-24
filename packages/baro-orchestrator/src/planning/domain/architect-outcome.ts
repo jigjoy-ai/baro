@@ -7,7 +7,7 @@
  */
 
 import type { GoalEnvelope } from "../../session/conversation-contract.js"
-import { deriveGoalContract } from "../../runtime/goal-contract.js"
+import { deriveGoalContract } from "../../goal/goal-contract.js"
 import {
     ArchitectureDecisionDocumentError,
     parseArchitectureDecisionDocument,

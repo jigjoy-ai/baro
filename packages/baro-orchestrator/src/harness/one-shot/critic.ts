@@ -16,19 +16,19 @@ import {
     Critique,
     ModelInvocationMeasured,
 } from "../../semantic-events.js"
-import { buildCorrectiveMessage, extractVerdictJson } from "../../participants/critic-verdict.js"
+import { buildCorrectiveMessage, extractVerdictJson } from "../../acceptance/critic-verdict.js"
 import {
     inconclusiveEvidenceVerdict,
     prepareCriticEvaluation,
     type CriticEvidenceSource,
-} from "../../participants/critic-evidence.js"
+} from "../../acceptance/critic-evidence.js"
 import { withIsolatedCriticCwd } from "../critic-cli-isolation.js"
-import { criticInput, criticReplayKey } from "../../participants/critic-input.js"
-import { drainCriticPending } from "../../participants/critic-pending.js"
+import { criticInput, criticReplayKey } from "../../acceptance/critic-input.js"
+import { drainCriticPending } from "../../acceptance/critic-pending.js"
 import {
     isAuthorizedTerminalTurn,
     type TerminalTurnAuthorityOptions,
-} from "../../participants/terminal-turn-authority.js"
+} from "../../acceptance/terminal-turn-authority.js"
 
 export interface OneShotCriticEvaluation {
     status?: "evaluated" | "inconclusive"

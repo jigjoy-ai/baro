@@ -11,7 +11,7 @@ import {
     snapshotTurnReview,
     turnReviewDisposition,
     turnReviewTimeoutFailure,
-} from "../../participants/turn-review.js"
+} from "../../acceptance/turn-review.js"
 
 export interface OneShotTurnReviewOptions {
     agentId: string

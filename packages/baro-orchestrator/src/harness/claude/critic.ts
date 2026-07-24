@@ -38,15 +38,15 @@ import {
     type OneShotCriticEvaluation,
     type OneShotCriticInvocationContext,
 } from "../one-shot/critic.js"
-import { VERDICT_SYSTEM_PROMPT, extractVerdictJson } from "../../participants/critic-verdict.js"
+import { VERDICT_SYSTEM_PROMPT, extractVerdictJson } from "../../acceptance/critic-verdict.js"
 
-export { buildEvalPrompt } from "../../participants/critic-evidence.js"
+export { buildEvalPrompt } from "../../acceptance/critic-evidence.js"
 export {
     VERDICT_SYSTEM_PROMPT,
     buildCorrectiveMessage,
     extractVerdictJson,
     verdictSystemPrompt,
-} from "../../participants/critic-verdict.js"
+} from "../../acceptance/critic-verdict.js"
 
 export interface CriticOptions extends OneShotCriticCoreOptions {
     /** Claude model used for verdict calls. Default: "haiku". */

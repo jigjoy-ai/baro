@@ -11,7 +11,7 @@ import type { PrdFile, PrdStory } from "../../src/prd.js"
 import {
     deriveGoalContract,
     GoalInvariantLedger,
-} from "../../src/runtime/goal-contract.js"
+} from "../../src/goal/goal-contract.js"
 import {
     PlanFragmentAdmitted,
     PlanFragmentProposed,

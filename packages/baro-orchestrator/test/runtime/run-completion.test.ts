@@ -9,7 +9,7 @@ import type { PrdStory } from "../../src/prd.js"
 import {
     deriveGoalContract,
     GoalInvariantLedger,
-} from "../../src/runtime/goal-contract.js"
+} from "../../src/goal/goal-contract.js"
 
 function story(id: string, dependsOn: string[] = [], passes = false): PrdStory {
     return {
