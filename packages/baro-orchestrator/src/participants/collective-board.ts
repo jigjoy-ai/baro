@@ -27,6 +27,11 @@ import {
     WorkOfferDesk,
     sameOfferRetractionCorrelation,
 } from "../market/work-offer-desk.js"
+import {
+    GoalCompletionCheckTimedOut,
+    VerificationGoalGate,
+} from "../verification/verification-goal-gate.js"
+import { envNonNegativeInt } from "../runtime/env-int.js"
 import { validatePrdArchitectureObligationCoverage } from "../planning/architecture-obligation-contract.js"
 import {
     defineSemanticEvent,
@@ -34,7 +39,6 @@ import {
     ConversationDelegationProposed,
     CoordinationModeSelected,
     GoalCompletionAttested,
-    GoalCompletionCheckRequested,
     GoalInvariantRemediationAdmitted,
     GoalInvariantRemediationProposed,
     GoalLedgerProjectionPersisted,
@@ -59,7 +63,6 @@ import {
     RunStartRequest,
     RunStarted,
     RunVerificationCompleted,
-    RunVerificationRequested,
     RunVerificationTimedOut,
     StoryIntegrationRequested,
     StoryMergeFailed,
@@ -91,7 +94,6 @@ import {
     type RuntimeReplanMutation,
     type RuntimeReplanProposedData,
     type RunVerificationCompletedData,
-    type RunVerificationEvidence,
     type StoryFailureData,
     type StoryQualityCompletedData,
     type StoryResultData,
@@ -267,19 +269,6 @@ const SoftDeadlineReached = defineSemanticEvent<SoftDeadlineReachedData>(
     "collective_soft_deadline_reached",
 )
 
-interface GoalCompletionCheckTimedOutData {
-    runId: string
-    checkId: string
-    contractId: string | null
-    verificationId: string
-    timeoutMs: number
-}
-
-const GoalCompletionCheckTimedOut =
-    defineSemanticEvent<GoalCompletionCheckTimedOutData>(
-        "goal_completion_check_timed_out",
-    )
-
 type BoardPhase = "idle" | "preparing" | "running" | "verifying" | "pushing" | "done"
 
 const MAX_GOAL_REMEDIATION_ADMISSION_ATTEMPTS = 3
@@ -294,17 +283,6 @@ export class CollectiveBoard extends SerializedObserver {
     private runtimeReplanStageSequence = 0
 
     private cleanupSequence = 0
-    private verificationSequence = 0
-    /**
-     * A Board can be reconstructed with the same run id while persisted goal
-     * evidence survives. Sequence numbers restart at one, so they cannot by
-     * themselves distinguish a fresh verifier invocation from one issued by
-     * the previous coordinator instance. Keep a cryptographically fresh
-     * instance epoch in every verification identity so an old aggregate PASS
-     * can never match the new completion basis.
-     */
-    private readonly verificationEpoch = randomUUID()
-    private goalCheckSequence = 0
     private discoverySequence = 0
     private totalAttempts = 0
     private readonly completed: string[] = []
@@ -403,19 +381,9 @@ export class CollectiveBoard extends SerializedObserver {
     private healingActionsSinceProgress = 0
     private runtimeAdaptationsSinceProgress = 0
     private stopReason: string | null = null
-    private pendingVerificationId: string | null = null
-    private pendingGoalCheck: {
-        checkId: string
-        contractId: string | null
-        verificationId: string
-        verificationIncompleteReason: string | null
-    } | null = null
-    private verificationStatus: "passed" | "failed" | "skipped" | undefined
-    private verification: RunVerificationEvidence | undefined
+    private readonly verificationGate: VerificationGoalGate
     private readonly timers = new NamedTimers<
-        | "verification"
         | "softDeadline"
-        | "goalCompletion"
         | "operationalRetry"
         | "goalRemediationRetry"
         | "offerRetraction"
@@ -427,6 +395,26 @@ export class CollectiveBoard extends SerializedObserver {
     constructor(private readonly opts: CollectiveBoardOptions) {
         super()
         this.offers = new WorkOfferDesk(opts.runId)
+        this.verificationGate = new VerificationGoalGate({
+            runId: opts.runId,
+            verifyBeforePush: opts.verifyBeforePush ?? false,
+            verificationTimeoutMs: opts.verificationTimeoutMs,
+            goalCompletionTimeoutMs: opts.goalCompletionTimeoutMs,
+            hasGoalCompletionAuthority:
+                opts.goalCompletionAuthority !== undefined,
+            host: {
+                emit: (event) => this.emit(event),
+                phase: () => this.phase,
+                enterVerifying: () => {
+                    this.phase = "verifying"
+                },
+                requestPush: (reason) => this.requestPush(reason),
+                prd: () => this.prd,
+                persistGoalProtocol: (protocol) =>
+                    this.persistGoalProtocol(protocol),
+                waveOrdinal: () => this.waveOrdinal,
+            },
+        })
         this.marketRouteIds = new Set(opts.marketRouteIds ?? [])
         this.operationalRecovery = new OperationalRecoveryPolicy({
             maxRetriesPerStory: opts.maxOperationalRetriesPerStory ?? 2,
@@ -537,7 +525,7 @@ export class CollectiveBoard extends SerializedObserver {
             context.internal &&
             event.data.runId === this.opts.runId
         ) {
-            this.onGoalCompletionCheckTimedOut(event.data)
+            this.verificationGate.onGoalCompletionCheckTimedOut(event.data)
             return
         }
         if (
@@ -964,22 +952,29 @@ export class CollectiveBoard extends SerializedObserver {
         if (
             RunVerificationCompleted.is(event) &&
             event.data.runId === this.opts.runId &&
-            event.data.verificationId === this.pendingVerificationId &&
+            this.verificationGate.matchesPendingVerification(
+                event.data.verificationId,
+            ) &&
             this.phase === "verifying" &&
             (!this.opts.verifierAuthority ||
                 context.source === this.opts.verifierAuthority)
         ) {
-            this.onVerificationCompleted(event.data)
+            this.verificationGate.onVerificationCompleted(event.data)
             return
         }
         if (
             RunVerificationTimedOut.is(event) &&
             event.data.runId === this.opts.runId &&
-            event.data.verificationId === this.pendingVerificationId &&
+            this.verificationGate.matchesPendingVerification(
+                event.data.verificationId,
+            ) &&
             this.phase === "verifying" &&
             context.internal
         ) {
-            this.onVerificationTimedOut(event.data.verificationId, event.data.timeoutMs)
+            this.verificationGate.onVerificationTimedOut(
+                event.data.verificationId,
+                event.data.timeoutMs,
+            )
             return
         }
         if (
@@ -998,7 +993,7 @@ export class CollectiveBoard extends SerializedObserver {
             this.opts.goalCompletionAuthority !== undefined &&
             context.source === this.opts.goalCompletionAuthority
         ) {
-            this.onGoalCompletionAttested(event.data)
+            this.verificationGate.onGoalCompletionAttested(event.data)
             return
         }
         if (
@@ -2304,12 +2299,7 @@ export class CollectiveBoard extends SerializedObserver {
         remediation: GoalInvariantRemediationProposedData,
     ): void {
         if (this.phase !== "verifying") return
-        this.timers.clear("verification")
-        this.timers.clear("goalCompletion")
-        this.pendingVerificationId = null
-        this.pendingGoalCheck = null
-        this.verificationStatus = undefined
-        this.verification = undefined
+        this.verificationGate.abandonForRemediation()
         this.phase = "running"
         this.emit(
             ConductorState.create({
@@ -2986,7 +2976,7 @@ export class CollectiveBoard extends SerializedObserver {
             )
             return
         }
-        this.requestVerification(null)
+        this.verificationGate.requestVerification(null)
     }
 
     private startWave(
@@ -3148,214 +3138,10 @@ export class CollectiveBoard extends SerializedObserver {
         if (this.phase !== "running" && this.phase !== "verifying") return
         this.timers.clearAll()
         this.operationalRetryDueAt = null
-        this.pendingVerificationId = null
-        this.pendingGoalCheck = null
+        this.verificationGate.releasePendings()
         this.stopReason = reason
         this.phase = "pushing"
         this.emit(RunPushRequested.create({ runId: this.opts.runId }))
-    }
-
-    private requestVerification(reason: string | null): void {
-        if (reason !== null) {
-            this.requestPush(reason)
-            return
-        }
-        if (!this.opts.verifyBeforePush) {
-            this.requestGoalCompletion("verification-disabled")
-            return
-        }
-        if (this.phase !== "running") return
-        const verificationId =
-            `${this.opts.runId}:verification:${this.verificationEpoch}:${++this.verificationSequence}`
-        this.pendingVerificationId = verificationId
-        this.phase = "verifying"
-        const timeoutMs =
-            this.opts.verificationTimeoutMs ??
-            envNonNegativeInt("BARO_RUN_VERIFICATION_TIMEOUT_SECS", 21 * 60) * 1_000
-        if (timeoutMs > 0) {
-            this.timers.arm("verification", timeoutMs, () => {
-                this.emit(
-                    RunVerificationTimedOut.create({
-                        runId: this.opts.runId,
-                        verificationId,
-                        timeoutMs,
-                    }),
-                )
-            })
-        }
-        this.emit(
-            ConductorState.create({
-                phase: "level_complete",
-                detail: "collective work integrated; verifying merged result",
-                currentLevel: this.waveOrdinal,
-            }),
-        )
-        this.emit(
-            RunVerificationRequested.create({
-                runId: this.opts.runId,
-                verificationId,
-            }),
-        )
-    }
-
-    private onVerificationCompleted(
-        result: RunVerificationCompletedData,
-    ): void {
-        this.timers.clear("verification")
-        this.pendingVerificationId = null
-        const hasPassedCommand = result.commands.some(
-            (command) => command.status === "passed",
-        )
-        const failedCommand = result.commands.find(
-            (command) => command.status === "failed",
-        )
-        const skippedCommands = result.commands
-            .filter((command) => command.status === "skipped")
-            .map((command) => command.command)
-        const effectiveStatus =
-            failedCommand || result.status === "failed"
-                ? "failed"
-                : result.status === "passed" &&
-                      hasPassedCommand &&
-                      skippedCommands.length === 0
-                  ? "passed"
-                  : "skipped"
-        this.verificationStatus = effectiveStatus
-        this.verification = {
-            verificationId: result.verificationId,
-            status: effectiveStatus,
-            commands: result.commands.map((command) => ({ ...command })),
-            durationMs: result.durationMs,
-        }
-        if (effectiveStatus === "failed") {
-            this.requestPush(
-                `verification failed: ${failedCommand?.command ?? "build/test"}`,
-            )
-            return
-        }
-        if (effectiveStatus === "skipped") {
-            const incoherentPass = result.status === "passed"
-            const reason = incoherentPass
-                ? "objective verification incomplete: verifier reported passed without complete passing command evidence"
-                : skippedCommands.length > 0
-                  ? `objective verification incomplete: skipped ${skippedCommands.join(", ")}`
-                  : hasPassedCommand
-                    ? "objective verification incomplete: verifier reported skipped despite passing command evidence"
-                  : "objective verification incomplete: no applicable build/test/typecheck/lint commands ran"
-            const hasGoalContract = Boolean(
-                this.prd && deriveGoalContract(this.prd.goalEnvelope),
-            )
-            if (
-                hasPassedCommand &&
-                hasGoalContract &&
-                this.opts.goalCompletionAuthority
-            ) {
-                this.requestGoalCompletion(result.verificationId, reason)
-                return
-            }
-            this.requestPush(reason)
-            return
-        }
-        this.requestGoalCompletion(result.verificationId)
-    }
-
-    private requestGoalCompletion(
-        verificationId: string,
-        verificationIncompleteReason: string | null = null,
-    ): void {
-        if (!this.prd) return
-        if (!this.opts.goalCompletionAuthority) {
-            this.requestPush(null)
-            return
-        }
-        if (this.phase !== "running" && this.phase !== "verifying") return
-
-        const contract = deriveGoalContract(this.prd.goalEnvelope)
-        const checkId =
-            `${this.opts.runId}:goal-check:${++this.goalCheckSequence}`
-        this.phase = "verifying"
-        this.pendingGoalCheck = {
-            checkId,
-            contractId: contract?.contractId ?? null,
-            verificationId,
-            verificationIncompleteReason,
-        }
-        this.armGoalCompletionTimer(this.pendingGoalCheck)
-        this.emit(
-            ConductorState.create({
-                phase: "level_complete",
-                detail: verificationIncompleteReason
-                    ? "objective verification is incomplete; checking global goal invariants for actionable remediation"
-                    : contract
-                      ? "objective verification passed; checking global goal invariants"
-                      : "objective verification passed; goal governance is disabled for this legacy PRD",
-                currentLevel: this.waveOrdinal,
-            }),
-        )
-        this.emit(
-            GoalCompletionCheckRequested.create({
-                runId: this.opts.runId,
-                checkId,
-                contractId: contract?.contractId ?? null,
-                storyIds: this.prd.userStories
-                    .filter((story) => story.passes)
-                    .map((story) => story.id),
-                verificationId,
-            }),
-        )
-    }
-
-    private onGoalCompletionAttested(
-        attestation: GoalCompletionAttestedData,
-    ): void {
-        const pending = this.pendingGoalCheck
-        if (
-            !pending ||
-            attestation.checkId !== pending.checkId ||
-            attestation.contractId !== pending.contractId ||
-            attestation.verificationId !== pending.verificationId
-        ) return
-        this.timers.clear("goalCompletion")
-        if (attestation.contractId !== null) {
-            const protocol = this.prd?.runtimeGraph?.protocol
-            if (
-                !protocol ||
-                protocol.goal.contractId !== attestation.contractId ||
-                protocol.goal.revision !== attestation.goalRevision
-            ) {
-                throw new Error(
-                    "goal attestation does not match its durable ledger projection",
-                )
-            }
-            if (pending.verificationIncompleteReason === null) {
-                this.persistGoalProtocol({
-                    ...protocol,
-                    completion: structuredClone(attestation),
-                })
-            }
-        }
-        this.pendingGoalCheck = null
-        if (
-            attestation.status === "satisfied" ||
-            attestation.status === "disabled"
-        ) {
-            this.requestPush(pending.verificationIncompleteReason)
-            return
-        }
-        const unresolved = [
-            ...attestation.openInvariantIds,
-            ...attestation.rejectedInvariantIds,
-        ]
-        const goalReason = `global goal is not satisfied${
-                unresolved.length > 0
-                    ? ` (${unresolved.join(", ")})`
-                    : ""
-            }: ${attestation.reason}`
-        this.requestPush(
-            pending.verificationIncompleteReason
-                ? `${pending.verificationIncompleteReason}; ${goalReason}`
-                : goalReason,
-        )
     }
 
     private onGoalLedgerProjectionUpdated(
@@ -3426,47 +3212,6 @@ export class CollectiveBoard extends SerializedObserver {
         this.prd = next
     }
 
-    private onVerificationTimedOut(
-        verificationId: string,
-        timeoutMs: number,
-    ): void {
-        const reason = `verification timed out after ${Math.ceil(timeoutMs / 1_000)}s`
-        this.timers.clear("verification")
-        this.verificationStatus = "failed"
-        this.verification = {
-            verificationId,
-            status: "failed",
-            commands: [
-                {
-                    command: "baro run verifier",
-                    status: "failed",
-                    durationMs: timeoutMs,
-                    tail: reason,
-                },
-            ],
-            durationMs: timeoutMs,
-        }
-        this.requestPush(reason)
-    }
-
-    private onGoalCompletionCheckTimedOut(
-        timeout: GoalCompletionCheckTimedOutData,
-    ): void {
-        const pending = this.pendingGoalCheck
-        if (
-            this.phase !== "verifying" ||
-            !pending ||
-            timeout.checkId !== pending.checkId ||
-            timeout.contractId !== pending.contractId ||
-            timeout.verificationId !== pending.verificationId
-        ) return
-        this.timers.clear("goalCompletion")
-        this.requestPush(
-            `goal completion attestation timed out after ` +
-                `${Math.ceil(timeout.timeoutMs / 1_000)}s`,
-        )
-    }
-
     private healingHaltReason(): string | null {
         if (
             this.replanProgressBudget > 0 &&
@@ -3531,30 +3276,6 @@ export class CollectiveBoard extends SerializedObserver {
         if (this.phase === "running" && !this.wave) this.scheduleNextWave()
     }
 
-    private armGoalCompletionTimer(
-        pending: NonNullable<CollectiveBoard["pendingGoalCheck"]>,
-    ): void {
-        this.timers.clear("goalCompletion")
-        const configuredTimeoutMs =
-            this.opts.goalCompletionTimeoutMs ??
-            envNonNegativeInt("BARO_GOAL_COMPLETION_TIMEOUT_SECS", 30) * 1_000
-        const timeoutMs = Math.max(
-            1,
-            Math.min(configuredTimeoutMs, 2_147_483_647),
-        )
-        this.timers.arm("goalCompletion", timeoutMs, () => {
-            this.emit(
-                GoalCompletionCheckTimedOut.create({
-                    runId: this.opts.runId,
-                    checkId: pending.checkId,
-                    contractId: pending.contractId,
-                    verificationId: pending.verificationId,
-                    timeoutMs,
-                }),
-            )
-        })
-    }
-
     private scheduleOperationalRetry(delayMs: number): void {
         const boundedDelay = Math.max(0, Math.min(delayMs, 2_147_483_647))
         const dueAt = Date.now() + boundedDelay
@@ -3604,8 +3325,8 @@ export class CollectiveBoard extends SerializedObserver {
     private terminate(success: boolean, abortReason: string | null): void {
         if (this.phase === "done") return
         this.timers.clearAll()
+        this.verificationGate.releasePendings()
         this.operationalRetryDueAt = null
-        this.pendingGoalCheck = null
         this.phase = "done"
         const totalDurationSecs = Math.round((Date.now() - this.startedAt) / 1_000)
         const failedStories = this.prd
@@ -3621,10 +3342,12 @@ export class CollectiveBoard extends SerializedObserver {
             droppedStories: [...this.dropped],
             totalDurationSecs,
             totalAttempts: this.totalAttempts,
-            ...(this.verificationStatus
-                ? { verificationStatus: this.verificationStatus }
+            ...(this.verificationGate.status()
+                ? { verificationStatus: this.verificationGate.status()! }
                 : {}),
-            ...(this.verification ? { verification: this.verification } : {}),
+            ...(this.verificationGate.evidence()
+                ? { verification: this.verificationGate.evidence()! }
+                : {}),
         }
         this.emit(
             ConductorState.create({
@@ -3640,10 +3363,12 @@ export class CollectiveBoard extends SerializedObserver {
                 totalDurationSecs,
                 totalAttempts: this.totalAttempts,
                 abortReason,
-                ...(this.verificationStatus
-                    ? { verificationStatus: this.verificationStatus }
+                ...(this.verificationGate.status()
+                    ? { verificationStatus: this.verificationGate.status()! }
                     : {}),
-                ...(this.verification ? { verification: this.verification } : {}),
+                ...(this.verificationGate.evidence()
+                    ? { verification: this.verificationGate.evidence()! }
+                    : {}),
                 runId: this.opts.runId,
             }),
         )
@@ -4066,13 +3791,6 @@ function blockRejectionCode(
 
 function messageOf(error: unknown): string {
     return (error as Error)?.message ?? String(error)
-}
-
-function envNonNegativeInt(name: string, fallback: number): number {
-    const raw = process.env[name]
-    if (raw == null || raw.trim() === "") return fallback
-    const value = Number(raw)
-    return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback
 }
 
 function tokens(text: string): string[] {
