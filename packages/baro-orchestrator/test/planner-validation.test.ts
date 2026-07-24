@@ -1,11 +1,11 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { assertRunnablePlannerPrdJson } from "../src/planning/planner-validation.js"
+import { assertRunnablePlannerPrdJson } from "../src/planning/domain/planner-validation.js"
 import {
     parseArchitectureObligationContract,
     renderArchitectureObligationCriterion,
-} from "../src/planning/architecture-obligation-contract.js"
+} from "../src/planning/domain/architecture-obligation-contract.js"
 
 function validPrd(): Record<string, unknown> {
     return {

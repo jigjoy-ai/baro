@@ -35,7 +35,7 @@ import { buildDag } from "../dag.js"
 import { getHeadSha } from "../git.js"
 import { BARO_COAUTHOR_TRAILER, loadPrd, type PrdFile, type PrdStory } from "../prd.js"
 import { readAuthoritativeDeclaredTests } from "../prd-declared-tests.js"
-import { renderRuntimeAmendments } from "../planning/runtime-amendments.js"
+import { renderRuntimeAmendments } from "../planning/domain/runtime-amendments.js"
 import { runRepositoryCommand as execFileAsync } from "../repository-command.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import {

@@ -30,7 +30,7 @@ import {
     providerCallTimeoutError,
     runInferenceRound,
     type OpenAIConnection,
-} from "../planning/openai-runtime.js"
+} from "../harness/openai/runtime.js"
 import {
     knownMetric,
     notApplicableMetric,

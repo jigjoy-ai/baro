@@ -5,7 +5,7 @@ import { RuntimeReplanCoordinator } from "../../src/participants/runtime-replan-
 import {
     renderRuntimeAmendments,
     renderRuntimeAmendmentsForPrompt,
-} from "../../src/planning/runtime-amendments.js"
+} from "../../src/planning/domain/runtime-amendments.js"
 import type { PrdFile } from "../../src/prd.js"
 import {
     deriveGoalContract,

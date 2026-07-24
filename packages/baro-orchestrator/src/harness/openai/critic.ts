@@ -38,7 +38,7 @@ import {
     GenericOpenAIModel,
     UsageAccumulator,
     runInferenceRound,
-} from "../../planning/openai-runtime.js"
+} from "./runtime.js"
 import {
     AgentTargetedMessage,
     Critique,

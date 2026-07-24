@@ -24,13 +24,13 @@ import {
 import {
     runArchitectOpenAI,
     type ArchitectOpenAITestRuntime,
-} from "../src/planning/architect-openai.js"
+} from "../src/planning/adapters/architect-openai.js"
 import {
     createOpenAIModel,
     GenericOpenAIModel,
-} from "../src/planning/openai-runtime.js"
+} from "../src/harness/openai/runtime.js"
 import { createDialogueResponder } from "../src/participants/dialogue-responder.js"
-import { createCodebaseTools } from "../src/planning/codebase-tools.js"
+import { createCodebaseTools } from "../src/planning/adapters/codebase-tools.js"
 
 const PARALLEL_MODE = {
     mode: "parallel" as const,

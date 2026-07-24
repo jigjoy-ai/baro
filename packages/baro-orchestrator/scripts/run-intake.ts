@@ -15,12 +15,12 @@ import {
 import {
     heuristicModeContract,
     type ModeContract,
-} from "../src/planning/planner-prompts.js"
-import { runClaudeIntake } from "../src/planning/planner-claude.js"
-import { runCodexIntake } from "../src/planning/planner-codex.js"
-import { runOpenAIIntake } from "../src/planning/planner-openai.js"
-import { runOpenCodeIntake } from "../src/planning/planner-opencode.js"
-import { runPiIntake } from "../src/planning/planner-pi.js"
+} from "../src/planning/domain/planner-prompts.js"
+import { runClaudeIntake } from "../src/planning/adapters/planner-claude.js"
+import { runCodexIntake } from "../src/planning/adapters/planner-codex.js"
+import { runOpenAIIntake } from "../src/planning/adapters/planner-openai.js"
+import { runOpenCodeIntake } from "../src/planning/adapters/planner-opencode.js"
+import { runPiIntake } from "../src/planning/adapters/planner-pi.js"
 
 interface Args {
     goal: string

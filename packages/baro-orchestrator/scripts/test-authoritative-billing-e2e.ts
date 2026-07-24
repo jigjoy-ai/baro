@@ -19,7 +19,7 @@ import type { ModelInvocationMeasuredData } from "../src/model-telemetry.js"
 import {
     GenericOpenAIModel,
     runInferenceRound,
-} from "../src/planning/openai-runtime.js"
+} from "../src/harness/openai/runtime.js"
 
 interface ControlPlane {
     readonly port: number

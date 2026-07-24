@@ -6,8 +6,8 @@ import {
     type PrdFile,
     type PrdStory,
 } from "../prd.js"
-import { isVerificationOnlyStory } from "../planning/verification-stories.js"
-import { validateGoalContractCoverage } from "../planning/goal-contract-coverage.js"
+import { isVerificationOnlyStory } from "../planning/domain/verification-stories.js"
+import { validateGoalContractCoverage } from "../planning/domain/goal-contract-coverage.js"
 import type {
     ReplanStoryAdd,
     RuntimeReplanMutation,
@@ -18,7 +18,7 @@ import {
     architectureObligationsFromDecision,
     obligationMappingsForStories,
     validateArchitectureObligationCoverage,
-} from "../planning/architecture-obligation-contract.js"
+} from "../planning/domain/architecture-obligation-contract.js"
 
 export interface RuntimeReplanValidationOptions {
     /** Running, leased, or otherwise already-started stories are immutable. */

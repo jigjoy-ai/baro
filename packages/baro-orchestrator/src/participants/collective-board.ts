@@ -17,7 +17,7 @@ import {
 import {
     buildRecoveryPromptSection,
     buildStoryOfferPrompt,
-} from "../planning/story-offer-prompt.js"
+} from "../planning/domain/story-offer-prompt.js"
 import {
     blockedStoryIds,
     goalCompletionFailure,
@@ -35,7 +35,7 @@ import {
     VerificationGoalGate,
 } from "../verification/verification-goal-gate.js"
 import { envNonNegativeInt } from "../runtime/env-int.js"
-import { validatePrdArchitectureObligationCoverage } from "../planning/architecture-obligation-contract.js"
+import { validatePrdArchitectureObligationCoverage } from "../planning/domain/architecture-obligation-contract.js"
 import {
     defineSemanticEvent,
     ConductorState,
@@ -114,7 +114,7 @@ import {
     RuntimeReplanCoordinator,
     type RuntimeReplanDecisionOutcome,
 } from "./runtime-replan-coordinator.js"
-import { ProgressivePlanningCoordinator } from "./progressive-planning-coordinator.js"
+import { ProgressivePlanningCoordinator } from "../planning/application/progressive-planning-coordinator.js"
 import { OperationalRecoveryPolicy } from "./operational-recovery.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import { isProviderCapacityFailure } from "../provider-failure.js"

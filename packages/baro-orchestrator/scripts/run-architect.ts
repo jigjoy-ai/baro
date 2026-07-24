@@ -28,27 +28,27 @@ import {
     type DialogueResponderInvocation,
 } from "../src/participants/dialogue-agent.js"
 import { createDialogueResponder } from "../src/participants/dialogue-responder.js"
-import { runArchitectClaude } from "../src/planning/architect-claude.js"
-import { runArchitectCodex } from "../src/planning/architect-codex.js"
-import type { ArchitectInvocationObserver } from "../src/planning/architect-invocation.js"
-import { compileArchitectObligationSegments } from "../src/planning/architect-obligation-segments.js"
-import { runArchitectOpenAI } from "../src/planning/architect-openai.js"
-import { runArchitectOpenCode } from "../src/planning/architect-opencode.js"
-import { runArchitectPi } from "../src/planning/architect-pi.js"
-import { providerCallTimeoutError } from "../src/planning/openai-runtime.js"
-import { emitPlanLine } from "../src/planning/plan-events.js"
-import { effortTimeoutMs } from "../src/planning/planner-claude.js"
+import { runArchitectClaude } from "../src/planning/adapters/architect-claude.js"
+import { runArchitectCodex } from "../src/planning/adapters/architect-codex.js"
+import type { ArchitectInvocationObserver } from "../src/planning/adapters/architect-invocation.js"
+import { compileArchitectObligationSegments } from "../src/planning/domain/architect-obligation-segments.js"
+import { runArchitectOpenAI } from "../src/planning/adapters/architect-openai.js"
+import { runArchitectOpenCode } from "../src/planning/adapters/architect-opencode.js"
+import { runArchitectPi } from "../src/planning/adapters/architect-pi.js"
+import { providerCallTimeoutError } from "../src/harness/openai/runtime.js"
+import { emitPlanLine } from "../src/planning/application/plan-events.js"
+import { effortTimeoutMs } from "../src/planning/adapters/planner-claude.js"
 import {
     parseArchitectOutcome,
     validateArchitectOutcomeCorrelation,
     wrapArchitectOutcome,
     type ArchitectOutcomeCorrelationV1,
-} from "../src/planning/architect-outcome.js"
+} from "../src/planning/domain/architect-outcome.js"
 import {
     parseRequiredModeContract,
     type ModeContract,
-} from "../src/planning/planner-prompts.js"
-import { resolvePlannerModelName } from "../src/planning/planner-openai.js"
+} from "../src/planning/domain/planner-prompts.js"
+import { resolvePlannerModelName } from "../src/planning/adapters/planner-openai.js"
 import { runnerMeasurement } from "../src/runner-measurement.js"
 import { emit } from "../src/tui-protocol.js"
 import {

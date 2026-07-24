@@ -9,15 +9,15 @@ import {
     type Tool,
 } from "../src/runtime/mozaik.js"
 
-import { GenericOpenAIModel } from "../src/planning/openai-runtime.js"
+import { GenericOpenAIModel } from "../src/harness/openai/runtime.js"
 import {
     fallbackPrdJson,
     resolvePlannerModelName,
     runPlannerOpenAI,
     type PlannerOpenAIPlanFragmentEvent,
     type PlannerOpenAITestRuntime,
-} from "../src/planning/planner-openai.js"
-import { createPlannerProgressivePublisher } from "../src/planning/planner-openai-progressive.js"
+} from "../src/planning/adapters/planner-openai.js"
+import { createPlannerProgressivePublisher } from "../src/planning/adapters/planner-openai-progressive.js"
 
 const PARALLEL_MODE = {
     mode: "parallel" as const,

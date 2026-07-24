@@ -8,10 +8,10 @@ import {
     parseRequiredModeContract,
     PLANNER_SYSTEM_PROMPT,
     renderModeContract,
-} from "../src/planning/planner-prompts.js"
-import { buildArchitectUserMessage } from "../src/planning/architect-prompts.js"
-import { completeSoleStoryOwnership, enforceModeContract, resolveEffectiveParallel, widestDagLevel } from "../src/planning/mode-enforcement.js"
-import { isVerificationOnlyStory } from "../src/planning/verification-stories.js"
+} from "../src/planning/domain/planner-prompts.js"
+import { buildArchitectUserMessage } from "../src/planning/domain/architect-prompts.js"
+import { completeSoleStoryOwnership, enforceModeContract, resolveEffectiveParallel, widestDagLevel } from "../src/planning/domain/mode-enforcement.js"
+import { isVerificationOnlyStory } from "../src/planning/domain/verification-stories.js"
 import type { PrdExecutionMode, PrdFile, PrdStory } from "../src/prd.js"
 
 const mode = (m: Partial<PrdExecutionMode> & { mode: PrdExecutionMode["mode"] }): PrdExecutionMode => ({ reason: "r", ...m })

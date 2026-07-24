@@ -14,7 +14,7 @@ import {
     type DialogueResponderInvocation,
 } from "../../src/participants/dialogue-agent.js"
 import { createDialogueResponder } from "../../src/participants/dialogue-responder.js"
-import { isProviderCallTimeout } from "../../src/planning/openai-runtime.js"
+import { isProviderCallTimeout } from "../../src/harness/openai/runtime.js"
 import {
     GoalAggregateReviewCompleted,
     GoalAggregateReviewRequested,

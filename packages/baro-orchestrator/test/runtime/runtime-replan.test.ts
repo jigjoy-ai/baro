@@ -13,7 +13,7 @@ import {
     snapshotRuntimeReplanMutation,
     validateRuntimeReplanMutation,
 } from "../../src/runtime-replan.js"
-import { renderArchitectureObligationCriterion } from "../../src/planning/architecture-obligation-contract.js"
+import { renderArchitectureObligationCriterion } from "../../src/planning/domain/architecture-obligation-contract.js"
 
 const RUNTIME_OBLIGATION = {
     id: "O-001",

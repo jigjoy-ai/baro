@@ -8,7 +8,7 @@ import {
     RUNTIME_AMENDMENT_PROMPT_MAX_CHARS,
     decisionOriginOf,
     runtimeAmendmentPromptProjectionChars,
-} from "../planning/runtime-amendments.js"
+} from "../planning/domain/runtime-amendments.js"
 import {
     RuntimeReplanApplied,
     RuntimeReplanRejected,

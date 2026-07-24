@@ -113,7 +113,7 @@ export {
     type StoryObligationMapping,
     type ArchitectureObligationCoverageMode,
     type ArchitectureObligationCoverageResult,
-} from "./planning/architecture-obligation-contract.js"
+} from "./planning/domain/architecture-obligation-contract.js"
 
 export {
     createGoalAggregateReviewBasis,
@@ -430,7 +430,7 @@ export {
     type ProgressivePlanFragmentV1,
     type ProgressivePlanAdmissionV1,
     type ProgressivePlanSnapshotV1,
-} from "./planning/progressive-plan.js"
+} from "./planning/domain/progressive-plan.js"
 
 export {
     buildDag,

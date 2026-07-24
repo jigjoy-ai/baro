@@ -105,7 +105,7 @@ import { SurgeonOpenAI } from "./harness/openai/surgeon.js"
 import { SurgeonOpenCode } from "./harness/opencode/surgeon.js"
 import { SurgeonPi } from "./harness/pi/surgeon.js"
 import { Supervisor } from "./participants/supervisor.js"
-import { resolveEffectiveParallel } from "./planning/mode-enforcement.js"
+import { resolveEffectiveParallel } from "./planning/domain/mode-enforcement.js"
 import { PrdFile, loadPrd, savePrd } from "./prd.js"
 import { readAuthoritativeDeclaredTests } from "./prd-declared-tests.js"
 import {

@@ -3,14 +3,14 @@ import { chmodSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import { runArchitectClaude } from "../src/planning/architect-claude.js"
-import { runArchitectCodex } from "../src/planning/architect-codex.js"
+import { runArchitectClaude } from "../src/planning/adapters/architect-claude.js"
+import { runArchitectCodex } from "../src/planning/adapters/architect-codex.js"
 import type {
     ArchitectInvocationMetadata,
     ArchitectInvocationObserver,
-} from "../src/planning/architect-invocation.js"
-import { runArchitectOpenCode } from "../src/planning/architect-opencode.js"
-import { runArchitectPi } from "../src/planning/architect-pi.js"
+} from "../src/planning/adapters/architect-invocation.js"
+import { runArchitectOpenCode } from "../src/planning/adapters/architect-opencode.js"
+import { runArchitectPi } from "../src/planning/adapters/architect-pi.js"
 import type { RunnerInvocationObservation } from "../src/runner-invocation.js"
 import { withTempDir } from "./participants/helpers.js"
 

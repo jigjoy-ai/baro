@@ -1,4 +1,4 @@
-import { buildStoryOfferPrompt } from "../../src/planning/story-offer-prompt.js"
+import { buildStoryOfferPrompt } from "../../src/planning/domain/story-offer-prompt.js"
 import assert from "node:assert/strict"
 import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"

@@ -13,23 +13,23 @@ import {
     createGatewayBillingCoordinatorFromEnv,
     reconcileAndCloseGatewayBilling,
 } from "../src/billing/index.js"
-import { runPlannerClaude } from "../src/planning/planner-claude.js"
-import { runPlannerCodex } from "../src/planning/planner-codex.js"
-import { runPlannerOpenAI } from "../src/planning/planner-openai.js"
-import { runPlannerOpenCode } from "../src/planning/planner-opencode.js"
-import { runPlannerPi } from "../src/planning/planner-pi.js"
+import { runPlannerClaude } from "../src/planning/adapters/planner-claude.js"
+import { runPlannerCodex } from "../src/planning/adapters/planner-codex.js"
+import { runPlannerOpenAI } from "../src/planning/adapters/planner-openai.js"
+import { runPlannerOpenCode } from "../src/planning/adapters/planner-opencode.js"
+import { runPlannerPi } from "../src/planning/adapters/planner-pi.js"
 import {
     currentPlannerMcpServerCommand,
     parseProgressivePlannerMcpInvocation,
     runProgressivePlannerMcpServer,
     type PlannerHarnessProgressiveConfig,
-} from "../src/planning/planner-harness-progressive.js"
-import { parseRequiredModeContract, type ModeContract } from "../src/planning/planner-prompts.js"
+} from "../src/planning/adapters/planner-harness-progressive.js"
+import { parseRequiredModeContract, type ModeContract } from "../src/planning/domain/planner-prompts.js"
 import {
     completeSoleStoryOwnership,
     enforceModeContract,
-} from "../src/planning/mode-enforcement.js"
-import { assertRunnablePlannerPrdJson } from "../src/planning/planner-validation.js"
+} from "../src/planning/domain/mode-enforcement.js"
+import { assertRunnablePlannerPrdJson } from "../src/planning/domain/planner-validation.js"
 import {
     goalEnvelopeFingerprint,
     type GoalEnvelope,
@@ -42,7 +42,7 @@ import {
     ProgressivePlannerLifecycle,
     resolveProgressivePlannerConfig,
     type ProgressiveBootstrapMetadata,
-} from "../src/planning/progressive-planner-protocol.js"
+} from "../src/planning/application/progressive-planner-protocol.js"
 import { emit } from "../src/tui-protocol.js"
 
 interface Args {

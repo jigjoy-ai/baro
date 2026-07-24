@@ -9,11 +9,11 @@ import {
     ArchitectOutcomeContractError,
     parseArchitectOutcome,
     wrapArchitectOutcome,
-} from "../src/planning/architect-outcome.js"
+} from "../src/planning/domain/architect-outcome.js"
 import {
     ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_OUTCOME_SYSTEM_PROMPT,
-} from "../src/planning/architect-prompts.js"
+} from "../src/planning/domain/architect-prompts.js"
 
 const DECISION_DOCUMENT = `## Existing context
 The repository uses a strict provider-neutral planning contract.

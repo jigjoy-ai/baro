@@ -33,8 +33,8 @@ import {
     type OpenAIConnection,
     UsageAccumulator,
     runInferenceRound,
-} from "../../planning/openai-runtime.js"
-import { createStoryTools } from "../../planning/story-tools.js"
+} from "./runtime.js"
+import { createStoryTools } from "../../planning/adapters/story-tools.js"
 import {
     AgentResult,
     AgentState,

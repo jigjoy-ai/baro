@@ -20,9 +20,9 @@ import {
     GenericOpenAIModel,
     providerCallTimeoutError,
     runInferenceRound,
-} from "../../src/planning/openai-runtime.js"
-import { runArchitectOpenAI } from "../../src/planning/architect-openai.js"
-import { runPlannerOpenAI } from "../../src/planning/planner-openai.js"
+} from "../../src/harness/openai/runtime.js"
+import { runArchitectOpenAI } from "../../src/planning/adapters/architect-openai.js"
+import { runPlannerOpenAI } from "../../src/planning/adapters/planner-openai.js"
 
 const servers = new Set<Server>()
 

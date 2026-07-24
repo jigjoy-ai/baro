@@ -30,7 +30,7 @@ import {
 } from "../semantic-events.js"
 import { runnerMeasurement } from "../runner-measurement.js"
 import type { Metric } from "../model-telemetry.js"
-import { providerCallTimeoutError } from "../planning/openai-runtime.js"
+import { providerCallTimeoutError } from "../harness/openai/runtime.js"
 import {
     SerializedObserver,
     type SerializedEventContext,

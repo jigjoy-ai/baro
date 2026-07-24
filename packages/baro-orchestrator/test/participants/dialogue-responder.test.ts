@@ -18,7 +18,7 @@ import {
 import { GatewayBillingCoordinator } from "../../src/billing/index.js"
 import { DialogueResponderInvocationError } from "../../src/participants/dialogue-agent.js"
 import { createDialogueResponder } from "../../src/participants/dialogue-responder.js"
-import { providerCallTimeoutError } from "../../src/planning/openai-runtime.js"
+import { providerCallTimeoutError } from "../../src/harness/openai/runtime.js"
 import { ConversationIntake } from "../../src/session/conversation-intake.js"
 import {
     assertHarnessEnvironmentWasSanitized,

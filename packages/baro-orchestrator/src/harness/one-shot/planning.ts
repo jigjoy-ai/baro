@@ -16,13 +16,13 @@ import {
     ARCHITECT_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_SYSTEM_PROMPT,
     buildArchitectUserMessage,
-} from "../../planning/architect-prompts.js"
+} from "../../planning/domain/architect-prompts.js"
 import {
     bufferedArchitectRunnerObserver,
     isArchitectProcessLaunchFailure,
     type ArchitectInvocationObserver,
-} from "../../planning/architect-invocation.js"
-import type { ArchitectOutcomeContractMode } from "../../planning/architect-outcome.js"
+} from "../../planning/adapters/architect-invocation.js"
+import type { ArchitectOutcomeContractMode } from "../../planning/domain/architect-outcome.js"
 import {
     PLANNER_SYSTEM_PROMPT,
     buildIntakePrompt,
@@ -30,7 +30,7 @@ import {
     heuristicModeContract,
     parseModeContract,
     type ModeContract,
-} from "../../planning/planner-prompts.js"
+} from "../../planning/domain/planner-prompts.js"
 
 export interface OneShotPlanningRequest {
     prompt: string

@@ -44,7 +44,7 @@ import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
 import { AgenticEnvironment } from "../runtime/mozaik.js"
 import { buildDag } from "../dag.js"
 import { envNonNegativeInt } from "../runtime/env-int.js"
-import { validatePrdArchitectureObligationCoverage } from "../planning/architecture-obligation-contract.js"
+import { validatePrdArchitectureObligationCoverage } from "../planning/domain/architecture-obligation-contract.js"
 import { deriveGoalContract } from "../runtime/goal-contract.js"
 import {
     PrdFile,

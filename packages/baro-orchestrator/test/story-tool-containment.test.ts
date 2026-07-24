@@ -17,7 +17,7 @@ import assert from "node:assert/strict"
 
 import { type Tool } from "../src/runtime/mozaik.js"
 
-import { createStoryTools } from "../src/planning/story-tools.js"
+import { createStoryTools } from "../src/planning/adapters/story-tools.js"
 
 function namedTool(tools: Tool[], name: string): Tool {
     const tool = tools.find((candidate) => candidate.name === name)
