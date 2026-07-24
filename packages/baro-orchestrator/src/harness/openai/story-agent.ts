@@ -55,7 +55,7 @@ import {
     compactProviderFailureDetail,
 } from "../../provider-failure.js"
 import { acceptsTargetedMessage } from "../../runtime/targeted-message-authority.js"
-import { correlationOf, type StoryOutcome, type StorySpec } from "../../participants/story-agent.js"
+import { correlationOf, type StoryOutcome, type StorySpec } from "../story-contract.js"
 import type { StoryCollaborationAccess } from "../../participants/story-executor.js"
 import {
     createRuntimeReplanTool,

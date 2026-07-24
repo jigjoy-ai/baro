@@ -280,11 +280,11 @@ export {
     type Frame,
 } from "./participants/cartographer.js"
 
+export { StoryAgent } from "./harness/claude/story-agent.js"
 export {
-    StoryAgent,
     type StorySpec,
     type StoryOutcome,
-} from "./participants/story-agent.js"
+} from "./harness/story-contract.js"
 export {
     OpenAIStoryAgent,
     type OpenAIStoryAgentOptions,

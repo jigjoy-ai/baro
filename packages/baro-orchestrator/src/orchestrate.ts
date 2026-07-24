@@ -94,7 +94,7 @@ import { RunVerifier } from "./participants/run-verifier.js"
 import { Sentry } from "./participants/sentry.js"
 import { StoryFactory } from "./participants/story-factory.js"
 import { WorkContextProvider } from "./participants/work-context-provider.js"
-import { type StoryAgent } from "./participants/story-agent.js"
+import { type StoryAgent } from "./harness/claude/story-agent.js"
 import {
     Surgeon,
     type PrdSnapshot,

@@ -8,9 +8,9 @@
 
 import { setTimeout as setTimeoutPromise } from "timers/promises"
 
-import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
+import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
 
-import { AgenticEnvironment } from "../runtime/mozaik.js"
+import { AgenticEnvironment } from "../../runtime/mozaik.js"
 import {
     AgentResult,
     AgentState,
@@ -22,73 +22,25 @@ import {
     type AgentResultData,
     type StoryFailureData,
     type StoryResultData,
-} from "../semantic-events.js"
-import { acceptsTargetedMessage } from "../runtime/targeted-message-authority.js"
+} from "../../semantic-events.js"
+import { acceptsTargetedMessage } from "../../runtime/targeted-message-authority.js"
 import {
     classifyProviderFailure,
     classifyStoryFailure,
     compactProviderFailureDetail,
-} from "../provider-failure.js"
+} from "../../provider-failure.js"
 import {
     ClaudeCliParticipant,
     ClaudeRunSummary,
-} from "../harness/claude/cli-participant.js"
-import { criticInput } from "./critic-input.js"
-import { StreamingTurnLifecycle } from "./turn-review.js"
-
-export interface StorySpec {
-    /** Story ID, used as agentId for observer attribution. */
-    id: string
-    prompt: string
-    cwd: string
-    runId?: string
-    leaseId?: string
-    generation?: number
-    /** Runtime DAG version captured when this story lease was launched. */
-    graphVersion?: number
-    model?: string
-    /** Passed as `claude --effort` (low|medium|high|xhigh|max). */
-    effort?: string
-    claudeBin?: string
-    /** Number of *additional* attempts after the first. */
-    retries?: number
-    /** Per-attempt timeout in seconds. */
-    timeoutSecs?: number
-    retryDelayMs?: number
-    /** Ms of silence (no AgentResult for this story) before stdin is closed. */
-    quietTimeoutMs?: number
-    /** Max AgentResult events (turns) before stdin is closed unconditionally. */
-    maxTurns?: number
-    /** Hard cap in seconds for the whole story across all attempts; <= 0 disables. */
-    hardTimeoutSecs?: number
-    /** Await an exact Critic verdict before completing each candidate turn. */
-    requiresQualityReview?: boolean
-    /** Object-identity authority allowed to review this worker's turns. */
-    turnReviewAuthority?: Participant
-    /** Exact Bridge allowed to deliver a collective message for this lease. */
-    targetedMessageAuthority?: Participant
-    /** Bound for one terminal-turn review. Default: 240 seconds. */
-    turnReviewTimeoutMs?: number
-    /** Collective-only execution handoff. An inconclusive review closes the
-     * worker, while AcceptanceGate keeps the candidate pending and rechecks it. */
-    handoffInconclusiveToAcceptanceGate?: boolean
-    /** Require a positive process-tree quiescence certificate before a
-     * spawned CLI attempt may succeed, retry, or release its worktree. */
-    requireProcessQuiescenceCertification?: boolean
-}
-
-export interface StoryOutcome {
-    storyId: string
-    success: boolean
-    attempts: number
-    durationSecs: number
-    finalSummary: ClaudeRunSummary | null
-    error: string | null
-    failure?: StoryFailureData
-    suspension?: StorySuspension
-}
-
-export type StorySuspension = NonNullable<StoryResultData["suspension"]>
+} from "./cli-participant.js"
+import {
+    correlationOf,
+    type StoryOutcome,
+    type StorySpec,
+    type StorySuspension,
+} from "../story-contract.js"
+import { criticInput } from "../../participants/critic-input.js"
+import { StreamingTurnLifecycle } from "../../participants/turn-review.js"
 
 export class StoryAgent extends BaseObserver {
     private readonly spec: Required<
@@ -752,18 +704,6 @@ function quiescenceFailure(): StoryFailureData {
 
 function describeClaudeResultError(result: AgentResultData): string {
     return `claude reported isError on result:${result.subtype}`
-}
-
-export function correlationOf(
-    spec: Pick<StorySpec, "runId" | "leaseId" | "generation">,
-): { runId: string; leaseId: string; generation: number } | Record<string, never> {
-    return spec.runId && spec.leaseId && spec.generation != null
-        ? {
-              runId: spec.runId,
-              leaseId: spec.leaseId,
-              generation: spec.generation,
-          }
-        : {}
 }
 
 function raceWithTimeout<T>(

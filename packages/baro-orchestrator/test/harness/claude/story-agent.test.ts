@@ -13,22 +13,22 @@ import {
     BaseObserver,
     type Participant,
     type SemanticEvent,
-} from "../../src/runtime/mozaik.js"
+} from "../../../src/runtime/mozaik.js"
 
 import {
     AgentResult,
     AgentTargetedMessage,
     Critique,
     StoryResult,
-} from "../../src/semantic-events.js"
-import { criticInput } from "../../src/participants/critic-input.js"
-import { StoryAgent } from "../../src/participants/story-agent.js"
+} from "../../../src/semantic-events.js"
+import { criticInput } from "../../../src/participants/critic-input.js"
+import { StoryAgent } from "../../../src/harness/claude/story-agent.js"
 import {
     captureEnv,
     source,
     type CapturedEnvironment,
     withTempDir,
-} from "./helpers.js"
+} from "../../participants/helpers.js"
 
 // These tests exercise semantic outcomes, not the production attempt watchdog.
 // The full suite launches many fixture processes concurrently, so leave enough

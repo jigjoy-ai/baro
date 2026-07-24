@@ -14,7 +14,7 @@ import {
     type OneShotStoryCoreSpec,
     type OneShotStoryOutcome,
 } from "../one-shot/story-agent.js"
-import { correlationOf } from "../../participants/story-agent.js"
+import { correlationOf } from "../story-contract.js"
 
 export interface CodexStorySpec extends OneShotStoryCoreSpec {
     model?: string

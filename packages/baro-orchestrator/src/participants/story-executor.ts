@@ -17,7 +17,7 @@ import { CodexStoryAgent } from "../harness/codex/story-agent.js"
 import { OpenAIStoryAgent } from "../harness/openai/story-agent.js"
 import { OpenCodeStoryAgent } from "../harness/opencode/story-agent.js"
 import { PiStoryAgent } from "../harness/pi/story-agent.js"
-import { StoryAgent } from "./story-agent.js"
+import { StoryAgent } from "../harness/claude/story-agent.js"
 
 export interface StoryExecOpts {
     /** Default model for the OpenAI path when the route names none. */

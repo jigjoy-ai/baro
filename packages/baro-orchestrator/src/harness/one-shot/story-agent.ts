@@ -33,7 +33,7 @@ import {
     OneShotTurnReview,
     oneShotSurgicalRevisionPrompt,
 } from "./turn-review.js"
-import { correlationOf, type StorySuspension } from "../../participants/story-agent.js"
+import { correlationOf, type StorySuspension } from "../story-contract.js"
 
 export interface OneShotStoryCoreSpec {
     /** Story ID, used as agentId for observer attribution. */
