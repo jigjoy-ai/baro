@@ -1,6 +1,5 @@
 import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
 import { randomUUID } from "node:crypto"
-import { isDeepStrictEqual } from "node:util"
 
 import { buildDag } from "../dag.js"
 import {
@@ -24,6 +23,10 @@ import {
     goalCompletionFailure,
 } from "../runtime/run-completion.js"
 import { NamedTimers } from "../runtime/named-timers.js"
+import {
+    WorkOfferDesk,
+    sameOfferRetractionCorrelation,
+} from "../market/work-offer-desk.js"
 import { validatePrdArchitectureObligationCoverage } from "../planning/architecture-obligation-contract.js"
 import {
     defineSemanticEvent,
@@ -96,7 +99,6 @@ import {
     type WorkBlockedData,
     type WorkBlockRejectionCode,
     type WorkLeaseGrantedData,
-    type WorkOfferedData,
     type WorkOfferRetractionRequestedData,
     type WorkOfferRetractionResolvedData,
 } from "../semantic-events.js"
@@ -226,9 +228,7 @@ interface RememberedWorkBlockDecision {
     event: WorkBlockDecisionEvent
 }
 
-interface ActiveWorkOffer {
-    data: WorkOfferedData
-}
+
 
 interface QueuedRuntimeReplan {
     proposal: RuntimeReplanProposedData
@@ -290,9 +290,9 @@ export class CollectiveBoard extends SerializedObserver {
     private startedAt = 0
     private wave: WaveState | null = null
     private waveOrdinal = 0
-    private offerSequence = 0
+
     private runtimeReplanStageSequence = 0
-    private contextSequence = 0
+
     private cleanupSequence = 0
     private verificationSequence = 0
     /**
@@ -332,19 +332,10 @@ export class CollectiveBoard extends SerializedObserver {
             supportsCooperativeSuspend: boolean
         }
     >()
-    /** Board-side lifecycle projection for work which has been published but
-     * has not crossed the Broker's lease boundary. Planned/context-pending
-     * stories deliberately do not appear here. */
-    private readonly activeOffers = new Map<string, ActiveWorkOffer>()
+    private readonly offers: WorkOfferDesk
     private readonly runtimeReplanQueue: QueuedRuntimeReplan[] = []
     private stagedRuntimeReplan: StagedRuntimeReplan | null = null
-    /** A timed-out request can still resolve later. Retain its exact
-     * correlation so a late retraction restores that story without touching a
-     * newer offer. */
-    private readonly abandonedOfferRetractions = new Map<
-        string,
-        WorkOfferRetractionRequestedData
-    >()
+
     private readonly settledLeaseResults = new Set<string>()
     private readonly pendingQuality = new Map<string, StoryResultData>()
     private readonly durations = new Map<string, number>()
@@ -405,7 +396,7 @@ export class CollectiveBoard extends SerializedObserver {
             generation?: number
         }
     >()
-    private readonly contextRequests = new Map<string, PrdStory>()
+
     private readonly replanProgressBudget: number
     private readonly runtimeAdaptationBudget: number
     private readonly softDeadlineSecs: number
@@ -435,6 +426,7 @@ export class CollectiveBoard extends SerializedObserver {
 
     constructor(private readonly opts: CollectiveBoardOptions) {
         super()
+        this.offers = new WorkOfferDesk(opts.runId)
         this.marketRouteIds = new Set(opts.marketRouteIds ?? [])
         this.operationalRecovery = new OperationalRecoveryPolicy({
             maxRetriesPerStory: opts.maxOperationalRetriesPerStory ?? 2,
@@ -621,9 +613,11 @@ export class CollectiveBoard extends SerializedObserver {
             (!this.opts.contextAuthority ||
                 context.source === this.opts.contextAuthority)
         ) {
-            const story = this.contextRequests.get(event.data.requestId)
-            if (!story || story.id !== event.data.storyId) return
-            this.contextRequests.delete(event.data.requestId)
+            const story = this.offers.takeContextStory(
+                event.data.requestId,
+                event.data.storyId,
+            )
+            if (!story) return
             if (
                 this.wave?.pending.has(story.id) &&
                 !this.runtimeReplanTargetsStory(story.id)
@@ -725,14 +719,14 @@ export class CollectiveBoard extends SerializedObserver {
             event.data.runId === this.opts.runId &&
             (!this.opts.leaseAuthority || context.source === this.opts.leaseAuthority)
         ) {
-            const offer = this.activeOffers.get(event.data.storyId)
+            const offer = this.offers.offerFor(event.data.storyId)
             if (!offer || offer.data.offerId !== event.data.offerId) return
             const stagedRetraction = this.isOfferAwaitingRetraction(
                 event.data.offerId,
             )
             const abandonedRetraction =
-                this.consumeAbandonedOfferRetractions(event.data.offerId)
-            this.activeOffers.delete(event.data.storyId)
+                this.offers.consumeAbandonedByOffer(event.data.offerId)
+            this.offers.deleteOffer(event.data.storyId)
             if (stagedRetraction) return
             if (abandonedRetraction) {
                 // The graph transaction already failed closed at its
@@ -2376,9 +2370,7 @@ export class CollectiveBoard extends SerializedObserver {
             const queued = this.runtimeReplanQueue.shift()
             if (!queued) return
             const targetIds = runtimeReplanTargetIds(queued.proposal)
-            const offers = [...targetIds]
-                .map((storyId) => this.activeOffers.get(storyId))
-                .filter((offer): offer is ActiveWorkOffer => offer !== undefined)
+            const offers = this.offers.offersFor(targetIds)
             if (offers.length === 0) {
                 this.executeRuntimeReplan(queued)
                 continue
@@ -2487,9 +2479,9 @@ export class CollectiveBoard extends SerializedObserver {
             ) return
             entry.resolution = structuredClone(resolution)
             if (resolution.disposition === "retracted") {
-                const active = this.activeOffers.get(resolution.storyId)
+                const active = this.offers.offerFor(resolution.storyId)
                 if (active?.data.offerId === resolution.offerId) {
-                    this.activeOffers.delete(resolution.storyId)
+                    this.offers.deleteOffer(resolution.storyId)
                 }
             }
             if (
@@ -2502,20 +2494,10 @@ export class CollectiveBoard extends SerializedObserver {
             return
         }
 
-        const abandoned = this.abandonedOfferRetractions.get(
-            resolution.retractionId,
-        )
-        if (
-            !abandoned ||
-            !sameOfferRetractionCorrelation(abandoned, resolution)
-        ) return
-        this.abandonedOfferRetractions.delete(resolution.retractionId)
-        if (resolution.disposition !== "retracted") return
-        const active = this.activeOffers.get(resolution.storyId)
-        if (active?.data.offerId === resolution.offerId) {
-            this.activeOffers.delete(resolution.storyId)
-        }
-        this.restoreRetractedStories([resolution.storyId])
+        const restoreStoryId =
+            this.offers.resolveAbandonedRetraction(resolution)
+        if (restoreStoryId === null) return
+        this.restoreRetractedStories([restoreStoryId])
     }
 
     private finishStagedRuntimeReplan(staged: StagedRuntimeReplan): void {
@@ -2574,10 +2556,7 @@ export class CollectiveBoard extends SerializedObserver {
             if (entry.resolution?.disposition === "retracted") {
                 retractedStoryIds.push(entry.request.storyId)
             } else if (!entry.resolution) {
-                this.abandonedOfferRetractions.set(
-                    entry.request.retractionId,
-                    entry.request,
-                )
+                this.offers.abandonRetraction(entry.request)
             }
         }
         const reason =
@@ -2643,15 +2622,7 @@ export class CollectiveBoard extends SerializedObserver {
 
     private onWorkLeaseGranted(grant: WorkLeaseGrantedData): void {
         const storyId = grant.request.storyId
-        const offer = this.activeOffers.get(storyId)
-        if (
-            !offer ||
-            offer.data.runId !== grant.runId ||
-            offer.data.offerId !== grant.offerId ||
-            offer.data.generation !== grant.generation ||
-            !isDeepStrictEqual(offer.data.request, grant.request)
-        ) return
-        this.activeOffers.delete(storyId)
+        if (!this.offers.consumeLeaseGrant(grant)) return
         this.leases.set(storyId, {
             leaseId: grant.leaseId,
             generation: grant.generation,
@@ -2675,16 +2646,6 @@ export class CollectiveBoard extends SerializedObserver {
         return false
     }
 
-    private consumeAbandonedOfferRetractions(offerId: string): boolean {
-        let consumed = false
-        for (const [retractionId, request] of this.abandonedOfferRetractions) {
-            if (request.offerId !== offerId) continue
-            this.abandonedOfferRetractions.delete(retractionId)
-            consumed = true
-        }
-        return consumed
-    }
-
     private restoreRetractedStories(storyIds: readonly string[]): void {
         if (this.phase !== "running" || !this.prd || !this.wave) return
         const currentById = new Map(
@@ -2697,8 +2658,8 @@ export class CollectiveBoard extends SerializedObserver {
                 story.passes ||
                 !this.wave.pending.has(storyId) ||
                 this.leases.has(storyId) ||
-                this.activeOffers.has(storyId) ||
-                this.hasContextRequest(storyId) ||
+                this.offers.hasOffer(storyId) ||
+                this.offers.hasContextRequest(storyId) ||
                 this.runtimeReplanTargetsStory(storyId) ||
                 !story.dependsOn.every(
                     (dependency) => currentById.get(dependency)?.passes === true,
@@ -2720,8 +2681,8 @@ export class CollectiveBoard extends SerializedObserver {
             ...applied.modifiedStoryIds,
         ])
         for (const storyId of rescheduled) {
-            this.cancelContextRequests(storyId)
-            this.activeOffers.delete(storyId)
+            this.offers.cancelContextRequests(storyId)
+            this.offers.deleteOffer(storyId)
             if (
                 this.wave.pending.has(storyId) &&
                 !this.leases.has(storyId) &&
@@ -2735,19 +2696,6 @@ export class CollectiveBoard extends SerializedObserver {
         }
         this.reconcileReadyStories()
         this.maybeCompleteWave()
-    }
-
-    private hasContextRequest(storyId: string): boolean {
-        for (const story of this.contextRequests.values()) {
-            if (story.id === storyId) return true
-        }
-        return false
-    }
-
-    private cancelContextRequests(storyId: string): void {
-        for (const [requestId, story] of this.contextRequests) {
-            if (story.id === storyId) this.contextRequests.delete(requestId)
-        }
     }
 
     /** Project runnable work continuously from the accepted graph. A DAG level
@@ -3101,34 +3049,29 @@ export class CollectiveBoard extends SerializedObserver {
 
     private requestStoryContext(story: PrdStory): void {
         if (
-            this.hasContextRequest(story.id) ||
-            this.activeOffers.has(story.id) ||
+            this.offers.hasContextRequest(story.id) ||
+            this.offers.hasOffer(story.id) ||
             this.leases.has(story.id) ||
             this.runtimeReplanTargetsStory(story.id)
         ) return
-        const requestId = `${this.opts.runId}:context:${++this.contextSequence}:${story.id}`
-        this.contextRequests.set(requestId, story)
         this.emit(
-            WorkContextRequested.create({
-                runId: this.opts.runId,
-                requestId,
-                storyId: story.id,
-                hints: [
+            WorkContextRequested.create(
+                this.offers.beginContextRequest(story, [
                     ...tokens(story.title),
                     ...tokens(story.description).slice(0, 8),
-                ],
-            }),
+                ]),
+            ),
         )
     }
 
     private offerStory(story: PrdStory, context: string | null): void {
         if (
             !this.wave?.pending.has(story.id) ||
-            this.activeOffers.has(story.id) ||
+            this.offers.hasOffer(story.id) ||
             this.leases.has(story.id) ||
             this.runtimeReplanTargetsStory(story.id)
         ) return
-        const offerId = `${this.opts.runId}:offer:${++this.offerSequence}:${story.id}`
+        const offerId = this.offers.nextOfferId(story.id)
         const basePrompt = buildStoryOfferPrompt(this.prd, story)
         const rememberedRecovery = this.recoveryContext.get(story.id)
         const recovery =
@@ -3171,9 +3114,7 @@ export class CollectiveBoard extends SerializedObserver {
                 ...(recovery ? { recovery } : {}),
             },
         })
-        this.activeOffers.set(story.id, {
-            data: structuredClone(offered.data),
-        })
+        this.offers.recordOffer(offered.data)
         this.emit(offered)
     }
 
@@ -4022,20 +3963,6 @@ function runtimeReplanTargetIds(
     ])
 }
 
-function sameOfferRetractionCorrelation(
-    request: WorkOfferRetractionRequestedData,
-    resolution: WorkOfferRetractionResolvedData,
-): boolean {
-    return (
-        request.runId === resolution.runId &&
-        request.proposalId === resolution.proposalId &&
-        request.retractionId === resolution.retractionId &&
-        request.offerId === resolution.offerId &&
-        request.storyId === resolution.storyId &&
-        request.generation === resolution.generation &&
-        request.graphVersion === resolution.graphVersion
-    )
-}
 
 function sameRemediationStory(
     current: PrdStory,
