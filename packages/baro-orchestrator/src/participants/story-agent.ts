@@ -32,7 +32,7 @@ import {
 import {
     ClaudeCliParticipant,
     ClaudeRunSummary,
-} from "./claude-cli-participant.js"
+} from "../harness/claude/cli-participant.js"
 import { criticInput } from "./critic-input.js"
 import { StreamingTurnLifecycle } from "./turn-review.js"
 

@@ -26,10 +26,10 @@ import {
     prepareCriticEvaluation,
     type CriticEvidenceSource,
 } from "../../src/participants/critic-evidence.js"
-import { CriticOpenAI } from "../../src/participants/critic-openai.js"
-import { CriticOpenCode } from "../../src/participants/critic-opencode.js"
-import { CriticPi } from "../../src/participants/critic-pi.js"
-import { Critic, VERDICT_SYSTEM_PROMPT } from "../../src/participants/critic.js"
+import { CriticOpenAI } from "../../src/harness/openai/critic.js"
+import { CriticOpenCode } from "../../src/harness/opencode/critic.js"
+import { CriticPi } from "../../src/harness/pi/critic.js"
+import { Critic, VERDICT_SYSTEM_PROMPT } from "../../src/harness/claude/critic.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import { AgentResult, AgentState } from "../../src/semantic-events.js"
 import { joinWithCapture, source, withTempDir } from "./helpers.js"

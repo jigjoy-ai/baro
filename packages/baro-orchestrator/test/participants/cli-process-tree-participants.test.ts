@@ -3,10 +3,10 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import { ClaudeCliParticipant } from "../../src/participants/claude-cli-participant.js"
-import { CodexCliParticipant } from "../../src/participants/codex-cli-participant.js"
-import { OpenCodeCliParticipant } from "../../src/participants/opencode-cli-participant.js"
-import { PiCliParticipant } from "../../src/participants/pi-cli-participant.js"
+import { ClaudeCliParticipant } from "../../src/harness/claude/cli-participant.js"
+import { CodexCliParticipant } from "../../src/harness/codex/cli-participant.js"
+import { OpenCodeCliParticipant } from "../../src/harness/opencode/cli-participant.js"
+import { PiCliParticipant } from "../../src/harness/pi/cli-participant.js"
 import {
     activeProcessTreeCount,
     processTreeObserverStats,

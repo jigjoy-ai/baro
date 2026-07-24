@@ -10,9 +10,9 @@ import {
 } from "../../src/runtime/mozaik.js"
 
 import { AgentState, StoryResult } from "../../src/semantic-events.js"
-import { CodexStoryAgent } from "../../src/participants/codex-story-agent.js"
-import { OpenCodeStoryAgent } from "../../src/participants/opencode-story-agent.js"
-import { PiStoryAgent } from "../../src/participants/pi-story-agent.js"
+import { CodexStoryAgent } from "../../src/harness/codex/story-agent.js"
+import { OpenCodeStoryAgent } from "../../src/harness/opencode/story-agent.js"
+import { PiStoryAgent } from "../../src/harness/pi/story-agent.js"
 import { StoryAgent } from "../../src/participants/story-agent.js"
 import { PROCESS_TREE_CAPABILITIES } from "../../src/process-tree.js"
 import {

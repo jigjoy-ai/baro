@@ -3,12 +3,12 @@
  * The shared prompt/isolation/telemetry flow lives in one-shot-planning.ts.
  */
 
-import { runPiOneShot } from "../pi-one-shot.js"
+import { runPiOneShot } from "../harness/pi/one-shot.js"
 import {
     runOneShotArchitect,
     type OneShotArchitectCoreOptions,
     type OneShotPlanningRequest,
-} from "./one-shot-planning.js"
+} from "../harness/one-shot/planning.js"
 
 export interface RunArchitectPiOptions extends OneShotArchitectCoreOptions {
     /** Pi provider (e.g. "anthropic", "openai"). */

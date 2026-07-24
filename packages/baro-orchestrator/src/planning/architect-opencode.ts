@@ -3,12 +3,12 @@
  * The shared prompt/isolation/telemetry flow lives in one-shot-planning.ts.
  */
 
-import { runOpenCodeOneShot } from "../opencode-one-shot.js"
+import { runOpenCodeOneShot } from "../harness/opencode/one-shot.js"
 import {
     runOneShotArchitect,
     type OneShotArchitectCoreOptions,
     type OneShotPlanningRequest,
-} from "./one-shot-planning.js"
+} from "../harness/one-shot/planning.js"
 
 export interface RunArchitectOpenCodeOptions extends OneShotArchitectCoreOptions {
     /** OpenCode model in `provider/model` format. */

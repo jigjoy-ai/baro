@@ -17,10 +17,10 @@ import {
     ModelMessageItem,
 } from "../src/runtime/mozaik.js"
 
-import { mapPiEvent } from "../src/pi-stream-mapper.js"
-import { PiCliParticipant } from "../src/participants/pi-cli-participant.js"
-import { PiStoryAgent } from "../src/participants/pi-story-agent.js"
-import { runPiOneShot } from "../src/pi-one-shot.js"
+import { mapPiEvent } from "../src/harness/pi/stream-mapper.js"
+import { PiCliParticipant } from "../src/harness/pi/cli-participant.js"
+import { PiStoryAgent } from "../src/harness/pi/story-agent.js"
+import { runPiOneShot } from "../src/harness/pi/one-shot.js"
 
 let testDir: string
 let passed = 0

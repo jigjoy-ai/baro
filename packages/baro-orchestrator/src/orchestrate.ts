@@ -52,7 +52,7 @@ import {
     Conductor,
     ConductorRunSummary,
 } from "./participants/conductor.js"
-import { Critic } from "./participants/critic.js"
+import { Critic } from "./harness/claude/critic.js"
 import {
     CriticCommandEvidenceCollector,
     type CriticRepositoryTarget,
@@ -62,10 +62,10 @@ import {
     CriticTargetRegistry,
     buildCriticTargets,
 } from "./participants/critic-target-registry.js"
-import { CriticCodex } from "./participants/critic-codex.js"
-import { CriticOpenAI } from "./participants/critic-openai.js"
-import { CriticOpenCode } from "./participants/critic-opencode.js"
-import { CriticPi } from "./participants/critic-pi.js"
+import { CriticCodex } from "./harness/codex/critic.js"
+import { CriticOpenAI } from "./harness/openai/critic.js"
+import { CriticOpenCode } from "./harness/opencode/critic.js"
+import { CriticPi } from "./harness/pi/critic.js"
 import {
     DialogueAgent,
     type DialogueResponder,
@@ -100,10 +100,10 @@ import {
     type PrdSnapshot,
     type RouteDescriber,
 } from "./participants/surgeon.js"
-import { SurgeonCodex } from "./participants/surgeon-codex.js"
-import { SurgeonOpenAI } from "./participants/surgeon-openai.js"
-import { SurgeonOpenCode } from "./participants/surgeon-opencode.js"
-import { SurgeonPi } from "./participants/surgeon-pi.js"
+import { SurgeonCodex } from "./harness/codex/surgeon.js"
+import { SurgeonOpenAI } from "./harness/openai/surgeon.js"
+import { SurgeonOpenCode } from "./harness/opencode/surgeon.js"
+import { SurgeonPi } from "./harness/pi/surgeon.js"
 import { Supervisor } from "./participants/supervisor.js"
 import { resolveEffectiveParallel } from "./planning/mode-enforcement.js"
 import { PrdFile, loadPrd, savePrd } from "./prd.js"

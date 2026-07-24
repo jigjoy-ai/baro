@@ -10,7 +10,7 @@ import {
 import {
     extractVerdictJson,
     verdictSystemPrompt,
-} from "./critic.js"
+} from "../harness/claude/critic.js"
 import {
     GOAL_REVIEW_STABLE_CAPTURE_BUDGET_MS,
     prepareGoalInvariantReview,

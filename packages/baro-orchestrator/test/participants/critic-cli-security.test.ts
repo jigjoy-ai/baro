@@ -10,14 +10,14 @@ import {
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import { CriticCodex } from "../../src/participants/critic-codex.js"
+import { CriticCodex } from "../../src/harness/codex/critic.js"
 import type { CriticEvidenceSource } from "../../src/participants/critic-evidence.js"
-import { CriticOpenCode } from "../../src/participants/critic-opencode.js"
-import { CriticPi } from "../../src/participants/critic-pi.js"
+import { CriticOpenCode } from "../../src/harness/opencode/critic.js"
+import { CriticPi } from "../../src/harness/pi/critic.js"
 import {
     Critic,
     VERDICT_SYSTEM_PROMPT,
-} from "../../src/participants/critic.js"
+} from "../../src/harness/claude/critic.js"
 import { AgentResult, Critique } from "../../src/semantic-events.js"
 import {
     assertHarnessEnvironmentWasSanitized,

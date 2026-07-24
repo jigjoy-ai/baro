@@ -8,7 +8,7 @@
 
 import { realpathSync } from "node:fs"
 
-import { runCodexOneShot } from "../codex-one-shot.js"
+import { runCodexOneShot } from "../harness/codex/one-shot.js"
 import {
     createPlannerHarnessProgressiveSupport,
     PROGRESSIVE_PLANNER_MCP_SERVER_NAME,

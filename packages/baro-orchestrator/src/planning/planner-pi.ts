@@ -3,13 +3,13 @@
  * The shared intake/prompt/extraction flow lives in one-shot-planning.ts.
  */
 
-import { runPiOneShot } from "../pi-one-shot.js"
+import { runPiOneShot } from "../harness/pi/one-shot.js"
 import {
     runOneShotIntake,
     runOneShotPlanner,
     type OneShotPlannerCoreOptions,
     type OneShotPlanningRequest,
-} from "./one-shot-planning.js"
+} from "../harness/one-shot/planning.js"
 import type { ModeContract } from "./planner-prompts.js"
 
 export interface RunPlannerPiOptions extends OneShotPlannerCoreOptions {

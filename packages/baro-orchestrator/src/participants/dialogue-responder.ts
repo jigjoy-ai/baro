@@ -18,11 +18,11 @@ import {
 } from "../runtime/mozaik.js"
 
 import type { GatewayBillingCoordinator } from "../billing/index.js"
-import { runCodexOneShot } from "../codex-one-shot.js"
+import { runCodexOneShot } from "../harness/codex/one-shot.js"
 import { execFileCli } from "../exec-file-cli.js"
 import { harnessChildEnvironment } from "../harness-environment.js"
-import { runOpenCodeOneShot } from "../opencode-one-shot.js"
-import { runPiOneShot } from "../pi-one-shot.js"
+import { runOpenCodeOneShot } from "../harness/opencode/one-shot.js"
+import { runPiOneShot } from "../harness/pi/one-shot.js"
 import {
     createOpenAIModel,
     GenericOpenAIModel,

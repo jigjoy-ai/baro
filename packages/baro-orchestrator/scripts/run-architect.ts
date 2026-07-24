@@ -22,7 +22,7 @@ import {
     reconcileAndCloseGatewayBilling,
     type GatewayBillingCoordinator,
 } from "../src/billing/index.js"
-import { sanitizeDiagnosticText } from "../src/codex-failure-diagnostics.js"
+import { sanitizeDiagnosticText } from "../src/harness/codex/failure-diagnostics.js"
 import {
     DialogueResponderInvocationError,
     type DialogueResponderInvocation,

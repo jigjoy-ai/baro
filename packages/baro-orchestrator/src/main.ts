@@ -183,7 +183,7 @@ export {
     type RunnerMeasurementContext,
 } from "./runner-measurement.js"
 
-export { mapClaudeEvent, type MapResult } from "./stream-json-mapper.js"
+export { mapClaudeEvent, type MapResult } from "./harness/claude/stream-mapper.js"
 
 export {
     createVerifyPlan,
@@ -207,25 +207,25 @@ export {
     mapCodexEvent,
     type CodexMapResult,
     type MappedCodexItem,
-} from "./codex-stream-mapper.js"
+} from "./harness/codex/stream-mapper.js"
 
 export {
     ClaudeCliParticipant,
     type ClaudeCliParticipantOptions,
     type ClaudeRunSummary,
-} from "./participants/claude-cli-participant.js"
+} from "./harness/claude/cli-participant.js"
 
 export {
     CodexCliParticipant,
     type CodexCliParticipantOptions,
     type CodexRunSummary,
-} from "./participants/codex-cli-participant.js"
+} from "./harness/codex/cli-participant.js"
 
 export {
     CodexStoryAgent,
     type CodexStorySpec,
     type CodexStoryOutcome,
-} from "./participants/codex-story-agent.js"
+} from "./harness/codex/story-agent.js"
 
 export {
     ModelTelemetryCollector,
@@ -236,41 +236,41 @@ export {
     OpenCodeCliParticipant,
     type OpenCodeCliParticipantOptions,
     type OpenCodeRunSummary,
-} from "./participants/opencode-cli-participant.js"
+} from "./harness/opencode/cli-participant.js"
 
 export {
     OpenCodeStoryAgent,
     type OpenCodeStorySpec,
     type OpenCodeStoryOutcome,
-} from "./participants/opencode-story-agent.js"
+} from "./harness/opencode/story-agent.js"
 
 export {
     mapOpenCodeEvent,
     type OpenCodeMapResult,
     type MappedOpenCodeItem,
-} from "./opencode-stream-mapper.js"
+} from "./harness/opencode/stream-mapper.js"
 
-export { runOpenCodeOneShot, type RunOpenCodeOneShotOptions } from "./opencode-one-shot.js"
+export { runOpenCodeOneShot, type RunOpenCodeOneShotOptions } from "./harness/opencode/one-shot.js"
 
 export {
     PiCliParticipant,
     type PiCliParticipantOptions,
     type PiRunSummary,
-} from "./participants/pi-cli-participant.js"
+} from "./harness/pi/cli-participant.js"
 
 export {
     PiStoryAgent,
     type PiStorySpec,
     type PiStoryOutcome,
-} from "./participants/pi-story-agent.js"
+} from "./harness/pi/story-agent.js"
 
 export {
     mapPiEvent,
     type PiMapResult,
     type MappedPiItem,
-} from "./pi-stream-mapper.js"
+} from "./harness/pi/stream-mapper.js"
 
-export { runPiOneShot, type RunPiOneShotOptions } from "./pi-one-shot.js"
+export { runPiOneShot, type RunPiOneShotOptions } from "./harness/pi/one-shot.js"
 
 export { Auditor, type AuditorOptions } from "./participants/auditor.js"
 
@@ -288,7 +288,7 @@ export {
 export {
     OpenAIStoryAgent,
     type OpenAIStoryAgentOptions,
-} from "./participants/openai-story-agent.js"
+} from "./harness/openai/story-agent.js"
 export { StoryResult } from "./semantic-events.js"
 
 // The StoryExecutor seam: pass a custom implementation as
@@ -600,7 +600,7 @@ export {
 export {
     Critic,
     type CriticOptions,
-} from "./participants/critic.js"
+} from "./harness/claude/critic.js"
 
 export {
     Surgeon,

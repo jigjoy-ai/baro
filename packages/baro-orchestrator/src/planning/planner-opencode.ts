@@ -3,13 +3,13 @@
  * The shared intake/prompt/extraction flow lives in one-shot-planning.ts.
  */
 
-import { runOpenCodeOneShot } from "../opencode-one-shot.js"
+import { runOpenCodeOneShot } from "../harness/opencode/one-shot.js"
 import {
     runOneShotIntake,
     runOneShotPlanner,
     type OneShotPlannerCoreOptions,
     type OneShotPlanningRequest,
-} from "./one-shot-planning.js"
+} from "../harness/one-shot/planning.js"
 import type { ModeContract } from "./planner-prompts.js"
 
 export interface RunPlannerOpenCodeOptions extends OneShotPlannerCoreOptions {
