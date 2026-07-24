@@ -1,95 +1,45 @@
 /**
  * ArchitectOpenCode — one-shot Architect call via `opencode run --format json`.
- * Same prompt shape as ArchitectClaude / ArchitectCodex so providers produce
- * comparable decision documents; OpenCode's built-in tools explore.
+ * The shared prompt/isolation/telemetry flow lives in one-shot-planning.ts.
  */
-
-import { mkdtempSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 
 import { runOpenCodeOneShot } from "../opencode-one-shot.js"
 import {
-    ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
-    ARCHITECT_OUTCOME_SYSTEM_PROMPT,
-    ARCHITECT_SYSTEM_PROMPT,
-    buildArchitectUserMessage,
-} from "./architect-prompts.js"
-import {
-    bufferedArchitectRunnerObserver,
-    isArchitectProcessLaunchFailure,
-    type ArchitectInvocationObserver,
-} from "./architect-invocation.js"
-import type { ArchitectOutcomeContractMode } from "./architect-outcome.js"
-import type { ModeContract } from "./planner-prompts.js"
+    runOneShotArchitect,
+    type OneShotArchitectCoreOptions,
+    type OneShotPlanningRequest,
+} from "./one-shot-planning.js"
 
-export interface RunArchitectOpenCodeOptions {
-    goal: string
-    cwd: string
+export interface RunArchitectOpenCodeOptions extends OneShotArchitectCoreOptions {
     /** OpenCode model in `provider/model` format. */
     model?: string
-    projectContext?: string
-    modeContract?: ModeContract
     opencodeBin?: string
-    /** Default 10 min — tool-call exploration blew past the old
-     *  3-minute timeout mid-exploration. */
-    timeoutMs?: number
-    outcomeMode?: boolean
-    /** Strict outcome phase. Defaults to the complete ADR + obligations contract. */
-    outcomeContractMode?: ArchitectOutcomeContractMode
-    /** Optional observational telemetry for this one-shot Architect process. */
-    onInvocation?: ArchitectInvocationObserver
 }
 
 export async function runArchitectOpenCode(
     opts: RunArchitectOpenCodeOptions,
 ): Promise<string> {
-    const userMessage = buildArchitectUserMessage(opts.goal, opts.projectContext, opts.modeContract)
-    const outcomePrompt = (opts.outcomeContractMode ?? "complete") === "decision"
-        ? ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT
-        : ARCHITECT_OUTCOME_SYSTEM_PROMPT
-    const prompt = opts.outcomeMode
-        ? userMessage
-        : `${ARCHITECT_SYSTEM_PROMPT}\n\n${userMessage}`
-    // OpenCode has no repository read-only sandbox. Outcome mode therefore
-    // runs its existing deny-all evaluator in an empty disposable directory
-    // and relies only on Baro's brokered deterministic project context.
-    const isolatedCwd = opts.outcomeMode
-        ? mkdtempSync(join(tmpdir(), "baro-architect-opencode-"))
-        : undefined
-    const invocationTelemetry = bufferedArchitectRunnerObserver(opts.onInvocation)
-
-    let text: string
-    try {
-        text = await runOpenCodeOneShot({
-            prompt,
-            cwd: isolatedCwd ?? opts.cwd,
-            model: opts.model,
-            opencodeBin: opts.opencodeBin,
-            timeoutMs: opts.timeoutMs ?? 600_000,
-            label: "opencode-architect",
-            ...(invocationTelemetry.onInvocation
-                ? { onInvocation: invocationTelemetry.onInvocation }
-                : {}),
-            ...(opts.outcomeMode
-                ? { safeEvaluatorSystemPrompt: outcomePrompt }
-                : {}),
-        })
-        invocationTelemetry.flush()
-    } catch (error) {
-        if (isArchitectProcessLaunchFailure(error)) {
-            invocationTelemetry.discard()
-        } else {
-            invocationTelemetry.flush()
-        }
-        throw error
-    } finally {
-        if (isolatedCwd) rmSync(isolatedCwd, { recursive: true, force: true })
-    }
-
-    const doc = text.trim()
-    if (!doc) {
-        throw new Error("ArchitectOpenCode: opencode returned empty result")
-    }
-    return doc
+    return runOneShotArchitect(
+        "ArchitectOpenCode",
+        "opencode",
+        opts,
+        (request: OneShotPlanningRequest) =>
+            runOpenCodeOneShot({
+                prompt: request.prompt,
+                cwd: request.cwd,
+                model: opts.model,
+                opencodeBin: opts.opencodeBin,
+                timeoutMs: request.timeoutMs,
+                label: request.label,
+                ...(request.onInvocation
+                    ? { onInvocation: request.onInvocation }
+                    : {}),
+                ...(request.safeEvaluatorSystemPrompt
+                    ? {
+                          safeEvaluatorSystemPrompt:
+                              request.safeEvaluatorSystemPrompt,
+                      }
+                    : {}),
+            }),
+    )
 }
