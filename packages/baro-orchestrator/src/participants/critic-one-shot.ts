@@ -16,7 +16,7 @@ import {
     Critique,
     ModelInvocationMeasured,
 } from "../semantic-events.js"
-import { buildCorrectiveMessage, extractVerdictJson } from "./critic.js"
+import { buildCorrectiveMessage, extractVerdictJson } from "./critic-verdict.js"
 import {
     inconclusiveEvidenceVerdict,
     prepareCriticEvaluation,
@@ -51,7 +51,7 @@ export interface OneShotCriticCoreOptions extends TerminalTurnAuthorityOptions {
 
 export interface OneShotCriticBackendSpec {
     /** Telemetry backend tag. */
-    backend: "codex" | "opencode" | "pi"
+    backend: "claude" | "codex" | "opencode" | "pi"
     /** Critique `modelUsed` when no explicit model was requested. */
     defaultModelLabel: string
     /** Human-facing prefix for evaluator failure reasons. */
@@ -68,7 +68,7 @@ export abstract class OneShotCritic extends BaseObserver {
     private readonly terminalAuthorities: TerminalTurnAuthorityOptions
     private readonly maxEmissionsPerAgent: number
     private readonly targets: ReadonlyMap<string, readonly string[]>
-    private readonly runId: string | undefined
+    protected readonly runId: string | undefined
     private readonly evidence: CriticEvidenceSource | undefined
     protected readonly timeoutMs: number
     private readonly emissions = new Map<string, number>()
@@ -117,6 +117,19 @@ export abstract class OneShotCritic extends BaseObserver {
         }
     }
 
+    /**
+     * Runs after each evaluation, before its Critique reaches the bus —
+     * the slot for backend telemetry that must precede the verdict it
+     * describes. `preparationReady` is false when evidence preparation
+     * failed or was inconclusive, i.e. no evaluator model was invoked.
+     */
+    protected onEvaluationSettled(
+        _agentId: string,
+        _turn: number,
+        _evaluation: OneShotCriticEvaluation,
+        _preparationReady: boolean,
+    ): void {}
+
     /** Resolves once every in-flight evaluation has emitted its CritiqueItem. */
     async idle(): Promise<void> {
         await drainCriticPending(this.pending)
@@ -145,6 +158,7 @@ export abstract class OneShotCritic extends BaseObserver {
 
         const work = (async () => {
             let repositoryFingerprint: string | null = null
+            let preparationReady = false
             let evaluation: OneShotCriticEvaluation
             try {
                 const preparation = await prepareCriticEvaluation(
@@ -154,7 +168,8 @@ export abstract class OneShotCritic extends BaseObserver {
                     this.evidence,
                 )
                 repositoryFingerprint = preparation.repositoryFingerprint
-                evaluation = preparation.status === "ready"
+                preparationReady = preparation.status === "ready"
+                evaluation = preparationReady
                     ? await this.evaluate(preparation.prompt, agentId, turn)
                     : inconclusiveEvidenceVerdict(preparation.issues)
             } catch (error) {
@@ -169,6 +184,7 @@ export abstract class OneShotCritic extends BaseObserver {
                     ],
                 }
             }
+            this.onEvaluationSettled(agentId, turn, evaluation, preparationReady)
             const { verdict, reasoning, violatedCriteria } = evaluation
             const status = evaluation.status ?? "evaluated"
 
@@ -217,7 +233,7 @@ export abstract class OneShotCritic extends BaseObserver {
         await work
     }
 
-    private async evaluate(
+    protected async evaluate(
         userPrompt: string,
         agentId: string,
         turn: number,

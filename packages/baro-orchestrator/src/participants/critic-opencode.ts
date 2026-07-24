@@ -1,7 +1,7 @@
 /** CriticOpenCode — one-shot acceptance evaluator via `opencode run`. */
 
 import { runOpenCodeOneShot } from "../opencode-one-shot.js"
-import { VERDICT_SYSTEM_PROMPT } from "./critic.js"
+import { VERDICT_SYSTEM_PROMPT } from "./critic-verdict.js"
 import {
     OneShotCritic,
     type OneShotCriticCoreOptions,
