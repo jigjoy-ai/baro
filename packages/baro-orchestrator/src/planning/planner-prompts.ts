@@ -88,6 +88,11 @@ Repository-specific invariants that those commands do not cover (for example,
 an exact public-export or dependency policy) remain substantive acceptance work.
 Use repository-owned package scripts for focused JavaScript tests, for example
 \`npm test -- tests/path.test.ts\`; never emit \`npx\` or another package downloader.
+The final verifier executes ONLY these declared-test forms and skips anything
+else as unprovable: \`npm|pnpm|yarn test\` / \`... run <build|typecheck|test|lint>\`,
+\`node --test <paths>\`, \`node --check <file>\`, \`cargo <build|test|check|clippy>\`,
+and \`git diff --check\`. Never declare inline code (\`node -e ...\`), shell
+pipelines, or ad-hoc scripts — a skipped declared test fails the whole run.
 
 When in doubt, prefer FEWER stories over more. A single 2-file story is better
 than two artificially-split 1-file stories.
