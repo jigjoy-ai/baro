@@ -96,10 +96,10 @@ import { StoryFactory } from "./market/story-factory.js"
 import { WorkContextProvider } from "./market/work-context-provider.js"
 import { type StoryAgent } from "./harness/claude/story-agent.js"
 import {
-    Surgeon,
     type PrdSnapshot,
     type RouteDescriber,
 } from "./execution/surgeon.js"
+import { Surgeon } from "./harness/claude/surgeon.js"
 import { SurgeonCodex } from "./harness/codex/surgeon.js"
 import { SurgeonOpenAI } from "./harness/openai/surgeon.js"
 import { SurgeonOpenCode } from "./harness/opencode/surgeon.js"

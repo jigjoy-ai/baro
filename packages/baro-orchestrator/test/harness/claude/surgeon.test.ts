@@ -3,9 +3,10 @@ import { chmodSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import { knownMetric, unknownMetric } from "../../src/telemetry/model-telemetry.js"
-import { Surgeon, type PrdSnapshot } from "../../src/execution/surgeon.js"
-import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
+import { knownMetric, unknownMetric } from "../../../src/telemetry/model-telemetry.js"
+import { Surgeon } from "../../../src/harness/claude/surgeon.js"
+import { type PrdSnapshot } from "../../../src/execution/surgeon.js"
+import { StoryOutcomeAuthority } from "../../../src/runtime/story-outcome-authority.js"
 import {
     Critique,
     ModelInvocationMeasured,
@@ -15,7 +16,7 @@ import {
     StoryQualityCompleted,
     StoryResult,
     WorkLeaseGranted,
-} from "../../src/semantic-events.js"
+} from "../../../src/semantic-events.js"
 import {
     assertHarnessEnvironmentWasSanitized,
     harnessEnvironmentCaptureProgram,
@@ -23,7 +24,7 @@ import {
     source,
     withInjectedJigJoyEnvironment,
     withTempDir,
-} from "./helpers.js"
+} from "../../execution/helpers.js"
 
 const snapshot: PrdSnapshot = {
     project: "Surgeon test",

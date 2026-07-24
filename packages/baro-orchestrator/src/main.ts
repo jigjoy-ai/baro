@@ -605,5 +605,5 @@ export {
 export {
     Surgeon,
     type SurgeonOptions,
-    type PrdSnapshot,
-} from "./execution/surgeon.js"
+} from "./harness/claude/surgeon.js"
+export { type PrdSnapshot } from "./execution/surgeon.js"
