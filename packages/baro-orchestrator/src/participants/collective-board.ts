@@ -23,6 +23,7 @@ import {
     blockedStoryIds,
     goalCompletionFailure,
 } from "../runtime/run-completion.js"
+import { NamedTimers } from "../runtime/named-timers.js"
 import { validatePrdArchitectureObligationCoverage } from "../planning/architecture-obligation-contract.js"
 import {
     defineSemanticEvent,
@@ -420,13 +421,15 @@ export class CollectiveBoard extends SerializedObserver {
     } | null = null
     private verificationStatus: "passed" | "failed" | "skipped" | undefined
     private verification: RunVerificationEvidence | undefined
-    private verificationTimer: ReturnType<typeof setTimeout> | null = null
-    private softDeadlineTimer: ReturnType<typeof setTimeout> | null = null
-    private goalCompletionTimer: ReturnType<typeof setTimeout> | null = null
-    private operationalRetryTimer: ReturnType<typeof setTimeout> | null = null
+    private readonly timers = new NamedTimers<
+        | "verification"
+        | "softDeadline"
+        | "goalCompletion"
+        | "operationalRetry"
+        | "goalRemediationRetry"
+        | "offerRetraction"
+    >()
     private operationalRetryDueAt: number | null = null
-    private goalRemediationRetryTimer: ReturnType<typeof setTimeout> | null = null
-    private offerRetractionTimer: ReturnType<typeof setTimeout> | null = null
     readonly done: Promise<ConductorRunSummary>
     private resolveDone!: (summary: ConductorRunSummary) => void
 
@@ -2122,7 +2125,7 @@ export class CollectiveBoard extends SerializedObserver {
             this.pendingGoalRemediations.delete(remediation.proposalId)
             this.pendingGoalRemediationFailures.delete(remediation.proposalId)
             if (this.pendingGoalRemediations.size === 0) {
-                this.clearGoalRemediationRetryTimer()
+                this.timers.clear("goalRemediationRetry")
             }
             this.emitGoalRemediationAdmitted(
                 remediation,
@@ -2221,7 +2224,7 @@ export class CollectiveBoard extends SerializedObserver {
         this.pendingGoalRemediations.delete(remediation.proposalId)
         this.pendingGoalRemediationFailures.delete(remediation.proposalId)
         if (this.pendingGoalRemediations.size === 0) {
-            this.clearGoalRemediationRetryTimer()
+            this.timers.clear("goalRemediationRetry")
         }
         this.prd = outcome.applied.prd
         this.emitGraphDecision(outcome.event)
@@ -2307,8 +2310,8 @@ export class CollectiveBoard extends SerializedObserver {
         remediation: GoalInvariantRemediationProposedData,
     ): void {
         if (this.phase !== "verifying") return
-        this.clearVerificationTimer()
-        this.clearGoalCompletionTimer()
+        this.timers.clear("verification")
+        this.timers.clear("goalCompletion")
         this.pendingVerificationId = null
         this.pendingGoalCheck = null
         this.verificationStatus = undefined
@@ -2326,7 +2329,7 @@ export class CollectiveBoard extends SerializedObserver {
     }
 
     private scheduleGoalRemediationRetry(): void {
-        if (this.goalRemediationRetryTimer || this.phase !== "running") return
+        if (this.timers.isArmed("goalRemediationRetry") || this.phase !== "running") return
         const hasRetryable = [...this.pendingGoalRemediations.keys()].some(
             (proposalId) => {
                 const failure = this.pendingGoalRemediationFailures.get(proposalId)
@@ -2336,20 +2339,12 @@ export class CollectiveBoard extends SerializedObserver {
             },
         )
         if (!hasRetryable) return
-        this.goalRemediationRetryTimer = setTimeout(() => {
-            this.goalRemediationRetryTimer = null
+        this.timers.arm("goalRemediationRetry", 0, () => {
             this.retryPendingGoalRemediations(false)
             if (this.phase === "running" && !this.wave) {
                 this.scheduleNextWave()
             }
-        }, 0)
-    }
-
-    private clearGoalRemediationRetryTimer(): void {
-        if (this.goalRemediationRetryTimer) {
-            clearTimeout(this.goalRemediationRetryTimer)
-        }
-        this.goalRemediationRetryTimer = null
+        })
     }
 
     private decideRuntimeReplan(
@@ -2525,7 +2520,7 @@ export class CollectiveBoard extends SerializedObserver {
 
     private finishStagedRuntimeReplan(staged: StagedRuntimeReplan): void {
         if (this.stagedRuntimeReplan !== staged) return
-        this.clearOfferRetractionTimer()
+        this.timers.clear("offerRetraction")
         this.stagedRuntimeReplan = null
         const resolutions = [...staged.retractions.values()].map(
             ({ resolution }) => resolution!,
@@ -2546,13 +2541,13 @@ export class CollectiveBoard extends SerializedObserver {
     }
 
     private armOfferRetractionTimer(staged: StagedRuntimeReplan): void {
-        this.clearOfferRetractionTimer()
+        this.timers.clear("offerRetraction")
         const configured = this.opts.offerRetractionTimeoutMs ?? 5_000
         const timeoutMs =
             Number.isFinite(configured) && configured > 0
                 ? Math.max(1, Math.floor(configured))
                 : 5_000
-        this.offerRetractionTimer = setTimeout(() => {
+        this.timers.arm("offerRetraction", timeoutMs, () => {
             this.emit(
                 RuntimeReplanRetractionTimedOut.create({
                     runId: this.opts.runId,
@@ -2560,12 +2555,7 @@ export class CollectiveBoard extends SerializedObserver {
                     proposalId: staged.proposal.proposalId,
                 }),
             )
-        }, timeoutMs)
-    }
-
-    private clearOfferRetractionTimer(): void {
-        if (this.offerRetractionTimer) clearTimeout(this.offerRetractionTimer)
-        this.offerRetractionTimer = null
+        })
     }
 
     private onRuntimeReplanRetractionTimedOut(
@@ -2577,7 +2567,7 @@ export class CollectiveBoard extends SerializedObserver {
             staged.stageId !== timeout.stageId ||
             staged.proposal.proposalId !== timeout.proposalId
         ) return
-        this.clearOfferRetractionTimer()
+        this.timers.clear("offerRetraction")
         this.stagedRuntimeReplan = null
         const retractedStoryIds: string[] = []
         for (const entry of staged.retractions.values()) {
@@ -3018,7 +3008,7 @@ export class CollectiveBoard extends SerializedObserver {
         // letting an older goal/verification snapshot reach push.
         if (this.pendingGoalRemediations.size > 0) {
             this.scheduleGoalRemediationRetry()
-            if (this.goalRemediationRetryTimer) {
+            if (this.timers.isArmed("goalRemediationRetry")) {
                 this.emit(
                     ConductorState.create({
                         phase: "running_level",
@@ -3215,12 +3205,8 @@ export class CollectiveBoard extends SerializedObserver {
 
     private requestPush(reason: string | null): void {
         if (this.phase !== "running" && this.phase !== "verifying") return
-        this.clearSoftDeadlineTimer()
-        this.clearVerificationTimer()
-        this.clearGoalCompletionTimer()
-        this.clearOperationalRetryTimer()
-        this.clearGoalRemediationRetryTimer()
-        this.clearOfferRetractionTimer()
+        this.timers.clearAll()
+        this.operationalRetryDueAt = null
         this.pendingVerificationId = null
         this.pendingGoalCheck = null
         this.stopReason = reason
@@ -3246,7 +3232,7 @@ export class CollectiveBoard extends SerializedObserver {
             this.opts.verificationTimeoutMs ??
             envNonNegativeInt("BARO_RUN_VERIFICATION_TIMEOUT_SECS", 21 * 60) * 1_000
         if (timeoutMs > 0) {
-            this.verificationTimer = setTimeout(() => {
+            this.timers.arm("verification", timeoutMs, () => {
                 this.emit(
                     RunVerificationTimedOut.create({
                         runId: this.opts.runId,
@@ -3254,7 +3240,7 @@ export class CollectiveBoard extends SerializedObserver {
                         timeoutMs,
                     }),
                 )
-            }, timeoutMs)
+            })
         }
         this.emit(
             ConductorState.create({
@@ -3274,7 +3260,7 @@ export class CollectiveBoard extends SerializedObserver {
     private onVerificationCompleted(
         result: RunVerificationCompletedData,
     ): void {
-        this.clearVerificationTimer()
+        this.timers.clear("verification")
         this.pendingVerificationId = null
         const hasPassedCommand = result.commands.some(
             (command) => command.status === "passed",
@@ -3388,7 +3374,7 @@ export class CollectiveBoard extends SerializedObserver {
             attestation.contractId !== pending.contractId ||
             attestation.verificationId !== pending.verificationId
         ) return
-        this.clearGoalCompletionTimer()
+        this.timers.clear("goalCompletion")
         if (attestation.contractId !== null) {
             const protocol = this.prd?.runtimeGraph?.protocol
             if (
@@ -3504,7 +3490,7 @@ export class CollectiveBoard extends SerializedObserver {
         timeoutMs: number,
     ): void {
         const reason = `verification timed out after ${Math.ceil(timeoutMs / 1_000)}s`
-        this.clearVerificationTimer()
+        this.timers.clear("verification")
         this.verificationStatus = "failed"
         this.verification = {
             verificationId,
@@ -3533,7 +3519,7 @@ export class CollectiveBoard extends SerializedObserver {
             timeout.contractId !== pending.contractId ||
             timeout.verificationId !== pending.verificationId
         ) return
-        this.clearGoalCompletionTimer()
+        this.timers.clear("goalCompletion")
         this.requestPush(
             `goal completion attestation timed out after ` +
                 `${Math.ceil(timeout.timeoutMs / 1_000)}s`,
@@ -3567,22 +3553,21 @@ export class CollectiveBoard extends SerializedObserver {
     }
 
     private armSoftDeadlineTimer(): void {
-        this.clearSoftDeadlineTimer()
+        this.timers.clear("softDeadline")
         if (this.softDeadlineSecs <= 0 || this.startedAt <= 0) return
         const startedAt = this.startedAt
         const delayMs = Math.max(
             0,
             Math.min(this.softDeadlineRemainingMs(), 2_147_483_647),
         )
-        this.softDeadlineTimer = setTimeout(() => {
-            this.softDeadlineTimer = null
+        this.timers.arm("softDeadline", delayMs, () => {
             this.emit(
                 SoftDeadlineReached.create({
                     runId: this.opts.runId,
                     startedAt,
                 }),
             )
-        }, delayMs)
+        })
     }
 
     private onSoftDeadlineReached(deadline: SoftDeadlineReachedData): void {
@@ -3605,15 +3590,10 @@ export class CollectiveBoard extends SerializedObserver {
         if (this.phase === "running" && !this.wave) this.scheduleNextWave()
     }
 
-    private clearSoftDeadlineTimer(): void {
-        if (this.softDeadlineTimer) clearTimeout(this.softDeadlineTimer)
-        this.softDeadlineTimer = null
-    }
-
     private armGoalCompletionTimer(
         pending: NonNullable<CollectiveBoard["pendingGoalCheck"]>,
     ): void {
-        this.clearGoalCompletionTimer()
+        this.timers.clear("goalCompletion")
         const configuredTimeoutMs =
             this.opts.goalCompletionTimeoutMs ??
             envNonNegativeInt("BARO_GOAL_COMPLETION_TIMEOUT_SECS", 30) * 1_000
@@ -3621,8 +3601,7 @@ export class CollectiveBoard extends SerializedObserver {
             1,
             Math.min(configuredTimeoutMs, 2_147_483_647),
         )
-        this.goalCompletionTimer = setTimeout(() => {
-            this.goalCompletionTimer = null
+        this.timers.arm("goalCompletion", timeoutMs, () => {
             this.emit(
                 GoalCompletionCheckTimedOut.create({
                     runId: this.opts.runId,
@@ -3632,34 +3611,26 @@ export class CollectiveBoard extends SerializedObserver {
                     timeoutMs,
                 }),
             )
-        }, timeoutMs)
-    }
-
-    private clearGoalCompletionTimer(): void {
-        if (this.goalCompletionTimer) clearTimeout(this.goalCompletionTimer)
-        this.goalCompletionTimer = null
+        })
     }
 
     private scheduleOperationalRetry(delayMs: number): void {
         const boundedDelay = Math.max(0, Math.min(delayMs, 2_147_483_647))
         const dueAt = Date.now() + boundedDelay
         if (
-            this.operationalRetryTimer &&
+            this.timers.isArmed("operationalRetry") &&
             this.operationalRetryDueAt !== null &&
             this.operationalRetryDueAt <= dueAt
         ) return
-        this.clearOperationalRetryTimer()
         this.operationalRetryDueAt = dueAt
-        this.operationalRetryTimer = setTimeout(() => {
-            this.operationalRetryTimer = null
+        this.timers.arm("operationalRetry", boundedDelay, () => {
             this.operationalRetryDueAt = null
             this.scheduleNextWave()
-        }, boundedDelay)
+        })
     }
 
     private clearOperationalRetryTimer(): void {
-        if (this.operationalRetryTimer) clearTimeout(this.operationalRetryTimer)
-        this.operationalRetryTimer = null
+        this.timers.clear("operationalRetry")
         this.operationalRetryDueAt = null
     }
 
@@ -3691,12 +3662,8 @@ export class CollectiveBoard extends SerializedObserver {
 
     private terminate(success: boolean, abortReason: string | null): void {
         if (this.phase === "done") return
-        this.clearSoftDeadlineTimer()
-        this.clearVerificationTimer()
-        this.clearGoalCompletionTimer()
-        this.clearOperationalRetryTimer()
-        this.clearGoalRemediationRetryTimer()
-        this.clearOfferRetractionTimer()
+        this.timers.clearAll()
+        this.operationalRetryDueAt = null
         this.pendingGoalCheck = null
         this.phase = "done"
         const totalDurationSecs = Math.round((Date.now() - this.startedAt) / 1_000)
@@ -3740,11 +3707,6 @@ export class CollectiveBoard extends SerializedObserver {
             }),
         )
         this.resolveDone(summary)
-    }
-
-    private clearVerificationTimer(): void {
-        if (this.verificationTimer) clearTimeout(this.verificationTimer)
-        this.verificationTimer = null
     }
 
     /** Publish the durable graph decision, then project any newly admitted
