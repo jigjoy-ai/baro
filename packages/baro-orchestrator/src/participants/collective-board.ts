@@ -6,10 +6,8 @@ import { buildDag } from "../dag.js"
 import {
     deriveGoalContract,
     normalizeGoalLedgerProjection,
-    renderGoalContractPrompt,
 } from "../runtime/goal-contract.js"
 import {
-    buildDefaultStoryPrompt,
     loadPrd,
     markStoryPassed,
     savePrdAtomic,
@@ -17,7 +15,14 @@ import {
     type PrdFile,
     type PrdStory,
 } from "../prd.js"
-import { renderRuntimeAmendmentsForPrompt } from "../planning/runtime-amendments.js"
+import {
+    buildRecoveryPromptSection,
+    buildStoryOfferPrompt,
+} from "../planning/story-offer-prompt.js"
+import {
+    blockedStoryIds,
+    goalCompletionFailure,
+} from "../runtime/run-completion.js"
 import { validatePrdArchitectureObligationCoverage } from "../planning/architecture-obligation-contract.js"
 import {
     defineSemanticEvent,
@@ -3134,25 +3139,14 @@ export class CollectiveBoard extends SerializedObserver {
             this.runtimeReplanTargetsStory(story.id)
         ) return
         const offerId = `${this.opts.runId}:offer:${++this.offerSequence}:${story.id}`
-        const basePrompt = this.storyPrompt(story)
+        const basePrompt = buildStoryOfferPrompt(this.prd, story)
         const rememberedRecovery = this.recoveryContext.get(story.id)
         const recovery =
             this.wave?.recovery || rememberedRecovery?.kind === "dependency"
                 ? rememberedRecovery
                 : undefined
         const recoveryPrompt = recovery
-            ? [
-                  recovery.kind === "dependency"
-                      ? "## Resumed after dependency integration"
-                      : "## Recovery attempt",
-                  "",
-                  recovery.kind === "dependency"
-                      ? `The previous attempt cooperatively paused: ${recovery.reason}`
-                      : `The previous ${recovery.kind} attempt failed: ${recovery.reason}`,
-                  recovery.branch
-                      ? `This fresh worktree starts at the latest integrated run branch. The rejected attempt is preserved at ${recovery.branch}. Inspect \`git diff HEAD...${recovery.branch}\` and \`git show ${recovery.branch}\`, then reapply its intent while preserving already-integrated work. Do not merge or cherry-pick the backup wholesale. Run the required checks and commit the reconciled result.`
-                      : "Re-run the story from the current integrated repository state, address the failure, run the required checks, and commit the corrected work.",
-              ].join("\n")
+            ? buildRecoveryPromptSection(recovery)
             : null
         const prompt = [context?.trim() || null, recoveryPrompt, basePrompt]
             .filter((part): part is string => Boolean(part))
@@ -3193,62 +3187,8 @@ export class CollectiveBoard extends SerializedObserver {
         this.emit(offered)
     }
 
-    private storyPrompt(story: PrdStory): string {
-        const sections: string[] = []
-        const contract = deriveGoalContract(this.prd?.goalEnvelope)
-        if (contract) {
-            sections.push(
-                "## Global goal contract",
-                "",
-                renderGoalContractPrompt(contract, story.goalInvariantIds ?? []),
-                "",
-                "---",
-                "",
-            )
-        }
-        const document = this.prd?.decisionDocument?.trim()
-        if (document) {
-            sections.push(
-                "## Current shared design decision",
-                "",
-                "This is the Architect's evidence-backed baseline, not an override of the global goal. Preserve it unless repository evidence proves an amendment is required; propose that amendment through the collective rather than silently diverging.",
-                "",
-                document,
-                "",
-                "---",
-                "",
-            )
-        }
-        const runtimeAmendments = renderRuntimeAmendmentsForPrompt(this.prd)
-        if (runtimeAmendments) {
-            sections.push(
-                runtimeAmendments.trim(),
-                "",
-                "---",
-                "",
-            )
-        }
-        sections.push(buildDefaultStoryPrompt(story))
-        return sections.join("\n")
-    }
-
     private computeBlockedStoryIds(): Set<string> {
-        if (!this.prd || this.failed.size === 0) return new Set()
-        const blocked = new Set<string>()
-        let changed = true
-        while (changed) {
-            changed = false
-            for (const story of this.prd.userStories) {
-                if (story.passes || this.failed.has(story.id) || blocked.has(story.id)) {
-                    continue
-                }
-                if (story.dependsOn.some((id) => this.failed.has(id) || blocked.has(id))) {
-                    blocked.add(story.id)
-                    changed = true
-                }
-            }
-        }
-        return blocked
+        return blockedStoryIds(this.prd, this.failed)
     }
 
     private finishAfterPush(): void {
@@ -3270,17 +3210,7 @@ export class CollectiveBoard extends SerializedObserver {
     }
 
     private goalCompletionFailureReason(): string | null {
-        if (!this.prd) return "global goal state is unavailable"
-        const contract = deriveGoalContract(this.prd.goalEnvelope)
-        if (!contract) return null
-        const completion = this.prd.runtimeGraph?.protocol?.completion
-        if (
-            completion?.contractId === contract.contractId &&
-            completion.goalRevision ===
-                this.prd.runtimeGraph?.protocol?.goal.revision &&
-            completion.status === "satisfied"
-        ) return null
-        return "global goal evidence changed after completion attestation"
+        return goalCompletionFailure(this.prd)
     }
 
     private requestPush(reason: string | null): void {

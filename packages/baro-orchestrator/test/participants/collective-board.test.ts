@@ -1,3 +1,4 @@
+import { buildStoryOfferPrompt } from "../../src/planning/story-offer-prompt.js"
 import assert from "node:assert/strict"
 import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -124,13 +125,7 @@ describe("CollectiveBoard", () => {
                 },
             }],
         }
-        const internal = board as unknown as {
-            prd: PrdFile
-            storyPrompt(story: PrdFile["userStories"][number]): string
-        }
-        internal.prd = input
-
-        const prompt = internal.storyPrompt(input.userStories[0]!)
+        const prompt = buildStoryOfferPrompt(input, input.userStories[0]!)
 
         const baselineAt = prompt.indexOf("## Current shared design decision")
         const amendmentAt = prompt.indexOf(
