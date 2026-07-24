@@ -43,6 +43,7 @@ import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
 
 import { AgenticEnvironment } from "../runtime/mozaik.js"
 import { buildDag } from "../dag.js"
+import { envNonNegativeInt } from "../runtime/env-int.js"
 import { validatePrdArchitectureObligationCoverage } from "../planning/architecture-obligation-contract.js"
 import { deriveGoalContract } from "../runtime/goal-contract.js"
 import {
@@ -1033,13 +1034,6 @@ export class Conductor extends BaseObserver {
     private emit(event: SemanticEvent<unknown>): void {
         this.envRef?.deliverSemanticEvent(this, event)
     }
-}
-
-function envNonNegativeInt(name: string, fallback: number): number {
-    const raw = process.env[name]
-    if (raw == null || raw.trim() === "") return fallback
-    const n = Number(raw)
-    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback
 }
 
 function errorMessage(error: unknown): string {
