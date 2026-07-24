@@ -33,7 +33,7 @@ import {
     summarizeReplanEvents,
     totalCompleteMetrics,
     type CompleteMetricTotal,
-} from "../src/benchmark-metrics.js"
+} from "../src/telemetry/benchmark-metrics.js"
 import {
     knownMetric,
     notApplicableMetric,
@@ -41,7 +41,7 @@ import {
     unknownMetric,
     type Metric,
     type ModelInvocationMeasuredData,
-} from "../src/model-telemetry.js"
+} from "../src/telemetry/model-telemetry.js"
 import {
     freezeVerificationInputs,
     includeUnmeasuredAttempts,

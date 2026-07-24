@@ -18,14 +18,14 @@ import type {
     StoryExecution,
     StoryExecOpts,
     StoryExecutor,
-} from "../src/participants/story-executor.js"
+} from "../src/execution/story-executor.js"
 import type { PrdFile } from "../src/prd.js"
 import type { StoryRoute } from "../src/market/routing.js"
 import {
     StoryResult,
     type StorySpawnRequestData,
 } from "../src/semantic-events.js"
-import { withTempDir } from "./participants/helpers.js"
+import { withTempDir } from "./execution/helpers.js"
 
 class NeverQuiescingExecutor implements StoryExecutor {
     readonly started: string[] = []

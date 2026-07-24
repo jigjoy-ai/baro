@@ -12,7 +12,7 @@ import {
     WorkspaceCleanupCompleted,
     WorkspaceCleanupRequested,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source } from "../participants/helpers.js"
+import { joinWithCapture, source } from "../execution/helpers.js"
 
 describe("LocalRepositoryAgent", () => {
     it("fails closed before its Board authority is bound", () => {

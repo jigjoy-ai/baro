@@ -12,8 +12,8 @@ import {
     DialogueResponderNotDispatchedError,
     type DialogueResponder,
     type DialogueResponderInvocation,
-} from "../../src/participants/dialogue-agent.js"
-import { createDialogueResponder } from "../../src/participants/dialogue-responder.js"
+} from "../../src/conversation/dialogue-agent.js"
+import { createDialogueResponder } from "../../src/conversation/dialogue-responder.js"
 import { isProviderCallTimeout } from "../../src/harness/openai/runtime.js"
 import {
     GoalAggregateReviewCompleted,
@@ -23,7 +23,7 @@ import {
     RunVerificationCompleted,
     type RunVerificationCompletedData,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source } from "../participants/helpers.js"
+import { joinWithCapture, source } from "../execution/helpers.js"
 
 describe("GoalInvariantReviewer", () => {
     it("batches an A8-shaped aggregate review once and caches an exact replay", async () => {

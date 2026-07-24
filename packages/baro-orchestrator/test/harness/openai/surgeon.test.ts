@@ -10,16 +10,16 @@ import {
     TokenUsage,
 } from "../../../src/runtime/mozaik.js"
 
-import { knownMetric, unknownMetric } from "../../../src/model-telemetry.js"
+import { knownMetric, unknownMetric } from "../../../src/telemetry/model-telemetry.js"
 import { SurgeonOpenAI } from "../../../src/harness/openai/surgeon.js"
-import type { PrdSnapshot } from "../../../src/participants/surgeon.js"
+import type { PrdSnapshot } from "../../../src/execution/surgeon.js"
 import {
     ModelInvocationMeasured,
     Replan,
     StoryResult,
     type ReplanStoryAdd,
 } from "../../../src/semantic-events.js"
-import { joinWithCapture, source } from "../../participants/helpers.js"
+import { joinWithCapture, source } from "../../execution/helpers.js"
 
 const snapshot = (): PrdSnapshot => ({
     project: "participant-tests",

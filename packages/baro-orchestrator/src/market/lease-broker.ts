@@ -35,7 +35,7 @@ import {
     selectWorkBid,
     type WorkBidPolicy,
 } from "./work-market.js"
-import { isProviderCapacityFailure } from "../provider-failure.js"
+import { isProviderCapacityFailure } from "../harness/provider-failure.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import {
     SerializedObserver,

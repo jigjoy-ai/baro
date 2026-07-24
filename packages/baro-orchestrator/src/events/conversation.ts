@@ -1,9 +1,9 @@
 /** User conversation lane: dialogue, front-door intake, repository context. Wire `type` strings are frozen (see ../semantic-events.ts). */
 
 import { defineSemanticEvent } from "./define.js"
-import type { ConversationResponse } from "../session/conversation-contract.js"
-import type { ConversationRequestIntent } from "../session/conversation-intake.js"
-import type { RepositoryBriefV1 } from "../session/repository-brief.js"
+import type { ConversationResponse } from "../conversation/session/conversation-contract.js"
+import type { ConversationRequestIntent } from "../conversation/session/conversation-intake.js"
+import type { RepositoryBriefV1 } from "../conversation/session/repository-brief.js"
 
 // Optional conversation participant. It may observe and communicate, but
 // these events deliberately carry no lease, integration, verification, or

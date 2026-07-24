@@ -11,7 +11,7 @@
 import { stdin } from "process"
 import { createInterface } from "readline"
 
-import type { ModelInvocationMeasuredData } from "./model-telemetry.js"
+import type { ModelInvocationMeasuredData } from "./telemetry/model-telemetry.js"
 
 export interface StoryInfo {
     id: string

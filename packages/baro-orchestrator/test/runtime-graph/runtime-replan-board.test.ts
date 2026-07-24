@@ -5,7 +5,7 @@ import { describe, it } from "node:test"
 
 import type { SemanticEvent } from "../../src/runtime/mozaik.js"
 
-import { CollectiveBoard } from "../../src/participants/collective-board.js"
+import { CollectiveBoard } from "../../src/execution/collective-board.js"
 import type { PrdFile, PrdStory } from "../../src/prd.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import {
@@ -31,7 +31,7 @@ import {
     source,
     type CapturedEnvironment,
     withTempDir,
-} from "../participants/helpers.js"
+} from "../execution/helpers.js"
 
 describe("CollectiveBoard runtime DAG adaptation", () => {
     it("persists an atomic future rewire immediately and replays its decision idempotently", async () => {

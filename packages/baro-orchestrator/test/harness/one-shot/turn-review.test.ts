@@ -6,7 +6,7 @@ import {
     oneShotSurgicalRevisionPrompt,
 } from "../../../src/harness/one-shot/turn-review.js"
 import { AgentTurnCompleted, Critique } from "../../../src/semantic-events.js"
-import { source } from "../../participants/helpers.js"
+import { source } from "../../execution/helpers.js"
 
 describe("OneShotTurnReview", () => {
     const projector = source("projector")

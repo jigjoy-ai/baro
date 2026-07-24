@@ -9,7 +9,7 @@ import {
     type SerializedObserverFailure,
     type SerializedObserverOptions,
 } from "../../src/runtime/serialized-observer.js"
-import { captureEnv, source } from "../participants/helpers.js"
+import { captureEnv, source } from "../execution/helpers.js"
 
 type Handler = (
     context: SerializedEventContext,

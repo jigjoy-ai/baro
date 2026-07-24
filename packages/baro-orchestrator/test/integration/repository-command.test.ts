@@ -6,19 +6,19 @@ import { describe, it } from "node:test"
 
 import { GitGate } from "../../src/integration/git.js"
 import { StoryFactory } from "../../src/market/story-factory.js"
-import type { StoryExecutor } from "../../src/participants/story-executor.js"
+import type { StoryExecutor } from "../../src/execution/story-executor.js"
 import {
     RepositoryCommandError,
     runRepositoryCommand,
 } from "../../src/integration/repository-command.js"
-import { classifyStoryFailure } from "../../src/provider-failure.js"
+import { classifyStoryFailure } from "../../src/harness/provider-failure.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import {
     StorySpawnFailed,
     WorkLeaseGranted,
 } from "../../src/semantic-events.js"
 import { WorktreeManager } from "../../src/integration/worktree.js"
-import { joinWithCapture, source, withTempDir } from "../participants/helpers.js"
+import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
 
 function writeCli(dir: string, name: string, source: string): string {
     const path = join(dir, name)

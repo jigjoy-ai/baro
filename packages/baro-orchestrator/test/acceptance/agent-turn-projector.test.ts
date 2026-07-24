@@ -15,7 +15,7 @@ import {
     StoryRouted,
     WorkLeaseGranted,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source } from "../participants/helpers.js"
+import { joinWithCapture, source } from "../execution/helpers.js"
 
 describe("AgentTurnProjector", () => {
     it("projects a completed Codex turn with accumulated assistant text", async () => {

@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import type { PrdFile } from "../src/prd.js"
-import { withTempDir } from "./participants/helpers.js"
+import { withTempDir } from "./execution/helpers.js"
 
 describe("progressive planner process lane", () => {
     it("buffers immediate Rust-style lifecycle commands until PlanningFeed is ready", async () => {

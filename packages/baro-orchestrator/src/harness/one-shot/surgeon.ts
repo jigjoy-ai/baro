@@ -11,8 +11,8 @@
 
 import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
 
-import { runnerMeasurement } from "../../runner-measurement.js"
-import type { RunnerInvocationObserver } from "../../runner-invocation.js"
+import { runnerMeasurement } from "../../telemetry/runner-measurement.js"
+import type { RunnerInvocationObserver } from "../runner-invocation.js"
 import {
     ModelInvocationMeasured,
     RecoveryDecision,
@@ -25,7 +25,7 @@ import {
 import { ActiveLeaseRegistry } from "../../runtime/active-lease-registry.js"
 import { RecoverySourceAuthority } from "../../runtime/recovery-source-authority.js"
 import type { StoryOutcomeAuthority } from "../../runtime/story-outcome-authority.js"
-import { correlateRecoveryReplan, recoveryInput } from "../../participants/recovery-input.js"
+import { correlateRecoveryReplan, recoveryInput } from "../../execution/recovery-input.js"
 import {
     PrdSnapshot,
     type RouteDescriber,
@@ -34,7 +34,7 @@ import {
     CritiqueLog,
     extractJsonObject,
     surgeonDeterministicReplan,
-} from "../../participants/surgeon.js"
+} from "../../execution/surgeon.js"
 
 export interface OneShotSurgeonCoreOptions {
     /** Returns a fresh snapshot of the current PRD. */

@@ -13,11 +13,11 @@ import {
     CodexFailureDiagnostics,
     sanitizeDiagnosticText,
 } from "./failure-diagnostics.js"
-import { harnessChildEnvironment } from "../../harness-environment.js"
+import { harnessChildEnvironment } from "../environment.js"
 import {
     ManagedProcessTree,
     POSIX_PROCESS_GROUPS_SUPPORTED,
-} from "../../process-tree.js"
+} from "../process-tree.js"
 
 import {
     knownMetric,
@@ -26,12 +26,12 @@ import {
     type Metric,
     type ModelInvocationStatus,
     type ModelTokenMetrics,
-} from "../../model-telemetry.js"
+} from "../../telemetry/model-telemetry.js"
 import {
     RunnerInvocationTracker,
     type RunnerInvocationObserver,
     type UnsequencedRunnerInvocationObservation,
-} from "../../runner-invocation.js"
+} from "../runner-invocation.js"
 
 export interface RunCodexOneShotOptions {
     /** Combined system+user prompt. */

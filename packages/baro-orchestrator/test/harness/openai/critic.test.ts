@@ -8,7 +8,7 @@ import {
     TokenUsage,
 } from "../../../src/runtime/mozaik.js"
 
-import { knownMetric, unknownMetric } from "../../../src/model-telemetry.js"
+import { knownMetric, unknownMetric } from "../../../src/telemetry/model-telemetry.js"
 import { AgentTurnProjector } from "../../../src/acceptance/agent-turn-projector.js"
 import { CriticOpenAI } from "../../../src/harness/openai/critic.js"
 import { StoryOutcomeAuthority } from "../../../src/runtime/story-outcome-authority.js"
@@ -21,7 +21,7 @@ import {
     StoryQualityReverificationRequested,
     WorkLeaseGranted,
 } from "../../../src/semantic-events.js"
-import { captureEnv, joinWithCapture, source } from "../../participants/helpers.js"
+import { captureEnv, joinWithCapture, source } from "../../execution/helpers.js"
 
 describe("CriticOpenAI", () => {
     it("emits critiques while bounding corrective messages", async () => {

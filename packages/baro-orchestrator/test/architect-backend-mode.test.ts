@@ -11,8 +11,8 @@ import type {
 } from "../src/planning/adapters/architect-invocation.js"
 import { runArchitectOpenCode } from "../src/planning/adapters/architect-opencode.js"
 import { runArchitectPi } from "../src/planning/adapters/architect-pi.js"
-import type { RunnerInvocationObservation } from "../src/runner-invocation.js"
-import { withTempDir } from "./participants/helpers.js"
+import type { RunnerInvocationObservation } from "../src/harness/runner-invocation.js"
+import { withTempDir } from "./execution/helpers.js"
 
 const DECISION_DOCUMENT = `## Existing context
 The fixture repository has one provider-neutral contract.

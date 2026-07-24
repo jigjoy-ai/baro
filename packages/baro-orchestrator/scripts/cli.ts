@@ -14,16 +14,16 @@ import {
     type CollectiveWorkerCandidateConfig,
     type OrchestrateConfig,
 } from "../src/orchestrate.js"
-import { resolveGatewayBillingForRoutes } from "../src/billing/index.js"
-import { signalAllProcessTrees } from "../src/process-tree.js"
+import { resolveGatewayBillingForRoutes } from "../src/telemetry/billing/index.js"
+import { signalAllProcessTrees } from "../src/harness/process-tree.js"
 import { configureProviderOwnershipManifest } from "../src/provider-ownership-manifest.js"
-import type { Operator } from "../src/participants/operator.js"
-import type { PlanningFeed } from "../src/participants/planning-feed.js"
+import type { Operator } from "../src/execution/operator.js"
+import type { PlanningFeed } from "../src/execution/planning-feed.js"
 import { handleStdinCommand } from "../src/stdin-commands.js"
 import { subscribeCommands, type BaroCommand } from "../src/tui-protocol.js"
 import type { CoordinationMode } from "../src/semantic-events.js"
 import { loadPrd } from "../src/prd.js"
-import { loadConversationContextFile } from "../src/session/conversation-context.js"
+import { loadConversationContextFile } from "../src/conversation/session/conversation-context.js"
 import {
     parseEndpoints,
     parseTierMap,

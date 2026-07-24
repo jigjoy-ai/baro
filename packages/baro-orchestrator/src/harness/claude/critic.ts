@@ -17,7 +17,7 @@
 import type { SpawnOptions } from "child_process"
 import spawn from "cross-spawn"
 
-import { harnessChildEnvironment } from "../../harness-environment.js"
+import { harnessChildEnvironment } from "../environment.js"
 import { ModelInvocationMeasured } from "../../semantic-events.js"
 import {
     knownMetric,
@@ -30,7 +30,7 @@ import {
     type ModelInvocationStatus,
     type ModelTokenMetrics,
     type UnknownMetricReason,
-} from "../../model-telemetry.js"
+} from "../../telemetry/model-telemetry.js"
 import { withIsolatedCriticCwd } from "../critic-cli-isolation.js"
 import {
     OneShotCritic,

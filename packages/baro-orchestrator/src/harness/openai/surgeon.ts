@@ -32,7 +32,7 @@ import {
     type TokenUsage,
 } from "../../runtime/mozaik.js"
 
-import type { GatewayBillingCoordinator } from "../../billing/index.js"
+import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import {
     GenericOpenAIModel,
     UsageAccumulator,
@@ -58,11 +58,11 @@ import {
     type ModelInvocationStatus,
     type ModelTokenMetrics,
     type UnknownMetricReason,
-} from "../../model-telemetry.js"
+} from "../../telemetry/model-telemetry.js"
 import { ActiveLeaseRegistry } from "../../runtime/active-lease-registry.js"
 import { RecoverySourceAuthority } from "../../runtime/recovery-source-authority.js"
 import type { StoryOutcomeAuthority } from "../../runtime/story-outcome-authority.js"
-import { correlateRecoveryReplan, recoveryInput } from "../../participants/recovery-input.js"
+import { correlateRecoveryReplan, recoveryInput } from "../../execution/recovery-input.js"
 import {
     SURGEON_SYSTEM_PROMPT,
     buildSurgeonPrompt,
@@ -71,7 +71,7 @@ import {
     surgeonDeterministicReplan,
     type PrdSnapshot,
     type RouteDescriber,
-} from "../../participants/surgeon.js"
+} from "../../execution/surgeon.js"
 
 export interface SurgeonOpenAIOptions {
     /** PRD snapshot provider. Same shape as `Surgeon`. */

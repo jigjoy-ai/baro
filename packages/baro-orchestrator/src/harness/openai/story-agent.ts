@@ -27,7 +27,7 @@ import {
 } from "../../runtime/mozaik.js"
 
 import { AgenticEnvironment } from "../../runtime/mozaik.js"
-import type { GatewayBillingCoordinator } from "../../billing/index.js"
+import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import {
     GenericOpenAIModel,
     type OpenAIConnection,
@@ -53,10 +53,10 @@ import {
 import {
     classifyStoryFailure,
     compactProviderFailureDetail,
-} from "../../provider-failure.js"
+} from "../provider-failure.js"
 import { acceptsTargetedMessage } from "../../runtime/targeted-message-authority.js"
 import { correlationOf, type StoryOutcome, type StorySpec } from "../story-contract.js"
-import type { StoryCollaborationAccess } from "../../participants/story-executor.js"
+import type { StoryCollaborationAccess } from "../../execution/story-executor.js"
 import {
     createRuntimeReplanTool,
     parseRuntimeReplanArgs,

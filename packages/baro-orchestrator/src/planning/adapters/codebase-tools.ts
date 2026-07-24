@@ -13,7 +13,7 @@ import * as path from "path"
 
 import { type Tool } from "../../runtime/mozaik.js"
 
-import { execFileCli } from "../../exec-file-cli.js"
+import { execFileCli } from "../../harness/exec-file-cli.js"
 
 const IGNORE = new Set([
     "node_modules",

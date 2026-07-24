@@ -6,13 +6,13 @@ import { describe, it } from "node:test"
 import type { Participant } from "../../../src/runtime/mozaik.js"
 
 import { OpenCodeStoryAgent } from "../../../src/harness/opencode/story-agent.js"
-import { PROCESS_TREE_CAPABILITIES } from "../../../src/process-tree.js"
+import { PROCESS_TREE_CAPABILITIES } from "../../../src/harness/process-tree.js"
 import {
     AgentTurnCompleted,
     Critique,
     StoryResult,
 } from "../../../src/semantic-events.js"
-import { captureEnv, source, withTempDir } from "../../participants/helpers.js"
+import { captureEnv, source, withTempDir } from "../../execution/helpers.js"
 
 describe("OpenCodeStoryAgent", () => {
     it("emits a successful terminal StoryResult from a fake OpenCode backend", async () => {

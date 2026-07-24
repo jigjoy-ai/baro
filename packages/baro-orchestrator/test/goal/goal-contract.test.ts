@@ -8,7 +8,7 @@ import {
     normalizeGoalLedgerProjection,
     renderGoalContractPrompt,
 } from "../../src/goal/goal-contract.js"
-import { goalEnvelopeFingerprint } from "../../src/session/conversation-contract.js"
+import { goalEnvelopeFingerprint } from "../../src/conversation/session/conversation-contract.js"
 
 const envelope = {
     objective: "Make cancellation lossless.",

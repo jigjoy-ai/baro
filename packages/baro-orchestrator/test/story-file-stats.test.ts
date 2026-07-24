@@ -4,7 +4,7 @@ import assert from "node:assert/strict"
 import { FunctionCallItem, type Participant } from "../src/runtime/mozaik.js"
 
 import { AgentState, StoryResult } from "../src/semantic-events.js"
-import { StoryLifecycleForwarder } from "../src/participants/forwarders/story-lifecycle.js"
+import { StoryLifecycleForwarder } from "../src/execution/forwarders/story-lifecycle.js"
 
 // The forwarder reads `source.agentId`; a story's agentId == its storyId.
 function source(agentId: string): Participant {

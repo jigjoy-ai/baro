@@ -1,6 +1,6 @@
 import { basename } from "node:path"
 
-import { execFileCli, execFileCliBuffer } from "../exec-file-cli.js"
+import { execFileCli, execFileCliBuffer } from "../harness/exec-file-cli.js"
 
 /**
  * Repository commands should normally finish in seconds, but large worktrees

@@ -5,9 +5,9 @@
  * (`PrdOutput`) so the schema has a single source of truth.
  */
 
-import { execFileCli } from "../../exec-file-cli.js"
+import { execFileCli } from "../../harness/exec-file-cli.js"
 
-import { harnessChildEnvironment } from "../../harness-environment.js"
+import { harnessChildEnvironment } from "../../harness/environment.js"
 
 import {
     createPlannerHarnessProgressiveSupport,

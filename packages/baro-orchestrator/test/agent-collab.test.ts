@@ -19,7 +19,7 @@ import {
     encodeInboxAgentId,
     inboxFilenameForAgentId,
 } from "../scripts/collaboration-inbox-path.mjs"
-import { withTempDir } from "./participants/helpers.js"
+import { withTempDir } from "./execution/helpers.js"
 
 const exec = promisify(execFile)
 const SCRIPT = join(import.meta.dirname, "..", "scripts", "agent-collab.mjs")

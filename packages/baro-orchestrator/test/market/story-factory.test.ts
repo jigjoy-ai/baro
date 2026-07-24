@@ -9,14 +9,14 @@ import type {
     StoryExecution,
     StoryExecOpts,
     StoryExecutor,
-} from "../../src/participants/story-executor.js"
+} from "../../src/execution/story-executor.js"
 import type { StoryRoute } from "../../src/market/routing.js"
 import {
     knownMetric,
     notApplicableMetric,
     unknownMetric,
     type ModelInvocationMeasuredData,
-} from "../../src/model-telemetry.js"
+} from "../../src/telemetry/model-telemetry.js"
 import {
     ModelInvocationMeasured,
     RouteEstimateUpdated,
@@ -42,8 +42,8 @@ import type { WorktreeManager } from "../../src/integration/worktree.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import type {
     CollaborationLeaseCapabilityRequest,
-} from "../../src/participants/collaboration-bridge.js"
-import { joinWithCapture, source, withTempDir } from "../participants/helpers.js"
+} from "../../src/execution/collaboration-bridge.js"
+import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
 
 const TEST_COLLABORATION_TOKEN = "a".repeat(43)
 

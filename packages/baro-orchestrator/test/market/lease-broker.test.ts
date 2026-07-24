@@ -24,7 +24,7 @@ import {
     type StoryFailureData,
     type WorkRouteDescriptor,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source } from "../participants/helpers.js"
+import { joinWithCapture, source } from "../execution/helpers.js"
 
 describe("LeaseBroker", () => {
     it("holds the parallel cap until the integrated event releases a lease", async () => {

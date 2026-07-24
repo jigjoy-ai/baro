@@ -36,7 +36,7 @@ import {
     type GoalStoryInvariantMapping,
 } from "./goal-contract.js"
 import { goalAggregateStableBasisFingerprint } from "../runtime/goal-aggregate-review.js"
-import type { GoalEnvelope } from "../session/conversation-contract.js"
+import type { GoalEnvelope } from "../conversation/session/conversation-contract.js"
 
 const MAX_AGGREGATE_REMEDIATIONS_PER_INVARIANT = 3
 

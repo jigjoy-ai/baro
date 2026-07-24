@@ -6,13 +6,13 @@ import { describe, it } from "node:test"
 import type { Participant } from "../../../src/runtime/mozaik.js"
 
 import { PiStoryAgent } from "../../../src/harness/pi/story-agent.js"
-import { PROCESS_TREE_CAPABILITIES } from "../../../src/process-tree.js"
+import { PROCESS_TREE_CAPABILITIES } from "../../../src/harness/process-tree.js"
 import {
     AgentTurnCompleted,
     Critique,
     StoryResult,
 } from "../../../src/semantic-events.js"
-import { captureEnv, source, withTempDir } from "../../participants/helpers.js"
+import { captureEnv, source, withTempDir } from "../../execution/helpers.js"
 
 // A freshly-created executable can be held by corporate endpoint scanning for
 // several seconds when the complete suite launches many child processes in

@@ -20,32 +20,32 @@ import { join } from "node:path"
 import {
     createGatewayBillingCoordinatorFromEnv,
     reconcileAndCloseGatewayBilling,
-} from "../src/billing/index.js"
+} from "../src/telemetry/billing/index.js"
 import {
     createDialogueResponder,
     type DialogueBackend,
-} from "../src/participants/dialogue-responder.js"
+} from "../src/conversation/dialogue-responder.js"
 import {
     ConversationIntake,
     type ConversationHistoryEntry,
     type ConversationRequestIntent,
     type ConversationResponder,
-} from "../src/session/conversation-intake.js"
-import { assertCorrelationId } from "../src/session/conversation-contract.js"
-import { runFrontDoorConversationTurn } from "../src/session/conversation-frontdoor.js"
+} from "../src/conversation/session/conversation-intake.js"
+import { assertCorrelationId } from "../src/conversation/session/conversation-contract.js"
+import { runFrontDoorConversationTurn } from "../src/conversation/session/conversation-frontdoor.js"
 import {
     AutonomousRepositoryScanner,
     type RepositoryScoutResponder,
-} from "../src/session/autonomous-repository-scout.js"
+} from "../src/conversation/session/autonomous-repository-scout.js"
 import {
     validateRepositoryBriefV1,
     type RepositoryBriefV1,
-} from "../src/session/repository-brief.js"
+} from "../src/conversation/session/repository-brief.js"
 import {
     DeterministicRepositoryScanner,
     type RepositoryContextScanner,
-} from "../src/session/repository-scanner.js"
-import { trustedFrontDoorBillingRunId } from "../src/session/frontdoor-billing.js"
+} from "../src/conversation/session/repository-scanner.js"
+import { trustedFrontDoorBillingRunId } from "../src/conversation/session/frontdoor-billing.js"
 
 interface Args {
     inputFile: string

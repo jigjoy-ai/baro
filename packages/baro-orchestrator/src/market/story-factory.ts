@@ -16,7 +16,7 @@ import {
 } from "../runtime/mozaik.js"
 
 import { AgenticEnvironment } from "../runtime/mozaik.js"
-import type { GatewayBillingCoordinator } from "../billing/index.js"
+import type { GatewayBillingCoordinator } from "../telemetry/billing/index.js"
 import {
     RunCompleted,
     RunStartRequest,
@@ -49,7 +49,7 @@ import {
     type StoryExecutor,
     type StoryCollaborationAccess,
     type StorySuspensionSummary,
-} from "../participants/story-executor.js"
+} from "../execution/story-executor.js"
 import { RouteLearner } from "./route-learning.js"
 import {
     formatRoute,
@@ -65,12 +65,12 @@ import {
     StoryOutcomeAuthority,
     type StoryResultAuthorityCorrelation,
 } from "../runtime/story-outcome-authority.js"
-import { classifyStoryFailure } from "../provider-failure.js"
+import { classifyStoryFailure } from "../harness/provider-failure.js"
 import type {
     CollaborationDeliveryMode,
     CollaborationLeaseCapability,
     CollaborationLeaseCapabilityRequest,
-} from "../participants/collaboration-bridge.js"
+} from "../execution/collaboration-bridge.js"
 
 const COLLECTIVE_CLI_PROCESS_CONTRACT = `COLLECTIVE PROCESS-LIFECYCLE CONTRACT:
 - Do not start background, detached, daemonized, or persistent processes.

@@ -6,19 +6,19 @@ import { describe, it } from "node:test"
 import type { AgenticEnvironment } from "../src/runtime/mozaik.js"
 
 import { orchestrate } from "../src/orchestrate.js"
-import type { PlanningFeed } from "../src/participants/planning-feed.js"
+import type { PlanningFeed } from "../src/execution/planning-feed.js"
 import type {
     StoryExecution,
     StoryExecOpts,
     StoryExecutor,
-} from "../src/participants/story-executor.js"
+} from "../src/execution/story-executor.js"
 import type { PrdFile, PrdStory } from "../src/prd.js"
 import type { StoryRoute } from "../src/market/routing.js"
 import {
     StoryResult,
     type StorySpawnRequestData,
 } from "../src/semantic-events.js"
-import { withTempDir } from "./participants/helpers.js"
+import { withTempDir } from "./execution/helpers.js"
 
 class GatedExecutor implements StoryExecutor {
     readonly started: string[] = []

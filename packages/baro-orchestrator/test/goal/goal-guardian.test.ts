@@ -21,7 +21,7 @@ import {
     StoryMerged,
     StoryQualityCompleted,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source } from "../participants/helpers.js"
+import { joinWithCapture, source } from "../execution/helpers.js"
 
 const envelope = {
     objective: "Keep cancellation lossless.",

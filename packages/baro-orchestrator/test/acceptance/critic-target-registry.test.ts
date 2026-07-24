@@ -10,7 +10,7 @@ import {
     ReplanApplied,
     RuntimeReplanApplied,
 } from "../../src/semantic-events.js"
-import { source } from "../participants/helpers.js"
+import { source } from "../execution/helpers.js"
 
 describe("CriticTargetRegistry runtime replans", () => {
     it("delivers canonical Architect obligations to the collective Critic unchanged", () => {

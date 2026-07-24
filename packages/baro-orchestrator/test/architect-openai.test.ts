@@ -29,7 +29,7 @@ import {
     createOpenAIModel,
     GenericOpenAIModel,
 } from "../src/harness/openai/runtime.js"
-import { createDialogueResponder } from "../src/participants/dialogue-responder.js"
+import { createDialogueResponder } from "../src/conversation/dialogue-responder.js"
 import { createCodebaseTools } from "../src/planning/adapters/codebase-tools.js"
 
 const PARALLEL_MODE = {

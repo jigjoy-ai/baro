@@ -23,7 +23,7 @@ import {
     assertCorrelationId,
     type GoalEnvelope,
     validateGoalEnvelope,
-} from "./session/conversation-contract.js"
+} from "./conversation/session/conversation-contract.js"
 
 export interface PrdStory {
     id: string

@@ -18,7 +18,7 @@ import { AgenticEnvironment } from "./runtime/mozaik.js"
 import {
     GatewayBillingCoordinator,
     type GatewayBillingCoordinatorOptions,
-} from "./billing/index.js"
+} from "./telemetry/billing/index.js"
 import {
     GitGate,
     createOrCheckoutBranch,
@@ -42,16 +42,16 @@ import {
     type ResolveOpts,
     type TierMap,
 } from "./market/routing.js"
-import { Auditor } from "./participants/auditor.js"
+import { Auditor } from "./execution/auditor.js"
 import { AcceptanceGate } from "./acceptance/acceptance-gate.js"
 import { AgentTurnProjector } from "./acceptance/agent-turn-projector.js"
-import { CollaborationBridge } from "./participants/collaboration-bridge.js"
-import { CollectiveBoard } from "./participants/collective-board.js"
+import { CollaborationBridge } from "./execution/collaboration-bridge.js"
+import { CollectiveBoard } from "./execution/collective-board.js"
 import { GoalGuardian } from "./goal/goal-guardian.js"
 import {
     Conductor,
     ConductorRunSummary,
-} from "./participants/conductor.js"
+} from "./execution/conductor.js"
 import { Critic } from "./harness/claude/critic.js"
 import {
     CriticCommandEvidenceCollector,
@@ -69,11 +69,11 @@ import { CriticPi } from "./harness/pi/critic.js"
 import {
     DialogueAgent,
     type DialogueResponder,
-} from "./participants/dialogue-agent.js"
+} from "./conversation/dialogue-agent.js"
 import {
     createDialogueResponder,
     type DialogueBackend,
-} from "./participants/dialogue-responder.js"
+} from "./conversation/dialogue-responder.js"
 import { Finalizer } from "./integration/finalizer.js"
 import { GitCoordinator } from "./integration/git-coordinator.js"
 import {
@@ -81,17 +81,17 @@ import {
     GoalInvariantReviewer,
     goalReviewRoundTimeoutMs,
 } from "./goal/goal-invariant-reviewer.js"
-import { DialogueForwarder } from "./participants/forwarders/dialogue.js"
-import { joinBaroEventForwarders } from "./participants/forwarders/index.js"
-import { Librarian } from "./participants/librarian.js"
+import { DialogueForwarder } from "./execution/forwarders/dialogue.js"
+import { joinBaroEventForwarders } from "./execution/forwarders/index.js"
+import { Librarian } from "./execution/librarian.js"
 import { LeaseBroker } from "./market/lease-broker.js"
 import { LocalRepositoryAgent } from "./integration/local-repository-agent.js"
-import { MemoryLibrarian } from "./participants/memory-librarian.js"
-import { ModelTelemetryCollector } from "./participants/model-telemetry-collector.js"
-import { Operator } from "./participants/operator.js"
-import { PlanningFeed } from "./participants/planning-feed.js"
+import { MemoryLibrarian } from "./execution/memory-librarian.js"
+import { ModelTelemetryCollector } from "./telemetry/model-telemetry-collector.js"
+import { Operator } from "./execution/operator.js"
+import { PlanningFeed } from "./execution/planning-feed.js"
 import { RunVerifier } from "./verification/run-verifier.js"
-import { Sentry } from "./participants/sentry.js"
+import { Sentry } from "./execution/sentry.js"
 import { StoryFactory } from "./market/story-factory.js"
 import { WorkContextProvider } from "./market/work-context-provider.js"
 import { type StoryAgent } from "./harness/claude/story-agent.js"
@@ -99,12 +99,12 @@ import {
     Surgeon,
     type PrdSnapshot,
     type RouteDescriber,
-} from "./participants/surgeon.js"
+} from "./execution/surgeon.js"
 import { SurgeonCodex } from "./harness/codex/surgeon.js"
 import { SurgeonOpenAI } from "./harness/openai/surgeon.js"
 import { SurgeonOpenCode } from "./harness/opencode/surgeon.js"
 import { SurgeonPi } from "./harness/pi/surgeon.js"
-import { Supervisor } from "./participants/supervisor.js"
+import { Supervisor } from "./execution/supervisor.js"
 import { resolveEffectiveParallel } from "./planning/domain/mode-enforcement.js"
 import { PrdFile, loadPrd, savePrd } from "./prd.js"
 import { readAuthoritativeDeclaredTests } from "./verification/prd-declared-tests.js"
@@ -123,7 +123,7 @@ import {
     assertConversationContextBinding,
     validateConversationContextSnapshot,
     type ConversationContextSnapshot,
-} from "./session/conversation-context.js"
+} from "./conversation/session/conversation-context.js"
 import {
     isValidWorkBidEstimate,
     selectWorkBid,
@@ -341,7 +341,7 @@ export interface OrchestrateConfig {
      * pass a custom StoryExecutor (mock, out-of-process, remote) without
      * changing any other participant.
      */
-    executor?: import("./participants/story-executor.js").StoryExecutor
+    executor?: import("./execution/story-executor.js").StoryExecutor
     /**
      * Legacy-only direct callbacks for Operator abort/shutdown commands (Rust
      * TUI compatibility). Collective mode rejects configured callbacks;

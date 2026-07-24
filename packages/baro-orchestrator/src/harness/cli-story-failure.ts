@@ -1,7 +1,7 @@
 import {
     classifyStoryFailure,
     compactProviderFailureDetail,
-} from "../provider-failure.js"
+} from "./provider-failure.js"
 import type { StoryFailureData } from "../semantic-events.js"
 
 export interface DescribedCliStoryFailure {

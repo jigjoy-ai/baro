@@ -12,7 +12,7 @@ import {
 import { ActiveLeaseRegistry } from "../../src/runtime/active-lease-registry.js"
 import { RecoverySourceAuthority } from "../../src/runtime/recovery-source-authority.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
-import { source } from "../participants/helpers.js"
+import { source } from "../execution/helpers.js"
 
 describe("RecoverySourceAuthority", () => {
     it("fails closed before collective lease and quality authorities are bound", () => {

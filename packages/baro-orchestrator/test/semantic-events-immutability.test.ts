@@ -11,8 +11,8 @@ import {
     ConversationDelegationProposed,
     type ConversationDelegationProposedData,
 } from "../src/semantic-events.js"
-import { conversationDelegationProposalId } from "../src/participants/conversation-delegation.js"
-import { captureEnv, source } from "./participants/helpers.js"
+import { conversationDelegationProposalId } from "../src/conversation/conversation-delegation.js"
+import { captureEnv, source } from "./execution/helpers.js"
 
 class SynchronousMutator extends BaseObserver {
     readonly errors: unknown[] = []

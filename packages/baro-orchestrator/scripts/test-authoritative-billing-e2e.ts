@@ -14,8 +14,8 @@ import {
 import {
     GatewayBillingCoordinator,
     type GatewayBillingDrainResult,
-} from "../src/billing/index.js"
-import type { ModelInvocationMeasuredData } from "../src/model-telemetry.js"
+} from "../src/telemetry/billing/index.js"
+import type { ModelInvocationMeasuredData } from "../src/telemetry/model-telemetry.js"
 import {
     GenericOpenAIModel,
     runInferenceRound,

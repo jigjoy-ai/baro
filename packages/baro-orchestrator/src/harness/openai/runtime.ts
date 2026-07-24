@@ -27,11 +27,11 @@ import type {
     BillingInvocationContext,
     GatewayBillingCoordinator,
     GatewayBillingDispatch,
-} from "../../billing/index.js"
+} from "../../telemetry/billing/index.js"
 import type {
     ModelInvocationStatus,
     UnknownMetricReason,
-} from "../../model-telemetry.js"
+} from "../../telemetry/model-telemetry.js"
 
 export interface InferenceRound {
     items: ContextItem[]

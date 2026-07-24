@@ -11,7 +11,7 @@ import {
 
 import { AgentTurnProjector } from "../../../src/acceptance/agent-turn-projector.js"
 import { CodexStoryAgent } from "../../../src/harness/codex/story-agent.js"
-import { PROCESS_TREE_CAPABILITIES } from "../../../src/process-tree.js"
+import { PROCESS_TREE_CAPABILITIES } from "../../../src/harness/process-tree.js"
 import { StoryOutcomeAuthority } from "../../../src/runtime/story-outcome-authority.js"
 import {
     AgentTurnCompleted,
@@ -20,7 +20,7 @@ import {
     StoryResult,
     WorkLeaseGranted,
 } from "../../../src/semantic-events.js"
-import { captureEnv, source, withTempDir } from "../../participants/helpers.js"
+import { captureEnv, source, withTempDir } from "../../execution/helpers.js"
 
 describe("CodexStoryAgent", () => {
     it("emits a successful terminal StoryResult from a fake Codex backend", async () => {

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { isAbsolute, resolve } from "node:path"
 
-import type { CompleteMetricTotal } from "../src/benchmark-metrics.js"
+import type { CompleteMetricTotal } from "../src/telemetry/benchmark-metrics.js"
 
 export interface FrozenVerificationInput {
     path: string

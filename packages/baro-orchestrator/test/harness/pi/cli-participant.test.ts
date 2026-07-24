@@ -15,7 +15,7 @@ import {
     harnessEnvironmentCaptureProgram,
     withInjectedJigJoyEnvironment,
     withTempDir,
-} from "../../participants/helpers.js"
+} from "../../execution/helpers.js"
 
 function writeFakePi(dir: string): string {
     const bin = join(dir, "fake-pi.mjs")

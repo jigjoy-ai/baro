@@ -20,7 +20,7 @@ import {
     assertCorrelationId,
     type GoalEnvelope,
     validateGoalEnvelope,
-} from "../../session/conversation-contract.js"
+} from "../../conversation/session/conversation-contract.js"
 import type { BaroCommand } from "../../tui-protocol.js"
 import {
     architectureObligationsFromDecision,

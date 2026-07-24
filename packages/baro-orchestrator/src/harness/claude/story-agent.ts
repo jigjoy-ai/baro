@@ -28,7 +28,7 @@ import {
     classifyProviderFailure,
     classifyStoryFailure,
     compactProviderFailureDetail,
-} from "../../provider-failure.js"
+} from "../provider-failure.js"
 import {
     ClaudeCliParticipant,
     ClaudeRunSummary,

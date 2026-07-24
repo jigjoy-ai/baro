@@ -17,7 +17,7 @@ import {
     source,
     withInjectedJigJoyEnvironment,
     withTempDir,
-} from "../../participants/helpers.js"
+} from "../../execution/helpers.js"
 
 function writeFakeClaude(dir: string): string {
     const bin = join(dir, "fake-claude.mjs")

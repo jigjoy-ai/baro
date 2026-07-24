@@ -1,7 +1,7 @@
 import type {
     Metric,
     ModelInvocationMeasuredData,
-} from "../model-telemetry.js"
+} from "../telemetry/model-telemetry.js"
 import type {
     WorkBidEstimateData,
     WorkLeaseReleasedData,

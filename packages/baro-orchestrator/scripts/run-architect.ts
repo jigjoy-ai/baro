@@ -21,13 +21,13 @@ import {
     createGatewayBillingCoordinatorFromEnv,
     reconcileAndCloseGatewayBilling,
     type GatewayBillingCoordinator,
-} from "../src/billing/index.js"
+} from "../src/telemetry/billing/index.js"
 import { sanitizeDiagnosticText } from "../src/harness/codex/failure-diagnostics.js"
 import {
     DialogueResponderInvocationError,
     type DialogueResponderInvocation,
-} from "../src/participants/dialogue-agent.js"
-import { createDialogueResponder } from "../src/participants/dialogue-responder.js"
+} from "../src/conversation/dialogue-agent.js"
+import { createDialogueResponder } from "../src/conversation/dialogue-responder.js"
 import { runArchitectClaude } from "../src/planning/adapters/architect-claude.js"
 import { runArchitectCodex } from "../src/planning/adapters/architect-codex.js"
 import type { ArchitectInvocationObserver } from "../src/planning/adapters/architect-invocation.js"
@@ -49,12 +49,12 @@ import {
     type ModeContract,
 } from "../src/planning/domain/planner-prompts.js"
 import { resolvePlannerModelName } from "../src/planning/adapters/planner-openai.js"
-import { runnerMeasurement } from "../src/runner-measurement.js"
+import { runnerMeasurement } from "../src/telemetry/runner-measurement.js"
 import { emit } from "../src/tui-protocol.js"
 import {
     validateGoalEnvelope,
     type GoalEnvelope,
-} from "../src/session/conversation-contract.js"
+} from "../src/conversation/session/conversation-contract.js"
 
 interface Args {
     goal: string

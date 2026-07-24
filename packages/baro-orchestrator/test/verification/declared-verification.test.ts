@@ -18,7 +18,7 @@ import {
     verifyBuild,
 } from "../../src/verification/verify.js"
 import { readAuthoritativeDeclaredTests } from "../../src/verification/prd-declared-tests.js"
-import { withTempDir } from "../participants/helpers.js"
+import { withTempDir } from "../execution/helpers.js"
 
 describe("declared verification policy", () => {
     it("routes a declaration matching a trusted script body through that script", async () => {

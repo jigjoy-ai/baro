@@ -16,8 +16,8 @@ import {
     type ReplanStoryAdd,
 } from "../../../src/semantic-events.js"
 import { SurgeonCodex } from "../../../src/harness/codex/surgeon.js"
-import type { PrdSnapshot } from "../../../src/participants/surgeon.js"
-import { joinWithCapture, source } from "../../participants/helpers.js"
+import type { PrdSnapshot } from "../../../src/execution/surgeon.js"
+import { joinWithCapture, source } from "../../execution/helpers.js"
 
 const snapshot = (): PrdSnapshot => ({
     project: "participant-tests",

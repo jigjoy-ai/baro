@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto"
 import {
     createGatewayBillingCoordinatorFromEnv,
     reconcileAndCloseGatewayBilling,
-} from "../src/billing/index.js"
+} from "../src/telemetry/billing/index.js"
 import {
     heuristicModeContract,
     type ModeContract,

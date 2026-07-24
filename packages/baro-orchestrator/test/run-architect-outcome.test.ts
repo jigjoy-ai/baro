@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import { withTempDir } from "./participants/helpers.js"
+import { withTempDir } from "./execution/helpers.js"
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url))
 const RUN_ARCHITECT = join(

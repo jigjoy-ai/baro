@@ -13,7 +13,7 @@ import {
 import {
     ManagedProcessTree,
     POSIX_PROCESS_GROUPS_SUPPORTED,
-} from "../src/process-tree.js"
+} from "../src/harness/process-tree.js"
 
 const TOKEN = "provider-ownership-test-token"
 let cleanup: (() => Promise<void>) | null = null

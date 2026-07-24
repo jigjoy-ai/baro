@@ -8,10 +8,10 @@ import {
     knownMetric,
     notApplicableMetric,
     unknownMetric,
-} from "../../../src/model-telemetry.js"
+} from "../../../src/telemetry/model-telemetry.js"
 import { runPiOneShot } from "../../../src/harness/pi/one-shot.js"
-import type { RunnerInvocationObservation } from "../../../src/runner-invocation.js"
-import { withTempDir } from "../../participants/helpers.js"
+import type { RunnerInvocationObservation } from "../../../src/harness/runner-invocation.js"
+import { withTempDir } from "../../execution/helpers.js"
 
 function writeFakePi(
     dir: string,

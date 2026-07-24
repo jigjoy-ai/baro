@@ -1,7 +1,7 @@
 import type {
     RunnerInvocationObservation,
     RunnerInvocationObserver,
-} from "../../runner-invocation.js"
+} from "../../harness/runner-invocation.js"
 
 export interface ArchitectInvocationMetadata {
     /** True when the trusted inference interceptor already published this runner record. */

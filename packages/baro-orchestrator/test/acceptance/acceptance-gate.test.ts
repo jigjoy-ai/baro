@@ -18,7 +18,7 @@ import {
     StoryResult,
     WorkLeaseGranted,
 } from "../../src/semantic-events.js"
-import { captureEnv, joinWithCapture, source } from "../participants/helpers.js"
+import { captureEnv, joinWithCapture, source } from "../execution/helpers.js"
 
 describe("AcceptanceGate", () => {
     it("ignores forged RunCompleted while a Board quality decision is pending", async () => {

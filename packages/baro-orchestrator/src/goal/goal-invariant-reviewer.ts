@@ -6,7 +6,7 @@ import {
     DialogueResponderNotDispatchedError,
     type DialogueResponder,
     type DialogueResponderInvocation,
-} from "../participants/dialogue-agent.js"
+} from "../conversation/dialogue-agent.js"
 import {
     extractVerdictJson,
     verdictSystemPrompt,
@@ -28,8 +28,8 @@ import {
     type GoalAggregateReviewRequestedData,
     type RunVerificationCompletedData,
 } from "../semantic-events.js"
-import { runnerMeasurement } from "../runner-measurement.js"
-import type { Metric } from "../model-telemetry.js"
+import { runnerMeasurement } from "../telemetry/runner-measurement.js"
+import type { Metric } from "../telemetry/model-telemetry.js"
 import { providerCallTimeoutError } from "../harness/openai/runtime.js"
 import {
     SerializedObserver,

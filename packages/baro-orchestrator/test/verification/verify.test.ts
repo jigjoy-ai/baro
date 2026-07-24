@@ -15,7 +15,7 @@ import {
     recommendedVerifyTimeoutMs,
     verifyBuild,
 } from "../../src/verification/verify.js"
-import { withTempDir } from "../participants/helpers.js"
+import { withTempDir } from "../execution/helpers.js"
 
 // Uses real `npm run <script>` so the gate is exercised end-to-end (no lockfile
 // → npm is the detected package manager). Timeouts are generous, so these run in

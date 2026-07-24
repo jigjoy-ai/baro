@@ -4,7 +4,7 @@ import {
     MIN_STORY_PRIORITY,
 } from "../../prd.js"
 import { deriveGoalContract } from "../../goal/goal-contract.js"
-import type { GoalEnvelope } from "../../session/conversation-contract.js"
+import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
     architectureObligationsFromDecision,
     validateArchitectureObligationCoverage,

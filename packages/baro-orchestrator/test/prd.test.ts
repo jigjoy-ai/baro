@@ -19,7 +19,7 @@ import {
     GoalInvariantLedger,
 } from "../src/goal/goal-contract.js"
 import type { RuntimeReplanAppliedData } from "../src/semantic-events.js"
-import { withTempDir } from "./participants/helpers.js"
+import { withTempDir } from "./execution/helpers.js"
 
 function story(overrides: Partial<PrdStory> = {}): PrdStory {
     return {

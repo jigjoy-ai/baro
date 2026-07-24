@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto"
 import {
     createGatewayBillingCoordinatorFromEnv,
     reconcileAndCloseGatewayBilling,
-} from "../src/billing/index.js"
+} from "../src/telemetry/billing/index.js"
 import { runPlannerClaude } from "../src/planning/adapters/planner-claude.js"
 import { runPlannerCodex } from "../src/planning/adapters/planner-codex.js"
 import { runPlannerOpenAI } from "../src/planning/adapters/planner-openai.js"
@@ -34,7 +34,7 @@ import {
     goalEnvelopeFingerprint,
     type GoalEnvelope,
     validateGoalEnvelope,
-} from "../src/session/conversation-contract.js"
+} from "../src/conversation/session/conversation-contract.js"
 import {
     applyProgressiveBootstrapMetadata,
     parseProgressiveBootstrapMetadata,

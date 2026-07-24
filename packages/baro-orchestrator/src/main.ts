@@ -131,15 +131,15 @@ export {
     type DialogueAgentOptions,
     type DialogueResponder,
     type DialogueResponderInput,
-} from "./participants/dialogue-agent.js"
+} from "./conversation/dialogue-agent.js"
 
 export {
     createDialogueResponder,
     type DialogueBackend,
     type CreateDialogueResponderOptions,
-} from "./participants/dialogue-responder.js"
+} from "./conversation/dialogue-responder.js"
 
-export { DialogueForwarder } from "./participants/forwarders/dialogue.js"
+export { DialogueForwarder } from "./execution/forwarders/dialogue.js"
 
 export {
     AgentTurnProjector,
@@ -170,18 +170,18 @@ export {
     type ModelInvocationMeasuredData,
     type ReducedModelInvocation,
     type ModelTelemetryReduction,
-} from "./model-telemetry.js"
+} from "./telemetry/model-telemetry.js"
 
-export * from "./billing/index.js"
+export * from "./telemetry/billing/index.js"
 
 export type {
     RunnerInvocationObservation,
     RunnerInvocationObserver,
-} from "./runner-invocation.js"
+} from "./harness/runner-invocation.js"
 export {
     runnerMeasurement,
     type RunnerMeasurementContext,
-} from "./runner-measurement.js"
+} from "./telemetry/runner-measurement.js"
 
 export { mapClaudeEvent, type MapResult } from "./harness/claude/stream-mapper.js"
 
@@ -230,7 +230,7 @@ export {
 export {
     ModelTelemetryCollector,
     type ModelTelemetryCollectorOptions,
-} from "./participants/model-telemetry-collector.js"
+} from "./telemetry/model-telemetry-collector.js"
 
 export {
     OpenCodeCliParticipant,
@@ -272,13 +272,13 @@ export {
 
 export { runPiOneShot, type RunPiOneShotOptions } from "./harness/pi/one-shot.js"
 
-export { Auditor, type AuditorOptions } from "./participants/auditor.js"
+export { Auditor, type AuditorOptions } from "./execution/auditor.js"
 
 export {
     Cartographer,
     type CartographerOptions,
     type Frame,
-} from "./participants/cartographer.js"
+} from "./execution/cartographer.js"
 
 export { StoryAgent } from "./harness/claude/story-agent.js"
 export {
@@ -298,7 +298,7 @@ export {
     type StoryExecutor,
     type StoryExecution,
     type StoryExecOpts,
-} from "./participants/story-executor.js"
+} from "./execution/story-executor.js"
 export { type StoryRoute, type Backend } from "./market/routing.js"
 export { type StorySpawnRequestData } from "./semantic-events.js"
 
@@ -306,7 +306,7 @@ export {
     Conductor,
     type ConductorOptions,
     type ConductorRunSummary,
-} from "./participants/conductor.js"
+} from "./execution/conductor.js"
 export { ConductorState } from "./semantic-events.js"
 export {
     CoordinationModeSelected,
@@ -380,7 +380,7 @@ export {
 export {
     CollectiveBoard,
     type CollectiveBoardOptions,
-} from "./participants/collective-board.js"
+} from "./execution/collective-board.js"
 export {
     LeaseBroker,
     type LeaseBrokerOptions,
@@ -418,7 +418,7 @@ export {
     buildDefaultStoryPrompt,
 } from "./prd.js"
 
-export { PlanningFeed } from "./participants/planning-feed.js"
+export { PlanningFeed } from "./execution/planning-feed.js"
 export {
     PROGRESSIVE_PLAN_SCHEMA_VERSION,
     ProgressivePlanContractError,
@@ -481,7 +481,7 @@ export {
     type ConversationResponse,
     type ConversationResponseKind,
     type GoalEnvelope,
-} from "./session/conversation-contract.js"
+} from "./conversation/session/conversation-contract.js"
 export {
     CONVERSATION_INTAKE_SYSTEM_PROMPT,
     ConversationIntake,
@@ -495,7 +495,7 @@ export {
     type ConversationResponderBackend,
     type ConversationResponderInput,
     type ConversationResponderResult,
-} from "./session/conversation-intake.js"
+} from "./conversation/session/conversation-intake.js"
 export {
     REPOSITORY_BRIEF_SCHEMA_VERSION,
     MAX_REPOSITORY_BRIEF_BYTES,
@@ -505,7 +505,7 @@ export {
     type RepositoryBriefV1,
     type RepositoryFactV1,
     type RepositoryFactConfidence,
-} from "./session/repository-brief.js"
+} from "./conversation/session/repository-brief.js"
 export {
     DeterministicRepositoryScanner,
     repositoryDirectoryIsIgnored,
@@ -514,7 +514,7 @@ export {
     type RepositoryContextScanner,
     type RepositoryContextScanRequest,
     type DeterministicRepositoryScannerOptions,
-} from "./session/repository-scanner.js"
+} from "./conversation/session/repository-scanner.js"
 export {
     AUTONOMOUS_REPOSITORY_SCOUT_SYSTEM_PROMPT,
     AutonomousRepositoryScanner,
@@ -522,14 +522,14 @@ export {
     type RepositoryScoutResponder,
     type RepositoryScoutResponderInput,
     type RepositoryScoutResponderResult,
-} from "./session/autonomous-repository-scout.js"
+} from "./conversation/session/autonomous-repository-scout.js"
 export {
     createReadOnlyRepositoryScoutTools,
     validateInspectableRepositoryEvidencePath,
     validateRepositoryGlobPattern,
     validateRepositoryResearchDirectoryPath,
     validateRepositorySearchPattern,
-} from "./session/repository-research-tools.js"
+} from "./conversation/session/repository-research-tools.js"
 export {
     ConversationTurnHost,
     ConversationIntakeParticipant,
@@ -541,14 +541,14 @@ export {
     type ConversationIntakeParticipantOptions,
     type RepositoryScoutParticipantOptions,
     type RunFrontDoorConversationTurnOptions,
-} from "./session/conversation-frontdoor.js"
+} from "./conversation/session/conversation-frontdoor.js"
 export {
     SessionLifecycle,
     SessionLifecycleError,
     type SessionLifecycleSnapshot,
     type SessionPhase,
     type SessionPhaseChange,
-} from "./session/session-lifecycle.js"
+} from "./conversation/session/session-lifecycle.js"
 export {
     CONVERSATION_CONTEXT_SCHEMA_VERSION,
     MAX_CONVERSATION_CONTEXT_BYTES,
@@ -562,7 +562,7 @@ export {
     type ConversationContextHistoryEntry,
     type ConversationContextPhase,
     type ConversationContextSnapshot,
-} from "./session/conversation-context.js"
+} from "./conversation/session/conversation-context.js"
 export {
     ProcessSessionHost,
     type HostedRunResult,
@@ -571,23 +571,23 @@ export {
     type ProcessRunFactory,
     type ProcessRunOutcome,
     type ProcessSessionHostOptions,
-} from "./session/process-session-host.js"
+} from "./conversation/session/process-session-host.js"
 
 export {
     Operator,
     type OperatorCommand,
     type OperatorHooks,
-} from "./participants/operator.js"
+} from "./execution/operator.js"
 
 export {
     Librarian,
     type LibrarianOptions,
-} from "./participants/librarian.js"
+} from "./execution/librarian.js"
 
 export {
     Sentry,
     type SentryOptions,
-} from "./participants/sentry.js"
+} from "./execution/sentry.js"
 
 export {
     Knowledge,
@@ -606,4 +606,4 @@ export {
     Surgeon,
     type SurgeonOptions,
     type PrdSnapshot,
-} from "./participants/surgeon.js"
+} from "./execution/surgeon.js"

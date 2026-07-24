@@ -4,7 +4,7 @@
  * are all dropped silently — this lane must never crash a run.
  */
 
-import type { Operator } from "./participants/operator.js"
+import type { Operator } from "./execution/operator.js"
 import { emit, type BaroCommand, type BaroEvent } from "./tui-protocol.js"
 
 let generatedConversationSequence = 0

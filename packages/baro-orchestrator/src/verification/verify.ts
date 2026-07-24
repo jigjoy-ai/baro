@@ -18,7 +18,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 
-import { execFileCli } from "../exec-file-cli.js"
+import { execFileCli } from "../harness/exec-file-cli.js"
 import {
     MAX_DECLARED_VERIFY_COMMANDS,
     revalidateContainedPaths,

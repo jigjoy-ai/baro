@@ -7,7 +7,7 @@ import {
     WorkContextProvided,
     WorkContextRequested,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source } from "../participants/helpers.js"
+import { joinWithCapture, source } from "../execution/helpers.js"
 
 describe("WorkContextProvider", () => {
     it("fails closed before request and collaboration authorities are bound", async () => {

@@ -16,7 +16,7 @@ import {
     SemanticEvent,
 } from "../../runtime/mozaik.js"
 
-import { PROCESS_TREE_CAPABILITIES } from "../../process-tree.js"
+import { PROCESS_TREE_CAPABILITIES } from "../process-tree.js"
 import {
     AgentState,
     OneShotAttemptFinalized,

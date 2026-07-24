@@ -22,11 +22,11 @@ import {
     SemanticEvent,
 } from "../runtime/mozaik.js"
 
-import { harnessChildEnvironment } from "../harness-environment.js"
+import { harnessChildEnvironment } from "./environment.js"
 import {
     ManagedProcessTree,
     POSIX_PROCESS_GROUPS_SUPPORTED,
-} from "../process-tree.js"
+} from "./process-tree.js"
 import { AgentState, type AgentPhase } from "../semantic-events.js"
 import { appendCliDiagnosticTail } from "./cli-story-failure.js"
 

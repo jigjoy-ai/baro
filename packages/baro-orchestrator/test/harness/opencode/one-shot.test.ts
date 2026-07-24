@@ -4,10 +4,10 @@ import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { describe, it } from "node:test"
 
-import { knownMetric, unknownMetric } from "../../../src/model-telemetry.js"
+import { knownMetric, unknownMetric } from "../../../src/telemetry/model-telemetry.js"
 import { runOpenCodeOneShot } from "../../../src/harness/opencode/one-shot.js"
-import type { RunnerInvocationObservation } from "../../../src/runner-invocation.js"
-import { withTempDir } from "../../participants/helpers.js"
+import type { RunnerInvocationObservation } from "../../../src/harness/runner-invocation.js"
+import { withTempDir } from "../../execution/helpers.js"
 
 function writeFakeOpenCode(
     dir: string,

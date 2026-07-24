@@ -5,7 +5,7 @@ import {
     acceptsTargetedMessage,
     correlatedTargetedMessage,
 } from "../../src/runtime/targeted-message-authority.js"
-import { source } from "../participants/helpers.js"
+import { source } from "../execution/helpers.js"
 
 describe("targeted message authority", () => {
     it("keeps legacy recipient-only delivery while collective delivery fails closed", () => {

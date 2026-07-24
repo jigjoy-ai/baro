@@ -10,7 +10,7 @@ import {
     Critique,
     ModelInvocationMeasured,
 } from "../../../src/semantic-events.js"
-import { joinWithCapture, source, withTempDir } from "../../participants/helpers.js"
+import { joinWithCapture, source, withTempDir } from "../../execution/helpers.js"
 
 describe("CriticOpenCode", () => {
     it("emits critiques while bounding corrective messages", async () => {

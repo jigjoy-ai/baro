@@ -30,7 +30,7 @@ import type {
     StoryExecution,
     StoryExecOpts,
     StoryExecutor,
-} from "../src/participants/story-executor.js"
+} from "../src/execution/story-executor.js"
 import type { StoryRoute } from "../src/market/routing.js"
 import {
     AgentState,
@@ -61,10 +61,10 @@ import {
     knownMetric,
     notApplicableMetric,
     unknownMetric,
-} from "../src/model-telemetry.js"
+} from "../src/telemetry/model-telemetry.js"
 import type { PrdFile } from "../src/prd.js"
 import { acceptsTargetedMessage } from "../src/runtime/targeted-message-authority.js"
-import { captureStdout, withTempDir } from "./participants/helpers.js"
+import { captureStdout, withTempDir } from "./execution/helpers.js"
 
 class PassingExecutor implements StoryExecutor {
     readonly started: string[] = []

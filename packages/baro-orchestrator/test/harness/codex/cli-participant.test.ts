@@ -15,7 +15,7 @@ import {
     harnessEnvironmentCaptureProgram,
     withInjectedJigJoyEnvironment,
     withTempDir,
-} from "../../participants/helpers.js"
+} from "../../execution/helpers.js"
 
 function writeFakeCodex(dir: string): string {
     const bin = join(dir, "fake-codex.mjs")

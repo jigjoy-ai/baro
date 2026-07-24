@@ -1,5 +1,5 @@
 import { extractModelJsonObject } from "../../model-json.js"
-import type { GoalEnvelope } from "../../session/conversation-contract.js"
+import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
     deriveGoalContract,
     type GoalContract,

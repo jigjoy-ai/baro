@@ -32,7 +32,7 @@ import { CriticPi } from "../../src/harness/pi/critic.js"
 import { Critic, VERDICT_SYSTEM_PROMPT } from "../../src/harness/claude/critic.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import { AgentResult, AgentState } from "../../src/semantic-events.js"
-import { joinWithCapture, source, withTempDir } from "../participants/helpers.js"
+import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
 
 interface TestCritic {
     onExternalEvent(source: Participant, event: SemanticEvent<unknown>): Promise<void>

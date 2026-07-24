@@ -24,13 +24,13 @@ import {
     type OpenAIConnection,
     type OpenAIReasoningEffort,
 } from "../../harness/openai/runtime.js"
-import type { GatewayBillingCoordinator } from "../../billing/index.js"
+import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import {
     isRunnerTimeoutError,
     normalizeOpenAIRunnerObservation,
     unknownOpenAIRunnerObservation,
-} from "../../participants/dialogue-responder.js"
-import type { GoalEnvelope } from "../../session/conversation-contract.js"
+} from "../../conversation/dialogue-responder.js"
+import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 
 import {
     ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,

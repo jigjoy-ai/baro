@@ -10,7 +10,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { extractModelJsonObject } from "../../model-json.js"
-import type { RunnerInvocationObserver } from "../../runner-invocation.js"
+import type { RunnerInvocationObserver } from "../runner-invocation.js"
 import {
     ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_OUTCOME_SYSTEM_PROMPT,

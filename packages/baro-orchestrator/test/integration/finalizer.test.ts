@@ -19,7 +19,7 @@ import {
     StoryResult,
     type RunVerificationCompletedData,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source, withTempDir } from "../participants/helpers.js"
+import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
 
 describe("Finalizer", () => {
     it("ships accepted runtime amendments beside the Architect ADR baseline", async () => {

@@ -9,8 +9,8 @@
 
 import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
 
-import { runnerMeasurement } from "../../runner-measurement.js"
-import type { RunnerInvocationObserver } from "../../runner-invocation.js"
+import { runnerMeasurement } from "../../telemetry/runner-measurement.js"
+import type { RunnerInvocationObserver } from "../runner-invocation.js"
 import {
     AgentTargetedMessage,
     Critique,

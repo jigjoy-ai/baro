@@ -33,7 +33,7 @@ import {
     type TokenUsage,
 } from "../../runtime/mozaik.js"
 
-import type { GatewayBillingCoordinator } from "../../billing/index.js"
+import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import {
     GenericOpenAIModel,
     UsageAccumulator,
@@ -54,7 +54,7 @@ import {
     type ModelInvocationStatus,
     type ModelTokenMetrics,
     type UnknownMetricReason,
-} from "../../model-telemetry.js"
+} from "../../telemetry/model-telemetry.js"
 import {
     VERDICT_SYSTEM_PROMPT,
     buildCorrectiveMessage,

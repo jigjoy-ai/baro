@@ -1,7 +1,7 @@
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
-import { Operator } from "../src/participants/operator.js"
+import { Operator } from "../src/execution/operator.js"
 import {
     AgentTargetedMessage,
     ConversationRequested,
@@ -11,7 +11,7 @@ import {
     type PlanningFeed,
 } from "../src/stdin-commands.js"
 import type { BaroCommand, BaroEvent } from "../src/tui-protocol.js"
-import { joinWithCapture } from "./participants/helpers.js"
+import { joinWithCapture } from "./execution/helpers.js"
 
 function wired() {
     const operator = new Operator({}, { runId: "run-stdin" })

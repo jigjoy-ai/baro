@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
 
-import { ManagedProcessTree } from "../../src/process-tree.js"
+import { ManagedProcessTree } from "../../src/harness/process-tree.js"
 import { configureProviderOwnershipManifest } from "../../src/provider-ownership-manifest.js"
 
 const manifestPath = requiredEnv("BARO_INTERNAL_PROVIDER_OWNERSHIP_MANIFEST")

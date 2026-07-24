@@ -2,7 +2,7 @@ import {
     goalEnvelopeFingerprint,
     validateGoalEnvelope,
     type GoalEnvelope,
-} from "../session/conversation-contract.js"
+} from "../conversation/session/conversation-contract.js"
 import {
     createGoalAggregateReviewBasis,
     normalizeGoalAggregateReviewEvidence,

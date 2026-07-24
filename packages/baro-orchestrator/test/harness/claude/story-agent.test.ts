@@ -28,7 +28,7 @@ import {
     source,
     type CapturedEnvironment,
     withTempDir,
-} from "../../participants/helpers.js"
+} from "../../execution/helpers.js"
 
 // These tests exercise semantic outcomes, not the production attempt watchdog.
 // The full suite launches many fixture processes concurrently, so leave enough

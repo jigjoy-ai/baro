@@ -12,8 +12,8 @@ import {
     type PrdFile,
 } from "../src/prd.js"
 import { validateRuntimeReplanMutation } from "../src/runtime/runtime-replan.js"
-import type { GoalEnvelope } from "../src/session/conversation-contract.js"
-import { withTempDir } from "./participants/helpers.js"
+import type { GoalEnvelope } from "../src/conversation/session/conversation-contract.js"
+import { withTempDir } from "./execution/helpers.js"
 
 const GOAL: GoalEnvelope = {
     objective: "Keep the conversation intent attached to the run.",

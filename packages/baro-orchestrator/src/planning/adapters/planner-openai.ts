@@ -25,9 +25,9 @@ import {
     runInferenceRound,
     type InferenceRound,
 } from "../../harness/openai/runtime.js"
-import type { GatewayBillingCoordinator } from "../../billing/index.js"
+import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import { deriveGoalContract } from "../../goal/goal-contract.js"
-import type { GoalEnvelope } from "../../session/conversation-contract.js"
+import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 
 import { createCodebaseTools } from "./codebase-tools.js"
 import { emitPlanLine, emitToolCall } from "../application/plan-events.js"

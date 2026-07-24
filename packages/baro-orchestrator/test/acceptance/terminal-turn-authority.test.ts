@@ -14,7 +14,7 @@ import {
     AgentTurnCompleted,
     Critique,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source } from "../participants/helpers.js"
+import { joinWithCapture, source } from "../execution/helpers.js"
 
 interface AuthorityAwareCritic {
     onExternalEvent(

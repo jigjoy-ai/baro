@@ -3,7 +3,7 @@ import { chmodSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import { knownMetric, unknownMetric } from "../../../src/model-telemetry.js"
+import { knownMetric, unknownMetric } from "../../../src/telemetry/model-telemetry.js"
 import { Critic } from "../../../src/harness/claude/critic.js"
 import {
     AgentResult,
@@ -12,7 +12,7 @@ import {
     Critique,
     ModelInvocationMeasured,
 } from "../../../src/semantic-events.js"
-import { joinWithCapture, source, withTempDir } from "../../participants/helpers.js"
+import { joinWithCapture, source, withTempDir } from "../../execution/helpers.js"
 
 describe("Critic", () => {
     it("emits critiques while bounding corrective messages", async () => {

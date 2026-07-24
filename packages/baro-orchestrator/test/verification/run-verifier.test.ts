@@ -15,7 +15,7 @@ import {
     RunVerificationRequested,
     RunVerificationTimedOut,
 } from "../../src/semantic-events.js"
-import { joinWithCapture, source, withTempDir } from "../participants/helpers.js"
+import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
 
 const BOARD = source("board")
 

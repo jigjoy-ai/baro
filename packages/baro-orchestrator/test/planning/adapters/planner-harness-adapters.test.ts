@@ -21,7 +21,7 @@ import {
     type PlannerOpenAIPlanFragmentEvent,
 } from "../../../src/planning/adapters/planner-openai-progressive.js"
 import type { ModeContract } from "../../../src/planning/domain/planner-prompts.js"
-import { withTempDir } from "../../participants/helpers.js"
+import { withTempDir } from "../../execution/helpers.js"
 
 const RUN_PLANNER_ENTRY = fileURLToPath(
     new URL("../../../scripts/run-planner.ts", import.meta.url),

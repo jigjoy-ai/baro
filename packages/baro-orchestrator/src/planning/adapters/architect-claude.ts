@@ -4,14 +4,14 @@
  * decision documents; Claude's built-in tools do the exploration.
  */
 
-import { execFileCli } from "../../exec-file-cli.js"
+import { execFileCli } from "../../harness/exec-file-cli.js"
 
-import { harnessChildEnvironment } from "../../harness-environment.js"
+import { harnessChildEnvironment } from "../../harness/environment.js"
 import {
     isRunnerTimeoutError,
     normalizeClaudeRunnerObservation,
     unknownClaudeRunnerObservation,
-} from "../../participants/dialogue-responder.js"
+} from "../../conversation/dialogue-responder.js"
 
 import {
     ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
