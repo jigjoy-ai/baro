@@ -199,8 +199,8 @@ async fn run_conversation_turn_with_entry(
             {
                 return;
             }
-            if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
-                sink(text.to_string());
+            if let Some(append) = value.get("append").and_then(|v| v.as_str()) {
+                sink(append.to_string());
             }
         }),
     )

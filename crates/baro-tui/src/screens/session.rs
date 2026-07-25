@@ -156,7 +156,7 @@ fn transcript_lines(app: &App, lines: &mut Vec<Line<'static>>) {
 
 /// The assistant's reply as it is being composed (conversation_delta).
 fn streaming_lines(app: &App, lines: &mut Vec<Line<'static>>) {
-    let Some(text) = &app.conversation_stream else { return };
+    let Some((_, text)) = &app.conversation_stream else { return };
     if text.is_empty() {
         return;
     }

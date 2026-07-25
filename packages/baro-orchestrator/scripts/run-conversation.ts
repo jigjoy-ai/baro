@@ -222,10 +222,15 @@ async function main(): Promise<void> {
     const isolatedCwd = mkdtempSync(join(tmpdir(), "baro-conversation-intake-"))
     let intake: ConversationIntake | null = null
     try {
+        // The front door is the user's conversational partner: default the
+        // claude lane to sonnet (haiku's multilingual chat is noticeably
+        // weaker); explicit --model always wins. Scout keeps its own default.
+        const conversationModel =
+            args.model ?? (args.llm === "claude" ? "sonnet" : undefined)
         const dialogue = createDialogueResponder({
             backend: args.llm,
             cwd: isolatedCwd,
-            model: args.model,
+            model: conversationModel,
             timeoutMs: providerTimeoutMs,
             claudeBin: args.claudeBin,
             codexBin: args.codexBin,
@@ -240,12 +245,17 @@ async function main(): Promise<void> {
         const streamDelta = (jsonSoFar: string): void => {
             const partial = extractAssistantMessagePartial(jsonSoFar)
             if (partial === null || partial === lastStreamed) return
+            if (!partial.startsWith(lastStreamed)) lastStreamed = ""
+            const append = partial.slice(lastStreamed.length)
             lastStreamed = partial
-            process.stdout.write(
+            if (!append) return
+            // stderr: the runner streams stderr lines live; stdout is
+            // buffered until exit.
+            process.stderr.write(
                 JSON.stringify({
                     type: "conversation_delta",
                     requestId: input.requestId,
-                    text: partial,
+                    append,
                 }) + "\n",
             )
         }
@@ -266,13 +276,24 @@ async function main(): Promise<void> {
                 return typeof result === "string" ? result : result.text
             },
         }
-        // Keep a distinct policy seam even while the CLI defaults both roles
-        // to the same selected backend/model. A future route can move Scout to
-        // a cheaper model without changing the Mozaik event contract.
+        // Scout stays on the caller's model (or the adapter default): its
+        // calls are structured policy steps where haiku is sufficient.
+        const scoutDialogue = createDialogueResponder({
+            backend: args.llm,
+            cwd: isolatedCwd,
+            model: args.model,
+            timeoutMs: providerTimeoutMs,
+            claudeBin: args.claudeBin,
+            codexBin: args.codexBin,
+            opencodeBin: args.opencodeBin,
+            piBin: args.piBin,
+            codexSkipGitRepoCheck: true,
+            billingCoordinator: billing ?? undefined,
+        })
         const scoutResponder: RepositoryScoutResponder = {
             backend: args.llm,
             respond: async (request, signal) => {
-                const result = await dialogue(
+                const result = await scoutDialogue(
                     {
                         runId: billingRunId,
                         messageId:

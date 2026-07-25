@@ -544,8 +544,8 @@ pub struct App {
     pub session_feed: SessionFeed,
     /// Workbench (execute screen) shown as an overlay above the session.
     pub workbench_overlay: bool,
-    /// Cumulative partial assistant text for the pending conversation turn.
-    pub conversation_stream: Option<String>,
+    /// (request_id, accumulated text) of the streaming assistant reply.
+    pub conversation_stream: Option<(String, String)>,
     pub diff_scroll_offset: u16,
     /// File the diff view should scroll to; applied at render (only there
     /// is the composed diff's line layout known), then the flag clears.

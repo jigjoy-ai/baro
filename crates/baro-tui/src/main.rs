@@ -1243,14 +1243,28 @@ async fn run_app(
     let mut last_draw = Instant::now()
         .checked_sub(Duration::from_millis(100))
         .unwrap_or_else(Instant::now);
+    let mut dirty = true;
     loop {
         if let Some(t) = terminal.as_deref_mut() {
-            if last_draw.elapsed() >= Duration::from_millis(33) {
+            if dirty && last_draw.elapsed() >= Duration::from_millis(33) {
                 t.draw(|f| ui::render(f, &mut app))?;
                 last_draw = Instant::now();
+                dirty = false;
             }
         }
-        match rx.recv().await {
+        // A throttled-away frame must not wait for the NEXT event to render:
+        // bound the wait so a lone keystroke appears within one frame.
+        let received = if dirty {
+            let wait = Duration::from_millis(33).saturating_sub(last_draw.elapsed());
+            match tokio::time::timeout(wait.max(Duration::from_millis(1)), rx.recv()).await {
+                Ok(event) => event,
+                Err(_) => continue,
+            }
+        } else {
+            rx.recv().await
+        };
+        dirty = true;
+        match received {
             Some(AppEvent::Baro(ev)) => {
                 if matches!(ev, BaroEvent::NotificationReady) {
                     notification::notify_completion();
@@ -1308,7 +1322,12 @@ async fn run_app(
                     .pending_request_id()
                     .is_some_and(|pending| pending == request_id)
                 {
-                    app.conversation_stream = Some(text);
+                    match &mut app.conversation_stream {
+                        Some((current, accumulated)) if *current == request_id => {
+                            accumulated.push_str(&text);
+                        }
+                        _ => app.conversation_stream = Some((request_id, text)),
+                    }
                 }
             }
             Some(AppEvent::ConversationResponse(turn)) => {
