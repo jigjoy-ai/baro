@@ -546,6 +546,9 @@ pub struct App {
     pub workbench_overlay: bool,
     /// (request_id, accumulated text) of the streaming assistant reply.
     pub conversation_stream: Option<(String, String)>,
+    /// Plan awaiting inline confirmation in the session (conversation-owned
+    /// runs); legacy flows use the Review screen instead.
+    pub pending_plan: Option<Vec<ReviewStory>>,
     pub diff_scroll_offset: u16,
     /// File the diff view should scroll to; applied at render (only there
     /// is the composed diff's line layout known), then the flag clears.
@@ -693,6 +696,7 @@ impl App {
             session_feed: SessionFeed::default(),
             workbench_overlay: false,
             conversation_stream: None,
+            pending_plan: None,
             diff_scroll_offset: 0,
             diff_target: None,
             diff_scroll_pending: false,
@@ -742,7 +746,10 @@ impl App {
     }
 
     pub fn start_planning(&mut self) {
-        self.screen = Screen::Planning;
+        // Conversation-owned runs keep the chat spine through planning.
+        if self.conversation.goal_envelope().is_none() {
+            self.screen = Screen::Planning;
+        }
         self.planning_start = Some(Instant::now());
         self.planning_progress = None;
     }
@@ -763,6 +770,7 @@ impl App {
         } else {
             Screen::Execute
         };
+        self.pending_plan = None;
         self.session_feed.clear();
         self.start_time = Instant::now();
         self.dag_scroll_offset = 0;

@@ -1567,6 +1567,9 @@ async fn run_app(
                         // auto-confirm and execute (no review screen).
                         println!(r#"{{"type":"plan_ready","stories":{}}}"#, stories.len());
                         confirm_and_execute(&mut app, stories, &cwd, tx.clone());
+                    } else if app.conversation.goal_envelope().is_some() {
+                        // Conversation-owned: confirm inline in the session.
+                        app.pending_plan = Some(stories);
                     } else {
                         app.show_review(stories);
                     }
@@ -1880,6 +1883,14 @@ async fn run_app(
                                 open_in_browser(&pr);
                             }
                         }
+                        KeyCode::Char('v')
+                            if app.pending_plan.is_some()
+                                && !app.conversation_accepts_input() =>
+                        {
+                            if let Some(stories) = app.pending_plan.take() {
+                                app.show_review(stories);
+                            }
+                        }
                         KeyCode::Up => app.session_feed.scroll_up(),
                         KeyCode::Down => app.session_feed.scroll_down(),
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1894,7 +1905,9 @@ async fn run_app(
                             spawn_pending_conversation(&mut app, &cwd, tx.clone(), intent);
                         }
                         KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
-                            if app.conversation_input.trim().is_empty() {
+                            if let Some(stories) = app.pending_plan.take() {
+                                confirm_and_execute(&mut app, stories, &cwd, tx.clone());
+                            } else if app.conversation_input.trim().is_empty() {
                             } else if app.conversation_accepts_input() {
                                 let message = std::mem::take(&mut app.conversation_input);
                                 if let Err(error) =

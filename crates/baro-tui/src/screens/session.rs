@@ -37,6 +37,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     transcript_lines(app, &mut lines);
     streaming_lines(app, &mut lines);
     feed_lines(app, width, &mut lines);
+    planning_lines(app, width, &mut lines);
 
     let visible = chunks[1].height as usize;
     let tail = lines.len().saturating_sub(visible);
@@ -410,6 +411,69 @@ fn story_line(app: &App, id: &str, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Live planning status and the inline plan-confirmation block.
+fn planning_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {
+    if let Some(stories) = &app.pending_plan {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  ◆ ", Style::default().fg(theme::ACCENT)),
+            Span::styled(
+                format!("plan ready — {} stories", stories.len()),
+                Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        const VISIBLE: usize = 8;
+        for story in stories.iter().take(VISIBLE) {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("    ○ {} ", story.id),
+                    Style::default().fg(theme::TEXT_DIM),
+                ),
+                Span::styled(
+                    clip(&story.title, width.saturating_sub(12)),
+                    Style::default().fg(theme::TEXT),
+                ),
+            ]));
+        }
+        if stories.len() > VISIBLE {
+            lines.push(Line::from(Span::styled(
+                format!("    … and {} more", stories.len() - VISIBLE),
+                Style::default().fg(theme::MUTED),
+            )));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("  › ", Style::default().fg(theme::ACCENT)),
+            Span::styled("enter", Style::default().fg(theme::ACCENT)),
+            Span::styled(" run the plan  ·  ", Style::default().fg(theme::TEXT_DIM)),
+            Span::styled("v", Style::default().fg(theme::ACCENT)),
+            Span::styled(" detailed review", Style::default().fg(theme::TEXT_DIM)),
+        ]));
+        return;
+    }
+    if app.conversation.phase() == ConversationPhase::Planning {
+        let mut spans = vec![
+            Span::styled(
+                format!(
+                    "  {} ",
+                    SPINNER[(app.tick_count as usize / 2) % SPINNER.len()]
+                ),
+                Style::default().fg(theme::ACCENT),
+            ),
+            Span::styled(
+                "architect & planner are working…",
+                Style::default().fg(theme::TEXT_DIM),
+            ),
+        ];
+        if let Some(progress) = &app.planning_progress {
+            spans.push(Span::styled(
+                format!("  {}", clip(progress, width.saturating_sub(36))),
+                Style::default().fg(theme::MUTED),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+}
+
 fn input_box(app: &App) -> Paragraph<'static> {
     let text = if app.conversation_busy {
         format!(
@@ -417,6 +481,15 @@ fn input_box(app: &App) -> Paragraph<'static> {
             SPINNER[(app.tick_count as usize / 2) % SPINNER.len()]
         )
     } else if app.conversation_input.is_empty() {
+        if app.pending_plan.is_some() {
+            return Paragraph::new(" Enter runs the plan · v opens detailed review")
+                .wrap(Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(theme::BORDER_ACTIVE)),
+                );
+        }
         match app.conversation.phase() {
             ConversationPhase::Executing | ConversationPhase::Verifying => {
                 " Message baro — @S1 targets an agent…".to_string()
@@ -511,6 +584,19 @@ mod tests {
                 success: true,
                 summary: vec![("stopped".into(), "never".into())],
             });
+            app.pending_plan = Some(vec![crate::app::ReviewStory {
+                id: "S9".into(),
+                priority: 1,
+                title: "Pending plan story".into(),
+                description: String::new(),
+                depends_on: Vec::new(),
+                retries: 1,
+                acceptance: Vec::new(),
+                tests: Vec::new(),
+                goal_invariant_ids: Vec::new(),
+                completed: false,
+                model: None,
+            }]);
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal.draw(|frame| render(frame, &app)).unwrap();
