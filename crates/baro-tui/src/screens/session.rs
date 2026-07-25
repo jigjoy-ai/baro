@@ -172,14 +172,33 @@ fn transcript_lines(app: &App, lines: &mut Vec<Line<'static>>) {
     }
 }
 
-/// The assistant's reply as it is being composed (conversation_delta).
+/// The assistant's reply as it is being composed (conversation_delta),
+/// or a contextual thinking line while nothing has streamed yet.
 fn streaming_lines(app: &App, lines: &mut Vec<Line<'static>>) {
-    let Some((_, text)) = &app.conversation_stream else { return };
-    if text.is_empty() {
-        return;
+    if let Some((_, text)) = &app.conversation_stream {
+        if !text.is_empty() {
+            markdown_lines(text, "  ", lines);
+            lines.push(Line::from(""));
+            return;
+        }
     }
-    markdown_lines(text, "  ", lines);
-    lines.push(Line::from(""));
+    if app.conversation_busy {
+        let status = if app.architect_status == crate::app::ArchitectStatus::Running {
+            "validating the goal against the repository…"
+        } else {
+            "thinking…"
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(
+                    "  {} ",
+                    SPINNER[(app.tick_count as usize / 2) % SPINNER.len()]
+                ),
+                Style::default().fg(theme::ACCENT),
+            ),
+            Span::styled(status.to_string(), Style::default().fg(theme::TEXT_DIM)),
+        ]));
+    }
 }
 
 fn feed_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {
@@ -497,15 +516,22 @@ fn planning_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {
             ));
         }
         lines.push(Line::from(spans));
+        // The planning feed's tail: what the architect/planner agents are
+        // actually doing right now.
+        if let Some(plan) = app.active_stories.get("plan") {
+            for line in plan.logs.iter().rev().take(3).rev() {
+                lines.push(Line::from(Span::styled(
+                    format!("      {}", clip(line, width.saturating_sub(8))),
+                    Style::default().fg(theme::MUTED),
+                )));
+            }
+        }
     }
 }
 
 fn input_box(app: &App) -> Paragraph<'static> {
-    let text = if app.conversation_busy {
-        format!(
-            " {} thinking…",
-            SPINNER[(app.tick_count as usize / 2) % SPINNER.len()]
-        )
+    let text = if app.conversation_busy && app.conversation_input.is_empty() {
+        " Baro is working — you can keep typing…".to_string()
     } else if app.conversation_input.is_empty() {
         if app.pending_plan.is_some() {
             return Paragraph::new(" Enter runs the plan · v opens detailed review")
