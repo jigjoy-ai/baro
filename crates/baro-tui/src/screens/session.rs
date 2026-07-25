@@ -393,7 +393,9 @@ fn input_box(app: &App) -> Paragraph<'static> {
         )
     } else if app.conversation_input.is_empty() {
         match app.conversation.phase() {
-            ConversationPhase::Executing => " Message baro… (Tab workbench)".to_string(),
+            ConversationPhase::Executing | ConversationPhase::Verifying => {
+                " Message baro — @S1 targets an agent…".to_string()
+            }
             ConversationPhase::Completed | ConversationPhase::Failed => {
                 " Ask what was done, or describe the next iteration…".to_string()
             }
