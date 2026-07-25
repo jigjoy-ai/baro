@@ -1,4 +1,10 @@
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs"
+import {
+    chmodSync,
+    existsSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { describe, it } from "node:test"
@@ -86,8 +92,7 @@ import { writeFileSync } from "node:fs";
 const descendantSource = ${JSON.stringify(`
 import { writeFileSync } from "node:fs";
 process.on("SIGTERM", () => {});
-setTimeout(() => writeFileSync(process.env.BARO_TEST_ESCAPED, "yes"), 2_000);
-setInterval(() => {}, 10_000);
+setInterval(() => writeFileSync(process.env.BARO_TEST_ESCAPED, "yes"), 100);
 `)};
 const descendant = spawn(process.execPath, ["--input-type=module", "-e", descendantSource], {
     env: process.env,
@@ -105,7 +110,7 @@ setInterval(() => {}, 10_000);
                         BARO_TEST_STARTED: started,
                         BARO_TEST_ESCAPED: escaped,
                     },
-                    timeout: 1_200,
+                    timeout: 3_000,
                     terminationGraceMs: 75,
                 }),
                 (error: Error & { killed?: boolean }) => {
@@ -116,7 +121,8 @@ setInterval(() => {}, 10_000);
             )
 
             assert.equal(existsSync(started), true, "descendant was never spawned")
-            await delay(2_050)
+            rmSync(escaped, { force: true })
+            await delay(350)
             assert.equal(
                 existsSync(escaped),
                 false,
@@ -138,8 +144,7 @@ import { spawn } from "node:child_process";
 const descendantSource = ${JSON.stringify(`
 import { writeFileSync } from "node:fs";
 process.on("SIGTERM", () => {});
-setTimeout(() => writeFileSync(${JSON.stringify(escaped)}, "yes"), 700);
-setInterval(() => {}, 10_000);
+setInterval(() => writeFileSync(${JSON.stringify(escaped)}, "yes"), 100);
 `)};
 const descendant = spawn(process.execPath, ["--input-type=module", "-e", descendantSource], {
     stdio: ["ignore", "inherit", "inherit"],
@@ -156,7 +161,8 @@ process.exit(0);
                 })
 
                 assert.equal(result.stdout, "ready\n")
-                await delay(750)
+                rmSync(escaped, { force: true })
+                await delay(350)
                 assert.equal(
                     existsSync(escaped),
                     false,
@@ -178,8 +184,7 @@ import { writeFileSync } from "node:fs";
 const descendantSource = ${JSON.stringify(`
 import { writeFileSync } from "node:fs";
 process.on("SIGTERM", () => {});
-setTimeout(() => writeFileSync(${JSON.stringify(escaped)}, "yes"), 1_300);
-setInterval(() => {}, 10_000);
+setInterval(() => writeFileSync(${JSON.stringify(escaped)}, "yes"), 100);
 `)};
 const descendant = spawn(process.execPath, ["--input-type=module", "-e", descendantSource], {
     stdio: ["ignore", "inherit", "inherit"],
@@ -207,6 +212,9 @@ process.exit(0);
                 Date.now() - abortedAt < 2_500,
                 "late abort exceeded the bounded cleanup window",
             )
+            // A dead descendant cannot recreate the marker; a survivor
+            // rewrites it within 100ms. No knife-edge timer race.
+            rmSync(escaped, { force: true })
             await delay(350)
             assert.equal(
                 existsSync(escaped),
