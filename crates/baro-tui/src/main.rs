@@ -17,6 +17,7 @@ mod executor;
 mod gateway_credential;
 mod git;
 mod headless_transport;
+mod highlight;
 mod intake_runner;
 mod notification;
 mod orchestrator_client;
@@ -1226,6 +1227,7 @@ async fn run_app(
         });
     }
 
+    highlight::warm();
     let tx_tick = tx.clone();
     tokio::spawn(async move {
         loop {

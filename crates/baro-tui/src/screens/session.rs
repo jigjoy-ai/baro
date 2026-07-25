@@ -615,21 +615,39 @@ fn markdown_lines(
     indent: &str,
     lines: &mut Vec<Line<'static>>,
 ) {
-    let mut in_fence = false;
+    let mut fence: Option<(String, String)> = None; // (lang, buffered code)
+    let mut flush_fence =
+        |fence: &mut Option<(String, String)>, lines: &mut Vec<Line<'static>>| {
+            let Some((lang, code)) = fence.take() else { return };
+            if let Some(highlighted) =
+                crate::highlight::highlight_block(&lang, &code, indent)
+            {
+                lines.extend(highlighted);
+                return;
+            }
+            for raw in code.lines() {
+                lines.push(Line::from(vec![
+                    Span::raw(indent.to_string()),
+                    Span::styled(
+                        format!("  {raw}"),
+                        Style::default().fg(theme::ACCENT_DIM),
+                    ),
+                ]));
+            }
+        };
     for raw in text.lines() {
         let trimmed = raw.trim_start();
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
+        if let Some(tag) = trimmed.strip_prefix("```") {
+            if fence.is_some() {
+                flush_fence(&mut fence, lines);
+            } else {
+                fence = Some((tag.trim().to_string(), String::new()));
+            }
             continue;
         }
-        if in_fence {
-            lines.push(Line::from(vec![
-                Span::raw(indent.to_string()),
-                Span::styled(
-                    format!("  {raw}"),
-                    Style::default().fg(theme::ACCENT_DIM),
-                ),
-            ]));
+        if let Some((_, code)) = fence.as_mut() {
+            code.push_str(raw);
+            code.push('\n');
             continue;
         }
         let (prefix, body) = if let Some(rest) = trimmed
@@ -663,6 +681,7 @@ fn markdown_lines(
         inline_spans(body, &mut spans);
         lines.push(Line::from(spans));
     }
+    flush_fence(&mut fence, lines);
 }
 
 /// Split `**bold**` and `` `code` `` runs into styled spans.
