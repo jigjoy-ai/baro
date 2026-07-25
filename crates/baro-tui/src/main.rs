@@ -237,6 +237,8 @@ fn progressive_planning_enabled(headless: bool) -> bool {
 enum AppEvent {
     Baro(BaroEvent),
     Key(crossterm::event::KeyEvent),
+    /// Positive = wheel up (toward history), negative = wheel down.
+    MouseScroll(i8),
     ContextReady(String),
     ContextError(String),
     ConversationResponse(conversation_runner::ConversationTurnResult),
@@ -414,6 +416,7 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = open_terminal_writer()?;
     enable_raw_mode()?;
     execute!(writer, EnterAlternateScreen)?;
+    execute!(writer, crossterm::event::EnableMouseCapture)?;
     execute!(writer, Clear(ClearType::All))?;
     execute!(writer, Clear(ClearType::Purge))?;
     let backend = CrosstermBackend::new(writer);
@@ -422,6 +425,7 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     let result = run_app(Some(&mut terminal), cli).await;
 
     disable_raw_mode()?;
+    execute!(terminal.backend_mut(), crossterm::event::DisableMouseCapture)?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     terminal.backend_mut().flush()?;
@@ -1215,10 +1219,27 @@ async fn run_app(
         std::thread::spawn(move || loop {
             match crossterm::event::poll(Duration::from_millis(100)) {
                 Ok(true) => {
-                    if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
-                        if tx_key.blocking_send(AppEvent::Key(key)).is_err() {
-                            break;
+                    match crossterm::event::read() {
+                        Ok(crossterm::event::Event::Key(key)) => {
+                            if tx_key.blocking_send(AppEvent::Key(key)).is_err() {
+                                break;
+                            }
                         }
+                        Ok(crossterm::event::Event::Mouse(mouse)) => {
+                            let delta = match mouse.kind {
+                                crossterm::event::MouseEventKind::ScrollUp => 1i8,
+                                crossterm::event::MouseEventKind::ScrollDown => -1i8,
+                                _ => 0,
+                            };
+                            if delta != 0
+                                && tx_key
+                                    .blocking_send(AppEvent::MouseScroll(delta))
+                                    .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Ok(false) => {}
@@ -1317,6 +1338,17 @@ async fn run_app(
                         }
                     }
                 }
+            }
+            Some(AppEvent::MouseScroll(delta)) => {
+                if app.screen == Screen::Conversation && !app.workbench_overlay {
+                    if delta > 0 {
+                        app.session_feed.scroll_up();
+                    } else {
+                        app.session_feed.scroll_down();
+                    }
+                }
+                // Other screens keep wheel inert until their scroll models
+                // are unified — a wrong-pane scroll is worse than none.
             }
             Some(AppEvent::ConversationDelta { request_id, text }) => {
                 if app

@@ -32,7 +32,7 @@ fn theme() -> &'static Theme {
 /// Build the syntax set off the render thread. Safe to call more than once.
 pub fn warm() {
     std::thread::spawn(|| {
-        let _ = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
+        let _ = SYNTAXES.get_or_init(|| two_face::syntax::extra_newlines());
     });
 }
 
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn highlights_rust_once_the_set_is_loaded() {
-        let _ = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
+        let _ = SYNTAXES.get_or_init(|| two_face::syntax::extra_newlines());
         let lines = highlight_block("rust", "fn main() {}\n", "  ")
             .expect("rust grammar is bundled");
         assert_eq!(lines.len(), 1);
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn unknown_language_falls_back() {
-        let _ = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
+        let _ = SYNTAXES.get_or_init(|| two_face::syntax::extra_newlines());
         assert!(highlight_block("notalang", "x", "").is_none());
         assert!(highlight_block("", "x", "").is_none());
     }
