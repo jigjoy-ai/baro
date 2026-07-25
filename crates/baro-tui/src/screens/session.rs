@@ -35,6 +35,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     let width = chunks[1].width.saturating_sub(2) as usize;
     let mut lines: Vec<Line> = Vec::new();
     transcript_lines(app, &mut lines);
+    streaming_lines(app, &mut lines);
     feed_lines(app, width, &mut lines);
 
     let visible = chunks[1].height as usize;
@@ -151,6 +152,30 @@ fn transcript_lines(app: &App, lines: &mut Vec<Line<'static>>) {
         }
         lines.push(Line::from(""));
     }
+}
+
+/// The assistant's reply as it is being composed (conversation_delta).
+fn streaming_lines(app: &App, lines: &mut Vec<Line<'static>>) {
+    let Some(text) = &app.conversation_stream else { return };
+    if text.is_empty() {
+        return;
+    }
+    for (index, part) in text.lines().enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                if index == 0 {
+                    "  Baro ".to_string()
+                } else {
+                    "       ".to_string()
+                },
+                Style::default()
+                    .fg(theme::ACCENT_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(part.to_string(), Style::default().fg(theme::TEXT)),
+        ]));
+    }
+    lines.push(Line::from(""));
 }
 
 fn feed_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {

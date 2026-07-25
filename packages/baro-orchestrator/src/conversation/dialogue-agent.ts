@@ -96,6 +96,9 @@ export interface DialogueResponderInput {
     billingAttempt?: number
     systemPrompt: string
     userPrompt: string
+    /** Streaming sink: called with the cumulative assistant text as the
+     * provider emits it. Adapters without streaming support ignore it. */
+    onDeltaText?: (text: string) => void
 }
 
 /** One provider call plus the dimensions needed to correlate it on the bus. */

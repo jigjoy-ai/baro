@@ -234,6 +234,21 @@ async function main(): Promise<void> {
             codexSkipGitRepoCheck: true,
             billingCoordinator: billing ?? undefined,
         })
+        // Stream the user-facing message out of the growing JSON envelope so
+        // the TUI can render the reply as it is composed.
+        let lastStreamed = ""
+        const streamDelta = (jsonSoFar: string): void => {
+            const partial = extractAssistantMessagePartial(jsonSoFar)
+            if (partial === null || partial === lastStreamed) return
+            lastStreamed = partial
+            process.stdout.write(
+                JSON.stringify({
+                    type: "conversation_delta",
+                    requestId: input.requestId,
+                    text: partial,
+                }) + "\n",
+            )
+        }
         const responder: ConversationResponder = {
             backend: args.llm,
             respond: async (request, signal) => {
@@ -244,6 +259,7 @@ async function main(): Promise<void> {
                         billingRole: "conversation",
                         systemPrompt: request.systemPrompt,
                         userPrompt: request.userPrompt,
+                        onDeltaText: streamDelta,
                     },
                     signal,
                 )
@@ -376,3 +392,35 @@ main().catch((error) => {
     process.stderr.write(`[run-conversation] ${messageOf(error)}\n`)
     process.exitCode = 1
 })
+
+/**
+ * Pull the (possibly still-growing) "message" string field out of a partial
+ * JSON envelope. Escape-aware; returns the unescaped prefix composed so far,
+ * or null before the field starts.
+ */
+export function extractAssistantMessagePartial(jsonSoFar: string): string | null {
+    const key = /"message"\s*:\s*"/u.exec(jsonSoFar)
+    if (!key) return null
+    const start = key.index + key[0].length
+    let end = jsonSoFar.length
+    let closed = false
+    for (let index = start; index < jsonSoFar.length; index += 1) {
+        const ch = jsonSoFar[index]
+        if (ch === "\\") {
+            index += 1
+            continue
+        }
+        if (ch === '"') {
+            end = index
+            closed = true
+            break
+        }
+    }
+    let raw = jsonSoFar.slice(start, end)
+    if (!closed && raw.endsWith("\\")) raw = raw.slice(0, -1)
+    try {
+        return JSON.parse('"' + raw + '"') as string
+    } catch {
+        return null
+    }
+}

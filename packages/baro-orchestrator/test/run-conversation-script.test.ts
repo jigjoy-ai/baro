@@ -763,6 +763,7 @@ if (scout) {
 previous.push(record);
 writeFileSync(${JSON.stringify(capture)}, JSON.stringify(previous));
 process.stdout.write(JSON.stringify({
+    type: "result",
     result: JSON.stringify(response),
     duration_ms: 1,
     total_cost_usd: 0,
@@ -783,6 +784,7 @@ ${capture ? `writeFileSync(${JSON.stringify(capture)}, JSON.stringify(process.ar
 ${capture ? `writeFileSync(${JSON.stringify(`${capture}.cwd`)}, process.cwd());` : ""}
 ${capture ? `writeFileSync(${JSON.stringify(`${capture}.stdin`)}, input);` : ""}
 process.stdout.write(JSON.stringify({
+    type: "result",
     result: ${JSON.stringify(raw)},
     duration_ms: 1,
     total_cost_usd: 0,

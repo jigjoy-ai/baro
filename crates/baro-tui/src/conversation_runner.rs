@@ -64,6 +64,8 @@ pub struct ConversationRunOptions<'a> {
     pub provider_timeout_ms: u64,
     pub openai_api_key: Option<&'a str>,
     pub openai_base_url: Option<&'a str>,
+    /// Streaming sink for the assistant's partial reply (cumulative text).
+    pub on_delta: Option<&'a (dyn Fn(String) + Send + Sync)>,
 }
 
 #[derive(Debug, Clone)]
@@ -180,9 +182,27 @@ async fn run_conversation_turn_with_entry(
             .timeout_ms
             .saturating_add(OUTER_TIMEOUT_SHUTDOWN_GRACE_MS),
     );
+    let expected_request_id = request_id.to_string();
+    let on_delta = options.on_delta;
     match tokio::time::timeout(
         outer_timeout,
-        subprocess::spawn_and_capture_streaming(command, "conversation", |_| {}),
+        subprocess::spawn_and_capture_streaming(command, "conversation", move |line| {
+            let Some(sink) = on_delta else { return };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                return;
+            };
+            if value.get("type").and_then(|v| v.as_str()) != Some("conversation_delta") {
+                return;
+            }
+            if value.get("requestId").and_then(|v| v.as_str())
+                != Some(expected_request_id.as_str())
+            {
+                return;
+            }
+            if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
+                sink(text.to_string());
+            }
+        }),
     )
     .await
     {
@@ -526,6 +546,7 @@ writeFileSync(get("--result-file"), JSON.stringify({{
                 provider_timeout_ms: 1_000,
                 openai_api_key: None,
                 openai_base_url: None,
+                on_delta: None,
             },
             ScriptEntry::NodeJs(script),
         )
@@ -535,7 +556,11 @@ writeFileSync(get("--result-file"), JSON.stringify({{
         assert_eq!(result.response.kind, ConversationKind::Ready);
         let public = serde_json::to_value(&result.response).unwrap();
         assert_eq!(public.as_object().unwrap().len(), 7);
-        let context = result.repository_brief.render_architect_context().unwrap();
+        let context = result
+            .repository_brief
+            .expect("ready fixture carries a brief")
+            .render_architect_context()
+            .unwrap();
         assert!(context.contains("src/runtime/cancellation/abort-coordinator.ts"));
         assert!(context.contains("baro-process-sidecar-evidence"));
     }
@@ -555,10 +580,16 @@ writeFileSync(get("--result-file"), JSON.stringify({
   schemaVersion: 1,
   sessionId: input.sessionId,
   requestId: input.requestId,
-  kind: "answer",
-  message: "No context sidecar was written.",
+  kind: "ready",
+  message: "Ready without repository evidence.",
   questions: [],
-  goalEnvelope: null
+  goalEnvelope: {
+    objective: "Do the work",
+    constraints: [],
+    acceptanceCriteria: ["observable"],
+    nonGoals: [],
+    assumptions: []
+  }
 }));
 "#,
         )
@@ -579,13 +610,18 @@ writeFileSync(get("--result-file"), JSON.stringify({
                 provider_timeout_ms: 1_000,
                 openai_api_key: None,
                 openai_base_url: None,
+                on_delta: None,
             },
             ScriptEntry::NodeJs(script),
         )
         .await
         .unwrap_err();
 
-        assert!(error.message.contains("repository brief sidecar"));
+        assert!(
+            error.message.contains("without a repository brief"),
+            "unexpected error: {}",
+            error.message
+        );
     }
 
     fn complete_ready_cycle(session: &mut ConversationSession, request_id: &str, text: &str) {

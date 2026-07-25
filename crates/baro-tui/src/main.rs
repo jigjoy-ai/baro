@@ -239,6 +239,8 @@ enum AppEvent {
     ContextReady(String),
     ContextError(String),
     ConversationResponse(conversation_runner::ConversationTurnResult),
+    /// Cumulative partial assistant text for the pending conversation turn.
+    ConversationDelta { request_id: String, text: String },
     /// A conversation `ready` response is only a candidate until the
     /// repository-aware Architect validates it. The durable session keeps one
     /// pending response slot: either this candidate or an Architect-authored
@@ -1300,7 +1302,17 @@ async fn run_app(
                     }
                 }
             }
+            Some(AppEvent::ConversationDelta { request_id, text }) => {
+                if app
+                    .conversation
+                    .pending_request_id()
+                    .is_some_and(|pending| pending == request_id)
+                {
+                    app.conversation_stream = Some(text);
+                }
+            }
             Some(AppEvent::ConversationResponse(turn)) => {
+                app.conversation_stream = None;
                 let conversation_runner::ConversationTurnResult {
                     response,
                     repository_brief,
@@ -1452,6 +1464,7 @@ async fn run_app(
                 error,
                 log_path,
             }) => {
+                app.conversation_stream = None;
                 let architect_failure = app.architect_status == app::ArchitectStatus::Running;
                 let deterministic_reason = if architect_failure {
                     "Repository validation failed before the goal was accepted; retry the request."
@@ -2775,6 +2788,16 @@ fn spawn_pending_conversation(
                 provider_timeout_ms,
                 openai_api_key: openai_api_key.as_deref(),
                 openai_base_url: openai_base_url.as_deref(),
+                on_delta: Some(&{
+                    let tx = tx.clone();
+                    let request_id = request_id.clone();
+                    move |text: String| {
+                        let _ = tx.try_send(AppEvent::ConversationDelta {
+                            request_id: request_id.clone(),
+                            text,
+                        });
+                    }
+                }),
             },
         )
         .await;
