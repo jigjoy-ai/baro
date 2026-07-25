@@ -1267,18 +1267,27 @@ async fn run_app(
         .checked_sub(Duration::from_millis(100))
         .unwrap_or_else(Instant::now);
     let mut dirty = true;
+    // Scroll frames render from the session cache, so they can run at
+    // ~120fps; content frames keep the 30fps flood throttle.
+    let mut scroll_frame = false;
     loop {
+        let min_gap = if scroll_frame {
+            Duration::from_millis(8)
+        } else {
+            Duration::from_millis(33)
+        };
         if let Some(t) = terminal.as_deref_mut() {
-            if dirty && last_draw.elapsed() >= Duration::from_millis(33) {
+            if dirty && last_draw.elapsed() >= min_gap {
                 t.draw(|f| ui::render(f, &mut app))?;
                 last_draw = Instant::now();
                 dirty = false;
+                scroll_frame = false;
             }
         }
         // A throttled-away frame must not wait for the NEXT event to render:
         // bound the wait so a lone keystroke appears within one frame.
         let received = if dirty {
-            let wait = Duration::from_millis(33).saturating_sub(last_draw.elapsed());
+            let wait = min_gap.saturating_sub(last_draw.elapsed());
             match tokio::time::timeout(wait.max(Duration::from_millis(1)), rx.recv()).await {
                 Ok(event) => event,
                 Err(_) => continue,
@@ -1287,7 +1296,9 @@ async fn run_app(
             rx.recv().await
         };
         dirty = true;
-        if !matches!(received, Some(AppEvent::MouseScroll(_))) {
+        if matches!(received, Some(AppEvent::MouseScroll(_))) {
+            scroll_frame = true;
+        } else {
             app.session_version = app.session_version.wrapping_add(1);
         }
         match received {
