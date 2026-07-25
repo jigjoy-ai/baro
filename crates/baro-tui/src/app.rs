@@ -1290,7 +1290,13 @@ impl App {
                 if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
                     story.status = StoryStatus::Running;
                 }
-                self.session_feed.push(SessionBlock::Story { id: id.clone() });
+                let level_owned = self.session_feed.blocks().iter().any(|b| {
+                    matches!(b, SessionBlock::Level { story_ids, .. }
+                        if story_ids.iter().any(|s| s == &id))
+                });
+                if !level_owned {
+                    self.session_feed.push(SessionBlock::Story { id: id.clone() });
+                }
                 self.active_stories.insert(
                     id,
                     ActiveStory {
@@ -1334,6 +1340,15 @@ impl App {
                 op,
                 ok,
             } => {
+                // Curated run narration: the plan lane's warn/error notices
+                // (verification, goal, story failures) — never the per-tool
+                // stream, never "collective …" wave chatter.
+                if id == "plan"
+                    && (kind == "warn" || kind == "error")
+                    && !text.starts_with("collective ")
+                {
+                    self.session_feed.push(SessionBlock::Note { text: text.clone() });
+                }
                 if let Some(active) = self.active_stories.get_mut(&id) {
                     active.activity.push(ActivityEntry {
                         kind,

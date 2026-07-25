@@ -207,11 +207,10 @@ fn feed_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {
                         format!("level {}", ordinal),
                         Style::default().fg(theme::TEXT_DIM),
                     ),
-                    Span::styled(
-                        format!("  {}", story_ids.join(" ")),
-                        Style::default().fg(theme::MUTED),
-                    ),
                 ]));
+                for id in story_ids {
+                    lines.push(story_line(app, id, width));
+                }
             }
             SessionBlock::Story { id } => lines.push(story_line(app, id, width)),
             SessionBlock::Critique { id, pass, reason } => {
@@ -406,6 +405,25 @@ fn story_line(app: &App, id: &str, width: usize) -> Line<'static> {
                 ));
             }
         }
+        StoryStatus::Pending => {
+            let deps_done = story.is_some_and(|s| {
+                s.depends_on.iter().all(|dep| {
+                    app.stories
+                        .iter()
+                        .find(|other| &other.id == dep)
+                        .is_some_and(|other| other.status == StoryStatus::Complete)
+                })
+            });
+            spans.push(Span::styled(
+                if deps_done {
+                    "  matching a worker…"
+                } else {
+                    "  waiting on deps"
+                }
+                .to_string(),
+                Style::default().fg(theme::MUTED),
+            ));
+        }
         _ => {}
     }
     Line::from(spans)
@@ -552,6 +570,7 @@ fn clip(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
 
 
 
