@@ -489,11 +489,14 @@ export async function runCodexOneShot(
                     additionalEnvironment,
                 )
                 if (
-                    item.type === "agent_message" &&
+                    (item.type === "agent_message" ||
+                        item.type === "message") &&
                     typeof item.text === "string"
                 ) {
                     // Codex can emit completed assistant/status messages before
                     // the terminal response. Keep only the terminal message.
+                    // "message" is the mapper's alias for assistant text
+                    // (stream-mapper.ts) — both paths must accept it.
                     agentMessage = item.text
                 } else if (innerType === "command_execution") {
                     const cmd =
