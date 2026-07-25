@@ -1287,6 +1287,9 @@ async fn run_app(
             rx.recv().await
         };
         dirty = true;
+        if !matches!(received, Some(AppEvent::MouseScroll(_))) {
+            app.session_version = app.session_version.wrapping_add(1);
+        }
         match received {
             Some(AppEvent::Baro(ev)) => {
                 if matches!(ev, BaroEvent::NotificationReady) {

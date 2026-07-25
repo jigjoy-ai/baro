@@ -35,18 +35,34 @@ pub fn render(frame: &mut Frame, app: &App) {
     frame.render_widget(header_line(app), chunks[0]);
 
     let width = chunks[1].width.saturating_sub(2) as usize;
-    let mut lines: Vec<Line> = Vec::new();
-    transcript_lines(app, &mut lines);
-    streaming_lines(app, &mut lines);
-    feed_lines(app, width, &mut lines);
-    planning_lines(app, width, &mut lines);
+    // Rebuild + re-measure only when content (or width) changed: wheel
+    // frames between events render straight from the cache.
+    thread_local! {
+        static CACHE: std::cell::RefCell<Option<(u64, u16, Vec<Line<'static>>, usize)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let (lines, total) = CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((version, cached_width, lines, total)) = cache.as_ref() {
+            if *version == app.session_version && *cached_width == chunks[1].width {
+                return (lines.clone(), *total);
+            }
+        }
+        let mut lines: Vec<Line> = Vec::new();
+        transcript_lines(app, &mut lines);
+        streaming_lines(app, &mut lines);
+        feed_lines(app, width, &mut lines);
+        planning_lines(app, width, &mut lines);
+        let total = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(chunks[1].width);
+        *cache = Some((app.session_version, chunks[1].width, lines.clone(), total));
+        (lines, total)
+    });
 
-    // Scroll in wrapped visual rows so long lines don't cause jumps:
-    // line_count gives the post-wrap height, and Paragraph::scroll offsets
-    // by rendered rows.
+    // Scroll in wrapped visual rows so long lines don't cause jumps.
     let visible = chunks[1].height as usize;
     let transcript = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let total = transcript.line_count(chunks[1].width);
     let max_back = total.saturating_sub(visible);
     let back = app.session_feed.scroll_back.min(max_back);
     let offset = max_back.saturating_sub(back);

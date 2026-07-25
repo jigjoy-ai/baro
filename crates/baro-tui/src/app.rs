@@ -552,6 +552,9 @@ pub struct App {
     pub workbench_overlay: bool,
     /// (request_id, accumulated text) of the streaming assistant reply.
     pub conversation_stream: Option<(String, String)>,
+    /// Bumped whenever session-visible content may have changed; wheel
+    /// scrolling reuses the previous frame's built transcript.
+    pub session_version: u64,
     /// Plan awaiting inline confirmation in the session (conversation-owned
     /// runs); legacy flows use the Review screen instead.
     pub pending_plan: Option<Vec<ReviewStory>>,
@@ -705,6 +708,7 @@ impl App {
             session_feed: SessionFeed::default(),
             workbench_overlay: false,
             conversation_stream: None,
+            session_version: 0,
             pending_plan: None,
             diff_scroll_offset: 0,
             diff_target: None,
