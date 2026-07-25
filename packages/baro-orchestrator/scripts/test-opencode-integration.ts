@@ -16,12 +16,12 @@ import {
     FunctionCallItem,
     FunctionCallOutputItem,
     ModelMessageItem,
-} from "@mozaik-ai/core"
+} from "../src/runtime/mozaik.js"
 
-import { mapOpenCodeEvent } from "../src/opencode-stream-mapper.js"
-import { OpenCodeCliParticipant } from "../src/participants/opencode-cli-participant.js"
-import { OpenCodeStoryAgent } from "../src/participants/opencode-story-agent.js"
-import { runOpenCodeOneShot } from "../src/opencode-one-shot.js"
+import { mapOpenCodeEvent } from "../src/harness/opencode/stream-mapper.js"
+import { OpenCodeCliParticipant } from "../src/harness/opencode/cli-participant.js"
+import { OpenCodeStoryAgent } from "../src/harness/opencode/story-agent.js"
+import { runOpenCodeOneShot } from "../src/harness/opencode/one-shot.js"
 
 let testDir: string
 let passed = 0

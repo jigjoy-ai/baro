@@ -1,31 +1,43 @@
 mod app;
 mod architect_runner;
-mod claude_runner;
+mod branch_authority;
+mod cli;
 mod config;
 mod constants;
 mod context;
+mod conversation;
+mod conversation_frontdoor;
+mod conversation_host;
+mod conversation_runner;
+mod dag_state;
 mod discovery;
 mod doctor;
 mod events;
 mod executor;
+mod gateway_credential;
 mod git;
+mod headless_transport;
 mod intake_runner;
 mod notification;
 mod orchestrator_client;
+mod planner_host;
 mod planner_runner;
+mod planner_stream_bridge;
+mod preaccept_context;
+mod progressive_planning;
+mod provider_ownership;
+mod repository_brief;
+mod resume;
+mod review_refiner;
 mod screens;
 mod service;
 mod subprocess;
 mod theme;
 mod ui;
 mod utils;
-mod cli;
-use utils::extract_json;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -36,27 +48,149 @@ use crossterm::{
     },
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use app::{App, Planner, ReviewStory, Screen};
+use conversation::{ConversationKind, ConversationPhase, ConversationWireResponse};
+use conversation_frontdoor::{
+    apply_or_close_conversation_response, architect_clarification_response,
+    close_failed_initial_request, spawn_conversation_architect_validation,
+    supports_preaccept_architect_outcome, PrevalidatedArchitect,
+};
+use conversation_host::{
+    attach_conversation_metadata, begin_conversation_execution, fail_conversation_run,
+    finish_conversation_run, persist_conversation, restore_conversation_from_prd,
+    restore_pre_prd_conversation,
+};
 use events::BaroEvent;
+use headless_transport::StdinHub;
+pub(crate) use planner_host::PrdOutput;
+use planner_host::{PlannerOutcome, PlannerRunSpec, ProgressivePlannerRuntime};
+
+const JIGJOY_STRONG_MODEL: &str = "glm-5.2";
+const JIGJOY_CHEAP_STORY_MODEL: &str = "deepseek-v4-flash";
+const JIGJOY_HEAVY_STORY_MODEL: &str = "deepseek-v4-pro";
+const JIGJOY_GATEWAY_URL: &str = "https://gw.baro.jigjoy.ai/v1";
+
+fn preferred_jigjoy_gateway_key(
+    jigjoy_key: Option<String>,
+    openai_key: Option<String>,
+) -> Option<String> {
+    jigjoy_key
+        .filter(|value| !value.is_empty())
+        // Compatibility fallback for operators who historically placed a
+        // JigJoy gateway token in OPENAI_API_KEY directly.
+        .or_else(|| openai_key.filter(|value| !value.is_empty()))
+}
+
+fn is_signed_jigjoy_gateway_key(value: &str) -> bool {
+    value.starts_with("hk_") || value.starts_with("gk_v1.")
+}
+
+fn legacy_hosted_run_id(value: &str) -> Option<&str> {
+    let payload = value.strip_prefix("hk_")?.split_once('.')?.0;
+    let run_id = payload.split_once('~')?.1;
+    (!run_id.is_empty() && run_id.len() <= 128).then_some(run_id)
+}
+
+fn local_client_run_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("run-local-client-{nanos}-{}", std::process::id())
+}
+
+fn preferred_jigjoy_gateway_url(
+    explicit_openai_base_url: Option<String>,
+    jigjoy_url: Option<String>,
+) -> String {
+    explicit_openai_base_url
+        .filter(|value| !value.is_empty())
+        .or_else(|| jigjoy_url.filter(|value| !value.is_empty()))
+        .unwrap_or_else(|| JIGJOY_GATEWAY_URL.to_string())
+}
+
+fn reconcile_jigjoy_phase_overrides(
+    app: &mut App,
+    architect_model_explicit: bool,
+    planner_model_explicit: bool,
+    critic_model_explicit: bool,
+    surgeon_model_explicit: bool,
+    tier_map_explicit: bool,
+) {
+    if app.architect_llm != app::LlmProvider::OpenAI && !architect_model_explicit {
+        app.architect_model = None;
+    }
+    if app.planner_llm != app::LlmProvider::OpenAI && !planner_model_explicit {
+        app.planner_model = None;
+    }
+    if app.critic_llm != app::LlmProvider::OpenAI && !critic_model_explicit {
+        app.critic_model = None;
+    }
+    if app.surgeon_llm != app::LlmProvider::OpenAI && !surgeon_model_explicit {
+        app.surgeon_model = None;
+    }
+    if app.story_llm != app::LlmProvider::OpenAI && !tier_map_explicit {
+        app.tier_map = None;
+    }
+}
+
+/// Apply an interactive primary-provider choice without clobbering a
+/// deliberate per-phase Critic route.
+fn apply_primary_provider_choice(
+    app: &mut App,
+    provider: app::LlmProvider,
+    critic_backend_explicitly_set: bool,
+) {
+    app.llm = provider;
+    app.architect_llm = provider;
+    app.planner_llm = provider;
+    app.story_llm = provider;
+    if !critic_backend_explicitly_set {
+        app.critic_llm = provider;
+    }
+    app.surgeon_llm = provider;
+    app.planner = match provider {
+        app::LlmProvider::Claude => app::Planner::Claude,
+        app::LlmProvider::OpenAI => app::Planner::OpenAI,
+        app::LlmProvider::Codex => app::Planner::Codex,
+        app::LlmProvider::OpenCode => app::Planner::OpenCode,
+        app::LlmProvider::Pi => app::Planner::Pi,
+    };
+}
 
 fn review_stories_from_prd(prd: &executor::PrdFile) -> Vec<ReviewStory> {
     prd.user_stories
         .iter()
         .map(|s| ReviewStory {
             id: s.id.clone(),
+            priority: s.priority,
             title: s.title.clone(),
             description: s.description.clone(),
             depends_on: s.depends_on.clone(),
+            retries: s.retries,
+            acceptance: s.acceptance.clone(),
+            tests: s.tests.clone(),
+            goal_invariant_ids: s.goal_invariant_ids.clone(),
             completed: s.passes,
             model: s.model.clone(),
         })
         .collect()
 }
 
-fn executor_config_from_app(app: &App) -> executor::ExecutorConfig {
-    executor::ExecutorConfig {
+fn executor_config_from_app(app: &App) -> Result<executor::ExecutorConfig, String> {
+    // Runtime Dialogue is a collective participant. Legacy still uses the
+    // same conversation-first intake and durable GoalEnvelope, but must not
+    // receive a context flag that the legacy orchestrator correctly rejects.
+    let conversation_context = if current_coordination_has_runtime_dialogue() {
+        app.conversation
+            .conversation_context_snapshot(None)
+            .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
+    Ok(executor::ExecutorConfig {
         parallel: app.parallel_limit,
         timeout_secs: app.timeout_secs,
         model_routing: app.model_routing,
@@ -80,7 +214,22 @@ fn executor_config_from_app(app: &App) -> executor::ExecutorConfig {
         story_model: app.story_model.clone(),
         tier_map: app.tier_map.clone(),
         openai_endpoints: app.openai_endpoints.clone(),
-    }
+        conversation_context,
+    })
+}
+
+fn coordination_has_runtime_dialogue(mode: &str) -> bool {
+    mode == "collective"
+}
+
+fn current_coordination_has_runtime_dialogue() -> bool {
+    std::env::var("BARO_COORDINATION").is_ok_and(|mode| coordination_has_runtime_dialogue(&mode))
+}
+
+fn progressive_planning_enabled(headless: bool) -> bool {
+    let coordination =
+        std::env::var("BARO_COORDINATION").unwrap_or_else(|_| "collective".to_string());
+    progressive_planning::progressive_planning_enabled(headless, &coordination, false)
 }
 
 enum AppEvent {
@@ -88,16 +237,41 @@ enum AppEvent {
     Key(crossterm::event::KeyEvent),
     ContextReady(String),
     ContextError(String),
-    /// Last element is the planner-stamped `executionMode` contract,
-    /// carried opaquely into prd.json.
-    PlanReady(Vec<ReviewStory>, String, String, String, Option<serde_json::Value>),
-    /// Planner or Architect failure; second element is the persisted
-    /// log path, if any.
-    PlanError(String, Option<std::path::PathBuf>),
+    ConversationResponse(conversation_runner::ConversationTurnResult),
+    /// A conversation `ready` response is only a candidate until the
+    /// repository-aware Architect validates it. The durable session keeps one
+    /// pending response slot: either this candidate or an Architect-authored
+    /// clarification consumes it, never both.
+    ConversationArchitectOutcome {
+        candidate: ConversationWireResponse,
+        repository_context: String,
+        transport: architect_runner::ArchitectOutcomeTransportV1,
+    },
+    ConversationError {
+        request_id: String,
+        error: String,
+        log_path: Option<std::path::PathBuf>,
+    },
+    /// Architect + intake are complete. Headless progressive mode now opens
+    /// the empty collective bootstrap before starting Planner.
+    ProgressivePlanningPrepared(PlannerRunSpec),
+    /// The host boundary normalizes legacy/progressive success and failure;
+    /// this loop only applies the result to App state.
+    PlannerFinished(PlannerOutcome),
     /// Intake finished (`--mode auto`, interactive): show the ModePicker.
-    IntakeReady { decision_doc: Option<String>, contract_json: String },
-    RefineReady(Vec<ReviewStory>, String, String, String),
-    RefineError(String),
+    IntakeReady {
+        decision_doc: Option<String>,
+        contract_json: String,
+    },
+    RefineReady(
+        u64,
+        Vec<ReviewStory>,
+        String,
+        String,
+        String,
+        Option<serde_json::Value>,
+    ),
+    RefineError(u64, String),
     BranchError(String),
     /// Payload is the suffixed branch name the async git task settled
     /// on; the handler updates `app.branch_name` so the TUI shows the
@@ -113,6 +287,10 @@ enum AppEvent {
     /// arrives once per spawn, replacing any stale handle from a
     /// previous run.
     OrchestratorStdin(mpsc::Sender<String>),
+    /// One-shot structured shutdown for the live orchestrator process tree.
+    OrchestratorShutdown(tokio::sync::oneshot::Sender<()>),
+    /// OS Ctrl-C observed by the headless host.
+    Interrupt,
     Tick,
 }
 
@@ -145,21 +323,6 @@ fn open_terminal_writer() -> io::Result<Box<dyn Write>> {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct PrdOutput {
-    project: String,
-    #[serde(default)]
-    #[serde(rename = "branchName")]
-    branch_name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(rename = "userStories")]
-    user_stories: Vec<PrdStoryOutput>,
-    #[serde(default)]
-    #[serde(rename = "executionMode")]
-    execution_mode: Option<serde_json::Value>,
-}
-
 /// Display fields of a ModeContract; the raw JSON stays authoritative.
 #[derive(serde::Deserialize)]
 struct ModeContractView {
@@ -170,22 +333,18 @@ struct ModeContractView {
     reason: String,
 }
 
-#[derive(serde::Deserialize)]
-struct PrdStoryOutput {
-    id: String,
-    title: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    #[serde(rename = "dependsOn")]
-    depends_on: Vec<String>,
-    #[serde(default)]
-    model: Option<String>,
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    match run_main().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     // `baro connect [--token …] [--workspace …]` — run as a baro-cloud runner.
     // Handled before clap / the session lock so it bypasses the TUI entirely.
     let raw_args: Vec<String> = std::env::args().collect();
@@ -203,7 +362,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // terminal (below) — the alternate screen purges it.
     let update_notice = notify_update();
 
-     let (cli, _lock) = cli::cli::parse()?;
+    let (cli, _lock) = cli::cli::parse()?;
+    std::env::set_var("BARO_COORDINATION", &cli.coordination);
+    if cli.local_only {
+        std::env::set_var("BARO_LOCAL_ONLY", "1");
+    }
+    if let Some(value) = &cli.collective_workers {
+        std::env::set_var("BARO_COLLECTIVE_WORKERS_FILE", value);
+    }
+    if let Some(value) = cli.collective_bid_window_ms {
+        std::env::set_var("BARO_COLLECTIVE_BID_WINDOW_MS", value.to_string());
+    }
+    if let Some(value) = cli.collective_min_success {
+        std::env::set_var("BARO_COLLECTIVE_MIN_SUCCESS", value.to_string());
+    }
+    if let Some(value) = cli.collective_max_cost_usd {
+        std::env::set_var("BARO_COLLECTIVE_MAX_COST_USD", value.to_string());
+    }
+    if let Some(value) = cli.collective_max_latency_ms {
+        std::env::set_var("BARO_COLLECTIVE_MAX_LATENCY_MS", value.to_string());
+    }
+    if cli.with_dialogue {
+        std::env::set_var("BARO_WITH_DIALOGUE", "1");
+    }
+    if let Some(value) = &cli.dialogue_llm {
+        std::env::set_var("BARO_DIALOGUE_LLM", value);
+    }
+    if let Some(value) = &cli.dialogue_model {
+        std::env::set_var("BARO_DIALOGUE_MODEL", value);
+    }
 
     // --doctor short-circuits before any TUI setup — it must work even
     // when the things a real run depends on (e.g. claude auth) are broken.
@@ -214,12 +401,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Headless: no terminal / alternate screen. Drive the run and stream
     // the orchestrator's event JSON to stdout (CI / automation / remote runner).
     if cli.headless {
-        let result = run_app(None, cli).await;
-        if let Err(err) = result {
-            eprintln!("Error: {}", err);
-            std::process::exit(1);
-        }
-        return Ok(());
+        // Returning lets the Tokio runtime drop every supervised phase before
+        // the process terminates. `process::exit` would bypass the
+        // ProcessTreeGuard destructors and can orphan paid CLI workers.
+        return run_app(None, cli).await;
     }
 
     let mut writer = open_terminal_writer()?;
@@ -244,20 +429,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // _lock is dropped here, removing baro.lock
 
-    if let Err(err) = result {
-        eprintln!("Error: {}", err);
-        std::process::exit(1);
-    }
-
-    Ok(())
+    result
 }
 
 /// True if version `a` is older than `b` (numeric, per dotted segment).
 fn semver_lt(a: &str, b: &str) -> bool {
-    let p = |s: &str| s.split('.').map(|x| x.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    let p = |s: &str| {
+        s.split('.')
+            .map(|x| x.parse::<u64>().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
     let (pa, pb) = (p(a), p(b));
     for i in 0..3 {
-        let (x, y) = (pa.get(i).copied().unwrap_or(0), pb.get(i).copied().unwrap_or(0));
+        let (x, y) = (
+            pa.get(i).copied().unwrap_or(0),
+            pb.get(i).copied().unwrap_or(0),
+        );
         if x != y {
             return x < y;
         }
@@ -271,7 +458,9 @@ fn semver_lt(a: &str, b: &str) -> bool {
 /// refresh when stale. Best-effort — never blocks or fails.
 fn notify_update() -> Option<String> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    let cache = std::path::PathBuf::from(home).join(".baro").join("update-check.json");
+    let cache = std::path::PathBuf::from(home)
+        .join(".baro")
+        .join("update-check.json");
     let mut fresh = false;
     let mut notice = None;
     if let Ok(s) = std::fs::read_to_string(&cache) {
@@ -299,7 +488,11 @@ fn notify_update() -> Option<String> {
 /// Fire-and-forget the JS update check so the cache refreshes for next time.
 fn spawn_bg_update_check() {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let Ok(entry) = discovery::locate_script(&cwd, "packages/baro-orchestrator/scripts/runner.ts", "runner.mjs") else {
+    let Ok(entry) = discovery::locate_script(
+        &cwd,
+        "packages/baro-orchestrator/scripts/runner.ts",
+        "runner.mjs",
+    ) else {
         return;
     };
     let mut cmd = match &entry {
@@ -326,8 +519,14 @@ fn spawn_bg_update_check() {
 /// so later `baro connect` needs no token. CONTROL_URL is inherited from the env if set.
 async fn run_login() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let entry = discovery::locate_script(&cwd, "packages/baro-orchestrator/scripts/runner.ts", "runner.mjs")
-        .map_err(|e| format!("could not locate the runner bundle ({e}). Reinstall: npm install -g baro-ai"))?;
+    let entry = discovery::locate_script(
+        &cwd,
+        "packages/baro-orchestrator/scripts/runner.ts",
+        "runner.mjs",
+    )
+    .map_err(|e| {
+        format!("could not locate the runner bundle ({e}). Reinstall: npm install -g baro-ai")
+    })?;
     let mut cmd = match &entry {
         discovery::ScriptEntry::Tsx { tsx, script } => {
             let mut c = tokio::process::Command::new(tsx);
@@ -341,7 +540,11 @@ async fn run_login() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     cmd.env("BARO_LOGIN", "1");
-    let status = cmd.spawn().map_err(|e| format!("failed to start login: {e}"))?.wait().await?;
+    let status = cmd
+        .spawn()
+        .map_err(|e| format!("failed to start login: {e}"))?
+        .wait()
+        .await?;
     std::process::exit(status.code().unwrap_or(1));
 }
 
@@ -424,13 +627,26 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     // Install the background service (token + workspace baked in) and exit —
     // the service itself runs `baro connect` for real, in the background.
     if install {
-        let exe = std::env::current_exe().map_err(|e| format!("cannot resolve baro binary: {e}"))?;
-        let token = token.ok_or("--install-service needs --token <rt_…> (get one from the dashboard)")?;
-        return service::install(&service::ServiceConfig { exe, token, workspace: cwd, control_url });
+        let exe =
+            std::env::current_exe().map_err(|e| format!("cannot resolve baro binary: {e}"))?;
+        let token =
+            token.ok_or("--install-service needs --token <rt_…> (get one from the dashboard)")?;
+        return service::install(&service::ServiceConfig {
+            exe,
+            token,
+            workspace: cwd,
+            control_url,
+        });
     }
 
-    let entry = discovery::locate_script(&cwd, "packages/baro-orchestrator/scripts/runner.ts", "runner.mjs")
-        .map_err(|e| format!("could not locate the runner bundle ({e}). Reinstall: npm install -g baro-ai"))?;
+    let entry = discovery::locate_script(
+        &cwd,
+        "packages/baro-orchestrator/scripts/runner.ts",
+        "runner.mjs",
+    )
+    .map_err(|e| {
+        format!("could not locate the runner bundle ({e}). Reinstall: npm install -g baro-ai")
+    })?;
 
     let mut cmd = match &entry {
         discovery::ScriptEntry::Tsx { tsx, script } => {
@@ -467,7 +683,10 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     // stdin stays attached (inherit): the runner asks its one-time
     // "keep this runner online?" question on a TTY. It reads nothing else.
 
-    println!("baro connect — starting runner (workspace: {})", cwd.display());
+    println!(
+        "baro connect — starting runner (workspace: {})",
+        cwd.display()
+    );
     let status = cmd
         .spawn()
         .map_err(|e| format!("failed to start runner: {e}"))?
@@ -481,12 +700,13 @@ async fn run_app(
     cli: cli::cli::Cli,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let headless = cli.headless;
+    let critic_backend_explicitly_set = cli.critic_llm.is_some();
     let mut app = App::new();
     let cwd = std::fs::canonicalize(&cli.cwd)?;
 
     let rc = config::load_config(&cwd);
 
-    app.parallel_limit = rc.parallel.unwrap_or(0);
+    app.parallel_limit = resolve_parallel_limit(rc.parallel, cli.parallel);
     // 0 = "auto": the orchestrator effort-scales the per-story timeout.
     app.timeout_secs = rc.timeout.unwrap_or(0);
 
@@ -506,8 +726,9 @@ async fn run_app(
         _ => {} // "routed" or None = keep defaults
     }
 
-    if cli.parallel != 0 { app.parallel_limit = cli.parallel; }
-    if let Some(t) = cli.timeout { app.timeout_secs = t; }
+    if let Some(t) = cli.timeout {
+        app.timeout_secs = t;
+    }
 
     if cli.planner != "claude" {
         app.planner = match cli.planner.as_str() {
@@ -601,12 +822,6 @@ async fn run_app(
         app.with_surgeon = false;
     }
 
-    // --continue: the branch override happens in the JS orchestrator; the
-    // spawned cli.mjs inherits this env var, so no config field is threaded.
-    if cli.continue_run {
-        std::env::set_var("BARO_CONTINUE", "1");
-    }
-
     app.effort = cli.effort.clone();
     app.mode = cli.mode.clone();
     app.confirm_mode = cli.confirm_mode;
@@ -624,15 +839,18 @@ async fn run_app(
             app.architect_llm = app::LlmProvider::Claude;
             app.planner_llm = app::LlmProvider::Claude;
             app.story_llm = app::LlmProvider::Codex;
-            app.critic_llm = app::LlmProvider::Codex;
+            // Hybrid intentionally keeps review on Claude's native tool-less
+            // evaluator. A pure Codex preset instead uses Baro's isolated,
+            // evidence-only Codex Critic while Codex executes stories.
+            app.critic_llm = app::LlmProvider::Claude;
             app.surgeon_llm = app::LlmProvider::Claude;
         }
         "jigjoy" => {
             // Hosted preset: every phase talks to the baro gateway, an
             // OpenAI-compatible proxy that holds the upstream keys and
-            // maps model names to tiers. Strong defaults to DeepSeek V4 Pro
-            // while we validate cost/quality; set BARO_JIGJOY_STRONG_MODEL to
-            // gpt-5.5 to opt back into OpenAI for planning/replanning.
+            // maps model names to tiers. Planning/replanning defaults to GLM,
+            // while high-blast-radius execution and review use DeepSeek Pro.
+            // Every lane remains independently env-overridable.
             app.llm = app::LlmProvider::OpenAI;
             app.architect_llm = app::LlmProvider::OpenAI;
             app.planner_llm = app::LlmProvider::OpenAI;
@@ -644,28 +862,24 @@ async fn run_app(
             // These are the gateway's tier tokens; env-overridable so a
             // self-hosted gateway can point them at its own models.
             //
-            // Two lanes, deliberately separate:
-            //  - Planner lane (planner + architect) = `strong` frontier model.
+            // Three lanes, deliberately separate:
+            //  - Planner lane (planner + architect + surgeon) = `strong` model.
             //    Planning quality is what scales with the subscription tier, so
-            //    this is where a frontier model (e.g. glm) earns its cost.
-            //  - Executor lane (ALL story tiers) = `cheap` Flash. Execution is a
-            //    commodity: cheap and robust to the planner's (unreliable) tiering.
-            //    A story Flash can't do is a decomposition smell, not a reason to
-            //    pay more per story.
-            //  - Surgeon lane (fixing a failed story) = `surgeon`, a stronger
-            //    model. The ESCALATION path — a smarter fixer only when execution
-            //    fails, instead of pricing every "heavy"-tiered story up front.
-            // Critic + light/standard/default stay on the cheap Flash model.
-            let strong =
-                std::env::var("BARO_JIGJOY_STRONG_MODEL").unwrap_or_else(|_| "deepseek-v4-pro".to_string());
-            let cheap =
-                std::env::var("BARO_JIGJOY_STORY_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
+            //    this is where GLM earns its cost.
+            //  - Executor lane = Flash for light/standard work, DeepSeek Pro for
+            //    `heavy` stories whose failure can break shared contracts.
+            //  - Review lane = DeepSeek Pro. A cheap Critic that misses semantic
+            //    defects makes the entire collective look green incorrectly.
+            let strong = std::env::var("BARO_JIGJOY_STRONG_MODEL")
+                .unwrap_or_else(|_| JIGJOY_STRONG_MODEL.to_string());
+            let cheap = std::env::var("BARO_JIGJOY_STORY_MODEL")
+                .unwrap_or_else(|_| JIGJOY_CHEAP_STORY_MODEL.to_string());
+            let story_heavy = std::env::var("BARO_JIGJOY_STORY_HEAVY_MODEL")
+                .unwrap_or_else(|_| JIGJOY_HEAVY_STORY_MODEL.to_string());
             let surgeon =
-                std::env::var("BARO_JIGJOY_SURGEON_MODEL").unwrap_or_else(|_| "deepseek-v4-pro".to_string());
-            // `heavy` stories default to the cheap Flash lane too (executor is
-            // always cheap); the knob remains for a self-hosted override.
-            let story_heavy =
-                std::env::var("BARO_JIGJOY_STORY_HEAVY_MODEL").unwrap_or_else(|_| cheap.clone());
+                std::env::var("BARO_JIGJOY_SURGEON_MODEL").unwrap_or_else(|_| strong.clone());
+            let critic =
+                std::env::var("BARO_JIGJOY_CRITIC_MODEL").unwrap_or_else(|_| story_heavy.clone());
             if app.planner_model.is_none() {
                 app.planner_model = Some(strong.clone());
             }
@@ -676,7 +890,7 @@ async fn run_app(
                 app.surgeon_model = Some(surgeon.clone());
             }
             if app.critic_model.is_none() {
-                app.critic_model = Some(cheap.clone());
+                app.critic_model = Some(critic);
             }
             // Most story tiers map to the cheap model; `heavy` maps to the
             // executor lane (story_heavy) for focused/high-blast-radius work
@@ -689,30 +903,79 @@ async fn run_app(
                 ));
             }
 
-            // Default gateway URL unless --openai-base-url / OPENAI_BASE_URL
-            // is set; the env var feeds the resolution below. Override
-            // per-deploy with BARO_JIGJOY_URL.
-            let base_url_set = cli.openai_base_url.is_some()
-                || std::env::var("OPENAI_BASE_URL")
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false);
-            if !base_url_set {
-                let url = std::env::var("BARO_JIGJOY_URL")
-                    .unwrap_or_else(|_| "https://baro.jigjoy.ai/v1".to_string());
-                std::env::set_var("OPENAI_BASE_URL", url);
+            let explicit_url = cli
+                .openai_base_url
+                .clone()
+                .filter(|value| !value.is_empty());
+            let jigjoy_url = std::env::var("BARO_JIGJOY_URL")
+                .ok()
+                .filter(|value| !value.is_empty());
+            let custom_gateway = explicit_url.is_some() || jigjoy_url.is_some();
+            let jigjoy_key = std::env::var("JIGJOY_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty());
+            let ambient_openai_key = std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty());
+            // At the hosted default, only a recognizable signed Gateway key
+            // is a safe compatibility fallback. A normal sk-* OpenAI key is
+            // unrelated and must never be sent to JigJoy. Custom/self-hosted
+            // endpoints retain the historical arbitrary-key fallback.
+            let compatible_openai_key = ambient_openai_key
+                .filter(|key| custom_gateway || is_signed_jigjoy_gateway_key(key));
+            let manual_key = preferred_jigjoy_gateway_key(jigjoy_key, compatible_openai_key);
+
+            // No manual key at the official endpoint: exchange the local
+            // `baro login` for one server-generated run identity and a
+            // short-lived scoped credential. Never auto-send a login bearer
+            // to a caller-selected compatible endpoint.
+            let issued = if manual_key.is_none() && !custom_gateway {
+                Some(gateway_credential::acquire(&cwd).await.map_err(|error| {
+                    format!("could not acquire local JigJoy credential: {error}")
+                })?)
+            } else {
+                None
+            };
+            if manual_key.is_none() && issued.is_none() {
+                return Err(
+                    "a custom JigJoy/OpenAI endpoint requires an explicit JIGJOY_API_KEY".into(),
+                );
             }
 
-            // The hosted key arrives as JIGJOY_API_KEY; the OpenAI path reads
-            // OPENAI_API_KEY, so bridge it without clobbering an explicit one.
-            let openai_key_set = std::env::var("OPENAI_API_KEY")
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
-            if !openai_key_set {
-                if let Ok(k) = std::env::var("JIGJOY_API_KEY") {
-                    if !k.is_empty() {
-                        std::env::set_var("OPENAI_API_KEY", k);
-                    }
-                }
+            // A JigJoy run must not inherit an unrelated ambient
+            // OPENAI_BASE_URL. An auto-issued credential uses only the
+            // authenticated control plane's returned Gateway URL.
+            let url = issued
+                .as_ref()
+                .map(|credential| credential.gateway_base_url.clone())
+                .unwrap_or_else(|| preferred_jigjoy_gateway_url(explicit_url, jigjoy_url));
+            std::env::set_var("OPENAI_BASE_URL", &url);
+            // Only the explicit JigJoy preset grants billing authority to the
+            // same endpoint. Generic OPENAI_BASE_URL values remain untrusted.
+            std::env::set_var("BARO_GATEWAY_BILLING_URL", &url);
+            // Marks ownership of the injected routing variables even when a
+            // credential is missing. Subscription-backed harness children
+            // use this to remove only Baro-owned Gateway environment.
+            std::env::set_var("BARO_JIGJOY_ENV_INJECTED", "1");
+
+            let key = issued
+                .as_ref()
+                .map(|credential| credential.api_key.clone())
+                .or(manual_key)
+                .expect("JigJoy credential checked above");
+            // Inference correlation is credential-bound. Keep the model
+            // request and receipt-feed credentials byte-identical even if
+            // the parent shell contains a stale billing-specific value.
+            std::env::set_var("OPENAI_API_KEY", &key);
+            std::env::set_var("BARO_GATEWAY_BILLING_API_KEY", &key);
+
+            if std::env::var("BARO_RUN_ID").is_err() {
+                let run_id = issued
+                    .as_ref()
+                    .map(|credential| credential.run_id.clone())
+                    .or_else(|| legacy_hosted_run_id(&key).map(str::to_string))
+                    .unwrap_or_else(local_client_run_id);
+                std::env::set_var("BARO_RUN_ID", run_id);
             }
         }
         other => {
@@ -754,6 +1017,17 @@ async fn run_app(
         }
     }
 
+    if cli.llm == "jigjoy" {
+        reconcile_jigjoy_phase_overrides(
+            &mut app,
+            cli.architect_model.is_some(),
+            cli.planner_model.is_some(),
+            cli.critic_model.is_some(),
+            cli.surgeon_model.is_some(),
+            cli.tier_map.is_some(),
+        );
+    }
+
     // A global `--model` hits EVERY phase, but the Claude CLI only
     // accepts opus/sonnet/haiku — reject early if any phase still
     // routes through Claude. The check lives here, after per-phase
@@ -785,30 +1059,91 @@ async fn run_app(
     if app.llm == app::LlmProvider::OpenAI && std::env::var("OPENAI_API_KEY").is_err() {
         eprintln!(
             "[baro] WARNING: --llm openai requested but OPENAI_API_KEY is not set. \
-             Set it before running: `export OPENAI_API_KEY=sk-...`. \
-             Continuing — current build silently falls through to Claude behaviour."
+             Interactive mode will request it before the first turn; \
+             --headless requires it in the environment."
         );
     }
 
     let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
+    let mut next_refine_generation = 0_u64;
+    let mut active_refine_generation: Option<u64> = None;
+    let mut orchestrator_shutdown: Option<tokio::sync::oneshot::Sender<()>> = None;
+    let mut interrupted = false;
 
-    // Resume detection: check for existing prd.json with incomplete stories
+    if headless {
+        let interrupt_tx = tx.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = interrupt_tx.send(AppEvent::Interrupt).await;
+            }
+        });
+    }
+
+    // Resume detection: the PRD in the initial checkout supplies only the
+    // branch hint. Establish that branch and reload its own PRD before showing
+    // Review, otherwise refinement could inspect one branch while executing
+    // and overwriting another.
     let prd_path = cwd.join("prd.json");
+    if cli.continue_run {
+        let prd_branch_hint = std::fs::read_to_string(&prd_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<executor::PrdFile>(&contents).ok())
+            .map(|prd| prd.branch_name);
+        let current_branch = git::get_current_branch(&cwd)
+            .await
+            .map_err(|error| format!("cannot establish --continue branch authority: {error}"))?;
+        let continuation_branch = branch_authority::verify_continuation_branch(
+            &current_branch,
+            prd_branch_hint.as_deref(),
+        )
+        .map_err(|error| format!("cannot establish --continue branch authority: {error}"))?;
+        app.is_followup = true;
+        app.branch_name = continuation_branch.clone();
+        app.continuation_branch = Some(continuation_branch);
+        // The JS orchestrator uses this only after Rust has verified and kept
+        // the existing branch; the environment flag is not branch authority.
+        std::env::set_var("BARO_CONTINUE", "1");
+    }
     let mut entered_resume = false;
     if prd_path.exists() {
-        if let Ok(prd_contents) = std::fs::read_to_string(&prd_path) {
-            if let Ok(prd) = serde_json::from_str::<executor::PrdFile>(&prd_contents) {
-                let has_incomplete = prd.user_stories.iter().any(|s| !s.passes);
+        let initial = std::fs::read_to_string(&prd_path)
+            .map_err(|error| error.to_string())
+            .and_then(|contents| {
+                serde_json::from_str::<executor::PrdFile>(&contents)
+                    .map_err(|error| error.to_string())
+            });
+        match initial {
+            Ok(branch_hint) => {
+                let has_incomplete = branch_hint.user_stories.iter().any(|story| !story.passes);
                 if cli.resume || (has_incomplete && cli.goal.is_none()) {
+                    let prd = resume::checkout_and_load_prd(&cwd, &branch_hint.branch_name)
+                        .await
+                        .map_err(|error| format!("cannot establish resume branch: {error}"))?;
+                    let current_branch = git::get_current_branch(&cwd)
+                        .await
+                        .map_err(|error| format!("cannot verify resume branch: {error}"))?;
+                    let continuation_branch = branch_authority::verify_continuation_branch(
+                        &current_branch,
+                        Some(&prd.branch_name),
+                    )
+                    .map_err(|error| format!("cannot verify resume branch: {error}"))?;
                     app.is_resume = true;
                     app.project = prd.project.clone();
-                    app.branch_name = prd.branch_name.clone();
+                    app.branch_name = continuation_branch.clone();
+                    app.continuation_branch = Some(continuation_branch);
                     app.description = prd.description.clone();
+                    app.decision_document = prd.decision_document.clone();
+                    app.execution_mode = prd.execution_mode.clone();
+                    restore_conversation_from_prd(&mut app, &prd, &cwd);
                     let stories = review_stories_from_prd(&prd);
                     app.show_review(stories);
                     entered_resume = true;
                 }
             }
+            Err(error) if cli.resume => {
+                return Err(format!("cannot resume from prd.json: {error}").into());
+            }
+            Err(_) => {}
         }
     }
 
@@ -829,14 +1164,20 @@ async fn run_app(
         }
     }
 
-    // CLI goal (not resuming): skip welcome and start planning.
-    // No goal: start at the ProviderPicker unless --llm was explicit.
+    // An explicit new goal wins over an unfinished local intake. Interactive
+    // startup without one resumes the repository-scoped clarification or
+    // closes an interrupted provider turn so the user can retry safely.
+    if !entered_resume && cli.goal.is_none() {
+        restore_pre_prd_conversation(&mut app, &cwd);
+    }
+
+    // Every new goal is now the first user turn of the durable conversation
+    // session. Provider selection may precede it because the front-door agent
+    // needs a backend; planning never starts until a validated GoalEnvelope is
+    // handed off exactly once.
     if !entered_resume {
         if let Some(goal) = cli.goal {
-            app.goal_input = goal;
-            // CLI-goal + openai + no key → detour through ApiKeyInput;
-            // its Enter handler sees `goal_input` set and jumps straight
-            // to planning, so the user never goes through Welcome.
+            app.conversation_input = goal;
             if app.llm == app::LlmProvider::OpenAI && app.openai_api_key.is_none() {
                 if headless {
                     return Err("--headless with --llm openai requires OPENAI_API_KEY".into());
@@ -844,18 +1185,9 @@ async fn run_app(
                 app.screen = app::Screen::ApiKeyInput;
                 app.api_key_input.clear();
             } else {
-                let claude_md_path = cwd.join("CLAUDE.md");
-                if claude_md_path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
-                        ensure_agents_md_mirror(&cwd, &content);
-                        app.claude_md_content = Some(content);
-                    }
-                    app.start_planning();
-                    spawn_planner(&app, &cwd, tx.clone(), headless);
-                } else {
-                    app.start_context();
-                    spawn_context_builder(&cwd, tx.clone());
-                }
+                let message = std::mem::take(&mut app.conversation_input);
+                submit_conversation_message(&mut app, &cwd, tx.clone(), message)
+                    .map_err(|error| format!("cannot start conversation: {error}"))?;
             }
         } else {
             if headless {
@@ -866,7 +1198,7 @@ async fn run_app(
             // resolve to Claude, and re-prompting would let the picker
             // overwrite the hybrid per-phase split.
             if app.llm_explicitly_set {
-                app.screen = app::Screen::Welcome;
+                app.start_conversation();
             } else {
                 app.screen = app::Screen::ProviderPicker;
             }
@@ -880,7 +1212,9 @@ async fn run_app(
             match crossterm::event::poll(Duration::from_millis(100)) {
                 Ok(true) => {
                     if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
-                        if tx_key.blocking_send(AppEvent::Key(key)).is_err() { break; }
+                        if tx_key.blocking_send(AppEvent::Key(key)).is_err() {
+                            break;
+                        }
                     }
                 }
                 Ok(false) => {}
@@ -893,7 +1227,9 @@ async fn run_app(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            if tx_tick.send(AppEvent::Tick).await.is_err() { break; }
+            if tx_tick.send(AppEvent::Tick).await.is_err() {
+                break;
+            }
         }
     });
 
@@ -916,13 +1252,32 @@ async fn run_app(
                 if matches!(ev, BaroEvent::NotificationReady) {
                     notification::notify_completion();
                 }
+                let is_done = matches!(ev, BaroEvent::Done { .. });
                 let is_exit = matches!(ev, BaroEvent::OrchestratorExited { .. });
+                if is_exit {
+                    // The sender belongs only to the runtime that produced
+                    // this terminal event. Keeping it would make a later
+                    // Ctrl-C wait for an exit that already happened.
+                    orchestrator_shutdown = None;
+                }
+                let is_runtime_conversation = matches!(
+                    ev,
+                    BaroEvent::ConversationRequest { .. }
+                        | BaroEvent::ConversationResponse { .. }
+                        | BaroEvent::ConversationFailed { .. }
+                );
                 let story_start_id = if let BaroEvent::StoryStart { ref id, .. } = ev {
                     Some(id.clone())
                 } else {
                     None
                 };
                 app.handle_event(ev);
+                if is_runtime_conversation {
+                    persist_conversation(&app.conversation, &cwd);
+                }
+                if is_done || is_exit {
+                    finish_conversation_run(&mut app, is_done, &cwd);
+                }
                 // Headless: events already stream to stdout via echo_raw;
                 // orchestrator exit means the run is done.
                 if headless {
@@ -937,38 +1292,302 @@ async fn run_app(
                 if let Some(ref sid) = story_start_id {
                     if app.main_view == app::MainView::Plan {
                         if let Some(t) = terminal.as_deref_mut() {
-                            let visible = t.size().map(|s| s.height.saturating_sub(10)).unwrap_or(20);
+                            let visible =
+                                t.size().map(|s| s.height.saturating_sub(10)).unwrap_or(20);
                             app.dag_auto_scroll_to_story(sid, visible);
                         }
                     }
                 }
             }
+            Some(AppEvent::ConversationResponse(turn)) => {
+                let conversation_runner::ConversationTurnResult {
+                    response,
+                    repository_brief,
+                } = turn;
+                if response.kind == ConversationKind::Ready
+                    && !app.quick
+                    && supports_preaccept_architect_outcome(app.architect_llm)
+                {
+                    let failed_request_id = response.request_id.clone();
+                    if let Err(error) = spawn_conversation_architect_validation(
+                        &mut app,
+                        &cwd,
+                        tx.clone(),
+                        response,
+                        repository_brief,
+                        headless,
+                    ) {
+                        let close_result = close_failed_initial_request(
+                            &mut app,
+                            &failed_request_id,
+                            "Repository validation could not start; retry the request.",
+                        );
+                        persist_conversation(&app.conversation, &cwd);
+                        match &close_result {
+                            Ok(false) => continue,
+                            Ok(true) => app.conversation_busy = false,
+                            Err(_) => {}
+                        }
+                        let error = match close_result {
+                            Err(close_error) => format!("{error}; {close_error}"),
+                            Ok(_) => error,
+                        };
+                        if headless {
+                            return Err(format!("goal validation failed: {error}").into());
+                        }
+                        app.conversation_error = Some(error);
+                        app.screen = Screen::Conversation;
+                    }
+                    continue;
+                }
+                if let Err(error) = accept_conversation_response(
+                    &mut app,
+                    &cwd,
+                    tx.clone(),
+                    response,
+                    headless,
+                    None,
+                )
+                .await
+                {
+                    if headless {
+                        return Err(error.into());
+                    }
+                    app.conversation_error = Some(error);
+                    app.screen = Screen::Conversation;
+                }
+            }
+            Some(AppEvent::ConversationArchitectOutcome {
+                candidate,
+                repository_context,
+                transport,
+            }) => match transport.outcome.kind {
+                architect_runner::ArchitectOutcomeKindV1::Ready => {
+                    let decision_document = transport
+                        .outcome
+                        .decision_document
+                        .ok_or("validated Architect outcome has no decision document")?;
+                    if let Err(error) = accept_conversation_response(
+                        &mut app,
+                        &cwd,
+                        tx.clone(),
+                        candidate,
+                        headless,
+                        Some(PrevalidatedArchitect {
+                            repository_context,
+                            decision_document,
+                        }),
+                    )
+                    .await
+                    {
+                        if headless {
+                            return Err(error.into());
+                        }
+                        app.conversation_error = Some(error);
+                        app.screen = Screen::Conversation;
+                    }
+                }
+                architect_runner::ArchitectOutcomeKindV1::NeedsInput => {
+                    app.architect_status = app::ArchitectStatus::Skipped(
+                        "Waiting for repository-specific clarification.".to_string(),
+                    );
+                    app.planning_progress = None;
+                    let clarification = match architect_clarification_response(
+                        &candidate,
+                        transport.outcome,
+                    ) {
+                        Ok(clarification) => clarification,
+                        Err(error) => {
+                            let close_result = close_failed_initial_request(
+                                &mut app,
+                                &candidate.request_id,
+                                "Repository validation returned an invalid clarification; retry the request.",
+                            );
+                            persist_conversation(&app.conversation, &cwd);
+                            match &close_result {
+                                Ok(false) => continue,
+                                Ok(true) => app.conversation_busy = false,
+                                Err(_) => {}
+                            }
+                            let error = match close_result {
+                                Err(close_error) => format!("{error}; {close_error}"),
+                                Ok(_) => error,
+                            };
+                            if headless {
+                                return Err(
+                                    format!("invalid Architect clarification: {error}").into()
+                                );
+                            }
+                            app.conversation_error =
+                                Some(format!("Invalid Architect clarification: {error}"));
+                            app.screen = Screen::Conversation;
+                            continue;
+                        }
+                    };
+                    if let Err(error) = accept_conversation_response(
+                        &mut app,
+                        &cwd,
+                        tx.clone(),
+                        clarification,
+                        headless,
+                        None,
+                    )
+                    .await
+                    {
+                        if headless {
+                            return Err(error.into());
+                        }
+                        app.conversation_error = Some(error);
+                        app.screen = Screen::Conversation;
+                    }
+                }
+            },
+            Some(AppEvent::ConversationError {
+                request_id,
+                error,
+                log_path,
+            }) => {
+                let architect_failure = app.architect_status == app::ArchitectStatus::Running;
+                let deterministic_reason = if architect_failure {
+                    "Repository validation failed before the goal was accepted; retry the request."
+                } else {
+                    "The conversation backend failed before returning a response; retry the request."
+                };
+                let close_result =
+                    close_failed_initial_request(&mut app, &request_id, deterministic_reason);
+                persist_conversation(&app.conversation, &cwd);
+                match &close_result {
+                    Ok(false) => {
+                        // A late failure for an already completed request
+                        // cannot unlock or overwrite a newer in-flight turn.
+                        continue;
+                    }
+                    Ok(true) => app.conversation_busy = false,
+                    Err(_) => {}
+                }
+                if architect_failure {
+                    app.architect_status =
+                        app::ArchitectStatus::Skipped("Validation failed.".to_string());
+                }
+                let error = match close_result {
+                    Err(close_error) => format!("{error}; {close_error}"),
+                    Ok(_) => error,
+                };
+                if headless {
+                    return Err(format!("conversation failed: {error}").into());
+                }
+                app.conversation_error = Some(match log_path {
+                    Some(path) => format!("{error} (log: {})", path.display()),
+                    None => error,
+                });
+                app.screen = Screen::Conversation;
+            }
             Some(AppEvent::ContextReady(content)) => {
                 app.claude_md_content = Some(content);
                 app.start_planning();
-                spawn_planner(&app, &cwd, tx.clone(), headless);
+                spawn_planner(&app, &cwd, tx.clone(), headless, None);
             }
             Some(AppEvent::ContextError(err)) => {
+                let conversation_owned = app.conversation.goal_envelope().is_some();
+                fail_conversation_run(&mut app, &format!("context discovery failed: {err}"), &cwd);
                 if headless {
                     return Err(format!("context build failed: {}", err).into());
                 }
-                app.planning_error = Some(err);
-            }
-            Some(AppEvent::PlanReady(stories, project, branch, description, execution_mode)) => {
-                app.project = project;
-                app.branch_name = branch;
-                app.description = description;
-                app.execution_mode = execution_mode;
-                if headless {
-                    // Emit a planning event for the runner/dashboard, then
-                    // auto-confirm and execute (no review screen).
-                    println!(r#"{{"type":"plan_ready","stories":{}}}"#, stories.len());
-                    confirm_and_execute(&mut app, stories, &cwd, tx.clone());
-                } else {
-                    app.show_review(stories);
+                app.planning_error = Some(err.clone());
+                if conversation_owned {
+                    app.conversation_error = Some(format!(
+                        "Repository context discovery failed: {err}. Tell me to retry or adjust the goal."
+                    ));
+                    app.screen = Screen::Conversation;
                 }
             }
-            Some(AppEvent::IntakeReady { decision_doc, contract_json }) => {
+            Some(AppEvent::ProgressivePlanningPrepared(spec)) => {
+                if let Err(error) =
+                    begin_progressive_execution(&mut app, spec, &cwd, tx.clone()).await
+                {
+                    if headless {
+                        return Err(format!("progressive planning could not start: {error}").into());
+                    }
+                    app.planning_error = Some(error);
+                    app.screen = Screen::Conversation;
+                }
+            }
+            Some(AppEvent::PlannerFinished(outcome)) => match outcome {
+                PlannerOutcome::Ready {
+                    stories,
+                    project,
+                    branch,
+                    description,
+                    execution_mode,
+                    progressive: false,
+                } => {
+                    app.project = project;
+                    app.branch_name = branch;
+                    app.description = description;
+                    app.execution_mode = execution_mode;
+                    if headless {
+                        // Emit a planning event for the runner/dashboard, then
+                        // auto-confirm and execute (no review screen).
+                        println!(r#"{{"type":"plan_ready","stories":{}}}"#, stories.len());
+                        confirm_and_execute(&mut app, stories, &cwd, tx.clone());
+                    } else {
+                        app.show_review(stories);
+                    }
+                }
+                PlannerOutcome::Ready {
+                    stories,
+                    project,
+                    branch,
+                    description,
+                    execution_mode,
+                    progressive: true,
+                } => {
+                    app.project = project;
+                    app.branch_name = branch;
+                    app.description = description;
+                    app.execution_mode = execution_mode;
+                    println!(
+                        r#"{{"type":"plan_ready","stories":{},"progressive":true}}"#,
+                        stories.len()
+                    );
+                    app.review_stories = stories;
+                }
+                PlannerOutcome::Failed {
+                    message,
+                    log_path,
+                    progressive: true,
+                } => {
+                    // The host attempted a backpressured correlated
+                    // plan_failed before publishing this outcome. A closed
+                    // command lane is included in the message below.
+                    eprintln!("[baro] progressive planner failed: {message}");
+                    app.planning_error = Some(message);
+                    app.planning_log_path = log_path;
+                }
+                PlannerOutcome::Failed {
+                    message,
+                    log_path,
+                    progressive: false,
+                } => {
+                    let conversation_owned = app.conversation.goal_envelope().is_some();
+                    fail_conversation_run(&mut app, &format!("planning failed: {message}"), &cwd);
+                    if headless {
+                        return Err(format!("planning failed: {message}").into());
+                    }
+                    app.planning_error = Some(message.clone());
+                    app.planning_log_path = log_path;
+                    if conversation_owned {
+                        app.conversation_error = Some(format!(
+                            "Planning failed: {message}. Tell me to retry or adjust the goal."
+                        ));
+                        app.screen = Screen::Conversation;
+                    }
+                }
+            },
+            Some(AppEvent::IntakeReady {
+                decision_doc,
+                contract_json,
+            }) => {
                 if app.decision_document.is_none() {
                     app.decision_document = decision_doc;
                 }
@@ -994,21 +1613,48 @@ async fn run_app(
                 });
                 app.screen = Screen::ModePicker;
             }
-            Some(AppEvent::PlanError(err, log_path)) => {
-                if headless {
-                    return Err(format!("planning failed: {}", err).into());
+            Some(AppEvent::RefineReady(
+                generation,
+                mut stories,
+                project,
+                branch,
+                description,
+                execution_mode,
+            )) => {
+                if !resume::should_accept_refine_result(
+                    app.screen,
+                    app.refining,
+                    active_refine_generation,
+                    generation,
+                ) {
+                    continue;
                 }
-                app.planning_error = Some(err);
-                app.planning_log_path = log_path;
-            }
-            Some(AppEvent::RefineReady(stories, project, branch, description)) => {
+                active_refine_generation = None;
                 app.refining = false;
+                if app.is_resume {
+                    stories = review_refiner::preserve_completed_review_stories(
+                        &app.review_stories,
+                        stories,
+                    );
+                }
                 app.project = project;
-                app.branch_name = branch;
+                if !app.is_resume {
+                    app.branch_name = branch;
+                    app.execution_mode = execution_mode;
+                }
                 app.description = description;
                 app.show_review(stories);
             }
-            Some(AppEvent::RefineError(err)) => {
+            Some(AppEvent::RefineError(generation, err)) => {
+                if !resume::should_accept_refine_result(
+                    app.screen,
+                    app.refining,
+                    active_refine_generation,
+                    generation,
+                ) {
+                    continue;
+                }
+                active_refine_generation = None;
                 app.refining = false;
                 app.planning_error = Some(err);
             }
@@ -1031,23 +1677,44 @@ async fn run_app(
                 app.decision_document = Some(doc);
             }
             Some(AppEvent::ArchitectSkipped(reason)) => {
+                if headless {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "type": "architect_skipped",
+                            "reason": &reason,
+                        })
+                    );
+                }
                 app.architect_status = app::ArchitectStatus::Skipped(reason);
                 app.decision_document = None;
             }
             Some(AppEvent::BranchError(err)) => {
+                let conversation_owned = app.conversation.goal_envelope().is_some();
+                fail_conversation_run(&mut app, &err, &cwd);
                 if headless {
                     return Err(format!("branch/exec failed: {}", err).into());
                 }
-                app.planning_error = Some(err);
-                app.screen = Screen::Review;
+                app.planning_error = Some(err.clone());
+                if conversation_owned {
+                    app.conversation_error = Some(format!(
+                        "Execution could not start: {err}. Tell me to retry or change the goal."
+                    ));
+                    app.screen = Screen::Conversation;
+                } else {
+                    app.screen = Screen::Review;
+                }
             }
             Some(AppEvent::BranchReady(name)) => {
-                app.branch_name = name;
+                app.branch_name = name.clone();
+                app.continuation_branch = Some(name);
             }
             Some(AppEvent::Key(key)) => {
                 // Keys only arrive in TUI mode; rebind `terminal` to the
                 // real handle so the screen handlers below are unchanged.
-                let Some(terminal) = terminal.as_deref_mut() else { continue };
+                let Some(terminal) = terminal.as_deref_mut() else {
+                    continue;
+                };
                 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
                 // Kitty-protocol terminals (Ghostty) emit Enter as a
                 // Release-only event or literal CR/LF Char, which a
@@ -1074,11 +1741,14 @@ async fn run_app(
                             if app.provider_picker_index > 0 {
                                 app.provider_picker_index -= 1;
                             } else {
-                                app.provider_picker_index = app.provider_picker_options.len().saturating_sub(1);
+                                app.provider_picker_index =
+                                    app.provider_picker_options.len().saturating_sub(1);
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if app.provider_picker_index < app.provider_picker_options.len().saturating_sub(1) {
+                            if app.provider_picker_index
+                                < app.provider_picker_options.len().saturating_sub(1)
+                            {
                                 app.provider_picker_index += 1;
                             } else {
                                 app.provider_picker_index = 0;
@@ -1086,26 +1756,17 @@ async fn run_app(
                         }
                         KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
                             let chosen = app.provider_picker_options[app.provider_picker_index];
-                            app.llm = chosen;
-                            app.architect_llm = chosen;
-                            app.planner_llm = chosen;
-                            app.story_llm = chosen;
-                            app.critic_llm = chosen;
-                            app.surgeon_llm = chosen;
-                            // Set the legacy planner enum to match
-                            app.planner = match chosen {
-                                app::LlmProvider::Claude => app::Planner::Claude,
-                                app::LlmProvider::OpenAI => app::Planner::OpenAI,
-                                app::LlmProvider::Codex => app::Planner::Codex,
-                                app::LlmProvider::OpenCode => app::Planner::OpenCode,
-                                app::LlmProvider::Pi => app::Planner::Pi,
-                            };
+                            apply_primary_provider_choice(
+                                &mut app,
+                                chosen,
+                                critic_backend_explicitly_set,
+                            );
                             // OpenAI needs an API key — detour if missing
                             if chosen == app::LlmProvider::OpenAI && app.openai_api_key.is_none() {
                                 app.api_key_input.clear();
                                 app.screen = Screen::ApiKeyInput;
                             } else {
-                                app.screen = Screen::Welcome;
+                                app.start_conversation();
                             }
                         }
                         _ => {}
@@ -1124,24 +1785,19 @@ async fn run_app(
                             if !trimmed.is_empty() {
                                 app.openai_api_key = Some(trimmed.to_string());
                                 app.api_key_input.clear();
-                                // A CLI goal means "what should I do" is
-                                // already answered — jump straight to
-                                // planning instead of Welcome.
-                                if !app.goal_input.is_empty() {
-                                    let claude_md_path = cwd.join("CLAUDE.md");
-                                    if claude_md_path.exists() {
-                                        if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
-                                            ensure_agents_md_mirror(&cwd, &content);
-                                            app.claude_md_content = Some(content);
-                                        }
-                                        app.start_planning();
-                                        spawn_planner(&app, &cwd, tx.clone(), headless);
-                                    } else {
-                                        app.start_context();
-                                        spawn_context_builder(&cwd, tx.clone());
+                                if !app.conversation_input.is_empty() {
+                                    let message = std::mem::take(&mut app.conversation_input);
+                                    if let Err(error) = submit_conversation_message(
+                                        &mut app,
+                                        &cwd,
+                                        tx.clone(),
+                                        message,
+                                    ) {
+                                        app.start_conversation();
+                                        app.conversation_error = Some(error);
                                     }
                                 } else {
-                                    app.screen = Screen::Welcome;
+                                    app.start_conversation();
                                 }
                             }
                         }
@@ -1150,6 +1806,39 @@ async fn run_app(
                         }
                         KeyCode::Char(c) => {
                             app.api_key_input.push(c);
+                        }
+                        _ => {}
+                    },
+                    Screen::Conversation => match key.code {
+                        KeyCode::Esc => return Ok(()),
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.conversation_input.clear();
+                        }
+                        KeyCode::Char('r')
+                            if app.conversation_error.is_some()
+                                && app.conversation.pending_request_id().is_some()
+                                && app.conversation_input.is_empty() =>
+                        {
+                            let intent = conversation_intent(&app);
+                            spawn_pending_conversation(&mut app, &cwd, tx.clone(), intent);
+                        }
+                        KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
+                            if app.conversation_accepts_input()
+                                && !app.conversation_input.trim().is_empty()
+                            {
+                                let message = std::mem::take(&mut app.conversation_input);
+                                if let Err(error) =
+                                    submit_conversation_message(&mut app, &cwd, tx.clone(), message)
+                                {
+                                    app.conversation_error = Some(error);
+                                }
+                            }
+                        }
+                        KeyCode::Backspace if !app.conversation_busy => {
+                            app.conversation_input.pop();
+                        }
+                        KeyCode::Char(character) if !app.conversation_busy => {
+                            app.conversation_input.push(character);
                         }
                         _ => {}
                     },
@@ -1184,21 +1873,21 @@ async fn run_app(
                     },
                     Screen::Welcome => match key.code {
                         KeyCode::Esc => return Ok(()),
-                        KeyCode::Tab => { app.welcome_field = app.welcome_field.next(); }
-                        KeyCode::BackTab => { app.welcome_field = app.welcome_field.prev(); }
+                        KeyCode::Tab => {
+                            app.welcome_field = app.welcome_field.next();
+                        }
+                        KeyCode::BackTab => {
+                            app.welcome_field = app.welcome_field.prev();
+                        }
                         KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
                             if app.welcome_field != app::WelcomeField::Goal {
                                 // Enter on non-goal fields = jump to goal
                                 app.welcome_field = app::WelcomeField::Goal;
                             } else if !app.goal_input.is_empty() {
-                                let claude_md_path = cwd.join("CLAUDE.md");
-                                if claude_md_path.exists() {
-                                    if let Ok(content) = std::fs::read_to_string(&claude_md_path) {
-                                        ensure_agents_md_mirror(&cwd, &content);
-                                        app.claude_md_content = Some(content);
-                                    }
+                                if let Some(content) = load_project_instructions(&cwd) {
+                                    app.claude_md_content = Some(content);
                                     app.start_planning();
-                                    spawn_planner(&app, &cwd, tx.clone(), headless);
+                                    spawn_planner(&app, &cwd, tx.clone(), headless, None);
                                 } else {
                                     app.start_context();
                                     spawn_context_builder(&cwd, tx.clone());
@@ -1209,14 +1898,16 @@ async fn run_app(
                             match app.welcome_field {
                                 app::WelcomeField::Model => {
                                     // Cycle: routed -> opus -> sonnet -> haiku
-                                    let options: &[Option<&str>] = &[None, Some("opus"), Some("sonnet"), Some("haiku")];
-                                    let current = options.iter().position(|o| {
-                                        match (&app.override_model, o) {
+                                    let options: &[Option<&str>] =
+                                        &[None, Some("opus"), Some("sonnet"), Some("haiku")];
+                                    let current = options
+                                        .iter()
+                                        .position(|o| match (&app.override_model, o) {
                                             (None, None) => app.model_routing,
                                             (Some(m), Some(o)) => m.as_str() == *o,
                                             _ => false,
-                                        }
-                                    }).unwrap_or(0);
+                                        })
+                                        .unwrap_or(0);
                                     let next = if key.code == KeyCode::Right {
                                         (current + 1) % options.len()
                                     } else {
@@ -1241,7 +1932,8 @@ async fn run_app(
                                     if key.code == KeyCode::Right {
                                         app.timeout_secs = (app.timeout_secs + 60).min(3600);
                                     } else {
-                                        app.timeout_secs = app.timeout_secs.saturating_sub(60).max(60);
+                                        app.timeout_secs =
+                                            app.timeout_secs.saturating_sub(60).max(60);
                                     }
                                 }
                                 app::WelcomeField::Planner => {
@@ -1277,265 +1969,297 @@ async fn run_app(
                             if app.planning_error.is_some() {
                                 app.planning_error = None;
                                 app.start_planning();
-                                spawn_planner(&app, &cwd, tx.clone(), headless);
+                                let validated_document = app.decision_document.clone();
+                                spawn_planner(&app, &cwd, tx.clone(), headless, validated_document);
                             }
                         }
                         _ => {}
                     },
-                    Screen::Review => if app.refine_input.is_some() {
-                        // Overlay is open — handle overlay keys only
-                        match key.code {
-                            KeyCode::Esc => { app.refine_input = None; }
-                            KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
-                                let feedback = app.refine_input.as_ref().unwrap().clone();
-                                if !feedback.is_empty() {
-                                    app.refining = true;
+                    Screen::Review => {
+                        if app.refine_input.is_some() {
+                            // Overlay is open — handle overlay keys only
+                            match key.code {
+                                KeyCode::Esc => {
                                     app.refine_input = None;
-                                    spawn_refiner(&app, &feedback, &cwd, tx.clone());
                                 }
+                                KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
+                                    let feedback = app.refine_input.as_ref().unwrap().clone();
+                                    if !feedback.is_empty() {
+                                        next_refine_generation =
+                                            next_refine_generation.checked_add(1).unwrap_or(1);
+                                        active_refine_generation = Some(next_refine_generation);
+                                        app.refining = true;
+                                        app.refine_input = None;
+                                        review_refiner::spawn_refiner(
+                                            &app,
+                                            next_refine_generation,
+                                            &feedback,
+                                            &cwd,
+                                            tx.clone(),
+                                        );
+                                    }
+                                }
+                                KeyCode::Char(c) => {
+                                    app.refine_input.as_mut().unwrap().push(c);
+                                }
+                                KeyCode::Backspace => {
+                                    app.refine_input.as_mut().unwrap().pop();
+                                }
+                                _ => {}
                             }
-                            KeyCode::Char(c) => { app.refine_input.as_mut().unwrap().push(c); }
-                            KeyCode::Backspace => { app.refine_input.as_mut().unwrap().pop(); }
-                            _ => {}
-                        }
-                    } else if app.planning_error.is_some() {
-                        // Branch/planning errors surface as a modal here;
-                        // Enter/Esc dismisses rather than re-triggering the
-                        // doomed run or quitting.
-                        match key.code {
-                            KeyCode::Enter
-                            | KeyCode::Char('\r')
-                            | KeyCode::Char('\n')
-                            | KeyCode::Esc => {
-                                app.planning_error = None;
+                        } else if app.planning_error.is_some() {
+                            // Branch/planning errors surface as a modal here;
+                            // Enter/Esc dismisses rather than re-triggering the
+                            // doomed run or quitting.
+                            match key.code {
+                                KeyCode::Enter
+                                | KeyCode::Char('\r')
+                                | KeyCode::Char('\n')
+                                | KeyCode::Esc => {
+                                    app.planning_error = None;
+                                }
+                                _ => {}
                             }
-                            _ => {}
-                        }
-                    } else {
-                        match key.code {
-                        KeyCode::Char('r') => {
-                            if !app.refining {
-                                app.refine_input = Some(String::new());
-                            }
-                        }
-                        KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                        KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
-                            if app.is_resume {
-                                // Resume mode: read existing prd.json (has full acceptance/tests data)
-                                let prd_path = cwd.join("prd.json");
-                                match std::fs::read_to_string(&prd_path)
-                                    .map_err(|e| e.to_string())
-                                    .and_then(|c| serde_json::from_str::<executor::PrdFile>(&c).map_err(|e| e.to_string()))
+                        } else {
+                            match key.code {
+                                KeyCode::Char('r') => {
+                                    if !app.refining {
+                                        app.refine_input = Some(String::new());
+                                    }
+                                }
+                                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                                KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n')
+                                    if !app.refining =>
                                 {
-                                    Ok(prd) => {
-                                        // prd.json holds either the full "baro/<slug>-<suffix>"
-                                        // name or (legacy) the bare slug — prefix only when missing.
-                                        let full_branch = if prd.branch_name.starts_with("baro/") {
-                                            prd.branch_name.clone()
-                                        } else {
-                                            format!("baro/{}", prd.branch_name)
-                                        };
-                                        let branch_cwd = cwd.clone();
-                                        let branch_name_clone = full_branch.clone();
-                                        app.branch_name = full_branch;
-                                        app.start_execution();
+                                    if app.is_resume {
+                                        let resume_branch = app.branch_name.clone();
+                                        let project = app.project.clone();
+                                        let description = app.description.clone();
+                                        let reviewed_stories = app.review_stories.clone();
                                         let exec_cwd = cwd.clone();
                                         let branch_tx = tx.clone();
-                                        let mr = app.model_routing;
-                                        let om = app.override_model.clone();
-                                        let pl = app.parallel_limit;
-                                        let ts = app.timeout_secs;
-                                        let wc = app.with_critic;
-                                        let cm = app.critic_model.clone();
-                                        let wl = app.with_librarian;
-                                        let wmem = app.with_memory;
-                                        let ws = app.with_sentry;
-                                        let wsg = app.with_surgeon;
-                                        let sul = app.surgeon_use_llm;
-                                        let sm = app.surgeon_model.clone();
-                                        let ild = app.intra_level_delay_secs;
-                                        let llm = app.llm;
-                                        let sllm = app.story_llm;
-                                        let cllm = app.critic_llm;
-                                        let surllm = app.surgeon_llm;
-                                        let oak = app.openai_api_key.clone();
-                                        let obu = app.openai_base_url.clone();
-                                        let eff = app.effort.clone();
-                                        let stm = app.story_model.clone();
-                                        let ttm = app.tier_map.clone();
-                                        let oep = app.openai_endpoints.clone();
                                         let err_tx = tx.clone();
-                                        tokio::spawn(async move {
-                                            // Resume: check out the suffixed branch prd.json
-                                            // holds — never create a new one (that would
-                                            // silently drift off the prior work).
-                                            if let Err(e) = git::checkout_existing_branch(&branch_cwd, &branch_name_clone).await {
-                                                let _ = err_tx.send(AppEvent::BranchError(
-                                                    format!("Branch checkout failed: {}. Cannot resume run on this branch.", e)
-                                                )).await;
-                                                return;
-                                            }
-                                            match git::get_current_branch(&exec_cwd).await {
-                                                Ok(ref actual) if actual == &branch_name_clone => {}
-                                                Ok(actual) => {
-                                                    let _ = err_tx.send(AppEvent::BranchError(
-                                                        format!("Branch verification failed: expected '{}', got '{}'. Cannot proceed on main branch.", branch_name_clone, actual)
-                                                    )).await;
-                                                    return;
-                                                }
-                                                Err(e) => {
-                                                    let _ = err_tx.send(AppEvent::BranchError(
-                                                        format!("Branch verification failed: {}. Cannot proceed on main branch.", e)
-                                                    )).await;
-                                                    return;
-                                                }
-                                            }
-                                            spawn_executor(prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() }, false);
-                                        });
-                                    }
-                                    Err(e) => {
-                                        app.planning_error = Some(format!("Failed to read prd.json: {}", e));
-                                    }
-                                }
-                            } else {
-                                let prd = executor::prd_from_review(
-                                    &app.project,
-                                    &app.branch_name,
-                                    &app.description,
-                                    &app.review_stories,
-                                    app.decision_document.clone(),
-                                    app.execution_mode.clone(),
-                                );
-                                if let Err(e) = executor::write_prd(&prd, &cwd) {
-                                    app.planning_error = Some(format!("Failed to write prd.json: {}", e));
-                                } else {
-                                    let full_branch = if app.branch_name.starts_with("baro/") {
-                                        app.branch_name.clone()
-                                    } else {
-                                        format!("baro/{}", app.branch_name)
-                                    };
-                                    let branch_cwd = cwd.clone();
-                                    let branch_name_clone = full_branch.clone();
-                                    app.branch_name = full_branch;
-                                    app.start_execution();
-                                    let exec_prd = prd;
-                                    let exec_cwd = cwd.clone();
-                                    let branch_tx = tx.clone();
-                                    let is_followup = app.is_followup;
-                                    let mr = app.model_routing;
-                                    let om = app.override_model.clone();
-                                    let pl = app.parallel_limit;
-                                    let ts = app.timeout_secs;
-                                    let wc = app.with_critic;
-                                    let cm = app.critic_model.clone();
-                                    let wl = app.with_librarian;
-                                    let wmem = app.with_memory;
-                                    let ws = app.with_sentry;
-                                    let wsg = app.with_surgeon;
-                                    let sul = app.surgeon_use_llm;
-                                    let sm = app.surgeon_model.clone();
-                                    let ild = app.intra_level_delay_secs;
-                                    let llm = app.llm;
-                                    let sllm = app.story_llm;
-                                    let cllm = app.critic_llm;
-                                    let surllm = app.surgeon_llm;
-                                    let oak = app.openai_api_key.clone();
-                                    let obu = app.openai_base_url.clone();
-                                    let eff = app.effort.clone();
-                                    let stm = app.story_model.clone();
-                                    let ttm = app.tier_map.clone();
-                                    let oep = app.openai_endpoints.clone();
-                                    let err_tx = tx.clone();
-                                    tokio::spawn(async move {
-                                        // Follow-up (--continue): stay on the current branch
-                                        // so it lands on the same PR. Otherwise ALWAYS cut a
-                                        // fresh suffixed branch — sibling clones sharing an
-                                        // origin would collide on `git push`.
-                                        let actual_full_branch = if is_followup {
-                                            match git::get_current_branch(&branch_cwd).await {
-                                                Ok(name) => name,
-                                                Err(e) => {
-                                                    let _ = err_tx.send(AppEvent::BranchError(
-                                                        format!("Couldn't read current branch for follow-up: {}", e)
-                                                    )).await;
-                                                    return;
-                                                }
-                                            }
-                                        } else {
-                                            match git::create_fresh_branch(&branch_cwd, &branch_name_clone).await {
-                                                Ok(name) => name,
-                                                Err(e) => {
-                                                    let _ = err_tx.send(AppEvent::BranchError(
-                                                        format!("Branch creation failed: {}. Cannot proceed on main branch.", e)
-                                                    )).await;
-                                                    return;
-                                                }
+                                        if let Err(error) =
+                                            begin_conversation_execution(&mut app, &cwd)
+                                        {
+                                            app.planning_error = Some(error);
+                                            continue;
+                                        }
+                                        let cfg = match executor_config_from_app(&app) {
+                                            Ok(config) => config,
+                                            Err(error) => {
+                                                fail_conversation_run(
+                                                    &mut app,
+                                                    &format!(
+                                                        "conversation context projection failed: {error}"
+                                                    ),
+                                                    &cwd,
+                                                );
+                                                app.planning_error = Some(error);
+                                                continue;
                                             }
                                         };
-                                        // Persist the FULL "baro/<slug>-<suffix>" name to
-                                        // prd.json — the TS orchestrator reads prd.branchName
-                                        // verbatim, and a stripped name once made it commit
-                                        // every story to a second un-prefixed branch,
-                                        // breaking resume.
-                                        let mut exec_prd = exec_prd;
-                                        exec_prd.branch_name = actual_full_branch.clone();
-                                        if let Err(e) = executor::write_prd(&exec_prd, &exec_cwd) {
-                                            let _ = err_tx.send(AppEvent::BranchError(
+                                        app.start_execution();
+                                        tokio::spawn(async move {
+                                            let original_prd = match resume::checkout_and_load_prd(
+                                                &exec_cwd,
+                                                &resume_branch,
+                                            )
+                                            .await
+                                            {
+                                                Ok(prd) => prd,
+                                                Err(error) => {
+                                                    let _ = err_tx
+                                                        .send(AppEvent::BranchError(format!(
+                                                            "Cannot reload resume branch: {error}"
+                                                        )))
+                                                        .await;
+                                                    return;
+                                                }
+                                            };
+                                            let prd = match executor::prd_from_resume_review(
+                                                &original_prd,
+                                                &project,
+                                                &description,
+                                                &reviewed_stories,
+                                                None,
+                                            ) {
+                                                Ok(prd) => prd,
+                                                Err(error) => {
+                                                    let _ = err_tx
+                                                        .send(AppEvent::BranchError(format!(
+                                                    "Refined resume plan is invalid: {error}"
+                                                )))
+                                                        .await;
+                                                    return;
+                                                }
+                                            };
+                                            if let Err(error) = executor::write_prd(&prd, &exec_cwd)
+                                            {
+                                                let _ = err_tx
+                                                    .send(AppEvent::BranchError(format!(
+                                                "Failed to persist refined resume plan: {error}"
+                                            )))
+                                                    .await;
+                                                return;
+                                            }
+                                            spawn_executor(
+                                                prd, exec_cwd, branch_tx, cfg, false, None,
+                                            );
+                                        });
+                                    } else {
+                                        let mut prd = executor::prd_from_review(
+                                            &app.project,
+                                            &app.branch_name,
+                                            &app.description,
+                                            &app.review_stories,
+                                            app.decision_document.clone(),
+                                            app.execution_mode.clone(),
+                                        );
+                                        attach_conversation_metadata(&mut prd, &app);
+                                        if let Err(e) = executor::write_prd(&prd, &cwd) {
+                                            app.planning_error =
+                                                Some(format!("Failed to write prd.json: {}", e));
+                                        } else {
+                                            let planned_full_branch =
+                                                if app.branch_name.starts_with("baro/") {
+                                                    app.branch_name.clone()
+                                                } else {
+                                                    format!("baro/{}", app.branch_name)
+                                                };
+                                            let continuation_branch = if app.is_followup {
+                                                match app.continuation_branch.clone() {
+                                                    Some(branch) => Some(branch),
+                                                    None => {
+                                                        app.planning_error = Some(
+                                                            "Follow-up has no established branch authority; refusing to execute on the current checkout."
+                                                                .to_string(),
+                                                        );
+                                                        continue;
+                                                    }
+                                                }
+                                            } else {
+                                                None
+                                            };
+                                            let branch_cwd = cwd.clone();
+                                            let branch_name_clone = planned_full_branch.clone();
+                                            // A continuation branch is established authority. A
+                                            // fresh branch is not authoritative until git creates
+                                            // and the post-create guard verifies its suffixed name.
+                                            if let Some(branch) = continuation_branch.as_ref() {
+                                                app.branch_name = branch.clone();
+                                            }
+                                            if let Err(error) =
+                                                begin_conversation_execution(&mut app, &cwd)
+                                            {
+                                                app.planning_error = Some(error);
+                                                continue;
+                                            }
+                                            let cfg = match executor_config_from_app(&app) {
+                                                Ok(config) => config,
+                                                Err(error) => {
+                                                    fail_conversation_run(
+                                                        &mut app,
+                                                        &format!(
+                                                            "conversation context projection failed: {error}"
+                                                        ),
+                                                        &cwd,
+                                                    );
+                                                    app.planning_error = Some(error);
+                                                    continue;
+                                                }
+                                            };
+                                            app.start_execution();
+                                            let exec_prd = prd;
+                                            let exec_cwd = cwd.clone();
+                                            let branch_tx = tx.clone();
+                                            let err_tx = tx.clone();
+                                            tokio::spawn(async move {
+                                                // Follow-up (--continue): stay on the current branch
+                                                // so it lands on the same PR. Otherwise ALWAYS cut a
+                                                // fresh suffixed branch — sibling clones sharing an
+                                                // origin would collide on `git push`.
+                                                let actual_full_branch = if let Some(expected) =
+                                                    continuation_branch
+                                                {
+                                                    match git::get_current_branch(&branch_cwd).await
+                                                    {
+                                                        Ok(name) if name == expected => name,
+                                                        Ok(name) => {
+                                                            let _ = err_tx.send(AppEvent::BranchError(
+                                                                format!("Follow-up branch changed before execution: expected '{}', got '{}'.", expected, name)
+                                                            )).await;
+                                                            return;
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = err_tx.send(AppEvent::BranchError(
+                                                        format!("Couldn't read current branch for follow-up: {}", e)
+                                                    )).await;
+                                                            return;
+                                                        }
+                                                    }
+                                                } else {
+                                                    match git::create_fresh_branch(
+                                                        &branch_cwd,
+                                                        &branch_name_clone,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(name) => name,
+                                                        Err(e) => {
+                                                            let _ = err_tx.send(AppEvent::BranchError(
+                                                        format!("Branch creation failed: {}. Cannot proceed on main branch.", e)
+                                                    )).await;
+                                                            return;
+                                                        }
+                                                    }
+                                                };
+                                                if let Err(error) =
+                                                    branch_authority::verify_execution_branch(
+                                                        &exec_cwd,
+                                                        &actual_full_branch,
+                                                    )
+                                                    .await
+                                                {
+                                                    let _ = err_tx
+                                                        .send(AppEvent::BranchError(error))
+                                                        .await;
+                                                    return;
+                                                }
+                                                // Persist the FULL "baro/<slug>-<suffix>" name to
+                                                // prd.json — the TS orchestrator reads prd.branchName
+                                                // verbatim, and a stripped name once made it commit
+                                                // every story to a second un-prefixed branch,
+                                                // breaking resume.
+                                                let mut exec_prd = exec_prd;
+                                                exec_prd.branch_name = actual_full_branch.clone();
+                                                if let Err(e) =
+                                                    executor::write_prd(&exec_prd, &exec_cwd)
+                                                {
+                                                    let _ = err_tx.send(AppEvent::BranchError(
                                                 format!("Failed to persist suffixed branch in prd.json: {}", e)
                                             )).await;
-                                            return;
+                                                    return;
+                                                }
+                                                let _ = err_tx
+                                                    .send(AppEvent::BranchReady(
+                                                        actual_full_branch.clone(),
+                                                    ))
+                                                    .await;
+                                                spawn_executor(
+                                                    exec_prd, exec_cwd, branch_tx, cfg, false, None,
+                                                );
+                                            });
                                         }
-                                        let _ = err_tx.send(AppEvent::BranchReady(actual_full_branch.clone())).await;
-                                        match git::get_current_branch(&exec_cwd).await {
-                                            Ok(ref actual) if actual == &actual_full_branch => {}
-                                            Ok(actual) => {
-                                                let _ = err_tx.send(AppEvent::BranchError(
-                                                    format!("Branch verification failed: expected '{}', got '{}'. Cannot proceed on main branch.", actual_full_branch, actual)
-                                                )).await;
-                                                return;
-                                            }
-                                            Err(e) => {
-                                                let _ = err_tx.send(AppEvent::BranchError(
-                                                    format!("Branch verification failed: {}. Cannot proceed on main branch.", e)
-                                                )).await;
-                                                return;
-                                            }
-                                        }
-                                        spawn_executor(exec_prd, exec_cwd, branch_tx, executor::ExecutorConfig { parallel: pl, timeout_secs: ts, model_routing: mr, override_model: om, with_critic: wc, critic_model: cm, with_librarian: wl, with_memory: wmem, with_sentry: ws, with_surgeon: wsg, surgeon_use_llm: sul, surgeon_model: sm, intra_level_delay_secs: ild, llm, story_llm: sllm, critic_llm: cllm, surgeon_llm: surllm, openai_api_key: oak.clone(), openai_base_url: obu.clone(), effort: eff.clone(), story_model: stm.clone(), tier_map: ttm.clone(), openai_endpoints: oep.clone() }, false);
-                                    });
+                                    }
                                 }
+                                KeyCode::Up | KeyCode::Char('k') => app.review_prev(),
+                                KeyCode::Down | KeyCode::Char('j') => app.review_next(),
+                                _ => {}
                             }
                         }
-                        KeyCode::Up | KeyCode::Char('k') => app.review_prev(),
-                        KeyCode::Down | KeyCode::Char('j') => app.review_next(),
-                        _ => {}
-                    }},
+                    }
                     Screen::Execute => match key.code {
-                        // Follow-up prompt (open after a successful run): type a new goal,
-                        // Enter re-plans on the SAME branch (--continue → updates the PR).
-                        KeyCode::Esc if app.followup_input.is_some() => {
-                            app.followup_input = None;
-                        }
-                        KeyCode::Backspace if app.followup_input.is_some() => {
-                            if let Some(s) = app.followup_input.as_mut() {
-                                s.pop();
-                            }
-                        }
-                        KeyCode::Char(c) if app.followup_input.is_some() => {
-                            if let Some(s) = app.followup_input.as_mut() {
-                                s.push(c);
-                            }
-                        }
-                        KeyCode::Enter if app.followup_input.is_some() => {
-                            let goal = app.followup_input.take().unwrap_or_default();
-                            if !goal.trim().is_empty() {
-                                std::env::set_var("BARO_CONTINUE", "1");
-                                app.is_followup = true;
-                                app.goal_input = goal;
-                                app.start_planning();
-                                spawn_planner(&app, &cwd, tx.clone(), headless);
-                            }
-                        }
                         // Mid-run agent chat: same bottom-strip input, one JSON
                         // line to the orchestrator's stdin on Enter.
                         KeyCode::Esc if app.agent_msg_input.is_some() => {
@@ -1555,37 +2279,76 @@ async fn run_app(
                             if let Some((id, text)) = app.agent_msg_input.take() {
                                 let text = text.trim().to_string();
                                 if !text.is_empty() {
-                                    if let Some(sender) = &app.orchestrator_stdin {
-                                        let line = serde_json::json!({
-                                            "type": "agent_message",
-                                            "id": id,
-                                            "text": text,
-                                        })
-                                        .to_string();
-                                        let _ = sender.try_send(line);
+                                    let runtime_request_id = if id == app::DIALOGUE_AGENT_ID {
+                                        let request_id = app.next_conversation_request_id();
+                                        match app.conversation.begin_request(&request_id, &text) {
+                                            Ok(()) => {
+                                                persist_conversation(&app.conversation, &cwd);
+                                                Some(request_id)
+                                            }
+                                            Err(error) => {
+                                                app.conversation_error = Some(format!(
+                                                    "cannot send conversation message: {error}"
+                                                ));
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    let line = message_command_line(
+                                        &id,
+                                        &text,
+                                        runtime_request_id.as_deref(),
+                                    );
+                                    let sent = app
+                                        .orchestrator_stdin
+                                        .as_ref()
+                                        .is_some_and(|sender| sender.try_send(line).is_ok());
+                                    if !sent {
+                                        if let Some(request_id) = runtime_request_id.as_deref() {
+                                            let _ = app.conversation.apply_runtime_failure(
+                                                request_id,
+                                                "orchestrator command lane is unavailable",
+                                            );
+                                            persist_conversation(&app.conversation, &cwd);
+                                            app.conversation_error = Some(
+                                                "Collective conversation is unavailable because the run command lane closed."
+                                                    .to_string(),
+                                            );
+                                        }
                                     }
                                     app.echo_user_message(&id, &text);
                                 }
                             }
                         }
-                        // Follow-up works on the current branch via --continue, with or
-                        // without a PR — don't gate on pr_url (local/no-remote runs can
-                        // still continue the run in place).
-                        KeyCode::Char('f') if app.done && app.exit_reason.is_none() && app.followup_input.is_none() => {
-                            app.followup_input = Some(String::new());
+                        // The same durable conversation owns status questions and
+                        // implementation follow-ups after a run. A Ready response
+                        // later re-plans on the current branch.
+                        KeyCode::Char('f') if app.done => {
+                            app.start_conversation();
+                            app.conversation_input.clear();
                         }
-                        KeyCode::Char('m') if !app.done && app.followup_input.is_none() => {
+                        KeyCode::Char('m') if !app.done => {
                             if let Some(id) = app.message_target() {
                                 app.agent_msg_input = Some((id, String::new()));
                             }
+                        }
+                        KeyCode::Char('c') if !app.done => {
+                            app.open_dialogue();
                         }
                         KeyCode::Char('r') if app.done && app.exit_reason.is_some() => {
                             let prd_path = cwd.join("prd.json");
                             match std::fs::read_to_string(&prd_path)
                                 .map_err(|e| e.to_string())
-                                .and_then(|c| serde_json::from_str::<executor::PrdFile>(&c).map_err(|e| e.to_string()))
-                            {
+                                .and_then(|c| {
+                                    serde_json::from_str::<executor::PrdFile>(&c)
+                                        .map_err(|e| e.to_string())
+                                }) {
                                 Ok(prd) => {
+                                    if app.conversation.goal_envelope().is_none() {
+                                        restore_conversation_from_prd(&mut app, &prd, &cwd);
+                                    }
                                     let full_branch = if prd.branch_name.starts_with("baro/") {
                                         prd.branch_name.clone()
                                     } else {
@@ -1594,17 +2357,38 @@ async fn run_app(
                                     app.is_resume = true;
                                     app.project = prd.project.clone();
                                     app.branch_name = full_branch.clone();
+                                    app.continuation_branch = Some(full_branch.clone());
                                     app.description = prd.description.clone();
                                     app.review_stories = review_stories_from_prd(&prd);
-                                    app.start_execution();
-
+                                    if let Err(error) = begin_conversation_execution(&mut app, &cwd)
+                                    {
+                                        app.exit_reason = Some(error);
+                                        continue;
+                                    }
                                     let exec_cwd = cwd.clone();
                                     let branch_cwd = cwd.clone();
                                     let branch_tx = tx.clone();
                                     let err_tx = tx.clone();
-                                    let cfg = executor_config_from_app(&app);
+                                    let cfg = match executor_config_from_app(&app) {
+                                        Ok(config) => config,
+                                        Err(error) => {
+                                            fail_conversation_run(
+                                                &mut app,
+                                                &format!(
+                                                    "conversation context projection failed: {error}"
+                                                ),
+                                                &cwd,
+                                            );
+                                            app.exit_reason = Some(error);
+                                            continue;
+                                        }
+                                    };
+                                    app.start_execution();
                                     tokio::spawn(async move {
-                                        if let Err(e) = git::checkout_existing_branch(&branch_cwd, &full_branch).await {
+                                        if let Err(e) =
+                                            git::checkout_existing_branch(&branch_cwd, &full_branch)
+                                                .await
+                                        {
                                             let _ = err_tx.send(AppEvent::BranchError(
                                                 format!("Branch checkout failed: {}. Cannot rerun this checkpoint.", e)
                                             )).await;
@@ -1625,11 +2409,12 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(prd, exec_cwd, branch_tx, cfg, false);
+                                        spawn_executor(prd, exec_cwd, branch_tx, cfg, false, None);
                                     });
                                 }
                                 Err(e) => {
-                                    app.exit_reason = Some(format!("Failed to read prd.json for rerun: {}", e));
+                                    app.exit_reason =
+                                        Some(format!("Failed to read prd.json for rerun: {}", e));
                                 }
                             }
                         }
@@ -1677,10 +2462,14 @@ async fn run_app(
                             let back = key.code == KeyCode::BackTab
                                 || key.modifiers.contains(KeyModifiers::SHIFT);
                             let width = terminal.size().map(|s| s.width).unwrap_or(120);
-                            let explorer_shown = app.explorer_visible
-                                && width >= screens::execute::BP_EXPLORER;
+                            let explorer_shown =
+                                app.explorer_visible && width >= screens::execute::BP_EXPLORER;
                             if explorer_shown {
-                                app.focus = if back { app.focus.prev() } else { app.focus.next() };
+                                app.focus = if back {
+                                    app.focus.prev()
+                                } else {
+                                    app.focus.next()
+                                };
                             } else if back {
                                 app.prev_log();
                             } else {
@@ -1697,7 +2486,10 @@ async fn run_app(
                             app::WorkbenchFocus::Changes => app.explorer_files_move(-1),
                             app::WorkbenchFocus::Main => match app.main_view {
                                 app::MainView::Activity => {
-                                    let inner_h = terminal.size().map(|s| s.height.saturating_sub(12) as usize).unwrap_or(20);
+                                    let inner_h = terminal
+                                        .size()
+                                        .map(|s| s.height.saturating_sub(12) as usize)
+                                        .unwrap_or(20);
                                     let active_ids = app.active_story_ids();
                                     let selected_id = app
                                         .activity_filter
@@ -1707,8 +2499,13 @@ async fn run_app(
                                     if !app.review_logs.is_empty() && active_ids.is_empty() {
                                         let total = app.review_logs.len();
                                         app.review_log_scroll_up(1, total, inner_h);
-                                    } else if let Some(story) = app.active_stories.get(&selected_id) {
-                                        let total = if story.activity.is_empty() { story.logs.len() } else { story.activity.len() };
+                                    } else if let Some(story) = app.active_stories.get(&selected_id)
+                                    {
+                                        let total = if story.activity.is_empty() {
+                                            story.logs.len()
+                                        } else {
+                                            story.activity.len()
+                                        };
                                         app.log_scroll_up(1, total, inner_h);
                                     }
                                 }
@@ -1720,12 +2517,16 @@ async fn run_app(
                                 app::MainView::Stats => {}
                             },
                         },
-                        KeyCode::Down | KeyCode::Char('j') => match effective_focus(&app, terminal) {
+                        KeyCode::Down | KeyCode::Char('j') => match effective_focus(&app, terminal)
+                        {
                             app::WorkbenchFocus::Agents => app.explorer_agents_move(1),
                             app::WorkbenchFocus::Changes => app.explorer_files_move(1),
                             app::WorkbenchFocus::Main => match app.main_view {
                                 app::MainView::Activity => {
-                                    let inner_h = terminal.size().map(|s| s.height.saturating_sub(12) as usize).unwrap_or(20);
+                                    let inner_h = terminal
+                                        .size()
+                                        .map(|s| s.height.saturating_sub(12) as usize)
+                                        .unwrap_or(20);
                                     let active_ids = app.active_story_ids();
                                     let selected_id = app
                                         .activity_filter
@@ -1735,14 +2536,22 @@ async fn run_app(
                                     if !app.review_logs.is_empty() && active_ids.is_empty() {
                                         let total = app.review_logs.len();
                                         app.review_log_scroll_down(1, total, inner_h);
-                                    } else if let Some(story) = app.active_stories.get(&selected_id) {
-                                        let total = if story.activity.is_empty() { story.logs.len() } else { story.activity.len() };
+                                    } else if let Some(story) = app.active_stories.get(&selected_id)
+                                    {
+                                        let total = if story.activity.is_empty() {
+                                            story.logs.len()
+                                        } else {
+                                            story.activity.len()
+                                        };
                                         app.log_scroll_down(1, total, inner_h);
                                     }
                                 }
                                 app::MainView::Plan => {
                                     let total = app.dag_line_count();
-                                    let visible = terminal.size().map(|s| s.height.saturating_sub(10)).unwrap_or(20);
+                                    let visible = terminal
+                                        .size()
+                                        .map(|s| s.height.saturating_sub(10))
+                                        .unwrap_or(20);
                                     app.dag_scroll_down(total, visible);
                                 }
                                 app::MainView::Diff => app.diff_scroll_down(),
@@ -1765,12 +2574,317 @@ async fn run_app(
                 }
                 app.orchestrator_stdin = Some(sender);
             }
+            Some(AppEvent::OrchestratorShutdown(sender)) => {
+                // Replacing an authoritative runtime means the old one must
+                // not remain detached in the background.
+                if let Some(previous) = orchestrator_shutdown.replace(sender) {
+                    let _ = previous.send(());
+                }
+            }
+            Some(AppEvent::Interrupt) => {
+                interrupted = true;
+                app.orchestrator_stdin = None;
+                if let Some(shutdown) = orchestrator_shutdown.take() {
+                    // Keep the event loop alive until OrchestratorExited so
+                    // graceful provider cleanup and the hard fallback finish.
+                    if shutdown.send(()).is_err() {
+                        // A naturally exited runtime can race its registration
+                        // event. There is then no future exit to wait for; drop
+                        // the remaining supervised phase tasks immediately.
+                        break;
+                    }
+                } else {
+                    // Conversation, Architect, and Planner subprocess futures
+                    // are supervised by kill-on-drop guards. Returning allows
+                    // Tokio to drop those detached phase tasks cleanly.
+                    break;
+                }
+            }
             Some(AppEvent::Tick) => {
                 app.tick_count += 1;
             }
             None => break,
         }
     }
+    // The JSON `done` event is the authoritative outcome. The orchestrator
+    // process can exit cleanly after emitting `success:false`; automation must
+    // still receive a non-zero baro exit code instead of mistaking that for a
+    // successful run.
+    if interrupted {
+        return Err("interrupted by Ctrl-C".into());
+    }
+    if headless {
+        if let Some(reason) = headless_failure_reason(&app) {
+            return Err(reason.into());
+        }
+    }
+    Ok(())
+}
+
+fn headless_failure_reason(app: &App) -> Option<String> {
+    app.exit_reason.clone()
+}
+
+fn conversation_intent(app: &App) -> conversation_runner::ConversationIntent {
+    if matches!(
+        app.conversation.phase(),
+        ConversationPhase::Completed | ConversationPhase::Failed
+    ) {
+        return conversation_runner::ConversationIntent::Chat;
+    }
+    if app
+        .conversation
+        .transcript()
+        .iter()
+        .rev()
+        .find(|turn| turn.role == conversation::TranscriptRole::Assistant)
+        .and_then(|turn| turn.kind)
+        == Some(ConversationKind::Clarify)
+    {
+        conversation_runner::ConversationIntent::Clarification
+    } else {
+        conversation_runner::ConversationIntent::Goal
+    }
+}
+
+fn conversation_model(app: &App) -> Option<String> {
+    app.override_model.clone().or_else(|| {
+        (app.llm == app::LlmProvider::OpenAI)
+            .then(|| app.architect_model.clone())
+            .flatten()
+    })
+}
+
+fn spawn_pending_conversation(
+    app: &mut App,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+    intent: conversation_runner::ConversationIntent,
+) {
+    let session = app.conversation.clone();
+    let request_id = session
+        .pending_request_id()
+        .expect("spawn_pending_conversation requires a pending request")
+        .to_string();
+    let cwd = cwd.to_path_buf();
+    let llm = app.llm;
+    let model = conversation_model(app);
+    let openai_api_key = app.openai_api_key.clone();
+    let openai_base_url = app.openai_base_url.clone();
+    app.conversation_busy = true;
+    app.conversation_error = None;
+    app.screen = Screen::Conversation;
+    persist_conversation(&app.conversation, &cwd);
+
+    tokio::spawn(async move {
+        let turn_timeout_ms = conversation_frontdoor::conversation_turn_timeout_ms();
+        let provider_timeout_ms =
+            conversation_frontdoor::conversation_provider_timeout_ms(turn_timeout_ms);
+        let result = conversation_runner::run_conversation_turn(
+            &session,
+            intent,
+            conversation_runner::ConversationRunOptions {
+                cwd: &cwd,
+                llm,
+                model: model.as_deref(),
+                timeout_ms: turn_timeout_ms,
+                provider_timeout_ms,
+                openai_api_key: openai_api_key.as_deref(),
+                openai_base_url: openai_base_url.as_deref(),
+            },
+        )
+        .await;
+        match result {
+            Ok(response) => {
+                let _ = tx.send(AppEvent::ConversationResponse(response)).await;
+            }
+            Err(error) => {
+                let _ = tx
+                    .send(AppEvent::ConversationError {
+                        request_id,
+                        error: error.message,
+                        log_path: error.log_path,
+                    })
+                    .await;
+            }
+        }
+    });
+}
+
+fn submit_conversation_message(
+    app: &mut App,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+    text: String,
+) -> Result<(), String> {
+    if !app.conversation_accepts_input() {
+        return Err("conversation is not accepting a new message".to_string());
+    }
+    if matches!(
+        app.conversation.phase(),
+        ConversationPhase::Completed | ConversationPhase::Failed
+    ) {
+        // A terminal phase permits a follow-up conversation, but only an
+        // actually established run branch authorizes same-PR execution. A
+        // failed intake/planning attempt may still be sitting on main.
+        app.is_followup = app.continuation_branch.is_some();
+    }
+    let intent = conversation_intent(app);
+    let request_id = app.next_conversation_request_id();
+    app.conversation
+        .begin_request(request_id, text)
+        .map_err(|error| error.to_string())?;
+    app.conversation_input.clear();
+    spawn_pending_conversation(app, cwd, tx, intent);
+    Ok(())
+}
+
+/// Apply one conversation response and perform the caller-owned lifecycle
+/// action. A non-quick `ready` response reaches this function only after
+/// repository validation, so its decision document can be handed directly to
+/// Planner without invoking Architect a second time.
+async fn accept_conversation_response(
+    app: &mut App,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+    response: ConversationWireResponse,
+    headless: bool,
+    prevalidated: Option<PrevalidatedArchitect>,
+) -> Result<(), String> {
+    let kind = response.kind;
+    if prevalidated.is_some() && kind != ConversationKind::Ready {
+        return Err("prevalidated Architect data requires a ready response".to_string());
+    }
+    let request_id = response.request_id.clone();
+    let message = response.message.clone();
+    let questions = response.questions.clone();
+    match apply_or_close_conversation_response(app, response) {
+        Ok(conversation::ApplyOutcome::Duplicate) => return Ok(()),
+        Ok(conversation::ApplyOutcome::Accepted(_)) => {}
+        Err(error) => {
+            persist_conversation(&app.conversation, cwd);
+            return Err(error);
+        }
+    }
+    persist_conversation(&app.conversation, cwd);
+
+    if headless {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "conversation_response",
+                "session_id": app.conversation.session_id(),
+                "request_id": request_id,
+                "kind": match kind {
+                    ConversationKind::Ready => "ready",
+                    ConversationKind::Clarify => "clarify",
+                    ConversationKind::Answer => "answer",
+                },
+                "message": message,
+                "questions": questions,
+            })
+        );
+    }
+
+    match kind {
+        ConversationKind::Ready => {
+            let result = match prevalidated {
+                Some(architect) => {
+                    start_prevalidated_planning_from_conversation(app, cwd, tx, headless, architect)
+                }
+                None => start_planning_from_conversation(app, cwd, tx, headless),
+            };
+            result.map_err(|error| format!("goal handoff failed: {error}"))
+        }
+        ConversationKind::Clarify | ConversationKind::Answer => {
+            app.screen = Screen::Conversation;
+            if !headless {
+                return Ok(());
+            }
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "conversation_needs_input",
+                    "session_id": app.conversation.session_id(),
+                    "after_request_id": request_id,
+                })
+            );
+            let session_id = app.conversation.session_id().to_string();
+            match StdinHub::global()
+                .await_conversation_message(&session_id, &request_id)
+                .await
+            {
+                Some(text) => submit_conversation_message(app, cwd, tx, text)
+                    .map_err(|error| format!("cannot continue conversation: {error}")),
+                None => Err(
+                    "conversation requires another user message, but the headless stdin transport closed"
+                        .to_string(),
+                ),
+            }
+        }
+    }
+}
+
+fn start_planning_from_conversation(
+    app: &mut App,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+    headless: bool,
+) -> Result<(), String> {
+    let handoff = app
+        .conversation
+        .take_ready_handoff()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "conversation produced no new ready handoff".to_string())?;
+    app.goal_input = handoff.planning_prompt;
+    if app.is_followup {
+        std::env::set_var("BARO_CONTINUE", "1");
+    }
+    app.conversation
+        .transition_to(ConversationPhase::Planning)
+        .map_err(|error| error.to_string())?;
+    app.conversation
+        .record_system_turn("Goal accepted. Architect and Planner are starting.")
+        .map_err(|error| error.to_string())?;
+    persist_conversation(&app.conversation, cwd);
+    if let Some(context) = load_project_instructions(cwd) {
+        app.claude_md_content = Some(context);
+        app.start_planning();
+        spawn_planner(app, cwd, tx, headless, None);
+    } else {
+        app.start_context();
+        spawn_context_builder(cwd, tx);
+    }
+    Ok(())
+}
+
+fn start_prevalidated_planning_from_conversation(
+    app: &mut App,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+    headless: bool,
+    architect: PrevalidatedArchitect,
+) -> Result<(), String> {
+    let handoff = app
+        .conversation
+        .take_ready_handoff()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "conversation produced no new ready handoff".to_string())?;
+    app.goal_input = handoff.planning_prompt;
+    if app.is_followup {
+        std::env::set_var("BARO_CONTINUE", "1");
+    }
+    app.conversation
+        .transition_to(ConversationPhase::Planning)
+        .map_err(|error| error.to_string())?;
+    app.conversation
+        .record_system_turn("Goal validated against repository evidence. Planner is starting.")
+        .map_err(|error| error.to_string())?;
+    persist_conversation(&app.conversation, cwd);
+
+    app.claude_md_content = Some(architect.repository_context);
+    app.start_planning();
+    spawn_planner(app, cwd, tx, headless, Some(architect.decision_document));
     Ok(())
 }
 
@@ -1805,26 +2919,20 @@ fn plan_progress_sink(headless: bool, tx: mpsc::Sender<AppEvent>) -> impl Fn(&st
 fn plan_event_sink(headless: bool, tx: mpsc::Sender<AppEvent>) -> impl Fn(&str) {
     move |raw: &str| {
         if headless {
-            println!("{}", raw);
-        } else if let Some(line) = plan_line_from_event(raw) {
+            println!("{}", events::jsonl_safe_line(raw, "plan"));
+        } else if let Some(line) = planner_host::line_from_event(raw) {
             let _ = tx.try_send(AppEvent::PlanProgress(line));
         }
     }
 }
 
-/// Pull the human-readable line out of a planner/architect BaroEvent JSON:
-/// `story_log.line` or `activity.text`. Unrecognized/non-JSON lines are
-/// dropped from the TUI (they still reach headless via the raw echo).
-fn plan_line_from_event(raw: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
-    match v.get("type").and_then(|t| t.as_str())? {
-        "story_log" => v.get("line").and_then(|l| l.as_str()).map(str::to_string),
-        "activity" => v.get("text").and_then(|t| t.as_str()).map(str::to_string),
-        _ => None,
-    }
-}
-
-fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bool) {
+fn spawn_planner(
+    app: &App,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+    headless: bool,
+    prevalidated_decision_doc: Option<String>,
+) {
     let goal = app.goal_input.clone();
     let planner = app.planner;
     let cwd = cwd.to_path_buf();
@@ -1841,8 +2949,18 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
     let openai_api_key = app.openai_api_key.clone();
     let openai_base_url = app.openai_base_url.clone();
     let effort = app.effort.clone();
+    let goal_envelope_json = app.conversation.goal_envelope().map(|envelope| {
+        serde_json::to_string(envelope)
+            .expect("GoalEnvelope contains only JSON-serializable fields")
+    });
 
     tokio::spawn(async move {
+        // Resolve operator-fixed contracts before the Architect so the
+        // mode-aware OpenAI planning phases see the same execution shape. Auto
+        // remains undecided here: the Architect may run its own intake, and
+        // the shared intake below can still incorporate its decision document.
+        let fixed_mode_json = fixed_mode_contract(quick, &mode);
+
         // Quick mode skips the Architect — its job is aligning parallel
         // agents, and quick runs are single-agent. Still emit
         // ArchitectSkipped so the TUI shows why there's no design doc.
@@ -1853,6 +2971,12 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
                 ))
                 .await;
             None
+        } else if let Some(doc) = prevalidated_decision_doc {
+            // Conversation pre-acceptance already ran the repository-aware
+            // Architect. Publish the usual lifecycle event, but never spend a
+            // second model call rediscovering the same decision document.
+            let _ = tx.send(AppEvent::ArchitectComplete(doc.clone())).await;
+            Some(doc)
         } else {
             // The Architect runs for every backend (run-architect.ts
             // handles all providers) — only quick mode skips it. Routing
@@ -1864,11 +2988,14 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
                 architect_llm,
                 architect_model.as_deref(),
                 context.as_deref(),
+                fixed_mode_json.as_deref(),
                 openai_api_key.as_deref(),
                 openai_base_url.as_deref(),
                 &effort,
                 plan_event_sink(headless, tx.clone()),
-            ).await {
+            )
+            .await
+            {
                 Ok(doc) => {
                     let _ = tx.send(AppEvent::ArchitectComplete(doc.clone())).await;
                     Some(doc)
@@ -1892,10 +3019,8 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
         // Contract resolution: --quick and an explicit --mode never
         // consult the intake; auto runs it, and interactive auto pauses
         // for the picker instead of continuing.
-        let mode_json = if quick {
-            Some(user_mode_contract("focused", "Quick mode"))
-        } else if mode != "auto" {
-            Some(user_mode_contract(&mode, &format!("User selected {} mode.", mode)))
+        let mode_json = if let Some(contract) = fixed_mode_json {
+            Some(contract)
         } else {
             let contract = intake_runner::run_intake(
                 &goal,
@@ -1907,7 +3032,9 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
                 openai_api_key.as_deref(),
                 openai_base_url.as_deref(),
                 plan_progress_sink(headless, tx.clone()),
-            ).await;
+                plan_event_sink(headless, tx.clone()),
+            )
+            .await;
             if headless {
                 // Ask-after-planning (opt-in): emit the proposal and block for a
                 // confirm_mode command (≤120s). Without the flag, headless stays
@@ -1919,13 +3046,16 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
                 }
             } else {
                 let _ = tx
-                    .send(AppEvent::IntakeReady { decision_doc, contract_json: contract })
+                    .send(AppEvent::IntakeReady {
+                        decision_doc,
+                        contract_json: contract,
+                    })
                     .await;
                 return;
             }
         };
 
-        run_planner_and_report(
+        let spec = PlannerRunSpec {
             goal,
             cwd,
             planner_llm,
@@ -1937,11 +3067,30 @@ fn spawn_planner(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, headless: bo
             openai_base_url,
             effort,
             mode_json,
-            tx,
-            headless,
-        )
-        .await;
+            goal_envelope_json,
+        };
+        if progressive_planning_enabled(headless) {
+            let _ = tx.send(AppEvent::ProgressivePlanningPrepared(spec)).await;
+        } else {
+            run_planner_and_report(spec, tx, headless, None).await;
+        }
     });
+}
+
+/// Return the immutable mode contract selected directly by the operator.
+/// Auto mode deliberately returns `None`: its contract depends on intake and,
+/// unlike explicit `--mode`, may use the Architect's decision document.
+fn fixed_mode_contract(quick: bool, mode: &str) -> Option<String> {
+    if quick {
+        Some(user_mode_contract("focused", "Quick mode"))
+    } else if mode != "auto" {
+        Some(user_mode_contract(
+            mode,
+            &format!("User selected {} mode.", mode),
+        ))
+    } else {
+        None
+    }
 }
 
 /// Stage B: the planner proper, then PlanReady/PlanError.
@@ -1955,21 +3104,29 @@ fn spawn_planner_stage_b(app: &App, cwd: &Path, tx: mpsc::Sender<AppEvent>, mode
     let openai_api_key = app.openai_api_key.clone();
     let openai_base_url = app.openai_base_url.clone();
     let effort = app.effort.clone();
+    let goal_envelope_json = app.conversation.goal_envelope().map(|envelope| {
+        serde_json::to_string(envelope)
+            .expect("GoalEnvelope contains only JSON-serializable fields")
+    });
     tokio::spawn(async move {
         run_planner_and_report(
-            goal,
-            cwd,
-            planner_llm,
-            model,
-            context,
-            decision_doc,
-            false, // the picker never shows in quick mode
-            openai_api_key,
-            openai_base_url,
-            effort,
-            Some(mode_json),
+            PlannerRunSpec {
+                goal,
+                cwd,
+                planner_llm,
+                model,
+                context,
+                decision_doc,
+                quick: false, // the picker never shows in quick mode
+                openai_api_key,
+                openai_base_url,
+                effort,
+                mode_json: Some(mode_json),
+                goal_envelope_json,
+            },
             tx,
             false, // stage B only runs interactively (the picker never shows headless)
+            None,
         )
         .await;
     });
@@ -1986,7 +3143,7 @@ fn user_mode_contract(mode: &str, reason: &str) -> String {
         }),
         "parallel" => serde_json::json!({
             "mode": "parallel", "confidence": 1, "reason": reason,
-            "parallelism": 4, "source": "user",
+            "source": "user",
         }),
         _ => serde_json::json!({
             "mode": "focused", "confidence": 1, "reason": reason,
@@ -1996,84 +3153,51 @@ fn user_mode_contract(mode: &str, reason: &str) -> String {
     v.to_string()
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_planner_and_report(
-    goal: String,
-    cwd: PathBuf,
-    planner_llm: app::LlmProvider,
-    model: Option<String>,
-    context: Option<String>,
-    decision_doc: Option<String>,
-    quick: bool,
-    openai_api_key: Option<String>,
-    openai_base_url: Option<String>,
-    effort: String,
-    mode_json: Option<String>,
-    tx: mpsc::Sender<AppEvent>,
-    headless: bool,
-) {
-    let result = planner_runner::run_planner(
-        &goal,
-        &cwd,
-        planner_llm,
-        model.as_deref(),
-        context.as_deref(),
-        decision_doc.as_deref(),
-        quick,
-        openai_api_key.as_deref(),
-        openai_base_url.as_deref(),
-        &effort,
-        mode_json.as_deref(),
-        plan_event_sink(headless, tx.clone()),
-    ).await;
-
-    match result.and_then(|raw_json| {
-        let prd: PrdOutput = serde_json::from_str(&raw_json).map_err(|e| {
-            subprocess::ProcessRunError {
-                message: format!(
-                    "Failed to parse PRD JSON from planner: {}\nRaw (first 500 chars): {}",
-                    e,
-                    &raw_json[..raw_json.len().min(500)],
-                ),
-                log_path: None,
-            }
-        })?;
-        let stories: Vec<ReviewStory> = prd.user_stories
-            .into_iter()
-            .map(|s| ReviewStory {
-                id: s.id,
-                title: s.title,
-                description: s.description,
-                depends_on: s.depends_on,
-                completed: false,
-                model: s.model,
-            })
-            .collect();
-        Ok((stories, prd.project, prd.branch_name, prd.description, prd.execution_mode))
-    }) {
-        Ok((stories, project, branch, description, execution_mode)) => {
-            let _ = tx
-                .send(AppEvent::PlanReady(stories, project, branch, description, execution_mode))
-                .await;
-        }
-        Err(err) => {
-            let _ = tx
-                .send(AppEvent::PlanError(err.message.clone(), err.log_path))
-                .await;
-        }
-    }
+/// CLI values override repository configuration even when the explicit value
+/// is zero, because zero is the meaningful "unlimited" setting.
+fn resolve_parallel_limit(config: Option<u32>, cli: Option<u32>) -> u32 {
+    cli.or(config).unwrap_or(0)
 }
 
-/// Mirror CLAUDE.md into AGENTS.md so backends following that
-/// convention (OpenAI Codex CLI) see the same project context. Never
-/// overwrites an existing AGENTS.md; write errors are silently
-/// ignored — CLAUDE.md stays authoritative.
-fn ensure_agents_md_mirror(cwd: &Path, content: &str) {
-    let agents_md_path = cwd.join("AGENTS.md");
-    if agents_md_path.exists() {
-        return;
+async fn run_planner_and_report(
+    spec: PlannerRunSpec,
+    tx: mpsc::Sender<AppEvent>,
+    headless: bool,
+    progressive: Option<ProgressivePlannerRuntime>,
+) {
+    let outcome =
+        planner_host::run_planner(spec, progressive, plan_event_sink(headless, tx.clone())).await;
+    let _ = tx.send(AppEvent::PlannerFinished(outcome)).await;
+}
+
+/// Read existing repository instructions without changing the checkout.
+/// When both conventions exist, preserve both under explicit labels so every
+/// backend receives the same source material without Baro manufacturing or
+/// overwriting instruction files before the goal is accepted.
+fn load_project_instructions(cwd: &Path) -> Option<String> {
+    let mut sections: Vec<(&str, String)> = Vec::new();
+    for name in ["AGENTS.md", "CLAUDE.md"] {
+        let path = cwd.join(name);
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let trimmed = content.trim();
+        if trimmed.is_empty() || sections.iter().any(|(_, body)| body == trimmed) {
+            continue;
+        }
+        sections.push((name, trimmed.to_string()));
     }
-    let _ = std::fs::write(&agents_md_path, content);
+    if sections.is_empty() {
+        None
+    } else {
+        Some(
+            sections
+                .into_iter()
+                .map(|(name, body)| format!("# Instructions from {name}\n\n{body}"))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        )
+    }
 }
 
 fn spawn_context_builder(cwd: &Path, tx: mpsc::Sender<AppEvent>) {
@@ -2081,111 +3205,15 @@ fn spawn_context_builder(cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     tokio::spawn(async move {
         match context::build_context(&cwd).await {
             Ok(content) => {
-                let claude_md_path = cwd.join("CLAUDE.md");
-                if let Err(e) = tokio::fs::write(&claude_md_path, &content).await {
-                    let _ = tx.send(AppEvent::ContextError(format!("Failed to write CLAUDE.md: {}", e))).await;
-                    return;
-                }
-                // Mirror the same bytes to AGENTS.md for backends that
-                // follow that convention. Soft-fail: CLAUDE.md is already
-                // written, so the Claude path still works.
-                let agents_md_path = cwd.join("AGENTS.md");
-                if let Err(e) = tokio::fs::write(&agents_md_path, &content).await {
-                    let _ = tx
-                        .send(AppEvent::ContextError(format!(
-                            "Failed to write AGENTS.md (CLAUDE.md still wrote OK): {}",
-                            e
-                        )))
-                        .await;
-                }
                 let _ = tx.send(AppEvent::ContextReady(content)).await;
             }
             Err(e) => {
-                let _ = tx.send(AppEvent::ContextError(format!("Failed to build context: {}", e))).await;
-            }
-        }
-    });
-}
-
-fn spawn_refiner(app: &App, feedback: &str, cwd: &Path, tx: mpsc::Sender<AppEvent>) {
-    let feedback = feedback.to_string();
-    let cwd = cwd.to_path_buf();
-    let model = app.model_for_phase("planning");
-    let effort = app.effort.clone();
-    let context = app.claude_md_content.clone();
-
-    // Build current plan JSON from app state
-    let stories_json: Vec<serde_json::Value> = app.review_stories.iter().map(|s| {
-        serde_json::json!({
-            "id": s.id,
-            "title": s.title,
-            "description": s.description,
-            "dependsOn": s.depends_on,
-        })
-    }).collect();
-    let plan_json = serde_json::json!({
-        "project": app.project,
-        "branchName": app.branch_name,
-        "description": app.description,
-        "userStories": stories_json,
-    });
-    let plan_str = serde_json::to_string_pretty(&plan_json).unwrap_or_default();
-
-    tokio::spawn(async move {
-        let base_prompt = format!(
-            "Here is the current plan:\n{}\nThe user wants these changes: {}\nGenerate an updated plan with the same JSON schema. Keep stories the user did not mention unchanged. Output ONLY valid JSON, no markdown, no explanation.",
-            plan_str, feedback
-        );
-        let prompt = match context {
-            Some(ctx) => format!("Here is the project context:\n{}\n\n{}", ctx, base_prompt),
-            None => base_prompt,
-        };
-
-        let result = async {
-            let config = claude_runner::ClaudeRunConfig {
-                prompt: prompt.clone(),
-                cwd: cwd.clone(),
-                model: model.clone(),
-                effort: effort.clone(),
-                log_tag: Some("refine"),
-            };
-
-            let output = claude_runner::spawn_claude_json(&config).await?;
-
-            let claude_output: serde_json::Value = serde_json::from_str(&output.stdout)
-                .map_err(|e| format!("Failed to parse Claude JSON wrapper: {}", e))?;
-
-            let plan_text = claude_output
-                .get("result")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&output.stdout);
-
-            let json_str = extract_json(plan_text);
-
-            let prd: PrdOutput = serde_json::from_str(&json_str)
-                .map_err(|e| format!("Failed to parse refined PRD JSON: {}\nRaw: {}", e, &json_str[..json_str.len().min(500)]))?;
-
-            let stories: Vec<ReviewStory> = prd.user_stories
-                .into_iter()
-                .map(|s| ReviewStory {
-                    id: s.id,
-                    title: s.title,
-                    description: s.description,
-                    depends_on: s.depends_on,
-                    completed: false,
-                    model: s.model,
-                })
-                .collect();
-
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((stories, prd.project, prd.branch_name, prd.description))
-        }.await;
-
-        match result {
-            Ok((stories, project, branch, description)) => {
-                let _ = tx.send(AppEvent::RefineReady(stories, project, branch, description)).await;
-            }
-            Err(e) => {
-                let _ = tx.send(AppEvent::RefineError(e.to_string())).await;
+                let _ = tx
+                    .send(AppEvent::ContextError(format!(
+                        "Failed to build context: {}",
+                        e
+                    )))
+                    .await;
             }
         }
     });
@@ -2201,7 +3229,7 @@ fn confirm_and_execute(
     tx: mpsc::Sender<AppEvent>,
 ) {
     app.review_stories = stories;
-    let prd = executor::prd_from_review(
+    let mut prd = executor::prd_from_review(
         &app.project,
         &app.branch_name,
         &app.description,
@@ -2209,36 +3237,212 @@ fn confirm_and_execute(
         app.decision_document.clone(),
         app.execution_mode.clone(),
     );
+    attach_conversation_metadata(&mut prd, app);
     if let Err(e) = executor::write_prd(&prd, cwd) {
-        let _ = tx.try_send(AppEvent::BranchError(format!("Failed to write prd.json: {}", e)));
+        let _ = tx.try_send(AppEvent::BranchError(format!(
+            "Failed to write prd.json: {}",
+            e
+        )));
         return;
     }
-    let full_branch = format!("baro/{}", app.branch_name);
-    app.branch_name = full_branch.clone();
+    let planned_full_branch = if app.branch_name.starts_with("baro/") {
+        app.branch_name.clone()
+    } else {
+        format!("baro/{}", app.branch_name)
+    };
+    let continuation_branch = if app.is_followup {
+        match app.continuation_branch.clone() {
+            Some(branch) => Some(branch),
+            None => {
+                let _ = tx.try_send(AppEvent::BranchError(
+                    "Follow-up has no established branch authority; refusing to execute on the current checkout."
+                        .to_string(),
+                ));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    // Keep a fresh planner suggestion provisional until BranchReady carries
+    // the verified, suffixed checkout. An existing continuation is already
+    // durable branch authority and can be shown immediately.
+    if let Some(branch) = continuation_branch.as_ref() {
+        app.branch_name = branch.clone();
+    }
+    if let Err(error) = begin_conversation_execution(app, cwd) {
+        let _ = tx.try_send(AppEvent::BranchError(error));
+        return;
+    }
+    let cfg = match executor_config_from_app(app) {
+        Ok(config) => config,
+        Err(error) => {
+            fail_conversation_run(
+                app,
+                &format!("conversation context projection failed: {error}"),
+                cwd,
+            );
+            let _ = tx.try_send(AppEvent::BranchError(error));
+            return;
+        }
+    };
     app.start_execution();
-    let cfg = executor_config_from_app(app);
     let exec_cwd = cwd.to_path_buf();
     let branch_cwd = cwd.to_path_buf();
     tokio::spawn(async move {
-        let actual_full_branch = match git::create_fresh_branch(&branch_cwd, &full_branch).await {
-            Ok(name) => name,
-            Err(e) => {
-                let _ = tx
-                    .send(AppEvent::BranchError(format!("Branch creation failed: {}", e)))
-                    .await;
-                return;
+        let actual_full_branch = if let Some(expected) = continuation_branch {
+            match git::get_current_branch(&branch_cwd).await {
+                Ok(name) if name == expected => name,
+                Ok(name) => {
+                    let _ = tx
+                        .send(AppEvent::BranchError(format!(
+                            "Follow-up branch changed before execution: expected '{}', got '{}'.",
+                            expected, name
+                        )))
+                        .await;
+                    return;
+                }
+                Err(error) => {
+                    let _ = tx
+                        .send(AppEvent::BranchError(format!(
+                            "Couldn't read current branch for follow-up: {error}"
+                        )))
+                        .await;
+                    return;
+                }
+            }
+        } else {
+            match git::create_fresh_branch(&branch_cwd, &planned_full_branch).await {
+                Ok(name) => name,
+                Err(e) => {
+                    let _ = tx
+                        .send(AppEvent::BranchError(format!(
+                            "Branch creation failed: {}",
+                            e
+                        )))
+                        .await;
+                    return;
+                }
             }
         };
+        if let Err(error) =
+            branch_authority::verify_execution_branch(&exec_cwd, &actual_full_branch).await
+        {
+            let _ = tx.send(AppEvent::BranchError(error)).await;
+            return;
+        }
         let mut exec_prd = prd;
-        exec_prd.branch_name = actual_full_branch;
+        exec_prd.branch_name = actual_full_branch.clone();
         if let Err(e) = executor::write_prd(&exec_prd, &exec_cwd) {
             let _ = tx
-                .send(AppEvent::BranchError(format!("Failed to persist branch in prd.json: {}", e)))
+                .send(AppEvent::BranchError(format!(
+                    "Failed to persist branch in prd.json: {}",
+                    e
+                )))
                 .await;
             return;
         }
-        spawn_executor(exec_prd, exec_cwd, tx, cfg, true);
+        let _ = tx.send(AppEvent::BranchReady(actual_full_branch)).await;
+        spawn_executor(exec_prd, exec_cwd, tx, cfg, true, None);
     });
+}
+
+async fn begin_progressive_execution(
+    app: &mut App,
+    spec: PlannerRunSpec,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+) -> Result<(), String> {
+    if app.is_followup || app.is_resume {
+        return Err(
+            "progressive planning v1 supports fresh headless runs only; resume/follow-up keeps the complete-plan barrier"
+                .to_string(),
+        );
+    }
+
+    let generated = progressive_planning::ProgressivePlanningIds::generate();
+    let run_id = std::env::var("BARO_RUN_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| generated.run_id().to_string());
+    let ids = progressive_planning::ProgressivePlanningIds::new(
+        run_id.clone(),
+        generated.planning_id().to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+    // The TS orchestrator and Planner billing/session lanes must inherit the
+    // exact identity stamped into runtimeGraph.
+    std::env::set_var("BARO_RUN_ID", ids.run_id());
+
+    let execution_mode = spec
+        .mode_json
+        .as_deref()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .transpose()
+        .map_err(|error| format!("invalid progressive execution mode: {error}"))?;
+    let mut bootstrap = progressive_planning::build_progressive_bootstrap_prd(
+        progressive_planning::ProgressiveBootstrapInput {
+            cwd,
+            goal: &spec.goal,
+            ids: &ids,
+            decision_document: spec.decision_doc.as_deref(),
+            execution_mode: execution_mode.as_ref(),
+            conversation_session_id: None,
+            goal_envelope: None,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    attach_conversation_metadata(&mut bootstrap, app);
+
+    let actual_branch = git::create_fresh_branch(cwd, &bootstrap.branch_name)
+        .await
+        .map_err(|error| format!("progressive branch creation failed: {error}"))?;
+    branch_authority::verify_execution_branch(cwd, &actual_branch).await?;
+    bootstrap.branch_name = actual_branch.clone();
+    executor::write_prd(&bootstrap, cwd)
+        .map_err(|error| format!("could not persist progressive bootstrap PRD: {error}"))?;
+
+    app.project = bootstrap.project.clone();
+    app.branch_name = actual_branch.clone();
+    app.description = bootstrap.description.clone();
+    app.execution_mode = bootstrap.execution_mode.clone();
+    app.review_stories.clear();
+    begin_conversation_execution(app, cwd)?;
+    let executor_config = executor_config_from_app(app)?;
+    app.start_execution();
+    let _ = tx.send(AppEvent::BranchReady(actual_branch)).await;
+
+    let planning_id = ids.planning_id().to_string();
+    let orchestrator_stdin = spawn_executor(
+        bootstrap.clone(),
+        cwd.to_path_buf(),
+        tx.clone(),
+        executor_config,
+        true,
+        Some(planning_id.clone()),
+    );
+    // Queue the open command immediately. The TS CLI has a bounded startup
+    // buffer until the Board persists and exposes its PlanningFeed authority.
+    orchestrator_stdin
+        .send(
+            serde_json::json!({
+                "type": "planning_open",
+                "run_id": ids.run_id(),
+                "planning_id": ids.planning_id(),
+            })
+            .to_string(),
+        )
+        .await
+        .map_err(|_| "orchestrator command lane closed before Planner start".to_string())?;
+
+    let bootstrap_json = serde_json::to_string(&bootstrap)
+        .map_err(|error| format!("could not serialize progressive bootstrap: {error}"))?;
+    let runtime =
+        ProgressivePlannerRuntime::new(run_id, planning_id, bootstrap_json, orchestrator_stdin);
+    tokio::spawn(async move {
+        run_planner_and_report(spec, tx, true, Some(runtime)).await;
+    });
+    Ok(())
 }
 
 fn spawn_executor(
@@ -2247,15 +3451,16 @@ fn spawn_executor(
     tx: mpsc::Sender<AppEvent>,
     config: executor::ExecutorConfig,
     echo_raw: bool,
-) {
+    progressive_planning_id: Option<String>,
+) -> mpsc::Sender<String> {
     // Bridge the orchestrator's BaroEvents to AppEvent::Baro so
     // app/screens stay untouched.
     let (exec_tx, mut exec_rx) = mpsc::channel::<BaroEvent>(256);
 
     // TUI→orchestrator command lane (agent chat): hand the app loop the
     // sender, the child-stdin writer consumes the receiver.
-    let (stdin_tx, stdin_rx) = mpsc::channel::<String>(64);
-    let _ = tx.try_send(AppEvent::OrchestratorStdin(stdin_tx));
+    let (stdin_tx, stdin_rx) = mpsc::channel::<String>(256);
+    let _ = tx.try_send(AppEvent::OrchestratorStdin(stdin_tx.clone()));
 
     let tx_fwd = tx.clone();
     tokio::spawn(async move {
@@ -2266,8 +3471,12 @@ fn spawn_executor(
         }
     });
 
-    let default_model = if config.model_routing {
-        Some("opus".to_string())
+    // Preserve PRD light/standard/heavy classes only for the opt-in collective
+    // market so workers can bid by tier. Legacy intentionally keeps its
+    // historical global Opus default unchanged.
+    let collective = current_coordination_has_runtime_dialogue();
+    let default_model = if config.model_routing && collective {
+        None
     } else {
         Some("opus".to_string())
     };
@@ -2292,8 +3501,7 @@ fn spawn_executor(
         .unwrap_or_else(|| cwd.clone())
         .join(".baro")
         .join("runs");
-    let audit_log_default =
-        audit_root.join(format!("{}-{}.jsonl", project_name, unix_secs));
+    let audit_log_default = audit_root.join(format!("{}-{}.jsonl", project_name, unix_secs));
     if let Some(parent) = audit_log_default.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!(
@@ -2330,6 +3538,7 @@ fn spawn_executor(
     let orch_cfg = orchestrator_client::OrchestratorConfig {
         prd_path: cwd.join("prd.json"),
         cwd,
+        progressive_planning_id,
         parallel: config.parallel,
         timeout_secs: config.timeout_secs,
         override_model: config.override_model,
@@ -2355,98 +3564,17 @@ fn spawn_executor(
         story_model: config.story_model,
         tier_map: config.tier_map,
         openai_endpoints: config.openai_endpoints,
+        conversation_context: config.conversation_context,
         echo_raw,
     };
-    orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx, stdin_rx);
-}
-
-/// Single reader over headless stdin, shared by two lanes: the intake
-/// `confirm_mode` gate and the execution `agent_message` command lane. One
-/// thread owns the Stdin mutex — two competing `stdin().lock()` readers would
-/// starve each other (a parked read holds the lock for the whole process).
-struct StdinHub {
-    confirm_gate: StdMutex<Option<oneshot::Sender<String>>>,
-    orch_tx: StdMutex<Option<mpsc::Sender<String>>>,
-    reader_started: AtomicBool,
-}
-
-impl StdinHub {
-    fn global() -> &'static StdinHub {
-        static HUB: OnceLock<StdinHub> = OnceLock::new();
-        HUB.get_or_init(|| StdinHub {
-            confirm_gate: StdMutex::new(None),
-            orch_tx: StdMutex::new(None),
-            reader_started: AtomicBool::new(false),
-        })
-    }
-
-    /// Spawn the single stdin reader thread (idempotent). A plain std thread —
-    /// like the keyboard reader — so a forever-blocked read never stalls the
-    /// runtime; each parsed line routes to whichever lane wants it.
-    fn ensure_reader(&'static self) {
-        if self.reader_started.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        std::thread::spawn(move || {
-            use std::io::BufRead;
-            for line in std::io::stdin().lock().lines() {
-                let Ok(line) = line else { break };
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                // confirm_mode lines resolve the intake gate; if no gate is open
-                // (already confirmed / not waiting) they're dropped.
-                if let Some(mode) = parse_confirm_mode(trimmed) {
-                    if let Some(tx) = self.confirm_gate.lock().unwrap().take() {
-                        let _ = tx.send(mode);
-                    }
-                    continue;
-                }
-                // Everything else is an execution-phase command (agent_message);
-                // forward to the orchestrator lane once execution has set it.
-                if let Some(cmd) = stdin_command_line(trimmed) {
-                    let tx = self.orch_tx.lock().unwrap().clone();
-                    if let Some(tx) = tx {
-                        let _ = tx.blocking_send(cmd);
-                    }
-                }
-            }
-        });
-    }
-
-    /// Register the execution-phase command sender and start the reader.
-    fn set_orchestrator(&'static self, tx: mpsc::Sender<String>) {
-        *self.orch_tx.lock().unwrap() = Some(tx);
-        self.ensure_reader();
-    }
-
-    /// Block for a `confirm_mode` line, up to `timeout`. `None` on timeout so
-    /// the caller can auto-proceed — a run must never hang on confirmation.
-    async fn await_confirm(&'static self, timeout: Duration) -> Option<String> {
-        let (tx, rx) = oneshot::channel();
-        *self.confirm_gate.lock().unwrap() = Some(tx);
-        self.ensure_reader();
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(mode)) => Some(mode),
-            // Timed out (or the sender was dropped): close the gate so a late
-            // line is discarded rather than resolving a stale wait.
-            _ => {
-                *self.confirm_gate.lock().unwrap() = None;
-                None
-            }
-        }
-    }
-}
-
-/// Parse a `{"kind":"confirm_mode","mode":"…"}` command line into its mode
-/// string. `None` for anything else (agent_message, non-JSON, missing fields).
-fn parse_confirm_mode(line: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    if v.get("kind")?.as_str()? != "confirm_mode" {
-        return None;
-    }
-    Some(v.get("mode")?.as_str()?.to_string())
+    let shutdown = orchestrator_client::spawn_orchestrator(orch_cfg, exec_tx, stdin_rx);
+    tokio::spawn(async move {
+        // Do not lose the authoritative shutdown handle when the UI event
+        // queue is temporarily full. If the host is already gone, dropping
+        // the sender still lets runtime teardown close the process-tree guard.
+        let _ = tx.send(AppEvent::OrchestratorShutdown(shutdown)).await;
+    });
+    stdin_tx
 }
 
 /// Ask-after-planning (headless): emit the `mode_proposal` event, then block
@@ -2465,7 +3593,10 @@ async fn resolve_confirm_mode(contract: String) -> String {
         println!("{}", line);
     }
     let proposed = view.mode.clone();
-    match StdinHub::global().await_confirm(Duration::from_secs(120)).await {
+    match StdinHub::global()
+        .await_confirm(Duration::from_secs(120))
+        .await
+    {
         // "accept" or the proposed mode itself: keep the intake contract verbatim.
         Some(m) if m == "accept" || m == proposed => {
             eprintln!("[baro] confirm-mode: proceeding with proposed mode '{proposed}'");
@@ -2490,18 +3621,6 @@ async fn resolve_confirm_mode(contract: String) -> String {
     }
 }
 
-/// Headless command lane: keep a stdin line only if it's a JSON object
-/// with a "type" field — anything else is dropped silently.
-fn stdin_command_line(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-    v.get("type")?;
-    Some(trimmed.to_string())
-}
-
 /// Delete the previous word from the goal input, terminal-style: drop any
 /// trailing whitespace, then the trailing run of non-whitespace characters.
 fn delete_prev_word(s: &mut String) {
@@ -2516,9 +3635,35 @@ fn delete_prev_word(s: &mut String) {
     }
 }
 
+fn message_command_line(id: &str, text: &str, message_id: Option<&str>) -> String {
+    if id == app::DIALOGUE_AGENT_ID {
+        serde_json::json!({
+            "type": "dialogue_message",
+            "message_id": message_id,
+            "text": text,
+        })
+        .to_string()
+    } else {
+        serde_json::json!({
+            "type": "agent_message",
+            "id": id,
+            "text": text,
+        })
+        .to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{delete_prev_word, parse_confirm_mode, stdin_command_line};
+    use clap::Parser;
+
+    use super::{
+        apply_primary_provider_choice, coordination_has_runtime_dialogue, delete_prev_word,
+        fixed_mode_contract, headless_failure_reason, message_command_line,
+        preferred_jigjoy_gateway_key, preferred_jigjoy_gateway_url,
+        reconcile_jigjoy_phase_overrides, resolve_parallel_limit, App, JIGJOY_CHEAP_STORY_MODEL,
+        JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL, JIGJOY_STRONG_MODEL,
+    };
 
     fn deleted(input: &str) -> String {
         let mut s = input.to_string();
@@ -2535,33 +3680,186 @@ mod tests {
     }
 
     #[test]
-    fn stdin_command_line_cases() {
-        let msg = r#"{"type":"agent_message","id":"S2","text":"hi"}"#;
-        assert_eq!(stdin_command_line(msg).as_deref(), Some(msg));
-        // Trimmed before forwarding.
-        assert_eq!(stdin_command_line(&format!("  {msg}  ")).as_deref(), Some(msg));
-        assert_eq!(stdin_command_line(""), None);
-        assert_eq!(stdin_command_line("   "), None);
-        assert_eq!(stdin_command_line("not json"), None);
-        assert_eq!(stdin_command_line(r#"{"id":"S2"}"#), None); // no "type"
-        assert_eq!(stdin_command_line(r#"["type"]"#), None); // not an object
+    fn message_command_distinguishes_collective_from_story_chat() {
+        assert_eq!(
+            message_command_line(crate::app::DIALOGUE_AGENT_ID, "status", Some("request-7"),),
+            r#"{"message_id":"request-7","text":"status","type":"dialogue_message"}"#,
+        );
+        assert_eq!(
+            message_command_line("S2", "run tests", None),
+            r#"{"id":"S2","text":"run tests","type":"agent_message"}"#,
+        );
     }
 
     #[test]
-    fn parse_confirm_mode_cases() {
+    fn only_collective_coordination_receives_runtime_dialogue_context() {
+        assert!(coordination_has_runtime_dialogue("collective"));
+        assert!(!coordination_has_runtime_dialogue("legacy"));
+        assert!(!coordination_has_runtime_dialogue(""));
+    }
+
+    #[test]
+    fn jigjoy_defaults_keep_planning_and_heavy_review_off_flash() {
+        assert_eq!(JIGJOY_STRONG_MODEL, "glm-5.2");
+        assert_eq!(JIGJOY_CHEAP_STORY_MODEL, "deepseek-v4-flash");
+        assert_eq!(JIGJOY_HEAVY_STORY_MODEL, "deepseek-v4-pro");
+        assert_eq!(JIGJOY_GATEWAY_URL, "https://gw.baro.jigjoy.ai/v1");
+        assert_ne!(JIGJOY_STRONG_MODEL, JIGJOY_CHEAP_STORY_MODEL);
+        assert_ne!(JIGJOY_HEAVY_STORY_MODEL, JIGJOY_CHEAP_STORY_MODEL);
+    }
+
+    #[test]
+    fn jigjoy_key_wins_over_an_unrelated_openai_key() {
         assert_eq!(
-            parse_confirm_mode(r#"{"kind":"confirm_mode","mode":"parallel"}"#).as_deref(),
-            Some("parallel"),
+            preferred_jigjoy_gateway_key(Some("jigjoy-token".into()), Some("openai-token".into()),)
+                .as_deref(),
+            Some("jigjoy-token"),
         );
-        // "accept" means "use the proposed mode" — passed through verbatim.
         assert_eq!(
-            parse_confirm_mode(r#"  {"kind":"confirm_mode","mode":"accept"}  "#).as_deref(),
-            Some("accept"),
+            preferred_jigjoy_gateway_key(None, Some("legacy-gateway-token".into())).as_deref(),
+            Some("legacy-gateway-token"),
         );
-        // An agent_message (the execution lane) is not a confirm_mode line.
-        assert_eq!(parse_confirm_mode(r#"{"type":"agent_message","id":"S2","text":"hi"}"#), None);
-        assert_eq!(parse_confirm_mode(r#"{"kind":"other","mode":"parallel"}"#), None);
-        assert_eq!(parse_confirm_mode(r#"{"kind":"confirm_mode"}"#), None); // no mode
-        assert_eq!(parse_confirm_mode("not json"), None);
+    }
+
+    #[test]
+    fn jigjoy_url_ignores_ambient_openai_routing() {
+        assert_eq!(
+            preferred_jigjoy_gateway_url(None, Some("https://tenant-gateway.example/v1".into()),),
+            "https://tenant-gateway.example/v1",
+        );
+        assert_eq!(
+            preferred_jigjoy_gateway_url(
+                Some("https://explicit.example/v1".into()),
+                Some("https://tenant-gateway.example/v1".into()),
+            ),
+            "https://explicit.example/v1",
+        );
+        assert_eq!(preferred_jigjoy_gateway_url(None, None), JIGJOY_GATEWAY_URL);
+    }
+
+    #[test]
+    fn jigjoy_phase_backend_overrides_drop_incompatible_preset_models() {
+        let mut app = App::new();
+        app.llm = crate::app::LlmProvider::OpenAI;
+        app.architect_llm = crate::app::LlmProvider::Claude;
+        app.planner_llm = crate::app::LlmProvider::Codex;
+        app.story_llm = crate::app::LlmProvider::Claude;
+        app.critic_llm = crate::app::LlmProvider::Claude;
+        app.surgeon_llm = crate::app::LlmProvider::Claude;
+        app.architect_model = Some(JIGJOY_STRONG_MODEL.into());
+        app.planner_model = Some(JIGJOY_STRONG_MODEL.into());
+        app.critic_model = Some(JIGJOY_HEAVY_STORY_MODEL.into());
+        app.surgeon_model = Some(JIGJOY_STRONG_MODEL.into());
+        app.tier_map = Some("default=openai:deepseek-v4-flash".into());
+
+        reconcile_jigjoy_phase_overrides(&mut app, false, false, false, false, false);
+
+        assert_eq!(app.model_for_phase("architect").as_deref(), Some("opus"));
+        assert_eq!(app.model_for_phase("planning"), None);
+        assert_eq!(app.critic_model, None);
+        assert_eq!(app.surgeon_model, None);
+        assert_eq!(app.tier_map, None);
+    }
+
+    #[test]
+    fn fixed_mode_contract_is_available_before_architect() {
+        assert!(fixed_mode_contract(false, "auto").is_none());
+
+        let parallel: serde_json::Value =
+            serde_json::from_str(&fixed_mode_contract(false, "parallel").unwrap()).unwrap();
+        assert_eq!(parallel["mode"], "parallel");
+        assert_eq!(parallel["source"], "user");
+        assert!(parallel.get("parallelism").is_none());
+        assert!(parallel.get("maxStories").is_none());
+
+        let sequential: serde_json::Value =
+            serde_json::from_str(&fixed_mode_contract(false, "sequential").unwrap()).unwrap();
+        assert_eq!(sequential["mode"], "sequential");
+        assert_eq!(sequential["parallelism"], 1);
+        assert_eq!(sequential["maxStories"], 5);
+
+        let focused: serde_json::Value =
+            serde_json::from_str(&fixed_mode_contract(false, "focused").unwrap()).unwrap();
+        assert_eq!(focused["mode"], "focused");
+        assert_eq!(focused["parallelism"], 1);
+        assert_eq!(focused["maxStories"], 1);
+
+        // Quick is the stronger operator override even if another mode value
+        // is present on the App.
+        let quick: serde_json::Value =
+            serde_json::from_str(&fixed_mode_contract(true, "parallel").unwrap()).unwrap();
+        assert_eq!(quick["mode"], "focused");
+        assert_eq!(quick["source"], "user");
+        assert_eq!(quick["maxStories"], 1);
+    }
+
+    #[test]
+    fn explicit_unlimited_parallel_overrides_repository_cap() {
+        let omitted = crate::cli::cli::Cli::try_parse_from(["baro"]).unwrap();
+        let unlimited = crate::cli::cli::Cli::try_parse_from(["baro", "--parallel", "0"]).unwrap();
+
+        assert_eq!(omitted.parallel, None);
+        assert_eq!(unlimited.parallel, Some(0));
+        assert_eq!(resolve_parallel_limit(Some(4), Some(0)), 0);
+        assert_eq!(resolve_parallel_limit(Some(4), None), 4);
+        assert_eq!(resolve_parallel_limit(None, Some(6)), 6);
+        assert_eq!(resolve_parallel_limit(None, None), 0);
+    }
+
+    #[test]
+    fn primary_codex_choice_keeps_semantic_review_enabled() {
+        let mut app = App::new();
+        apply_primary_provider_choice(&mut app, crate::app::LlmProvider::Codex, false);
+
+        assert!(app.with_critic);
+        assert_eq!(app.architect_llm, crate::app::LlmProvider::Codex);
+        assert_eq!(app.planner_llm, crate::app::LlmProvider::Codex);
+        assert_eq!(app.story_llm, crate::app::LlmProvider::Codex);
+        assert_eq!(app.critic_llm, crate::app::LlmProvider::Codex);
+        assert_eq!(app.surgeon_llm, crate::app::LlmProvider::Codex);
+    }
+
+    #[test]
+    fn picker_preserves_an_explicit_critic_backend() {
+        for critic_backend in [
+            crate::app::LlmProvider::Claude,
+            crate::app::LlmProvider::OpenAI,
+            crate::app::LlmProvider::Codex,
+            crate::app::LlmProvider::OpenCode,
+            crate::app::LlmProvider::Pi,
+        ] {
+            let mut app = App::new();
+            app.critic_llm = critic_backend;
+            apply_primary_provider_choice(&mut app, crate::app::LlmProvider::Codex, true);
+
+            assert!(app.with_critic);
+            assert_eq!(app.critic_llm, critic_backend);
+        }
+    }
+
+    #[test]
+    fn failed_done_is_a_headless_process_failure() {
+        let mut app = App::new();
+        app.handle_event(
+            serde_json::from_str(
+                r#"{"type":"done","total_time_secs":7,"success":false,
+                    "abort_reason":"verification failed: npm run test",
+                    "verification":{"verification_id":"verify-1","status":"failed",
+                    "duration_ms":12,"commands":[{"command":"npm run test",
+                    "status":"failed","duration_ms":12,"tail":"tests failed"}]},
+                    "stats":{"stories_completed":1,"stories_skipped":0,
+                    "total_commits":1,"files_created":1,"files_modified":0}}"#,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(
+            headless_failure_reason(&app).as_deref(),
+            Some("verification failed: npm run test"),
+        );
+        assert_eq!(app.verification_status.as_deref(), Some("failed"));
+        let evidence = app.verification.as_ref().unwrap();
+        assert_eq!(evidence.verification_id, "verify-1");
+        assert_eq!(evidence.commands[0].tail.as_deref(), Some("tests failed"));
     }
 }

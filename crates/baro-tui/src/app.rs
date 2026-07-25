@@ -3,9 +3,21 @@ use std::time::Instant;
 
 use ratatui::widgets::ListState;
 
-use crate::events::{BaroEvent, DoneStats};
+use crate::conversation::{ConversationPhase, ConversationSession};
+use crate::events::{BaroEvent, DoneStats, RunVerificationEvidence};
 
 use crate::constants::MAX_LOG_LINES;
+use crate::dag_state::rebuild_dag_levels;
+
+pub const DIALOGUE_AGENT_ID: &str = "_dialogue";
+
+fn new_conversation_session_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("session-{nanos}-{}", std::process::id())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Screen {
@@ -15,6 +27,8 @@ pub enum Screen {
     /// Shown only for the OpenAI backend when `OPENAI_API_KEY` isn't
     /// set. Held in memory only; never written to disk.
     ApiKeyInput,
+    /// Long-lived user-facing session before planning and after each run.
+    Conversation,
     /// Interactive confirm/override of the intake's proposed execution
     /// mode (`--mode auto` only); sits between Architect and Planner.
     ModePicker,
@@ -304,12 +318,17 @@ pub struct ModeProposal {
     pub contract_json: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewStory {
     pub id: String,
+    pub priority: i32,
     pub title: String,
     pub description: String,
     pub depends_on: Vec<String>,
+    pub retries: u32,
+    pub acceptance: Vec<String>,
+    pub tests: Vec<String>,
+    pub goal_invariant_ids: Vec<String>,
     pub completed: bool,
     pub model: Option<String>,
 }
@@ -336,6 +355,14 @@ pub struct App {
 
     // Welcome screen
     pub goal_input: String,
+    /// Durable logical conversation; provider calls remain isolated children.
+    pub conversation: ConversationSession,
+    /// Current conversation composer buffer.
+    pub conversation_input: String,
+    /// True while one correlated conversation subprocess is active.
+    pub conversation_busy: bool,
+    pub conversation_error: Option<String>,
+    pub conversation_request_counter: u64,
     pub welcome_field: WelcomeField,
 
     // Context building screen
@@ -389,6 +416,10 @@ pub struct App {
     pub done: bool,
     pub final_stats: Option<DoneStats>,
     pub total_time_secs: u64,
+    /// Objective run verification: passed, failed, or skipped/unverified.
+    pub verification_status: Option<String>,
+    /// Correlated commands and timings behind the objective verdict.
+    pub verification: Option<RunVerificationEvidence>,
     /// Set when the orchestrator terminated without a normal `Done`
     /// event; the completion screen surfaces the unclean finish.
     pub exit_reason: Option<String>,
@@ -410,11 +441,12 @@ pub struct App {
 
     // Refinement
     pub refine_input: Option<String>,
-    /// When `Some`, the post-run follow-up prompt is open and this is the buffer.
-    pub followup_input: Option<String>,
     /// Set when the current run is a follow-up (continue on the existing branch/PR);
     /// the Review→Execute path then stays on the current branch instead of creating one.
     pub is_followup: bool,
+    /// Exact previously established branch that authorizes a follow-up. A
+    /// terminal conversation phase alone is never sufficient branch authority.
+    pub continuation_branch: Option<String>,
     pub refining: bool,
 
     // Config
@@ -468,7 +500,7 @@ pub struct App {
     /// override is set.
     pub llm: LlmProvider,
     /// Per-phase overrides; each defaults to `llm`. `--llm hybrid`
-    /// flips Story + Critic to Codex.
+    /// flips Story to Codex while keeping Critic on tool-less Claude.
     pub architect_llm: LlmProvider,
     pub planner_llm: LlmProvider,
     pub story_llm: LlmProvider,
@@ -486,6 +518,8 @@ pub struct App {
     pub token_usage: HashMap<String, (u64, u64)>,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+    /// Latest non-authoritative live snapshot per running agent.
+    pub live_token_usage: HashMap<String, (u64, u64)>,
 
     // UI state
     pub main_view: MainView,
@@ -512,8 +546,10 @@ pub struct App {
     pub diff_scroll_pending: bool,
     pub decisions_scroll: u16,
     /// Mid-run chat input: (target story id, buffer). Rendered in the
-    /// bottom strip; Enter sends an `agent_message` command line.
+    /// bottom strip; Enter sends an agent or collective dialogue command.
     pub agent_msg_input: Option<(String, String)>,
+    /// The opt-in communication-only collective participant is available.
+    pub dialogue_enabled: bool,
     /// Live orchestrator stdin (JSON command lines); refreshed per spawn.
     pub orchestrator_stdin: Option<tokio::sync::mpsc::Sender<String>>,
 }
@@ -544,6 +580,12 @@ impl App {
             effort: "high".to_string(),
 
             goal_input: String::new(),
+            conversation: ConversationSession::new(new_conversation_session_id())
+                .expect("generated conversation session id is valid"),
+            conversation_input: String::new(),
+            conversation_busy: false,
+            conversation_error: None,
+            conversation_request_counter: 0,
             welcome_field: WelcomeField::Goal,
 
             claude_md_content: None,
@@ -575,6 +617,8 @@ impl App {
             done: false,
             final_stats: None,
             total_time_secs: 0,
+            verification_status: None,
+            verification: None,
             exit_reason: None,
             push_results: Vec::new(),
             review_in_progress: false,
@@ -584,8 +628,8 @@ impl App {
             pr_url: None,
             is_resume: false,
             refine_input: None,
-            followup_input: None,
             is_followup: false,
+            continuation_branch: None,
             refining: false,
             parallel_limit: 0,
             timeout_secs: 0, // 0 = auto (orchestrator effort-scales the per-story timeout)
@@ -622,6 +666,7 @@ impl App {
             token_usage: HashMap::new(),
             total_input_tokens: 0,
             total_output_tokens: 0,
+            live_token_usage: HashMap::new(),
             runner: None,
             changed_files: Vec::new(),
             story_diffs: HashMap::new(),
@@ -643,6 +688,8 @@ impl App {
             diff_scroll_pending: false,
             decisions_scroll: 0,
             agent_msg_input: None,
+            dialogue_enabled: std::env::var("BARO_WITH_DIALOGUE").is_ok_and(|value| value == "1")
+                || std::env::var("BARO_COORDINATION").is_ok_and(|value| value == "collective"),
             orchestrator_stdin: None,
         }
     }
@@ -651,6 +698,37 @@ impl App {
     pub fn start_context(&mut self) {
         self.screen = Screen::Context;
         self.tick_count = 0;
+    }
+
+    pub fn start_conversation(&mut self) {
+        self.screen = Screen::Conversation;
+        self.conversation_busy = false;
+        self.conversation_error = None;
+        self.tick_count = 0;
+    }
+
+    pub fn next_conversation_request_id(&mut self) -> String {
+        self.conversation_request_counter = self.conversation_request_counter.saturating_add(1);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        format!(
+            "request-{nanos}-{}-{}",
+            std::process::id(),
+            self.conversation_request_counter
+        )
+    }
+
+    pub fn conversation_accepts_input(&self) -> bool {
+        !self.conversation_busy
+            && matches!(
+                self.conversation.phase(),
+                ConversationPhase::Clarifying
+                    | ConversationPhase::NeedsInput
+                    | ConversationPhase::Completed
+                    | ConversationPhase::Failed
+            )
     }
 
     pub fn start_planning(&mut self) {
@@ -677,6 +755,8 @@ impl App {
         self.percentage = 0;
         self.final_stats = None;
         self.done = false;
+        self.verification_status = None;
+        self.verification = None;
         self.exit_reason = None;
         self.finalize_in_progress = false;
         self.pr_url = None;
@@ -684,6 +764,7 @@ impl App {
         self.token_usage.clear();
         self.total_input_tokens = 0;
         self.total_output_tokens = 0;
+        self.live_token_usage.clear();
         self.changed_files.clear();
         self.story_diffs.clear();
         self.total_cost_usd = 0.0;
@@ -737,7 +818,10 @@ impl App {
     }
 
     pub fn explorer_narrower(&mut self) {
-        self.explorer_width = self.explorer_width.saturating_sub(2).max(EXPLORER_MIN_WIDTH);
+        self.explorer_width = self
+            .explorer_width
+            .saturating_sub(2)
+            .max(EXPLORER_MIN_WIDTH);
     }
 
     /// Selectable story ids in the exact item order of the explorer Agents
@@ -813,18 +897,47 @@ impl App {
             None
         }
         .or_else(|| self.activity_filter.clone())
-        .or_else(|| self.active_story_ids().get(self.selected_log_index).cloned());
-        candidate.filter(|id| self.active_stories.contains_key(id))
+        .or_else(|| {
+            self.active_story_ids()
+                .get(self.selected_log_index)
+                .cloned()
+        });
+        candidate.filter(|id| id != DIALOGUE_AGENT_ID && self.active_stories.contains_key(id))
+    }
+
+    /// Open the global collective conversation without making it part of the
+    /// control plane. The synthetic activity lane is UI-only.
+    pub fn open_dialogue(&mut self) {
+        if !self.dialogue_enabled {
+            return;
+        }
+        self.active_stories
+            .entry(DIALOGUE_AGENT_ID.to_string())
+            .or_insert_with(|| ActiveStory {
+                title: "Collective".to_string(),
+                logs: Vec::new(),
+                activity: Vec::new(),
+                start_time: Instant::now(),
+            });
+        self.activity_filter = Some(DIALOGUE_AGENT_ID.to_string());
+        self.main_view = MainView::Activity;
+        self.focus = WorkbenchFocus::Main;
+        self.agent_msg_input = Some((DIALOGUE_AGENT_ID.to_string(), String::new()));
     }
 
     /// Local echo of a user→agent message so it shows in the feed
     /// immediately, before (and regardless of) orchestrator round-trip.
     pub fn echo_user_message(&mut self, id: &str, text: &str) {
+        let target = if id == DIALOGUE_AGENT_ID {
+            "collective"
+        } else {
+            id
+        };
         self.push_story_activity(
             id,
             ActivityEntry {
                 kind: "user".to_string(),
-                text: format!("you → {}: {}", id, text),
+                text: format!("you → {}: {}", target, text),
                 tool: None,
                 op: None,
                 ok: None,
@@ -879,9 +992,11 @@ impl App {
     /// Story whose feed the activity view is showing: the explorer-pinned
     /// filter wins, otherwise the tab-selected active story.
     pub fn activity_story_id(&self) -> Option<String> {
-        self.activity_filter
-            .clone()
-            .or_else(|| self.active_story_ids().get(self.selected_log_index).cloned())
+        self.activity_filter.clone().or_else(|| {
+            self.active_story_ids()
+                .get(self.selected_log_index)
+                .cloned()
+        })
     }
 
     /// Scroll the shown story's log panel up by `lines`. Pins position (stops auto-scroll).
@@ -1054,8 +1169,11 @@ impl App {
             let visible_end = self.review_scroll_offset.saturating_add(20); // estimate ~20 visible lines
             let selected_bottom = (self.review_scroll as u16 + 1) * lines_per_story;
             if selected_bottom > visible_end {
-                let max_offset = (self.review_stories.len() as u16).saturating_mul(lines_per_story).saturating_sub(20);
-                self.review_scroll_offset = (self.review_scroll_offset + lines_per_story).min(max_offset);
+                let max_offset = (self.review_stories.len() as u16)
+                    .saturating_mul(lines_per_story)
+                    .saturating_sub(20);
+                self.review_scroll_offset =
+                    (self.review_scroll_offset + lines_per_story).min(max_offset);
             }
         }
     }
@@ -1093,7 +1211,12 @@ impl App {
 
     pub fn handle_event(&mut self, event: BaroEvent) {
         match event {
-            BaroEvent::Init { project, stories, runner, mode } => {
+            BaroEvent::Init {
+                project,
+                stories,
+                runner,
+                mode,
+            } => {
                 self.project = project;
                 self.runner = runner;
                 self.run_mode = mode;
@@ -1148,6 +1271,18 @@ impl App {
                 );
             }
 
+            BaroEvent::StorySuspended { id, block_id: _ } => {
+                if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
+                    story.status = StoryStatus::Pending;
+                    story.error = None;
+                }
+                self.active_stories.remove(&id);
+                let count = self.active_stories.len();
+                if count > 0 && self.selected_log_index >= count {
+                    self.selected_log_index = count - 1;
+                }
+            }
+
             BaroEvent::StoryLog { id, line } => {
                 if let Some(active) = self.active_stories.get_mut(&id) {
                     active.logs.push(line);
@@ -1159,9 +1294,24 @@ impl App {
                 self.log_scroll_offsets.entry(id).or_insert(usize::MAX);
             }
 
-            BaroEvent::Activity { id, kind, text, tool, path: _, op, ok } => {
+            BaroEvent::Activity {
+                id,
+                kind,
+                text,
+                tool,
+                path: _,
+                op,
+                ok,
+            } => {
                 if let Some(active) = self.active_stories.get_mut(&id) {
-                    active.activity.push(ActivityEntry { kind, text, tool, op, ok, system: false });
+                    active.activity.push(ActivityEntry {
+                        kind,
+                        text,
+                        tool,
+                        op,
+                        ok,
+                        system: false,
+                    });
                     if active.activity.len() > MAX_LOG_LINES {
                         active.activity.remove(0);
                     }
@@ -1184,12 +1334,8 @@ impl App {
                     // Resume: the story finished in a prior run and isn't in
                     // app.stories — push a synthetic entry so duration_secs
                     // feeds the completion screen's sequential-time sum.
-                    let mut s = StoryState::new(
-                        id.clone(),
-                        id.clone(),
-                        Vec::new(),
-                        StoryStatus::Complete,
-                    );
+                    let mut s =
+                        StoryState::new(id.clone(), id.clone(), Vec::new(), StoryStatus::Complete);
                     s.duration_secs = Some(duration_secs);
                     s.files_created = files_created;
                     s.files_modified = files_modified;
@@ -1239,7 +1385,9 @@ impl App {
             BaroEvent::PushStatus { id, success, error } => {
                 if let Some(active) = self.active_stories.get_mut(&id) {
                     if success {
-                        active.logs.push(format!("[push] Successfully pushed {}", id));
+                        active
+                            .logs
+                            .push(format!("[push] Successfully pushed {}", id));
                     } else {
                         active.logs.push(format!(
                             "[push] Failed to push {}: {}",
@@ -1261,7 +1409,11 @@ impl App {
                 self.review_logs.push(line);
             }
 
-            BaroEvent::ReviewComplete { level, passed, fix_count } => {
+            BaroEvent::ReviewComplete {
+                level,
+                passed,
+                fix_count,
+            } => {
                 self.review_in_progress = false;
                 self.review_logs.push(format!(
                     "Level {} review: {} ({})",
@@ -1281,7 +1433,6 @@ impl App {
                         activity: Vec::new(),
                         start_time: Instant::now(),
                     },
-
                 );
             }
 
@@ -1295,16 +1446,41 @@ impl App {
                 stats,
                 success,
                 abort_reason,
+                verification_status,
+                verification,
             } => {
                 self.done = true;
                 self.total_time_secs = total_time_secs;
                 self.final_stats = Some(stats);
+                let embedded_status = verification
+                    .as_ref()
+                    .map(|evidence| evidence.status.clone());
+                let status_mismatch = embedded_status.is_some()
+                    && verification_status.is_some()
+                    && embedded_status != verification_status;
+                let candidate_status = embedded_status.or(verification_status);
+                self.verification_status = match candidate_status.as_deref() {
+                    Some("passed" | "failed" | "skipped") => candidate_status,
+                    Some(other) => {
+                        self.exit_reason =
+                            Some(format!("Invalid objective verification status: {}", other,));
+                        Some("failed".to_string())
+                    }
+                    None => None,
+                };
+                self.verification = verification;
+                if status_mismatch {
+                    self.verification_status = Some("failed".to_string());
+                    self.exit_reason =
+                        Some("Inconsistent objective verification evidence received.".to_string());
+                }
                 if !success {
                     // Show the explicit failure reason instead of the
                     // green completion banner.
-                    self.exit_reason = Some(abort_reason.unwrap_or_else(|| {
-                        "Run did not complete the goal.".to_string()
-                    }));
+                    self.exit_reason = Some(
+                        abort_reason
+                            .unwrap_or_else(|| "Run did not complete the goal.".to_string()),
+                    );
                 }
             }
 
@@ -1312,7 +1488,12 @@ impl App {
                 self.notification_ready = true;
             }
 
-            BaroEvent::TokenUsage { id, input_tokens, output_tokens, cost_usd } => {
+            BaroEvent::TokenUsage {
+                id,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            } => {
                 let entry = self.token_usage.entry(id).or_insert((0, 0));
                 entry.0 += input_tokens;
                 entry.1 += output_tokens;
@@ -1323,12 +1504,28 @@ impl App {
                 }
             }
 
+            BaroEvent::ModelUsage { measurement: _ } => {
+                // Parsed deliberately so structured telemetry never becomes a
+                // noisy [parse-skip] line. TokenUsage remains the compatibility
+                // projection used for the current totals UI.
+            }
+
+            BaroEvent::TokenProgress {
+                id,
+                input_tokens,
+                output_tokens,
+            } => {
+                // Live snapshots are not deltas and therefore must not be
+                // added to the authoritative final totals.
+                self.live_token_usage
+                    .insert(id, (input_tokens, output_tokens));
+            }
+
             BaroEvent::StoryDiff { id, files, diff } => {
                 // Merge file stats into the run-wide changed-files list (dedup
                 // by path, accumulating counts), and keep the per-story diff.
                 for f in files {
-                    if let Some(existing) =
-                        self.changed_files.iter_mut().find(|e| e.path == f.path)
+                    if let Some(existing) = self.changed_files.iter_mut().find(|e| e.path == f.path)
                     {
                         existing.added += f.added;
                         existing.removed += f.removed;
@@ -1341,18 +1538,24 @@ impl App {
                 }
             }
 
-            BaroEvent::Replan { source, reason, added, removed, rewired } => {
+            BaroEvent::Replan {
+                source,
+                reason,
+                added,
+                removed,
+                rewired,
+            } => {
                 for a in added {
                     if let Some(existing) = self.stories.iter_mut().find(|s| s.id == a.id) {
+                        existing.title = a.title;
                         existing.replan = Some(ReplanMark::Added);
                         existing.depends_on = a.depends_on;
+                        if existing.status == StoryStatus::Skipped {
+                            existing.status = StoryStatus::Pending;
+                        }
                     } else {
-                        let mut s = StoryState::new(
-                            a.id,
-                            a.title,
-                            a.depends_on,
-                            StoryStatus::Pending,
-                        );
+                        let mut s =
+                            StoryState::new(a.id, a.title, a.depends_on, StoryStatus::Pending);
                         s.replan = Some(ReplanMark::Added);
                         self.stories.push(s);
                     }
@@ -1360,9 +1563,7 @@ impl App {
                 for id in removed {
                     if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
                         story.replan = Some(ReplanMark::Removed(reason.clone()));
-                        if story.status == StoryStatus::Pending
-                            || story.status == StoryStatus::Running
-                        {
+                        if story.status != StoryStatus::Complete {
                             story.status = StoryStatus::Skipped;
                         }
                     }
@@ -1373,14 +1574,30 @@ impl App {
                         story.depends_on = r.depends_on;
                     }
                 }
-                self.total = self.stories.len() as u32;
+                // Removed stories remain visible as struck/skipped history but
+                // are no longer part of the live work denominator. Progress
+                // events and this projection therefore agree regardless of
+                // which observer's stdout event arrives first.
+                self.total = self
+                    .stories
+                    .iter()
+                    .filter(|story| story.status != StoryStatus::Skipped)
+                    .count() as u32;
+                if let Some(levels) = rebuild_dag_levels(&self.stories) {
+                    self.dag_levels = levels;
+                }
                 self.push_run_activity(ActivityEntry::system(
                     "replan",
                     format!("replan ({}): {}", source, reason),
                 ));
             }
 
-            BaroEvent::Intervention { id, source, action, reason } => {
+            BaroEvent::Intervention {
+                id,
+                source,
+                action,
+                reason,
+            } => {
                 if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
                     story.intervened = Some(action.clone());
                 }
@@ -1413,13 +1630,25 @@ impl App {
                 ));
             }
 
-            BaroEvent::LevelStarted { ordinal, story_ids: _ } => {
+            BaroEvent::LevelStarted {
+                ordinal,
+                story_ids: _,
+            } => {
                 self.level_states.insert(ordinal, LevelRunState::Running);
             }
 
-            BaroEvent::LevelCompleted { ordinal, passed: _, failed } => {
-                self.level_states
-                    .insert(ordinal, LevelRunState::Done { failed: !failed.is_empty() });
+            BaroEvent::LevelCompleted {
+                ordinal,
+                passed: _,
+                failed,
+                blocked: _,
+            } => {
+                self.level_states.insert(
+                    ordinal,
+                    LevelRunState::Done {
+                        failed: !failed.is_empty(),
+                    },
+                );
             }
 
             BaroEvent::RecoveryStarted { attempt, story_ids } => {
@@ -1436,7 +1665,12 @@ impl App {
                 }
             }
 
-            BaroEvent::Critique { id, verdict, reasoning, violated } => {
+            BaroEvent::Critique {
+                id,
+                verdict,
+                reasoning,
+                violated,
+            } => {
                 let pass = verdict == "pass";
                 if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
                     story.critic_pass = Some(pass);
@@ -1446,11 +1680,49 @@ impl App {
                 } else if violated.is_empty() {
                     format!("critic: fail — {}", reasoning)
                 } else {
-                    format!("critic: fail — {} (violated: {})", reasoning, violated.join(", "))
+                    format!(
+                        "critic: fail — {} (violated: {})",
+                        reasoning,
+                        violated.join(", ")
+                    )
                 };
                 let mut entry = ActivityEntry::system("verdict", text);
                 entry.ok = Some(pass);
                 self.push_story_activity(&id, entry);
+            }
+
+            BaroEvent::ConversationRequest { message_id, text } => {
+                if let Err(error) = self.conversation.observe_runtime_request(message_id, text) {
+                    self.conversation_error =
+                        Some(format!("runtime conversation request rejected: {error}"));
+                }
+            }
+
+            BaroEvent::ConversationResponse { message_id, text } => {
+                match self.conversation.apply_runtime_answer(message_id, text) {
+                    Ok(_) => self.conversation_error = None,
+                    Err(error) => {
+                        self.conversation_error =
+                            Some(format!("runtime conversation response rejected: {error}"));
+                    }
+                }
+            }
+
+            BaroEvent::ConversationFailed { message_id, error } => {
+                match self
+                    .conversation
+                    .apply_runtime_failure(message_id, error.clone())
+                {
+                    Ok(_) => {
+                        self.conversation_error =
+                            Some(format!("Collective conversation was unavailable: {error}"));
+                    }
+                    Err(lifecycle_error) => {
+                        self.conversation_error = Some(format!(
+                            "runtime conversation failure was not correlated: {lifecycle_error}"
+                        ));
+                    }
+                }
             }
 
             BaroEvent::OrchestratorExited { code, reason } => {
@@ -1463,10 +1735,9 @@ impl App {
                         self.total_time_secs = self.elapsed_secs();
                     }
                     let msg = match (code, reason) {
-                        (Some(0), _) => {
-                            "Orchestrator exited without a final summary. \
-                             Some stories may not have completed.".to_string()
-                        }
+                        (Some(0), _) => "Orchestrator exited without a final summary. \
+                             Some stories may not have completed."
+                            .to_string(),
                         (Some(c), Some(r)) => {
                             format!("Orchestrator exited (code {}): {}", c, r)
                         }
@@ -1476,9 +1747,7 @@ impl App {
                         (None, Some(r)) => {
                             format!("Orchestrator terminated: {}", r)
                         }
-                        (None, None) => {
-                            "Orchestrator terminated unexpectedly.".to_string()
-                        }
+                        (None, None) => "Orchestrator terminated unexpectedly.".to_string(),
                     };
                     self.exit_reason = Some(msg);
                 }
@@ -1514,11 +1783,18 @@ impl App {
         if let Some(m) = per_phase {
             return Some(m.clone());
         }
+        let provider = match phase {
+            "architect" => self.architect_llm,
+            "planning" => self.planner_llm,
+            "execution" | "story" => self.story_llm,
+            "review" => self.critic_llm,
+            _ => self.llm,
+        };
         // Routed defaults must match the provider — returning a Claude
         // name on the OpenAI path once made the TS planner throw
         // "unknown model 'opus'" before any inference.
         if self.model_routing {
-            return match (self.llm, phase) {
+            return match (provider, phase) {
                 (LlmProvider::Claude, "architect" | "planning" | "execution" | "story") => {
                     Some("opus".to_string())
                 }
@@ -1555,8 +1831,24 @@ mod tests {
             r#"{"type":"init","project":"p","mode":"focused",
                 "stories":[{"id":"S1","title":"One"},{"id":"S2","title":"Two","depends_on":["S1"]}]}"#,
         );
-        feed(&mut app, r#"{"type":"story_start","id":"S1","title":"One"}"#);
+        feed(
+            &mut app,
+            r#"{"type":"story_start","id":"S1","title":"One"}"#,
+        );
         app
+    }
+
+    #[test]
+    fn routed_model_defaults_follow_each_phase_backend() {
+        let mut app = App::new();
+        app.llm = LlmProvider::OpenAI;
+        app.architect_llm = LlmProvider::Claude;
+        app.planner_llm = LlmProvider::OpenAI;
+        app.story_llm = LlmProvider::Codex;
+
+        assert_eq!(app.model_for_phase("architect").as_deref(), Some("opus"));
+        assert_eq!(app.model_for_phase("planning").as_deref(), Some("gpt-5.5"));
+        assert_eq!(app.model_for_phase("story"), None);
     }
 
     #[test]
@@ -1564,10 +1856,16 @@ mod tests {
         let mut app = app_with_run();
         assert_eq!(app.run_mode.as_deref(), Some("focused"));
 
-        feed(&mut app, r#"{"type":"routed","id":"S1","backend":"codex","model":"gpt-5.3"}"#);
+        feed(
+            &mut app,
+            r#"{"type":"routed","id":"S1","backend":"codex","model":"gpt-5.3"}"#,
+        );
         assert_eq!(app.story("S1").route.as_deref(), Some("codex:gpt-5.3"));
 
-        feed(&mut app, r#"{"type":"critique","id":"S1","verdict":"fail","reasoning":"no tests","violated":["AC1"]}"#);
+        feed(
+            &mut app,
+            r#"{"type":"critique","id":"S1","verdict":"fail","reasoning":"no tests","violated":["AC1"]}"#,
+        );
         assert_eq!(app.story("S1").critic_pass, Some(false));
         // Story-scoped system entry lands in the active story's feed.
         let feed_s1 = &app.active_stories.get("S1").unwrap().activity;
@@ -1577,18 +1875,48 @@ mod tests {
         feed(&mut app, r#"{"type":"story_retry","id":"S1","attempt":2}"#);
         assert_eq!(app.story("S1").retry_count, 2);
 
-        feed(&mut app, r#"{"type":"intervention","id":"S1","source":"sentry","action":"aborted","reason":"stall"}"#);
+        feed(
+            &mut app,
+            r#"{"type":"intervention","id":"S1","source":"sentry","action":"aborted","reason":"stall"}"#,
+        );
         assert_eq!(app.story("S1").intervened.as_deref(), Some("aborted"));
 
-        feed(&mut app, r#"{"type":"story_merged","id":"S1","mode":"worktree"}"#);
+        feed(
+            &mut app,
+            r#"{"type":"story_merged","id":"S1","mode":"worktree"}"#,
+        );
         assert_eq!(app.story("S1").merge, Some(true));
-        feed(&mut app, r#"{"type":"merge_failed","id":"S2","error":"conflict"}"#);
+        feed(
+            &mut app,
+            r#"{"type":"merge_failed","id":"S2","error":"conflict"}"#,
+        );
         assert_eq!(app.story("S2").merge, Some(false));
+    }
+
+    #[test]
+    fn dependency_suspension_returns_a_running_story_to_pending() {
+        let mut app = app_with_run();
+        assert_eq!(app.story("S1").status, StoryStatus::Running);
+        assert!(app.active_stories.contains_key("S1"));
+
+        feed(
+            &mut app,
+            r#"{"type":"story_suspended","id":"S1","block_id":"block-S1-S0"}"#,
+        );
+
+        assert_eq!(app.story("S1").status, StoryStatus::Pending);
+        assert_eq!(app.story("S1").error, None);
+        assert!(!app.active_stories.contains_key("S1"));
     }
 
     #[test]
     fn replan_adds_removes_and_rewires() {
         let mut app = app_with_run();
+        feed(
+            &mut app,
+            r#"{"type":"story_error","id":"S2","error":"first attempt failed","attempt":1,"max_retries":1}"#,
+        );
+        assert_eq!(app.story("S2").status, StoryStatus::Failed);
         feed(
             &mut app,
             r#"{"type":"replan","source":"sentry","reason":"scope shift",
@@ -1602,16 +1930,32 @@ mod tests {
             Some(ReplanMark::Removed("scope shift".into()))
         );
         assert_eq!(app.story("S2").status, StoryStatus::Skipped);
-        assert_eq!(app.total, 3);
+        assert_eq!(app.total, 2);
+        assert_eq!(app.dag_levels, vec![vec!["S1"], vec!["S3"]]);
         // Run-level system entry is fanned out to active feeds.
         let feed_s1 = &app.active_stories.get("S1").unwrap().activity;
         assert!(feed_s1.last().unwrap().text.contains("scope shift"));
+
+        feed(
+            &mut app,
+            r#"{"type":"replan","source":"board","reason":"safe replacement",
+                "added":[{"id":"S2","title":"Two replacement","depends_on":["S3"]}],
+                "removed":[],"rewired":[]}"#,
+        );
+        assert_eq!(app.story("S2").status, StoryStatus::Pending);
+        assert_eq!(app.total, 3);
+        assert_eq!(app.story("S2").title, "Two replacement");
+        assert_eq!(app.story("S2").depends_on, vec!["S3"]);
+        assert_eq!(app.dag_levels, vec![vec!["S1"], vec!["S3"], vec!["S2"]]);
     }
 
     #[test]
     fn explorer_agent_navigation_skips_header_rows() {
         let mut app = app_with_run();
-        feed(&mut app, r#"{"type":"dag","levels":[[{"id":"S1"}],[{"id":"S2"}]]}"#);
+        feed(
+            &mut app,
+            r#"{"type":"dag","levels":[[{"id":"S1"}],[{"id":"S2"}]]}"#,
+        );
         // header, S1, connector, header, S2
         assert_eq!(
             app.agent_item_rows(),
@@ -1638,7 +1982,10 @@ mod tests {
     #[test]
     fn message_target_prefers_explorer_selection_then_pin_then_tab() {
         let mut app = app_with_run();
-        feed(&mut app, r#"{"type":"dag","levels":[[{"id":"S1"}],[{"id":"S2"}]]}"#);
+        feed(
+            &mut app,
+            r#"{"type":"dag","levels":[[{"id":"S1"}],[{"id":"S2"}]]}"#,
+        );
 
         // Default: tab-selected active story.
         assert_eq!(app.message_target().as_deref(), Some("S1"));
@@ -1646,7 +1993,10 @@ mod tests {
         // Pinned agent wins, but only while it's running.
         app.activity_filter = Some("S2".to_string());
         assert_eq!(app.message_target(), None); // S2 not active
-        feed(&mut app, r#"{"type":"story_start","id":"S2","title":"Two"}"#);
+        feed(
+            &mut app,
+            r#"{"type":"story_start","id":"S2","title":"Two"}"#,
+        );
         assert_eq!(app.message_target().as_deref(), Some("S2"));
 
         // Agents-focus selection wins over the pin.
@@ -1659,12 +2009,52 @@ mod tests {
     fn echo_user_message_lands_in_the_agent_feed() {
         let mut app = app_with_run();
         app.echo_user_message("S1", "check the edge cases");
-        let entry = app.active_stories.get("S1").unwrap().activity.last().unwrap();
+        let entry = app
+            .active_stories
+            .get("S1")
+            .unwrap()
+            .activity
+            .last()
+            .unwrap();
         assert_eq!(entry.kind, "user");
         assert!(!entry.system);
         assert_eq!(entry.text, "you → S1: check the edge cases");
         // Echo to a non-active story is a no-op, not a panic.
         app.echo_user_message("S9", "hello");
+    }
+
+    #[test]
+    fn collective_dialogue_is_a_separate_non_story_message_lane() {
+        let mut app = app_with_run();
+        app.dialogue_enabled = true;
+        app.open_dialogue();
+
+        assert_eq!(
+            app.agent_msg_input.as_ref().map(|(id, _)| id.as_str()),
+            Some(DIALOGUE_AGENT_ID),
+        );
+        assert_eq!(app.activity_filter.as_deref(), Some(DIALOGUE_AGENT_ID));
+        assert_eq!(app.message_target(), None);
+
+        app.echo_user_message(DIALOGUE_AGENT_ID, "what is blocked?");
+        let entry = app
+            .active_stories
+            .get(DIALOGUE_AGENT_ID)
+            .unwrap()
+            .activity
+            .last()
+            .unwrap();
+        assert_eq!(entry.text, "you → collective: what is blocked?");
+    }
+
+    #[test]
+    fn conversation_request_ids_include_a_cross_process_time_nonce() {
+        let mut app = App::new();
+        let first = app.next_conversation_request_id();
+        let second = app.next_conversation_request_id();
+        assert_ne!(first, second);
+        assert!(first.starts_with("request-"));
+        assert!(first.split('-').count() >= 4);
     }
 
     #[test]
@@ -1693,11 +2083,59 @@ mod tests {
     #[test]
     fn level_and_recovery_state() {
         let mut app = app_with_run();
-        feed(&mut app, r#"{"type":"level_started","ordinal":0,"story_ids":["S1"]}"#);
+        feed(
+            &mut app,
+            r#"{"type":"level_started","ordinal":0,"story_ids":["S1"]}"#,
+        );
         assert_eq!(app.level_states.get(&0), Some(&LevelRunState::Running));
-        feed(&mut app, r#"{"type":"level_completed","ordinal":0,"passed":[],"failed":["S1"]}"#);
-        assert_eq!(app.level_states.get(&0), Some(&LevelRunState::Done { failed: true }));
-        feed(&mut app, r#"{"type":"recovery_started","attempt":1,"story_ids":["S1"]}"#);
+        feed(
+            &mut app,
+            r#"{"type":"level_completed","ordinal":0,"passed":[],"failed":["S1"]}"#,
+        );
+        assert_eq!(
+            app.level_states.get(&0),
+            Some(&LevelRunState::Done { failed: true })
+        );
+        feed(
+            &mut app,
+            r#"{"type":"recovery_started","attempt":1,"story_ids":["S1"]}"#,
+        );
         assert_eq!(app.recoveries, vec![(1, vec!["S1".to_string()])]);
+    }
+
+    #[test]
+    fn embedded_verification_is_canonical_and_mismatch_fails_closed() {
+        let mut app = app_with_run();
+        feed(
+            &mut app,
+            r#"{"type":"done","total_time_secs":1,"success":true,
+                "verification_status":"passed",
+                "verification":{"verification_id":"v1","status":"failed",
+                "duration_ms":1,"commands":[]},
+                "stats":{"stories_completed":1,"stories_skipped":0,
+                "total_commits":0,"files_created":0,"files_modified":0}}"#,
+        );
+
+        assert_eq!(app.verification_status.as_deref(), Some("failed"));
+        assert!(app
+            .exit_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Inconsistent objective verification"));
+    }
+
+    #[test]
+    fn unknown_verification_status_never_renders_as_green() {
+        let mut app = app_with_run();
+        feed(
+            &mut app,
+            r#"{"type":"done","total_time_secs":1,"success":true,
+                "verification_status":"mystery",
+                "stats":{"stories_completed":1,"stories_skipped":0,
+                "total_commits":0,"files_created":0,"files_modified":0}}"#,
+        );
+
+        assert_eq!(app.verification_status.as_deref(), Some("failed"));
+        assert!(app.exit_reason.is_some());
     }
 }

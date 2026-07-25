@@ -11,6 +11,8 @@
 import { stdin } from "process"
 import { createInterface } from "readline"
 
+import type { ModelInvocationMeasuredData } from "./telemetry/model-telemetry.js"
+
 export interface StoryInfo {
     id: string
     title: string
@@ -35,6 +37,18 @@ export interface DiffFileInfo {
     removed: number
 }
 
+export interface VerificationEvidenceInfo {
+    verification_id: string
+    status: "passed" | "failed" | "skipped"
+    duration_ms: number
+    commands: Array<{
+        command: string
+        status: "passed" | "failed" | "skipped"
+        duration_ms: number
+        tail?: string
+    }>
+}
+
 export type BaroEvent =
     | { type: "init"; project: string; stories: StoryInfo[]; runner?: string; mode?: string; mode_reason?: string }
     // The Architect's design/decision spec (markdown), emitted once after
@@ -42,6 +56,7 @@ export type BaroEvent =
     | { type: "decision_document"; document: string }
     | { type: "dag"; levels: DagNodeInfo[][] }
     | { type: "story_start"; id: string; title: string }
+    | { type: "story_suspended"; id: string; block_id: string }
     | { type: "story_log"; id: string; line: string }
     | {
           type: "story_complete"
@@ -68,6 +83,8 @@ export type BaroEvent =
           stats: DoneStats
           success?: boolean
           abort_reason?: string
+          verification_status?: "passed" | "failed" | "skipped"
+          verification?: VerificationEvidenceInfo
       }
     | { type: "notification_ready" }
     // Per-story changes merged into the run branch, for the Changes view.
@@ -85,6 +102,10 @@ export type BaroEvent =
           // Absent for subscription paths (codex/openai) that have no
           // per-call dollar cost. Summed downstream.
           cost_usd?: number
+      }
+    | {
+          type: "model_usage"
+          measurement: ModelInvocationMeasuredData
       }
     // Live cumulative-per-agent token estimate streamed WHILE a story runs;
     // token_usage remains the authoritative total on finish. Consumers must
@@ -122,7 +143,13 @@ export type BaroEvent =
     | { type: "story_merged"; id: string; mode: "worktree" | "shared-tree" }
     | { type: "merge_failed"; id: string; error: string }
     | { type: "level_started"; ordinal: number; story_ids: string[] }
-    | { type: "level_completed"; ordinal: number; passed: string[]; failed: string[] }
+    | {
+          type: "level_completed"
+          ordinal: number
+          passed: string[]
+          failed: string[]
+          blocked?: string[]
+      }
     | { type: "recovery_started"; attempt: number; story_ids: string[] }
     | { type: "routed"; id: string; backend: string; model: string }
     | {
@@ -131,6 +158,22 @@ export type BaroEvent =
           verdict: "pass" | "fail"
           reasoning: string
           violated: string[]
+      }
+    | {
+          type: "conversation_request"
+          message_id: string
+          text: string
+      }
+    | {
+          type: "conversation_response"
+          message_id: string
+          text: string
+          actions: Array<{ recipient_id: string; text: string }>
+      }
+    | {
+          type: "conversation_failed"
+          message_id: string
+          error: string
       }
 
 /** Caller must not include trailing newlines in any field. */
@@ -154,6 +197,34 @@ export type BaroCommand =
     | { type: "redirect"; story_id: string; message: string }
     /** Mid-run user chat with a running agent (TUI `m` key). */
     | { type: "agent_message"; id: string; text: string }
+    /** Mid-run chat with the optional, non-authoritative DialogueAgent. */
+    | { type: "dialogue_message"; message_id?: string; text: string }
+    /** Open one correlated progressive-planning stream. */
+    | { type: "planning_open"; run_id: string; planning_id: string }
+    /** Admit one ordered batch of provisional stories for consideration. */
+    | {
+          type: "plan_fragment"
+          run_id: string
+          planning_id: string
+          fragment_id: string
+          ordinal: number
+          stories: unknown[]
+      }
+    /** Close the correlated stream with the Planner's authoritative result. */
+    | {
+          type: "plan_complete"
+          run_id: string
+          planning_id: string
+          final_prd: unknown
+      }
+    /** Close the correlated stream without an authoritative final plan. */
+    | {
+          type: "plan_failed"
+          run_id: string
+          planning_id: string
+          code: string
+          reason: string
+      }
     | { type: "shutdown" }
 
 export type CommandHandler = (cmd: BaroCommand) => Promise<void> | void

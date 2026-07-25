@@ -67,7 +67,21 @@ export default defineConfig([
         ...sharedBundleConfig,
     },
     {
+        // One repository-tool-free turn of the durable conversation session.
+        entry: { "run-conversation": "../baro-orchestrator/scripts/run-conversation.ts" },
+        ...sharedBundleConfig,
+    },
+    {
+        // Short-lived, login-backed local JigJoy Gateway credential exchange.
+        entry: { "acquire-gateway-credential": "../baro-orchestrator/scripts/acquire-gateway-credential.ts" },
+        ...sharedBundleConfig,
+    },
+    {
         entry: { "baro-memory": "../baro-orchestrator/scripts/baro-memory.ts" },
+        ...sharedBundleConfig,
+    },
+    {
+        entry: { "agent-collab": "../baro-orchestrator/scripts/agent-collab.mjs" },
         ...sharedBundleConfig,
     },
     {

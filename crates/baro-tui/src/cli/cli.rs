@@ -28,8 +28,48 @@ pub struct Cli {
     pub resume: bool,
 
     /// Max parallel story executors (0 = unlimited)
-    #[arg(long, default_value = "0")]
-    pub parallel: u32,
+    #[arg(long)]
+    pub parallel: Option<u32>,
+
+    /// Coordination engine: collective event-bus agents (default) or legacy Conductor compatibility.
+    #[arg(long, value_parser=["legacy", "collective"], env = "BARO_COORDINATION", default_value = "collective")]
+    pub coordination: String,
+
+    /// Disable Baro-owned pushes and pull requests; use a remote-free clone for hard isolation.
+    #[arg(long)]
+    pub local_only: bool,
+
+    /// JSON file containing opt-in collective worker candidates and their bids.
+    #[arg(long, env = "BARO_COLLECTIVE_WORKERS_FILE")]
+    pub collective_workers: Option<String>,
+
+    /// Milliseconds to collect collective worker bids before deterministic selection.
+    #[arg(long, env = "BARO_COLLECTIVE_BID_WINDOW_MS")]
+    pub collective_bid_window_ms: Option<u64>,
+
+    /// Reject collective bids below this estimated success probability.
+    #[arg(long, value_parser = parse_probability, env = "BARO_COLLECTIVE_MIN_SUCCESS")]
+    pub collective_min_success: Option<f64>,
+
+    /// Reject collective bids above this expected one-attempt cost in USD.
+    #[arg(long, value_parser = parse_non_negative_f64, env = "BARO_COLLECTIVE_MAX_COST_USD")]
+    pub collective_max_cost_usd: Option<f64>,
+
+    /// Reject collective bids above this estimated latency in milliseconds.
+    #[arg(long, env = "BARO_COLLECTIVE_MAX_LATENCY_MS")]
+    pub collective_max_latency_ms: Option<u64>,
+
+    /// Explicitly enable the run-local conversation participant (already on in collective mode).
+    #[arg(long)]
+    pub with_dialogue: bool,
+
+    /// Text-only backend for the conversation participant.
+    #[arg(long, value_parser=["claude", "openai", "codex"], env = "BARO_DIALOGUE_LLM")]
+    pub dialogue_llm: Option<String>,
+
+    /// Model id for the optional conversation participant.
+    #[arg(long, env = "BARO_DIALOGUE_MODEL")]
+    pub dialogue_model: Option<String>,
 
     /// Per-story timeout in seconds. Default scales with --effort
     /// (max ≈ 25 min, xhigh ≈ 20, high ≈ 15, else 10).
@@ -57,7 +97,7 @@ pub struct Cli {
 
     /// (deprecated) Critic is on by default; use --no-critic to opt out.
     #[arg(long, hide = true)]
-    with_critic: bool,
+    pub with_critic: bool,
 
      /// Disable the Librarian (cross-agent runtime memory). Default: ON.
     #[arg(long)]
@@ -145,8 +185,8 @@ pub struct Cli {
     ///                      (needs OPENAI_API_KEY or the picker screen).
     ///   codex            — all phases via the OpenAI Codex CLI
     ///                      (ChatGPT Plus/Pro billing).
-    ///   hybrid           — Architect/Planner/Surgeon on Claude,
-    ///                      Story/Critic on Codex; phase overrides win.
+    ///   hybrid           — Architect/Planner/Critic/Surgeon on Claude,
+    ///                      Story on Codex; phase overrides win.
     ///   jigjoy           — hosted baro gateway holding the upstream keys
     ///                      (JIGJOY_API_KEY; URL via BARO_JIGJOY_URL).
     #[arg(long, default_value="claude", value_parser=["claude", "openai", "codex", "opencode", "pi", "hybrid", "jigjoy"])]
@@ -154,7 +194,7 @@ pub struct Cli {
 
     /// Base URL for all OpenAI-routed calls instead of api.openai.com,
     /// for OpenAI-compatible providers (OpenRouter, vLLM, Ollama, ...).
-    #[arg(long, env = "OPENAI_BASE_URL")]
+    #[arg(long)]
     pub openai_base_url: Option<String>,
 
     /// Per-phase backend overrides; each wins over `--llm` (including
@@ -188,6 +228,28 @@ pub struct Cli {
     /// and wait (≤120s) for a confirm_mode command before planning continues.
     #[arg(long, env = "BARO_CONFIRM_MODE")]
     pub confirm_mode: bool,
+}
+
+fn parse_probability(raw: &str) -> Result<f64, String> {
+    let value = raw
+        .parse::<f64>()
+        .map_err(|_| "must be a number between 0 and 1".to_string())?;
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("must be a finite number between 0 and 1".to_string())
+    }
+}
+
+fn parse_non_negative_f64(raw: &str) -> Result<f64, String> {
+    let value = raw
+        .parse::<f64>()
+        .map_err(|_| "must be a non-negative number".to_string())?;
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err("must be a finite non-negative number".to_string())
+    }
 }
 
 pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {

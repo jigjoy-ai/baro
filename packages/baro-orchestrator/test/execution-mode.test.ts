@@ -2,13 +2,17 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
 import {
+    extractJsonObjects,
     heuristicModeContract,
     parseModeContract,
+    parseRequiredModeContract,
     PLANNER_SYSTEM_PROMPT,
     renderModeContract,
-} from "../src/planning/planner-prompts.js"
-import { enforceModeContract, resolveEffectiveParallel } from "../src/planning/mode-enforcement.js"
-import type { PrdExecutionMode, PrdFile } from "../src/prd.js"
+} from "../src/planning/domain/planner-prompts.js"
+import { buildArchitectUserMessage } from "../src/planning/domain/architect-prompts.js"
+import { completeSoleStoryOwnership, enforceModeContract, resolveEffectiveParallel, widestDagLevel } from "../src/planning/domain/mode-enforcement.js"
+import { isVerificationOnlyStory } from "../src/planning/domain/verification-stories.js"
+import type { PrdExecutionMode, PrdFile, PrdStory } from "../src/prd.js"
 
 const mode = (m: Partial<PrdExecutionMode> & { mode: PrdExecutionMode["mode"] }): PrdExecutionMode => ({ reason: "r", ...m })
 
@@ -26,6 +30,55 @@ describe("parseModeContract", () => {
         assert.equal(c.mode, "focused")
         assert.equal(c.source, "user")
     })
+
+    it("skips prose braces and preserves braces inside JSON strings", () => {
+        const c = parseModeContract(
+            'Use `{ signal }` when implementing this.\n```json\n' +
+            '{"mode":"parallel","confidence":0.8,"reason":"providers use { exact } signals"}\n```',
+        )
+        assert.equal(c.mode, "parallel")
+        assert.equal(c.reason, "providers use { exact } signals")
+    })
+
+    it("requires an explicit valid mode at the persisted contract boundary", () => {
+        assert.throws(() => parseRequiredModeContract("{}"), /must contain mode/)
+        assert.throws(
+            () => parseRequiredModeContract('{"mode":"yolo"}'),
+            /must contain mode/,
+        )
+        assert.equal(
+            parseRequiredModeContract('{"mode":"parallel","reason":"user pick"}').mode,
+            "parallel",
+        )
+    })
+
+    it("returns separate provider JSON objects in response order", () => {
+        assert.deepEqual(
+            extractJsonObjects('args: {"path":"src/x.ts"}\nfinal: {"project":"p"}'),
+            ['{"path":"src/x.ts"}', '{"project":"p"}'],
+        )
+    })
+
+    it("finds valid JSON nested after an earlier invalid prose brace", () => {
+        assert.deepEqual(
+            extractJsonObjects('prefix { invalid {"project":"p"} } suffix'),
+            ['{"project":"p"}'],
+        )
+    })
+})
+
+describe("architect execution contract", () => {
+    it("puts an explicit parallel choice in the Architect prompt", () => {
+        const prompt = buildArchitectUserMessage("change providers", undefined, {
+            mode: "parallel",
+            confidence: 1,
+            reason: "operator selected parallel",
+            source: "user",
+        })
+        assert.match(prompt, /mode: parallel/)
+        assert.match(prompt, /multiple agents on independent DAG siblings/)
+        assert.match(prompt, /do not reclassify/i)
+    })
 })
 
 describe("planner prompt tiers", () => {
@@ -39,6 +92,18 @@ describe("planner prompt tiers", () => {
         const text = renderModeContract({ mode: "focused", confidence: 1, reason: "r" })
         assert.match(text, /"heavy"/)
         assert.doesNotMatch(text, /"opus"/)
+    })
+
+    it("assigns deterministic final gates to RunVerifier", () => {
+        assert.match(PLANNER_SYSTEM_PROMPT, /do NOT create a final verification-only story/)
+        assert.match(PLANNER_SYSTEM_PROMPT, /RunVerifier/)
+    })
+
+    it("requires semantic traceability and rejects summary-only acceptance", () => {
+        assert.match(PLANNER_SYSTEM_PROMPT, /REQUIREMENT COVERAGE/)
+        assert.match(PLANNER_SYSTEM_PROMPT, /built-in implementation\/caller/)
+        assert.match(PLANNER_SYSTEM_PROMPT, /"Tests pass" is never/)
+        assert.match(PLANNER_SYSTEM_PROMPT, /must not contradict/)
     })
 })
 
@@ -75,12 +140,272 @@ function prd(stories: Array<Partial<PrdFile["userStories"][0]> & { id: string }>
 }
 
 describe("enforceModeContract", () => {
+    it("removes the recorded S11 verification shape and rewires its dependent", () => {
+        const out = JSON.parse(enforceModeContract(
+            prd([
+                { id: "S1", title: "Implement cancellation", description: "Add cancellation propagation." },
+                {
+                    id: "S11",
+                    title: "Run npm test, typecheck, build, and lint; fix failures",
+                    description: "Run the existing final gates against merged code. Fix any test, typecheck, build, or lint failures caused by cross-story integration issues. Do not introduce new features — only incidental fixes.",
+                    dependsOn: ["S1"],
+                    acceptance: ["npm test exits 0", "npm run build exits 0"],
+                },
+                {
+                    id: "S12",
+                    title: "Publish cancellation metadata",
+                    description: "Implement the metadata adapter.",
+                    dependsOn: ["S11"],
+                },
+            ]),
+            { mode: "sequential", confidence: 1, reason: "ordered" },
+            "add cancellation",
+        )) as PrdFile
+
+        assert.deepEqual(out.userStories.map((story) => story.id), ["S1", "S12"])
+        assert.deepEqual(out.userStories[1]!.dependsOn, ["S1"])
+    })
+
+    it("removes recorded build/lint variants but preserves uncovered config audits", () => {
+        const out = JSON.parse(enforceModeContract(
+            prd([
+                { id: "S1", title: "Implement feature", description: "Implement product code." },
+                {
+                    id: "S11b1",
+                    title: "Run npm run build (tsup), fix build failures",
+                    description: "Run npm run build. Fix any build failures. Do not introduce new features — only incidental fixes.",
+                    dependsOn: ["S1"],
+                },
+                {
+                    id: "S11b2",
+                    title: "Run npm run lint, fix new lint errors",
+                    description: "Run npm run lint. Fix any lint errors. Do not introduce new features — only incidental fixes.",
+                    dependsOn: ["S11b1"],
+                },
+                {
+                    id: "S11c",
+                    title: "Audit for no new deps, no unexpected export or config changes",
+                    description: "Verify that no new dependencies were added and configuration is unchanged. Report deviations and revert any incidental deviations.",
+                    dependsOn: ["S11b2"],
+                },
+                {
+                    id: "S12",
+                    title: "Implement follow-up",
+                    description: "Create the actual adapter.",
+                    dependsOn: ["S11c"],
+                },
+            ]),
+            { mode: "sequential", confidence: 1, reason: "ordered" },
+            "feature",
+        )) as PrdFile
+
+        assert.deepEqual(out.userStories.map((story) => story.id), ["S1", "S11c", "S12"])
+        assert.deepEqual(out.userStories[1]!.dependsOn, ["S1"])
+        assert.deepEqual(out.userStories[2]!.dependsOn, ["S11c"])
+    })
+
+    it("preserves stories that implement tests or substantive fixes", () => {
+        const testStory = {
+            title: "Verify cancellation behavior by adding unit tests",
+            description: "Implement new race and abort test cases.",
+        }
+        const fixStory = {
+            title: "Run cancellation tests and fix the abort protocol",
+            description: "Change signal propagation so nested calls cancel.",
+        }
+        assert.equal(isVerificationOnlyStory(testStory), false)
+        assert.equal(isVerificationOnlyStory(fixStory), false)
+    })
+
+    it("preserves a verification-titled story that changes streaming behavior", () => {
+        const story = {
+            title: "Verify OpenAI Responses streaming cancellation races",
+            description:
+                "After correcting the SDK boundary, make the Responses " +
+                "streaming path consume the iterable through " +
+                "abortableAsyncIterable and complete deterministic race tests.",
+        }
+        const finalGate = {
+            title: "Run npm test and report results",
+            description: "Execute the existing suite and report the results.",
+        }
+
+        assert.equal(isVerificationOnlyStory(story), false)
+        assert.equal(isVerificationOnlyStory(finalGate), true)
+    })
+
+    it("fails open when a verification-titled story requests substantive code changes", () => {
+        const implementationDescriptions = [
+            "Repair abort propagation across nested workers.",
+            "Replace the legacy cancellation adapter with the shared controller.",
+            "Remove the obsolete process fallback from the execution path.",
+            "Delete the stale signal shim after migrating its callers.",
+            "Correct the SDK boundary so cancellation reaches the response stream.",
+            "Consume the response iterable through abortableAsyncIterable.",
+            "Propagate the terminal signal to every active child process.",
+            "Enforce lease ownership before persisting the result.",
+        ]
+
+        for (const description of implementationDescriptions) {
+            assert.equal(
+                isVerificationOnlyStory({
+                    title: "Verify cancellation tests",
+                    description,
+                }),
+                false,
+                description,
+            )
+        }
+    })
+
+    it("still recognizes pure and bounded-repair final verification gates", () => {
+        const finalGates = [
+            {
+                title: "Run npm test and npm run typecheck",
+                description: "Execute the existing commands and report their results.",
+            },
+            {
+                title: "Run npm run test:unit",
+                description: "Execute the existing command and report the results.",
+            },
+            {
+                title: "Run the test suite and repair failures",
+                description: "Repair any test failures caused by integration issues. Do not replace product behavior.",
+            },
+            {
+                title: "Execute the final build",
+                description: "Check the existing build output; do not modify implementation code.",
+            },
+        ]
+
+        for (const story of finalGates) {
+            assert.equal(isVerificationOnlyStory(story), true, story.title)
+        }
+    })
+
+    it("fails open for ambiguous verification language and product scope", () => {
+        const implementationStories = [
+            {
+                title: "Verify build compatibility",
+                description: "Support Windows and preserve legacy configuration.",
+            },
+            {
+                title: "Check test isolation",
+                description: "Ensure workers cannot read sibling state.",
+            },
+            {
+                title: "Audit the final build",
+                description: "Upgrade the Windows packaging configuration.",
+            },
+            {
+                title: "Run npm test and support Windows",
+                description: "Execute the existing suite after configuring the shim.",
+            },
+            {
+                title: "Run npm test",
+                description: "Use the shared adapter and allow legacy callers.",
+            },
+            {
+                title: "Run tests",
+                description: "Check the existing tests and deploy the package.",
+            },
+            {
+                title: "Execute the final build",
+                description: "Verify the final build and publish artifacts.",
+            },
+            {
+                title: "Run npm test",
+                description: "Check the existing suite and commit generated fixes.",
+            },
+            {
+                title: "Run tests",
+                description: "Report results and deploy the package.",
+            },
+            {
+                title: "Run tests",
+                description: "Summarize outcomes and publish artifacts.",
+            },
+            {
+                title: "Run tests",
+                description: "Record status and ship the release.",
+            },
+            {
+                title: "Run npm run deploy",
+                description: "Execute the existing command and report the results.",
+            },
+            {
+                title: "Execute npm run release",
+                description: "Execute the existing command and report the results.",
+            },
+            {
+                title: "Run pnpm publish",
+                description: "Execute the existing command and report the results.",
+            },
+            {
+                title: "Run cargo fmt",
+                description: "Execute the existing command and report the results.",
+            },
+            ...[
+                "npm run test:deploy",
+                "npm run build:publish",
+                "npm run build-release",
+                "npm run lint:ship",
+                "npm run test:seed",
+                "npm run build:upload",
+                "npm run check:test:deploy",
+                "npm run build (deploy production)",
+                "build (publish artifacts)",
+                "test (ship release)",
+                "cargo build (upload package)",
+                "build (seed database)",
+            ].map((command) => ({
+                title: `Run ${command}`,
+                description: "Execute the existing command and report the results.",
+            })),
+        ]
+
+        for (const story of implementationStories) {
+            assert.equal(isVerificationOnlyStory(story), false, story.title)
+        }
+    })
+
+    it("refuses a plan made entirely of final-gate stories", () => {
+        assert.throws(
+            () => enforceModeContract(
+                prd([{
+                    id: "S11",
+                    title: "Run npm test and npm run typecheck",
+                    description: "Run the existing test and typecheck commands and report results.",
+                }]),
+                { mode: "focused", confidence: 1, reason: "single" },
+                "verify",
+            ),
+            /only deterministic verification stories/,
+        )
+    })
+
     it("collapses a multi-story PRD to ONE story in focused mode", () => {
         const out = JSON.parse(enforceModeContract(
             prd([
-                { id: "S1", title: "step one", acceptance: ["a1"] },
-                { id: "S2", title: "step two", acceptance: ["a2"], dependsOn: ["S1"] },
-                { id: "S3", title: "step three", acceptance: ["a1"] },
+                {
+                    id: "S1",
+                    title: "step one",
+                    acceptance: ["a1"],
+                    goalInvariantIds: ["G-A1"],
+                },
+                {
+                    id: "S2",
+                    title: "step two",
+                    acceptance: ["a2"],
+                    dependsOn: ["S1"],
+                    goalInvariantIds: ["G-A2", "G-C1"],
+                },
+                {
+                    id: "S3",
+                    title: "step three",
+                    acceptance: ["a1"],
+                    goalInvariantIds: ["G-A1"],
+                },
             ]),
             { mode: "focused", confidence: 0.9, reason: "bugfix", maxStories: 1, parallelism: 1, source: "llm" },
             "fix the thing",
@@ -90,6 +415,7 @@ describe("enforceModeContract", () => {
         assert.equal(s.id, "S1")
         assert.deepEqual(s.dependsOn, [])
         assert.deepEqual([...s.acceptance].sort(), ["a1", "a2"])
+        assert.deepEqual(s.goalInvariantIds, ["G-A1", "G-A2", "G-C1"])
         assert.equal(s.model, "heavy")
         assert.match(s.description, /step two/)
         assert.equal(out.executionMode?.mode, "focused")
@@ -129,6 +455,67 @@ describe("enforceModeContract", () => {
             raw,
         )
     })
+
+    it("refuses a one-story fallback stamped as parallel", () => {
+        assert.throws(
+            () => enforceModeContract(
+                prd([{ id: "S1", model: "heavy" }]),
+                { mode: "parallel", confidence: 1, reason: "user selected parallel", source: "user" },
+                "cross-cutting goal",
+            ),
+            /Refusing single-worker fallback/,
+        )
+    })
+
+    it("refuses a fully serial DAG stamped as parallel", () => {
+        assert.throws(
+            () => enforceModeContract(
+                prd([
+                    { id: "S1" },
+                    { id: "S2", dependsOn: ["S1"] },
+                    { id: "S3", dependsOn: ["S2"] },
+                ]),
+                { mode: "parallel", confidence: 0.9, reason: "parallel" },
+                "goal",
+            ),
+            /maximum width 1/,
+        )
+    })
+
+    it("accepts a parallel DAG with an independently executable level", () => {
+        const out = JSON.parse(enforceModeContract(
+            prd([
+                { id: "S1" },
+                { id: "S2" },
+                { id: "S3", dependsOn: ["S1", "S2"] },
+            ]),
+            { mode: "parallel", confidence: 1, reason: "independent providers", source: "user" },
+            "goal",
+        )) as PrdFile
+        assert.equal(out.userStories.length, 3)
+        assert.equal(out.executionMode?.mode, "parallel")
+    })
+})
+
+describe("widestDagLevel", () => {
+    it("calculates independent width and rejects cycles/unknown dependencies", () => {
+        assert.equal(widestDagLevel([
+            { id: "S1", dependsOn: [] } as PrdStory,
+            { id: "S2", dependsOn: [] } as PrdStory,
+            { id: "S3", dependsOn: ["S1", "S2"] } as PrdStory,
+        ]), 2)
+        assert.throws(
+            () => widestDagLevel([{ id: "S1", dependsOn: ["missing"] } as PrdStory]),
+            /unknown story/,
+        )
+        assert.throws(
+            () => widestDagLevel([
+                { id: "S1", dependsOn: ["S2"] } as PrdStory,
+                { id: "S2", dependsOn: ["S1"] } as PrdStory,
+            ]),
+            /cycle/,
+        )
+    })
 })
 
 describe("resolveEffectiveParallel", () => {
@@ -154,5 +541,80 @@ describe("resolveEffectiveParallel", () => {
         assert.equal(resolveEffectiveParallel(undefined, 10), 10)
         assert.equal(resolveEffectiveParallel(undefined, 0), 0)
         assert.equal(resolveEffectiveParallel(mode({ mode: "sequential", source: "llm" }), undefined), 0)
+    })
+})
+
+describe("completeSoleStoryOwnership", () => {
+    const goalEnvelope = {
+        objective: "Preserve the boundary behavior.",
+        acceptanceCriteria: ["The behavior stays observable."],
+        constraints: [],
+        nonGoals: [],
+        assumptions: [],
+    }
+    const decisionDocument = `## ADR-001: Keep the boundary
+**Status:** Accepted
+**Context:** ctx
+**Decision:** keep
+**Consequences:** none
+
+## Semantic obligation contract
+
+\`\`\`baro-obligations-v1
+{"schemaVersion":1,"obligations":[{"id":"O-001","invariantIds":["G-A1"],"subject":"the boundary","scenario":"it is invoked","expectedOutcome":"behavior preserved","evidence":["a direct test"]}]}
+\`\`\``
+    const story = (overrides: Partial<PrdStory> = {}): PrdStory => ({
+        id: "S1",
+        priority: 1,
+        title: "Implement",
+        description: "Implement the change.",
+        dependsOn: [],
+        retries: 2,
+        acceptance: ["works"],
+        tests: ["npm test"],
+        passes: false,
+        completedAt: null,
+        durationSecs: null,
+        ...overrides,
+    })
+    const prdJson = (stories: PrdStory[]) =>
+        JSON.stringify({ project: "p", userStories: stories })
+
+    it("appends missing canonical criteria and invariants to a sole story", () => {
+        const completed = JSON.parse(
+            completeSoleStoryOwnership(
+                prdJson([story()]),
+                decisionDocument,
+                goalEnvelope,
+            ),
+        ) as PrdFile
+        const sole = completed.userStories[0]!
+        assert.equal(sole.acceptance[0], "works")
+        assert.match(sole.acceptance[1]!, /^\[O-001\]; Subject: the boundary;/)
+        assert.deepEqual(sole.goalInvariantIds, ["G-A1"])
+
+        // Idempotent: a second pass changes nothing.
+        const again = completeSoleStoryOwnership(
+            JSON.stringify(completed),
+            decisionDocument,
+            goalEnvelope,
+        )
+        assert.deepEqual(JSON.parse(again), completed)
+    })
+
+    it("never rewrites multi-story plans — allocation stays a planner decision", () => {
+        const multi = prdJson([story(), story({ id: "S2", dependsOn: ["S1"] })])
+        assert.equal(
+            completeSoleStoryOwnership(multi, decisionDocument, goalEnvelope),
+            multi,
+        )
+    })
+
+    it("is a no-op without a goal contract", () => {
+        const lone = prdJson([story()])
+        assert.equal(
+            completeSoleStoryOwnership(lone, decisionDocument, undefined),
+            lone,
+        )
     })
 })

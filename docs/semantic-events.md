@@ -1,8 +1,9 @@
 # Semantic events: migration policy and wire-format notes
 
 `packages/baro-orchestrator/src/semantic-events.ts` defines every baro
-orchestrator bus event as a Mozaik 3.10 `SemanticEvent`. It replaced the old
-`BusEvent` class hierarchy (`types.ts`, plus `ConductorStateItem` in
+orchestrator bus event as a Mozaik `SemanticEvent`. The conversion began on
+Mozaik 3.10; the runtime now uses Mozaik 3.12. It replaced the old `BusEvent`
+class hierarchy (`types.ts`, plus `ConductorStateItem` in
 `participants/conductor.ts` and `StoryResultItem` in
 `participants/story-agent.ts`).
 
@@ -54,6 +55,52 @@ carry no compat constraint beyond "don't rename once shipped"):
   the machine-readable twin of the `[story-factory] S1 → backend:model`
   stderr line (which stays). See docs/tui-protocol-v2.md for the structured
   BaroEvents these feed.
+- `replan_applied` — the legacy Conductor accepted a buffered Surgeon
+  `Replan`, applied it at a level boundary, and persisted the PRD. Raw
+  `replan` remains a proposal and is never projected as committed state.
+- `runtime_replan_proposed` — a collective worker proposes a closed,
+  correlated mutation of the not-yet-started DAG. Its run/story/lease/
+  generation identify the active authority and `baseGraphVersion` is the
+  optimistic-concurrency precondition.
+- `runtime_replan_applied` — the Board accepted the candidate only after the
+  graph, incremented version and applied-decision ledger were atomically
+  persisted. `graphVersion` is the immutable commit version;
+  `currentGraphVersion` is the latest version at delivery time and may be
+  newer on an idempotent replay.
+- `runtime_replan_rejected` — the correlated proposal did not mutate the DAG.
+  It carries a stable machine-readable rejection `code` and the Board's
+  current graph version so the worker does not continue from stale state.
+- `frontdoor_conversation_requested` — the caller-owned host submits one
+  correlated pre-PRD turn to the exact bound Conversation participant.
+- `repository_context_requested` — Conversation requests bounded read-only
+  repository research before every ready-capable turn. Chat is projected as
+  clarification research because it may identify a new implementation follow-up.
+  The exact correlation enters an autonomous RepoScout policy loop whose
+  internal read/search/glob actions are executed only by Baro's fixed,
+  shell-free capability broker.
+- `repository_context_provided` / `repository_context_failed` — the exact bound
+  RepoScout returns a frozen `RepositoryBriefV1` or a correlated terminal
+  failure. Autonomous findings remain untrusted repository data; the trusted
+  envelope retains the deterministic snapshot identity for fallback results and
+  a composite exact-bootstrap-projection plus finishing-observation-suffix
+  identity for an autonomous success. The omission count is bound too; clipped
+  paths are not trusted until rediscovered. The identity binds projected evidence, not the semantic
+  truth of model-authored statements. Both participant identity and declared
+  `scoutId` are checked.
+- `frontdoor_conversation_completed` / `frontdoor_conversation_failed` — the
+  exact bound Conversation participant closes the host request. A completed
+  event carries the unchanged public ConversationResponse v1 contract.
+
+`proposalId` is the runtime-replan idempotency key. The same ID and identical
+content replays the remembered decision; the same ID with different content
+is rejected as `proposal_id_conflict`. Applied decisions are kept in the
+PRD's `runtimeGraph` metadata and can be restored by a host that resumes the
+same `runId`. The current public CLI starts a new identity after a process
+restart, so it keeps the graph/version baseline but does not yet expose
+end-to-end replay of an old decision. This runtime contract is distinct from
+the older `Replan` event, which remains the Surgeon/Conductor recovery
+proposal contract; in collective mode only the Board's persisted Applied
+decision reaches stateful projections.
 
 ## Why type discriminators, not `instanceof`
 

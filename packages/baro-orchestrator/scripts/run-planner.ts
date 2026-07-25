@@ -7,22 +7,47 @@
  */
 
 import { readFileSync, writeFileSync } from "fs"
+import { randomUUID } from "node:crypto"
 
-import { runPlannerClaude } from "../src/planning/planner-claude.js"
-import { runPlannerCodex } from "../src/planning/planner-codex.js"
-import { runPlannerOpenAI } from "../src/planning/planner-openai.js"
-import { runPlannerOpenCode } from "../src/planning/planner-opencode.js"
-import { runPlannerPi } from "../src/planning/planner-pi.js"
-import { parseModeContract, type ModeContract } from "../src/planning/planner-prompts.js"
-import { enforceModeContract } from "../src/planning/mode-enforcement.js"
+import {
+    createGatewayBillingCoordinatorFromEnv,
+    reconcileAndCloseGatewayBilling,
+} from "../src/telemetry/billing/index.js"
+import { runPlannerClaude } from "../src/planning/adapters/planner-claude.js"
+import { runPlannerCodex } from "../src/planning/adapters/planner-codex.js"
+import { runPlannerOpenAI } from "../src/planning/adapters/planner-openai.js"
+import { runPlannerOpenCode } from "../src/planning/adapters/planner-opencode.js"
+import { runPlannerPi } from "../src/planning/adapters/planner-pi.js"
+import {
+    currentPlannerMcpServerCommand,
+    parseProgressivePlannerMcpInvocation,
+    runProgressivePlannerMcpServer,
+    type PlannerHarnessProgressiveConfig,
+} from "../src/planning/adapters/planner-harness-progressive.js"
+import { parseRequiredModeContract, type ModeContract } from "../src/planning/domain/planner-prompts.js"
+import {
+    completeSoleStoryOwnership,
+    enforceModeContract,
+} from "../src/planning/domain/mode-enforcement.js"
+import { assertRunnablePlannerPrdJson } from "../src/planning/domain/planner-validation.js"
+import {
+    goalEnvelopeFingerprint,
+    type GoalEnvelope,
+    validateGoalEnvelope,
+} from "../src/conversation/session/conversation-contract.js"
+import {
+    applyProgressiveBootstrapMetadata,
+    parseProgressiveBootstrapMetadata,
+    persistProgressivePlannerResult,
+    ProgressivePlannerLifecycle,
+    resolveProgressivePlannerConfig,
+    type ProgressiveBootstrapMetadata,
+} from "../src/planning/application/progressive-planner-protocol.js"
+import { emit } from "../src/tui-protocol.js"
 
 interface Args {
     goal: string
     cwd: string
-    /**
-     * "codex" is accepted at the boundary but currently routes through the
-     * Claude planner path — codex-planner.ts is a v2 follow-up.
-     */
     llm: "claude" | "openai" | "codex" | "opencode" | "pi"
     model?: string
     effort?: string
@@ -30,10 +55,17 @@ interface Args {
     decisionFile?: string
     /** JSON ModeContract from the run-intake step (user-confirmed); skips planner intake. */
     modeFile?: string
+    /** Host-owned confirmed GoalEnvelope; never sourced from provider JSON. */
+    goalEnvelopeFile?: string
     /** When set, the PRD is written here and stdout is freed for the event stream. */
     resultFile?: string
+    progressiveRunId?: string
+    progressivePlanningId?: string
+    progressiveBootstrapFile?: string
     quick: boolean
 }
+
+let activeProgressiveLifecycle: ProgressivePlannerLifecycle | undefined
 
 function parseArgs(argv: string[]): Args {
     let goal: string | undefined
@@ -44,7 +76,11 @@ function parseArgs(argv: string[]): Args {
     let contextFile: string | undefined
     let decisionFile: string | undefined
     let modeFile: string | undefined
+    let goalEnvelopeFile: string | undefined
     let resultFile: string | undefined
+    let progressiveRunId: string | undefined
+    let progressivePlanningId: string | undefined
+    let progressiveBootstrapFile: string | undefined
     let quick = false
 
     for (let i = 0; i < argv.length; i++) {
@@ -79,8 +115,32 @@ function parseArgs(argv: string[]): Args {
             case "--mode-file":
                 modeFile = required(argv, ++i, "--mode-file")
                 break
+            case "--goal-envelope-file":
+                goalEnvelopeFile = required(
+                    argv,
+                    ++i,
+                    "--goal-envelope-file",
+                )
+                break
             case "--result-file":
                 resultFile = required(argv, ++i, "--result-file")
+                break
+            case "--progressive-run-id":
+                progressiveRunId = required(argv, ++i, "--progressive-run-id")
+                break
+            case "--progressive-planning-id":
+                progressivePlanningId = required(
+                    argv,
+                    ++i,
+                    "--progressive-planning-id",
+                )
+                break
+            case "--progressive-bootstrap-file":
+                progressiveBootstrapFile = required(
+                    argv,
+                    ++i,
+                    "--progressive-bootstrap-file",
+                )
                 break
             case "--quick":
                 quick = true
@@ -101,7 +161,11 @@ function parseArgs(argv: string[]): Args {
         contextFile,
         decisionFile,
         modeFile,
+        goalEnvelopeFile,
         resultFile,
+        progressiveRunId,
+        progressivePlanningId,
+        progressiveBootstrapFile,
         quick,
     }
 }
@@ -129,21 +193,108 @@ function tryRead(path: string | undefined): string | undefined {
     }
 }
 
+function readTrustedGoalEnvelope(path: string | undefined): GoalEnvelope | undefined {
+    if (!path) return undefined
+    let raw: string
+    try {
+        raw = readFileSync(path, "utf8")
+    } catch (error) {
+        throw new Error(
+            `could not read trusted GoalEnvelope ${path}: ${(error as Error).message}`,
+        )
+    }
+    try {
+        return validateGoalEnvelope(JSON.parse(raw) as unknown)
+    } catch (error) {
+        throw new Error(
+            `trusted GoalEnvelope ${path} is invalid: ${(error as Error).message}`,
+        )
+    }
+}
+
+function reconcileTrustedGoalEnvelope(
+    hostEnvelope: GoalEnvelope | undefined,
+    bootstrapEnvelope: GoalEnvelope | undefined,
+): GoalEnvelope | undefined {
+    if (
+        hostEnvelope &&
+        bootstrapEnvelope &&
+        goalEnvelopeFingerprint(hostEnvelope) !==
+            goalEnvelopeFingerprint(bootstrapEnvelope)
+    ) {
+        throw new Error(
+            "trusted GoalEnvelope conflicts with progressive bootstrap metadata",
+        )
+    }
+    return hostEnvelope ?? bootstrapEnvelope
+}
+
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2))
+    let progressiveConfig
+    try {
+        progressiveConfig = resolveProgressivePlannerConfig(args)
+    } catch (error) {
+        fatal((error as Error).message)
+    }
     // With a result file, stdout is the event stream — let the planner emit.
     if (args.resultFile) process.env.BARO_PLAN_EVENTS = "1"
+    let bootstrapMetadata: ProgressiveBootstrapMetadata | undefined
+    if (progressiveConfig) {
+        try {
+            bootstrapMetadata = parseProgressiveBootstrapMetadata(
+                readFileSync(progressiveConfig.bootstrapFile, "utf8"),
+                progressiveConfig.bootstrapFile,
+            )
+        } catch (error) {
+            const reason = (error as Error)?.message ?? String(error)
+            fatal(`invalid --progressive-bootstrap-file: ${reason}`)
+        }
+    }
+    let trustedGoalEnvelope: GoalEnvelope | undefined
+    try {
+        trustedGoalEnvelope = reconcileTrustedGoalEnvelope(
+            readTrustedGoalEnvelope(args.goalEnvelopeFile),
+            bootstrapMetadata?.goalEnvelope,
+        )
+    } catch (error) {
+        fatal((error as Error).message)
+    }
     const projectContext = tryRead(args.contextFile)
     const decisionDocument = tryRead(args.decisionFile)
+    const progressiveDecisionDocument =
+        bootstrapMetadata?.decisionDocument ?? decisionDocument
+    const progressive = progressiveConfig
+        ? new ProgressivePlannerLifecycle({
+              ...progressiveConfig,
+              trustedGoalEnvelope,
+              trustedDecisionDocument: progressiveDecisionDocument,
+          })
+        : undefined
+    progressive?.open()
+    activeProgressiveLifecycle = progressive
+    const harnessProgressive: PlannerHarnessProgressiveConfig | undefined =
+        progressive && (args.llm === "claude" || args.llm === "codex")
+            ? {
+                  runId: progressive.config.runId,
+                  planningId: progressive.config.planningId,
+                  trustedGoalEnvelope,
+                  trustedDecisionDocument: progressiveDecisionDocument,
+                  publish: (event) => progressive.publish(event),
+                  mcpServer: currentPlannerMcpServerCommand(),
+              }
+            : undefined
     let modeContract: ModeContract | undefined
-    const modeJson = tryRead(args.modeFile)
-    if (modeJson) {
+    if (args.modeFile) {
         try {
-            modeContract = parseModeContract(modeJson)
+            modeContract = parseRequiredModeContract(readFileSync(args.modeFile, "utf-8"))
         } catch (e) {
-            process.stderr.write(
-                `[run-planner] warning: invalid --mode-file (${(e as Error).message}) — planner will run its own intake\n`,
+            emitProgressiveFailure(
+                progressive,
+                "invalid_mode_contract",
+                (e as Error).message,
             )
+            fatal(`invalid --mode-file: ${(e as Error).message}`)
         }
     }
 
@@ -158,26 +309,71 @@ async function main(): Promise<void> {
     try {
         if (args.llm === "openai") {
             if (!process.env.OPENAI_API_KEY) {
+                emitProgressiveFailure(
+                    progressive,
+                    "missing_provider_credentials",
+                    "--llm openai requires OPENAI_API_KEY to be set",
+                )
                 fatal("--llm openai requires OPENAI_API_KEY to be set")
             }
-            prdJson = await runPlannerOpenAI({
-                goal: args.goal,
-                cwd: args.cwd,
-                model: args.model,
-                projectContext,
-                decisionDocument,
-                quick: args.quick,
-                modeContract,
+            const billing = createGatewayBillingCoordinatorFromEnv({
+                runId: process.env.BARO_RUN_ID ?? `planner-${randomUUID()}`,
+                publishMeasurement: (measurement) => {
+                    if (process.env.BARO_PLAN_EVENTS === "1") {
+                        emit({ type: "model_usage", measurement })
+                    }
+                },
             })
+            try {
+                prdJson = await runPlannerOpenAI({
+                    goal: args.goal,
+                    goalEnvelope: trustedGoalEnvelope,
+                    cwd: args.cwd,
+                    model: args.model,
+                    projectContext,
+                    decisionDocument,
+                    quick: args.quick,
+                    modeContract,
+                    billingCoordinator: billing ?? undefined,
+                    ...(progressive
+                        ? {
+                              progressive: {
+                                  runId: progressive.config.runId,
+                                  planningId: progressive.config.planningId,
+                                  trustedGoalEnvelope,
+                                  trustedDecisionDocument:
+                                      progressiveDecisionDocument,
+                                  publish: (event: unknown) =>
+                                      progressive.publish(event),
+                              },
+                          }
+                        : {}),
+                })
+            } finally {
+                const result = await reconcileAndCloseGatewayBilling(billing)
+                if (result && !result.complete) {
+                    process.stderr.write(
+                        `[run-planner] billing reconciliation incomplete (${result.unresolvedInvocationIds.length} invocation(s))\n`,
+                    )
+                }
+            }
         } else if (args.llm === "codex") {
             prdJson = await runPlannerCodex({
                 goal: args.goal,
                 cwd: args.cwd,
                 model: args.model,
+                effort: args.effort as
+                    | "low"
+                    | "medium"
+                    | "high"
+                    | "xhigh"
+                    | "max"
+                    | undefined,
                 projectContext,
                 decisionDocument,
                 quick: args.quick,
                 modeContract,
+                progressive: harnessProgressive,
             })
         } else if (args.llm === "opencode") {
             prdJson = await runPlannerOpenCode({
@@ -209,17 +405,67 @@ async function main(): Promise<void> {
                 decisionDocument,
                 quick: args.quick,
                 modeContract,
+                progressive: harnessProgressive,
             })
         }
     } catch (e) {
+        emitProgressiveFailure(
+            progressive,
+            "planner_failed",
+            (e as Error)?.message ?? String(e),
+        )
         process.stderr.write(
             `[run-planner] FAILED after ${Date.now() - t0}ms: ${(e as Error)?.message ?? String(e)}\n`,
         )
         process.exit(1)
     }
 
-    if (modeContract) {
-        prdJson = enforceModeContract(prdJson, modeContract, args.goal)
+    try {
+        prdJson = completeSoleStoryOwnership(
+            prdJson,
+            decisionDocument,
+            trustedGoalEnvelope,
+        )
+        prdJson = assertRunnablePlannerPrdJson(
+            prdJson,
+            trustedGoalEnvelope,
+            decisionDocument,
+        )
+        if (modeContract) {
+            prdJson = enforceModeContract(prdJson, modeContract, args.goal)
+        }
+        // A focused collapse can only now have produced the sole story.
+        prdJson = completeSoleStoryOwnership(
+            prdJson,
+            decisionDocument,
+            trustedGoalEnvelope,
+        )
+        prdJson = assertRunnablePlannerPrdJson(
+            prdJson,
+            trustedGoalEnvelope,
+            decisionDocument,
+        )
+        if (bootstrapMetadata) {
+            prdJson = applyProgressiveBootstrapMetadata(
+                prdJson,
+                bootstrapMetadata,
+            )
+            prdJson = assertRunnablePlannerPrdJson(
+                prdJson,
+                trustedGoalEnvelope,
+                bootstrapMetadata.decisionDocument ?? decisionDocument,
+            )
+        }
+    } catch (e) {
+        emitProgressiveFailure(
+            progressive,
+            "invalid_final_plan",
+            (e as Error)?.message ?? String(e),
+        )
+        process.stderr.write(
+            `[run-planner] FAILED after ${Date.now() - t0}ms: ${(e as Error)?.message ?? String(e)}\n`,
+        )
+        process.exit(1)
     }
 
     process.stderr.write(
@@ -227,13 +473,59 @@ async function main(): Promise<void> {
     )
     // Result to the file (stdout is the event stream); legacy path keeps it on stdout.
     if (args.resultFile) {
-        writeFileSync(args.resultFile, prdJson)
+        try {
+            if (progressive) {
+                persistProgressivePlannerResult(
+                    args.resultFile,
+                    prdJson,
+                    progressive,
+                )
+            } else {
+                writeFileSync(args.resultFile, prdJson)
+            }
+        } catch (error) {
+            if (!progressive) throw error
+            const reason = (error as Error)?.message ?? String(error)
+            emitProgressiveFailure(progressive, "result_finalize_failed", reason)
+            process.stderr.write(
+                `[run-planner] FAILED after ${Date.now() - t0}ms: ${reason}\n`,
+            )
+            process.exit(1)
+        }
     } else {
         process.stdout.write(prdJson)
     }
 }
 
-main().catch((e) => {
+function emitProgressiveFailure(
+    lifecycle: ProgressivePlannerLifecycle | undefined,
+    code: string,
+    reason: string,
+): void {
+    try {
+        lifecycle?.fail(code, reason)
+    } catch {
+        // Preserve the original non-zero failure even if stdout itself closed.
+    }
+}
+
+async function runEntry(): Promise<void> {
+    const mcpInvocation = parseProgressivePlannerMcpInvocation(
+        process.argv.slice(2),
+    )
+    if (mcpInvocation) {
+        await runProgressivePlannerMcpServer(mcpInvocation)
+        return
+    }
+    await main()
+}
+
+runEntry().catch((e) => {
+    emitProgressiveFailure(
+        activeProgressiveLifecycle,
+        "planner_crashed",
+        (e as Error)?.message ?? String(e),
+    )
     process.stderr.write(`[run-planner] crashed: ${e?.stack ?? String(e)}\n`)
     process.exit(3)
 })

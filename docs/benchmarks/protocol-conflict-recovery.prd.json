@@ -1,0 +1,61 @@
+{
+  "project": "baro-protocol-conflict-recovery-benchmark",
+  "branchName": "baro/protocol-conflict-recovery-benchmark",
+  "description": "Add two independent control-plane-to-runner messages whose union updates overlap, then document both without losing either change during integration.",
+  "userStories": [
+    {
+      "id": "S1",
+      "priority": 1,
+      "title": "Add whole-run dispatch message",
+      "description": "In src/protocol.ts add and export RunDispatchMsg, discriminated by t: 'dispatch_run', with required runId, goal, workspaceId, parallel, timeoutSecs and optional route: DispatchRoute. Add it to ToRunner while preserving every existing union member.",
+      "dependsOn": [],
+      "retries": 1,
+      "acceptance": [
+        "RunDispatchMsg has the exact requested fields",
+        "ToRunner accepts RunDispatchMsg without losing existing message variants",
+        "npm run build succeeds"
+      ],
+      "tests": ["npm run build"],
+      "passes": false,
+      "completedAt": null,
+      "durationSecs": null,
+      "model": "standard"
+    },
+    {
+      "id": "S2",
+      "priority": 1,
+      "title": "Add runner rejection message",
+      "description": "In src/protocol.ts add and export RejectMsg for a control plane refusing a runner. It is discriminated by t: 'rejected' and has a required reason: string. Add it to ToRunner while preserving every existing union member, including changes made by other stories.",
+      "dependsOn": [],
+      "retries": 1,
+      "acceptance": [
+        "RejectMsg has t: 'rejected' and reason: string",
+        "ToRunner accepts RejectMsg without losing existing message variants",
+        "npm run build succeeds"
+      ],
+      "tests": ["npm run build"],
+      "passes": false,
+      "completedAt": null,
+      "durationSecs": null,
+      "model": "standard"
+    },
+    {
+      "id": "S3",
+      "priority": 2,
+      "title": "Document both control messages",
+      "description": "After both protocol changes are integrated, update README.md to concisely document dispatch_run and rejected, and state that existing story dispatch remains supported.",
+      "dependsOn": ["S1", "S2"],
+      "retries": 1,
+      "acceptance": [
+        "README mentions dispatch_run and rejected",
+        "README still describes story-level dispatch",
+        "npm run build succeeds"
+      ],
+      "tests": ["npm run build"],
+      "passes": false,
+      "completedAt": null,
+      "durationSecs": null,
+      "model": "light"
+    }
+  ]
+}

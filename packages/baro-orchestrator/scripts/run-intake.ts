@@ -6,16 +6,21 @@
  */
 
 import { readFileSync } from "fs"
+import { randomUUID } from "node:crypto"
 
+import {
+    createGatewayBillingCoordinatorFromEnv,
+    reconcileAndCloseGatewayBilling,
+} from "../src/telemetry/billing/index.js"
 import {
     heuristicModeContract,
     type ModeContract,
-} from "../src/planning/planner-prompts.js"
-import { runClaudeIntake } from "../src/planning/planner-claude.js"
-import { runCodexIntake } from "../src/planning/planner-codex.js"
-import { runOpenAIIntake } from "../src/planning/planner-openai.js"
-import { runOpenCodeIntake } from "../src/planning/planner-opencode.js"
-import { runPiIntake } from "../src/planning/planner-pi.js"
+} from "../src/planning/domain/planner-prompts.js"
+import { runClaudeIntake } from "../src/planning/adapters/planner-claude.js"
+import { runCodexIntake } from "../src/planning/adapters/planner-codex.js"
+import { runOpenAIIntake } from "../src/planning/adapters/planner-openai.js"
+import { runOpenCodeIntake } from "../src/planning/adapters/planner-opencode.js"
+import { runPiIntake } from "../src/planning/adapters/planner-pi.js"
 
 interface Args {
     goal: string
@@ -105,7 +110,30 @@ async function main(): Promise<void> {
     try {
         if (args.llm === "openai") {
             if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set")
-            contract = await runOpenAIIntake(opts)
+            const billing = createGatewayBillingCoordinatorFromEnv({
+                runId: process.env.BARO_RUN_ID ?? `intake-${randomUUID()}`,
+                // Intake stdout is the ModeContract, never an event stream.
+                // Carry telemetry over a reserved stderr sideband that the
+                // Rust launcher projects back onto the existing BaroEvent lane.
+                publishMeasurement: (measurement) => {
+                    process.stderr.write(
+                        `@baro-event ${JSON.stringify({ type: "model_usage", measurement })}\n`,
+                    )
+                },
+            })
+            try {
+                contract = await runOpenAIIntake({
+                    ...opts,
+                    billingCoordinator: billing ?? undefined,
+                })
+            } finally {
+                const result = await reconcileAndCloseGatewayBilling(billing)
+                if (result && !result.complete) {
+                    process.stderr.write(
+                        `[run-intake] billing reconciliation incomplete (${result.unresolvedInvocationIds.length} invocation(s))\n`,
+                    )
+                }
+            }
         } else if (args.llm === "codex") {
             contract = await runCodexIntake(opts)
         } else if (args.llm === "opencode") {

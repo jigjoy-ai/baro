@@ -30,3 +30,10 @@ export function buildInstallServiceArgs(opts: { token: string; workspace: string
     if (opts.controlUrl) args.push("--control-url", opts.controlUrl)
     return args
 }
+
+/** Match Rust's backwards-compatible Done.success default without truthy coercion. */
+export function parseDoneSuccess(value: unknown): boolean | null {
+    if (typeof value === "boolean") return value
+    if (value === undefined) return true
+    return null
+}

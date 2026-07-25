@@ -1,0 +1,23 @@
+{
+  "project": "collective-local-example",
+  "branchName": "baro/collective-local-example",
+  "description": "Replace this example with a frozen plan for the target repository.",
+  "userStories": [
+    {
+      "id": "S1",
+      "priority": 1,
+      "title": "Implement the benchmark task",
+      "description": "Replace this text with one concrete, repository-specific change.",
+      "dependsOn": [],
+      "retries": 1,
+      "acceptance": [
+        "The requested behavior is implemented without unrelated changes"
+      ],
+      "tests": [],
+      "passes": false,
+      "completedAt": null,
+      "durationSecs": null,
+      "model": "standard"
+    }
+  ]
+}

@@ -33,6 +33,27 @@ pub struct DiffFile {
     pub removed: u32,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct VerificationCommandEvidence {
+    pub command: String,
+    pub status: String,
+    #[allow(dead_code)]
+    pub duration_ms: u64,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub tail: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RunVerificationEvidence {
+    #[allow(dead_code)]
+    pub verification_id: String,
+    pub status: String,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub commands: Vec<VerificationCommandEvidence>,
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct ReplanStory {
     #[serde(default)]
@@ -68,21 +89,18 @@ pub enum BaroEvent {
     },
 
     #[serde(rename = "dag")]
-    Dag {
-        levels: Vec<Vec<DagNode>>,
-    },
+    Dag { levels: Vec<Vec<DagNode>> },
 
     #[serde(rename = "story_start")]
-    StoryStart {
-        id: String,
-        title: String,
-    },
+    StoryStart { id: String, title: String },
+
+    /// A worker quiesced because an accepted dependency block made its
+    /// current lease temporarily unrunnable. This is not a failure.
+    #[serde(rename = "story_suspended")]
+    StorySuspended { id: String, block_id: String },
 
     #[serde(rename = "story_log")]
-    StoryLog {
-        id: String,
-        line: String,
-    },
+    StoryLog { id: String, line: String },
 
     /// One condensed, typed entry for the structured Activity feed.
     #[serde(rename = "activity")]
@@ -119,10 +137,7 @@ pub enum BaroEvent {
     },
 
     #[serde(rename = "story_retry")]
-    StoryRetry {
-        id: String,
-        attempt: u32,
-    },
+    StoryRetry { id: String, attempt: u32 },
 
     #[serde(rename = "progress")]
     Progress {
@@ -139,14 +154,10 @@ pub enum BaroEvent {
     },
 
     #[serde(rename = "review_start")]
-    ReviewStart {
-        level: usize,
-    },
+    ReviewStart { level: usize },
 
     #[serde(rename = "review_log")]
-    ReviewLog {
-        line: String,
-    },
+    ReviewLog { line: String },
 
     #[serde(rename = "review_complete")]
     ReviewComplete {
@@ -159,9 +170,7 @@ pub enum BaroEvent {
     FinalizeStart,
 
     #[serde(rename = "finalize_complete")]
-    FinalizeComplete {
-        pr_url: Option<String>,
-    },
+    FinalizeComplete { pr_url: Option<String> },
 
     #[serde(rename = "done")]
     Done {
@@ -175,6 +184,13 @@ pub enum BaroEvent {
         /// Reason for an abort/early-termination if `success` is false.
         #[serde(default)]
         abort_reason: Option<String>,
+        /// Objective run-level gate. `skipped` means no build/test command
+        /// could be detected, so the run is complete but not verified.
+        #[serde(default)]
+        verification_status: Option<String>,
+        /// Full correlated command evidence behind `verification_status`.
+        #[serde(default)]
+        verification: Option<RunVerificationEvidence>,
     },
 
     #[serde(rename = "notification_ready")]
@@ -189,6 +205,22 @@ pub enum BaroEvent {
         /// for subscription paths. Summed into a per-run cost.
         #[serde(default)]
         cost_usd: Option<f64>,
+    },
+
+    /// Full backend-neutral measurement. The current UI keeps using the
+    /// compatibility TokenUsage projection while Cloud/audit consume this.
+    #[serde(rename = "model_usage")]
+    ModelUsage {
+        #[allow(dead_code)]
+        measurement: serde_json::Value,
+    },
+
+    /// Latest cumulative live estimate; unlike TokenUsage this is not a delta.
+    #[serde(rename = "token_progress")]
+    TokenProgress {
+        id: String,
+        input_tokens: u64,
+        output_tokens: u64,
     },
 
     /// Per-story changes merged into the run branch: file list + capped diff.
@@ -264,6 +296,10 @@ pub enum BaroEvent {
         passed: Vec<String>,
         #[serde(default)]
         failed: Vec<String>,
+        // Contract field; suspended stories remain pending for a later wave.
+        #[allow(dead_code)]
+        #[serde(default)]
+        blocked: Vec<String>,
     },
 
     #[serde(rename = "recovery_started")]
@@ -297,6 +333,18 @@ pub enum BaroEvent {
         violated: Vec<String>,
     },
 
+    /// Correlated reply from the run-local DialogueAgent. Compatibility
+    /// activity/story_log mirrors may follow, but this event is what updates
+    /// the durable user-facing conversation session.
+    #[serde(rename = "conversation_request")]
+    ConversationRequest { message_id: String, text: String },
+
+    #[serde(rename = "conversation_response")]
+    ConversationResponse { message_id: String, text: String },
+
+    #[serde(rename = "conversation_failed")]
+    ConversationFailed { message_id: String, error: String },
+
     /// Synthetic event the orchestrator client emits exactly once when
     /// the orchestrator subprocess terminates — whether cleanly with a
     /// preceding `Done` event or abruptly. Lets the TUI escape any
@@ -309,12 +357,58 @@ pub enum BaroEvent {
     },
 }
 
+/// Headless stdout is a machine-readable JSONL stream. A subprocess that
+/// dies mid-write, or a 64 KiB pipe read clipped at EOF, hands the echo
+/// path a partial JSON line; echoing it verbatim corrupts the stream, so a
+/// non-JSON line is wrapped into a bounded, valid `story_log` envelope.
+pub fn jsonl_safe_line<'a>(raw: &'a str, wrap_id: &str) -> std::borrow::Cow<'a, str> {
+    if serde_json::from_str::<serde_json::Value>(raw).is_ok() {
+        return std::borrow::Cow::Borrowed(raw);
+    }
+    let bounded: String = raw.chars().take(2_000).collect();
+    std::borrow::Cow::Owned(
+        serde_json::json!({
+            "type": "story_log",
+            "id": wrap_id,
+            "line": format!(
+                "[non-json line, {} bytes] {}",
+                raw.len(),
+                bounded,
+            ),
+        })
+        .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse(json: &str) -> BaroEvent {
         serde_json::from_str(json).expect(json)
+    }
+
+    #[test]
+    fn safe_line_passes_valid_json_through_unchanged() {
+        let raw = r#"{"type":"plan_complete_summary","stories":8}"#;
+        assert_eq!(jsonl_safe_line(raw, "plan"), raw);
+    }
+
+    #[test]
+    fn safe_line_wraps_a_clipped_json_line_into_valid_jsonl() {
+        // A 64 KiB pipe clip ends mid-string with no closing quote/brace.
+        let clipped = format!(
+            r#"{{"type":"plan_complete","final_prd":{{"description":"{}"#,
+            "x".repeat(70_000),
+        );
+        let wrapped = jsonl_safe_line(&clipped, "plan");
+        let value: serde_json::Value =
+            serde_json::from_str(&wrapped).expect("wrapped line must be valid JSON");
+        assert_eq!(value["type"], "story_log");
+        assert_eq!(value["id"], "plan");
+        let line = value["line"].as_str().unwrap();
+        assert!(line.starts_with("[non-json line,"));
+        assert!(line.len() < 3_000, "wrapped line must stay bounded");
     }
 
     #[test]
@@ -325,7 +419,12 @@ mod tests {
                 "removed":["S3"],"rewired":[{"id":"S4","depends_on":["S9"]}]}"#,
         );
         match e {
-            BaroEvent::Replan { added, removed, rewired, .. } => {
+            BaroEvent::Replan {
+                added,
+                removed,
+                rewired,
+                ..
+            } => {
                 assert_eq!(added[0].id, "S9");
                 assert_eq!(added[0].depends_on, vec!["S1"]);
                 assert_eq!(removed, vec!["S3"]);
@@ -337,7 +436,9 @@ mod tests {
 
     #[test]
     fn parses_intervention_and_merge_events() {
-        match parse(r#"{"type":"intervention","id":"S1","source":"sentry","action":"aborted","reason":"stall"}"#) {
+        match parse(
+            r#"{"type":"intervention","id":"S1","source":"sentry","action":"aborted","reason":"stall"}"#,
+        ) {
             BaroEvent::Intervention { id, action, .. } => {
                 assert_eq!(id, "S1");
                 assert_eq!(action, "aborted");
@@ -359,6 +460,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_dependency_suspension_as_its_own_event() {
+        match parse(r#"{"type":"story_suspended","id":"S2","block_id":"block-S2-S1"}"#) {
+            BaroEvent::StorySuspended { id, block_id } => {
+                assert_eq!(id, "S2");
+                assert_eq!(block_id, "block-S2-S1");
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
     fn parses_level_and_recovery_events() {
         match parse(r#"{"type":"level_started","ordinal":2,"story_ids":["S3","S4"]}"#) {
             BaroEvent::LevelStarted { ordinal, story_ids } => {
@@ -367,10 +479,18 @@ mod tests {
             }
             other => panic!("wrong variant: {:?}", other),
         }
-        match parse(r#"{"type":"level_completed","ordinal":2,"passed":["S3"],"failed":["S4"]}"#) {
-            BaroEvent::LevelCompleted { passed, failed, .. } => {
+        match parse(
+            r#"{"type":"level_completed","ordinal":2,"passed":["S3"],"failed":["S4"],"blocked":["S5"]}"#,
+        ) {
+            BaroEvent::LevelCompleted {
+                passed,
+                failed,
+                blocked,
+                ..
+            } => {
                 assert_eq!(passed, vec!["S3"]);
                 assert_eq!(failed, vec!["S4"]);
+                assert_eq!(blocked, vec!["S5"]);
             }
             other => panic!("wrong variant: {:?}", other),
         }
@@ -387,14 +507,50 @@ mod tests {
     fn parses_routed_and_critique() {
         match parse(r#"{"type":"routed","id":"S1","backend":"codex","model":"gpt-5.3-codex"}"#) {
             BaroEvent::Routed { id, backend, model } => {
-                assert_eq!((id.as_str(), backend.as_str(), model.as_str()), ("S1", "codex", "gpt-5.3-codex"));
+                assert_eq!(
+                    (id.as_str(), backend.as_str(), model.as_str()),
+                    ("S1", "codex", "gpt-5.3-codex")
+                );
             }
             other => panic!("wrong variant: {:?}", other),
         }
-        match parse(r#"{"type":"critique","id":"S1","verdict":"fail","reasoning":"missing tests","violated":["AC2"]}"#) {
-            BaroEvent::Critique { verdict, violated, .. } => {
+        match parse(
+            r#"{"type":"critique","id":"S1","verdict":"fail","reasoning":"missing tests","violated":["AC2"]}"#,
+        ) {
+            BaroEvent::Critique {
+                verdict, violated, ..
+            } => {
                 assert_eq!(verdict, "fail");
                 assert_eq!(violated, vec!["AC2"]);
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_correlated_runtime_conversation_events() {
+        match parse(r#"{"type":"conversation_request","message_id":"request-6","text":"Status?"}"#)
+        {
+            BaroEvent::ConversationRequest { message_id, text } => {
+                assert_eq!(message_id, "request-6");
+                assert_eq!(text, "Status?");
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+        match parse(
+            r#"{"type":"conversation_response","message_id":"request-7","text":"Still working.","actions":[{"recipient_id":"S1","text":"Run tests"}]}"#,
+        ) {
+            BaroEvent::ConversationResponse { message_id, text } => {
+                assert_eq!(message_id, "request-7");
+                assert_eq!(text, "Still working.");
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+        match parse(r#"{"type":"conversation_failed","message_id":"request-8","error":"timeout"}"#)
+        {
+            BaroEvent::ConversationFailed { message_id, error } => {
+                assert_eq!(message_id, "request-8");
+                assert_eq!(error, "timeout");
             }
             other => panic!("wrong variant: {:?}", other),
         }
@@ -406,7 +562,9 @@ mod tests {
         parse(r#"{"type":"replan"}"#);
         parse(r#"{"type":"critique","id":"S1"}"#);
         parse(r#"{"type":"routed","id":"S1","backend":"claude","model":"opus","future_field":42}"#);
-        match parse(r#"{"type":"activity","id":"S1","kind":"file_change","text":"src/a.rs","path":"src/a.rs","op":"modify"}"#) {
+        match parse(
+            r#"{"type":"activity","id":"S1","kind":"file_change","text":"src/a.rs","path":"src/a.rs","op":"modify"}"#,
+        ) {
             BaroEvent::Activity { path, op, .. } => {
                 assert_eq!(path.as_deref(), Some("src/a.rs"));
                 assert_eq!(op.as_deref(), Some("modify"));

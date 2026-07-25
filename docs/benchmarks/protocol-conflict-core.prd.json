@@ -1,0 +1,43 @@
+{
+  "project": "baro-protocol-conflict-core-benchmark",
+  "branchName": "baro/protocol-conflict-core-benchmark",
+  "description": "Add two independent control-plane-to-runner messages without losing either update when both stories modify the ToRunner union concurrently.",
+  "userStories": [
+    {
+      "id": "S1",
+      "priority": 1,
+      "title": "Add numeric whole-run dispatch message",
+      "description": "In src/protocol.ts add and export RunDispatchMsg with exactly these fields: t: 'dispatch_run', runId: string, goal: string, workspaceId: string, parallel: number, timeoutSecs: number, and optional route?: DispatchRoute. Add it to ToRunner while preserving every existing union member. Do not implement any other message type.",
+      "dependsOn": [],
+      "retries": 1,
+      "acceptance": [
+        "RunDispatchMsg uses parallel: number and the exact requested field types",
+        "ToRunner accepts RunDispatchMsg without losing existing variants",
+        "npm run build succeeds"
+      ],
+      "tests": ["npm run build"],
+      "passes": false,
+      "completedAt": null,
+      "durationSecs": null,
+      "model": "standard"
+    },
+    {
+      "id": "S2",
+      "priority": 1,
+      "title": "Add runner rejection message",
+      "description": "In src/protocol.ts add and export RejectMsg with exactly t: 'rejected' and reason: string. Add it to ToRunner while preserving every existing union member, including concurrent story updates. Do not implement whole-run dispatch yourself.",
+      "dependsOn": [],
+      "retries": 1,
+      "acceptance": [
+        "RejectMsg has exactly t: 'rejected' and reason: string",
+        "ToRunner accepts RejectMsg without losing existing or concurrent variants",
+        "npm run build succeeds"
+      ],
+      "tests": ["npm run build"],
+      "passes": false,
+      "completedAt": null,
+      "durationSecs": null,
+      "model": "standard"
+    }
+  ]
+}

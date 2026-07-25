@@ -64,18 +64,20 @@ baro --cwd ~/projects/myapp "Add REST API"
 
 1. **Plan** — Architect + Planner agents explore your codebase and generate a dependency graph of user stories
 2. **Review** — You review the plan, refine with feedback, accept or quit
-3. **Execute** — Stories run in parallel on a feature branch, each its own CLI subprocess (Claude Code, OpenAI Codex CLI, or Mozaik-native OpenAI Responses — picked by `--llm` or `--story-llm`)
+3. **Execute** — Stories run as independently scheduled workers on a feature branch: CLI backends use subprocesses, while Mozaik-native OpenAI-compatible workers run in-process (picked by `--llm` or `--story-llm`)
 4. **Critic** — After every turn, a Critic agent checks work against acceptance criteria and injects corrective feedback when verdict is FAIL
 5. **Finalize** — Runs build verification and creates a GitHub PR with full summary
 
-## Three LLM backends, one DAG
+## Five LLM backends, one DAG
 
 `--llm` picks how every agent in the run talks to its model:
 
 - `--llm claude` (default) — every agent shells out to the Claude Code CLI in headless mode. Bills against your Claude Max subscription.
-- `--llm codex` — every agent shells out to OpenAI's Codex CLI (`codex exec --json`). Bills against ChatGPT Pro/Plus subscription. ~3–11× cheaper per equivalent run than Claude.
+- `--llm codex` — every agent shells out to OpenAI's Codex CLI (`codex exec --json`), with Critic evaluation isolated from the checkout and limited to Baro-captured evidence. Bills against ChatGPT Pro/Plus subscription. ~3–11× cheaper per equivalent run than Claude.
 - `--llm openai` — Mozaik-native OpenAI Responses API. Bills per token retail.
-- `--llm hybrid` — Claude on Architect/Planner/Surgeon (where the upstream plan matters), Codex on Story/Critic (the parallel work that dominates the budget). Recommended for serious runs.
+- `--llm opencode` — shells out to OpenCode (`opencode run --format json`), using the provider and model configured in OpenCode.
+- `--llm pi` — shells out to Pi (`pi --mode json -p`), using the provider and model configured in Pi.
+- `--llm hybrid` — Claude on Architect/Planner/Critic/Surgeon (where upstream decisions and review matter), Codex on Story (the parallel work that dominates the budget). Recommended for serious runs.
 
 Per-phase overrides exist (`--architect-llm`, `--planner-llm`, `--story-llm`, `--critic-llm`, `--surgeon-llm`) if you want to mix anything yourself.
 
@@ -138,7 +140,8 @@ Arguments:
   goal                         Project goal (opens welcome screen if omitted)
 
 Options:
-  --llm <name>                 Backend for every phase: claude | codex | openai | hybrid
+  --llm <name>                 Backend for every phase: claude | codex | openai |
+                               opencode | pi | hybrid
                                (default: claude)
   --architect-llm <name>       Override LLM for Architect only
   --planner-llm <name>         Override LLM for Planner only
@@ -150,6 +153,8 @@ Options:
   --no-model-routing           Use opus for everything (disables routing)
   --parallel <N>               Max concurrent stories, 0 = unlimited (default: 0)
   --timeout <seconds>          Story timeout in seconds (default: 600)
+  --coordination <mode>        legacy (default) | collective (experimental)
+  --local-only                Disable Baro-owned pushes and PR creation
   --dry-run                    Generate plan only, save to prd.json, do not execute
   --resume                     Resume from existing prd.json (also runs dry-run plans)
   --skip-context               Skip CLAUDE.md / AGENTS.md auto-generation
@@ -162,6 +167,8 @@ Options:
 - At least one of:
   - [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli) authenticated (for `--llm claude`, the default)
   - [OpenAI Codex CLI](https://github.com/openai/codex) authenticated (for `--llm codex`)
+  - [OpenCode CLI](https://opencode.ai) with a provider configured (for `--llm opencode`)
+  - Pi CLI with a provider configured (for `--llm pi`)
   - `OPENAI_API_KEY` exported (for `--llm openai`)
   - Both Claude CLI **and** Codex CLI authenticated (for `--llm hybrid`)
 - macOS (arm64/x64), Linux (x64/arm64), or Windows (x64)
@@ -172,7 +179,7 @@ Options:
 
 ## Architecture
 
-Rust binary distributed via npm. TUI built with ratatui, async execution with tokio, one CLI subprocess per story (Claude Code, OpenAI Codex, or Mozaik-native OpenAI, depending on `--llm` / `--story-llm`). All agents communicate over a shared [Mozaik](https://github.com/jigjoy-ai/mozaik) event bus — no central coordinator.
+Rust binary distributed via npm. The TUI is built with ratatui and tokio. Before planning, a short-lived Mozaik lane lets the Conversation participant delegate repository research to an autonomous RepoScout. Scout starts from a deterministic snapshot, iteratively chooses only Baro-owned shell-free read/search/glob observations, excludes observed symlinks and known credential/key/cloud-state paths, and returns a bounded evidence brief or an explicitly truncated deterministic fallback. Scout and Conversation are separate provider-neutral roles even though the local CLI initially routes both through the selected backend/model. Their provider process is isolated in an empty temporary directory: Claude, OpenCode and Pi use explicit no-tool modes, while Codex uses a strict least-privilege profile that denies the empty workspace, tool network and inherited shell environment and ignores local config/rules. Every provider route then validates the candidate goal before acceptance. Claude, Codex and native OpenAI can inspect the checkout read-only; OpenCode and Pi use an isolated inference-only Architect with Baro's bounded brokered context. The pre-acceptance Codex Architect can explore the checkout from its read-only working root, while strict CLI config disables automatic repository `AGENTS.md`/project-document injection so those files are evidence rather than trusted instructions. The repository-scoped pre-PRD transcript survives restart, while interrupted provider turns are closed before retry. During execution, Board/Conductor, worker factories and observers share a separate [Mozaik](https://github.com/jigjoy-ai/mozaik) event bus; CLI workers are bridged from subprocesses, while native OpenAI-compatible workers run in-process. The current Conductor remains the default; `--coordination collective --local-only` enables the experimental claim/lease/integration engine while disabling Baro-owned pushes and PR creation. Use a remote-free disposable immutable clone when hard filesystem isolation is required, because story agents can execute shell commands and concurrent checkout mutation can race path checks.
 
 ## License
 
