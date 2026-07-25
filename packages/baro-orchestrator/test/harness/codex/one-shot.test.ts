@@ -111,6 +111,33 @@ describe("runCodexOneShot exit contract", () => {
         })
     })
 
+    it("resolves a terminal item typed `message` (mapper alias) on a clean exit", async () => {
+        // The stream mapper treats item.type "message" as an alias for
+        // "agent_message" (stream-mapper.ts). The one-shot must agree, or a
+        // successful run whose terminal item is typed "message" is rejected as
+        // "produced no agent_message".
+        await withTempDir("baro-codex-message-alias-", async (dir) => {
+            const bin = join(dir, "message-alias-codex.mjs")
+            writeFileSync(
+                bin,
+                `#!/usr/bin/env node
+console.log(JSON.stringify({
+    type: "item.completed",
+    item: { type: "message", text: "structured message alias" },
+}));
+`,
+            )
+            chmodSync(bin, 0o755)
+
+            const result = await runCodexOneShot({
+                prompt: "goal",
+                cwd: dir,
+                codexBin: bin,
+            })
+            assert.equal(result, "structured message alias")
+        })
+    })
+
     it("returns the terminal agent message instead of corrupting it with progress text", async () => {
         await withTempDir("baro-codex-terminal-message-", async (dir) => {
             const terminal = '{"schemaVersion":1,"kind":"ready"}'
