@@ -107,7 +107,20 @@ fn transcript_lines(app: &App, lines: &mut Vec<Line<'static>>) {
         ]));
         return;
     }
+    let done_in_feed = app
+        .session_feed
+        .blocks()
+        .iter()
+        .any(|b| matches!(b, SessionBlock::Done { .. }));
     for turn in app.conversation.transcript() {
+        // The Done block already renders the run summary in place; the
+        // durable system turn only matters for restored sessions.
+        if done_in_feed
+            && turn.role == TranscriptRole::System
+            && (turn.text.starts_with("Run completed") || turn.text.starts_with("Run stopped"))
+        {
+            continue;
+        }
         let (label, style) = match turn.role {
             TranscriptRole::User => (
                 "You",
@@ -268,6 +281,39 @@ fn feed_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {
                         Style::default().fg(theme::TEXT_DIM),
                     )));
                 }
+                if let Some(pr) = &app.pr_url {
+                    lines.push(Line::from(vec![
+                        Span::styled("    PR ", Style::default().fg(theme::TEXT_DIM)),
+                        Span::styled(pr.clone(), Style::default().fg(theme::ACCENT)),
+                    ]));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("  › ", Style::default().fg(theme::ACCENT)),
+                    Span::styled(
+                        "What next? ",
+                        Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "Type to ask about the run or start the next iteration",
+                        Style::default().fg(theme::TEXT_DIM),
+                    ),
+                ]));
+                let mut hints = vec![Span::styled(
+                    "    tab review changes",
+                    Style::default().fg(theme::TEXT_DIM),
+                )];
+                if app.pr_url.is_some() {
+                    hints.push(Span::styled(
+                        "  ·  ctrl+p open PR",
+                        Style::default().fg(theme::TEXT_DIM),
+                    ));
+                }
+                hints.push(Span::styled(
+                    "  ·  esc quit",
+                    Style::default().fg(theme::TEXT_DIM),
+                ));
+                lines.push(Line::from(hints));
             }
         }
     }
@@ -346,10 +392,12 @@ fn input_box(app: &App) -> Paragraph<'static> {
             SPINNER[(app.tick_count as usize / 2) % SPINNER.len()]
         )
     } else if app.conversation_input.is_empty() {
-        if app.conversation.phase() == ConversationPhase::Executing {
-            " Message baro… (Tab workbench)".to_string()
-        } else {
-            " Type a goal, answer, or follow-up…".to_string()
+        match app.conversation.phase() {
+            ConversationPhase::Executing => " Message baro… (Tab workbench)".to_string(),
+            ConversationPhase::Completed | ConversationPhase::Failed => {
+                " Ask what was done, or describe the next iteration…".to_string()
+            }
+            _ => " Type a goal, answer, or follow-up…".to_string(),
         }
     } else {
         format!(" {}█", app.conversation_input)
@@ -404,6 +452,7 @@ fn clip(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
 
 
     #[test]

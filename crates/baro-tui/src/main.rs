@@ -1849,6 +1849,13 @@ async fn run_app(
                         KeyCode::Tab => {
                             app.workbench_overlay = true;
                         }
+                        KeyCode::Char('p')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            if let Some(pr) = app.pr_url.clone() {
+                                open_in_browser(&pr);
+                            }
+                        }
                         KeyCode::Up => app.session_feed.scroll_up(),
                         KeyCode::Down => app.session_feed.scroll_down(),
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -2663,6 +2670,27 @@ async fn run_app(
 
 fn headless_failure_reason(app: &App) -> Option<String> {
     app.exit_reason.clone()
+}
+
+/// Fire-and-forget: open a URL with the platform opener. Failures are
+/// non-fatal — the URL stays visible in the transcript either way.
+fn open_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let opener = "xdg-open";
+    #[cfg(windows)]
+    let opener = "cmd";
+    let mut command = std::process::Command::new(opener);
+    #[cfg(windows)]
+    command.args(["/C", "start", "", url]);
+    #[cfg(not(windows))]
+    command.arg(url);
+    let _ = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 fn conversation_intent(app: &App) -> conversation_runner::ConversationIntent {
