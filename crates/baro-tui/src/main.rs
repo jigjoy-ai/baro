@@ -31,6 +31,7 @@ mod resume;
 mod review_refiner;
 mod screens;
 mod service;
+mod session_feed;
 mod subprocess;
 mod theme;
 mod ui;
@@ -1809,8 +1810,47 @@ async fn run_app(
                         }
                         _ => {}
                     },
+                    Screen::Conversation if app.workbench_overlay => match key.code {
+                        KeyCode::Tab | KeyCode::Esc | KeyCode::Char('q') => {
+                            app.workbench_overlay = false;
+                        }
+                        KeyCode::Char('1') => app.main_view = app::MainView::Activity,
+                        KeyCode::Char('2') => app.main_view = app::MainView::Plan,
+                        KeyCode::Char('3') => app.main_view = app::MainView::Stats,
+                        KeyCode::Char('4') => app.main_view = app::MainView::Diff,
+                        KeyCode::Char('5') => app.main_view = app::MainView::Decisions,
+                        KeyCode::Up | KeyCode::Char('k') => match app.main_view {
+                            app::MainView::Plan => app.dag_scroll_up(),
+                            app::MainView::Diff => app.diff_scroll_up(),
+                            app::MainView::Decisions => {
+                                app.decisions_scroll = app.decisions_scroll.saturating_sub(1);
+                            }
+                            _ => {}
+                        },
+                        KeyCode::Down | KeyCode::Char('j') => match app.main_view {
+                            app::MainView::Plan => {
+                                let total = app.dag_line_count();
+                                let visible = terminal
+                                    .size()
+                                    .map(|s| s.height.saturating_sub(10))
+                                    .unwrap_or(20);
+                                app.dag_scroll_down(total, visible);
+                            }
+                            app::MainView::Diff => app.diff_scroll_down(),
+                            app::MainView::Decisions => {
+                                app.decisions_scroll = app.decisions_scroll.saturating_add(1);
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    },
                     Screen::Conversation => match key.code {
                         KeyCode::Esc => return Ok(()),
+                        KeyCode::Tab => {
+                            app.workbench_overlay = true;
+                        }
+                        KeyCode::Up => app.session_feed.scroll_up(),
+                        KeyCode::Down => app.session_feed.scroll_down(),
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.conversation_input.clear();
                         }

@@ -11,5 +11,6 @@ pub mod mode_picker;
 pub mod planning;
 pub mod provider_picker;
 pub mod review;
+pub mod session;
 pub mod welcome;
 pub mod widgets;

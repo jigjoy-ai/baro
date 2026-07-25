@@ -4,6 +4,7 @@ use std::time::Instant;
 use ratatui::widgets::ListState;
 
 use crate::conversation::{ConversationPhase, ConversationSession};
+use crate::session_feed::{SessionBlock, SessionFeed};
 use crate::events::{BaroEvent, DoneStats, RunVerificationEvidence};
 
 use crate::constants::MAX_LOG_LINES;
@@ -539,6 +540,10 @@ pub struct App {
     /// When Some, the activity view is pinned to this story instead of
     /// following the active-agent tab strip.
     pub activity_filter: Option<String>,
+    /// v2 session spine: run lifecycle rendered as chat blocks.
+    pub session_feed: SessionFeed,
+    /// Workbench (execute screen) shown as an overlay above the session.
+    pub workbench_overlay: bool,
     pub diff_scroll_offset: u16,
     /// File the diff view should scroll to; applied at render (only there
     /// is the composed diff's line layout known), then the flag clears.
@@ -683,6 +688,8 @@ impl App {
             explorer_width: EXPLORER_DEFAULT_WIDTH,
             explorer_file_ix: 0,
             activity_filter: None,
+            session_feed: SessionFeed::default(),
+            workbench_overlay: false,
             diff_scroll_offset: 0,
             diff_target: None,
             diff_scroll_pending: false,
@@ -745,7 +752,12 @@ impl App {
     }
 
     pub fn start_execution(&mut self) {
-        self.screen = Screen::Execute;
+        // Conversation-driven sessions keep the chat spine; the workbench
+        // stays one Tab away. Direct-goal flows keep the legacy screen.
+        if self.screen != Screen::Conversation {
+            self.screen = Screen::Execute;
+        }
+        self.session_feed.clear();
         self.start_time = Instant::now();
         self.dag_scroll_offset = 0;
         self.active_stories.clear();
@@ -1247,6 +1259,10 @@ impl App {
                     })
                     .collect();
                 self.start_time = Instant::now();
+                self.session_feed.push(SessionBlock::PlanReady {
+                    total: self.total,
+                    mode: self.run_mode.clone().unwrap_or_default(),
+                });
             }
 
             BaroEvent::Dag { levels } => {
@@ -1260,6 +1276,7 @@ impl App {
                 if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
                     story.status = StoryStatus::Running;
                 }
+                self.session_feed.push(SessionBlock::Story { id: id.clone() });
                 self.active_stories.insert(
                     id,
                     ActiveStory {
@@ -1451,6 +1468,11 @@ impl App {
             } => {
                 self.done = true;
                 self.total_time_secs = total_time_secs;
+                let mut summary: Vec<(String, String)> = Vec::new();
+                if let Some(reason) = &abort_reason {
+                    summary.push(("stopped".to_string(), reason.clone()));
+                }
+                self.session_feed.push(SessionBlock::Done { success, summary });
                 self.final_stats = Some(stats);
                 let embedded_status = verification
                     .as_ref()
@@ -1545,6 +1567,10 @@ impl App {
                 removed,
                 rewired,
             } => {
+                self.session_feed.push(SessionBlock::Replan {
+                    source: source.clone(),
+                    reason: reason.clone(),
+                });
                 for a in added {
                     if let Some(existing) = self.stories.iter_mut().find(|s| s.id == a.id) {
                         existing.title = a.title;
@@ -1608,6 +1634,9 @@ impl App {
                         format!("intervention ({}): {} — {}", source, action, reason),
                     ),
                 );
+                self.session_feed.push(SessionBlock::Note {
+                    text: format!("{}: {} {} — {}", source, action, id, reason),
+                });
             }
 
             BaroEvent::StoryMerged { id, mode } => {
@@ -1618,6 +1647,11 @@ impl App {
                     "merge",
                     format!("{} merged ({})", id, mode),
                 ));
+                self.session_feed.push(SessionBlock::Merge {
+                    id: id.clone(),
+                    ok: true,
+                    detail: None,
+                });
             }
 
             BaroEvent::MergeFailed { id, error } => {
@@ -1628,13 +1662,19 @@ impl App {
                     "error",
                     format!("{} merge failed: {}", id, error),
                 ));
+                self.session_feed.push(SessionBlock::Merge {
+                    id: id.clone(),
+                    ok: false,
+                    detail: Some(error.clone()),
+                });
             }
 
-            BaroEvent::LevelStarted {
-                ordinal,
-                story_ids: _,
-            } => {
+            BaroEvent::LevelStarted { ordinal, story_ids } => {
                 self.level_states.insert(ordinal, LevelRunState::Running);
+                self.session_feed.push(SessionBlock::Level {
+                    ordinal: ordinal as u32,
+                    story_ids,
+                });
             }
 
             BaroEvent::LevelCompleted {
@@ -1656,6 +1696,13 @@ impl App {
                     "recovery",
                     format!("recovery attempt {} — {}", attempt, story_ids.join(", ")),
                 ));
+                self.session_feed.push(SessionBlock::Note {
+                    text: format!(
+                        "recovery attempt {} — {}",
+                        attempt,
+                        story_ids.join(", ")
+                    ),
+                });
                 self.recoveries.push((attempt, story_ids));
             }
 
@@ -1675,6 +1722,11 @@ impl App {
                 if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
                     story.critic_pass = Some(pass);
                 }
+                self.session_feed.push(SessionBlock::Critique {
+                    id: id.clone(),
+                    pass,
+                    reason: reasoning.clone(),
+                });
                 let text = if pass {
                     "critic: pass".to_string()
                 } else if violated.is_empty() {

@@ -8,7 +8,13 @@ pub fn render(f: &mut Frame, app: &mut App) {
     match app.screen {
         Screen::ProviderPicker => screens::provider_picker::draw(f, app, area),
         Screen::ApiKeyInput => screens::api_key_input::draw(f, app, area),
-        Screen::Conversation => screens::conversation::render(f, app),
+        Screen::Conversation => {
+            if app.workbench_overlay {
+                screens::execute::render(f, app)
+            } else {
+                screens::session::render(f, app)
+            }
+        }
         Screen::ModePicker => screens::mode_picker::draw(f, app, area),
         Screen::Welcome => screens::welcome::render(f, app),
         Screen::Context => screens::context::render(f, app),
