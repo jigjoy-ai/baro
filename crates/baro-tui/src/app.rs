@@ -752,11 +752,14 @@ impl App {
     }
 
     pub fn start_execution(&mut self) {
-        // Conversation-driven sessions keep the chat spine; the workbench
-        // stays one Tab away. Direct-goal flows keep the legacy screen.
-        if self.screen != Screen::Conversation {
-            self.screen = Screen::Execute;
-        }
+        // A conversation-owned run returns to the chat spine even when the
+        // Planning/Review screens sat in between; the workbench stays one
+        // Tab away. Only non-conversation flows keep the legacy screen.
+        self.screen = if self.conversation.goal_envelope().is_some() {
+            Screen::Conversation
+        } else {
+            Screen::Execute
+        };
         self.session_feed.clear();
         self.start_time = Instant::now();
         self.dag_scroll_offset = 0;
