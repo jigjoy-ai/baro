@@ -3,7 +3,9 @@
 //! background thread at startup; until it is ready (or for unknown
 //! languages) callers fall back to their single-color rendering.
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
 
 use ratatui::{
     style::{Color, Style},
@@ -36,8 +38,12 @@ pub fn warm() {
     });
 }
 
+static CACHE: OnceLock<Mutex<HashMap<u64, Vec<Line<'static>>>>> = OnceLock::new();
+
 /// Highlight one fenced block. `None` when the set is still loading or the
-/// language is unknown — the caller keeps its plain rendering.
+/// language is unknown — the caller keeps its plain rendering. Results are
+/// memoized: the render loop redraws at 30fps and re-highlighting every
+/// block every frame made scrolling crawl.
 pub fn highlight_block(
     lang: &str,
     code: &str,
@@ -45,6 +51,13 @@ pub fn highlight_block(
 ) -> Option<Vec<Line<'static>>> {
     if lang.is_empty() {
         return None;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (lang, code, indent).hash(&mut hasher);
+    let key = hasher.finish();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(lines) = cache.lock().ok()?.get(&key) {
+        return Some(lines.clone());
     }
     let syntaxes = SYNTAXES.get()?;
     let syntax = syntaxes
@@ -68,6 +81,13 @@ pub fn highlight_block(
             Err(_) => spans.push(Span::raw(raw.to_string())),
         }
         lines.push(Line::from(spans));
+    }
+    if let Ok(mut cache) = cache.lock() {
+        // Streaming fences produce a new key per delta; keep the map small.
+        if cache.len() > 256 {
+            cache.clear();
+        }
+        cache.insert(key, lines.clone());
     }
     Some(lines)
 }

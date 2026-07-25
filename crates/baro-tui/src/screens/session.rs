@@ -102,18 +102,10 @@ fn header_line(app: &App) -> Paragraph<'static> {
 fn transcript_lines(app: &App, lines: &mut Vec<Line<'static>>) {
     if app.conversation.transcript().is_empty() && app.session_feed.blocks().is_empty() {
         lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "  Baro  ",
-                Style::default()
-                    .fg(theme::ACCENT_BRIGHT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "What do you want to build or change?",
-                Style::default().fg(theme::TEXT),
-            ),
-        ]));
+        lines.push(Line::from(Span::styled(
+            "  What do you want to build or change?",
+            Style::default().fg(theme::TEXT),
+        )));
         return;
     }
     let done_in_feed = app
@@ -130,37 +122,34 @@ fn transcript_lines(app: &App, lines: &mut Vec<Line<'static>>) {
         {
             continue;
         }
-        let (label, style) = match turn.role {
-            TranscriptRole::User => (
-                "You",
-                Style::default()
-                    .fg(theme::SUCCESS)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            TranscriptRole::Assistant => (
-                "Baro",
-                Style::default()
-                    .fg(theme::ACCENT_BRIGHT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            TranscriptRole::System => ("·", Style::default().fg(theme::MUTED)),
-        };
-        if turn.role == TranscriptRole::Assistant {
-            lines.push(Line::from(Span::styled("  Baro".to_string(), style)));
-            markdown_lines(&turn.text, "       ", lines);
-        } else {
-            for (index, text) in turn.text.lines().enumerate() {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        if index == 0 {
-                            format!("  {label:<5}")
-                        } else {
-                            "       ".to_string()
-                        },
-                        style,
-                    ),
-                    Span::styled(text.to_string(), Style::default().fg(theme::TEXT)),
-                ]));
+        match turn.role {
+            TranscriptRole::Assistant => {
+                markdown_lines(&turn.text, "  ", lines);
+            }
+            TranscriptRole::User => {
+                for (index, text) in turn.text.lines().enumerate() {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            if index == 0 { "› " } else { "  " }.to_string(),
+                            Style::default().fg(theme::ACCENT),
+                        ),
+                        Span::styled(
+                            text.to_string(),
+                            Style::default().fg(theme::TEXT_DIM),
+                        ),
+                    ]));
+                }
+            }
+            TranscriptRole::System => {
+                for text in turn.text.lines() {
+                    lines.push(Line::from(vec![
+                        Span::styled("· ".to_string(), Style::default().fg(theme::MUTED)),
+                        Span::styled(
+                            text.to_string(),
+                            Style::default().fg(theme::MUTED),
+                        ),
+                    ]));
+                }
             }
         }
         lines.push(Line::from(""));
@@ -173,13 +162,7 @@ fn streaming_lines(app: &App, lines: &mut Vec<Line<'static>>) {
     if text.is_empty() {
         return;
     }
-    lines.push(Line::from(Span::styled(
-        "  Baro".to_string(),
-        Style::default()
-            .fg(theme::ACCENT_BRIGHT)
-            .add_modifier(Modifier::BOLD),
-    )));
-    markdown_lines(text, "       ", lines);
+    markdown_lines(text, "  ", lines);
     lines.push(Line::from(""));
 }
 
