@@ -13,7 +13,8 @@ use tokio::process::Command;
 
 use crate::app::LlmProvider;
 use crate::conversation::{
-    ConversationError, ConversationSession, ConversationWireResponse, TranscriptRole,
+    ConversationError, ConversationKind, ConversationSession, ConversationWireResponse,
+    TranscriptRole,
 };
 use crate::discovery::{self, ScriptEntry};
 use crate::repository_brief::{
@@ -63,12 +64,14 @@ pub struct ConversationRunOptions<'a> {
     pub provider_timeout_ms: u64,
     pub openai_api_key: Option<&'a str>,
     pub openai_base_url: Option<&'a str>,
+    /// Streaming sink for the assistant's partial reply (cumulative text).
+    pub on_delta: Option<&'a (dyn Fn(String) + Send + Sync)>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConversationTurnResult {
     pub(crate) response: ConversationWireResponse,
-    pub(crate) repository_brief: RepositoryBriefV1,
+    pub(crate) repository_brief: Option<RepositoryBriefV1>,
 }
 
 /// Run the exact pending request in a fresh provider subprocess.
@@ -179,9 +182,27 @@ async fn run_conversation_turn_with_entry(
             .timeout_ms
             .saturating_add(OUTER_TIMEOUT_SHUTDOWN_GRACE_MS),
     );
+    let expected_request_id = request_id.to_string();
+    let on_delta = options.on_delta;
     match tokio::time::timeout(
         outer_timeout,
-        subprocess::spawn_and_capture_streaming(command, "conversation", |_| {}),
+        subprocess::spawn_and_capture_streaming(command, "conversation", move |line| {
+            let Some(sink) = on_delta else { return };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                return;
+            };
+            if value.get("type").and_then(|v| v.as_str()) != Some("conversation_delta") {
+                return;
+            }
+            if value.get("requestId").and_then(|v| v.as_str())
+                != Some(expected_request_id.as_str())
+            {
+                return;
+            }
+            if let Some(append) = value.get("append").and_then(|v| v.as_str()) {
+                sink(append.to_string());
+            }
+        }),
     )
     .await
     {
@@ -237,15 +258,25 @@ async fn run_conversation_turn_with_entry(
             log_path: None,
         }
     })?;
-    let repository_brief = parse_repository_brief_sidecar(
-        &sidecar,
-        session.session_id(),
-        request_id,
-    )
-    .map_err(|message| ProcessRunError {
-        message,
-        log_path: None,
-    })?;
+    // Conversational turns skip RepoScout, so the sidecar may stay empty; a
+    // ready response is validated below to carry one.
+    let repository_brief = if sidecar.trim().is_empty() {
+        None
+    } else {
+        Some(
+            parse_repository_brief_sidecar(&sidecar, session.session_id(), request_id)
+                .map_err(|message| ProcessRunError {
+                    message,
+                    log_path: None,
+                })?,
+        )
+    };
+    if repository_brief.is_none() && response.kind == ConversationKind::Ready {
+        return Err(ProcessRunError {
+            message: "ready conversation turn arrived without a repository brief".to_string(),
+            log_path: None,
+        });
+    }
     Ok(ConversationTurnResult {
         response,
         repository_brief,
@@ -515,6 +546,7 @@ writeFileSync(get("--result-file"), JSON.stringify({{
                 provider_timeout_ms: 1_000,
                 openai_api_key: None,
                 openai_base_url: None,
+                on_delta: None,
             },
             ScriptEntry::NodeJs(script),
         )
@@ -524,7 +556,11 @@ writeFileSync(get("--result-file"), JSON.stringify({{
         assert_eq!(result.response.kind, ConversationKind::Ready);
         let public = serde_json::to_value(&result.response).unwrap();
         assert_eq!(public.as_object().unwrap().len(), 7);
-        let context = result.repository_brief.render_architect_context().unwrap();
+        let context = result
+            .repository_brief
+            .expect("ready fixture carries a brief")
+            .render_architect_context()
+            .unwrap();
         assert!(context.contains("src/runtime/cancellation/abort-coordinator.ts"));
         assert!(context.contains("baro-process-sidecar-evidence"));
     }
@@ -544,10 +580,16 @@ writeFileSync(get("--result-file"), JSON.stringify({
   schemaVersion: 1,
   sessionId: input.sessionId,
   requestId: input.requestId,
-  kind: "answer",
-  message: "No context sidecar was written.",
+  kind: "ready",
+  message: "Ready without repository evidence.",
   questions: [],
-  goalEnvelope: null
+  goalEnvelope: {
+    objective: "Do the work",
+    constraints: [],
+    acceptanceCriteria: ["observable"],
+    nonGoals: [],
+    assumptions: []
+  }
 }));
 "#,
         )
@@ -568,13 +610,18 @@ writeFileSync(get("--result-file"), JSON.stringify({
                 provider_timeout_ms: 1_000,
                 openai_api_key: None,
                 openai_base_url: None,
+                on_delta: None,
             },
             ScriptEntry::NodeJs(script),
         )
         .await
         .unwrap_err();
 
-        assert!(error.message.contains("repository brief sidecar"));
+        assert!(
+            error.message.contains("without a repository brief"),
+            "unexpected error: {}",
+            error.message
+        );
     }
 
     fn complete_ready_cycle(session: &mut ConversationSession, request_id: &str, text: &str) {

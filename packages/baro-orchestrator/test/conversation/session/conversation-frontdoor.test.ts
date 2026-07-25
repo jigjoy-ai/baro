@@ -203,13 +203,13 @@ describe("pre-PRD conversation front door", () => {
             response: readyWire("session-authority", request.requestId),
         }))
         await new Promise((resolve) => setTimeout(resolve, 10))
-        assert.equal(modelCalls, 0)
+        assert.equal(modelCalls, 1)
 
         gate.resolve(validBrief("c", "src/real-billing.ts"))
         const [firstResult, replayResult] = await Promise.all([first, replay])
         assert.equal(firstResult, replayResult)
         assert.equal(scans, 1)
-        assert.equal(modelCalls, 1)
+        assert.equal(modelCalls, 2)
         assert.match(prompt, /src\/real-billing\.ts/)
         assert.doesNotMatch(prompt, /forged\.ts|wrong-label\.ts/)
         assert.equal(await host.submit(request), firstResult)
@@ -218,7 +218,7 @@ describe("pre-PRD conversation front door", () => {
         leaveAll(environment, host, conversation, scout)
     })
 
-    it("fails closed on RepoScout timeout without invoking the model", async () => {
+    it("fails closed on RepoScout timeout after the model requests context", async () => {
         let modelCalls = 0
         let aborted = false
         const intake = new ConversationIntake({
@@ -249,14 +249,14 @@ describe("pre-PRD conversation front door", () => {
             /repository context timeout: repository scan timed out/,
         )
         assert.equal(aborted, true)
-        assert.equal(modelCalls, 0)
+        assert.equal(modelCalls, 1)
     })
 
     it("awaits aborted RepoScout settlement before returning timeout failure", async () => {
         let settled = false
         const intake = new ConversationIntake({
             sessionId: "session-scout-settlement",
-            responder: readyResponder(() => assert.fail("model must not run")),
+            responder: readyResponder(() => undefined),
         })
         const startedAt = Date.now()
 
@@ -355,7 +355,7 @@ describe("pre-PRD conversation front door", () => {
             }),
             /repository context invalid_brief/,
         )
-        assert.equal(modelCalls, 0)
+        assert.equal(modelCalls, 1)
     })
 })
 

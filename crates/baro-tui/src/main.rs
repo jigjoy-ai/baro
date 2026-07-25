@@ -31,6 +31,7 @@ mod resume;
 mod review_refiner;
 mod screens;
 mod service;
+mod session_feed;
 mod subprocess;
 mod theme;
 mod ui;
@@ -238,6 +239,8 @@ enum AppEvent {
     ContextReady(String),
     ContextError(String),
     ConversationResponse(conversation_runner::ConversationTurnResult),
+    /// Cumulative partial assistant text for the pending conversation turn.
+    ConversationDelta { request_id: String, text: String },
     /// A conversation `ready` response is only a candidate until the
     /// repository-aware Architect validates it. The durable session keeps one
     /// pending response slot: either this candidate or an Architect-authored
@@ -1240,14 +1243,28 @@ async fn run_app(
     let mut last_draw = Instant::now()
         .checked_sub(Duration::from_millis(100))
         .unwrap_or_else(Instant::now);
+    let mut dirty = true;
     loop {
         if let Some(t) = terminal.as_deref_mut() {
-            if last_draw.elapsed() >= Duration::from_millis(33) {
+            if dirty && last_draw.elapsed() >= Duration::from_millis(33) {
                 t.draw(|f| ui::render(f, &mut app))?;
                 last_draw = Instant::now();
+                dirty = false;
             }
         }
-        match rx.recv().await {
+        // A throttled-away frame must not wait for the NEXT event to render:
+        // bound the wait so a lone keystroke appears within one frame.
+        let received = if dirty {
+            let wait = Duration::from_millis(33).saturating_sub(last_draw.elapsed());
+            match tokio::time::timeout(wait.max(Duration::from_millis(1)), rx.recv()).await {
+                Ok(event) => event,
+                Err(_) => continue,
+            }
+        } else {
+            rx.recv().await
+        };
+        dirty = true;
+        match received {
             Some(AppEvent::Baro(ev)) => {
                 if matches!(ev, BaroEvent::NotificationReady) {
                     notification::notify_completion();
@@ -1299,7 +1316,22 @@ async fn run_app(
                     }
                 }
             }
+            Some(AppEvent::ConversationDelta { request_id, text }) => {
+                if app
+                    .conversation
+                    .pending_request_id()
+                    .is_some_and(|pending| pending == request_id)
+                {
+                    match &mut app.conversation_stream {
+                        Some((current, accumulated)) if *current == request_id => {
+                            accumulated.push_str(&text);
+                        }
+                        _ => app.conversation_stream = Some((request_id, text)),
+                    }
+                }
+            }
             Some(AppEvent::ConversationResponse(turn)) => {
+                app.conversation_stream = None;
                 let conversation_runner::ConversationTurnResult {
                     response,
                     repository_brief,
@@ -1309,6 +1341,10 @@ async fn run_app(
                     && supports_preaccept_architect_outcome(app.architect_llm)
                 {
                     let failed_request_id = response.request_id.clone();
+                    // The runner fails closed on Ready-without-brief, so this
+                    // expect can only trip on a programming error.
+                    let repository_brief = repository_brief
+                        .expect("ready conversation turn always carries a repository brief");
                     if let Err(error) = spawn_conversation_architect_validation(
                         &mut app,
                         &cwd,
@@ -1447,6 +1483,7 @@ async fn run_app(
                 error,
                 log_path,
             }) => {
+                app.conversation_stream = None;
                 let architect_failure = app.architect_status == app::ArchitectStatus::Running;
                 let deterministic_reason = if architect_failure {
                     "Repository validation failed before the goal was accepted; retry the request."
@@ -1530,6 +1567,9 @@ async fn run_app(
                         // auto-confirm and execute (no review screen).
                         println!(r#"{{"type":"plan_ready","stories":{}}}"#, stories.len());
                         confirm_and_execute(&mut app, stories, &cwd, tx.clone());
+                    } else if app.conversation.goal_envelope().is_some() {
+                        // Conversation-owned: confirm inline in the session.
+                        app.pending_plan = Some(stories);
                     } else {
                         app.show_review(stories);
                     }
@@ -1734,7 +1774,29 @@ async fn run_app(
                     notification::clear_badge();
                 }
 
-                match app.screen {
+                // Workbench overlay: the session keeps its screen, but keys
+                // route to the full Execute handler for parity. Tab (and
+                // q/Esc outside the message composer) closes the overlay.
+                let effective_screen = if app.screen == Screen::Conversation
+                    && app.workbench_overlay
+                {
+                    match key.code {
+                        KeyCode::Tab => {
+                            app.workbench_overlay = false;
+                            continue;
+                        }
+                        KeyCode::Esc | KeyCode::Char('q')
+                            if app.agent_msg_input.is_none() =>
+                        {
+                            app.workbench_overlay = false;
+                            continue;
+                        }
+                        _ => Screen::Execute,
+                    }
+                } else {
+                    app.screen
+                };
+                match effective_screen {
                     Screen::ProviderPicker => match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
                         KeyCode::Up | KeyCode::Char('k') => {
@@ -1811,6 +1873,26 @@ async fn run_app(
                     },
                     Screen::Conversation => match key.code {
                         KeyCode::Esc => return Ok(()),
+                        KeyCode::Tab => {
+                            app.workbench_overlay = true;
+                        }
+                        KeyCode::Char('p')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            if let Some(pr) = app.pr_url.clone() {
+                                open_in_browser(&pr);
+                            }
+                        }
+                        KeyCode::Char('v')
+                            if app.pending_plan.is_some()
+                                && !app.conversation_accepts_input() =>
+                        {
+                            if let Some(stories) = app.pending_plan.take() {
+                                app.show_review(stories);
+                            }
+                        }
+                        KeyCode::Up => app.session_feed.scroll_up(),
+                        KeyCode::Down => app.session_feed.scroll_down(),
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.conversation_input.clear();
                         }
@@ -1823,14 +1905,38 @@ async fn run_app(
                             spawn_pending_conversation(&mut app, &cwd, tx.clone(), intent);
                         }
                         KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
-                            if app.conversation_accepts_input()
-                                && !app.conversation_input.trim().is_empty()
-                            {
+                            if let Some(stories) = app.pending_plan.take() {
+                                confirm_and_execute(&mut app, stories, &cwd, tx.clone());
+                            } else if app.conversation_input.trim().is_empty() {
+                            } else if app.conversation_accepts_input() {
                                 let message = std::mem::take(&mut app.conversation_input);
                                 if let Err(error) =
                                     submit_conversation_message(&mut app, &cwd, tx.clone(), message)
                                 {
                                     app.conversation_error = Some(error);
+                                }
+                            } else if matches!(
+                                app.conversation.phase(),
+                                ConversationPhase::Executing | ConversationPhase::Verifying
+                            ) {
+                                // Mid-run: "@S3 ..." targets one agent; anything
+                                // else goes to the collective dialogue.
+                                let message = std::mem::take(&mut app.conversation_input);
+                                let trimmed = message.trim().to_string();
+                                let (target, body) = match trimmed.strip_prefix('@') {
+                                    Some(rest) => match rest.split_once(char::is_whitespace) {
+                                        Some((id, body)) => {
+                                            (id.to_string(), body.trim().to_string())
+                                        }
+                                        None => (rest.to_string(), String::new()),
+                                    },
+                                    None => (app::DIALOGUE_AGENT_ID.to_string(), trimmed),
+                                };
+                                if body.is_empty() && target != app::DIALOGUE_AGENT_ID {
+                                    app.conversation_error =
+                                        Some(format!("empty message for @{target}"));
+                                } else {
+                                    send_agent_message(&mut app, &cwd, target, body);
                                 }
                             }
                         }
@@ -2277,49 +2383,7 @@ async fn run_app(
                         }
                         KeyCode::Enter if app.agent_msg_input.is_some() => {
                             if let Some((id, text)) = app.agent_msg_input.take() {
-                                let text = text.trim().to_string();
-                                if !text.is_empty() {
-                                    let runtime_request_id = if id == app::DIALOGUE_AGENT_ID {
-                                        let request_id = app.next_conversation_request_id();
-                                        match app.conversation.begin_request(&request_id, &text) {
-                                            Ok(()) => {
-                                                persist_conversation(&app.conversation, &cwd);
-                                                Some(request_id)
-                                            }
-                                            Err(error) => {
-                                                app.conversation_error = Some(format!(
-                                                    "cannot send conversation message: {error}"
-                                                ));
-                                                continue;
-                                            }
-                                        }
-                                    } else {
-                                        None
-                                    };
-                                    let line = message_command_line(
-                                        &id,
-                                        &text,
-                                        runtime_request_id.as_deref(),
-                                    );
-                                    let sent = app
-                                        .orchestrator_stdin
-                                        .as_ref()
-                                        .is_some_and(|sender| sender.try_send(line).is_ok());
-                                    if !sent {
-                                        if let Some(request_id) = runtime_request_id.as_deref() {
-                                            let _ = app.conversation.apply_runtime_failure(
-                                                request_id,
-                                                "orchestrator command lane is unavailable",
-                                            );
-                                            persist_conversation(&app.conversation, &cwd);
-                                            app.conversation_error = Some(
-                                                "Collective conversation is unavailable because the run command lane closed."
-                                                    .to_string(),
-                                            );
-                                        }
-                                    }
-                                    app.echo_user_message(&id, &text);
-                                }
+                                send_agent_message(&mut app, &cwd, id, text);
                             }
                         }
                         // The same durable conversation owns status questions and
@@ -2625,6 +2689,71 @@ fn headless_failure_reason(app: &App) -> Option<String> {
     app.exit_reason.clone()
 }
 
+/// Send one user->agent (or user->collective dialogue) message over the
+/// run's stdin command lane, with local echo. Shared by the workbench
+/// message composer and the session input.
+fn send_agent_message(app: &mut App, cwd: &Path, id: String, text: String) {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+    let runtime_request_id = if id == app::DIALOGUE_AGENT_ID {
+        let request_id = app.next_conversation_request_id();
+        match app.conversation.begin_request(&request_id, &text) {
+            Ok(()) => {
+                persist_conversation(&app.conversation, cwd);
+                Some(request_id)
+            }
+            Err(error) => {
+                app.conversation_error =
+                    Some(format!("cannot send conversation message: {error}"));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let line = message_command_line(&id, &text, runtime_request_id.as_deref());
+    let sent = app
+        .orchestrator_stdin
+        .as_ref()
+        .is_some_and(|sender| sender.try_send(line).is_ok());
+    if !sent {
+        if let Some(request_id) = runtime_request_id.as_deref() {
+            let _ = app
+                .conversation
+                .apply_runtime_failure(request_id, "orchestrator command lane is unavailable");
+            persist_conversation(&app.conversation, cwd);
+            app.conversation_error = Some(
+                "Collective conversation is unavailable because the run command lane closed."
+                    .to_string(),
+            );
+        }
+    }
+    app.echo_user_message(&id, &text);
+}
+
+/// Fire-and-forget: open a URL with the platform opener. Failures are
+/// non-fatal — the URL stays visible in the transcript either way.
+fn open_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let opener = "xdg-open";
+    #[cfg(windows)]
+    let opener = "cmd";
+    let mut command = std::process::Command::new(opener);
+    #[cfg(windows)]
+    command.args(["/C", "start", "", url]);
+    #[cfg(not(windows))]
+    command.arg(url);
+    let _ = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 fn conversation_intent(app: &App) -> conversation_runner::ConversationIntent {
     if matches!(
         app.conversation.phase(),
@@ -2691,6 +2820,16 @@ fn spawn_pending_conversation(
                 provider_timeout_ms,
                 openai_api_key: openai_api_key.as_deref(),
                 openai_base_url: openai_base_url.as_deref(),
+                on_delta: Some(&{
+                    let tx = tx.clone();
+                    let request_id = request_id.clone();
+                    move |text: String| {
+                        let _ = tx.try_send(AppEvent::ConversationDelta {
+                            request_id: request_id.clone(),
+                            text,
+                        });
+                    }
+                }),
             },
         )
         .await;

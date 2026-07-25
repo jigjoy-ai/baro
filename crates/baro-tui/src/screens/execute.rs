@@ -740,6 +740,7 @@ mod tests {
             .collect()
     }
 
+
     #[test]
     fn full_frame_renders_every_view_at_every_breakpoint() {
         for view in [

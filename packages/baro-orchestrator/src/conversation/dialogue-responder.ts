@@ -6,6 +6,8 @@
  * Repository knowledge arrives only through brokered prompt observations.
  */
 
+import { spawn as spawnProcess } from "node:child_process"
+import { createInterface } from "node:readline"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -328,12 +330,16 @@ function createClaudeResponder(
     const responder: DialogueResponder = async (input, signal) => {
         let stdout: string
         try {
-            stdout = await execClaude(
+            const exec = input.onDeltaText ? execClaudeStreaming : execClaude
+            stdout = await exec(
                 opts.claudeBin ?? "claude",
                 [
                     "--print",
                     "--output-format",
-                    "json",
+                    input.onDeltaText ? "stream-json" : "json",
+                    ...(input.onDeltaText
+                        ? ["--verbose", "--include-partial-messages"]
+                        : []),
                     "--model",
                     requestedModel,
                     ...(opts.effort ? ["--effort", opts.effort] : []),
@@ -362,6 +368,9 @@ function createClaudeResponder(
                     terminationGraceMs: opts.terminationGraceMs,
                     signal,
                     input: input.userPrompt,
+                    ...(input.onDeltaText
+                        ? { onDeltaText: input.onDeltaText }
+                        : {}),
                 },
             )
         } catch (error) {
@@ -1025,6 +1034,119 @@ interface ExecClaudeOptions {
     terminationGraceMs?: number
     signal: AbortSignal
     input: string
+}
+
+/**
+ * Claude stream-json variant of execClaude: forwards cumulative assistant
+ * text through onDeltaText and resolves with the final "result" event line
+ * (the same wrapper shape --output-format json produces).
+ */
+function execClaudeStreaming(
+    binary: string,
+    args: readonly string[],
+    opts: ExecClaudeOptions & { onDeltaText?: (text: string) => void },
+): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const child = spawnProcess(binary, [...args], {
+            cwd: opts.cwd,
+            env: harnessChildEnvironment(),
+            stdio: ["pipe", "pipe", "pipe"],
+        })
+        let settled = false
+        let resultLine: string | null = null
+        let accumulated = ""
+        let stderrTail = ""
+        const settle = (outcome: () => void): void => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            opts.signal?.removeEventListener("abort", onAbort)
+            outcome()
+        }
+        const kill = (): void => {
+            try {
+                child.kill("SIGTERM")
+            } catch {
+                /* already gone */
+            }
+            const graceMs = opts.terminationGraceMs ?? 2_000
+            const hard = setTimeout(() => {
+                try {
+                    child.kill("SIGKILL")
+                } catch {
+                    /* already gone */
+                }
+            }, graceMs)
+            hard.unref?.()
+        }
+        const timer = setTimeout(() => {
+            kill()
+            settle(() => {
+                const error = new Error(
+                    `claude dialogue stream timed out after ${opts.timeoutMs}ms`,
+                ) as Error & { killed?: boolean }
+                error.killed = true
+                reject(error)
+            })
+        }, opts.timeoutMs)
+        timer.unref?.()
+        const onAbort = (): void => {
+            kill()
+            settle(() => {
+                const error = new Error("aborted") as Error & { name: string }
+                error.name = "AbortError"
+                reject(error)
+            })
+        }
+        opts.signal?.addEventListener("abort", onAbort, { once: true })
+        if (opts.signal?.aborted) onAbort()
+        child.on("error", (error) => settle(() => reject(error)))
+        child.stderr?.on("data", (chunk: Buffer) => {
+            stderrTail = (stderrTail + chunk.toString("utf8")).slice(-2_000)
+        })
+        const lines = createInterface({ input: child.stdout! })
+        lines.on("line", (line) => {
+            let event: unknown
+            try {
+                event = JSON.parse(line)
+            } catch {
+                return
+            }
+            if (!isRecord(event)) return
+            if (event.type === "result") {
+                resultLine = line
+                return
+            }
+            if (event.type !== "stream_event" || !isRecord(event.event)) return
+            const inner = event.event
+            if (inner.type !== "content_block_delta" || !isRecord(inner.delta)) {
+                return
+            }
+            const delta = inner.delta
+            if (delta.type === "text_delta" && typeof delta.text === "string") {
+                accumulated += delta.text
+                opts.onDeltaText?.(accumulated)
+            }
+        })
+        child.on("close", (code) => {
+            settle(() => {
+                if (resultLine !== null) {
+                    resolve(resultLine)
+                } else {
+                    reject(
+                        new Error(
+                            `claude dialogue stream ended (exit ${code}) without a result event` +
+                                (stderrTail ? `: ${stderrTail}` : ""),
+                        ),
+                    )
+                }
+            })
+        })
+        child.stdin?.on("error", () => {
+            /* EPIPE on shutdown is settled by close */
+        })
+        child.stdin?.end(opts.input ?? "")
+    })
 }
 
 function execClaude(

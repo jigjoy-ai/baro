@@ -222,7 +222,63 @@ async function main(): Promise<void> {
     const isolatedCwd = mkdtempSync(join(tmpdir(), "baro-conversation-intake-"))
     let intake: ConversationIntake | null = null
     try {
+        // The front door is the user's conversational partner: default the
+        // claude lane to sonnet (haiku's multilingual chat is noticeably
+        // weaker); explicit --model always wins. Scout keeps its own default.
+        const conversationModel =
+            args.model ?? (args.llm === "claude" ? "sonnet" : undefined)
         const dialogue = createDialogueResponder({
+            backend: args.llm,
+            cwd: isolatedCwd,
+            model: conversationModel,
+            timeoutMs: providerTimeoutMs,
+            claudeBin: args.claudeBin,
+            codexBin: args.codexBin,
+            opencodeBin: args.opencodeBin,
+            piBin: args.piBin,
+            codexSkipGitRepoCheck: true,
+            billingCoordinator: billing ?? undefined,
+        })
+        // Stream the user-facing message out of the growing JSON envelope so
+        // the TUI can render the reply as it is composed.
+        let lastStreamed = ""
+        const streamDelta = (jsonSoFar: string): void => {
+            const partial = extractAssistantMessagePartial(jsonSoFar)
+            if (partial === null || partial === lastStreamed) return
+            if (!partial.startsWith(lastStreamed)) lastStreamed = ""
+            const append = partial.slice(lastStreamed.length)
+            lastStreamed = partial
+            if (!append) return
+            // stderr: the runner streams stderr lines live; stdout is
+            // buffered until exit.
+            process.stderr.write(
+                JSON.stringify({
+                    type: "conversation_delta",
+                    requestId: input.requestId,
+                    append,
+                }) + "\n",
+            )
+        }
+        const responder: ConversationResponder = {
+            backend: args.llm,
+            respond: async (request, signal) => {
+                const result = await dialogue(
+                    {
+                        runId: billingRunId,
+                        messageId: request.requestId,
+                        billingRole: "conversation",
+                        systemPrompt: request.systemPrompt,
+                        userPrompt: request.userPrompt,
+                        onDeltaText: streamDelta,
+                    },
+                    signal,
+                )
+                return typeof result === "string" ? result : result.text
+            },
+        }
+        // Scout stays on the caller's model (or the adapter default): its
+        // calls are structured policy steps where haiku is sufficient.
+        const scoutDialogue = createDialogueResponder({
             backend: args.llm,
             cwd: isolatedCwd,
             model: args.model,
@@ -234,29 +290,10 @@ async function main(): Promise<void> {
             codexSkipGitRepoCheck: true,
             billingCoordinator: billing ?? undefined,
         })
-        const responder: ConversationResponder = {
-            backend: args.llm,
-            respond: async (request, signal) => {
-                const result = await dialogue(
-                    {
-                        runId: billingRunId,
-                        messageId: request.requestId,
-                        billingRole: "conversation",
-                        systemPrompt: request.systemPrompt,
-                        userPrompt: request.userPrompt,
-                    },
-                    signal,
-                )
-                return typeof result === "string" ? result : result.text
-            },
-        }
-        // Keep a distinct policy seam even while the CLI defaults both roles
-        // to the same selected backend/model. A future route can move Scout to
-        // a cheaper model without changing the Mozaik event contract.
         const scoutResponder: RepositoryScoutResponder = {
             backend: args.llm,
             respond: async (request, signal) => {
-                const result = await dialogue(
+                const result = await scoutDialogue(
                     {
                         runId: billingRunId,
                         messageId:
@@ -321,15 +358,19 @@ async function main(): Promise<void> {
                 intent: input.intent,
             },
         })
-        if (!repositoryBrief) {
-            throw new Error("successful conversation turn produced no repository brief")
+        // Conversational turns legitimately skip RepoScout; a ready handoff
+        // always captured a brief before validation allowed it.
+        if (response.kind === "ready" && !repositoryBrief) {
+            throw new Error("a ready conversation turn produced no repository brief")
         }
-        writeFileSync(args.repositoryBriefFile, JSON.stringify({
-            schemaVersion: 1,
-            sessionId: input.sessionId,
-            requestId: input.requestId,
-            repositoryBrief,
-        }))
+        if (repositoryBrief) {
+            writeFileSync(args.repositoryBriefFile, JSON.stringify({
+                schemaVersion: 1,
+                sessionId: input.sessionId,
+                requestId: input.requestId,
+                repositoryBrief,
+            }))
+        }
         writeFileSync(args.resultFile, JSON.stringify(response))
     } finally {
         intake?.close()
@@ -372,3 +413,35 @@ main().catch((error) => {
     process.stderr.write(`[run-conversation] ${messageOf(error)}\n`)
     process.exitCode = 1
 })
+
+/**
+ * Pull the (possibly still-growing) "message" string field out of a partial
+ * JSON envelope. Escape-aware; returns the unescaped prefix composed so far,
+ * or null before the field starts.
+ */
+export function extractAssistantMessagePartial(jsonSoFar: string): string | null {
+    const key = /"message"\s*:\s*"/u.exec(jsonSoFar)
+    if (!key) return null
+    const start = key.index + key[0].length
+    let end = jsonSoFar.length
+    let closed = false
+    for (let index = start; index < jsonSoFar.length; index += 1) {
+        const ch = jsonSoFar[index]
+        if (ch === "\\") {
+            index += 1
+            continue
+        }
+        if (ch === '"') {
+            end = index
+            closed = true
+            break
+        }
+    }
+    let raw = jsonSoFar.slice(start, end)
+    if (!closed && raw.endsWith("\\")) raw = raw.slice(0, -1)
+    try {
+        return JSON.parse('"' + raw + '"') as string
+    } catch {
+        return null
+    }
+}

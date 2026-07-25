@@ -1,6 +1,5 @@
 pub mod api_key_input;
 pub mod context;
-pub mod conversation;
 pub mod execute;
 pub mod execute_activity;
 pub mod execute_completion;
@@ -11,5 +10,6 @@ pub mod mode_picker;
 pub mod planning;
 pub mod provider_picker;
 pub mod review;
+pub mod session;
 pub mod welcome;
 pub mod widgets;

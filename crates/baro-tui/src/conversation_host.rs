@@ -407,10 +407,20 @@ pub(crate) fn finish_conversation_run(app: &mut App, received_done: bool, reposi
             app.conversation
                 .transition_to(ConversationPhase::Completed)?;
             let verification = app.verification_status.as_deref().unwrap_or("not reported");
-            app.conversation.record_system_turn(format!(
+            let mut summary = format!(
                 "Run completed in {}s. Objective verification: {verification}.",
                 app.total_time_secs
-            ))?;
+            );
+            if let Some(stats) = &app.final_stats {
+                summary.push_str(&format!(
+                    " Files created: {}, modified: {}, commits: {}.",
+                    stats.files_created, stats.files_modified, stats.total_commits
+                ));
+            }
+            if let Some(pr) = &app.pr_url {
+                summary.push_str(&format!(" PR: {pr}"));
+            }
+            app.conversation.record_system_turn(summary)?;
         } else {
             app.conversation.transition_to(ConversationPhase::Failed)?;
             let reason = app
