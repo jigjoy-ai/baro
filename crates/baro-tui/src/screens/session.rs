@@ -20,12 +20,14 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    let input_height =
+        (app.conversation_input.lines().count().max(1).min(4) as u16) + 2;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(5),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
             Constraint::Length(1),
         ])
         .split(area);
@@ -138,18 +140,23 @@ fn transcript_lines(app: &App, lines: &mut Vec<Line<'static>>) {
             ),
             TranscriptRole::System => ("·", Style::default().fg(theme::MUTED)),
         };
-        for (index, text) in turn.text.lines().enumerate() {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    if index == 0 {
-                        format!("  {label:<5}")
-                    } else {
-                        "       ".to_string()
-                    },
-                    style,
-                ),
-                Span::styled(text.to_string(), Style::default().fg(theme::TEXT)),
-            ]));
+        if turn.role == TranscriptRole::Assistant {
+            lines.push(Line::from(Span::styled("  Baro".to_string(), style)));
+            markdown_lines(&turn.text, "       ", lines);
+        } else {
+            for (index, text) in turn.text.lines().enumerate() {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if index == 0 {
+                            format!("  {label:<5}")
+                        } else {
+                            "       ".to_string()
+                        },
+                        style,
+                    ),
+                    Span::styled(text.to_string(), Style::default().fg(theme::TEXT)),
+                ]));
+            }
         }
         lines.push(Line::from(""));
     }
@@ -161,21 +168,13 @@ fn streaming_lines(app: &App, lines: &mut Vec<Line<'static>>) {
     if text.is_empty() {
         return;
     }
-    for (index, part) in text.lines().enumerate() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                if index == 0 {
-                    "  Baro ".to_string()
-                } else {
-                    "       ".to_string()
-                },
-                Style::default()
-                    .fg(theme::ACCENT_BRIGHT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(part.to_string(), Style::default().fg(theme::TEXT)),
-        ]));
-    }
+    lines.push(Line::from(Span::styled(
+        "  Baro".to_string(),
+        Style::default()
+            .fg(theme::ACCENT_BRIGHT)
+            .add_modifier(Modifier::BOLD),
+    )));
+    markdown_lines(text, "       ", lines);
     lines.push(Line::from(""));
 }
 
@@ -518,7 +517,7 @@ fn input_box(app: &App) -> Paragraph<'static> {
             _ => " Type a goal, answer, or follow-up…".to_string(),
         }
     } else {
-        format!(" {}█", app.conversation_input)
+        String::new() // rendered as spans below for an inline cursor
     };
     let border = if app.conversation_error.is_some() {
         theme::ERROR
@@ -527,11 +526,61 @@ fn input_box(app: &App) -> Paragraph<'static> {
     } else {
         theme::BORDER_ACTIVE
     };
-    Paragraph::new(text).wrap(Wrap { trim: false }).block(
+    let content: ratatui::text::Text = if text.is_empty()
+        && !app.conversation_input.is_empty()
+    {
+        input_with_cursor(app)
+    } else {
+        text.into()
+    };
+    Paragraph::new(content).wrap(Wrap { trim: false }).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border)),
     )
+}
+
+/// The typed text with a reversed-block cursor at the cursor position.
+fn input_with_cursor(app: &App) -> ratatui::text::Text<'static> {
+    let chars: Vec<char> = app.conversation_input.chars().collect();
+    let at = app.conversation_cursor.min(chars.len());
+    let before: String = chars[..at].iter().collect();
+    let (cursor_ch, after): (String, String) = if at < chars.len() {
+        (
+            chars[at].to_string(),
+            chars[at + 1..].iter().collect(),
+        )
+    } else {
+        (" ".to_string(), String::new())
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    let mut current: Vec<Span> = vec![Span::raw(" ")];
+    let mut push_text = |segment: &str, style: Style, lines: &mut Vec<Line<'static>>, current: &mut Vec<Span<'static>>| {
+        let mut first = true;
+        for part in segment.split('\n') {
+            if !first {
+                lines.push(Line::from(std::mem::take(current)));
+                current.push(Span::raw(" "));
+            }
+            first = false;
+            if !part.is_empty() {
+                current.push(Span::styled(part.to_string(), style));
+            }
+        }
+    };
+    let plain = Style::default().fg(theme::TEXT);
+    let cursor = Style::default().fg(theme::BG).bg(theme::ACCENT);
+    push_text(&before, plain, &mut lines, &mut current);
+    if cursor_ch == "\n" {
+        current.push(Span::styled(" ".to_string(), cursor));
+        lines.push(Line::from(std::mem::take(&mut current)));
+        current.push(Span::raw(" "));
+    } else {
+        current.push(Span::styled(cursor_ch, cursor));
+    }
+    push_text(&after, plain, &mut lines, &mut current);
+    lines.push(Line::from(current));
+    lines.into()
 }
 
 fn footer_line(app: &App) -> Paragraph<'static> {
@@ -547,6 +596,8 @@ fn footer_line(app: &App) -> Paragraph<'static> {
         Span::styled("tab", Style::default().fg(theme::ACCENT)),
         Span::styled(" workbench  ", Style::default().fg(theme::MUTED)),
         Span::styled("↑↓", Style::default().fg(theme::ACCENT)),
+        Span::styled(" history  ", Style::default().fg(theme::MUTED)),
+        Span::styled("⇞⇟", Style::default().fg(theme::ACCENT)),
         Span::styled(" scroll  ", Style::default().fg(theme::MUTED)),
         Span::styled("esc", Style::default().fg(theme::ACCENT)),
         Span::styled(" quit  ·  ", Style::default().fg(theme::MUTED)),
@@ -555,6 +606,105 @@ fn footer_line(app: &App) -> Paragraph<'static> {
             Style::default().fg(theme::ACCENT),
         ),
     ]))
+}
+
+/// Minimal markdown for assistant text: fenced code blocks, bullets,
+/// headers, **bold** and `inline code`. Everything else stays prose.
+fn markdown_lines(
+    text: &str,
+    indent: &str,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let mut in_fence = false;
+    for raw in text.lines() {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            lines.push(Line::from(vec![
+                Span::raw(indent.to_string()),
+                Span::styled(
+                    format!("  {raw}"),
+                    Style::default().fg(theme::ACCENT_DIM),
+                ),
+            ]));
+            continue;
+        }
+        let (prefix, body) = if let Some(rest) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .or_else(|| trimmed.strip_prefix("• "))
+        {
+            ("  • ", rest)
+        } else if trimmed.starts_with('#') {
+            let body = trimmed.trim_start_matches('#').trim_start();
+            lines.push(Line::from(vec![
+                Span::raw(indent.to_string()),
+                Span::styled(
+                    body.to_string(),
+                    Style::default()
+                        .fg(theme::ACCENT_BRIGHT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            continue;
+        } else {
+            ("", trimmed)
+        };
+        let mut spans: Vec<Span> = vec![Span::raw(indent.to_string())];
+        if !prefix.is_empty() {
+            spans.push(Span::styled(
+                prefix.to_string(),
+                Style::default().fg(theme::ACCENT),
+            ));
+        }
+        inline_spans(body, &mut spans);
+        lines.push(Line::from(spans));
+    }
+}
+
+/// Split `**bold**` and `` `code` `` runs into styled spans.
+fn inline_spans(text: &str, spans: &mut Vec<Span<'static>>) {
+    let plain = Style::default().fg(theme::TEXT);
+    let bold = Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD);
+    let code = Style::default().fg(theme::ACCENT_DIM);
+    let mut rest = text;
+    loop {
+        let next_bold = rest.find("**");
+        let next_code = rest.find('`');
+        match (next_bold, next_code) {
+            (None, None) => {
+                if !rest.is_empty() {
+                    spans.push(Span::styled(rest.to_string(), plain));
+                }
+                return;
+            }
+            (b, c) => {
+                let (at, is_bold) = match (b, c) {
+                    (Some(b), Some(c)) if b <= c => (b, true),
+                    (Some(b), None) => (b, true),
+                    (_, Some(c)) => (c, false),
+                    _ => unreachable!(),
+                };
+                let (marker, style): (&str, Style) =
+                    if is_bold { ("**", bold) } else { ("`", code) };
+                let close = rest[at + marker.len()..].find(marker);
+                let Some(close) = close else {
+                    spans.push(Span::styled(rest.to_string(), plain));
+                    return;
+                };
+                if at > 0 {
+                    spans.push(Span::styled(rest[..at].to_string(), plain));
+                }
+                let inner =
+                    &rest[at + marker.len()..at + marker.len() + close];
+                spans.push(Span::styled(inner.to_string(), style));
+                rest = &rest[at + marker.len() + close + marker.len()..];
+            }
+        }
+    }
 }
 
 fn clip(value: &str, max: usize) -> String {
@@ -570,6 +720,7 @@ fn clip(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
 
 
 

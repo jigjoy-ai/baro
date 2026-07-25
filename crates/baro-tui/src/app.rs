@@ -360,6 +360,12 @@ pub struct App {
     pub conversation: ConversationSession,
     /// Current conversation composer buffer.
     pub conversation_input: String,
+    /// Char index of the input cursor within `conversation_input`.
+    pub conversation_cursor: usize,
+    /// Sent messages, oldest first, for ↑/↓ recall.
+    pub input_history: Vec<String>,
+    /// Some(i) while recalling input_history[i]; None when editing fresh text.
+    pub input_history_ix: Option<usize>,
     /// True while one correlated conversation subprocess is active.
     pub conversation_busy: bool,
     pub conversation_error: Option<String>,
@@ -593,6 +599,9 @@ impl App {
             conversation: ConversationSession::new(new_conversation_session_id())
                 .expect("generated conversation session id is valid"),
             conversation_input: String::new(),
+            conversation_cursor: 0,
+            input_history: Vec::new(),
+            input_history_ix: None,
             conversation_busy: false,
             conversation_error: None,
             conversation_request_counter: 0,
@@ -949,6 +958,152 @@ impl App {
         self.main_view = MainView::Activity;
         self.focus = WorkbenchFocus::Main;
         self.agent_msg_input = Some((DIALOGUE_AGENT_ID.to_string(), String::new()));
+    }
+
+    fn cursor_byte(&self) -> usize {
+        self.conversation_input
+            .char_indices()
+            .nth(self.conversation_cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(self.conversation_input.len())
+    }
+
+    pub fn input_char_len(&self) -> usize {
+        self.conversation_input.chars().count()
+    }
+
+    pub fn input_insert(&mut self, ch: char) {
+        let at = self.cursor_byte();
+        self.conversation_input.insert(at, ch);
+        self.conversation_cursor += 1;
+        self.input_history_ix = None;
+    }
+
+    pub fn input_backspace(&mut self) {
+        if self.conversation_cursor == 0 {
+            return;
+        }
+        self.conversation_cursor -= 1;
+        let at = self.cursor_byte();
+        self.conversation_input.remove(at);
+        self.input_history_ix = None;
+    }
+
+    pub fn input_delete(&mut self) {
+        if self.conversation_cursor >= self.input_char_len() {
+            return;
+        }
+        let at = self.cursor_byte();
+        self.conversation_input.remove(at);
+    }
+
+    pub fn input_left(&mut self) {
+        self.conversation_cursor = self.conversation_cursor.saturating_sub(1);
+    }
+
+    pub fn input_right(&mut self) {
+        self.conversation_cursor =
+            (self.conversation_cursor + 1).min(self.input_char_len());
+    }
+
+    pub fn input_home(&mut self) {
+        self.conversation_cursor = 0;
+    }
+
+    pub fn input_end(&mut self) {
+        self.conversation_cursor = self.input_char_len();
+    }
+
+    pub fn input_word_left(&mut self) {
+        let chars: Vec<char> = self.conversation_input.chars().collect();
+        let mut i = self.conversation_cursor;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        self.conversation_cursor = i;
+    }
+
+    pub fn input_word_right(&mut self) {
+        let chars: Vec<char> = self.conversation_input.chars().collect();
+        let mut i = self.conversation_cursor;
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        self.conversation_cursor = i;
+    }
+
+    pub fn input_delete_word(&mut self) {
+        let end = self.conversation_cursor;
+        self.input_word_left();
+        let start_b = self.cursor_byte();
+        let end_b = self
+            .conversation_input
+            .char_indices()
+            .nth(end)
+            .map(|(i, _)| i)
+            .unwrap_or(self.conversation_input.len());
+        self.conversation_input.replace_range(start_b..end_b, "");
+        self.input_history_ix = None;
+    }
+
+    pub fn input_set(&mut self, text: String) {
+        self.conversation_cursor = text.chars().count();
+        self.conversation_input = text;
+    }
+
+    pub fn input_clear(&mut self) {
+        self.conversation_input.clear();
+        self.conversation_cursor = 0;
+        self.input_history_ix = None;
+    }
+
+    /// Take the input for sending: records history, resets cursor.
+    pub fn input_take(&mut self) -> String {
+        let text = std::mem::take(&mut self.conversation_input);
+        self.conversation_cursor = 0;
+        self.input_history_ix = None;
+        if !text.trim().is_empty()
+            && self.input_history.last() != Some(&text)
+        {
+            self.input_history.push(text.clone());
+        }
+        text
+    }
+
+    /// ↑: older history (only from empty input or an active recall).
+    pub fn input_history_prev(&mut self) -> bool {
+        if !self.conversation_input.is_empty() && self.input_history_ix.is_none() {
+            return false;
+        }
+        let next = match self.input_history_ix {
+            None if self.input_history.is_empty() => return false,
+            None => self.input_history.len() - 1,
+            Some(0) => 0,
+            Some(i) => i - 1,
+        };
+        self.input_history_ix = Some(next);
+        self.input_set(self.input_history[next].clone());
+        self.input_history_ix = Some(next);
+        true
+    }
+
+    /// ↓: newer history; past the newest clears back to fresh input.
+    pub fn input_history_next(&mut self) -> bool {
+        let Some(current) = self.input_history_ix else { return false };
+        if current + 1 >= self.input_history.len() {
+            self.input_clear();
+        } else {
+            self.input_history_ix = Some(current + 1);
+            self.input_set(self.input_history[current + 1].clone());
+            self.input_history_ix = Some(current + 1);
+        }
+        true
     }
 
     /// Local echo of a user→agent message so it shows in the feed

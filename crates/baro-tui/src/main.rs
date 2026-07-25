@@ -1180,7 +1180,7 @@ async fn run_app(
     // handed off exactly once.
     if !entered_resume {
         if let Some(goal) = cli.goal {
-            app.conversation_input = goal;
+            app.input_set(goal);
             if app.llm == app::LlmProvider::OpenAI && app.openai_api_key.is_none() {
                 if headless {
                     return Err("--headless with --llm openai requires OPENAI_API_KEY".into());
@@ -1891,10 +1891,49 @@ async fn run_app(
                                 app.show_review(stories);
                             }
                         }
-                        KeyCode::Up => app.session_feed.scroll_up(),
-                        KeyCode::Down => app.session_feed.scroll_down(),
+                        KeyCode::PageUp => app.session_feed.scroll_up(),
+                        KeyCode::PageDown => app.session_feed.scroll_down(),
+                        KeyCode::Up => {
+                            if !app.input_history_prev() {
+                                app.session_feed.scroll_up();
+                            }
+                        }
+                        KeyCode::Down => {
+                            if !app.input_history_next() {
+                                app.session_feed.scroll_down();
+                            }
+                        }
+                        KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.input_word_left();
+                        }
+                        KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.input_word_right();
+                        }
+                        KeyCode::Left => app.input_left(),
+                        KeyCode::Right => app.input_right(),
+                        KeyCode::Home => app.input_home(),
+                        KeyCode::End => app.input_end(),
+                        KeyCode::Delete if !app.conversation_busy => app.input_delete(),
+                        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.input_home();
+                        }
+                        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.input_end();
+                        }
+                        KeyCode::Char('w')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !app.conversation_busy =>
+                        {
+                            app.input_delete_word();
+                        }
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            app.conversation_input.clear();
+                            app.input_clear();
+                        }
+                        KeyCode::Enter
+                            if key.modifiers.contains(KeyModifiers::ALT)
+                                && !app.conversation_busy =>
+                        {
+                            app.input_insert('\n');
                         }
                         KeyCode::Char('r')
                             if app.conversation_error.is_some()
@@ -1909,7 +1948,7 @@ async fn run_app(
                                 confirm_and_execute(&mut app, stories, &cwd, tx.clone());
                             } else if app.conversation_input.trim().is_empty() {
                             } else if app.conversation_accepts_input() {
-                                let message = std::mem::take(&mut app.conversation_input);
+                                let message = app.input_take();
                                 if let Err(error) =
                                     submit_conversation_message(&mut app, &cwd, tx.clone(), message)
                                 {
@@ -1921,7 +1960,7 @@ async fn run_app(
                             ) {
                                 // Mid-run: "@S3 ..." targets one agent; anything
                                 // else goes to the collective dialogue.
-                                let message = std::mem::take(&mut app.conversation_input);
+                                let message = app.input_take();
                                 let trimmed = message.trim().to_string();
                                 let (target, body) = match trimmed.strip_prefix('@') {
                                     Some(rest) => match rest.split_once(char::is_whitespace) {
@@ -1941,10 +1980,10 @@ async fn run_app(
                             }
                         }
                         KeyCode::Backspace if !app.conversation_busy => {
-                            app.conversation_input.pop();
+                            app.input_backspace();
                         }
                         KeyCode::Char(character) if !app.conversation_busy => {
-                            app.conversation_input.push(character);
+                            app.input_insert(character);
                         }
                         _ => {}
                     },
@@ -2391,7 +2430,7 @@ async fn run_app(
                         // later re-plans on the current branch.
                         KeyCode::Char('f') if app.done => {
                             app.start_conversation();
-                            app.conversation_input.clear();
+                            app.input_clear();
                         }
                         KeyCode::Char('m') if !app.done => {
                             if let Some(id) = app.message_target() {
@@ -2873,7 +2912,7 @@ fn submit_conversation_message(
     app.conversation
         .begin_request(request_id, text)
         .map_err(|error| error.to_string())?;
-    app.conversation_input.clear();
+    app.input_clear();
     spawn_pending_conversation(app, cwd, tx, intent);
     Ok(())
 }
