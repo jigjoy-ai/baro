@@ -1342,9 +1342,9 @@ async fn run_app(
             Some(AppEvent::MouseScroll(delta)) => {
                 if app.screen == Screen::Conversation && !app.workbench_overlay {
                     if delta > 0 {
-                        app.session_feed.scroll_up();
+                        app.session_feed.scroll_up_by(1);
                     } else {
-                        app.session_feed.scroll_down();
+                        app.session_feed.scroll_down_by(1);
                     }
                 }
                 // Other screens keep wheel inert until their scroll models
@@ -1925,8 +1925,8 @@ async fn run_app(
                                 app.show_review(stories);
                             }
                         }
-                        KeyCode::PageUp => app.session_feed.scroll_up(),
-                        KeyCode::PageDown => app.session_feed.scroll_down(),
+                        KeyCode::PageUp => app.session_feed.scroll_up_by(10),
+                        KeyCode::PageDown => app.session_feed.scroll_down_by(10),
                         KeyCode::Up => {
                             if !app.input_history_prev() {
                                 app.session_feed.scroll_up();

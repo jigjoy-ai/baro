@@ -41,11 +41,16 @@ pub fn render(frame: &mut Frame, app: &App) {
     feed_lines(app, width, &mut lines);
     planning_lines(app, width, &mut lines);
 
+    // Scroll in wrapped visual rows so long lines don't cause jumps:
+    // line_count gives the post-wrap height, and Paragraph::scroll offsets
+    // by rendered rows.
     let visible = chunks[1].height as usize;
-    let tail = lines.len().saturating_sub(visible);
-    let start = tail.saturating_sub(app.session_feed.scroll_back);
-    let transcript = Paragraph::new(lines.into_iter().skip(start).collect::<Vec<_>>())
-        .wrap(Wrap { trim: false });
+    let transcript = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let total = transcript.line_count(chunks[1].width);
+    let max_back = total.saturating_sub(visible);
+    let back = app.session_feed.scroll_back.min(max_back);
+    let offset = max_back.saturating_sub(back);
+    let transcript = transcript.scroll((offset as u16, 0));
     frame.render_widget(transcript, chunks[1]);
 
     frame.render_widget(input_box(app), chunks[2]);

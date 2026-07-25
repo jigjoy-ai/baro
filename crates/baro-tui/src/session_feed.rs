@@ -57,11 +57,19 @@ impl SessionFeed {
     }
 
     pub fn scroll_up(&mut self) {
-        self.scroll_back = self.scroll_back.saturating_add(3);
+        self.scroll_up_by(3);
     }
 
     pub fn scroll_down(&mut self) {
-        self.scroll_back = self.scroll_back.saturating_sub(3);
+        self.scroll_down_by(3);
+    }
+
+    pub fn scroll_up_by(&mut self, rows: usize) {
+        self.scroll_back = self.scroll_back.saturating_add(rows);
+    }
+
+    pub fn scroll_down_by(&mut self, rows: usize) {
+        self.scroll_back = self.scroll_back.saturating_sub(rows);
     }
 }
 
