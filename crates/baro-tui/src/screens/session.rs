@@ -336,6 +336,11 @@ fn feed_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {
                         "  ·  ctrl+p open PR",
                         Style::default().fg(theme::TEXT_DIM),
                     ));
+                } else {
+                    hints.push(Span::styled(
+                        "  ·  ctrl+g publish to GitHub",
+                        Style::default().fg(theme::TEXT_DIM),
+                    ));
                 }
                 hints.push(Span::styled(
                     "  ·  esc quit",

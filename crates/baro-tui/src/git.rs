@@ -32,8 +32,75 @@ pub(crate) async fn get_current_branch(cwd: &Path) -> BaroResult<String> {
 /// best-effort — the orchestrator's per-story pushes retry later. In
 /// `BARO_LOCAL_ONLY=1` mode the branch stays local.
 pub async fn create_fresh_branch(cwd: &Path, base_name: &str) -> BaroResult<String> {
+    ensure_greenfield_repo(cwd).await;
     let publish_remote = std::env::var("BARO_LOCAL_ONLY").as_deref() != Ok("1");
     create_fresh_branch_with_publish(cwd, base_name, publish_remote).await
+}
+
+/// Greenfield bootstrap: an EMPTY directory (nothing but OS droppings)
+/// becomes a git repository with one empty root commit so the run branch
+/// has a base. Non-empty non-git directories are left alone. Best-effort:
+/// on any failure the branch step reports the real error right after.
+async fn ensure_greenfield_repo(cwd: &Path) {
+    let inside = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(cwd)
+        .output()
+        .await;
+    if matches!(&inside, Ok(out) if out.status.success()) {
+        return;
+    }
+    let empty = match std::fs::read_dir(cwd) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name();
+                // Ignore OS droppings and baro's own pre-branch artifacts:
+                // the plan and session lock land in cwd before the branch.
+                name != ".DS_Store"
+                    && name != "Thumbs.db"
+                    && name != "prd.json"
+                    && name != "baro.lock"
+                    && name != ".baro"
+            })
+            .next()
+            .is_none(),
+        Err(_) => false,
+    };
+    if !empty {
+        return;
+    }
+    let init = Command::new("git")
+        .args(["init"])
+        .current_dir(cwd)
+        .output()
+        .await;
+    if !matches!(&init, Ok(out) if out.status.success()) {
+        return;
+    }
+    let commit = Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "baro: initialize repository"])
+        .current_dir(cwd)
+        .output()
+        .await;
+    if !matches!(&commit, Ok(out) if out.status.success()) {
+        // No committer identity — retry with a repo-local fallback.
+        let _ = Command::new("git")
+            .args([
+                "-c",
+                "user.name=baro",
+                "-c",
+                "user.email=baro@localhost",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "baro: initialize repository",
+            ])
+            .current_dir(cwd)
+            .output()
+            .await;
+    }
+    eprintln!("[git] greenfield: initialized a fresh repository");
 }
 
 async fn create_fresh_branch_with_publish(

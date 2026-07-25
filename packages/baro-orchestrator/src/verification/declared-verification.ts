@@ -667,6 +667,32 @@ function translateNode(
     parsed: DeclaredTokens,
 ): VerifyCommandSpec {
     const mode = parsed.tokens[1]
+    // Greenfield allowance: with no package.json there is no manifest to
+    // anchor a trusted script, so a bare `node <contained file>` is the
+    // same trust class the manifest route grants elsewhere — repo content
+    // that just passed review, containment-checked here and revalidated
+    // after the merge. Repos WITH a manifest keep the strict rule: declare
+    // the script there instead.
+    if (
+        parsed.tokens.length === 2 &&
+        typeof mode === "string" &&
+        !mode.startsWith("-") &&
+        !existsSync(join(cwd, "package.json"))
+    ) {
+        const contained = containedPath(cwd, mode, true)
+        if (!contained.path) {
+            return incomplete(
+                requirement,
+                contained.reason ?? `unsafe node path '${mode}'`,
+            )
+        }
+        return {
+            label: `node ${contained.path}`,
+            tool: "node",
+            args: [contained.path],
+            containedPaths: [{ path: contained.path, requireFile: true }],
+        }
+    }
     const candidates = parsed.tokens.slice(2)
     if (
         !/^(--check|--test)$/.test(mode ?? "") ||
@@ -675,7 +701,7 @@ function translateNode(
     ) {
         return incomplete(
             requirement,
-            "node declarations are limited to '--check <file>' or '--test <contained paths>'",
+            "node declarations are limited to '--check <file>' or '--test <contained paths>' (bare 'node <file>' only in repositories without package.json)",
         )
     }
     const paths: string[] = []

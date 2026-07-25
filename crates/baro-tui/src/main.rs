@@ -244,6 +244,8 @@ enum AppEvent {
     ConversationResponse(conversation_runner::ConversationTurnResult),
     /// Cumulative partial assistant text for the pending conversation turn.
     ConversationDelta { request_id: String, text: String },
+    /// Result of the post-run `gh repo create` publish (ok = repo URL).
+    GreenfieldPublished(Result<String, String>),
     /// A conversation `ready` response is only a candidate until the
     /// repository-aware Architect validates it. The durable session keeps one
     /// pending response slot: either this candidate or an Architect-authored
@@ -1364,6 +1366,17 @@ async fn run_app(
                 // Other screens keep wheel inert until their scroll models
                 // are unified — a wrong-pane scroll is worse than none.
             }
+            Some(AppEvent::GreenfieldPublished(result)) => {
+                let text = match result {
+                    Ok(url) => {
+                        open_in_browser(&url);
+                        format!("GitHub repo created: {url}")
+                    }
+                    Err(error) => format!("GitHub publish failed: {error}"),
+                };
+                app.session_feed
+                    .push(crate::session_feed::SessionBlock::Note { text });
+            }
             Some(AppEvent::ConversationDelta { request_id, text }) => {
                 if app
                     .conversation
@@ -1930,6 +1943,18 @@ async fn run_app(
                             if let Some(pr) = app.pr_url.clone() {
                                 open_in_browser(&pr);
                             }
+                        }
+                        KeyCode::Char('g')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && app.done
+                                && app.pr_url.is_none() =>
+                        {
+                            spawn_greenfield_publish(&cwd, tx.clone());
+                            app.session_feed.push(
+                                crate::session_feed::SessionBlock::Note {
+                                    text: "publishing to GitHub…".to_string(),
+                                },
+                            );
                         }
                         KeyCode::Char('v')
                             if app.pending_plan.is_some()
@@ -2818,6 +2843,49 @@ fn send_agent_message(app: &mut App, cwd: &Path, id: String, text: String) {
         }
     }
     app.echo_user_message(&id, &text);
+}
+
+/// Publish the finished run's repository: `gh repo create` from the cwd
+/// (private, current directory as source, push). Async — the outcome
+/// arrives as a session note.
+fn spawn_greenfield_publish(cwd: &Path, tx: mpsc::Sender<AppEvent>) {
+    let cwd = cwd.to_path_buf();
+    tokio::spawn(async move {
+        let name = cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "baro-project".to_string());
+        let output = tokio::process::Command::new("gh")
+            .args(["repo", "create", &name, "--private", "--source", ".", "--push"])
+            .current_dir(&cwd)
+            .output()
+            .await;
+        let result = match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let url = stdout
+                    .lines()
+                    .find(|l| l.contains("github.com"))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                Ok(if url.is_empty() {
+                    format!("https://github.com (repo: {name})")
+                } else {
+                    url
+                })
+            }
+            Ok(out) => Err(String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("gh repo create failed")
+                .to_string()),
+            Err(error) => Err(format!(
+                "could not run gh ({error}); install GitHub CLI and `gh auth login`"
+            )),
+        };
+        let _ = tx.send(AppEvent::GreenfieldPublished(result)).await;
+    });
 }
 
 /// Fire-and-forget: open a URL with the platform opener. Failures are
