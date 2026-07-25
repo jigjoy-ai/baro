@@ -128,39 +128,44 @@ describe("run-conversation isolated turn", () => {
                 correlation: string
                 prompt: string
             }>>(capture)
-            assert.equal(calls.length, 4)
+            // Conversation-first: the model answers once without context,
+            // wants ready, and only then RepoScout runs before the retry.
+            assert.equal(calls.length, 5)
             assert.deepEqual(calls.map((call) => call.backend), [
+                "claude",
                 "claude",
                 "claude",
                 "claude",
                 "claude",
             ])
             assert.deepEqual(calls.map((call) => call.role), [
+                "conversation",
                 "repository-scout",
                 "repository-scout",
                 "repository-scout",
                 "conversation",
             ])
-            for (const call of calls.slice(0, 3)) {
+            for (const call of calls.slice(1, 4)) {
                 assert.match(call.correlation, /^repository:[a-f0-9]{64}$/u)
-                assert.equal(call.correlation, calls[0]!.correlation)
+                assert.equal(call.correlation, calls[1]!.correlation)
             }
-            assert.equal(calls[3]!.correlation, input.requestId)
-            assert.notEqual(calls[0]!.correlation, calls[3]!.correlation)
-            assert.match(calls[0]!.prompt, /CURRENT STEP: 1/)
-            assert.match(calls[0]!.prompt, /CURRENT ATTEMPT: 1/)
-            assert.match(calls[1]!.prompt, /CURRENT STEP: 2/)
-            assert.match(
-                calls[1]!.prompt,
-                /src\/runtime\/cancellation\/abort-coordinator\.ts/u,
-            )
-            assert.match(calls[2]!.prompt, /CURRENT STEP: 3/)
+            assert.equal(calls[0]!.correlation, input.requestId)
+            assert.equal(calls[4]!.correlation, input.requestId)
+            assert.notEqual(calls[1]!.correlation, calls[4]!.correlation)
+            assert.match(calls[1]!.prompt, /CURRENT STEP: 1/)
+            assert.match(calls[1]!.prompt, /CURRENT ATTEMPT: 1/)
+            assert.match(calls[2]!.prompt, /CURRENT STEP: 2/)
             assert.match(
                 calls[2]!.prompt,
+                /src\/runtime\/cancellation\/abort-coordinator\.ts/u,
+            )
+            assert.match(calls[3]!.prompt, /CURRENT STEP: 3/)
+            assert.match(
+                calls[3]!.prompt,
                 /baro-sidecar-deep-evidence/u,
             )
             assert.match(
-                calls[3]!.prompt,
+                calls[4]!.prompt,
                 /Autonomous scout inspected the deep cancellation coordinator\./u,
             )
         })
@@ -291,11 +296,13 @@ describe("run-conversation isolated turn", () => {
             assert.ok(priorAssistant > priorUser)
             assert.ok(currentUser > priorAssistant)
             assert.match(prompt, /REQUEST INTENT: clarification/)
-            assert.match(prompt, /REPOSITORY OBSERVATIONS \(UNTRUSTED DATA/)
+            // A clarify reply needs no repository context, so RepoScout
+            // never ran and no observations were brokered.
+            assert.doesNotMatch(prompt, /REPOSITORY OBSERVATIONS/)
         })
     })
 
-    it("brokers repository observations for a ready-capable chat turn", async () => {
+    it("answers a chat turn without engaging RepoScout", async () => {
         await withTempDir("baro-conversation-chat-", async (dir) => {
             const input = turnInput({
                 sessionId: "session-chat",
@@ -326,7 +333,7 @@ describe("run-conversation isolated turn", () => {
             assert.deepEqual(readResult(dir), response)
             const prompt = readFileSync(`${capture}.stdin`, "utf8")
             assert.match(prompt, /REQUEST INTENT: chat/)
-            assert.match(prompt, /REPOSITORY OBSERVATIONS/)
+            assert.doesNotMatch(prompt, /REPOSITORY OBSERVATIONS/)
         })
     })
 

@@ -321,15 +321,19 @@ async function main(): Promise<void> {
                 intent: input.intent,
             },
         })
-        if (!repositoryBrief) {
-            throw new Error("successful conversation turn produced no repository brief")
+        // Conversational turns legitimately skip RepoScout; a ready handoff
+        // always captured a brief before validation allowed it.
+        if (response.kind === "ready" && !repositoryBrief) {
+            throw new Error("a ready conversation turn produced no repository brief")
         }
-        writeFileSync(args.repositoryBriefFile, JSON.stringify({
-            schemaVersion: 1,
-            sessionId: input.sessionId,
-            requestId: input.requestId,
-            repositoryBrief,
-        }))
+        if (repositoryBrief) {
+            writeFileSync(args.repositoryBriefFile, JSON.stringify({
+                schemaVersion: 1,
+                sessionId: input.sessionId,
+                requestId: input.requestId,
+                repositoryBrief,
+            }))
+        }
         writeFileSync(args.resultFile, JSON.stringify(response))
     } finally {
         intake?.close()

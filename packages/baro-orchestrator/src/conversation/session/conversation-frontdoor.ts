@@ -28,6 +28,7 @@ import {
     type ConversationResponse,
 } from "./conversation-contract.js"
 import {
+    ConversationNeedsRepositoryContext,
     ConversationIntake,
     type ConversationRequestIntent,
 } from "./conversation-intake.js"
@@ -305,14 +306,27 @@ export class ConversationIntakeParticipant extends SerializedObserver {
         const turn: ConversationLaneTurn = {
             request,
             fingerprint,
-            phase: "awaiting-context",
+            phase: "answering",
         }
         this.turns.set(request.requestId, turn)
+        // Conversation-first: answer without repository context. RepoScout
+        // runs lazily, only when the model wants a ready handoff.
+        context.spawnTask(
+            { label: `conversation ${turn.request.requestId}`, key: "conversation" },
+            () => this.answer(turn, undefined, context),
+        )
+    }
 
+    private requestRepositoryContext(
+        turn: ConversationLaneTurn,
+        context: SerializedEventContext,
+    ): void {
+        const request = turn.request
         const contextRequestId = repositoryContextRequestId(
             request.sessionId,
             request.requestId,
         )
+        turn.phase = "awaiting-context"
         turn.contextRequestId = contextRequestId
         context.publish(RepositoryContextRequested.create({
             schemaVersion: 1,
@@ -449,6 +463,13 @@ export class ConversationIntakeParticipant extends SerializedObserver {
             turn.terminal = terminal
             context.publish(terminal)
         } catch (error) {
+            if (
+                error instanceof ConversationNeedsRepositoryContext &&
+                turn.phase === "answering"
+            ) {
+                this.requestRepositoryContext(turn, context)
+                return
+            }
             this.fail(turn, messageOf(error), context)
         }
     }

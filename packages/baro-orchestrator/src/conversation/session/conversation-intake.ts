@@ -112,11 +112,20 @@ export interface ConversationIntakeOptions {
     initialHistory?: readonly ConversationHistoryEntry[]
 }
 
+/** The model wants a ready handoff but no repository brief was supplied.
+ * The caller may fetch a brief (RepoScout) and retry the same requestId. */
+export class ConversationNeedsRepositoryContext extends Error {
+    constructor() {
+        super("an implementation handoff requires repository context before ready")
+    }
+}
+
 interface SeenRequest {
     text: string
     intent: ConversationRequestIntent
     repositoryBriefFingerprint: string | null
     result: Promise<ConversationResponse>
+    needsContext?: boolean
 }
 
 interface NormalizedConversationRequest {
@@ -190,16 +199,24 @@ export class ConversationIntake {
 
         const replay = this.seen.get(request.requestId)
         if (replay) {
-            if (
-                replay.text !== text ||
-                replay.intent !== intent ||
-                replay.repositoryBriefFingerprint !== repositoryBriefFingerprint
-            ) {
-                return Promise.reject(
-                    new Error("conversation requestId was replayed with different content"),
-                )
+            const briefUpgradeRetry =
+                replay.needsContext === true &&
+                replay.text === text &&
+                replay.intent === intent &&
+                replay.repositoryBriefFingerprint === null &&
+                repositoryBriefFingerprint !== null
+            if (!briefUpgradeRetry) {
+                if (
+                    replay.text !== text ||
+                    replay.intent !== intent ||
+                    replay.repositoryBriefFingerprint !== repositoryBriefFingerprint
+                ) {
+                    return Promise.reject(
+                        new Error("conversation requestId was replayed with different content"),
+                    )
+                }
+                return replay.result
             }
-            return replay.result
         }
 
         const result = this.tail.then(() => this.evaluate({
@@ -214,12 +231,18 @@ export class ConversationIntake {
             () => undefined,
             () => undefined,
         )
-        this.seen.set(request.requestId, {
+        const record: SeenRequest = {
             text,
             intent,
             repositoryBriefFingerprint,
             result,
+        }
+        result.catch((error) => {
+            if (error instanceof ConversationNeedsRepositoryContext) {
+                record.needsContext = true
+            }
         })
+        this.seen.set(request.requestId, record)
         return result
     }
 
@@ -241,11 +264,16 @@ export class ConversationIntake {
 
     private async evaluate(request: NormalizedConversationRequest): Promise<ConversationResponse> {
         if (this.closed) throw new Error("conversation intake is closed")
-        this.remember({
-            requestId: request.requestId,
-            role: "user",
-            text: request.text,
-        })
+        const last = this.history.at(-1)
+        if (
+            !(last?.requestId === request.requestId && last.role === "user")
+        ) {
+            this.remember({
+                requestId: request.requestId,
+                role: "user",
+                text: request.text,
+            })
+        }
         const controller = new AbortController()
         this.controllers.add(controller)
         let timer: ReturnType<typeof setTimeout> | undefined
@@ -390,9 +418,7 @@ function assertDispositionAllowed(
     hasRepositoryBrief: boolean,
 ): void {
     if (response.kind === "ready" && !hasRepositoryBrief) {
-        throw new TypeError(
-            "an implementation handoff requires repository context before ready",
-        )
+        throw new ConversationNeedsRepositoryContext()
     }
 }
 

@@ -13,7 +13,8 @@ use tokio::process::Command;
 
 use crate::app::LlmProvider;
 use crate::conversation::{
-    ConversationError, ConversationSession, ConversationWireResponse, TranscriptRole,
+    ConversationError, ConversationKind, ConversationSession, ConversationWireResponse,
+    TranscriptRole,
 };
 use crate::discovery::{self, ScriptEntry};
 use crate::repository_brief::{
@@ -68,7 +69,7 @@ pub struct ConversationRunOptions<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct ConversationTurnResult {
     pub(crate) response: ConversationWireResponse,
-    pub(crate) repository_brief: RepositoryBriefV1,
+    pub(crate) repository_brief: Option<RepositoryBriefV1>,
 }
 
 /// Run the exact pending request in a fresh provider subprocess.
@@ -237,15 +238,25 @@ async fn run_conversation_turn_with_entry(
             log_path: None,
         }
     })?;
-    let repository_brief = parse_repository_brief_sidecar(
-        &sidecar,
-        session.session_id(),
-        request_id,
-    )
-    .map_err(|message| ProcessRunError {
-        message,
-        log_path: None,
-    })?;
+    // Conversational turns skip RepoScout, so the sidecar may stay empty; a
+    // ready response is validated below to carry one.
+    let repository_brief = if sidecar.trim().is_empty() {
+        None
+    } else {
+        Some(
+            parse_repository_brief_sidecar(&sidecar, session.session_id(), request_id)
+                .map_err(|message| ProcessRunError {
+                    message,
+                    log_path: None,
+                })?,
+        )
+    };
+    if repository_brief.is_none() && response.kind == ConversationKind::Ready {
+        return Err(ProcessRunError {
+            message: "ready conversation turn arrived without a repository brief".to_string(),
+            log_path: None,
+        });
+    }
     Ok(ConversationTurnResult {
         response,
         repository_brief,

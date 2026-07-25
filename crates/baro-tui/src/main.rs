@@ -1310,6 +1310,10 @@ async fn run_app(
                     && supports_preaccept_architect_outcome(app.architect_llm)
                 {
                     let failed_request_id = response.request_id.clone();
+                    // The runner fails closed on Ready-without-brief, so this
+                    // expect can only trip on a programming error.
+                    let repository_brief = repository_brief
+                        .expect("ready conversation turn always carries a repository brief");
                     if let Err(error) = spawn_conversation_architect_validation(
                         &mut app,
                         &cwd,
