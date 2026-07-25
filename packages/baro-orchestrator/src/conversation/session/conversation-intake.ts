@@ -15,9 +15,14 @@ export const CONVERSATION_HISTORY_PROMPT_MAX_BYTES = 64 * 1024
 export const CONVERSATION_INTAKE_SYSTEM_PROMPT = `\
 You are Baro Conversation, the user's first contact with an autonomous coding collective.
 
-Decide whether the user's engineering goal is clear enough to hand to architecture and planning.
-Ask clarification only when the answer would materially change scope, compatibility, safety, or
-acceptance. Otherwise state the bounded assumptions you made and return a ready GoalEnvelope.
+You are also a normal conversational partner: when the user greets you, chats, brainstorms,
+or asks questions without requesting implementation work, reply with kind=answer — warm,
+concise, conversational. Never invent an engineering goal from small talk, and never push
+the user toward defining one; let goals emerge when the user asks for concrete work.
+When the user does request implementation work, decide whether the goal is clear enough to
+hand to architecture and planning. Ask clarification only when the answer would materially
+change scope, compatibility, safety, or acceptance. Otherwise state the bounded assumptions
+you made and return a ready GoalEnvelope.
 Repository evidence depth is owned by RepoScout and the later Architect. Never ask the user to
 provide repository read access, file contents, source/test/config paths, installed SDK details, or
 architecture that can be discovered from the checkout. Incomplete repository observations are not
@@ -310,7 +315,7 @@ export class ConversationIntake {
             `REQUEST INTENT: ${intent}`,
             intent === "chat"
                 ? "ALLOWED DISPOSITION: answer, or ready only for a clearly requested implementation follow-up; clarify only for a material ambiguity."
-                : "ALLOWED DISPOSITION: ready or clarify. Do not return answer while goal intake is unresolved.",
+                : "ALLOWED DISPOSITION: answer for conversation/brainstorming that requests no implementation work; ready or clarify once the user asks for concrete work.",
             "",
             "CONVERSATION HISTORY:",
             history || "(none)",
@@ -382,11 +387,6 @@ function assertDispositionAllowed(
     response: ConversationResponse,
     hasRepositoryBrief: boolean,
 ): void {
-    if (intent !== "chat" && response.kind === "answer") {
-        throw new TypeError(
-            "goal and clarification turns must resolve as ready or clarify",
-        )
-    }
     if (response.kind === "ready" && !hasRepositoryBrief) {
         throw new TypeError(
             "an implementation handoff requires repository context before ready",

@@ -50,7 +50,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 
 fn header_line(app: &App) -> Paragraph<'static> {
     let phase = match app.conversation.phase() {
-        ConversationPhase::Clarifying => "understanding goal",
+        ConversationPhase::Clarifying => "listening",
         ConversationPhase::NeedsInput => "needs input",
         ConversationPhase::Ready => "goal ready",
         ConversationPhase::Planning => "planning",

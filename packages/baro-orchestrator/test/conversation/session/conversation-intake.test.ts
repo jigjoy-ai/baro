@@ -159,7 +159,7 @@ describe("ConversationIntake", () => {
         })
         assert.match(prompt, /USER \[request-1\]: Refactor auth\./)
         assert.doesNotMatch(prompt, /attacker mutation/)
-        assert.match(prompt, /ALLOWED DISPOSITION: ready or clarify/)
+        assert.match(prompt, /ALLOWED DISPOSITION: answer for conversation/)
         await assert.rejects(
             intake.submit({ requestId: "request-1", text: "Replay." }),
             /already exists in durable history/,
@@ -275,10 +275,13 @@ describe("ConversationIntake", () => {
                 },
             },
         })
-        await assert.rejects(
-            answer.submit({ requestId: "request-goal-answer", text: "Implement it." }),
-            /must resolve as ready or clarify/u,
-        )
+        // Conversational answers are legal during intake: small talk and
+        // brainstorming must not be forced into clarify/ready.
+        const chatted = await answer.submit({
+            requestId: "request-goal-answer",
+            text: "Implement it.",
+        })
+        assert.equal(chatted.kind, "answer")
 
         for (const [intent, sessionId] of [
             ["goal", "session-goal-ready-rejected"],
