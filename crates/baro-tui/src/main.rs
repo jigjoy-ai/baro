@@ -1400,7 +1400,6 @@ async fn run_app(
                 }
             }
             Some(AppEvent::ConversationResponse(turn)) => {
-                app.conversation_stream = None;
                 let conversation_runner::ConversationTurnResult {
                     response,
                     repository_brief,
@@ -1449,6 +1448,7 @@ async fn run_app(
                     }
                     continue;
                 }
+                app.conversation_stream = None;
                 if let Err(error) = accept_conversation_response(
                     &mut app,
                     &cwd,
@@ -1476,7 +1476,8 @@ async fn run_app(
                         .outcome
                         .decision_document
                         .ok_or("validated Architect outcome has no decision document")?;
-                    if let Err(error) = accept_conversation_response(
+                    app.conversation_stream = None;
+                if let Err(error) = accept_conversation_response(
                         &mut app,
                         &cwd,
                         tx.clone(),
@@ -1533,7 +1534,8 @@ async fn run_app(
                             continue;
                         }
                     };
-                    if let Err(error) = accept_conversation_response(
+                    app.conversation_stream = None;
+                if let Err(error) = accept_conversation_response(
                         &mut app,
                         &cwd,
                         tx.clone(),
