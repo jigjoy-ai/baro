@@ -1480,6 +1480,19 @@ impl App {
             }
 
             BaroEvent::StoryLog { id, line } => {
+                // The planning feed logs under "plan" before any StoryStart;
+                // materialize the entry so the session can show the tail.
+                if id == "plan" && !self.active_stories.contains_key("plan") {
+                    self.active_stories.insert(
+                        "plan".to_string(),
+                        ActiveStory {
+                            title: "planning".to_string(),
+                            logs: Vec::new(),
+                            activity: Vec::new(),
+                            start_time: Instant::now(),
+                        },
+                    );
+                }
                 if let Some(active) = self.active_stories.get_mut(&id) {
                     active.logs.push(line);
                     if active.logs.len() > MAX_LOG_LINES {

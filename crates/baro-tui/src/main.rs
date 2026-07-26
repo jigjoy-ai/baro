@@ -242,8 +242,14 @@ enum AppEvent {
     ContextReady(String),
     ContextError(String),
     ConversationResponse(conversation_runner::ConversationTurnResult),
-    /// Cumulative partial assistant text for the pending conversation turn.
-    ConversationDelta { request_id: String, text: String },
+    /// Streaming chunk of the pending assistant reply; reset restarts it.
+    ConversationDelta {
+        request_id: String,
+        reset: bool,
+        text: String,
+    },
+    /// Result of the post-run `gh repo create` publish (ok = repo URL).
+    GreenfieldPublished(Result<String, String>),
     /// A conversation `ready` response is only a candidate until the
     /// repository-aware Architect validates it. The durable session keeps one
     /// pending response slot: either this candidate or an Architect-authored
@@ -1175,6 +1181,10 @@ async fn run_app(
     // An explicit new goal wins over an unfinished local intake. Interactive
     // startup without one resumes the repository-scoped clarification or
     // closes an interrupted provider turn so the user can retry safely.
+    // Greenfield: an empty cwd becomes a repository up front, so RepoScout,
+    // architect validation and branching all see a real repo.
+    git::greenfield_bootstrap(&cwd).await;
+
     if !entered_resume && cli.goal.is_none() {
         restore_pre_prd_conversation(&mut app, &cwd);
     }
@@ -1364,14 +1374,25 @@ async fn run_app(
                 // Other screens keep wheel inert until their scroll models
                 // are unified — a wrong-pane scroll is worse than none.
             }
-            Some(AppEvent::ConversationDelta { request_id, text }) => {
+            Some(AppEvent::GreenfieldPublished(result)) => {
+                let text = match result {
+                    Ok(url) => {
+                        open_in_browser(&url);
+                        format!("GitHub repo created: {url}")
+                    }
+                    Err(error) => format!("GitHub publish failed: {error}"),
+                };
+                app.session_feed
+                    .push(crate::session_feed::SessionBlock::Note { text });
+            }
+            Some(AppEvent::ConversationDelta { request_id, reset, text }) => {
                 if app
                     .conversation
                     .pending_request_id()
                     .is_some_and(|pending| pending == request_id)
                 {
                     match &mut app.conversation_stream {
-                        Some((current, accumulated)) if *current == request_id => {
+                        Some((current, accumulated)) if *current == request_id && !reset => {
                             accumulated.push_str(&text);
                         }
                         _ => app.conversation_stream = Some((request_id, text)),
@@ -1379,7 +1400,6 @@ async fn run_app(
                 }
             }
             Some(AppEvent::ConversationResponse(turn)) => {
-                app.conversation_stream = None;
                 let conversation_runner::ConversationTurnResult {
                     response,
                     repository_brief,
@@ -1393,6 +1413,10 @@ async fn run_app(
                     // expect can only trip on a programming error.
                     let repository_brief = repository_brief
                         .expect("ready conversation turn always carries a repository brief");
+                    app.session_feed.push(crate::session_feed::SessionBlock::Note {
+                        text: "handed off to the architect — validating the goal against the repository"
+                            .to_string(),
+                    });
                     if let Err(error) = spawn_conversation_architect_validation(
                         &mut app,
                         &cwd,
@@ -1424,6 +1448,7 @@ async fn run_app(
                     }
                     continue;
                 }
+                app.conversation_stream = None;
                 if let Err(error) = accept_conversation_response(
                     &mut app,
                     &cwd,
@@ -1451,7 +1476,8 @@ async fn run_app(
                         .outcome
                         .decision_document
                         .ok_or("validated Architect outcome has no decision document")?;
-                    if let Err(error) = accept_conversation_response(
+                    app.conversation_stream = None;
+                if let Err(error) = accept_conversation_response(
                         &mut app,
                         &cwd,
                         tx.clone(),
@@ -1508,7 +1534,8 @@ async fn run_app(
                             continue;
                         }
                     };
-                    if let Err(error) = accept_conversation_response(
+                    app.conversation_stream = None;
+                if let Err(error) = accept_conversation_response(
                         &mut app,
                         &cwd,
                         tx.clone(),
@@ -1752,6 +1779,9 @@ async fn run_app(
                 app.planning_progress = Some(msg);
             }
             Some(AppEvent::ArchitectStarted) => {
+                app.session_feed.push(crate::session_feed::SessionBlock::Note {
+                    text: "architect is examining the repository and pinning the design".to_string(),
+                });
                 if headless {
                     println!(r#"{{"type":"architect_start"}}"#);
                 }
@@ -1931,6 +1961,18 @@ async fn run_app(
                                 open_in_browser(&pr);
                             }
                         }
+                        KeyCode::Char('g')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && app.done
+                                && app.pr_url.is_none() =>
+                        {
+                            spawn_greenfield_publish(&cwd, tx.clone());
+                            app.session_feed.push(
+                                crate::session_feed::SessionBlock::Note {
+                                    text: "publishing to GitHub…".to_string(),
+                                },
+                            );
+                        }
                         KeyCode::Char('v')
                             if app.pending_plan.is_some()
                                 && !app.conversation_accepts_input() =>
@@ -2060,6 +2102,20 @@ async fn run_app(
                                 ),
                             };
                             app.start_planning();
+                            // Conversation-owned runs return to the session,
+                            // where the planning spinner and feed live; the
+                            // picker would otherwise linger with no proposal.
+                            if app.conversation.goal_envelope().is_some() {
+                                app.session_feed.push(
+                                    crate::session_feed::SessionBlock::Note {
+                                        text: format!(
+                                            "execution mode: {} — planner is composing the story plan",
+                                            chosen
+                                        ),
+                                    },
+                                );
+                                app.screen = Screen::Conversation;
+                            }
                             spawn_planner_stage_b(&app, &cwd, tx.clone(), mode_json);
                         }
                         _ => {}
@@ -2820,6 +2876,49 @@ fn send_agent_message(app: &mut App, cwd: &Path, id: String, text: String) {
     app.echo_user_message(&id, &text);
 }
 
+/// Publish the finished run's repository: `gh repo create` from the cwd
+/// (private, current directory as source, push). Async — the outcome
+/// arrives as a session note.
+fn spawn_greenfield_publish(cwd: &Path, tx: mpsc::Sender<AppEvent>) {
+    let cwd = cwd.to_path_buf();
+    tokio::spawn(async move {
+        let name = cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "baro-project".to_string());
+        let output = tokio::process::Command::new("gh")
+            .args(["repo", "create", &name, "--private", "--source", ".", "--push"])
+            .current_dir(&cwd)
+            .output()
+            .await;
+        let result = match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let url = stdout
+                    .lines()
+                    .find(|l| l.contains("github.com"))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                Ok(if url.is_empty() {
+                    format!("https://github.com (repo: {name})")
+                } else {
+                    url
+                })
+            }
+            Ok(out) => Err(String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .last()
+                .unwrap_or("gh repo create failed")
+                .to_string()),
+            Err(error) => Err(format!(
+                "could not run gh ({error}); install GitHub CLI and `gh auth login`"
+            )),
+        };
+        let _ = tx.send(AppEvent::GreenfieldPublished(result)).await;
+    });
+}
+
 /// Fire-and-forget: open a URL with the platform opener. Failures are
 /// non-fatal — the URL stays visible in the transcript either way.
 fn open_in_browser(url: &str) {
@@ -2910,9 +3009,10 @@ fn spawn_pending_conversation(
                 on_delta: Some(&{
                     let tx = tx.clone();
                     let request_id = request_id.clone();
-                    move |text: String| {
+                    move |reset: bool, text: String| {
                         let _ = tx.try_send(AppEvent::ConversationDelta {
                             request_id: request_id.clone(),
+                            reset,
                             text,
                         });
                     }
@@ -3072,6 +3172,9 @@ fn start_planning_from_conversation(
     app.conversation
         .record_system_turn("Goal accepted. Architect and Planner are starting.")
         .map_err(|error| error.to_string())?;
+    app.session_feed.push(crate::session_feed::SessionBlock::Note {
+        text: "goal accepted — the planner is composing the story plan".to_string(),
+    });
     persist_conversation(&app.conversation, cwd);
     if let Some(context) = load_project_instructions(cwd) {
         app.claude_md_content = Some(context);

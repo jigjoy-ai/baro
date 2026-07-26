@@ -29,6 +29,7 @@ import {
     getGitFileStats,
     getHeadSha,
     hasRemoteOrigin,
+    ensureGreenfieldRepo,
     isInsideGitRepo,
 } from "./integration/git.js"
 import { WorktreeManager } from "./integration/worktree.js"
@@ -170,6 +171,8 @@ export async function withCriticEvidenceBarrier<T>(
 }
 
 export interface OrchestrateConfig {
+    /** Initialize an empty non-git cwd as a fresh repository. Default on. */
+    greenfieldInit?: boolean
     prdPath: string
     cwd: string
     /** Stable authority/correlation identity shared with planning and billing. */
@@ -597,6 +600,11 @@ export async function orchestrate(
     operator.setEnvironment(env)
     operator.join(env)
 
+    if (config.greenfieldInit !== false) {
+        await ensureGreenfieldRepo(config.cwd, (line) =>
+            process.stderr.write(`${line}\n`),
+        ).catch(() => {})
+    }
     const useGit = config.withGit ?? (await isInsideGitRepo(config.cwd))
     const gitGate = new GitGate()
     let baseSha: string | null = null

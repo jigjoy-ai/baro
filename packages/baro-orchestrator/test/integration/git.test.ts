@@ -105,3 +105,41 @@ describe("getCommitCount", () => {
         assert.equal(await getCommitCount(repo, "missing-base"), 0)
     })
 })
+
+describe("ensureGreenfieldRepo", () => {
+    it("initializes only a truly empty directory", async () => {
+        const { ensureGreenfieldRepo, isInsideGitRepo } = await import(
+            "../../src/integration/git.js"
+        )
+        const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs")
+        const { tmpdir } = await import("node:os")
+        const { join } = await import("node:path")
+
+        const empty = mkdtempSync(join(tmpdir(), "baro-greenfield-"))
+        try {
+            assert.equal(await ensureGreenfieldRepo(empty), true)
+            assert.equal(await isInsideGitRepo(empty), true)
+            // Root commit exists so branches have a base.
+            const { execFileSync } = await import("node:child_process")
+            const head = execFileSync("git", ["rev-parse", "HEAD"], {
+                cwd: empty,
+            })
+                .toString()
+                .trim()
+            assert.ok(head.length >= 7)
+            // Idempotent: an existing repo is untouched.
+            assert.equal(await ensureGreenfieldRepo(empty), false)
+        } finally {
+            rmSync(empty, { recursive: true, force: true })
+        }
+
+        const occupied = mkdtempSync(join(tmpdir(), "baro-occupied-"))
+        try {
+            writeFileSync(join(occupied, "notes.txt"), "x")
+            assert.equal(await ensureGreenfieldRepo(occupied), false)
+            assert.equal(await isInsideGitRepo(occupied), false)
+        } finally {
+            rmSync(occupied, { recursive: true, force: true })
+        }
+    })
+})

@@ -56,6 +56,58 @@ export async function getCurrentBranch(cwd: string): Promise<string> {
     }
 }
 
+/**
+ * Greenfield bootstrap: an EMPTY directory (nothing but OS droppings)
+ * becomes a git repository with one empty root commit, so branching,
+ * worktree isolation and merging work for brand-new projects. Non-empty
+ * non-git directories are left alone — initializing someone's Downloads
+ * folder is worse than degraded git-less mode.
+ */
+export async function ensureGreenfieldRepo(
+    cwd: string,
+    onLog?: (line: string) => void,
+): Promise<boolean> {
+    if (await isInsideGitRepo(cwd)) return false
+    const { readdir } = await import("node:fs/promises")
+    const entries = (await readdir(cwd)).filter(
+        (name) =>
+            name !== ".DS_Store" &&
+            name !== "Thumbs.db" &&
+            // baro's own pre-branch artifacts don't make a directory a project.
+            name !== "prd.json" &&
+            name !== "baro.lock" &&
+            name !== ".baro",
+    )
+    if (entries.length > 0) return false
+    await exec("git", ["init"], { cwd })
+    try {
+        await exec(
+            "git",
+            ["commit", "--allow-empty", "-m", "baro: initialize repository"],
+            { cwd },
+        )
+    } catch {
+        // No committer identity configured — use a repo-local fallback so
+        // the root commit still lands without touching global config.
+        await exec(
+            "git",
+            [
+                "-c",
+                "user.name=baro",
+                "-c",
+                "user.email=baro@localhost",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "baro: initialize repository",
+            ],
+            { cwd },
+        )
+    }
+    onLog?.("[git] greenfield: initialized a fresh repository")
+    return true
+}
+
 export async function isInsideGitRepo(cwd: string): Promise<boolean> {
     try {
         await exec("git", ["rev-parse", "--is-inside-work-tree"], { cwd })

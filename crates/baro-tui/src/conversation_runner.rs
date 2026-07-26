@@ -64,8 +64,9 @@ pub struct ConversationRunOptions<'a> {
     pub provider_timeout_ms: u64,
     pub openai_api_key: Option<&'a str>,
     pub openai_base_url: Option<&'a str>,
-    /// Streaming sink for the assistant's partial reply (cumulative text).
-    pub on_delta: Option<&'a (dyn Fn(String) + Send + Sync)>,
+    /// Streaming sink: (reset, chunk). Reset replaces the accumulated
+    /// text (a retry restarted the reply); otherwise the chunk appends.
+    pub on_delta: Option<&'a (dyn Fn(bool, String) + Send + Sync)>,
 }
 
 #[derive(Debug, Clone)]
@@ -200,7 +201,8 @@ async fn run_conversation_turn_with_entry(
                 return;
             }
             if let Some(append) = value.get("append").and_then(|v| v.as_str()) {
-                sink(append.to_string());
+                let reset = value.get("reset").and_then(|v| v.as_bool()) == Some(true);
+                sink(reset, append.to_string());
             }
         }),
     )

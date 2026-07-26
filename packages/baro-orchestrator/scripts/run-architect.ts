@@ -28,6 +28,10 @@ import {
     type DialogueResponderInvocation,
 } from "../src/conversation/dialogue-agent.js"
 import { createDialogueResponder } from "../src/conversation/dialogue-responder.js"
+import {
+    classifyProviderFailure,
+    classifyTransportFailure,
+} from "../src/harness/provider-failure.js"
 import { runArchitectClaude } from "../src/planning/adapters/architect-claude.js"
 import { runArchitectCodex } from "../src/planning/adapters/architect-codex.js"
 import type { ArchitectInvocationObserver } from "../src/planning/adapters/architect-invocation.js"
@@ -338,14 +342,16 @@ async function main(): Promise<void> {
                 },
             })
         }
-        result = await runInitialArchitect(
-            args,
-            projectContext,
-            modeContract,
-            trustedGoalEnvelope,
-            billing,
-            resolvedArchitectRoute,
-            observeDecisionInvocation,
+        result = await withTransientRetry(() =>
+            runInitialArchitect(
+                args,
+                projectContext,
+                modeContract,
+                trustedGoalEnvelope,
+                billing,
+                resolvedArchitectRoute,
+                observeDecisionInvocation,
+            ),
         )
         if (
             args.outcomeFile &&
@@ -408,7 +414,7 @@ async function main(): Promise<void> {
 
     if (failure !== undefined) {
         process.stderr.write(
-            `[run-architect] FAILED after ${Date.now() - t0}ms: ${safeErrorForStderr(failure)}\n`,
+            `[run-architect] FAILED after ${Date.now() - t0}ms: ${sanitizeDiagnosticText(describeProviderError(failure)).slice(0, 16_384)}\n`,
         )
         process.exitCode = 1
         return
@@ -752,6 +758,68 @@ main().catch((e) => {
     process.stderr.write(`[run-architect] crashed: ${safeErrorForStderr(e, true)}\n`)
     process.exitCode = 3
 })
+
+/**
+ * One bounded retry, only for failures the provider taxonomy marks
+ * transient (capacity cooldowns, transport). Deterministic failures
+ * (bad contract, launch errors, empty results) still fail closed on the
+ * first attempt — retrying those would burn a full architect budget on a
+ * guaranteed repeat.
+ */
+async function withTransientRetry<T>(run: () => Promise<T>): Promise<T> {
+    try {
+        return await run()
+    } catch (error) {
+        const failure =
+            classifyProviderFailure(error) ?? classifyTransportFailure(error)
+        const transient =
+            failure?.kind === "provider_capacity" || failure?.kind === "transport"
+        if (!transient) throw error
+        const waitMs = Math.min(failure?.retryAfterMs ?? 3_000, 30_000)
+        process.stderr.write(
+            `[run-architect] attempt 1 failed (${failure!.kind}): ` +
+                `${describeProviderError(error)}; retrying in ${waitMs}ms\n`,
+        )
+        await new Promise((resolve) => setTimeout(resolve, waitMs))
+        return await run()
+    }
+}
+
+/**
+ * Claude with --output-format json reports errors on STDOUT; an exit-1
+ * with empty stderr used to log as a bare "exited with code 1". Pull the
+ * provider's own words out of the captured stdout when present.
+ */
+function describeProviderError(value: unknown): string {
+    const base = value instanceof Error ? value.message : String(value)
+    const stdout =
+        value && typeof value === "object" && "stdout" in value
+            ? (value as { stdout?: unknown }).stdout
+            : undefined
+    const text =
+        typeof stdout === "string"
+            ? stdout
+            : Buffer.isBuffer(stdout)
+              ? stdout.toString("utf8")
+              : ""
+    if (!text.trim()) return base
+    let detail = ""
+    try {
+        const parsed: unknown = JSON.parse(text)
+        if (parsed && typeof parsed === "object") {
+            const record = parsed as Record<string, unknown>
+            const candidate =
+                record.result ??
+                (record.error as Record<string, unknown> | undefined)?.message ??
+                record.message
+            if (typeof candidate === "string") detail = candidate
+        }
+    } catch {
+        detail = text
+    }
+    if (!detail.trim()) return base
+    return `${base.trim()} — provider said: ${detail.trim().slice(0, 500)}`
+}
 
 function safeErrorForStderr(value: unknown, includeStack = false): string {
     const raw =

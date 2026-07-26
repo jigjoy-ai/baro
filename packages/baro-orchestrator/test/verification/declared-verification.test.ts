@@ -684,3 +684,50 @@ describe("declared verification policy", () => {
         })
     })
 })
+
+describe("greenfield bare node declarations", () => {
+    it("allows bare `node <file>` only without package.json", async () => {
+        const { translateDeclaredTests } = await import(
+            "../../src/verification/declared-verification.js"
+        )
+        const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs")
+        const { tmpdir } = await import("node:os")
+        const { join } = await import("node:path")
+        const requirement = {
+            storyId: "S1",
+            command: "node test.js",
+        }
+        const bare = mkdtempSync(join(tmpdir(), "baro-df-bare-"))
+        try {
+            writeFileSync(join(bare, "test.js"), "process.exit(0)")
+            const [spec] = translateDeclaredTests(bare, [requirement], ["npm"])
+            assert.equal(spec?.tool, "node")
+            assert.deepEqual(spec?.args, ["test.js"])
+        } finally {
+            rmSync(bare, { recursive: true, force: true })
+        }
+        const withManifest = mkdtempSync(join(tmpdir(), "baro-df-manifest-"))
+        try {
+            writeFileSync(join(withManifest, "package.json"), "{}")
+            const [spec] = translateDeclaredTests(
+                withManifest,
+                [requirement],
+                ["npm"],
+            )
+            assert.match(spec?.incompleteReason ?? "", /without package\.json/)
+        } finally {
+            rmSync(withManifest, { recursive: true, force: true })
+        }
+        const traversal = mkdtempSync(join(tmpdir(), "baro-df-escape-"))
+        try {
+            const [spec] = translateDeclaredTests(
+                traversal,
+                [{ storyId: "S1", command: "node ../evil.js" }],
+                ["npm"],
+            )
+            assert.ok(spec?.incompleteReason)
+        } finally {
+            rmSync(traversal, { recursive: true, force: true })
+        }
+    })
+})
