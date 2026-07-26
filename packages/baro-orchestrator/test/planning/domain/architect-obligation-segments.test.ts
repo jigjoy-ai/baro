@@ -267,7 +267,42 @@ describe("segmented Architect obligation compiler", () => {
         assert.equal(calls, 0)
     })
 
-    it("allows exactly one repair for strict JSON and prevents model-owned ids", async () => {
+    it("discards a redundant echoed id without burning the repair budget", async () => {
+        // Models routinely echo an id despite the instruction; it is never
+        // authoritative (the host renumbers positionally), so the draft is
+        // accepted in one attempt and the forged id vanishes.
+        const requests: ArchitectObligationSegmentRequest[] = []
+        const progress: ArchitectObligationSegmentProgress[] = []
+        const result = await compileArchitectObligationSegments({
+            decisionDocument: DECISION_DOCUMENT,
+            goalEnvelope: goalEnvelope(1, 0),
+            respond: async (request) => {
+                requests.push(request)
+                return JSON.stringify({
+                    schemaVersion: 1,
+                    obligations: [{
+                        id: "O-999",
+                        adrIds: ["ADR-001"],
+                        invariantIds: ["G-A1"],
+                        subject: "echoed",
+                        scenario: "echoed",
+                        expectedOutcome: "echoed",
+                        evidence: ["echoed"],
+                    }],
+                })
+            },
+            onProgress: (event) => progress.push(event),
+        })
+
+        assert.deepEqual(requests.map(({ attempt }) => attempt), [1])
+        assert.equal(result.contract.obligations[0]!.id, "O-001")
+        assert.deepEqual(
+            progress.map(({ type }) => type),
+            ["batch_started", "batch_completed"],
+        )
+    })
+
+    it("allows exactly one repair for strict JSON and real shape drift", async () => {
         const requests: ArchitectObligationSegmentRequest[] = []
         const progress: ArchitectObligationSegmentProgress[] = []
         const result = await compileArchitectObligationSegments({
@@ -279,13 +314,13 @@ describe("segmented Architect obligation compiler", () => {
                     return JSON.stringify({
                         schemaVersion: 1,
                         obligations: [{
-                            id: "O-999",
                             adrIds: ["ADR-001"],
                             invariantIds: ["G-A1"],
                             subject: "forged",
                             scenario: "forged",
                             expectedOutcome: "forged",
                             evidence: ["forged"],
+                            priority: "high",
                         }],
                     })
                 }

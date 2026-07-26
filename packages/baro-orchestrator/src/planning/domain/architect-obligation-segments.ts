@@ -378,15 +378,23 @@ function parseSegmentResponse(
     }
     const decisionRank = new Map(decisionIds.map((id, index) => [id, index]))
     const draftDecisionIds: string[][] = []
+    const DRAFT_KEYS = [
+        "adrIds",
+        "invariantIds",
+        "subject",
+        "scenario",
+        "expectedOutcome",
+        "evidence",
+    ] as const
     const numbered = value.obligations.map((candidate, index) => {
-        if (!exactRecord(candidate, [
-            "adrIds",
-            "invariantIds",
-            "subject",
-            "scenario",
-            "expectedOutcome",
-            "evidence",
-        ])) {
+        // Models routinely echo an id despite the no-id instruction. It is
+        // redundant, never authoritative — the host renumbers positionally —
+        // so a draft that differs ONLY by an extra id is accepted and the
+        // model's id discarded. Any other shape drift still fails closed.
+        if (
+            !exactRecord(candidate, DRAFT_KEYS) &&
+            !exactRecord(candidate, [...DRAFT_KEYS, "id"])
+        ) {
             throw new ArchitectObligationSegmentError(
                 `architect obligation draft ${index + 1} must use the exact shape without an id`,
             )
