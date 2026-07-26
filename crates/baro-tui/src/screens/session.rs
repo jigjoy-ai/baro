@@ -495,7 +495,9 @@ fn planning_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {
         ]));
         return;
     }
-    if app.conversation.phase() == ConversationPhase::Planning {
+    let architect_running =
+        app.architect_status == crate::app::ArchitectStatus::Running;
+    if app.conversation.phase() == ConversationPhase::Planning || architect_running {
         let mut spans = vec![
             Span::styled(
                 format!(
@@ -505,7 +507,11 @@ fn planning_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {
                 Style::default().fg(theme::ACCENT),
             ),
             Span::styled(
-                "architect & planner are working…",
+                if architect_running {
+                    "architect is validating the goal…"
+                } else {
+                    "architect & planner are working…"
+                },
                 Style::default().fg(theme::TEXT_DIM),
             ),
         ];

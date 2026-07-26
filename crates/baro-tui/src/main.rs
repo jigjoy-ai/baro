@@ -1414,6 +1414,10 @@ async fn run_app(
                     // expect can only trip on a programming error.
                     let repository_brief = repository_brief
                         .expect("ready conversation turn always carries a repository brief");
+                    app.session_feed.push(crate::session_feed::SessionBlock::Note {
+                        text: "handed off to the architect — validating the goal against the repository"
+                            .to_string(),
+                    });
                     if let Err(error) = spawn_conversation_architect_validation(
                         &mut app,
                         &cwd,
@@ -1773,6 +1777,9 @@ async fn run_app(
                 app.planning_progress = Some(msg);
             }
             Some(AppEvent::ArchitectStarted) => {
+                app.session_feed.push(crate::session_feed::SessionBlock::Note {
+                    text: "architect is examining the repository and pinning the design".to_string(),
+                });
                 if headless {
                     println!(r#"{{"type":"architect_start"}}"#);
                 }
@@ -3149,6 +3156,9 @@ fn start_planning_from_conversation(
     app.conversation
         .record_system_turn("Goal accepted. Architect and Planner are starting.")
         .map_err(|error| error.to_string())?;
+    app.session_feed.push(crate::session_feed::SessionBlock::Note {
+        text: "goal accepted — the planner is composing the story plan".to_string(),
+    });
     persist_conversation(&app.conversation, cwd);
     if let Some(context) = load_project_instructions(cwd) {
         app.claude_md_content = Some(context);
