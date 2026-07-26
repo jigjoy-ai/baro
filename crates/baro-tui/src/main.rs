@@ -2102,6 +2102,20 @@ async fn run_app(
                                 ),
                             };
                             app.start_planning();
+                            // Conversation-owned runs return to the session,
+                            // where the planning spinner and feed live; the
+                            // picker would otherwise linger with no proposal.
+                            if app.conversation.goal_envelope().is_some() {
+                                app.session_feed.push(
+                                    crate::session_feed::SessionBlock::Note {
+                                        text: format!(
+                                            "execution mode: {} — planner is composing the story plan",
+                                            chosen
+                                        ),
+                                    },
+                                );
+                                app.screen = Screen::Conversation;
+                            }
                             spawn_planner_stage_b(&app, &cwd, tx.clone(), mode_json);
                         }
                         _ => {}
