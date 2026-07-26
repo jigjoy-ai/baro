@@ -241,16 +241,31 @@ Two boundaries implement the behavior.
             /coverage is incomplete.*O-002/u,
         )
 
+        // A paraphrased claim of a KNOWN id is restored to the canonical
+        // text — the returned (persisted) JSON carries the host-owned
+        // criterion, not the model's edit.
         stories[1]!.acceptance = [
             `${renderArchitectureObligationCriterion(obligations.obligations[1]!)} narrowed`,
         ]
+        const restored = JSON.parse(assertRunnablePlannerPrdJson(
+            JSON.stringify(prd),
+            trustedGoalEnvelope,
+            decisionDocument,
+        )) as { userStories: Array<{ acceptance: string[] }> }
+        assert.deepEqual(
+            restored.userStories[1]!.acceptance,
+            [renderArchitectureObligationCriterion(obligations.obligations[1]!)],
+        )
+
+        // A claim of an unknown id is fabrication, not paraphrase — fatal.
+        stories[1]!.acceptance = ["[O-999] fabricated obligation claim"]
         assert.throws(
             () => assertRunnablePlannerPrdJson(
                 JSON.stringify(prd),
                 trustedGoalEnvelope,
                 decisionDocument,
             ),
-            /altered canonical.*O-002/u,
+            /unknown architecture obligation O-999/u,
         )
 
         stories[1]!.acceptance = [

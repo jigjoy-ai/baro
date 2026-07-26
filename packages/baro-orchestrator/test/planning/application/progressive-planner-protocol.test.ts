@@ -194,7 +194,8 @@ describe("progressive planner lifecycle wire", () => {
         assert.equal(events.at(-1)?.type, "plan_complete_summary")
     })
 
-    it("rejects altered obligation criteria before admitting a fragment", () => {
+    it("restores an altered obligation criterion instead of rejecting the fragment", () => {
+        const events: ProgressivePlannerWireEvent[] = []
         const lifecycle = new ProgressivePlannerLifecycle(
             {
                 runId: "run-obligation-tamper",
@@ -203,27 +204,39 @@ describe("progressive planner lifecycle wire", () => {
                 trustedGoalEnvelope: OBLIGATION_GOAL,
                 trustedDecisionDocument: OBLIGATION_DOCUMENT,
             },
-            () => undefined,
+            (event) => events.push(event),
         )
         lifecycle.open()
-        assert.throws(
-            () => lifecycle.publish({
-                type: "plan_fragment",
-                run_id: "run-obligation-tamper",
-                planning_id: "planning-obligation-tamper",
-                fragment_id: "tampered",
-                ordinal: 1,
-                stories: [{
-                    ...STORY_S1,
-                    acceptance: [`${OBLIGATION_CRITERION} narrowed`],
-                    goalInvariantIds: ["G-A1"],
-                }],
-            }),
-            /altered canonical.*O-001/u,
+        lifecycle.publish({
+            type: "plan_fragment",
+            run_id: "run-obligation-tamper",
+            planning_id: "planning-obligation-tamper",
+            fragment_id: "tampered",
+            ordinal: 1,
+            stories: [{
+                ...STORY_S1,
+                acceptance: [`${OBLIGATION_CRITERION} narrowed`],
+                goalInvariantIds: ["G-A1"],
+            }],
+        })
+        assert.deepEqual(
+            events.map(({ type }) => type),
+            ["planning_open", "plan_fragment"],
         )
+        // The reconciled final plan carries the canonical text; the model's
+        // paraphrase never survives into ownership.
+        lifecycle.complete({
+            project: "p",
+            userStories: [{
+                ...STORY_S1,
+                acceptance: [OBLIGATION_CRITERION],
+                goalInvariantIds: ["G-A1"],
+            }],
+        })
+        assert.equal(events.at(-1)?.type, "plan_complete_summary")
     })
 
-    it("rejects an A19-style prefixed obligation claim before admitting a fragment", () => {
+    it("restores an A19-style prefixed obligation claim instead of rejecting it", () => {
         const events: ProgressivePlannerWireEvent[] = []
         const lifecycle = new ProgressivePlannerLifecycle(
             {
@@ -236,23 +249,22 @@ describe("progressive planner lifecycle wire", () => {
             (event) => events.push(event),
         )
         lifecycle.open()
-
-        assert.throws(
-            () => lifecycle.publish({
-                type: "plan_fragment",
-                run_id: "run-obligation-prefix",
-                planning_id: "planning-obligation-prefix",
-                fragment_id: "prefixed",
-                ordinal: 1,
-                stories: [{
-                    ...STORY_S1,
-                    acceptance: [`Parents G-A1: ${OBLIGATION_CRITERION}`],
-                    goalInvariantIds: ["G-A1"],
-                }],
-            }),
-            /altered canonical.*O-001/u,
+        lifecycle.publish({
+            type: "plan_fragment",
+            run_id: "run-obligation-prefix",
+            planning_id: "planning-obligation-prefix",
+            fragment_id: "prefixed",
+            ordinal: 1,
+            stories: [{
+                ...STORY_S1,
+                acceptance: [`Parents G-A1: ${OBLIGATION_CRITERION}`],
+                goalInvariantIds: ["G-A1"],
+            }],
+        })
+        assert.deepEqual(
+            events.map(({ type }) => type),
+            ["planning_open", "plan_fragment"],
         )
-        assert.deepEqual(events.map(({ type }) => type), ["planning_open"])
     })
 
     it("accepts an exact replay of a fragment that owns an obligation", () => {

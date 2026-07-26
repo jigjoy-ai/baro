@@ -24,6 +24,7 @@ import {
 import type { BaroCommand } from "../../tui-protocol.js"
 import {
     architectureObligationsFromDecision,
+    canonicalObligationAcceptance,
     obligationMappingsForStories,
     validateArchitectureObligationCoverage,
     type ArchitectureObligationContractV1,
@@ -184,13 +185,27 @@ export class ProgressivePlannerLifecycle {
             throw new Error("progressive planning stream is already closed")
         }
         const fragment = validateFragmentWireEvent(event, this.config)
-        const candidate = validateProgressivePlanFragment({
+        const validated = validateProgressivePlanFragment({
             schemaVersion: 1,
             planningSessionId: fragment.planning_id,
             fragmentId: fragment.fragment_id,
             ordinal: fragment.ordinal,
             stories: fragment.stories,
         })
+        // Restore host-owned obligation text on known-id claims the same way
+        // the final planner gate does, so a paraphrased fragment neither
+        // fails coverage here nor disagrees with the canonicalized final PRD
+        // at reconcile time.
+        const candidate = {
+            ...validated,
+            stories: validated.stories.map((story) => ({
+                ...story,
+                acceptance: canonicalObligationAcceptance(
+                    this.obligationContract,
+                    story.acceptance,
+                ).acceptance,
+            })),
+        }
         validateGoalContractCoverage(
             this.goalContract,
             goalContractMappings(candidate.stories),

@@ -7,6 +7,7 @@ import { deriveGoalContract } from "../../goal/goal-contract.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
     architectureObligationsFromDecision,
+    canonicalObligationAcceptance,
     validateArchitectureObligationCoverage,
     type StoryObligationMapping,
 } from "./architecture-obligation-contract.js"
@@ -42,6 +43,12 @@ export function assertRunnablePlannerPrdJson(
         throw new Error("final PRD must contain at least one user story")
     }
 
+    const goalContractForObligations = deriveGoalContract(trustedGoalEnvelope)
+    const obligationContract = architectureObligationsFromDecision(
+        trustedDecisionDocument,
+        goalContractForObligations,
+    )
+    let acceptanceCanonicalized = false
     const stories = prd.userStories as unknown[]
     const ids = new Set<string>()
     const dependencies = new Map<string, string[]>()
@@ -97,7 +104,18 @@ export function assertRunnablePlannerPrdJson(
         }
 
         const dependsOn = requireStringArray(story, id, "dependsOn", true)
-        const acceptance = requireStringArray(story, id, "acceptance", false)
+        // Planners paraphrase host-owned obligation text; restore the
+        // canonical criterion on known-id claims (and persist it — the
+        // returned JSON is what runs) before exact-match validation.
+        const canonicalized = canonicalObligationAcceptance(
+            obligationContract,
+            requireStringArray(story, id, "acceptance", false),
+        )
+        if (canonicalized.changed) {
+            story.acceptance = canonicalized.acceptance
+            acceptanceCanonicalized = true
+        }
+        const acceptance = canonicalized.acceptance
         requireStringArray(story, id, "tests", false)
         let goalInvariantIds: string[] = []
         if (story.goalInvariantIds !== undefined) {
@@ -147,11 +165,10 @@ export function assertRunnablePlannerPrdJson(
         }
     }
     assertAcyclic(dependencies)
-    const goalContract = deriveGoalContract(trustedGoalEnvelope)
     validateGoalContractCoverage(
         // The provider JSON is not authority for the run contract. Rust (or
         // another trusted host) supplies the confirmed envelope separately.
-        goalContract,
+        goalContractForObligations,
         goalMappings,
         // Unknown claims fail here. Missing ownership remains actionable:
         // GoalGuardian adds exact invariant-scoped work through Mozaik after
@@ -159,14 +176,11 @@ export function assertRunnablePlannerPrdJson(
         "partial",
     )
     validateArchitectureObligationCoverage(
-        architectureObligationsFromDecision(
-            trustedDecisionDocument,
-            goalContract,
-        ),
+        obligationContract,
         obligationMappings,
         "complete",
     )
-    return json
+    return acceptanceCanonicalized ? JSON.stringify(prd) : json
 }
 
 function requireNonEmptyString(value: unknown, error: string): string {

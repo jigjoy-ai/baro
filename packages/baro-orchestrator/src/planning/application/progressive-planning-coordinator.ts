@@ -34,6 +34,7 @@ import {
 import { validateGoalContractCoverage } from "../domain/goal-contract-coverage.js"
 import {
     architectureObligationsFromDecision,
+    canonicalObligationAcceptance,
     obligationMappingsForStories,
     validateArchitectureObligationCoverage,
 } from "../domain/architecture-obligation-contract.js"
@@ -272,8 +273,24 @@ export class ProgressivePlanningCoordinator {
                 ordinal: fragment.ordinal,
                 stories: fragment.stories,
             }
-            validated = validateProgressivePlanFragment(envelope)
+            const parsed = validateProgressivePlanFragment(envelope)
             const goalContract = deriveGoalContract(state.prd.goalEnvelope)
+            const obligationContract = architectureObligationsFromDecision(
+                state.prd.decisionDocument,
+                goalContract,
+            )
+            // Same canonicalization as the final planner gate: a paraphrased
+            // host-owned obligation criterion is restored, not fatal.
+            validated = {
+                ...parsed,
+                stories: parsed.stories.map((story) => ({
+                    ...story,
+                    acceptance: canonicalObligationAcceptance(
+                        obligationContract,
+                        story.acceptance,
+                    ).acceptance,
+                })),
+            }
             validateGoalContractCoverage(
                 goalContract,
                 goalContractMappings(validated.stories),
@@ -281,10 +298,7 @@ export class ProgressivePlanningCoordinator {
             )
             const fragmentIds = new Set(validated.stories.map(({ id }) => id))
             validateArchitectureObligationCoverage(
-                architectureObligationsFromDecision(
-                    state.prd.decisionDocument,
-                    goalContract,
-                ),
+                obligationContract,
                 obligationMappingsForStories([
                     ...state.prd.userStories.filter(
                         ({ id }) => !fragmentIds.has(id),

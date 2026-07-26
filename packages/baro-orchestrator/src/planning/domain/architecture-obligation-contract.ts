@@ -181,6 +181,45 @@ export function renderArchitectureObligationCriterion(
 }
 
 /**
+ * Restore host-owned criterion text on acceptance entries that claim a KNOWN
+ * obligation id. The claim (which obligation a story owns) is the model's
+ * decision; the criterion text is canonical and never the model's to edit —
+ * planners routinely paraphrase it, and a paraphrase must not kill a plan
+ * when the exact text is deterministically recoverable. Claims of unknown
+ * ids are left untouched for the validator to reject, and duplicate claims
+ * of one obligation within a story collapse to a single canonical entry.
+ */
+export function canonicalObligationAcceptance(
+    contract: ArchitectureObligationContractV1 | null | undefined,
+    acceptance: readonly string[],
+): { acceptance: string[]; changed: boolean } {
+    if (!contract) return { acceptance: [...acceptance], changed: false }
+    const byId = new Map(
+        contract.obligations.map((obligation) => [obligation.id, obligation]),
+    )
+    const claimed = new Set<string>()
+    const result: string[] = []
+    let changed = false
+    for (const criterion of acceptance) {
+        const claim = OBLIGATION_CRITERION_CLAIM.exec(criterion)
+        const obligation = claim ? byId.get(claim[1] ?? "") : undefined
+        if (!obligation) {
+            result.push(criterion)
+            continue
+        }
+        if (claimed.has(obligation.id)) {
+            changed = true
+            continue
+        }
+        claimed.add(obligation.id)
+        const canonical = renderArchitectureObligationCriterion(obligation)
+        if (canonical !== criterion) changed = true
+        result.push(canonical)
+    }
+    return { acceptance: result, changed }
+}
+
+/**
  * Require exact, single-owner propagation into stories. Partial mode permits
  * obligations to arrive in later progressive fragments but still rejects
  * unknown/tampered claims and duplicate owners in the supplied graph.
