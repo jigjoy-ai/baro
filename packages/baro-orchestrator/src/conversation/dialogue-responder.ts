@@ -412,6 +412,22 @@ function createClaudeResponder(
             requestedModel,
             claudeObservation(wrapper, requestedModel),
         )
+        // An error result (stream cut mid-response, provider overload) carries
+        // the provider's message in `result`. It must surface as a provider
+        // failure — passed through, it would reach the strict conversation
+        // contract parser as garbage and mask the real cause.
+        const subtype = typeof wrapper.subtype === "string" ? wrapper.subtype : ""
+        if (wrapper.is_error === true || (subtype !== "" && subtype !== "success")) {
+            const detail =
+                typeof wrapper.result === "string" && wrapper.result.trim()
+                    ? wrapper.result.trim().slice(0, 400)
+                    : subtype || "unknown error"
+            throw new DialogueResponderInvocationError(
+                `Claude dialogue provider reported an error: ${detail}`,
+                invocation,
+                { cause: wrapper },
+            )
+        }
         if (typeof wrapper.result !== "string" || !wrapper.result.trim()) {
             throw new DialogueResponderInvocationError(
                 "Claude dialogue returned no text",

@@ -144,6 +144,41 @@ process.stdout.write(JSON.stringify({ result: "{\\\"message\\\":\\\"Ready.\\\",\
         })
     })
 
+    it("surfaces a Claude error result as a provider failure, not text", async () => {
+        await withTempDir("dialogue-responder-", async (dir) => {
+            const binary = join(dir, "claude")
+            writeFileSync(
+                binary,
+                "#!/bin/sh\n" +
+                    "printf '%s' '{\"result\":\"API Error: 529 overloaded\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"duration_ms\":50,\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}'\n",
+            )
+            chmodSync(binary, 0o755)
+            const responder = createDialogueResponder({
+                backend: "claude",
+                cwd: dir,
+                claudeBin: binary,
+                model: "haiku",
+            })
+            await assert.rejects(
+                responder(
+                    {
+                        runId: "run-1",
+                        messageId: "message-1",
+                        systemPrompt: "system",
+                        userPrompt: "status",
+                    },
+                    new AbortController().signal,
+                ),
+                (error: unknown) => {
+                    assert.ok(error instanceof Error)
+                    assert.match(error.message, /reported an error/)
+                    assert.match(error.message, /529 overloaded/)
+                    return true
+                },
+            )
+        })
+    })
+
     it("hardens Claude when reused as a safe read-only evaluator", async () => {
         await withTempDir("dialogue-claude-safe-evaluator-", async (dir) => {
             const capture = join(dir, "argv.json")

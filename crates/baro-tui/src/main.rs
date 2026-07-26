@@ -239,6 +239,9 @@ enum AppEvent {
     Key(crossterm::event::KeyEvent),
     /// Positive = wheel up (toward history), negative = wheel down.
     MouseScroll(i8),
+    /// Bracketed paste: the whole text lands in the active input at once,
+    /// so embedded newlines can't submit a half-pasted message.
+    Paste(String),
     ContextReady(String),
     ContextError(String),
     ConversationResponse(conversation_runner::ConversationTurnResult),
@@ -423,6 +426,9 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     execute!(writer, EnterAlternateScreen)?;
     execute!(writer, crossterm::event::EnableMouseCapture)?;
+    // Without bracketed paste, a multiline paste replays raw keys and the
+    // first newline submits a half-pasted message.
+    execute!(writer, crossterm::event::EnableBracketedPaste)?;
     execute!(writer, Clear(ClearType::All))?;
     execute!(writer, Clear(ClearType::Purge))?;
     let backend = CrosstermBackend::new(writer);
@@ -431,6 +437,7 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     let result = run_app(Some(&mut terminal), cli).await;
 
     disable_raw_mode()?;
+    execute!(terminal.backend_mut(), crossterm::event::DisableBracketedPaste)?;
     execute!(terminal.backend_mut(), crossterm::event::DisableMouseCapture)?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -1183,7 +1190,11 @@ async fn run_app(
     // closes an interrupted provider turn so the user can retry safely.
     // Greenfield: an empty cwd becomes a repository up front, so RepoScout,
     // architect validation and branching all see a real repo.
-    git::greenfield_bootstrap(&cwd).await;
+    if git::greenfield_bootstrap(&cwd).await {
+        app.session_feed.push(session_feed::SessionBlock::Note {
+            text: "greenfield: initialized a fresh git repository".to_string(),
+        });
+    }
 
     if !entered_resume && cli.goal.is_none() {
         restore_pre_prd_conversation(&mut app, &cwd);
@@ -1246,6 +1257,11 @@ async fn run_app(
                                     .blocking_send(AppEvent::MouseScroll(delta))
                                     .is_err()
                             {
+                                break;
+                            }
+                        }
+                        Ok(crossterm::event::Event::Paste(text)) => {
+                            if tx_key.blocking_send(AppEvent::Paste(text)).is_err() {
                                 break;
                             }
                         }
@@ -1362,6 +1378,32 @@ async fn run_app(
                             app.dag_auto_scroll_to_story(sid, visible);
                         }
                     }
+                }
+            }
+            Some(AppEvent::Paste(text)) => {
+                // Normalize line endings; tabs become spaces so width math
+                // stays sane. Other control chars are dropped.
+                let cleaned: String = text
+                    .replace("\r\n", "\n")
+                    .replace('\r', "\n")
+                    .chars()
+                    .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+                    .collect();
+                match app.screen {
+                    Screen::Conversation if !app.conversation_busy => {
+                        for ch in cleaned.chars() {
+                            app.input_insert(if ch == '\t' { ' ' } else { ch });
+                        }
+                    }
+                    Screen::Welcome if app.welcome_field == app::WelcomeField::Goal => {
+                        app.goal_input
+                            .push_str(&cleaned.replace(['\n', '\t'], " "));
+                    }
+                    Screen::ApiKeyInput => {
+                        app.api_key_input
+                            .push_str(cleaned.trim());
+                    }
+                    _ => {}
                 }
             }
             Some(AppEvent::MouseScroll(delta)) => {

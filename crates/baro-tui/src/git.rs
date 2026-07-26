@@ -32,7 +32,7 @@ pub(crate) async fn get_current_branch(cwd: &Path) -> BaroResult<String> {
 /// best-effort — the orchestrator's per-story pushes retry later. In
 /// `BARO_LOCAL_ONLY=1` mode the branch stays local.
 pub async fn create_fresh_branch(cwd: &Path, base_name: &str) -> BaroResult<String> {
-    ensure_greenfield_repo(cwd).await;
+    let _ = ensure_greenfield_repo(cwd).await;
     let publish_remote = std::env::var("BARO_LOCAL_ONLY").as_deref() != Ok("1");
     create_fresh_branch_with_publish(cwd, base_name, publish_remote).await
 }
@@ -41,18 +41,20 @@ pub async fn create_fresh_branch(cwd: &Path, base_name: &str) -> BaroResult<Stri
 /// becomes a git repository with one empty root commit so the run branch
 /// has a base. Non-empty non-git directories are left alone. Best-effort:
 /// on any failure the branch step reports the real error right after.
-pub async fn greenfield_bootstrap(cwd: &Path) {
-    ensure_greenfield_repo(cwd).await;
+/// Returns true when a repository was initialized; the caller surfaces it
+/// (never print here — the TUI's alternate screen is already active).
+pub async fn greenfield_bootstrap(cwd: &Path) -> bool {
+    ensure_greenfield_repo(cwd).await
 }
 
-async fn ensure_greenfield_repo(cwd: &Path) {
+async fn ensure_greenfield_repo(cwd: &Path) -> bool {
     let inside = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(cwd)
         .output()
         .await;
     if matches!(&inside, Ok(out) if out.status.success()) {
-        return;
+        return false;
     }
     let empty = match std::fs::read_dir(cwd) {
         Ok(entries) => entries
@@ -72,7 +74,7 @@ async fn ensure_greenfield_repo(cwd: &Path) {
         Err(_) => false,
     };
     if !empty {
-        return;
+        return false;
     }
     let init = Command::new("git")
         .args(["init"])
@@ -80,7 +82,7 @@ async fn ensure_greenfield_repo(cwd: &Path) {
         .output()
         .await;
     if !matches!(&init, Ok(out) if out.status.success()) {
-        return;
+        return false;
     }
     let commit = Command::new("git")
         .args(["commit", "--allow-empty", "-m", "baro: initialize repository"])
@@ -104,7 +106,7 @@ async fn ensure_greenfield_repo(cwd: &Path) {
             .output()
             .await;
     }
-    eprintln!("[git] greenfield: initialized a fresh repository");
+    true
 }
 
 async fn create_fresh_branch_with_publish(

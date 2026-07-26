@@ -28,10 +28,7 @@ import {
     type DialogueResponderInvocation,
 } from "../src/conversation/dialogue-agent.js"
 import { createDialogueResponder } from "../src/conversation/dialogue-responder.js"
-import {
-    classifyProviderFailure,
-    classifyTransportFailure,
-} from "../src/harness/provider-failure.js"
+import { withTransientRetry } from "../src/harness/transient-retry.js"
 import { runArchitectClaude } from "../src/planning/adapters/architect-claude.js"
 import { runArchitectCodex } from "../src/planning/adapters/architect-codex.js"
 import type { ArchitectInvocationObserver } from "../src/planning/adapters/architect-invocation.js"
@@ -342,16 +339,22 @@ async function main(): Promise<void> {
                 },
             })
         }
-        result = await withTransientRetry(() =>
-            runInitialArchitect(
-                args,
-                projectContext,
-                modeContract,
-                trustedGoalEnvelope,
-                billing,
-                resolvedArchitectRoute,
-                observeDecisionInvocation,
-            ),
+        result = await withTransientRetry(
+            () =>
+                runInitialArchitect(
+                    args,
+                    projectContext,
+                    modeContract,
+                    trustedGoalEnvelope,
+                    billing,
+                    resolvedArchitectRoute,
+                    observeDecisionInvocation,
+                ),
+            {
+                notice: (message) =>
+                    process.stderr.write(`[run-architect] ${message}\n`),
+                describe: describeProviderError,
+            },
         )
         if (
             args.outcomeFile &&
@@ -758,32 +761,6 @@ main().catch((e) => {
     process.stderr.write(`[run-architect] crashed: ${safeErrorForStderr(e, true)}\n`)
     process.exitCode = 3
 })
-
-/**
- * One bounded retry, only for failures the provider taxonomy marks
- * transient (capacity cooldowns, transport). Deterministic failures
- * (bad contract, launch errors, empty results) still fail closed on the
- * first attempt — retrying those would burn a full architect budget on a
- * guaranteed repeat.
- */
-async function withTransientRetry<T>(run: () => Promise<T>): Promise<T> {
-    try {
-        return await run()
-    } catch (error) {
-        const failure =
-            classifyProviderFailure(error) ?? classifyTransportFailure(error)
-        const transient =
-            failure?.kind === "provider_capacity" || failure?.kind === "transport"
-        if (!transient) throw error
-        const waitMs = Math.min(failure?.retryAfterMs ?? 3_000, 30_000)
-        process.stderr.write(
-            `[run-architect] attempt 1 failed (${failure!.kind}): ` +
-                `${describeProviderError(error)}; retrying in ${waitMs}ms\n`,
-        )
-        await new Promise((resolve) => setTimeout(resolve, waitMs))
-        return await run()
-    }
-}
 
 /**
  * Claude with --output-format json reports errors on STDOUT; an exit-1

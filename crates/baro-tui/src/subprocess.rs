@@ -114,12 +114,23 @@ pub async fn spawn_and_capture_streaming(
 
     if !status.success() {
         let code = status.code();
+        // The conversation lane multiplexes live NDJSON deltas over stderr;
+        // they are UI traffic, not diagnostics, and would bury the real error.
+        let diagnostics: String = stderr_acc
+            .lines()
+            .filter(|line| {
+                !line
+                    .trim_start()
+                    .starts_with("{\"type\":\"conversation_delta\"")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         return Err(ProcessRunError {
             message: format!(
                 "{} exited with code {}{}",
                 log_tag,
                 code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
-                detail_tail(&stdout, &stderr_acc),
+                detail_tail(&stdout, &diagnostics),
             ),
             log_path,
         });

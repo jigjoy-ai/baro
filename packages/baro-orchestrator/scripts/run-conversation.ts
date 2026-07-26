@@ -46,6 +46,7 @@ import {
     type RepositoryContextScanner,
 } from "../src/conversation/session/repository-scanner.js"
 import { trustedFrontDoorBillingRunId } from "../src/conversation/session/frontdoor-billing.js"
+import { withTransientRetry } from "../src/harness/transient-retry.js"
 
 interface Args {
     inputFile: string
@@ -265,16 +266,34 @@ async function main(): Promise<void> {
         const responder: ConversationResponder = {
             backend: args.llm,
             respond: async (request, signal) => {
-                const result = await dialogue(
+                // Fast transient provider failures (an error result mid-stream,
+                // capacity cooldowns) get one classified retry. Our own
+                // watchdog kills (`killed`) and user aborts fail closed: the
+                // turn budget only guarantees room for two provider calls.
+                const result = await withTransientRetry(
+                    (attempt) =>
+                        dialogue(
+                            {
+                                runId: billingRunId,
+                                messageId:
+                                    attempt === 1
+                                        ? request.requestId
+                                        : `${request.requestId}.retry${attempt - 1}`,
+                                billingRole: "conversation",
+                                systemPrompt: request.systemPrompt,
+                                userPrompt: request.userPrompt,
+                                onDeltaText: streamDelta,
+                            },
+                            signal,
+                        ),
                     {
-                        runId: billingRunId,
-                        messageId: request.requestId,
-                        billingRole: "conversation",
-                        systemPrompt: request.systemPrompt,
-                        userPrompt: request.userPrompt,
-                        onDeltaText: streamDelta,
+                        maxWaitMs: 10_000,
+                        retryable: (error) =>
+                            signal?.aborted !== true &&
+                            (error as { killed?: boolean }).killed !== true,
+                        notice: (message) =>
+                            process.stderr.write(`[run-conversation] ${message}\n`),
                     },
-                    signal,
                 )
                 return typeof result === "string" ? result : result.text
             },
