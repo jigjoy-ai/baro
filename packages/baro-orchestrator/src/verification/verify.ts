@@ -18,6 +18,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 
+import type { VerificationCommandOutput } from "../events/verification.js"
 import { execFileCli } from "../harness/exec-file-cli.js"
 import {
     MAX_DECLARED_VERIFY_COMMANDS,
@@ -31,6 +32,12 @@ const TIMEOUT_MS = 5 * 60_000
 const COMMAND_SETTLEMENT_GRACE_MS = 5_000
 const COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS = 3_000
 const TAIL_BYTES = 1500
+/**
+ * Per-stream tail kept as goal-review evidence for every executed command.
+ * 2000 chars × 2 streams × a full 16-command plan ≈ 64KB worst case, safely
+ * inside the aggregate review's 256KB basis+verification budget.
+ */
+const OUTPUT_CAPTURE_CHARS = 2000
 /** Includes conventional commands added at runtime as well as PRD declarations. */
 export const MAX_FINAL_ADDED_VERIFY_COMMANDS = 8
 const MAX_COMPACTED_RSTEST_PATHS = 64
@@ -50,6 +57,7 @@ export interface VerifyCommandResult {
     status: "passed" | "failed" | "skipped"
     durationMs: number
     tail?: string
+    output?: VerificationCommandOutput
 }
 
 export interface VerifyCommandSpec {
@@ -910,9 +918,25 @@ export function recommendedMergedVerifyTimeoutMs(baseline: VerifyPlan): number {
 }
 
 type CmdOutcome =
-    | { status: "passed"; durationMs: number }
-    | { status: "failed"; durationMs: number; tail: string }
+    | { status: "passed"; durationMs: number; output?: VerificationCommandOutput }
+    | { status: "failed"; durationMs: number; tail: string; output?: VerificationCommandOutput }
     | { status: "skipped"; durationMs: number; tail: string }
+
+/** Tail-bound both streams once, at capture, with honest elision markers. */
+function captureCommandOutput(
+    stdout: string,
+    stderr: string,
+): VerificationCommandOutput {
+    return {
+        stdout: stdout.slice(-OUTPUT_CAPTURE_CHARS),
+        stderr: stderr.slice(-OUTPUT_CAPTURE_CHARS),
+        stdoutBytes: Buffer.byteLength(stdout, "utf8"),
+        stderrBytes: Buffer.byteLength(stderr, "utf8"),
+        truncated:
+            stdout.length > OUTPUT_CAPTURE_CHARS ||
+            stderr.length > OUTPUT_CAPTURE_CHARS,
+    }
+}
 
 async function runCmd(
     cwd: string,
@@ -957,14 +981,18 @@ async function runCmd(
         }
     }
     try {
-        await execFileCli(c.tool, c.args, {
+        const result = await execFileCli(c.tool, c.args, {
             cwd: commandCwd,
             timeout: TIMEOUT_MS,
             terminationGraceMs: COMMAND_SETTLEMENT_GRACE_MS,
             maxBuffer: 8 * 1024 * 1024,
             signal,
         })
-        return { status: "passed", durationMs: Date.now() - startedAt }
+        return {
+            status: "passed",
+            durationMs: Date.now() - startedAt,
+            output: captureCommandOutput(result.stdout, result.stderr),
+        }
     } catch (e) {
         if (signal?.aborted) throw e
         // Tool not installed → we couldn't verify with it. Not a failure.
@@ -981,6 +1009,7 @@ async function runCmd(
             status: "failed",
             durationMs: Date.now() - startedAt,
             tail: combined.slice(-TAIL_BYTES),
+            output: captureCommandOutput(err.stdout ?? "", err.stderr ?? ""),
         }
     }
 }
@@ -1013,6 +1042,9 @@ export async function verifyBuild(
             status: outcome.status,
             durationMs: outcome.durationMs,
             ...("tail" in outcome && outcome.tail ? { tail: outcome.tail } : {}),
+            ...("output" in outcome && outcome.output
+                ? { output: outcome.output }
+                : {}),
         })
         if (outcome.status === "skipped") continue
         ran = true

@@ -174,7 +174,10 @@ export class VerificationGoalGate {
         this.verificationEvidence = {
             verificationId: result.verificationId,
             status: effectiveStatus,
-            commands: result.commands.map((command) => ({ ...command })),
+            commands: result.commands.map((command) => ({
+                ...command,
+                ...(command.output ? { output: { ...command.output } } : {}),
+            })),
             durationMs: result.durationMs,
         }
         if (effectiveStatus === "failed") {

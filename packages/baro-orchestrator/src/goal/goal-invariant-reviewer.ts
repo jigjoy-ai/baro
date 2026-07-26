@@ -95,6 +95,10 @@ This is a run-level composition review, not a review of one worker. Evaluate eve
 story pass is evidence about that shard only; independently check the interaction of all mapped
 contributions. violated_criteria must contain only exact criterion strings from the prompt.
 
+Verification commands include their captured stdout/stderr (\`output\`). Weigh what the commands
+actually printed — test counts, suites run, warnings — over their pass/fail labels; a "passed"
+label whose output shows zero relevant tests executed does not prove an invariant.
+
 A skipped or missing command is control-plane incompleteness, not itself a violated goal invariant.
 Return "fail" only when repository evidence establishes a concrete semantic defect independently
 of the skipped evidence; return "pass" only when the available evidence still proves every invariant.

@@ -107,6 +107,50 @@ describe("verifyBuild", () => {
         })
     })
 
+    it("captures real stdout/stderr as evidence on a passing command", async () => {
+        await withTempDir("baro-verify-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "v",
+                    scripts: {
+                        test: "node -e \"console.log('12 tests passed'); console.error('one warning')\"",
+                    },
+                }),
+            )
+            const r = await verifyBuild(dir)
+            assert.equal(r.ok, true)
+            const output = r.commands[0]?.output
+            assert.ok(output, "passing command must carry captured output")
+            assert.match(output.stdout, /12 tests passed/)
+            assert.match(output.stderr, /one warning/)
+            assert.equal(output.truncated, false)
+            assert.ok(output.stdoutBytes > 0)
+        })
+    })
+
+    it("bounds captured output with honest truncation markers on failure", async () => {
+        await withTempDir("baro-verify-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "v",
+                    scripts: {
+                        test: "node -e \"console.log('x'.repeat(5000) + 'FINAL-SUMMARY'); process.exit(1)\"",
+                    },
+                }),
+            )
+            const r = await verifyBuild(dir)
+            assert.equal(r.ok, false)
+            const output = r.commands[0]?.output
+            assert.ok(output, "failing command must carry captured output")
+            assert.ok(output.stdout.length <= 2_000)
+            assert.match(output.stdout, /FINAL-SUMMARY/, "tail must keep the end of the stream")
+            assert.equal(output.truncated, true)
+            assert.ok(output.stdoutBytes > 5_000)
+        })
+    })
+
     it("returns {ran:true, ok:true} when build and test both pass", async () => {
         await withTempDir("baro-verify-", async (dir) => {
             writeFileSync(

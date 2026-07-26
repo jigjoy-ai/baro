@@ -6,12 +6,28 @@ export type RunVerificationStatus = "passed" | "failed" | "skipped"
 
 export type VerificationCommandStatus = "passed" | "failed" | "skipped"
 
+/**
+ * Bounded capture of a command's real streams, kept for every executed
+ * command (passing ones included) so downstream reviewers judge on output,
+ * not status labels. Bounded once at capture; byte counts record what the
+ * command actually produced before the tail was taken.
+ */
+export interface VerificationCommandOutput {
+    stdout: string
+    stderr: string
+    stdoutBytes: number
+    stderrBytes: number
+    truncated: boolean
+}
+
 export interface VerificationCommandEvidence {
     command: string
     status: VerificationCommandStatus
     durationMs: number
     /** Tail of stderr/stdout for failed commands, or a skip explanation. */
     tail?: string
+    /** Absent when the command never executed (preflight/containment/ENOENT). */
+    output?: VerificationCommandOutput
 }
 
 /** The coordinator has integrated all candidate work and requests an objective gate. */

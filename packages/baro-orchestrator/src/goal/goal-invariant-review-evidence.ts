@@ -103,6 +103,7 @@ export async function prepareGoalInvariantReview(
             basis,
             "",
             "## Exact source-bound final verification (lossless JSON)",
+            "Each executed command carries `output`: the real captured stdout/stderr tail (bounded once at capture; `truncated` plus the byte counts mark any elision). Judge invariants against this captured output, not against status labels alone.",
             commandEvidence,
             "",
             "## Complete merged repository delta",
