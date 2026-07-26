@@ -2025,7 +2025,13 @@ async fn run_app(
                         KeyCode::Left => app.input_left(),
                         KeyCode::Right => app.input_right(),
                         KeyCode::Home => app.input_home(),
-                        KeyCode::End => app.input_end(),
+                        KeyCode::End => {
+                            if app.conversation_input.is_empty() {
+                                app.session_feed.scroll_back = 0;
+                            } else {
+                                app.input_end();
+                            }
+                        }
                         KeyCode::Delete if !app.conversation_busy => app.input_delete(),
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.input_home();
