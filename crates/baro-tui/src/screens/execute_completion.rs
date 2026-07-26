@@ -47,52 +47,7 @@ pub fn render_completion(f: &mut Frame, app: &App) {
         .map(|s| s.files_modified)
         .unwrap_or_else(|| app.stories.iter().map(|s| s.files_modified).sum());
 
-    // Calculate time saved using DAG levels:
-    // For each level, sequential = sum of all story durations, parallel = max story duration
-    // Time saved = sum of (sequential - parallel) per level
-    let (saved_secs, sequential_time) = {
-        let mut total_sequential = 0u64;
-        let mut total_parallel = 0u64;
-
-        for level in &app.dag_levels {
-            let mut level_sum = 0u64;
-            let mut level_max = 0u64;
-            for story_id in level {
-                if let Some(story) = app.stories.iter().find(|s| s.id == *story_id) {
-                    if let Some(dur) = story.duration_secs {
-                        level_sum += dur;
-                        level_max = level_max.max(dur);
-                    }
-                }
-            }
-            total_sequential += level_sum;
-            total_parallel += level_max;
-        }
-
-        // Also count fix stories not in original DAG
-        for story in &app.stories {
-            if story.id.contains("-fix") {
-                if let Some(dur) = story.duration_secs {
-                    total_sequential += dur;
-                    total_parallel += dur; // fix stories run sequentially
-                }
-            }
-        }
-
-        let saved = total_sequential.saturating_sub(total_parallel);
-        (saved, total_sequential)
-    };
-
-    let multiplier = if sequential_time > 0 && saved_secs > 0 {
-        let parallel_time = sequential_time.saturating_sub(saved_secs);
-        if parallel_time > 0 {
-            sequential_time as f64 / parallel_time as f64
-        } else {
-            1.0
-        }
-    } else {
-        1.0
-    };
+    let (saved_secs, multiplier) = app.parallel_time_saved();
 
     // Dynamic width: measure the longest content lines, clamp to [50, 80]
     let label_width: usize = 18; // e.g. "  PR:             " or "  Time saved:     "

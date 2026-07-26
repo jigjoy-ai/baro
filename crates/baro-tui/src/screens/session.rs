@@ -98,14 +98,25 @@ fn render_focus(frame: &mut Frame, app: &App, id: &str, area: ratatui::layout::R
             Style::default().fg(theme::MUTED),
         ),
     ]));
-    lines.push(Line::from(""));
+    let header_rows = 2u16.min(area.height);
+    let header_area = ratatui::layout::Rect { height: header_rows, ..area };
+    let body_area = ratatui::layout::Rect {
+        y: area.y + header_rows,
+        height: area.height.saturating_sub(header_rows),
+        ..area
+    };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), header_area);
+
+    // Scrollable body: the agent's full retained activity, wheel/PageUp to
+    // look back, tail-follow when at the bottom. Recent 500 entries bound
+    // the per-frame build cost.
+    let mut body: Vec<Line> = Vec::new();
     if let Some(active) = app.active_stories.get(id) {
-        let budget = area.height.saturating_sub(3) as usize;
         let entries: Vec<&crate::app::ActivityEntry> =
-            active.activity.iter().rev().take(budget).rev().collect();
+            active.activity.iter().rev().take(500).rev().collect();
         if entries.is_empty() {
-            for log in active.logs.iter().rev().take(budget).rev() {
-                lines.push(Line::from(Span::styled(
+            for log in active.logs.iter().rev().take(500).rev() {
+                body.push(Line::from(Span::styled(
                     format!("  {log}"),
                     Style::default().fg(theme::TEXT_DIM),
                 )));
@@ -113,16 +124,22 @@ fn render_focus(frame: &mut Frame, app: &App, id: &str, area: ratatui::layout::R
         } else {
             let width = area.width.saturating_sub(4) as usize;
             for entry in entries {
-                lines.push(crate::screens::widgets::activity_line(entry, width));
+                body.push(crate::screens::widgets::activity_line(entry, width));
             }
         }
     } else {
-        lines.push(Line::from(Span::styled(
+        body.push(Line::from(Span::styled(
             "  (no live worker for this story right now)",
             Style::default().fg(theme::MUTED),
         )));
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    let paragraph = Paragraph::new(body).wrap(Wrap { trim: false });
+    let total = paragraph.line_count(body_area.width);
+    let visible = body_area.height as usize;
+    let max_back = total.saturating_sub(visible);
+    let back = app.focus_scroll_back.min(max_back);
+    let offset = max_back.saturating_sub(back);
+    frame.render_widget(paragraph.scroll((offset as u16, 0)), body_area);
 }
 
 fn header_line(app: &App) -> Paragraph<'static> {
@@ -406,12 +423,80 @@ fn block_lines(
                         Style::default().fg(theme::TEXT_DIM),
                     )));
                 }
+                let completed = app
+                    .stories
+                    .iter()
+                    .filter(|s| matches!(s.status, crate::app::StoryStatus::Complete))
+                    .count();
+                if !app.stories.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!("    stories {completed}/{}", app.stories.len()),
+                        Style::default().fg(theme::TEXT_DIM),
+                    )));
+                }
+                if let Some(status) = app.verification_status.as_deref() {
+                    let (label, color) = match status {
+                        "passed" => ("passed", theme::SUCCESS),
+                        "failed" => ("failed", theme::ERROR),
+                        _ => ("not run", theme::WARNING),
+                    };
+                    let detail = app
+                        .verification
+                        .as_ref()
+                        .map(|e| {
+                            format!(
+                                " · {} command(s) · {:.1}s",
+                                e.commands.len(),
+                                e.duration_ms as f64 / 1_000.0
+                            )
+                        })
+                        .unwrap_or_default();
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "    verification ".to_string(),
+                            Style::default().fg(theme::TEXT_DIM),
+                        ),
+                        Span::styled(label.to_string(), Style::default().fg(color)),
+                        Span::styled(detail, Style::default().fg(theme::TEXT_DIM)),
+                    ]));
+                }
+                let (saved_secs, multiplier) = app.parallel_time_saved();
+                if saved_secs > 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "    time saved ".to_string(),
+                            Style::default().fg(theme::TEXT_DIM),
+                        ),
+                        Span::styled(
+                            format!(
+                                "{}:{:02} with parallel execution ({multiplier:.1}x)",
+                                saved_secs / 60,
+                                saved_secs % 60
+                            ),
+                            Style::default().fg(theme::SUCCESS),
+                        ),
+                    ]));
+                }
                 if let Some(stats) = &app.final_stats {
                     lines.push(Line::from(Span::styled(
                         format!(
                             "    files +{} ~{} · commits {}",
                             stats.files_created, stats.files_modified, stats.total_commits
                         ),
+                        Style::default().fg(theme::TEXT_DIM),
+                    )));
+                }
+                if app.total_input_tokens > 0 || app.total_output_tokens > 0 {
+                    let mut usage = format!(
+                        "    tokens {} in / {} out",
+                        crate::utils::format_commas(app.total_input_tokens),
+                        crate::utils::format_commas(app.total_output_tokens)
+                    );
+                    if app.total_cost_usd > 0.0 {
+                        usage.push_str(&format!(" · ${:.2}", app.total_cost_usd));
+                    }
+                    lines.push(Line::from(Span::styled(
+                        usage,
                         Style::default().fg(theme::TEXT_DIM),
                     )));
                 }
@@ -545,6 +630,75 @@ fn story_line(app: &App, id: &str, width: usize) -> Line<'static> {
 
 /// Live planning status and the inline plan-confirmation block.
 fn planning_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {
+    if app.inline_mode_pick {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  ◆ ", Style::default().fg(theme::ACCENT)),
+            Span::styled(
+                "pick an execution mode",
+                Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        for (i, mode) in crate::app::MODE_OPTIONS.iter().enumerate() {
+            let selected = app.mode_picker_index == i;
+            let suggested = app
+                .mode_proposal
+                .as_ref()
+                .is_some_and(|p| p.mode == *mode);
+            let mut spans = vec![
+                Span::styled(
+                    if selected { "    ▶ " } else { "      " }.to_string(),
+                    Style::default().fg(theme::ACCENT),
+                ),
+                Span::styled(
+                    format!("{:<11}", crate::screens::mode_picker::mode_title(mode)),
+                    if selected {
+                        Style::default()
+                            .fg(theme::ACCENT_BRIGHT)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme::TEXT_DIM)
+                    },
+                ),
+                Span::styled(
+                    clip(
+                        crate::screens::mode_picker::mode_description(mode),
+                        width.saturating_sub(32),
+                    ),
+                    Style::default().fg(theme::MUTED),
+                ),
+            ];
+            if suggested {
+                spans.push(Span::styled(
+                    "  (suggested)",
+                    Style::default().fg(theme::SUCCESS),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        if let Some(p) = &app.mode_proposal {
+            lines.push(Line::from(Span::styled(
+                clip(
+                    &format!(
+                        "    Baro suggests {} ({:.0}%): {}",
+                        crate::screens::mode_picker::mode_title(&p.mode),
+                        p.confidence * 100.0,
+                        p.reason
+                    ),
+                    width.saturating_sub(4),
+                ),
+                Style::default().fg(theme::TEXT_DIM),
+            )));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("  › ", Style::default().fg(theme::ACCENT)),
+            Span::styled("↑/↓", Style::default().fg(theme::ACCENT)),
+            Span::styled(" choose  ·  ", Style::default().fg(theme::TEXT_DIM)),
+            Span::styled("enter", Style::default().fg(theme::ACCENT)),
+            Span::styled(" confirm", Style::default().fg(theme::TEXT_DIM)),
+        ]));
+        return;
+    }
     if let Some(stories) = &app.pending_plan {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
@@ -626,6 +780,15 @@ fn input_box(app: &App) -> Paragraph<'static> {
     let text = if app.conversation_busy && app.conversation_input.is_empty() {
         " Baro is working — you can keep typing…".to_string()
     } else if app.conversation_input.is_empty() {
+        if app.inline_mode_pick {
+            return Paragraph::new(" ↑/↓ choose an execution mode · enter confirms")
+                .wrap(Wrap { trim: false })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(theme::BORDER_ACTIVE)),
+                );
+        }
         if app.pending_plan.is_some() {
             return Paragraph::new(" Enter runs the plan · v opens detailed review")
                 .wrap(Wrap { trim: false })
@@ -711,7 +874,36 @@ fn input_with_cursor(app: &App) -> ratatui::text::Text<'static> {
     lines.into()
 }
 
+const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/plan", "review the plan"),
+    ("/pr", "open the PR"),
+    ("/publish", "create a GitHub repo"),
+    ("/agents", "cycle agent drill-in"),
+    ("/help", "all commands"),
+    ("/quit", "exit baro"),
+];
+
 fn footer_line(app: &App, scrolled_back: bool) -> Paragraph<'static> {
+    let typed = app.conversation_input.trim_start();
+    if typed.starts_with('/') && !typed.contains(char::is_whitespace) {
+        let mut spans: Vec<Span> = Vec::new();
+        for (name, blurb) in SLASH_COMMANDS
+            .iter()
+            .filter(|(name, _)| name.starts_with(typed))
+        {
+            spans.push(Span::styled(
+                format!(" {name}"),
+                Style::default().fg(theme::ACCENT),
+            ));
+            spans.push(Span::styled(
+                format!(" {blurb}  "),
+                Style::default().fg(theme::TEXT_DIM),
+            ));
+        }
+        if !spans.is_empty() {
+            return Paragraph::new(Line::from(spans));
+        }
+    }
     if scrolled_back {
         return Paragraph::new(Line::from(vec![
             Span::styled(" ↓ ", Style::default().fg(theme::WARNING)),

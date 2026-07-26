@@ -14,7 +14,7 @@ use ratatui::{
 use crate::app::{App, MODE_OPTIONS};
 use crate::theme;
 
-fn mode_title(mode: &str) -> &'static str {
+pub fn mode_title(mode: &str) -> &'static str {
     match mode {
         "sequential" => "Sequential",
         "parallel" => "Parallel",
@@ -22,7 +22,7 @@ fn mode_title(mode: &str) -> &'static str {
     }
 }
 
-fn mode_description(mode: &str) -> &'static str {
+pub fn mode_description(mode: &str) -> &'static str {
     match mode {
         "sequential" => "A few ordered stories, one agent at a time — for stepwise work on shared code.",
         "parallel" => "Full DAG fan-out — several agents on independent write surfaces at once.",

@@ -1366,7 +1366,13 @@ async fn run_app(
             }
             Some(AppEvent::MouseScroll(delta)) => {
                 if app.screen == Screen::Conversation && !app.workbench_overlay {
-                    if delta > 0 {
+                    if app.focused_story.is_some() {
+                        if delta > 0 {
+                            app.focus_scroll_back = app.focus_scroll_back.saturating_add(1);
+                        } else {
+                            app.focus_scroll_back = app.focus_scroll_back.saturating_sub(1);
+                        }
+                    } else if delta > 0 {
                         app.session_feed.scroll_up_by(1);
                     } else {
                         app.session_feed.scroll_down_by(1);
@@ -1727,7 +1733,15 @@ async fn run_app(
                     confidence: view.confidence,
                     contract_json: json,
                 });
-                app.screen = Screen::ModePicker;
+                // Conversation-owned runs pick the mode inline in the session;
+                // the dedicated picker screen is for the legacy Welcome flow.
+                if app.screen == Screen::Conversation
+                    && app.conversation.goal_envelope().is_some()
+                {
+                    app.inline_mode_pick = true;
+                } else {
+                    app.screen = Screen::ModePicker;
+                }
             }
             Some(AppEvent::RefineReady(
                 generation,
@@ -1972,6 +1986,7 @@ async fn run_app(
                                     None => 0,
                                 };
                                 app.focused_story = Some(ids[next].clone());
+                                app.focus_scroll_back = 0;
                             }
                         }
                         KeyCode::Tab => {
@@ -2003,6 +2018,23 @@ async fn run_app(
                             if let Some(stories) = app.pending_plan.take() {
                                 app.show_review(stories);
                             }
+                        }
+                        KeyCode::Up if app.inline_mode_pick => {
+                            app.mode_picker_index = if app.mode_picker_index > 0 {
+                                app.mode_picker_index - 1
+                            } else {
+                                app::MODE_OPTIONS.len() - 1
+                            };
+                        }
+                        KeyCode::Down if app.inline_mode_pick => {
+                            app.mode_picker_index =
+                                (app.mode_picker_index + 1) % app::MODE_OPTIONS.len();
+                        }
+                        KeyCode::PageUp if app.focused_story.is_some() => {
+                            app.focus_scroll_back = app.focus_scroll_back.saturating_add(10);
+                        }
+                        KeyCode::PageDown if app.focused_story.is_some() => {
+                            app.focus_scroll_back = app.focus_scroll_back.saturating_sub(10);
                         }
                         KeyCode::PageUp => app.session_feed.scroll_up_by(10),
                         KeyCode::PageDown => app.session_feed.scroll_down_by(10),
@@ -2063,8 +2095,33 @@ async fn run_app(
                             spawn_pending_conversation(&mut app, &cwd, tx.clone(), intent);
                         }
                         KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
-                            if let Some(stories) = app.pending_plan.take() {
+                            if app.inline_mode_pick {
+                                app.inline_mode_pick = false;
+                                let chosen = app::MODE_OPTIONS[app.mode_picker_index];
+                                let mode_json = match app.mode_proposal.take() {
+                                    Some(p) if p.mode == chosen => p.contract_json,
+                                    _ => user_mode_contract(
+                                        chosen,
+                                        &format!("User selected {} mode.", chosen),
+                                    ),
+                                };
+                                app.start_planning();
+                                app.screen = Screen::Conversation;
+                                app.session_feed.push(
+                                    crate::session_feed::SessionBlock::Note {
+                                        text: format!(
+                                            "execution mode: {chosen} — planner is composing the story plan"
+                                        ),
+                                    },
+                                );
+                                spawn_planner_stage_b(&app, &cwd, tx.clone(), mode_json);
+                            } else if let Some(stories) = app.pending_plan.take() {
                                 confirm_and_execute(&mut app, stories, &cwd, tx.clone());
+                            } else if app.conversation_input.trim().starts_with('/') {
+                                let command = app.input_take();
+                                if run_slash_command(&mut app, &cwd, tx.clone(), command.trim()) {
+                                    return Ok(());
+                                }
                             } else if app.conversation_input.trim().is_empty() {
                             } else if app.conversation_accepts_input() {
                                 let message = app.input_take();
@@ -2946,6 +3003,69 @@ fn spawn_greenfield_publish(cwd: &Path, tx: mpsc::Sender<AppEvent>) {
         };
         let _ = tx.send(AppEvent::GreenfieldPublished(result)).await;
     });
+}
+
+/// Session slash commands. Returns true when the app should quit.
+fn run_slash_command(
+    app: &mut App,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+    command: &str,
+) -> bool {
+    let note = |app: &mut App, text: String| {
+        app.session_feed
+            .push(crate::session_feed::SessionBlock::Note { text });
+    };
+    match command {
+        "/quit" | "/exit" => return true,
+        "/help" => note(
+            app,
+            "commands: /plan review the plan · /pr open the PR · /publish create a GitHub repo · /agents cycle agent drill-in · /quit — keys: tab workbench · ctrl+o agents · esc back".to_string(),
+        ),
+        "/pr" => match app.pr_url.clone() {
+            Some(url) => open_in_browser(&url),
+            None => note(app, "no PR for this run yet".to_string()),
+        },
+        "/publish" => {
+            if app.done && app.pr_url.is_none() {
+                spawn_greenfield_publish(cwd, tx);
+                note(app, "publishing to GitHub…".to_string());
+            } else {
+                note(
+                    app,
+                    "publish is available after a run that ends without a PR".to_string(),
+                );
+            }
+        }
+        "/plan" => {
+            if let Some(stories) = app.pending_plan.take() {
+                app.show_review(stories);
+            } else if !app.review_stories.is_empty() {
+                app.show_review(app.review_stories.clone());
+            } else {
+                note(app, "no plan to review yet".to_string());
+            }
+        }
+        "/agents" => {
+            let ids = app.active_story_ids();
+            if ids.is_empty() {
+                note(app, "no active agents right now".to_string());
+            } else {
+                let next = match &app.focused_story {
+                    Some(current) => ids
+                        .iter()
+                        .position(|id| id == current)
+                        .map(|ix| (ix + 1) % ids.len())
+                        .unwrap_or(0),
+                    None => 0,
+                };
+                app.focused_story = Some(ids[next].clone());
+                app.focus_scroll_back = 0;
+            }
+        }
+        other => note(app, format!("unknown command: {other} — try /help")),
+    }
+    false
 }
 
 /// Fire-and-forget: open a URL with the platform opener. Failures are

@@ -554,6 +554,11 @@ pub struct App {
     pub conversation_stream: Option<(String, String)>,
     /// Story id whose live activity fills the session (ctrl+o drill-in).
     pub focused_story: Option<String>,
+    /// Wrapped-row scrollback within the drill-in pane; 0 follows the tail.
+    pub focus_scroll_back: usize,
+    /// Mode proposal awaiting inline confirmation in the session
+    /// (conversation-owned runs); legacy flows use the ModePicker screen.
+    pub inline_mode_pick: bool,
     /// Sequence numbers for conversation turns (parallel to transcript
     /// order), drawn from the session feed's clock for interleaving.
     pub transcript_seqs: Vec<u64>,
@@ -714,6 +719,8 @@ impl App {
             workbench_overlay: false,
             conversation_stream: None,
             focused_story: None,
+            focus_scroll_back: 0,
+            inline_mode_pick: false,
             transcript_seqs: Vec::new(),
             session_version: 0,
             pending_plan: None,
@@ -791,6 +798,8 @@ impl App {
             Screen::Execute
         };
         self.pending_plan = None;
+        self.inline_mode_pick = false;
+        self.focus_scroll_back = 0;
         self.session_feed.clear();
         self.start_time = Instant::now();
         self.dag_scroll_offset = 0;
@@ -1363,6 +1372,43 @@ impl App {
         let mut ids: Vec<String> = self.active_stories.keys().cloned().collect();
         ids.sort();
         ids
+    }
+
+    /// (seconds saved by parallel execution, speedup multiplier). Per DAG
+    /// level, sequential = sum of story durations, parallel = the level max;
+    /// fix stories outside the DAG ran sequentially and save nothing.
+    pub fn parallel_time_saved(&self) -> (u64, f64) {
+        let mut total_sequential = 0u64;
+        let mut total_parallel = 0u64;
+        for level in &self.dag_levels {
+            let mut level_sum = 0u64;
+            let mut level_max = 0u64;
+            for story_id in level {
+                if let Some(story) = self.stories.iter().find(|s| s.id == *story_id) {
+                    if let Some(dur) = story.duration_secs {
+                        level_sum += dur;
+                        level_max = level_max.max(dur);
+                    }
+                }
+            }
+            total_sequential += level_sum;
+            total_parallel += level_max;
+        }
+        for story in &self.stories {
+            if story.id.contains("-fix") {
+                if let Some(dur) = story.duration_secs {
+                    total_sequential += dur;
+                    total_parallel += dur;
+                }
+            }
+        }
+        let saved = total_sequential.saturating_sub(total_parallel);
+        let multiplier = if total_parallel > 0 && saved > 0 {
+            total_sequential as f64 / total_parallel as f64
+        } else {
+            1.0
+        };
+        (saved, multiplier)
     }
 
     // Review screen navigation
