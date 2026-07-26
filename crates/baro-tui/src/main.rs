@@ -1190,13 +1190,18 @@ async fn run_app(
     // closes an interrupted provider turn so the user can retry safely.
     // Greenfield: an empty cwd becomes a repository up front, so RepoScout,
     // architect validation and branching all see a real repo.
-    if git::greenfield_bootstrap(&cwd).await {
+    let greenfield_initialized = git::greenfield_bootstrap(&cwd).await;
+    if greenfield_initialized {
         app.session_feed.push(session_feed::SessionBlock::Note {
             text: "greenfield: initialized a fresh git repository".to_string(),
         });
+        // A just-initialized empty directory cannot have a conversation in
+        // progress: snapshots stored under this path key belong to a deleted
+        // predecessor (rm -rf + mkdir keeps the same storage key).
+        conversation_host::purge_conversation_snapshots(&cwd);
     }
 
-    if !entered_resume && cli.goal.is_none() {
+    if !entered_resume && cli.goal.is_none() && !greenfield_initialized {
         restore_pre_prd_conversation(&mut app, &cwd);
     }
 

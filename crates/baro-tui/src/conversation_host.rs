@@ -40,6 +40,22 @@ fn repository_storage_key(repository_root: &Path) -> String {
     format!("{hash:032x}")
 }
 
+/// Drop every stored conversation snapshot for this checkout. Used when the
+/// directory was just greenfield-initialized: an empty folder cannot have a
+/// legitimate conversation in progress, so anything stored under its path
+/// key belongs to a deleted predecessor.
+pub(crate) fn purge_conversation_snapshots(repository_root: &Path) {
+    let Some(path) = conversation_snapshot_path(repository_root, "purge") else {
+        return;
+    };
+    let Some(directory) = path.parent() else {
+        return;
+    };
+    if directory.is_dir() {
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}
+
 pub(crate) fn persist_conversation(
     session: &conversation::ConversationSession,
     repository_root: &Path,
