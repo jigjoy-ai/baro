@@ -1395,7 +1395,7 @@ async fn run_app(
                     .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
                     .collect();
                 match app.screen {
-                    Screen::Conversation if !app.conversation_busy => {
+                    Screen::Conversation => {
                         for ch in cleaned.chars() {
                             app.input_insert(if ch == '\t' { ' ' } else { ch });
                         }
@@ -2111,7 +2111,7 @@ async fn run_app(
                                 app.input_end();
                             }
                         }
-                        KeyCode::Delete if !app.conversation_busy => app.input_delete(),
+                        KeyCode::Delete => app.input_delete(),
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.input_home();
                         }
@@ -2119,18 +2119,14 @@ async fn run_app(
                             app.input_end();
                         }
                         KeyCode::Char('w')
-                            if key.modifiers.contains(KeyModifiers::CONTROL)
-                                && !app.conversation_busy =>
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
                         {
                             app.input_delete_word();
                         }
                         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.input_clear();
                         }
-                        KeyCode::Enter
-                            if key.modifiers.contains(KeyModifiers::ALT)
-                                && !app.conversation_busy =>
-                        {
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
                             app.input_insert('\n');
                         }
                         KeyCode::Char('r')
@@ -2202,10 +2198,10 @@ async fn run_app(
                                 }
                             }
                         }
-                        KeyCode::Backspace if !app.conversation_busy => {
+                        KeyCode::Backspace => {
                             app.input_backspace();
                         }
-                        KeyCode::Char(character) if !app.conversation_busy => {
+                        KeyCode::Char(character) => {
                             app.input_insert(character);
                         }
                         _ => {}

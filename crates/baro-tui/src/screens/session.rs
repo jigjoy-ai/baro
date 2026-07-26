@@ -274,16 +274,22 @@ fn turn_lines(
 /// The assistant's reply as it is being composed (conversation_delta),
 /// or a contextual thinking line while nothing has streamed yet.
 fn streaming_lines(app: &App, lines: &mut Vec<Line<'static>>) {
-    if let Some((_, text)) = &app.conversation_stream {
-        if !text.is_empty() {
+    let streamed = match &app.conversation_stream {
+        Some((_, text)) if !text.is_empty() => {
             markdown_lines(text, "  ", lines);
             lines.push(Line::from(""));
-            return;
+            true
         }
-    }
+        _ => false,
+    };
+    // The turn stays busy after the reply finishes streaming (runner
+    // shutdown, billing, the architect handoff) — keep a live indicator
+    // under the text so a complete-looking reply never reads as stalled.
     if app.conversation_busy {
         let status = if app.architect_status == crate::app::ArchitectStatus::Running {
             "validating the goal against the repository…"
+        } else if streamed {
+            "working…"
         } else {
             "thinking…"
         };
