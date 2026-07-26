@@ -17,7 +17,9 @@ pub use contract::{
     render_planning_prompt, ClarificationQuestion, ConversationKind, ConversationWireResponse,
     GoalEnvelope,
 };
-pub use session::{ApplyOutcome, ConversationPhase, ConversationSession, TranscriptRole};
+pub use session::{
+    ApplyOutcome, ConversationPhase, ConversationSession, TranscriptRole, TranscriptTurn,
+};
 
 pub const CONVERSATION_SCHEMA_VERSION: u8 = 1;
 

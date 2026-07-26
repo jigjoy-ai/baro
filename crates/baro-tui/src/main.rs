@@ -1281,6 +1281,7 @@ async fn run_app(
     // ~120fps; content frames keep the 30fps flood throttle.
     let mut scroll_frame = false;
     loop {
+        app.sync_transcript_seqs();
         let min_gap = if scroll_frame {
             Duration::from_millis(8)
         } else {
@@ -1950,7 +1951,29 @@ async fn run_app(
                         _ => {}
                     },
                     Screen::Conversation => match key.code {
-                        KeyCode::Esc => return Ok(()),
+                        KeyCode::Esc => {
+                            if app.focused_story.is_some() {
+                                app.focused_story = None;
+                            } else {
+                                return Ok(());
+                            }
+                        }
+                        KeyCode::Char('o')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            let ids = app.active_story_ids();
+                            if !ids.is_empty() {
+                                let next = match &app.focused_story {
+                                    Some(current) => ids
+                                        .iter()
+                                        .position(|id| id == current)
+                                        .map(|ix| (ix + 1) % ids.len())
+                                        .unwrap_or(0),
+                                    None => 0,
+                                };
+                                app.focused_story = Some(ids[next].clone());
+                            }
+                        }
                         KeyCode::Tab => {
                             app.workbench_overlay = true;
                         }

@@ -552,6 +552,11 @@ pub struct App {
     pub workbench_overlay: bool,
     /// (request_id, accumulated text) of the streaming assistant reply.
     pub conversation_stream: Option<(String, String)>,
+    /// Story id whose live activity fills the session (ctrl+o drill-in).
+    pub focused_story: Option<String>,
+    /// Sequence numbers for conversation turns (parallel to transcript
+    /// order), drawn from the session feed's clock for interleaving.
+    pub transcript_seqs: Vec<u64>,
     /// Bumped whenever session-visible content may have changed; wheel
     /// scrolling reuses the previous frame's built transcript.
     pub session_version: u64,
@@ -708,6 +713,8 @@ impl App {
             session_feed: SessionFeed::default(),
             workbench_overlay: false,
             conversation_stream: None,
+            focused_story: None,
+            transcript_seqs: Vec::new(),
             session_version: 0,
             pending_plan: None,
             diff_scroll_offset: 0,
@@ -970,6 +977,19 @@ impl App {
             .nth(self.conversation_cursor)
             .map(|(i, _)| i)
             .unwrap_or(self.conversation_input.len())
+    }
+
+    /// Assign feed-clock sequence numbers to newly appeared transcript
+    /// turns so the session can interleave chat and run blocks by time.
+    pub fn sync_transcript_seqs(&mut self) {
+        let len = self.conversation.transcript().len();
+        if self.transcript_seqs.len() > len {
+            self.transcript_seqs.truncate(len);
+        }
+        while self.transcript_seqs.len() < len {
+            let seq = self.session_feed.next_seq();
+            self.transcript_seqs.push(seq);
+        }
     }
 
     pub fn input_char_len(&self) -> usize {
@@ -1449,7 +1469,7 @@ impl App {
                 if let Some(story) = self.stories.iter_mut().find(|s| s.id == id) {
                     story.status = StoryStatus::Running;
                 }
-                let level_owned = self.session_feed.blocks().iter().any(|b| {
+                let level_owned = self.session_feed.blocks().any(|b| {
                     matches!(b, SessionBlock::Level { story_ids, .. }
                         if story_ids.iter().any(|s| s == &id))
                 });

@@ -32,22 +32,37 @@ pub enum SessionBlock {
 /// the viewport.
 #[derive(Debug, Default)]
 pub struct SessionFeed {
-    blocks: Vec<SessionBlock>,
+    blocks: Vec<(u64, SessionBlock)>,
+    /// Shared ordering clock: feed blocks and conversation turns take
+    /// sequence numbers from the same counter so the transcript renders
+    /// chronologically (mid-run chat lands between story lines).
+    seq: u64,
     pub scroll_back: usize,
 }
 
 impl SessionFeed {
+    pub fn next_seq(&mut self) -> u64 {
+        self.seq += 1;
+        self.seq
+    }
+
     pub fn push(&mut self, block: SessionBlock) {
         // One live line per story: drop an earlier Story block when the
         // same story re-enters (retry/recovery) so it renders once.
         if let SessionBlock::Story { id } = &block {
-            self.blocks
-                .retain(|b| !matches!(b, SessionBlock::Story { id: existing } if existing == id))
+            self.blocks.retain(
+                |(_, b)| !matches!(b, SessionBlock::Story { id: existing } if existing == id),
+            )
         }
-        self.blocks.push(block);
+        let seq = self.next_seq();
+        self.blocks.push((seq, block));
     }
 
-    pub fn blocks(&self) -> &[SessionBlock] {
+    pub fn blocks(&self) -> impl Iterator<Item = &SessionBlock> {
+        self.blocks.iter().map(|(_, b)| b)
+    }
+
+    pub fn sequenced(&self) -> &[(u64, SessionBlock)] {
         &self.blocks
     }
 
@@ -85,12 +100,11 @@ mod tests {
         feed.push(SessionBlock::Story { id: "S1".into() });
         let stories: Vec<_> = feed
             .blocks()
-            .iter()
             .filter(|b| matches!(b, SessionBlock::Story { .. }))
             .collect();
         assert_eq!(stories.len(), 2);
         assert_eq!(
-            feed.blocks().last(),
+            feed.sequenced().last().map(|(_, b)| b),
             Some(&SessionBlock::Story { id: "S1".into() })
         );
     }

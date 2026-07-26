@@ -49,9 +49,8 @@ pub fn render(frame: &mut Frame, app: &App) {
             }
         }
         let mut lines: Vec<Line> = Vec::new();
-        transcript_lines(app, &mut lines);
+        interleaved_lines(app, width, &mut lines);
         streaming_lines(app, &mut lines);
-        feed_lines(app, width, &mut lines);
         planning_lines(app, width, &mut lines);
         let total = Paragraph::new(lines.clone())
             .wrap(Wrap { trim: false })
@@ -62,15 +61,68 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     // Scroll in wrapped visual rows so long lines don't cause jumps.
     let visible = chunks[1].height as usize;
-    let transcript = Paragraph::new(lines).wrap(Wrap { trim: false });
     let max_back = total.saturating_sub(visible);
     let back = app.session_feed.scroll_back.min(max_back);
-    let offset = max_back.saturating_sub(back);
-    let transcript = transcript.scroll((offset as u16, 0));
-    frame.render_widget(transcript, chunks[1]);
+    if let Some(id) = &app.focused_story {
+        render_focus(frame, app, id, chunks[1]);
+    } else {
+        let transcript = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let offset = max_back.saturating_sub(back);
+        let transcript = transcript.scroll((offset as u16, 0));
+        frame.render_widget(transcript, chunks[1]);
+    }
 
     frame.render_widget(input_box(app), chunks[2]);
-    frame.render_widget(footer_line(app), chunks[3]);
+    frame.render_widget(footer_line(app, back > 0), chunks[3]);
+}
+
+/// Inline drill-in: one agent's full activity tail over the transcript
+/// area. ctrl+o cycles agents, esc returns to the session.
+fn render_focus(frame: &mut Frame, app: &App, id: &str, area: ratatui::layout::Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+    let story = app.stories.iter().find(|s| s.id == id);
+    let title = story.map(|s| s.title.as_str()).unwrap_or("");
+    let route = story
+        .and_then(|s| s.route.as_deref())
+        .map(|r| format!("  [{r}]"))
+        .unwrap_or_default();
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  ◉ {id} "),
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(title.to_string(), Style::default().fg(theme::TEXT)),
+        Span::styled(route, Style::default().fg(theme::ACCENT_DIM)),
+        Span::styled(
+            "   esc back · ctrl+o next agent",
+            Style::default().fg(theme::MUTED),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    if let Some(active) = app.active_stories.get(id) {
+        let budget = area.height.saturating_sub(3) as usize;
+        let entries: Vec<&crate::app::ActivityEntry> =
+            active.activity.iter().rev().take(budget).rev().collect();
+        if entries.is_empty() {
+            for log in active.logs.iter().rev().take(budget).rev() {
+                lines.push(Line::from(Span::styled(
+                    format!("  {log}"),
+                    Style::default().fg(theme::TEXT_DIM),
+                )));
+            }
+        } else {
+            let width = area.width.saturating_sub(4) as usize;
+            for entry in entries {
+                lines.push(crate::screens::widgets::activity_line(entry, width));
+            }
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  (no live worker for this story right now)",
+            Style::default().fg(theme::MUTED),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 fn header_line(app: &App) -> Paragraph<'static> {
@@ -115,61 +167,91 @@ fn header_line(app: &App) -> Paragraph<'static> {
     Paragraph::new(Line::from(spans))
 }
 
-fn transcript_lines(app: &App, lines: &mut Vec<Line<'static>>) {
-    if app.conversation.transcript().is_empty() && app.session_feed.blocks().is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  What do you want to build or change?",
-            Style::default().fg(theme::TEXT),
-        )));
+/// Merge conversation turns and run blocks by their shared sequence
+/// clock, so mid-run chat renders between the story lines it happened
+/// around instead of above the whole run.
+fn interleaved_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {
+    if app.conversation.transcript().is_empty() && app.session_feed.sequenced().is_empty() {
+        greeting_lines(lines);
         return;
     }
+    let turns = app.conversation.transcript();
+    let seqs = &app.transcript_seqs;
+    let blocks = app.session_feed.sequenced();
+    let mut turn_ix = 0;
+    let mut block_ix = 0;
+    while turn_ix < turns.len() || block_ix < blocks.len() {
+        let turn_seq = seqs.get(turn_ix).copied().unwrap_or(u64::MAX);
+        let block_seq = blocks
+            .get(block_ix)
+            .map(|(seq, _)| *seq)
+            .unwrap_or(u64::MAX);
+        if turn_ix < turns.len() && turn_seq <= block_seq {
+            turn_lines(app, &turns[turn_ix], lines);
+            turn_ix += 1;
+        } else {
+            block_lines(app, &blocks[block_ix].1, width, lines);
+            block_ix += 1;
+        }
+    }
+}
+
+fn greeting_lines(lines: &mut Vec<Line<'static>>) {
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  What do you want to build or change?",
+        Style::default().fg(theme::TEXT),
+    )));
+}
+
+fn turn_lines(
+    app: &App,
+    turn: &crate::conversation::TranscriptTurn,
+    lines: &mut Vec<Line<'static>>,
+) {
+    // The Done block already renders the run summary in place; the
+    // durable system turn only matters for restored sessions.
     let done_in_feed = app
         .session_feed
         .blocks()
-        .iter()
         .any(|b| matches!(b, SessionBlock::Done { .. }));
-    for turn in app.conversation.transcript() {
-        // The Done block already renders the run summary in place; the
-        // durable system turn only matters for restored sessions.
-        if done_in_feed
-            && turn.role == TranscriptRole::System
-            && (turn.text.starts_with("Run completed") || turn.text.starts_with("Run stopped"))
-        {
-            continue;
-        }
-        match turn.role {
-            TranscriptRole::Assistant => {
-                markdown_lines(&turn.text, "  ", lines);
-            }
-            TranscriptRole::User => {
-                for (index, text) in turn.text.lines().enumerate() {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            if index == 0 { "› " } else { "  " }.to_string(),
-                            Style::default().fg(theme::ACCENT),
-                        ),
-                        Span::styled(
-                            text.to_string(),
-                            Style::default().fg(theme::TEXT_DIM),
-                        ),
-                    ]));
-                }
-            }
-            TranscriptRole::System => {
-                for text in turn.text.lines() {
-                    lines.push(Line::from(vec![
-                        Span::styled("· ".to_string(), Style::default().fg(theme::MUTED)),
-                        Span::styled(
-                            text.to_string(),
-                            Style::default().fg(theme::MUTED),
-                        ),
-                    ]));
-                }
-            }
-        }
-        lines.push(Line::from(""));
+    if done_in_feed
+        && turn.role == TranscriptRole::System
+        && (turn.text.starts_with("Run completed") || turn.text.starts_with("Run stopped"))
+    {
+        return;
     }
+    match turn.role {
+        TranscriptRole::Assistant => {
+            markdown_lines(&turn.text, "  ", lines);
+        }
+        TranscriptRole::User => {
+            for (index, text) in turn.text.lines().enumerate() {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if index == 0 { "› " } else { "  " }.to_string(),
+                        Style::default().fg(theme::ACCENT),
+                    ),
+                    Span::styled(
+                        text.to_string(),
+                        Style::default().fg(theme::TEXT_DIM),
+                    ),
+                ]));
+            }
+        }
+        TranscriptRole::System => {
+            for text in turn.text.lines() {
+                lines.push(Line::from(vec![
+                    Span::styled("· ".to_string(), Style::default().fg(theme::MUTED)),
+                    Span::styled(
+                        text.to_string(),
+                        Style::default().fg(theme::MUTED),
+                    ),
+                ]));
+            }
+        }
+    }
+    lines.push(Line::from(""));
 }
 
 /// The assistant's reply as it is being composed (conversation_delta),
@@ -201,8 +283,13 @@ fn streaming_lines(app: &App, lines: &mut Vec<Line<'static>>) {
     }
 }
 
-fn feed_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {
-    for block in app.session_feed.blocks() {
+fn block_lines(
+    app: &App,
+    block: &SessionBlock,
+    width: usize,
+    lines: &mut Vec<Line<'static>>,
+) {
+    {
         match block {
             SessionBlock::PlanReady { total, mode } => {
                 lines.push(Line::from(vec![
@@ -624,7 +711,18 @@ fn input_with_cursor(app: &App) -> ratatui::text::Text<'static> {
     lines.into()
 }
 
-fn footer_line(app: &App) -> Paragraph<'static> {
+fn footer_line(app: &App, scrolled_back: bool) -> Paragraph<'static> {
+    if scrolled_back {
+        return Paragraph::new(Line::from(vec![
+            Span::styled(" ↓ ", Style::default().fg(theme::WARNING)),
+            Span::styled(
+                "viewing older activity — ",
+                Style::default().fg(theme::TEXT_DIM),
+            ),
+            Span::styled("end", Style::default().fg(theme::ACCENT)),
+            Span::styled(" jumps to live", Style::default().fg(theme::TEXT_DIM)),
+        ]));
+    }
     if let Some(error) = &app.conversation_error {
         return Paragraph::new(Line::from(vec![
             Span::styled(" error: ", Style::default().fg(theme::ERROR)),
@@ -780,6 +878,7 @@ fn clip(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
+
 
 
 
