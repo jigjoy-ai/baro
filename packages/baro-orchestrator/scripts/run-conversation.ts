@@ -245,8 +245,10 @@ async function main(): Promise<void> {
         const streamDelta = (jsonSoFar: string): void => {
             const partial = extractAssistantMessagePartial(jsonSoFar)
             if (partial === null || partial === lastStreamed) return
-            if (!partial.startsWith(lastStreamed)) lastStreamed = ""
-            const append = partial.slice(lastStreamed.length)
+            // A brief-upgrade retry restarts the envelope on the same
+            // requestId: emit a reset so the TUI replaces, not appends.
+            const reset = !partial.startsWith(lastStreamed)
+            const append = reset ? partial : partial.slice(lastStreamed.length)
             lastStreamed = partial
             if (!append) return
             // stderr: the runner streams stderr lines live; stdout is
@@ -256,6 +258,7 @@ async function main(): Promise<void> {
                     type: "conversation_delta",
                     requestId: input.requestId,
                     append,
+                    ...(reset ? { reset: true } : {}),
                 }) + "\n",
             )
         }

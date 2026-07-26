@@ -242,8 +242,12 @@ enum AppEvent {
     ContextReady(String),
     ContextError(String),
     ConversationResponse(conversation_runner::ConversationTurnResult),
-    /// Cumulative partial assistant text for the pending conversation turn.
-    ConversationDelta { request_id: String, text: String },
+    /// Streaming chunk of the pending assistant reply; reset restarts it.
+    ConversationDelta {
+        request_id: String,
+        reset: bool,
+        text: String,
+    },
     /// Result of the post-run `gh repo create` publish (ok = repo URL).
     GreenfieldPublished(Result<String, String>),
     /// A conversation `ready` response is only a candidate until the
@@ -1177,6 +1181,10 @@ async fn run_app(
     // An explicit new goal wins over an unfinished local intake. Interactive
     // startup without one resumes the repository-scoped clarification or
     // closes an interrupted provider turn so the user can retry safely.
+    // Greenfield: an empty cwd becomes a repository up front, so RepoScout,
+    // architect validation and branching all see a real repo.
+    git::greenfield_bootstrap(&cwd).await;
+
     if !entered_resume && cli.goal.is_none() {
         restore_pre_prd_conversation(&mut app, &cwd);
     }
@@ -1377,14 +1385,14 @@ async fn run_app(
                 app.session_feed
                     .push(crate::session_feed::SessionBlock::Note { text });
             }
-            Some(AppEvent::ConversationDelta { request_id, text }) => {
+            Some(AppEvent::ConversationDelta { request_id, reset, text }) => {
                 if app
                     .conversation
                     .pending_request_id()
                     .is_some_and(|pending| pending == request_id)
                 {
                     match &mut app.conversation_stream {
-                        Some((current, accumulated)) if *current == request_id => {
+                        Some((current, accumulated)) if *current == request_id && !reset => {
                             accumulated.push_str(&text);
                         }
                         _ => app.conversation_stream = Some((request_id, text)),
@@ -2978,9 +2986,10 @@ fn spawn_pending_conversation(
                 on_delta: Some(&{
                     let tx = tx.clone();
                     let request_id = request_id.clone();
-                    move |text: String| {
+                    move |reset: bool, text: String| {
                         let _ = tx.try_send(AppEvent::ConversationDelta {
                             request_id: request_id.clone(),
+                            reset,
                             text,
                         });
                     }

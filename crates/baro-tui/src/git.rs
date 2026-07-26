@@ -41,6 +41,10 @@ pub async fn create_fresh_branch(cwd: &Path, base_name: &str) -> BaroResult<Stri
 /// becomes a git repository with one empty root commit so the run branch
 /// has a base. Non-empty non-git directories are left alone. Best-effort:
 /// on any failure the branch step reports the real error right after.
+pub async fn greenfield_bootstrap(cwd: &Path) {
+    ensure_greenfield_repo(cwd).await;
+}
+
 async fn ensure_greenfield_repo(cwd: &Path) {
     let inside = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
