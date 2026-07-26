@@ -267,6 +267,49 @@ describe("segmented Architect obligation compiler", () => {
         assert.equal(calls, 0)
     })
 
+    it("bisects a batch whose response JSON is silently cut off", async () => {
+        // A provider at its output cap returns a 200 with unterminated JSON;
+        // no typed limit error is thrown, so truncation must be detected at
+        // parse time and routed to the split path, not the repair path.
+        const progress: ArchitectObligationSegmentProgress[] = []
+        const result = await compileArchitectObligationSegments({
+            decisionDocument: DECISION_DOCUMENT,
+            goalEnvelope: goalEnvelope(2, 0),
+            respond: async (request) => {
+                if (request.invariantIds.length > 1) {
+                    return '{"schemaVersion":1,"obligations":[{"adrIds":["ADR-001"'
+                }
+                return responseFor(request.invariantIds)
+            },
+            onProgress: (event) => progress.push(event),
+        })
+
+        assert.ok(progress.some(({ type }) => type === "batch_split"))
+        assert.deepEqual(
+            result.contract.obligations.flatMap(({ invariantIds }) => invariantIds).sort(),
+            ["G-A1", "G-A2"],
+        )
+    })
+
+    it("repairs a single-target truncation with the cut-off reason in the prompt", async () => {
+        const requests: ArchitectObligationSegmentRequest[] = []
+        const result = await compileArchitectObligationSegments({
+            decisionDocument: DECISION_DOCUMENT,
+            goalEnvelope: goalEnvelope(1, 0),
+            respond: async (request) => {
+                requests.push(request)
+                if (request.attempt === 1) {
+                    return '{"schemaVersion":1,"obligations":[{"adrIds":["ADR-001"'
+                }
+                return responseFor(request.invariantIds)
+            },
+        })
+
+        assert.deepEqual(requests.map(({ attempt }) => attempt), [1, 2])
+        assert.match(requests[1]!.userPrompt, /cut off mid-stream/u)
+        assert.equal(result.contract.obligations.length, 1)
+    })
+
     it("discards a redundant echoed id without burning the repair budget", async () => {
         // Models routinely echo an id despite the instruction; it is never
         // authoritative (the host renumbers positionally), so the draft is

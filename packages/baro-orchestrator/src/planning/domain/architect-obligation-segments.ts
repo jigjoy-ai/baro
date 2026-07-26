@@ -216,6 +216,14 @@ async function compileBatch(input: CompileBatchInput): Promise<ArchitectureOblig
             })
             return drafts
         } catch (error) {
+            // Truncation discovered at parse time is an output limit, not a
+            // content defect: split the batch while it is still splittable.
+            if (
+                isOutputLimitError(error, input.options.isOutputLimitError) &&
+                input.targets.length >= 2
+            ) {
+                return await bisectOutputLimitedBatch(input, error)
+            }
             if (attempt === 2) {
                 throw new ArchitectObligationSegmentError(
                     `architect obligation batch ${input.batchId} remained invalid after one repair: ${safeReason(error)}`,
@@ -350,11 +358,23 @@ function parseSegmentResponse(
         )
     }
     let value: unknown
+    const candidate = extractModelJsonObject(raw)
     try {
-        value = JSON.parse(extractModelJsonObject(raw))
+        value = JSON.parse(candidate)
     } catch {
+        const tail = raw.replace(/\s+/gu, " ").trim().slice(-160)
+        // A provider can silently cut the stream at its output cap: the
+        // response is a 200 with unterminated JSON, not a typed limit error.
+        // Detect that shape so the batch takes the bisect path instead of
+        // burning the repair on a guaranteed repeat.
+        if (jsonAppearsTruncated(candidate)) {
+            throw new ArchitectObligationOutputLimitError(
+                "architect obligation segment JSON is cut off mid-stream — " +
+                    `emit fewer, more concise obligations (response ends: "…${tail}")`,
+            )
+        }
         throw new ArchitectObligationSegmentError(
-            "architect obligation segment is not valid JSON",
+            `architect obligation segment is not valid JSON (response ends: "…${tail}")`,
         )
     }
     if (!exactRecord(value, ["schemaVersion", "obligations"])) {
@@ -612,6 +632,31 @@ function throwIfAborted(signal?: AbortSignal): void {
     const error = new Error("architect obligation compilation aborted")
     error.name = "AbortError"
     throw error
+}
+
+/** An object was started but never closed — the string-aware brace walk
+ * ends at positive depth (or inside a string), i.e. the stream was cut. */
+function jsonAppearsTruncated(candidate: string): boolean {
+    const text = candidate.trimStart()
+    if (!text.startsWith("{")) return false
+    let depth = 0
+    let inString = false
+    let escaped = false
+    for (const char of text) {
+        if (escaped) {
+            escaped = false
+        } else if (char === "\\") {
+            escaped = inString
+        } else if (char === '"') {
+            inString = !inString
+        } else if (!inString && char === "{") {
+            depth += 1
+        } else if (!inString && char === "}") {
+            depth -= 1
+            if (depth === 0) return false
+        }
+    }
+    return true
 }
 
 function safeReason(error: unknown): string {
