@@ -307,6 +307,13 @@ describe("segmented Architect obligation compiler", () => {
 
         assert.deepEqual(requests.map(({ attempt }) => attempt), [1, 2])
         assert.match(requests[1]!.userPrompt, /cut off mid-stream/u)
+        // The retry advertises a smaller quota so it is short by construction.
+        const quotaOf = (prompt: string): number =>
+            (JSON.parse(prompt) as { maxObligations: number }).maxObligations
+        assert.ok(
+            quotaOf(requests[1]!.userPrompt) < quotaOf(requests[0]!.userPrompt),
+            "truncation repair must shrink the advertised obligation quota",
+        )
         assert.equal(result.contract.obligations.length, 1)
     })
 

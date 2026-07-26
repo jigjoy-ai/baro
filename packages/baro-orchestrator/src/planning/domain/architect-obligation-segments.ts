@@ -183,6 +183,10 @@ interface CompileBatchInput {
 
 async function compileBatch(input: CompileBatchInput): Promise<ArchitectureObligationDraftV1[]> {
     let repairReason: string | undefined
+    // Verbose models overflow the output cap even on a single invariant; a
+    // truncation repair halves the ADVERTISED quota so the retry is short by
+    // construction. Validation still accepts up to the real batch quota.
+    let requestedMaxObligations = input.maxObligations
     for (const attempt of [1, 2] as const) {
         throwIfAborted(input.options.signal)
         emitProgress(input, {
@@ -192,7 +196,7 @@ async function compileBatch(input: CompileBatchInput): Promise<ArchitectureOblig
         let raw: string
         try {
             raw = await input.options.respond(
-                buildRequest(input, attempt, repairReason),
+                buildRequest(input, attempt, repairReason, requestedMaxObligations),
                 input.options.signal,
             )
         } catch (error) {
@@ -217,12 +221,16 @@ async function compileBatch(input: CompileBatchInput): Promise<ArchitectureOblig
             return drafts
         } catch (error) {
             // Truncation discovered at parse time is an output limit, not a
-            // content defect: split the batch while it is still splittable.
-            if (
-                isOutputLimitError(error, input.options.isOutputLimitError) &&
-                input.targets.length >= 2
-            ) {
-                return await bisectOutputLimitedBatch(input, error)
+            // content defect: split the batch while it is still splittable,
+            // and shrink the advertised quota for an unsplittable retry.
+            if (isOutputLimitError(error, input.options.isOutputLimitError)) {
+                if (input.targets.length >= 2) {
+                    return await bisectOutputLimitedBatch(input, error)
+                }
+                requestedMaxObligations = Math.max(
+                    1,
+                    Math.min(3, Math.floor(requestedMaxObligations / 2)),
+                )
             }
             if (attempt === 2) {
                 throw new ArchitectObligationSegmentError(
@@ -301,6 +309,7 @@ function buildRequest(
     input: CompileBatchInput,
     attempt: 1 | 2,
     repairReason?: string,
+    requestedMaxObligations?: number,
 ): ArchitectObligationSegmentRequest {
     const invariantIds = Object.freeze(input.targets.map(({ id }) => id))
     const payload = {
@@ -313,7 +322,7 @@ function buildRequest(
         })),
         targetInvariantIds: invariantIds,
         architectureDecisionIds: input.decisionIds,
-        maxObligations: input.maxObligations,
+        maxObligations: requestedMaxObligations ?? input.maxObligations,
         decisionDocument: input.options.decisionDocument,
         ...(repairReason
             ? {
