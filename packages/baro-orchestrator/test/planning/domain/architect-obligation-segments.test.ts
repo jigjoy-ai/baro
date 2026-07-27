@@ -268,16 +268,17 @@ describe("segmented Architect obligation compiler", () => {
     })
 
     it("bisects a batch whose response JSON is silently cut off", async () => {
-        // A provider at its output cap returns a 200 with unterminated JSON;
-        // no typed limit error is thrown, so truncation must be detected at
-        // parse time and routed to the split path, not the repair path.
+        // A stream that dies mid-string leaves unterminated JSON with no typed
+        // limit error, so truncation is detected at parse time and routed to
+        // the split path, not the repair path. (Merely dropped trailing
+        // closers never reach here — extractModelJsonObject completes them.)
         const progress: ArchitectObligationSegmentProgress[] = []
         const result = await compileArchitectObligationSegments({
             decisionDocument: DECISION_DOCUMENT,
             goalEnvelope: goalEnvelope(2, 0),
             respond: async (request) => {
                 if (request.invariantIds.length > 1) {
-                    return '{"schemaVersion":1,"obligations":[{"adrIds":["ADR-001"'
+                    return '{"schemaVersion":1,"obligations":[{"adrIds":["ADR-0'
                 }
                 return responseFor(request.invariantIds)
             },
@@ -299,7 +300,7 @@ describe("segmented Architect obligation compiler", () => {
             respond: async (request) => {
                 requests.push(request)
                 if (request.attempt === 1) {
-                    return '{"schemaVersion":1,"obligations":[{"adrIds":["ADR-001"'
+                    return '{"schemaVersion":1,"obligations":[{"adrIds":["ADR-0'
                 }
                 return responseFor(request.invariantIds)
             },
