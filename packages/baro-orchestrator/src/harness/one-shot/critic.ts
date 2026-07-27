@@ -19,6 +19,7 @@ import {
 import { buildCorrectiveMessage, extractVerdictJson } from "../../acceptance/critic-verdict.js"
 import {
     inconclusiveEvidenceVerdict,
+    mergeSegmentVerdicts,
     prepareCriticEvaluation,
     type CriticEvidenceSource,
 } from "../../acceptance/critic-evidence.js"
@@ -170,7 +171,13 @@ export abstract class OneShotCritic extends BaseObserver {
                 repositoryFingerprint = preparation.repositoryFingerprint
                 preparationReady = preparation.status === "ready"
                 evaluation = preparationReady
-                    ? await this.evaluate(preparation.prompt, agentId, turn)
+                    ? mergeSegmentVerdicts(
+                          await Promise.all(
+                              preparation.prompts.map((prompt) =>
+                                  this.evaluate(prompt, agentId, turn),
+                              ),
+                          ),
+                      )
                     : inconclusiveEvidenceVerdict(preparation.issues)
             } catch (error) {
                 evaluation = {

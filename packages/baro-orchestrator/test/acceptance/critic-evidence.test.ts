@@ -22,7 +22,8 @@ import {
     CRITIC_MAX_PROMPT_CHARS,
     CriticCommandEvidenceCollector,
     buildEvalPrompt,
-    prepareCriticEvalPrompt,
+    prepareCriticEvalPrompts,
+    mergeSegmentVerdicts,
     prepareCriticEvaluation,
     type CriticEvidenceSource,
 } from "../../src/acceptance/critic-evidence.js"
@@ -248,9 +249,9 @@ describe("Critic repository evidence", () => {
                 decisionDocument: () => `${adr}\n${"filler ".repeat(20_000)}`,
             },
         )
-        assert.match(preparation.prompt, /exact `request\.signal` object/)
+        assert.match(preparation.prompts[0]!, /exact `request\.signal` object/)
         assert.match(
-            preparation.prompt,
+            preparation.prompts[0]!,
             /characters omitted by Critic evidence bound/,
         )
         const failingReader = await prepareCriticEvaluation(
@@ -265,7 +266,7 @@ describe("Critic repository evidence", () => {
             },
         )
         assert.doesNotMatch(
-            failingReader.prompt,
+            failingReader.prompts[0]!,
             /Accepted architecture decisions/,
         )
     })
@@ -284,7 +285,7 @@ describe("Critic repository evidence", () => {
         assert.deepEqual(preparation.issues, [
             "repository evidence is unavailable",
         ])
-        assert.match(preparation.prompt, /repository evidence unavailable/)
+        assert.match(preparation.prompts[0]!, /repository evidence unavailable/)
     })
 
     it("fails closed when a configured command collector has no evidence", async () => {
@@ -326,7 +327,7 @@ describe("Critic repository evidence", () => {
                     item.label,
                 )
                 assert.match(
-                    preparation.prompt,
+                    preparation.prompts[0]!,
                     /no shell\/test command evidence was observed/,
                     item.label,
                 )
@@ -516,10 +517,10 @@ describe("Critic repository evidence", () => {
 
             assert.equal(preparation.status, "ready")
             assert.deepEqual(preparation.issues, [])
-            assert.match(preparation.prompt, /freshness: STALE/)
-            assert.match(preparation.prompt, /fresh at conservative non-git revision 2/)
-            assert.match(preparation.prompt, /build passed/)
-            assert.match(preparation.prompt, /192 tests passed/)
+            assert.match(preparation.prompts[0]!, /freshness: STALE/)
+            assert.match(preparation.prompts[0]!, /fresh at conservative non-git revision 2/)
+            assert.match(preparation.prompts[0]!, /build passed/)
+            assert.match(preparation.prompts[0]!, /192 tests passed/)
         })
     })
 
@@ -1120,7 +1121,7 @@ describe("Critic repository evidence", () => {
                     "metadata only\n",
                 )
 
-                const prompt = await prepareCriticEvalPrompt(
+                const [prompt] = await prepareCriticEvalPrompts(
                     [`criterion mentions ${secret}`],
                     `agent output leaked ${secret}`,
                     "agent-a",
@@ -1130,7 +1131,7 @@ describe("Critic repository evidence", () => {
                             `command/output leaked ${secret}${"x".repeat(20_000)}`,
                     },
                 )
-                assert.doesNotMatch(prompt, new RegExp(secret))
+                assert.doesNotMatch(prompt!, new RegExp(secret))
                 assert.match(prompt, /REDACTED/)
                 assert.match(prompt, /tracked-secret\.ts/)
                 assert.match(prompt, /characters omitted by Critic evidence bound/)
@@ -1261,6 +1262,70 @@ describe("Critic repository evidence", () => {
             ),
             /lossless prompt budget; refusing partial evaluation/,
         )
+    })
+
+    it("judges a contract too large for one prompt in complete passes", async () => {
+        // A story owning many obligations (focused mode) legitimately outgrows
+        // one prompt; every criterion must still be judged, none dropped.
+        const criteria = Array.from(
+            { length: 9 },
+            (_, index) => `criterion-${index}-${"x".repeat(1_000)}`,
+        )
+        const prompts = await prepareCriticEvalPrompts(criteria, "result", "agent-a")
+
+        assert.ok(prompts.length > 1, "an oversized contract must split")
+        for (const [index, criterion] of criteria.entries()) {
+            const carrying = prompts.filter((prompt) =>
+                prompt.includes(`${index + 1}. ${criterion}`),
+            )
+            assert.equal(
+                carrying.length,
+                1,
+                `criterion ${index + 1} must appear in exactly one pass, globally numbered`,
+            )
+        }
+        for (const prompt of prompts) {
+            assert.match(prompt, /this is pass \d+/u)
+            assert.match(prompt, /must not influence this verdict/u)
+        }
+    })
+
+    it("merges segment verdicts fail-closed", () => {
+        const pass = {
+            status: "evaluated" as const,
+            verdict: "pass" as const,
+            reasoning: "ok",
+            violatedCriteria: [] as string[],
+        }
+        assert.equal(mergeSegmentVerdicts([pass]), pass)
+        assert.equal(mergeSegmentVerdicts([pass, pass]).verdict, "pass")
+
+        const failed = mergeSegmentVerdicts([
+            pass,
+            {
+                ...pass,
+                verdict: "fail" as const,
+                reasoning: "criterion 7 broken",
+                violatedCriteria: ["7"],
+            },
+        ])
+        assert.equal(failed.verdict, "fail")
+        assert.deepEqual(failed.violatedCriteria, ["7"])
+        assert.match(failed.reasoning, /criterion 7 broken/)
+
+        // An inconclusive pass outranks a plain failure: the story never gets
+        // a decisive verdict built on evidence the Critic could not evaluate.
+        const inconclusive = mergeSegmentVerdicts([
+            { ...pass, verdict: "fail" as const, violatedCriteria: ["2"] },
+            {
+                ...pass,
+                status: "inconclusive" as const,
+                verdict: "fail" as const,
+                violatedCriteria: ["[unavailable]"],
+            },
+        ])
+        assert.equal(inconclusive.status, "inconclusive")
+        assert.deepEqual(inconclusive.violatedCriteria, ["[unavailable]"])
     })
 })
 

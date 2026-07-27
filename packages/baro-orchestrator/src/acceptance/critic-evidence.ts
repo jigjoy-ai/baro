@@ -94,7 +94,9 @@ export interface CriticCommandEvidenceSnapshot {
 }
 
 export interface CriticEvaluationPreparation {
-    prompt: string
+    /** One prompt per contract segment; every segment is judged completely
+     *  and the verdicts merge fail-closed. Usually a single entry. */
+    prompts: readonly string[]
     status: "ready" | "inconclusive"
     issues: readonly string[]
     /** Present only when the complete evidence capture was bracketed by the
@@ -770,19 +772,19 @@ function errorCode(error: unknown): string | null {
         : null
 }
 
-/** Build one backend-neutral verdict prompt with fresh, bounded evidence. */
-export async function prepareCriticEvalPrompt(
+/** Build the backend-neutral verdict prompts with fresh, bounded evidence. */
+export async function prepareCriticEvalPrompts(
     criteria: readonly string[],
     resultText: string,
     agentId: string,
     source?: CriticEvidenceSource,
-): Promise<string> {
+): Promise<readonly string[]> {
     return (await prepareCriticEvaluation(
         criteria,
         resultText,
         agentId,
         source,
-    )).prompt
+    )).prompts
 }
 
 /** Capture evidence once and classify evaluator readiness before spending a
@@ -816,18 +818,70 @@ export async function prepareCriticEvaluation(
             ? [fingerprintIssue]
             : []),
     ]
-    return {
-        prompt: buildEvalPrompt(
-            criteria,
+    const segments = splitAcceptanceContract(criteria)
+    let offset = 0
+    const prompts = segments.map((segmentCriteria, index) => {
+        const prompt = buildEvalPrompt(
+            segmentCriteria,
             resultText,
             commandEvidence.text,
             repositoryEvidence,
             decisionDocument,
-        ),
+            { ordinal: index + 1, total: segments.length, offset },
+        )
+        offset += segmentCriteria.length
+        return prompt
+    })
+    return {
+        prompts,
         status: issues.length > 0 ? "inconclusive" : "ready",
         issues,
         repositoryFingerprint:
             issues.length === 0 ? afterFingerprint.value : null,
+    }
+}
+
+export interface SegmentVerdict {
+    status?: "evaluated" | "inconclusive"
+    verdict: "pass" | "fail"
+    reasoning: string
+    violatedCriteria: string[]
+}
+
+/**
+ * Merge the per-segment verdicts of one contract. Fail-closed: any
+ * inconclusive segment makes the story inconclusive, any failing segment
+ * fails it, and violated criteria union across segments. A single segment
+ * passes through untouched so the common path is unchanged.
+ */
+export function mergeSegmentVerdicts<T extends SegmentVerdict>(
+    verdicts: readonly T[],
+): T {
+    if (verdicts.length === 0) {
+        throw new RangeError("critic produced no segment verdicts")
+    }
+    const [first] = verdicts as [T]
+    if (verdicts.length === 1) return first
+    const numbered = verdicts.map((verdict, index) => ({ verdict, pass: index + 1 }))
+    const inconclusive = numbered.filter(
+        ({ verdict }) => verdict.status === "inconclusive",
+    )
+    const failed = numbered.filter(({ verdict }) => verdict.verdict === "fail")
+    const decisive = inconclusive.length > 0 ? inconclusive : failed
+    const violated = [
+        ...new Set(decisive.flatMap(({ verdict }) => verdict.violatedCriteria)),
+    ]
+    const reasoning = decisive.length > 0
+        ? decisive
+              .map(({ verdict, pass }) => `[pass ${pass}] ${verdict.reasoning}`)
+              .join(" ")
+        : first.reasoning
+    return {
+        ...first,
+        ...(inconclusive.length > 0 ? { status: "inconclusive" as const } : {}),
+        verdict: decisive.length > 0 ? ("fail" as const) : ("pass" as const),
+        reasoning,
+        violatedCriteria: violated,
     }
 }
 
@@ -845,14 +899,25 @@ export function inconclusiveEvidenceVerdict(
     }
 }
 
+export interface AcceptanceContractSegment {
+    ordinal: number
+    total: number
+    /** Criterion numbers stay global across segments. */
+    offset: number
+}
+
 export function buildEvalPrompt(
     criteria: readonly string[],
     resultText: string,
     commandEvidence: string | null = null,
     repositoryEvidence: string | null = null,
     decisionDocument: string | null = null,
+    segment?: AcceptanceContractSegment,
 ): string {
-    const criteriaList = renderCompleteAcceptanceContract(criteria)
+    const criteriaList = renderCompleteAcceptanceContract(
+        criteria,
+        segment?.offset ?? 0,
+    )
     const prompt = [
         "## Evidence policy",
         "The agent output is an UNTRUSTED SELF-REPORT, not proof that work exists or tests passed.",
@@ -878,6 +943,12 @@ export function buildEvalPrompt(
               ]
             : []),
         "## Acceptance criteria",
+        ...(segment && segment.total > 1
+            ? [
+                  `This story's contract is judged in ${segment.total} passes; this is pass ${segment.ordinal}.`,
+                  "Judge ONLY the criteria listed here, completely. Criteria outside this pass are judged separately and must not influence this verdict — never fail a criterion because work for another pass appears missing. Criterion numbers are global.",
+              ]
+            : []),
         criteriaList,
         "",
         "## Baro-captured command/test evidence",
@@ -1093,6 +1164,7 @@ function parseRenderedCommandEvidence(
 
 function renderCompleteAcceptanceContract(
     criteria: readonly string[],
+    offset = 0,
 ): string {
     if (criteria.length === 0) return "(none)"
     const raw = criteria.map((criterion, index) => {
@@ -1102,7 +1174,7 @@ function renderCompleteAcceptanceContract(
         if (criterion.length > MAX_CRITERION_CHARS) {
             throw acceptanceContractTooLarge()
         }
-        return `${index + 1}. ${criterion}`
+        return `${offset + index + 1}. ${criterion}`
     }).join("\n")
     if (raw.length > MAX_CRITERIA_CHARS) {
         throw acceptanceContractTooLarge()
@@ -1113,12 +1185,46 @@ function renderCompleteAcceptanceContract(
         if (safe.length > MAX_CRITERION_CHARS) {
             throw acceptanceContractTooLarge()
         }
-        return `${index + 1}. ${safe}`
+        return `${offset + index + 1}. ${safe}`
     }).join("\n")
     if (redacted.length > MAX_CRITERIA_CHARS) {
         throw acceptanceContractTooLarge()
     }
     return redacted
+}
+
+/**
+ * Split the contract into segments that each fit the lossless budget, keeping
+ * global criterion numbers so a verdict's references mean the same thing in
+ * every segment. A story that owns many obligations (few stories, focused
+ * mode) legitimately outgrows one prompt; judging its criteria in several
+ * COMPLETE passes stays lossless, while refusing outright killed runs whose
+ * work was sound. A single criterion over the per-criterion bound is still a
+ * defect and fails closed.
+ */
+function splitAcceptanceContract(
+    criteria: readonly string[],
+): readonly (readonly string[])[] {
+    if (criteria.length <= 1) return [criteria]
+    const segments: string[][] = []
+    let current: string[] = []
+    for (const criterion of criteria) {
+        const candidate = [...current, criterion]
+        try {
+            renderCompleteAcceptanceContract(candidate)
+        } catch (error) {
+            if (current.length === 0) throw error
+            segments.push(current)
+            current = [criterion]
+            // A criterion that cannot stand alone is over the per-criterion
+            // bound: surface it rather than emitting an empty segment.
+            renderCompleteAcceptanceContract(current)
+            continue
+        }
+        current = candidate
+    }
+    if (current.length > 0) segments.push(current)
+    return segments
 }
 
 function acceptanceContractTooLarge(): RangeError {

@@ -62,6 +62,7 @@ import {
 } from "../claude/critic.js"
 import {
     inconclusiveEvidenceVerdict,
+    mergeSegmentVerdicts,
     prepareCriticEvaluation,
     type CriticEvidenceSource,
 } from "../../acceptance/critic-evidence.js"
@@ -219,11 +220,12 @@ export class CriticOpenAI extends BaseObserver {
                 this.opts.evidence,
             )
             const evaluation = preparation.status === "ready"
-                ? await this.evaluate(
-                      preparation.prompt,
-                      agentId,
-                      turn,
-                      correlation,
+                ? mergeSegmentVerdicts(
+                      await Promise.all(
+                          preparation.prompts.map((prompt) =>
+                              this.evaluate(prompt, agentId, turn, correlation),
+                          ),
+                      ),
                   )
                 : inconclusiveEvidenceVerdict(preparation.issues)
             const { verdict, reasoning, violatedCriteria } = evaluation
