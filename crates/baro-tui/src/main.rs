@@ -1669,7 +1669,7 @@ async fn run_app(
             }
             Some(AppEvent::ProgressivePlanningPrepared(spec)) => {
                 if let Err(error) =
-                    begin_progressive_execution(&mut app, spec, &cwd, tx.clone()).await
+                    begin_progressive_execution(&mut app, spec, &cwd, tx.clone(), headless).await
                 {
                     if headless {
                         return Err(format!("progressive planning could not start: {error}").into());
@@ -1695,7 +1695,7 @@ async fn run_app(
                         // Emit a planning event for the runner/dashboard, then
                         // auto-confirm and execute (no review screen).
                         println!(r#"{{"type":"plan_ready","stories":{}}}"#, stories.len());
-                        confirm_and_execute(&mut app, stories, &cwd, tx.clone());
+                        confirm_and_execute(&mut app, stories, &cwd, tx.clone(), headless);
                     } else if app.conversation.goal_envelope().is_some() {
                         // Conversation-owned: confirm inline in the session.
                         app.pending_plan = Some(stories);
@@ -2159,7 +2159,7 @@ async fn run_app(
                                 );
                                 spawn_planner_stage_b(&app, &cwd, tx.clone(), mode_json);
                             } else if let Some(stories) = app.pending_plan.take() {
-                                confirm_and_execute(&mut app, stories, &cwd, tx.clone());
+                                confirm_and_execute(&mut app, stories, &cwd, tx.clone(), headless);
                             } else if app.conversation_input.trim().starts_with('/') {
                                 let command = app.input_take();
                                 if run_slash_command(&mut app, &cwd, tx.clone(), command.trim()) {
@@ -3740,14 +3740,15 @@ fn spawn_context_builder(cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     });
 }
 
-/// Headless plan confirmation: write the PRD, create the run branch, and spawn
-/// the orchestrator (streaming its events to stdout via echo_raw). Mirrors the
-/// TUI Review→Enter fresh path, minus the interactive review.
+/// Plan confirmation: write the PRD, create the run branch, and spawn the
+/// orchestrator. Shared by headless (which needs the raw event echo on stdout)
+/// and the conversation session, where echoing would paint over the TUI.
 fn confirm_and_execute(
     app: &mut App,
     stories: Vec<ReviewStory>,
     cwd: &Path,
     tx: mpsc::Sender<AppEvent>,
+    headless: bool,
 ) {
     app.review_stories = stories;
     let mut prd = executor::prd_from_review(
@@ -3864,7 +3865,7 @@ fn confirm_and_execute(
             return;
         }
         let _ = tx.send(AppEvent::BranchReady(actual_full_branch)).await;
-        spawn_executor(exec_prd, exec_cwd, tx, cfg, true, None);
+        spawn_executor(exec_prd, exec_cwd, tx, cfg, headless, None);
     });
 }
 
@@ -3873,6 +3874,7 @@ async fn begin_progressive_execution(
     spec: PlannerRunSpec,
     cwd: &Path,
     tx: mpsc::Sender<AppEvent>,
+    headless: bool,
 ) -> Result<(), String> {
     if app.is_followup || app.is_resume {
         return Err(
@@ -3939,7 +3941,7 @@ async fn begin_progressive_execution(
         cwd.to_path_buf(),
         tx.clone(),
         executor_config,
-        true,
+        headless,
         Some(planning_id.clone()),
     );
     // Queue the open command immediately. The TS CLI has a bounded startup

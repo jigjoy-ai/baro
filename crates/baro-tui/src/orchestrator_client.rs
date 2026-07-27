@@ -2,7 +2,7 @@
 //! streams its stdout (line-delimited BaroEvent JSON) into the TUI's
 //! event channel, and surfaces stderr to the operator.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -186,7 +186,11 @@ async fn run(
 
     // Drain stdout: each line is a BaroEvent JSON.
     let stdout_tx = tx.clone();
-    let echo_raw = cfg.echo_raw;
+    // The echo exists for headless hosts reading our stdout as a stream. A
+    // terminal on the other end means a TUI owns the screen, and raw protocol
+    // lines would paint straight over it — never echo there, whatever the
+    // caller asked for.
+    let echo_raw = cfg.echo_raw && !std::io::stdout().is_terminal();
     let stdout_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
