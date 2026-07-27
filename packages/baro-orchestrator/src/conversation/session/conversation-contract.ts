@@ -75,7 +75,13 @@ export function parseConversationResponse(
     try {
         parsed = JSON.parse(extractModelJsonObject(raw))
     } catch {
-        throw new ConversationContractError("conversation response is not valid JSON")
+        // Carry what actually arrived: a stream cut mid-envelope and a reply
+        // written as prose both land here, and only the tail tells them apart
+        // — in the log and in the repair prompt the model gets back.
+        const tail = raw.replace(/\s+/gu, " ").trim().slice(-160)
+        throw new ConversationContractError(
+            `conversation response is not valid JSON (response ends: "…${tail}")`,
+        )
     }
     return validateConversationResponse(parsed, expected)
 }

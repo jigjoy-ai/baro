@@ -32,6 +32,7 @@ describe("ConversationIntake", () => {
 
             assert.equal(response.kind, "ready")
             assert.deepEqual(Object.keys(observed!).sort(), [
+                "attempt",
                 "requestId",
                 "sessionId",
                 "systemPrompt",
@@ -305,6 +306,82 @@ describe("ConversationIntake", () => {
                 /requires repository context before ready/u,
             )
         }
+    })
+
+    it("repairs one contract violation with the rejection reason in the prompt", async () => {
+        // A cut stream leaves unterminated JSON; the reply is not a dead turn
+        // when a single reissue can produce the envelope.
+        const calls: ConversationResponderInput[] = []
+        const intake = new ConversationIntake({
+            sessionId: "session-contract-repair",
+            responder: {
+                backend: "claude",
+                async respond(input) {
+                    calls.push(input)
+                    if (input.attempt === 1) {
+                        return '{"schemaVersion":1,"sessionId":"session-contract-repair"' +
+                            ',"requestId":"request-1","kind":"ready","message":"Razumeo sam. Napra'
+                    }
+                    return JSON.stringify(readyWire(input.sessionId, input.requestId))
+                },
+            },
+        })
+
+        const response = await intake.submit({
+            requestId: "request-1",
+            text: "Implement this.",
+            repositoryBrief: repositoryBrief(),
+        })
+
+        assert.equal(response.kind, "ready")
+        assert.deepEqual(calls.map(({ attempt }) => attempt), [1, 2])
+        assert.match(calls[1]!.userPrompt, /YOUR PREVIOUS REPLY WAS REJECTED/u)
+        assert.match(calls[1]!.userPrompt, /is not valid JSON/u)
+        // The tail of the broken reply travels with the reason.
+        assert.match(calls[1]!.userPrompt, /Razumeo sam/u)
+        assert.equal(/YOUR PREVIOUS REPLY WAS REJECTED/u.test(calls[0]!.userPrompt), false)
+    })
+
+    it("fails closed when the repaired reply is still not a valid envelope", async () => {
+        let calls = 0
+        const intake = new ConversationIntake({
+            sessionId: "session-contract-repair-exhausted",
+            responder: {
+                backend: "claude",
+                async respond() {
+                    calls += 1
+                    return "Naravno, evo plana — bez JSON-a."
+                },
+            },
+        })
+
+        await assert.rejects(
+            intake.submit({ requestId: "request-1", text: "Implement this." }),
+            /conversation response is not valid JSON/u,
+        )
+        assert.equal(calls, 2)
+    })
+
+    it("never spends the repair on the repository-context signal", async () => {
+        // ready-without-brief is a routing signal for RepoScout, not a model
+        // mistake: reissuing it would burn a provider call for nothing.
+        let calls = 0
+        const intake = new ConversationIntake({
+            sessionId: "session-needs-context-no-repair",
+            responder: {
+                backend: "claude",
+                async respond(input) {
+                    calls += 1
+                    return JSON.stringify(readyWire(input.sessionId, input.requestId))
+                },
+            },
+        })
+
+        await assert.rejects(
+            intake.submit({ requestId: "request-1", text: "Implement this." }),
+            /requires repository context before ready/u,
+        )
+        assert.equal(calls, 1)
     })
 
     it("projects a validated brief as explicitly untrusted observations", async () => {

@@ -270,6 +270,12 @@ async function main(): Promise<void> {
                 // capacity cooldowns) get one classified retry. Our own
                 // watchdog kills (`killed`) and user aborts fail closed: the
                 // turn budget only guarantees room for two provider calls.
+                // A contract repair reissues the same requestId; keep the
+                // billing message id distinct so the second call is charged
+                // as its own message.
+                const baseMessageId = request.attempt === 1
+                    ? request.requestId
+                    : `${request.requestId}.repair${request.attempt - 1}`
                 const result = await withTransientRetry(
                     (attempt) =>
                         dialogue(
@@ -277,8 +283,8 @@ async function main(): Promise<void> {
                                 runId: billingRunId,
                                 messageId:
                                     attempt === 1
-                                        ? request.requestId
-                                        : `${request.requestId}.retry${attempt - 1}`,
+                                        ? baseMessageId
+                                        : `${baseMessageId}.retry${attempt - 1}`,
                                 billingRole: "conversation",
                                 systemPrompt: request.systemPrompt,
                                 userPrompt: request.userPrompt,
