@@ -44,7 +44,34 @@ describe("withTransientRetry", () => {
         assert.equal(value, "recovered")
         assert.deepEqual(attempts, [1, 2, 3])
         assert.equal(waits.length, 2)
-        assert.ok(waits[1]! > waits[0]!, "the second wait must be longer than the first")
+        // Exponential: a network drop that killed one request usually outlives
+        // a linear step, so the second pause must be several times the first.
+        assert.ok(
+            waits[1]! >= waits[0]! * 3,
+            `expected exponential growth, got ${waits.join(" then ")}`,
+        )
+    })
+
+    it("never waits longer than the caller's cap", async () => {
+        const waits: number[] = []
+        await assert.rejects(
+            withTransientRetry(
+                async () => {
+                    throw connectionError()
+                },
+                {
+                    maxAttempts: 4,
+                    maxWaitMs: 8_000,
+                    notice: (message) => {
+                        const wait = /retrying in (\d+)ms/u.exec(message)?.[1]
+                        if (wait) waits.push(Number(wait))
+                    },
+                },
+            ),
+            /Connection error/u,
+        )
+        assert.equal(waits.length, 3)
+        assert.ok(waits.every((wait) => wait <= 8_000), `waits exceeded the cap: ${waits}`)
     })
 
     it("stops at maxAttempts and rethrows the provider's error", async () => {

@@ -54,8 +54,12 @@ export async function withTransientRetry<T>(
             ) {
                 throw error
             }
+            // Exponential, not linear: the failures this catches are network
+            // drops (VPN reroute, link flap) that outlive a few seconds, and
+            // retrying inside the same outage just spends the budget without
+            // moving. A provider-supplied retry-after still wins as the base.
             const waitMs = Math.min(
-                (failure?.retryAfterMs ?? 3_000) * attempt,
+                (failure?.retryAfterMs ?? 5_000) * 3 ** (attempt - 1),
                 options.maxWaitMs ?? 30_000,
             )
             options.notice?.(

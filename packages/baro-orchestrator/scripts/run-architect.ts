@@ -359,9 +359,12 @@ async function main(): Promise<void> {
                 ),
             {
                 // Losing the architect kills the whole run, and billing
-                // correlation disables the SDK's own retries — one 3-second
-                // pause is not enough distance from a network blip.
-                maxAttempts: 3,
+                // correlation disables the SDK's own retries, so this is the
+                // only layer between a network drop and a dead run. Four
+                // attempts spread over ~65s ride out a VPN reroute; the phase
+                // budget is 30 minutes, so the wait costs nothing it needs.
+                maxAttempts: 4,
+                maxWaitMs: 60_000,
                 notice: (message) =>
                     process.stderr.write(`[run-architect] ${message}\n`),
                 describe: describeProviderError,
