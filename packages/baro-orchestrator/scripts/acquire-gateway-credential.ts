@@ -1,5 +1,5 @@
-#!/usr/bin/env node
-
+// No shebang: this file is a tsup bundle entry and the build banner adds one.
+// A second `#!` line is a hard SyntaxError in an ES module.
 import { acquireGatewayCredential } from "../src/gateway-credentials.js"
 
 try {
