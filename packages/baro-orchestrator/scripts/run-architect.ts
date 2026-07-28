@@ -351,6 +351,10 @@ async function main(): Promise<void> {
                     observeDecisionInvocation,
                 ),
             {
+                // Losing the architect kills the whole run, and billing
+                // correlation disables the SDK's own retries — one 3-second
+                // pause is not enough distance from a network blip.
+                maxAttempts: 3,
                 notice: (message) =>
                     process.stderr.write(`[run-architect] ${message}\n`),
                 describe: describeProviderError,
@@ -763,12 +767,26 @@ main().catch((e) => {
 })
 
 /**
+ * The OpenAI SDK collapses every network failure into the opaque "Connection
+ * error." and hides the real reason (reset, DNS, TLS, timeout) on `cause`.
+ * Without it a transport failure is undiagnosable from the run log.
+ */
+function withNetworkCause(value: unknown): string {
+    const base = value instanceof Error ? value.message : String(value)
+    const cause = value instanceof Error ? value.cause : undefined
+    if (!(cause instanceof Error)) return base
+    const code = (cause as NodeJS.ErrnoException).code
+    const detail = [code, cause.message].filter(Boolean).join(": ")
+    return detail ? `${base.trim()} (${detail})` : base
+}
+
+/**
  * Claude with --output-format json reports errors on STDOUT; an exit-1
  * with empty stderr used to log as a bare "exited with code 1". Pull the
  * provider's own words out of the captured stdout when present.
  */
 function describeProviderError(value: unknown): string {
-    const base = value instanceof Error ? value.message : String(value)
+    const base = withNetworkCause(value)
     const stdout =
         value && typeof value === "object" && "stdout" in value
             ? (value as { stdout?: unknown }).stdout
