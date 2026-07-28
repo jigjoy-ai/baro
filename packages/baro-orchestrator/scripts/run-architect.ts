@@ -293,6 +293,13 @@ async function main(): Promise<void> {
         `[run-architect] llm=${args.llm} model=${args.model ?? "(default)"}` +
             (modeContract ? ` mode=${modeContract.mode} (pre-decided)` : "") +
             (args.timeoutMs === undefined ? "" : ` timeoutMs=${args.timeoutMs}`) +
+            // Which endpoint this process will actually talk to. A transport
+            // failure is unreadable without it — the same "fetch failed"
+            // covers a missing base URL and a dead network.
+            (args.llm === "openai"
+                ? ` endpoint=${process.env.OPENAI_BASE_URL || "(default openai)"}` +
+                  ` key=${process.env.OPENAI_API_KEY ? `${process.env.OPENAI_API_KEY.slice(0, 6)}…` : "(none)"}`
+                : "") +
             "\n",
     )
 
@@ -773,11 +780,17 @@ main().catch((e) => {
  */
 function withNetworkCause(value: unknown): string {
     const base = value instanceof Error ? value.message : String(value)
-    const cause = value instanceof Error ? value.cause : undefined
-    if (!(cause instanceof Error)) return base
-    const code = (cause as NodeJS.ErrnoException).code
-    const detail = [code, cause.message].filter(Boolean).join(": ")
-    return detail ? `${base.trim()} (${detail})` : base
+    // Walk the whole chain: undici wraps the real errno twice over
+    // ("Connection error." → "fetch failed" → ECONNRESET/ENOTFOUND/…), and
+    // only the innermost link names what actually went wrong.
+    const links: string[] = []
+    let cause = value instanceof Error ? value.cause : undefined
+    while (cause instanceof Error && links.length < 4) {
+        const code = (cause as NodeJS.ErrnoException).code
+        links.push([code, cause.message].filter(Boolean).join(": "))
+        cause = cause.cause
+    }
+    return links.length > 0 ? `${base.trim()} (${links.join(" ← ")})` : base
 }
 
 /**
