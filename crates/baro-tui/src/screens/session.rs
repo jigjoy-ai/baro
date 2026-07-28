@@ -927,6 +927,15 @@ fn footer_line(app: &App, scrolled_back: bool) -> Paragraph<'static> {
             Span::styled(clip(error, 120), Style::default().fg(theme::TEXT_DIM)),
         ]));
     }
+    if app.quit_armed_tick.is_some_and(|armed| app.tick_count.saturating_sub(armed) <= 20) {
+        return Paragraph::new(Line::from(vec![
+            Span::styled(" ctrl+c", Style::default().fg(theme::WARNING)),
+            Span::styled(" again to quit baro", Style::default().fg(theme::TEXT_DIM)),
+        ]));
+    }
+    // While an agent is focused, esc leaves the drill-in — saying "quit" here
+    // makes the only way out look like it kills the run.
+    let focused = app.focused_story.is_some();
     Paragraph::new(Line::from(vec![
         Span::styled(" enter", Style::default().fg(theme::ACCENT)),
         Span::styled(" send  ", Style::default().fg(theme::MUTED)),
@@ -936,8 +945,18 @@ fn footer_line(app: &App, scrolled_back: bool) -> Paragraph<'static> {
         Span::styled(" history  ", Style::default().fg(theme::MUTED)),
         Span::styled("⇞⇟", Style::default().fg(theme::ACCENT)),
         Span::styled(" scroll  ", Style::default().fg(theme::MUTED)),
-        Span::styled("esc", Style::default().fg(theme::ACCENT)),
-        Span::styled(" quit  ·  ", Style::default().fg(theme::MUTED)),
+        Span::styled(
+            if focused { "esc" } else { "ctrl+c ×2" },
+            Style::default().fg(theme::ACCENT),
+        ),
+        Span::styled(
+            if focused {
+                " back to the session  ·  "
+            } else {
+                " quit  ·  "
+            },
+            Style::default().fg(theme::MUTED),
+        ),
         Span::styled(
             app.llm.as_str().to_string(),
             Style::default().fg(theme::ACCENT),

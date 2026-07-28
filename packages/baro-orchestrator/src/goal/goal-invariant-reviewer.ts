@@ -433,25 +433,42 @@ export class GoalInvariantReviewer extends SerializedObserver {
         const criteria = request.basis.invariants.map(
             ({ invariantId, text }) => `[${invariantId}] ${text}`,
         )
-        let preparation: Awaited<ReturnType<typeof prepareGoalInvariantReview>>
-        try {
-            preparation = await awaitGoalReviewEvidenceOperation(
-                deadline,
-                () => this.evidenceAdapter.prepare(
-                    this.opts.cwd,
-                    this.baseSha!,
-                    request,
-                    verification!,
+        let prepared:
+            | Awaited<ReturnType<typeof prepareGoalInvariantReview>>
+            | undefined
+        // Capture is a local git read, and a transient hiccup in it (a command
+        // killed mid-flight, a worktree still settling) used to fail the whole
+        // run closed on work that had already passed its story review and
+        // verification. One fresh capture costs a moment; if it fails again the
+        // verdict stays inconclusive, as before.
+        let preparationError: unknown
+        for (const attempt of [1, 2] as const) {
+            try {
+                prepared = await awaitGoalReviewEvidenceOperation(
                     deadline,
-                ),
-            )
-        } catch (error) {
+                    () => this.evidenceAdapter.prepare(
+                        this.opts.cwd,
+                        this.baseSha!,
+                        request,
+                        verification!,
+                        deadline,
+                    ),
+                )
+                preparationError = undefined
+                break
+            } catch (error) {
+                preparationError = error
+                if (attempt === 2) break
+            }
+        }
+        if (preparationError !== undefined || !prepared) {
             return this.inconclusive(
                 request,
                 0,
-                `aggregate evidence preparation failed closed: ${messageOf(error)}`,
+                `aggregate evidence preparation failed closed: ${messageOf(preparationError)}`,
             )
         }
+        const preparation = prepared
         if (preparation.status !== "ready") {
             return this.inconclusive(
                 request,

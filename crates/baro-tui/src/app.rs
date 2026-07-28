@@ -532,6 +532,9 @@ pub struct App {
     pub main_view: MainView,
     pub selected_log_index: usize,
     pub tick_count: u64,
+    /// Tick at which the first ctrl+c landed. Quitting takes a second one
+    /// inside the window — a single stray key must not end a live run.
+    pub quit_armed_tick: Option<u64>,
     pub story_list_state: ListState,
     pub dag_scroll_offset: u16,
     pub log_scroll_offsets: HashMap<String, usize>,
@@ -706,6 +709,7 @@ impl App {
             main_view: MainView::Activity,
             selected_log_index: 0,
             tick_count: 0,
+            quit_armed_tick: None,
             story_list_state: ListState::default(),
             dag_scroll_offset: 0,
             log_scroll_offsets: HashMap::new(),

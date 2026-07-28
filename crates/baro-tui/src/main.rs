@@ -2012,27 +2012,41 @@ async fn run_app(
                         _ => {}
                     },
                     Screen::Conversation => match key.code {
-                        KeyCode::Esc => {
-                            if app.focused_story.is_some() {
-                                app.focused_story = None;
-                            } else {
-                                return Ok(());
+                        // Quitting takes two ctrl+c inside ~2s. esc only backs
+                        // out of a drill-in: it sits next to the keys used
+                        // constantly during a run, and one stray press used to
+                        // kill it.
+                        KeyCode::Char('c')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            match app.quit_armed_tick {
+                                Some(armed) if app.tick_count.saturating_sub(armed) <= 20 => {
+                                    return Ok(())
+                                }
+                                _ => app.quit_armed_tick = Some(app.tick_count),
                             }
+                        }
+                        KeyCode::Esc => {
+                            app.quit_armed_tick = None;
+                            app.focused_story = None;
                         }
                         KeyCode::Char('o')
                             if key.modifiers.contains(KeyModifiers::CONTROL) =>
                         {
                             let ids = app.active_story_ids();
                             if !ids.is_empty() {
+                                // Cycling past the last agent returns to the
+                                // session, so ctrl+o alone is a way out and
+                                // not a loop with no exit.
                                 let next = match &app.focused_story {
                                     Some(current) => ids
                                         .iter()
                                         .position(|id| id == current)
-                                        .map(|ix| (ix + 1) % ids.len())
+                                        .map(|ix| ix + 1)
                                         .unwrap_or(0),
                                     None => 0,
                                 };
-                                app.focused_story = Some(ids[next].clone());
+                                app.focused_story = ids.get(next).cloned();
                                 app.focus_scroll_back = 0;
                             }
                         }

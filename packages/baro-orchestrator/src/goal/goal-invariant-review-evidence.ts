@@ -582,15 +582,18 @@ async function runGit(
                         error.stderrBuffer ?? Buffer.from(error.stderr, "utf8"),
                 }
             }
+            // An EMPTY stderr buffer must not win over the error message:
+            // a killed or silently-failing git left the caller with
+            // "no diagnostic output" and nothing to act on.
+            const stderrBuffer =
+                error.stderrBuffer && error.stderrBuffer.length > 0
+                    ? error.stderrBuffer
+                    : Buffer.from(error.stderr || error.message, "utf8")
             return {
                 exitCode,
                 stdout:
                     error.stdoutBuffer ?? Buffer.from(error.stdout, "utf8"),
-                stderr:
-                    error.stderrBuffer ?? Buffer.from(
-                        error.stderr || error.message,
-                        "utf8",
-                    ),
+                stderr: stderrBuffer,
             }
         }
         throw error
@@ -685,11 +688,23 @@ async function assertCanonicalPathInside(
     }
 }
 
+/** Below this a git process cannot start, run and be read. Handing one 1ms
+ *  killed it instantly with an empty stderr, which surfaced as the
+ *  undiagnosable "failed: no diagnostic output" and failed whole runs closed. */
+const MIN_GIT_BUDGET_MS = 500
+
 function remainingReviewDeadlineMs(
     deadline: GoalInvariantReviewDeadline,
 ): number {
     assertReviewDeadline(deadline)
-    return Math.max(1, Math.ceil(deadline.deadlineAt - Date.now()))
+    const remaining = Math.ceil(deadline.deadlineAt - Date.now())
+    if (remaining < MIN_GIT_BUDGET_MS) {
+        throw new Error(
+            "aggregate evidence capture budget is exhausted: less than " +
+                `${MIN_GIT_BUDGET_MS}ms remained for repository commands`,
+        )
+    }
+    return remaining
 }
 
 function assertReviewDeadline(deadline: GoalInvariantReviewDeadline): void {
