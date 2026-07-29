@@ -400,11 +400,15 @@ function assertCompleteSchema(value: unknown): void {
     assert.match(String(document.pattern ?? ""), /baro-obligations-v1/u)
 }
 
+/** The written-document branch, located by shape: phase one also offers an
+ *  object form where the Architect states decisions and the host renders. */
 function decisionDocumentSchema(value: unknown): Record<string, unknown> {
     const schema = value as {
-        properties?: { decisionDocument?: { anyOf?: unknown[] } }
+        properties?: { decisionDocument?: { anyOf?: Array<{ type?: string }> } }
     }
-    const document = schema.properties?.decisionDocument?.anyOf?.[0]
+    const document = schema.properties?.decisionDocument?.anyOf?.find(
+        ({ type }) => type === "string",
+    )
     assert.ok(document && typeof document === "object")
     return document as Record<string, unknown>
 }

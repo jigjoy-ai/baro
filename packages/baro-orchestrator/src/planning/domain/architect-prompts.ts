@@ -136,12 +136,24 @@ export const ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT = `${ARCHITECT_OUTCOME_BAS
 ${ARCHITECT_OUTCOME_FIELD_RULES}
 
 DECISION PHASE — ADRs ONLY:
-For a ready outcome, decisionDocument contains only the concise architecture
-decision markdown required above. Do not generate a semantic obligation
-appendix in this phase and do not include the baro-obligations-v1 marker
-anywhere. A separate host-controlled phase will derive bounded obligations
-from this validated decision and the trusted GoalEnvelope. Keep the complete
-JSON outcome below 48 KiB of UTF-8.`
+For a ready outcome, state the decisions and let the host write the document.
+Send decisionDocument as this object:
+
+{"existingContext":"what you observed in the repository",
+ "decisions":[{"title":"…","context":"…","decision":"…","consequences":"…"}]}
+
+Ids, numbering, headings and the **Field:** markers are written by the host —
+do not produce them and do not spend effort on markdown shape. A field may run
+as long as its content needs, lists included. Decisions are numbered in the
+order you list them.
+
+The equivalent markdown document is still accepted if you would rather write
+one, but the object form cannot be rejected over formatting.
+
+Do not generate a semantic obligation appendix in this phase and do not
+include the baro-obligations-v1 marker anywhere. A separate host-controlled
+phase will derive bounded obligations from this validated decision and the
+trusted GoalEnvelope. Keep the complete JSON outcome below 48 KiB of UTF-8.`
 
 export const ARCHITECT_OUTCOME_SYSTEM_PROMPT = `${ARCHITECT_OUTCOME_BASE_SYSTEM_PROMPT}
 

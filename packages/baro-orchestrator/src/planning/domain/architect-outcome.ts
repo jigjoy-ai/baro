@@ -11,6 +11,8 @@ import { deriveGoalContract } from "../../goal/goal-contract.js"
 import {
     ArchitectureDecisionDocumentError,
     parseArchitectureDecisionDocument,
+    renderArchitectureDecisionDocument,
+    type ArchitectureDecisionDraft,
 } from "./architecture-decision-document.js"
 import {
     bindArchitectureObligationContract,
@@ -28,6 +30,10 @@ const MAX_MESSAGE_LENGTH = 8_000
 const MAX_DECISION_DOCUMENT_LENGTH = 96 * 1024
 const MAX_QUESTIONS = 3
 const MAX_QUESTION_TEXT_LENGTH = 1_000
+const MAX_DECISION_TITLE_LENGTH = 200
+/** One field of one ADR; the whole rendered document is capped separately. */
+const MAX_DECISION_FIELD_LENGTH = 8_000
+const MAX_ARCHITECT_DECISIONS = 32
 const MAX_QUESTION_REASON_LENGTH = 1_000
 const MAX_EVIDENCE = 16
 const MAX_EVIDENCE_PATH_LENGTH = 512
@@ -153,6 +159,39 @@ function architectOutcomeJsonSchema(decisionOnly: boolean) {
             },
             decisionDocument: {
                 anyOf: [
+                    // Decision-only providers state the decisions and let the
+                    // host write the document; the string form stays valid so
+                    // no backend is forced to move at once.
+                    ...(decisionOnly
+                        ? [{
+                              type: "object",
+                              additionalProperties: false,
+                              required: ["existingContext", "decisions"],
+                              properties: {
+                                  existingContext: {
+                                      type: "string",
+                                      minLength: 1,
+                                      maxLength: MAX_DECISION_FIELD_LENGTH,
+                                  },
+                                  decisions: {
+                                      type: "array",
+                                      minItems: 1,
+                                      maxItems: MAX_ARCHITECT_DECISIONS,
+                                      items: {
+                                          type: "object",
+                                          additionalProperties: false,
+                                          required: ["title", "context", "decision", "consequences"],
+                                          properties: {
+                                              title: { type: "string", minLength: 1, maxLength: MAX_DECISION_TITLE_LENGTH },
+                                              context: { type: "string", minLength: 1, maxLength: MAX_DECISION_FIELD_LENGTH },
+                                              decision: { type: "string", minLength: 1, maxLength: MAX_DECISION_FIELD_LENGTH },
+                                              consequences: { type: "string", minLength: 1, maxLength: MAX_DECISION_FIELD_LENGTH },
+                                          },
+                                      },
+                                  },
+                              },
+                          }]
+                        : []),
                     {
                         type: "string",
                         minLength: 1,
@@ -238,7 +277,13 @@ export function validateArchitectOutcome(
             )
         }
         const decisionDocument = boundedText(
-            value.decisionDocument,
+            // Decisions may arrive as records the host renders into the exact
+            // ADR markdown, so the model is never asked to reproduce ids,
+            // numbering or field markers it cannot be held responsible for.
+            // Backends still emitting the document verbatim keep working.
+            options.decisionOnly === true && isStatedDecisions(value.decisionDocument)
+                ? renderStatedDecisions(value.decisionDocument)
+                : value.decisionDocument,
             options.decisionOnly === true
                 ? MAX_ARCHITECT_DECISION_OUTCOME_BYTES
                 : MAX_DECISION_DOCUMENT_LENGTH,
@@ -484,6 +529,56 @@ function safeCorrelationId(value: unknown, label: string): string {
         throw new ArchitectOutcomeContractError(`${label} is not a safe correlation id`)
     }
     return value
+}
+
+function isStatedDecisions(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/** Accept the substance; the host owns ids, ordering and markup. */
+function renderStatedDecisions(value: Record<string, unknown>): string {
+    if (!exactRecord(value, ["existingContext", "decisions"])) {
+        throw new ArchitectOutcomeContractError(
+            "stated architect decisions must use the exact decision schema",
+        )
+    }
+    const existingContext = boundedText(
+        value.existingContext,
+        MAX_DECISION_FIELD_LENGTH,
+        "architect existingContext",
+    )
+    if (!Array.isArray(value.decisions)) {
+        throw new ArchitectOutcomeContractError("architect decisions must be an array")
+    }
+    return renderArchitectureDecisionDocument(
+        parseDecisionDrafts(value.decisions),
+        existingContext,
+    )
+}
+
+function parseDecisionDrafts(value: readonly unknown[]): ArchitectureDecisionDraft[] {
+    if (value.length === 0 || value.length > MAX_ARCHITECT_DECISIONS) {
+        throw new ArchitectOutcomeContractError(
+            `architect decisions must contain 1-${MAX_ARCHITECT_DECISIONS} entries`,
+        )
+    }
+    return value.map((entry, index) => {
+        if (!exactRecord(entry, ["title", "context", "decision", "consequences"])) {
+            throw new ArchitectOutcomeContractError(
+                `architect decision ${index + 1} must use the exact decision schema`,
+            )
+        }
+        return {
+            title: boundedText(entry.title, MAX_DECISION_TITLE_LENGTH, `decision ${index + 1} title`),
+            context: boundedText(entry.context, MAX_DECISION_FIELD_LENGTH, `decision ${index + 1} context`),
+            decision: boundedText(entry.decision, MAX_DECISION_FIELD_LENGTH, `decision ${index + 1} decision`),
+            consequences: boundedText(
+                entry.consequences,
+                MAX_DECISION_FIELD_LENGTH,
+                `decision ${index + 1} consequences`,
+            ),
+        }
+    })
 }
 
 function boundedText(value: unknown, maximum: number, label: string): string {

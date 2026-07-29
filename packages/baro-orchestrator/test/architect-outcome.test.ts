@@ -133,16 +133,46 @@ describe("ArchitectOutcomeV1", () => {
             /SEMANTIC OBLIGATION APPENDIX — REQUIRED/u,
         )
 
-        const decisionDocumentSchema = ARCHITECT_DECISION_OUTCOME_JSON_SCHEMA
-            .properties.decisionDocument.anyOf[0]
-        const completeDocumentSchema = ARCHITECT_OUTCOME_JSON_SCHEMA
-            .properties.decisionDocument.anyOf[0]
+        // Located by shape, not position: phase one also offers a structured
+        // decisions array, so the string branch is no longer necessarily first.
+        const stringBranch = (schema: { anyOf: Array<{ type?: string }> }) =>
+            schema.anyOf.find(({ type }) => type === "string") as {
+                maxLength?: number
+                pattern?: string
+            }
+        const decisionDocumentSchema = stringBranch(
+            ARCHITECT_DECISION_OUTCOME_JSON_SCHEMA.properties.decisionDocument,
+        )
+        const completeDocumentSchema = stringBranch(
+            ARCHITECT_OUTCOME_JSON_SCHEMA.properties.decisionDocument,
+        )
         assert.equal(
             decisionDocumentSchema.maxLength,
             MAX_ARCHITECT_DECISION_OUTCOME_BYTES,
         )
         assert.equal("pattern" in decisionDocumentSchema, false)
         assert.match(completeDocumentSchema.pattern ?? "", /baro-obligations-v1/u)
+
+        // Phase one accepts the decisions themselves; the complete contract
+        // still takes only the finished document.
+        const stated = ARCHITECT_DECISION_OUTCOME_JSON_SCHEMA
+            .properties.decisionDocument.anyOf.find(
+                ({ type }: { type?: string }) => type === "object",
+            )
+        assert.ok(stated, "phase one must let the Architect state its decisions")
+        assert.deepEqual(stated.required, ["existingContext", "decisions"])
+        assert.deepEqual(stated.properties.decisions.items.required, [
+            "title",
+            "context",
+            "decision",
+            "consequences",
+        ])
+        assert.equal(
+            ARCHITECT_OUTCOME_JSON_SCHEMA.properties.decisionDocument.anyOf.some(
+                ({ type }: { type?: string }) => type === "object",
+            ),
+            false,
+        )
 
         assert.equal(
             parseArchitectOutcome(JSON.stringify(ready()), {
@@ -467,5 +497,84 @@ The repository uses a strict provider-neutral planning contract.
         )
         assert.match(parsed.decisions[0]!.decision, /^Parsing is owned by\n/u)
         assert.match(parsed.decisions[0]!.decision, /Correlation is attached only after/u)
+    })
+})
+
+describe("Architect states decisions, the host writes the document", () => {
+    // Phase one died in production on "requires a non-empty **Decision:**"
+    // because opus wrote the decision under the marker instead of after it.
+    // Ids, numbering and field markers are the host's to produce; the model
+    // supplies only what it actually decided.
+    const existingContext = "The repository uses a strict planning contract."
+    const drafts = [
+        {
+            title: "Keep authority outside model output",
+            context: "Provider text is untrusted.",
+            decision: "Attach correlation only after strict parsing.",
+            consequences: "Malformed output cannot advance planning.",
+        },
+        {
+            title: "Own the document shape",
+            context: "Markdown structure is not a modelling decision.",
+            decision: "Render ADR markup from the stated decisions.",
+            consequences: "A sound decision cannot be rejected for punctuation.",
+        },
+    ]
+
+    function structured() {
+        return { ...ready(), decisionDocument: { existingContext, decisions: drafts } }
+    }
+
+    it("renders numbered ADRs the existing parser accepts unchanged", () => {
+        const outcome = parseArchitectOutcome(JSON.stringify(structured()), {
+            decisionOnly: true,
+        })
+        const parsed = parseArchitectureDecisionDocument(outcome.decisionDocument)
+
+        assert.deepEqual(
+            parsed.decisions.map(({ id, title, status }) => ({ id, title, status })),
+            [
+                { id: "ADR-001", title: drafts[0]!.title, status: "Accepted" },
+                { id: "ADR-002", title: drafts[1]!.title, status: "Accepted" },
+            ],
+        )
+        assert.equal(parsed.decisions[1]!.decision, drafts[1]!.decision)
+    })
+
+    it("keeps the verbatim document form working for backends that send one", () => {
+        const outcome = parseArchitectOutcome(JSON.stringify(ready()), {
+            decisionOnly: true,
+        })
+        assert.equal(outcome.decisionDocument, DECISION_DOCUMENT)
+    })
+
+    it("folds a wrapped title back onto its heading line", () => {
+        const wrapped = structured()
+        wrapped.decisionDocument = {
+            existingContext,
+            decisions: [{ ...drafts[0]!, title: "Keep authority\n   outside model output" }],
+        }
+        const outcome = parseArchitectOutcome(JSON.stringify(wrapped), {
+            decisionOnly: true,
+        })
+        assert.match(outcome.decisionDocument, /## ADR-001: Keep authority outside model output\n/u)
+    })
+
+    it("rejects a decision that states nothing, and the complete contract still wants a document", () => {
+        const empty = structured()
+        empty.decisionDocument = {
+            existingContext,
+            decisions: [{ ...drafts[0]!, decision: "   " }],
+        }
+        assert.throws(
+            () => parseArchitectOutcome(JSON.stringify(empty), { decisionOnly: true }),
+            ArchitectOutcomeContractError,
+        )
+        // Only phase one authors decisions; the complete outcome carries the
+        // finished document with its obligation appendix.
+        assert.throws(
+            () => parseArchitectOutcome(JSON.stringify(structured())),
+            ArchitectOutcomeContractError,
+        )
     })
 })

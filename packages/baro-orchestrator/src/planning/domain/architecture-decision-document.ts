@@ -39,6 +39,65 @@ const LEVEL_TWO_HEADING = /^ {0,3}##(?:[ \t]+|$)/u
 const EXISTING_CONTEXT_HEADING = /^ {0,3}##[ \t]+Existing context[ \t]*$/u
 const REQUIRED_FIELD = /^ {0,3}\*\*(Status|Context|Decision|Consequences):\*\*[ \t]*(.*)$/u
 
+/** One decision as the Architect states it, before the host gives it a shape. */
+export interface ArchitectureDecisionDraft {
+    readonly title: string
+    readonly context: string
+    readonly decision: string
+    readonly consequences: string
+}
+
+/**
+ * Render the host-owned ADR markdown from decisions the Architect chose.
+ *
+ * The ids, the numbering, the heading shape and the field markers are the
+ * host's to write — asking a model to reproduce them only creates ways for a
+ * sound decision to be rejected for its punctuation. What the model supplies
+ * is the substance; this turns it into the exact document the parser expects.
+ */
+export function renderArchitectureDecisionDocument(
+    drafts: readonly ArchitectureDecisionDraft[],
+    existingContext?: string,
+): string {
+    if (drafts.length === 0) {
+        throw new ArchitectureDecisionDocumentError(
+            "a decision document requires at least one ADR",
+        )
+    }
+    const sections: string[] = []
+    if (existingContext?.trim()) {
+        sections.push(`## Existing context\n${existingContext.trim()}`)
+    }
+    drafts.forEach((draft, index) => {
+        const id = `ADR-${String(index + 1).padStart(3, "0")}`
+        for (const [field, value] of [
+            ["title", draft.title],
+            ["context", draft.context],
+            ["decision", draft.decision],
+            ["consequences", draft.consequences],
+        ] as const) {
+            if (typeof value !== "string" || !value.trim()) {
+                throw new ArchitectureDecisionDocumentError(
+                    `${id} requires a non-empty ${field}`,
+                )
+            }
+        }
+        sections.push(
+            `## ${id}: ${collapseHeading(draft.title)}\n` +
+                `**Status:** Accepted\n` +
+                `**Context:** ${draft.context.trim()}\n` +
+                `**Decision:** ${draft.decision.trim()}\n` +
+                `**Consequences:** ${draft.consequences.trim()}`,
+        )
+    })
+    return sections.join("\n\n")
+}
+
+/** A heading is one line by construction; a wrapped title would end the ADR. */
+function collapseHeading(title: string): string {
+    return title.trim().replace(/\s+/gu, " ")
+}
+
 /**
  * Parse the host-authoritative ADR subset of a markdown decision document.
  * Fenced examples are untrusted prose, not decisions or required fields.
