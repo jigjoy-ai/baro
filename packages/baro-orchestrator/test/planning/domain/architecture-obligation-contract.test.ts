@@ -5,6 +5,8 @@ import {
     ArchitectureObligationContractError,
     MAX_ARCHITECTURE_DECISION_DOCUMENT_BYTES,
     architectureObligationsFromDecision,
+    canonicalObligationAcceptance,
+    completeImpliedInvariantIds,
     attachArchitectureObligationContract,
     parseArchitectureObligationContract,
     renderArchitectureObligationCriterion,
@@ -281,6 +283,47 @@ describe("Architecture obligation contract", () => {
             }], "partial"),
             /unknown architecture obligation O-099/u,
         )
+    })
+
+    it("hands back the parent invariants a claim implies", () => {
+        // A real opus plan claimed O-018 and listed every parent but G-C3, and
+        // the run died at planning on work that was otherwise coherent. WHICH
+        // obligations a story owns is its decision; which invariants they
+        // descend from is already recorded in the contract.
+        const contract = architectureObligationsFromDecision(decision(), goal)!
+        const claimed = contract.obligations.map(renderArchitectureObligationCriterion)
+        const repaired = canonicalObligationAcceptance(contract, [
+            "a story-authored criterion",
+            ...claimed,
+        ])
+
+        assert.deepEqual(repaired.invariantIds, ["G-A1", "G-C1"])
+        assert.equal(repaired.acceptance[0], "a story-authored criterion")
+
+        // Completing the omitted parent makes the same mapping validate.
+        const completed = completeImpliedInvariantIds(["G-A1"], repaired.invariantIds)
+        assert.deepEqual(completed, ["G-A1", "G-C1"])
+        assert.doesNotThrow(() =>
+            validateArchitectureObligationCoverage(
+                contract,
+                [{ storyId: "S9", acceptance: claimed, invariantIds: completed }],
+                "complete",
+            ),
+        )
+    })
+
+    it("keeps what the story declared and never implies twice", () => {
+        assert.deepEqual(
+            completeImpliedInvariantIds(["G-C1", "G-A1"], ["G-A1"]),
+            ["G-C1", "G-A1"],
+        )
+        assert.deepEqual(completeImpliedInvariantIds(undefined, ["G-A1"]), ["G-A1"])
+        // No contract means nothing to imply, and the text stays untouched.
+        assert.deepEqual(canonicalObligationAcceptance(null, ["untouched"]), {
+            acceptance: ["untouched"],
+            invariantIds: [],
+            changed: false,
+        })
     })
 })
 

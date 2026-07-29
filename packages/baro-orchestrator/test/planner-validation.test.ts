@@ -268,18 +268,19 @@ Two boundaries implement the behavior.
             /unknown architecture obligation O-999/u,
         )
 
+        // An omitted parent invariant is a transcription slip, not a contract
+        // violation: the claim names the obligation, and the obligation names
+        // its parents. Complete it and persist it rather than kill the plan.
         stories[1]!.acceptance = [
             renderArchitectureObligationCriterion(obligations.obligations[1]!),
         ]
         stories[1]!.goalInvariantIds = []
-        assert.throws(
-            () => assertRunnablePlannerPrdJson(
-                JSON.stringify(prd),
-                trustedGoalEnvelope,
-                decisionDocument,
-            ),
-            /omits parent.*G-C1/u,
-        )
+        const completed = JSON.parse(assertRunnablePlannerPrdJson(
+            JSON.stringify(prd),
+            trustedGoalEnvelope,
+            decisionDocument,
+        )) as { userStories: Array<{ goalInvariantIds: string[] }> }
+        assert.deepEqual(completed.userStories[1]!.goalInvariantIds, ["G-C1"])
 
         assert.equal(
             assertRunnablePlannerPrdJson(

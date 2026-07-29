@@ -188,16 +188,25 @@ export function renderArchitectureObligationCriterion(
  * when the exact text is deterministically recoverable. Claims of unknown
  * ids are left untouched for the validator to reject, and duplicate claims
  * of one obligation within a story collapse to a single canonical entry.
+ *
+ * `invariantIds` is the union of parent invariants implied by those claims.
+ * WHICH obligations a story owns is the model's decision; which invariants
+ * they descend from is a host fact already recorded in the contract. Making
+ * the planner transcribe it only creates a way to omit one and kill a plan
+ * that is otherwise coherent, so callers fold this in instead.
  */
 export function canonicalObligationAcceptance(
     contract: ArchitectureObligationContractV1 | null | undefined,
     acceptance: readonly string[],
-): { acceptance: string[]; changed: boolean } {
-    if (!contract) return { acceptance: [...acceptance], changed: false }
+): { acceptance: string[]; invariantIds: string[]; changed: boolean } {
+    if (!contract) {
+        return { acceptance: [...acceptance], invariantIds: [], changed: false }
+    }
     const byId = new Map(
         contract.obligations.map((obligation) => [obligation.id, obligation]),
     )
     const claimed = new Set<string>()
+    const invariantIds: string[] = []
     const result: string[] = []
     let changed = false
     for (const criterion of acceptance) {
@@ -212,11 +221,26 @@ export function canonicalObligationAcceptance(
             continue
         }
         claimed.add(obligation.id)
+        for (const invariantId of obligation.invariantIds) {
+            if (!invariantIds.includes(invariantId)) invariantIds.push(invariantId)
+        }
         const canonical = renderArchitectureObligationCriterion(obligation)
         if (canonical !== criterion) changed = true
         result.push(canonical)
     }
-    return { acceptance: result, changed }
+    return { acceptance: result, invariantIds, changed }
+}
+
+/** Union the parent invariants a story's claims imply into what it declared. */
+export function completeImpliedInvariantIds(
+    declared: readonly string[] | undefined,
+    implied: readonly string[],
+): string[] {
+    const result = [...(declared ?? [])]
+    for (const invariantId of implied) {
+        if (!result.includes(invariantId)) result.push(invariantId)
+    }
+    return result
 }
 
 /**

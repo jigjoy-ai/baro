@@ -25,6 +25,7 @@ import type { BaroCommand } from "../../tui-protocol.js"
 import {
     architectureObligationsFromDecision,
     canonicalObligationAcceptance,
+    completeImpliedInvariantIds,
     obligationMappingsForStories,
     validateArchitectureObligationCoverage,
     type ArchitectureObligationContractV1,
@@ -198,13 +199,20 @@ export class ProgressivePlannerLifecycle {
         // at reconcile time.
         const candidate = {
             ...validated,
-            stories: validated.stories.map((story) => ({
-                ...story,
-                acceptance: canonicalObligationAcceptance(
+            stories: validated.stories.map((story) => {
+                const repaired = canonicalObligationAcceptance(
                     this.obligationContract,
                     story.acceptance,
-                ).acceptance,
-            })),
+                )
+                return {
+                    ...story,
+                    acceptance: repaired.acceptance,
+                    goalInvariantIds: completeImpliedInvariantIds(
+                        story.goalInvariantIds,
+                        repaired.invariantIds,
+                    ),
+                }
+            }),
         }
         validateGoalContractCoverage(
             this.goalContract,

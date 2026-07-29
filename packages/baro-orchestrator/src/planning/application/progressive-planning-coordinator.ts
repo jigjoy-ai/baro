@@ -35,6 +35,7 @@ import { validateGoalContractCoverage } from "../domain/goal-contract-coverage.j
 import {
     architectureObligationsFromDecision,
     canonicalObligationAcceptance,
+    completeImpliedInvariantIds,
     obligationMappingsForStories,
     validateArchitectureObligationCoverage,
 } from "../domain/architecture-obligation-contract.js"
@@ -279,17 +280,25 @@ export class ProgressivePlanningCoordinator {
                 state.prd.decisionDocument,
                 goalContract,
             )
-            // Same canonicalization as the final planner gate: a paraphrased
-            // host-owned obligation criterion is restored, not fatal.
+            // Same repair as the final planner gate: a paraphrased host-owned
+            // criterion is restored, and the parent invariants a claimed
+            // obligation implies are completed instead of being fatal.
             validated = {
                 ...parsed,
-                stories: parsed.stories.map((story) => ({
-                    ...story,
-                    acceptance: canonicalObligationAcceptance(
+                stories: parsed.stories.map((story) => {
+                    const repaired = canonicalObligationAcceptance(
                         obligationContract,
                         story.acceptance,
-                    ).acceptance,
-                })),
+                    )
+                    return {
+                        ...story,
+                        acceptance: repaired.acceptance,
+                        goalInvariantIds: completeImpliedInvariantIds(
+                            story.goalInvariantIds,
+                            repaired.invariantIds,
+                        ),
+                    }
+                }),
             }
             validateGoalContractCoverage(
                 goalContract,

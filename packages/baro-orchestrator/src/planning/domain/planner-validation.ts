@@ -48,7 +48,7 @@ export function assertRunnablePlannerPrdJson(
         trustedDecisionDocument,
         goalContractForObligations,
     )
-    let acceptanceCanonicalized = false
+    let prdRepaired = false
     const stories = prd.userStories as unknown[]
     const ids = new Set<string>()
     const dependencies = new Map<string, string[]>()
@@ -113,7 +113,7 @@ export function assertRunnablePlannerPrdJson(
         )
         if (canonicalized.changed) {
             story.acceptance = canonicalized.acceptance
-            acceptanceCanonicalized = true
+            prdRepaired = true
         }
         const acceptance = canonicalized.acceptance
         requireStringArray(story, id, "tests", false)
@@ -139,6 +139,20 @@ export function assertRunnablePlannerPrdJson(
                     `final PRD story ${id} has duplicate goalInvariantIds`,
                 )
             }
+        }
+        // A claimed obligation carries its parent invariants with it. The
+        // planner omitting one is a transcription slip, not a contract
+        // violation, so complete it here rather than killing the plan.
+        const implied = canonicalized.invariantIds.filter(
+            (invariantId) => !goalInvariantIds.includes(invariantId),
+        )
+        if (implied.length > 0) {
+            goalInvariantIds = [...goalInvariantIds, ...implied]
+            story.goalInvariantIds = goalInvariantIds
+            prdRepaired = true
+            process.stderr.write(
+                `[run-planner] story ${id} claims obligations implying ${implied.join(", ")}; completed its goalInvariantIds\n`,
+            )
         }
         goalMappings.push({ storyId: id, invariantIds: goalInvariantIds })
         obligationMappings.push({
@@ -180,7 +194,7 @@ export function assertRunnablePlannerPrdJson(
         obligationMappings,
         "complete",
     )
-    return acceptanceCanonicalized ? JSON.stringify(prd) : json
+    return prdRepaired ? JSON.stringify(prd) : json
 }
 
 function requireNonEmptyString(value: unknown, error: string): string {

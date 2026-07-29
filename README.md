@@ -2,7 +2,9 @@
 
 > Type a goal in your repo. Walk away. Come back to a pull request.
 
-![npm downloads](https://img.shields.io/npm/dt/baro-ai) ![npm downloads weekly](https://img.shields.io/npm/dw/baro-ai) ![npm version](https://img.shields.io/npm/v/baro-ai)
+[![npm version](https://img.shields.io/npm/v/baro-ai.svg?color=cb3837&logo=npm&logoColor=white)](https://www.npmjs.com/package/baro-ai)
+[![npm downloads](https://img.shields.io/npm/d18m/baro-ai.svg?label=downloads)](https://www.npmjs.com/package/baro-ai)
+[![npm downloads weekly](https://img.shields.io/npm/dw/baro-ai.svg?label=downloads%2Fweek)](https://www.npmjs.com/package/baro-ai)
 
 ### One prompt → a 33-story plan → 808 passing tests → a pull request. In 71 minutes.
 
