@@ -25,6 +25,46 @@ import {
 
 export const ARCHITECT_OBLIGATION_BATCH_SIZE = 3
 export const MAX_ARCHITECT_OBLIGATIONS_PER_SEGMENT = 8
+
+/** Kept modest: these are frontier-model calls on a subscription that rate
+ *  limits, and the win is already most of the way there at four. */
+export const ARCHITECT_OBLIGATION_BATCH_CONCURRENCY = 4
+
+/**
+ * Split the v1 namespace across batches up front. The remainder goes to the
+ * earliest batches so the whole budget is spendable — the serial version
+ * reached the same total by handing each batch what its predecessors left.
+ */
+export function shareObligationQuota(batchCount: number): number[] {
+    const base = Math.floor(MAX_ARCHITECTURE_OBLIGATIONS / batchCount)
+    const remainder = MAX_ARCHITECTURE_OBLIGATIONS % batchCount
+    return Array.from({ length: batchCount }, (_, index) =>
+        Math.min(
+            MAX_ARCHITECT_OBLIGATIONS_PER_SEGMENT,
+            base + (index < remainder ? 1 : 0),
+        ),
+    )
+}
+
+/** Ordered results, bounded in-flight work; the first rejection propagates. */
+async function mapWithConcurrency<In, Out>(
+    items: readonly In[],
+    limit: number,
+    run: (item: In, index: number) => Promise<Out>,
+): Promise<Out[]> {
+    const results = new Array<Out>(items.length)
+    let next = 0
+    const workers = Array.from(
+        { length: Math.max(1, Math.min(limit, items.length)) },
+        async () => {
+            for (let index = next++; index < items.length; index = next++) {
+                results[index] = await run(items[index]!, index)
+            }
+        },
+    )
+    await Promise.all(workers)
+    return results
+}
 /** Combined UTF-8 bytes of the system and user prompts sent for one batch. */
 export const MAX_ARCHITECT_OBLIGATION_REQUEST_BYTES = 96 * 1024
 export const MAX_ARCHITECT_OBLIGATION_SEGMENT_BYTES = 128 * 1024
@@ -119,37 +159,39 @@ export async function compileArchitectObligationSegments(
     const batches = chunk(invariants, ARCHITECT_OBLIGATION_BATCH_SIZE)
     const drafts: ArchitectureObligationDraftV1[] = []
 
-    for (let index = 0; index < batches.length; index++) {
-        throwIfAborted(options.signal)
-        const remainingCapacity = MAX_ARCHITECTURE_OBLIGATIONS - drafts.length
-        const remainingBatches = batches.length - index
-        // Deterministic fair-share quota reserves capacity for every later
-        // batch instead of allowing an early model response to consume the
-        // complete v1 namespace.
-        const quota = Math.min(
-            MAX_ARCHITECT_OBLIGATIONS_PER_SEGMENT,
-            Math.floor(remainingCapacity / remainingBatches),
+    // Batches partition the invariants and never read each other's output, so
+    // the only thing that ever serialized them was a quota derived from what
+    // earlier batches had already spent. Dividing the namespace up front is
+    // just as deterministic and spends exactly as much of it, which frees the
+    // batches to run at once.
+    const quotas = shareObligationQuota(batches.length)
+    if (quotas.some((quota) => quota < 1)) {
+        throw new ArchitectObligationSegmentError(
+            `architecture obligation aggregate exceeds ${MAX_ARCHITECTURE_OBLIGATIONS} entries`,
         )
-        if (quota < 1) {
-            throw new ArchitectObligationSegmentError(
-                `architecture obligation aggregate exceeds ${MAX_ARCHITECTURE_OBLIGATIONS} entries`,
-            )
-        }
-        const batchDrafts = await compileBatch({
-            options,
-            goal,
-            decisionIds,
-            targets: batches[index]!,
-            batchOrdinal: index + 1,
-            batchId: String(index + 1),
-            maxObligations: quota,
-        })
-        drafts.push(...batchDrafts)
-        if (drafts.length > MAX_ARCHITECTURE_OBLIGATIONS) {
-            throw new ArchitectObligationSegmentError(
-                `architecture obligation aggregate exceeds ${MAX_ARCHITECTURE_OBLIGATIONS} entries`,
-            )
-        }
+    }
+    const compiled = await mapWithConcurrency(
+        batches,
+        ARCHITECT_OBLIGATION_BATCH_CONCURRENCY,
+        (targets, index) => {
+            throwIfAborted(options.signal)
+            return compileBatch({
+                options,
+                goal,
+                decisionIds,
+                targets,
+                batchOrdinal: index + 1,
+                batchId: String(index + 1),
+                maxObligations: quotas[index]!,
+            })
+        },
+    )
+    // Results stay in batch order, so O-001… numbering is unchanged.
+    for (const batchDrafts of compiled) drafts.push(...batchDrafts)
+    if (drafts.length > MAX_ARCHITECTURE_OBLIGATIONS) {
+        throw new ArchitectObligationSegmentError(
+            `architecture obligation aggregate exceeds ${MAX_ARCHITECTURE_OBLIGATIONS} entries`,
+        )
     }
 
     const contract = validateArchitectureObligationContract({

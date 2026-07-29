@@ -7,6 +7,7 @@ import {
     MAX_ARCHITECT_OBLIGATION_REQUEST_BYTES,
     MAX_ARCHITECT_OBLIGATIONS_PER_SEGMENT,
     compileArchitectObligationSegments,
+    shareObligationQuota,
     type ArchitectObligationSegmentProgress,
     type ArchitectObligationSegmentRequest,
 } from "../../../src/planning/domain/architect-obligation-segments.js"
@@ -123,17 +124,23 @@ describe("segmented Architect obligation compiler", () => {
             parseArchitectureObligationContract(result.decisionDocument),
             result.contract,
         )
-        assert.deepEqual(
-            progress.map(({ type, batchId }) => `${type}:${batchId}`),
-            [
-                "batch_started:1",
-                "batch_completed:1",
-                "batch_started:2",
-                "batch_completed:2",
-                "batch_started:3",
-                "batch_completed:3",
-            ],
-        )
+        // Batches partition the invariants and share nothing, so they run
+        // concurrently and their progress interleaves. What must hold is that
+        // every batch reports exactly one start and one completion, and never
+        // completes before it started — not that batch 2 waits for batch 1.
+        for (const batchId of ["1", "2", "3"]) {
+            const own = progress
+                .map((event, index) => ({ ...event, index }))
+                .filter((event) => event.batchId === batchId)
+            const started = own.filter(({ type }) => type === "batch_started")
+            const completed = own.filter(({ type }) => type === "batch_completed")
+            assert.equal(started.length, 1, `batch ${batchId} start count`)
+            assert.equal(completed.length, 1, `batch ${batchId} completion count`)
+            assert.ok(
+                started[0]!.index < completed[0]!.index,
+                `batch ${batchId} completed before it started`,
+            )
+        }
         assert.equal(JSON.stringify(progress).includes("userPrompt"), false)
         assert.equal(JSON.stringify(progress).includes("decisionDocument"), false)
     })
@@ -633,5 +640,44 @@ ${DECISION_DOCUMENT.slice(DECISION_DOCUMENT.indexOf("## ADR-001"))}`
             /stop now/u,
         )
         assert.equal(calls, 0)
+    })
+})
+
+describe("obligation quota sharing", () => {
+    // The serial compiler handed each batch whatever its predecessors had left,
+    // which is exactly what forced batches into a chain. Dividing the namespace
+    // up front is only safe if it spends the same budget.
+    function serialQuotas(batchCount: number): number[] {
+        let spent = 0
+        const quotas: number[] = []
+        for (let index = 0; index < batchCount; index += 1) {
+            const quota = Math.min(
+                MAX_ARCHITECT_OBLIGATIONS_PER_SEGMENT,
+                Math.floor((MAX_ARCHITECTURE_OBLIGATIONS - spent) / (batchCount - index)),
+            )
+            quotas.push(quota)
+            spent += quota
+        }
+        return quotas
+    }
+
+    it("spends exactly what the serial allocator spent, for every batch count", () => {
+        const sum = (values: readonly number[]) => values.reduce((a, b) => a + b, 0)
+        for (let batchCount = 1; batchCount <= 130; batchCount += 1) {
+            assert.equal(
+                sum(shareObligationQuota(batchCount)),
+                sum(serialQuotas(batchCount)),
+                `batch count ${batchCount}`,
+            )
+        }
+    })
+
+    it("never lets one batch outgrow the per-segment cap", () => {
+        for (const batchCount of [1, 2, 3, 16, 22, 64]) {
+            for (const quota of shareObligationQuota(batchCount)) {
+                assert.ok(quota <= MAX_ARCHITECT_OBLIGATIONS_PER_SEGMENT)
+                assert.ok(quota >= 1)
+            }
+        }
     })
 })
