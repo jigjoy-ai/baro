@@ -690,6 +690,42 @@ describe("AutonomousRepositoryScanner", () => {
         })
     })
 
+    it("stops researching when it runs out of time, not only steps", async () => {
+        // Every other bound counts steps or bytes. A live run spent 25 minutes
+        // here — 64 serial model calls — and no budget noticed, because none
+        // of them measured time.
+        await withRepository(async (root) => {
+            writeFileSync(join(root, "README.md"), "timed research\n")
+            let calls = 0
+            let clock = 0
+            const responder: RepositoryScoutResponder = {
+                backend: "openai",
+                async respond(input) {
+                    calls += 1
+                    clock += 30_000 // each round trip costs half a minute
+                    return JSON.stringify(decision(input, {
+                        action: "glob",
+                        pattern: `**/*-${input.step}.md`,
+                    }))
+                },
+            }
+            const scanner = new AutonomousRepositoryScanner(root, {
+                responder,
+                maxSteps: 64,
+                maxElapsedMs: 120_000,
+                now: () => clock,
+            })
+            const brief = await scanner.scan(scanRequest(), new AbortController().signal)
+
+            // Four round trips fit inside two minutes; the fifth is never
+            // started, because the budget is checked before spending it.
+            assert.equal(calls, 4)
+            assert.ok(calls < 64, "the step cap must not be what stopped it")
+            assert.equal(brief.truncated, true)
+            assert.ok(brief.unknowns.some((item) => item.includes("ran out of time")))
+        })
+    })
+
     it("keeps the newest complete observations when the transcript is bounded", async () => {
         await withRepository(async (root) => {
             writeFileSync(join(root, "README.md"), "recent observation fixture\n")

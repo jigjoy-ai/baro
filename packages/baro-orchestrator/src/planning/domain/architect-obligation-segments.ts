@@ -30,6 +30,7 @@ export const MAX_ARCHITECT_OBLIGATIONS_PER_SEGMENT = 8
  *  limits, and the win is already most of the way there at four. */
 export const ARCHITECT_OBLIGATION_BATCH_CONCURRENCY = 4
 
+
 /**
  * Split the v1 namespace across batches up front. The remainder goes to the
  * earliest batches so the whole budget is spendable — the serial version

@@ -30,6 +30,14 @@ import {
 } from "./repository-research-tools.js"
 
 const DEFAULT_MAX_STEPS = 64
+/**
+ * Every other bound here counts steps or bytes, so nothing stopped 64 serial
+ * model calls from spending half an hour before the Architect had started. A
+ * live run sat here for 25 minutes and no budget noticed. Research is worth
+ * time, but not unbounded time — past this the deterministic snapshot stands
+ * in for whatever the Scout had not reached.
+ */
+const DEFAULT_MAX_ELAPSED_MS = 6 * 60 * 1000
 const DEFAULT_MAX_OBSERVATION_BYTES = 12 * 1024
 const DEFAULT_MAX_TRANSCRIPT_BYTES = 48 * 1024
 const DEFAULT_MAX_TOTAL_OBSERVATION_BYTES = 512 * 1024
@@ -115,6 +123,7 @@ export interface AutonomousRepositoryScannerOptions {
     /** Deterministic snapshot source and fail-safe result. */
     bootstrapScanner?: RepositoryContextScanner
     maxSteps?: number
+    maxElapsedMs?: number
     maxObservationBytes?: number
     maxTranscriptBytes?: number
     maxPromptBytes?: number
@@ -122,6 +131,8 @@ export interface AutonomousRepositoryScannerOptions {
     maxDecisionRepairs?: number
     /** Narrow provider-free test seam. Production always uses Baro's fixed tool set. */
     tools?: readonly Tool[]
+    /** Test seam for the elapsed-time budget; production reads the wall clock. */
+    now?: () => number
 }
 
 type ResearchDecision =
@@ -200,6 +211,8 @@ export class AutonomousRepositoryScanner implements RepositoryContextScanner {
     private readonly bootstrapScanner: RepositoryContextScanner
     private readonly tools: ReadonlyMap<string, Tool>
     private readonly maxSteps: number
+    private readonly maxElapsedMs: number
+    private readonly now: () => number
     private readonly maxObservationBytes: number
     private readonly maxTranscriptBytes: number
     private readonly maxPromptBytes: number
@@ -216,6 +229,13 @@ export class AutonomousRepositoryScanner implements RepositoryContextScanner {
         }
         this.bootstrapScanner = options.bootstrapScanner ??
             new DeterministicRepositoryScanner(root)
+        this.now = options.now ?? Date.now
+        this.maxElapsedMs = boundedInteger(
+            options.maxElapsedMs ?? DEFAULT_MAX_ELAPSED_MS,
+            "maxElapsedMs",
+            1_000,
+            60 * 60 * 1000,
+        )
         this.maxSteps = boundedInteger(
             options.maxSteps ?? DEFAULT_MAX_STEPS,
             "maxSteps",
@@ -293,9 +313,15 @@ export class AutonomousRepositoryScanner implements RepositoryContextScanner {
         const brokerSafetyUnknowns = new Set<string>()
         const executedActions = new Map<string, number>()
 
+        const deadline = this.now() + this.maxElapsedMs
         try {
             for (let step = 1; step <= this.maxSteps; step += 1) {
                 throwIfAborted(signal)
+                // Checked between steps, never mid-observation: a step already
+                // in flight finishes and its evidence counts.
+                if (step > 1 && this.now() >= deadline) {
+                    return deterministicFallback("time budget was exhausted")
+                }
                 let repairReason: string | undefined
                 let decision: Exclude<ResearchDecision, FinishDecision> | undefined
                 for (
@@ -880,6 +906,7 @@ function fallbackBrief(
 type FallbackReason =
     | "observation budget was exhausted"
     | "step safety bound was exhausted"
+    | "time budget was exhausted"
     | "repository changed during autonomous research"
     | "final repository rescan failed"
 
@@ -889,6 +916,9 @@ function fallbackReasonUnknown(reason: FallbackReason): string {
     }
     if (reason === "final repository rescan failed") {
         return "The final repository stability rescan failed; fallback evidence may no longer match the checkout."
+    }
+    if (reason === "time budget was exhausted") {
+        return "Autonomous repository research ran out of time; the deterministic snapshot stands in for what it had not reached."
     }
     return reason === "observation budget was exhausted"
         ? "Autonomous repository research exhausted its observation byte budget."
