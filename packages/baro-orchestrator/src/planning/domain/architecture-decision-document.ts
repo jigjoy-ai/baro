@@ -117,17 +117,37 @@ function parseRequiredFields(
     lines: readonly VisibleLine[],
     decisionId: string,
 ): Record<RequiredField, string> {
+    // A field's value may continue on the lines beneath its marker. The
+    // prompt demands an exhaustive Decision naming exact paths, columns and
+    // endpoints — content that becomes a list in any real markdown — so
+    // requiring it to sit on the marker line rejects good documents for
+    // their shape. Emptiness is still emptiness: a marker whose whole block
+    // is blank fails exactly as before.
     const values = new Map<RequiredField, string>()
+    let open: RequiredField | undefined
+    const continuation = new Map<RequiredField, string[]>()
     for (const { text } of lines) {
         const match = REQUIRED_FIELD.exec(text)
-        if (!match) continue
-        const field = match[1] as RequiredField
-        if (values.has(field)) {
-            throw new ArchitectureDecisionDocumentError(
-                `${decisionId} contains duplicate **${field}:** fields`,
-            )
+        if (match) {
+            const field = match[1] as RequiredField
+            if (values.has(field)) {
+                throw new ArchitectureDecisionDocumentError(
+                    `${decisionId} contains duplicate **${field}:** fields`,
+                )
+            }
+            values.set(field, match[2]!.trim())
+            open = field
+            continue
         }
-        values.set(field, match[2]!.trim())
+        if (open && text.trim()) {
+            const collected = continuation.get(open) ?? []
+            collected.push(text.trim())
+            continuation.set(open, collected)
+        }
+    }
+    for (const [field, collected] of continuation) {
+        const inline = values.get(field) ?? ""
+        values.set(field, [inline, ...collected].join("\n").trim())
     }
 
     const status = values.get("Status")
@@ -138,8 +158,12 @@ function parseRequiredFields(
     }
     for (const field of ["Context", "Decision", "Consequences"] as const) {
         if (!values.get(field)) {
+            // Say which it was so a failure after minutes of Architect time is
+            // diagnosable from the log alone.
             throw new ArchitectureDecisionDocumentError(
-                `${decisionId} requires a non-empty **${field}:** field`,
+                values.has(field)
+                    ? `${decisionId} has a **${field}:** marker but its block is empty`
+                    : `${decisionId} requires a non-empty **${field}:** field`,
             )
         }
     }

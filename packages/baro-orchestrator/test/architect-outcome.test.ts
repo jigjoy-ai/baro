@@ -10,6 +10,7 @@ import {
     parseArchitectOutcome,
     wrapArchitectOutcome,
 } from "../src/planning/domain/architect-outcome.js"
+import { parseArchitectureDecisionDocument } from "../src/planning/domain/architecture-decision-document.js"
 import {
     ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_OUTCOME_SYSTEM_PROMPT,
@@ -418,5 +419,53 @@ ${TRIVIAL_DECISION_DOCUMENT}
             }),
             ArchitectOutcomeContractError,
         )
+    })
+})
+
+describe("ADR field values spanning lines", () => {
+    // A live opus Architect burned 394s and then died on "requires a non-empty
+    // **Decision:** field". The prompt demands an EXHAUSTIVE decision naming
+    // exact paths, columns and endpoints — content that becomes a list under
+    // the marker in any real markdown — so the shape was being rejected, not
+    // the substance.
+    const belowTheMarker = `## Existing context
+The repository uses a strict provider-neutral planning contract.
+
+## ADR-001: Keep authority outside model output
+**Status:** Accepted
+**Context:** Provider text is untrusted.
+**Decision:**
+- \`src/planning/domain/architect-outcome.ts\` owns parsing.
+- Correlation is attached only after strict parsing.
+**Consequences:** Malformed model output cannot advance planning.`
+
+    it("accepts a value written beneath its marker", () => {
+        const parsed = parseArchitectureDecisionDocument(belowTheMarker)
+        const [adr] = parsed.decisions
+        assert.match(adr!.decision, /architect-outcome\.ts` owns parsing\./u)
+        assert.match(adr!.decision, /Correlation is attached only after/u)
+        assert.equal(adr!.consequences, "Malformed model output cannot advance planning.")
+    })
+
+    it("still rejects a marker whose block is genuinely empty", () => {
+        assert.throws(
+            () => parseArchitectureDecisionDocument(
+                belowTheMarker.replace(
+                    "- `src/planning/domain/architect-outcome.ts` owns parsing.\n- Correlation is attached only after strict parsing.\n",
+                    "",
+                ),
+            ),
+            /ADR-001 has a \*\*Decision:\*\* marker but its block is empty/u,
+        )
+    })
+
+    it("joins an inline opener with the lines continuing it", () => {
+        // The old parser kept only the marker line, so a decision wrapped
+        // across two lines reached the Planner cut off mid-sentence.
+        const parsed = parseArchitectureDecisionDocument(
+            belowTheMarker.replace("**Decision:**\n", "**Decision:** Parsing is owned by\n"),
+        )
+        assert.match(parsed.decisions[0]!.decision, /^Parsing is owned by\n/u)
+        assert.match(parsed.decisions[0]!.decision, /Correlation is attached only after/u)
     })
 })
