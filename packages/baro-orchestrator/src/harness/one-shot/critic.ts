@@ -286,3 +286,26 @@ export abstract class OneShotCritic extends BaseObserver {
         }
     }
 }
+
+/** Bounds for the per-call Critic budget, whatever the fleet width. */
+export const MIN_CRITIC_CALL_TIMEOUT_MS = 60_000
+export const MAX_CRITIC_CALL_TIMEOUT_MS = 300_000
+
+/**
+ * How long one Critic call may take, given how many story agents may be
+ * running beside it.
+ *
+ * A live 14-story run lost four finished stories to this: the Critic's fixed
+ * 60s budget was set when one agent ran at a time, and with ten CLI workers
+ * competing for the same machine and subscription every evaluation overran
+ * it. The gate's rechecks could not help — each retry got the same too-small
+ * budget under the same load — so work that had passed its own tests was
+ * discarded as "inconclusive". Wider parallelism made the reviewer fail more
+ * often, which is the opposite of what widening it is for.
+ */
+export function criticCallTimeoutMs(parallel: number | undefined): number {
+    // 0 means unlimited; treat it as a busy fleet rather than a quiet one.
+    const workers = parallel === undefined || parallel === 0 ? 12 : parallel
+    const scaled = MIN_CRITIC_CALL_TIMEOUT_MS + 15_000 * Math.max(0, workers - 1)
+    return Math.min(MAX_CRITIC_CALL_TIMEOUT_MS, scaled)
+}

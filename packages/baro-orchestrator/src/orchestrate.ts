@@ -115,6 +115,7 @@ import {
     type CoordinationMode,
     type WorkBidEstimateData,
 } from "./semantic-events.js"
+import { criticCallTimeoutMs } from "./harness/one-shot/critic.js"
 import { emit } from "./tui-protocol.js"
 import {
     createVerifyPlan,
@@ -1001,6 +1002,7 @@ export async function orchestrate(
         } else if (criticLlm === "codex") {
             critic = new CriticCodex({
                 targets: criticTargets,
+                timeoutMs: criticCallTimeoutMs(config.parallel),
                 model: config.criticModel,
                 runId,
                 evidence: criticEvidence,
@@ -1010,6 +1012,7 @@ export async function orchestrate(
         } else if (criticLlm === "opencode") {
             critic = new CriticOpenCode({
                 targets: criticTargets,
+                timeoutMs: criticCallTimeoutMs(config.parallel),
                 model: config.criticModel,
                 runId,
                 evidence: criticEvidence,
@@ -1019,6 +1022,7 @@ export async function orchestrate(
         } else if (criticLlm === "pi") {
             critic = new CriticPi({
                 targets: criticTargets,
+                timeoutMs: criticCallTimeoutMs(config.parallel),
                 model: config.criticModel,
                 runId,
                 evidence: criticEvidence,
@@ -1028,6 +1032,7 @@ export async function orchestrate(
         } else {
             critic = new Critic({
                 targets: criticTargets,
+                timeoutMs: criticCallTimeoutMs(config.parallel),
                 model: config.criticModel ?? "haiku",
                 runId,
                 evidence: criticEvidence,
