@@ -71,6 +71,7 @@ export class ContinuousGateRunner extends BaseObserver {
     private readonly running = new Set<string>()
     private readonly dirtyWhileRunning = new Set<string>()
     private readonly controller = new AbortController()
+    private readonly noted = new Set<string>()
     private stopped = false
 
     constructor(private readonly opts: ContinuousGateRunnerOptions) {
@@ -81,8 +82,18 @@ export class ContinuousGateRunner extends BaseObserver {
         if (this.stopped) return
         if (!isWriteTool(item.name)) return
         const agentId = participantAgentId(source)
-        if (!agentId) return
+        if (!agentId) {
+            this.note("saw a write from a participant with no agent id")
+            return
+        }
         this.schedule(agentId)
+    }
+
+    /** One line per distinct condition; enough to tell silence from absence. */
+    private note(message: string): void {
+        if (this.noted.has(message)) return
+        this.noted.add(message)
+        process.stderr.write(`[continuous-gate] ${message}\n`)
     }
 
     /** Stops timers and cancels a running gate; safe to call more than once. */
@@ -114,7 +125,10 @@ export class ContinuousGateRunner extends BaseObserver {
     private async run(agentId: string): Promise<void> {
         if (this.stopped) return
         const target = this.opts.resolveTarget(agentId)
-        if (!target) return
+        if (!target) {
+            this.note(`no worktree resolved for ${agentId}`)
+            return
+        }
         this.running.add(agentId)
         try {
             const commands = await this.execute(target.cwd)
@@ -123,11 +137,14 @@ export class ContinuousGateRunner extends BaseObserver {
             if (shouldDeliverGate(this.lastDelivered.get(agentId) ?? null, outcome)) {
                 this.lastDelivered.set(agentId, outcome)
                 this.deliver(agentId, outcome)
+                this.note("delivering gate results to agents")
             }
-        } catch {
+        } catch (error) {
             // A gate that cannot run is the host's problem, not the agent's.
             // Staying silent leaves the agent exactly where it was; telling it
-            // about our own failure would only cost it a turn.
+            // about our own failure would only cost it a turn — but the
+            // operator still needs to know we tried and could not.
+            this.note(`gates failed to run: ${error instanceof Error ? error.message : String(error)}`)
         } finally {
             this.running.delete(agentId)
             if (this.dirtyWhileRunning.delete(agentId)) this.schedule(agentId)
