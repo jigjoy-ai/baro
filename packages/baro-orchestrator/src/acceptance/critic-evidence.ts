@@ -11,6 +11,7 @@ import {
     type SemanticEvent,
 } from "../runtime/mozaik.js"
 
+import { participantAgentId } from "../runtime/participant-identity.js"
 import { AgentState } from "../semantic-events.js"
 import {
     RepositoryCommandError,
@@ -1557,13 +1558,6 @@ function joinOutput(result: GitResult): string {
 
 function formatGitFailure(command: string, result: GitResult): string {
     return `${command} failed with exit ${result.exitCode ?? "unknown"}: ${joinOutput(result) || "no diagnostic output"}`
-}
-
-function participantAgentId(source: Participant): string | null {
-    const candidate = (source as unknown as { agentId?: unknown }).agentId
-    return typeof candidate === "string" && candidate.length > 0
-        ? candidate
-        : null
 }
 
 function redactSensitiveText(value: string): string {

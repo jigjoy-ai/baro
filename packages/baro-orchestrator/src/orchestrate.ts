@@ -116,6 +116,7 @@ import {
     type WorkBidEstimateData,
 } from "./semantic-events.js"
 import { criticCallTimeoutMs } from "./harness/one-shot/critic.js"
+import { ContinuousGateRunner } from "./verification/continuous-gate-runner.js"
 import { emit } from "./tui-protocol.js"
 import {
     createVerifyPlan,
@@ -659,6 +660,7 @@ export async function orchestrate(
     let cleanupDialogue: (() => void) | null = null
     let shutdownStoryFactories: StoryFactory[] = []
     let shutdownWorktrees: WorktreeManager | null = null
+    let continuousGate: ContinuousGateRunner | null = null
     let shutdownCollaborationBridge: CollaborationBridge | null = null
     let workerShutdownDrained = false
     let goalReviewProviderSettled = true
@@ -1180,6 +1182,21 @@ export async function orchestrate(
             },
         })
         finalizer?.setVerifierAuthority(runVerifier)
+        // Run the project's own gates in each story's worktree while its agent
+        // is still working. Measured: 45% of story time goes on the agent
+        // discovering these results a turn at a time, and the host runs the
+        // same commands twice more anyway. Silent when the project declares
+        // no gates — never tell an agent it is green because we had nothing
+        // to run. Opt out with BARO_CONTINUOUS_GATE=0.
+        if (process.env.BARO_CONTINUOUS_GATE !== "0") {
+            continuousGate = new ContinuousGateRunner({
+                runId,
+                plan: verifyPlan,
+                resolveTarget: (storyId) =>
+                    resolveCriticRepositoryTarget(worktrees, storyId),
+            })
+            continuousGate.join(env)
+        }
         leaseBroker = new LeaseBroker({
             runId,
             parallel: collectiveParallel,
@@ -1755,6 +1772,8 @@ export async function orchestrate(
         // Exceptions during setup, coordination, verification, or finalization
         // must not strand a correlated provider call without a final pull.
         cleanupDialogue?.()
+        // Cancel any gate still running in a worktree that is about to go.
+        continuousGate?.stop()
         shutdownWorktrees?.beginShutdown()
         if (!workerShutdownDrained && shutdownStoryFactories.length > 0) {
             await Promise.allSettled(
