@@ -637,3 +637,23 @@ function deepFreeze<T>(value: T): T {
     }
     return value
 }
+
+/** The decision-phase byte cap, and only that: a shorter answer is worth asking for. */
+export function outcomeByteOverrun(
+    error: unknown,
+): { bytes: number; limit: number } | null {
+    const match = /architect outcome is (\d+) bytes; limit is (\d+)/u.exec(
+        error instanceof Error ? error.message : "",
+    )
+    if (!match) return null
+    return { bytes: Number(match[1]), limit: Number(match[2]) }
+}
+
+/** A host-authored instruction rides the existing project-context channel. */
+export function appendRepairNote(
+    projectContext: string | undefined,
+    note: string | undefined,
+): string | undefined {
+    if (!note) return projectContext
+    return projectContext ? `${projectContext}\n\n${note}` : note
+}

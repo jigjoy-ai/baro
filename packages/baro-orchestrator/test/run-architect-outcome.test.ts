@@ -11,6 +11,10 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import { withTempDir } from "./execution/helpers.js"
+import {
+    appendRepairNote,
+    outcomeByteOverrun,
+} from "../src/planning/domain/architect-outcome.js"
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url))
 const RUN_ARCHITECT = join(
@@ -821,3 +825,33 @@ function valueAfter(argv: readonly string[], flag: string): string {
     assert.ok(index >= 0, `missing ${flag}: ${JSON.stringify(argv)}`)
     return argv[index + 1] ?? ""
 }
+
+describe("decision phase length repair", () => {
+    // A ten-minute Architect phase died because its outcome was 52,902 bytes
+    // against a 49,152 limit — 7.6% over, with the decisions themselves sound.
+    // Length is the one contract breach worth paying for a second answer.
+    it("recognizes only the byte-cap breach as worth retrying", () => {
+        assert.deepEqual(
+            outcomeByteOverrun(new Error("architect outcome is 52902 bytes; limit is 49152")),
+            { bytes: 52902, limit: 49152 },
+        )
+        assert.equal(
+            outcomeByteOverrun(new Error("ready architect outcome requires a valid ADR decisionDocument")),
+            null,
+        )
+        assert.equal(
+            outcomeByteOverrun(
+                new Error("architect outcome transport is 99 bytes; limit is 10"),
+            ),
+            null,
+        )
+        assert.equal(outcomeByteOverrun("not an error"), null)
+    })
+
+    it("carries the instruction without discarding repository context", () => {
+        assert.equal(appendRepairNote("repo facts", "state it shorter"), "repo facts\n\nstate it shorter")
+        assert.equal(appendRepairNote(undefined, "state it shorter"), "state it shorter")
+        assert.equal(appendRepairNote("repo facts", undefined), "repo facts")
+        assert.equal(appendRepairNote(undefined, undefined), undefined)
+    })
+})

@@ -40,6 +40,8 @@ import { providerCallTimeoutError } from "../src/harness/openai/runtime.js"
 import { emitPlanLine } from "../src/planning/application/plan-events.js"
 import { effortTimeoutMs } from "../src/planning/adapters/planner-claude.js"
 import {
+    appendRepairNote,
+    outcomeByteOverrun,
     parseArchitectOutcome,
     validateArchitectOutcomeCorrelation,
     wrapArchitectOutcome,
@@ -346,30 +348,33 @@ async function main(): Promise<void> {
                 },
             })
         }
-        result = await withTransientRetry(
-            () =>
-                runInitialArchitect(
-                    args,
-                    projectContext,
-                    modeContract,
-                    trustedGoalEnvelope,
-                    billing,
-                    resolvedArchitectRoute,
-                    observeDecisionInvocation,
-                ),
-            {
-                // Losing the architect kills the whole run, and billing
-                // correlation disables the SDK's own retries, so this is the
-                // only layer between a network drop and a dead run. Four
-                // attempts spread over ~65s ride out a VPN reroute; the phase
-                // budget is 30 minutes, so the wait costs nothing it needs.
-                maxAttempts: 4,
-                maxWaitMs: 60_000,
-                notice: (message) =>
-                    process.stderr.write(`[run-architect] ${message}\n`),
-                describe: describeProviderError,
-            },
-        )
+        const issueDecisionPhase = (repairNote?: string) =>
+            withTransientRetry(
+                () =>
+                    runInitialArchitect(
+                        args,
+                        appendRepairNote(projectContext, repairNote),
+                        modeContract,
+                        trustedGoalEnvelope,
+                        billing,
+                        resolvedArchitectRoute,
+                        observeDecisionInvocation,
+                    ),
+                {
+                    // Losing the architect kills the whole run, and billing
+                    // correlation disables the SDK's own retries, so this is the
+                    // only layer between a network drop and a dead run. Four
+                    // attempts spread over ~65s ride out a VPN reroute; the phase
+                    // budget is 30 minutes, so the wait costs nothing it needs.
+                    maxAttempts: 4,
+                    maxWaitMs: 60_000,
+                    notice: (message) =>
+                        process.stderr.write(`[run-architect] ${message}\n`),
+                    describe: describeProviderError,
+                },
+            )
+
+        result = await issueDecisionPhase()
         if (
             args.outcomeFile &&
             Date.now() - t0 >= architectPhaseBudgetMs(args)
@@ -383,9 +388,34 @@ async function main(): Promise<void> {
         if (args.outcomeFile) {
             // Phase one is deliberately ADR-only. The repository-aware model
             // may still stop here with a bounded clarification request.
-            const decisionOutcome = parseArchitectOutcome(result, {
-                decisionOnly: true,
-            })
+            let decisionOutcome
+            try {
+                decisionOutcome = parseArchitectOutcome(result, {
+                    decisionOnly: true,
+                })
+            } catch (error) {
+                // Only length is worth another ten minutes: the decisions were
+                // sound, there were simply too many bytes of them. Every other
+                // contract breach means the content is wrong, and repeating the
+                // phase would just buy the same answer at the same price.
+                const overrun = outcomeByteOverrun(error)
+                if (!overrun || Date.now() - t0 >= architectPhaseBudgetMs(args)) {
+                    throw error
+                }
+                process.stderr.write(
+                    `[run-architect] decision outcome was ${overrun.bytes} bytes against a ` +
+                        `${overrun.limit} byte limit; asking for the same decisions, stated shorter\n`,
+                )
+                result = await issueDecisionPhase(
+                    `Your previous decision-phase outcome was ${overrun.bytes} bytes of UTF-8, ` +
+                        `over the ${overrun.limit} byte limit, and was rejected unread. Send the ` +
+                        `same decisions again with the same ids and ordering, stated more ` +
+                        `briefly — drop restatement and background, keep every choice.`,
+                )
+                decisionOutcome = parseArchitectOutcome(result, {
+                    decisionOnly: true,
+                })
+            }
             const completeOutcome = decisionOutcome.kind === "ready"
                 ? {
                       ...decisionOutcome,
@@ -850,3 +880,4 @@ function safeErrorForStderr(value: unknown, includeStack = false): string {
         .toString("utf8")
         .replace(/\uFFFD$/u, "")}${marker}`
 }
+
