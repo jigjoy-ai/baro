@@ -1157,8 +1157,19 @@ async fn run_app(
                     app.execution_mode = prd.execution_mode.clone();
                     restore_conversation_from_prd(&mut app, &prd, &cwd);
                     let stories = review_stories_from_prd(&prd);
-                    app.show_review(stories);
                     entered_resume = true;
+                    if headless {
+                        // The plan is already on disk and already reviewed, so
+                        // there is nothing to approve. Headless auto-confirm
+                        // otherwise only exists on the PlanReady path after a
+                        // fresh planner run, which resume never reaches — so
+                        // `--resume --headless` sat on a review screen it had
+                        // no way to answer.
+                        println!(r#"{{"type":"plan_ready","stories":{}}}"#, stories.len());
+                        confirm_and_execute(&mut app, stories, &cwd, tx.clone(), headless);
+                    } else {
+                        app.show_review(stories);
+                    }
                 }
             }
             Err(error) if cli.resume => {
