@@ -113,12 +113,20 @@ Mode semantics:
     fan out just to use agents.
 
 Dependency rules:
-  - Stories touching disjoint files/modules may run in parallel.
-  - Stories touching the same file/component/state/API must be sequential or one
-    focused story.
+  - The unit of conflict is the FILE, not the package or module. Stories that
+    each create their own new files run in parallel even inside one package,
+    as long as none of them adds a shared top-level name.
+  - Stories editing the same file, or racing on the same state/API/schema, must
+    be sequential or become one focused story.
   - Only add dependsOn when story B literally cannot start until A is merged
     because B imports a symbol A defines, modifies a file A creates, or relies
     on a schema/API A introduces.
+  - SIBLINGS, NOT A CHAIN. When several stories all build on the same
+    prerequisite, each depends on that prerequisite and on nothing else.
+    A→B, A→C, A→D is right. A→B→C→D is wrong: it serializes work that could
+    have run at once, and costs the run the difference. Before writing
+    dependsOn, ask what this story actually reads — not what happens to precede
+    it in your listing.
   - Decorative chains are bad, but unsafe parallel edits are worse.
 
 Output ONLY valid JSON matching this exact schema (no markdown, no explanation, just JSON):
