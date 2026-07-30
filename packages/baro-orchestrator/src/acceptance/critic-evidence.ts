@@ -1371,10 +1371,20 @@ async function collectRepositoryEvidence(
             throw new Error(formatGitFailure(label, result))
         }
     }
-    // `git diff --check` uses exit 1 for real whitespace findings. Missing
-    // exit status, timeout, or any other code is an evidence-collection
-    // incident rather than a verdict about the patch.
-    if (check.exitCode !== 0 && check.exitCode !== 1) {
+    // `git diff --check` reports findings by exiting non-zero: measured on
+    // git 2.39, trailing whitespace, a blank line at EOF and a conflict
+    // marker all exit 2, and a clean diff exits 0. Accept 1 as well rather
+    // than pin the version. A finding is EVIDENCE about the patch, not an
+    // inability to gather it — reading it as an incident once failed a story
+    // whose only sin was a blank line at the end of a test file, and took the
+    // story that depended on it down too. Real incidents stay distinct: a bad
+    // base or pathspec exits 128, running outside a repository 129, and a
+    // timeout carries no exit status at all.
+    if (
+        check.exitCode !== 0 &&
+        check.exitCode !== 1 &&
+        check.exitCode !== 2
+    ) {
         throw new Error(formatGitFailure("git diff --check <base>", check))
     }
 

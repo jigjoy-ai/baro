@@ -1381,3 +1381,55 @@ function staticEvidence(
 function git(cwd: string, ...args: string[]): string {
     return execFileSync("git", args, { cwd, encoding: "utf8" })
 }
+
+describe("whitespace findings are evidence, not an incident", () => {
+    // A live run lost story S4 to "Repository evidence collection failed
+    // closed: git diff --check <base> failed with exit 2: new blank line at
+    // EOF" — and S15, which depended on it, never started. `git diff --check`
+    // reports findings by exiting non-zero; measured on git 2.39 it uses 2 for
+    // trailing whitespace, a blank line at EOF and a conflict marker alike.
+    // The old guard accepted only 0 and 1, so every finding read as a broken
+    // tool. A real incident still looks different: 128 for a bad base, 129
+    // outside a repository.
+    async function evidenceFor(
+        repo: string,
+        write: (path: string) => void,
+    ): Promise<string> {
+        git(repo, "init", "--quiet")
+        writeFileSync(join(repo, "tracked.go"), "package main\n")
+        git(repo, "add", "-A")
+        git(
+            repo, "-c", "user.name=Baro Test", "-c", "user.email=baro@example.invalid",
+            "commit", "--quiet", "-m", "baseline",
+        )
+        const baseSha = git(repo, "rev-parse", "HEAD").trim()
+        write(repo)
+        const prepared = await prepareCriticEvaluation(
+            ["the change is well formed"],
+            "agent output",
+            "agent-a",
+            { resolveRepositoryTarget: () => ({ cwd: repo, baseSha }) },
+        )
+        return prepared.prompts.join("\n")
+    }
+
+    it("still gathers evidence when the patch ends on a blank line", async () => {
+        await withTempDir("baro-critic-blank-line-eof-", async (repo) => {
+            const prompt = await evidenceFor(repo, (dir) => {
+                writeFileSync(join(dir, "tracked.go"), "package main\n\n")
+            })
+            assert.doesNotMatch(prompt, /evidence collection failed closed/iu)
+            assert.match(prompt, /tracked\.go/u)
+        })
+    })
+
+    it("still gathers evidence when a line carries trailing whitespace", async () => {
+        await withTempDir("baro-critic-trailing-ws-", async (repo) => {
+            const prompt = await evidenceFor(repo, (dir) => {
+                writeFileSync(join(dir, "tracked.go"), "package main\nvar x = 1 \n")
+            })
+            assert.doesNotMatch(prompt, /evidence collection failed closed/iu)
+            assert.match(prompt, /tracked\.go/u)
+        })
+    })
+})
