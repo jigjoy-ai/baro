@@ -143,9 +143,10 @@ Send decisionDocument as this object:
  "decisions":[{"title":"…","context":"…","decision":"…","consequences":"…"}]}
 
 Ids, numbering, headings and the **Field:** markers are written by the host —
-do not produce them and do not spend effort on markdown shape. A field may run
-as long as its content needs, lists included. Decisions are numbered in the
-order you list them.
+do not produce them and do not spend effort on markdown shape. Fields are
+plain text and may contain newlines, so nothing has to fit on one line; this
+is a freedom from formatting, NOT licence to write more. Keep every field as
+short as the decision allows. Decisions are numbered in the order you list them.
 
 The equivalent markdown document is still accepted if you would rather write
 one, but the object form cannot be rejected over formatting.
