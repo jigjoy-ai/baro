@@ -51,16 +51,31 @@ export interface ContinuousGateRunnerOptions {
         Promise<readonly GateCommandOutcome[]>
 }
 
-const DEFAULT_SETTLE_MS = 4_000
+/**
+ * Long on purpose. The measured waste is the stretch AFTER an agent's last
+ * write, when it starts verifying; firing mid-burst neither helps it nor
+ * saves anything, and costs a full build. Quiet means it is done writing.
+ */
+const DEFAULT_SETTLE_MS = 20_000
 
-/** `exited with code null` means a signal, not a verdict about the patch. */
+/**
+ * A command that died on a signal says nothing about the patch. Both spellings
+ * have been seen in the wild: the runner reporting no exit status, and the Go
+ * toolchain reporting its own child as `signal: killed` under memory pressure.
+ */
 function wasKilled(command: { status: string; tail?: string }): boolean {
-    return command.status !== "passed" && /exited with code null/u.test(command.tail ?? "")
+    if (command.status === "passed") return false
+    const tail = command.tail ?? ""
+    return /exited with code null/u.test(tail) || /signal: (killed|terminated)/u.test(tail)
 }
 
 export class ContinuousGateRunner extends BaseObserver {
     private readonly lastDelivered = new Map<string, GateOutcome>()
     private readonly timers = new Map<string, NodeJS.Timeout>()
+    /** One gate at a time for the whole run. Ten concurrent `go build ./...`
+     *  in ten worktrees starved the machine badly enough that the compiler was
+     *  killed, and the runner reported that to an agent as a broken build. */
+    private gateInFlight: Promise<void> | null = null
     private readonly running = new Set<string>()
     private readonly dirtyWhileRunning = new Set<string>()
     private readonly controller = new AbortController()
@@ -124,7 +139,7 @@ export class ContinuousGateRunner extends BaseObserver {
         }
         this.running.add(agentId)
         try {
-            const commands = await this.execute(target.cwd)
+            const commands = await this.serialized(() => this.execute(target.cwd))
             if (this.stopped) return
             const outcome = summarizeGate(commands)
             if (shouldDeliverGate(this.lastDelivered.get(agentId) ?? null, outcome)) {
@@ -141,6 +156,19 @@ export class ContinuousGateRunner extends BaseObserver {
         } finally {
             this.running.delete(agentId)
             if (this.dirtyWhileRunning.delete(agentId)) this.schedule(agentId)
+        }
+    }
+
+    /** Queue behind whatever gate is already running, whichever story it is for. */
+    private async serialized<T>(work: () => Promise<T>): Promise<T> {
+        const previous = this.gateInFlight ?? Promise.resolve()
+        let release!: () => void
+        this.gateInFlight = new Promise<void>((resolve) => { release = resolve })
+        try {
+            await previous
+            return await work()
+        } finally {
+            release()
         }
     }
 

@@ -139,3 +139,40 @@ describe("ContinuousGateRunner", () => {
         h.runner.stop()
     })
 })
+
+describe("the gate runs when it is worth running, not constantly", () => {
+    // Ten concurrent `go build ./...` in ten worktrees starved the machine
+    // until the Go compiler was killed, and the runner reported that to an
+    // agent as a broken build. The agent then ran the same commands itself to
+    // check — so the feature meant to remove that work doubled it.
+    it("never runs two gates at once, however many stories write", async () => {
+        let inFlight = 0
+        let peak = 0
+        const h = harness(async () => {
+            inFlight += 1
+            peak = Math.max(peak, inFlight)
+            await new Promise((r) => setTimeout(r, 30))
+            inFlight -= 1
+            return GREEN
+        })
+        for (const story of ["S1", "S2", "S3", "S4"]) h.write(story)
+        await settle(300)
+        assert.equal(peak, 1, "the machine runs one build at a time")
+        assert.equal(h.runCount(), 4, "each story still gets checked")
+        h.runner.stop()
+    })
+
+    it("treats a signal death as our failure, not the agent's", async () => {
+        const h = harness(async () => {
+            throw new Error("a gate command was killed before it reported")
+        })
+        h.write("S1")
+        await settle()
+        assert.equal(
+            h.delivered.length,
+            0,
+            "a compiler we starved says nothing about the patch",
+        )
+        h.runner.stop()
+    })
+})
