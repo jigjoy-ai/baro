@@ -145,3 +145,57 @@ describe("MergeAwarenessRunner on a real bus", () => {
         assert.equal(h.delivered.length, 0, "a reader is not an audience and never collides")
     })
 })
+
+describe("one file, one name across worktrees", () => {
+    // The first live run fired 21 notices and reported zero collisions,
+    // because each agent writes an absolute path inside its own worktree:
+    // .../S13/internal/order/x.go never equals .../S10/internal/order/x.go.
+    // The feature ran the whole time and could not do its job.
+    it("sees two worktrees writing the same file as a collision", () => {
+        const roots: Record<string, string> = {
+            S13: "/tmp/wt/run-1/S13",
+            S10: "/tmp/wt/run-1/S10",
+        }
+        const env = new AgenticEnvironment("relative")
+        const integrator = new FakeIntegrator()
+        integrator.join(env)
+        const runner = new MergeAwarenessRunner({
+            runId: "run-1",
+            integrationAuthority: integrator,
+            resolveRoot: (agentId) => roots[agentId] ?? null,
+        })
+        runner.join(env)
+
+        const delivered: Array<{ recipientId: string; text: string; metadata: Record<string, unknown> }> = []
+        const real = env.deliverSemanticEvent.bind(env)
+        env.deliverSemanticEvent = (source, event) => {
+            const data = (event as { data?: { recipientId?: string } }).data
+            if (data?.recipientId) delivered.push(data as never)
+            real(source, event)
+        }
+
+        for (const [agentId, root] of Object.entries(roots)) {
+            const agent = new FakeAgent(agentId)
+            agent.join(env)
+            env.deliverFunctionCall(
+                agent,
+                FunctionCallItem.rehydrate({
+                    callId: `c-${agentId}`,
+                    name: "Write",
+                    args: JSON.stringify({ file_path: `${root}/internal/order/x_test.go` }),
+                }),
+            )
+        }
+        env.deliverSemanticEvent(
+            integrator,
+            StoryMerged.create({ storyId: "S13", mode: "worktree", runId: "run-1" }),
+        )
+
+        assert.equal(delivered.length, 1)
+        assert.equal(delivered[0]!.recipientId, "S10")
+        assert.equal(delivered[0]!.metadata.collides, true, "same file, different worktree")
+        assert.match(delivered[0]!.text, /internal\/order\/x_test\.go/u)
+        assert.doesNotMatch(delivered[0]!.text, /\/tmp\/wt/u, "a worktree path means nothing to the reader")
+        runner.stop?.()
+    })
+})

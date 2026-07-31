@@ -1208,6 +1208,8 @@ export async function orchestrate(
         mergeAwareness = new MergeAwarenessRunner({
             runId,
             ...(repositoryAuthority ? { integrationAuthority: repositoryAuthority } : {}),
+            resolveRoot: (storyId) =>
+                resolveCriticRepositoryTarget(worktrees, storyId)?.cwd ?? null,
         })
         mergeAwareness.join(env)
         // Sentry has detected overlapping writes all along and emitted a

@@ -29,6 +29,13 @@ export interface MergeAwarenessRunnerOptions {
     readonly runId: string
     /** Only this participant's merges are believed. */
     readonly integrationAuthority?: Participant
+    /**
+     * The agent's own worktree root, used to make a path mean the same thing
+     * to everyone. Agents write absolute paths inside their own worktree, so
+     * two stories editing one file produce two different strings and would
+     * never be seen to collide.
+     */
+    resolveRoot?(agentId: string): string | null
 }
 
 export class MergeAwarenessRunner extends BaseObserver {
@@ -48,7 +55,7 @@ export class MergeAwarenessRunner extends BaseObserver {
         const path = filePathFromToolCall(item.args)
         if (!path) return
         const own = this.writes.get(agentId) ?? new Set<string>()
-        own.add(path)
+        own.add(this.repositoryRelative(agentId, path))
         this.writes.set(agentId, own)
     }
 
@@ -77,6 +84,15 @@ export class MergeAwarenessRunner extends BaseObserver {
             return
         }
         this.announce(event.data.storyId)
+    }
+
+    /** One name per file, whichever worktree it was written in. */
+    private repositoryRelative(agentId: string, path: string): string {
+        const root = this.opts.resolveRoot?.(agentId)
+        if (root && path.startsWith(root)) {
+            return path.slice(root.length).replace(/^[/\\]+/u, "")
+        }
+        return path
     }
 
     private announce(storyId: string): void {
