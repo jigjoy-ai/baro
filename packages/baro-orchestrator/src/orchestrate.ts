@@ -118,6 +118,7 @@ import {
 import { criticCallTimeoutMs } from "./harness/one-shot/critic.js"
 import { ContinuousGateRunner } from "./verification/continuous-gate-runner.js"
 import { MergeAwarenessRunner } from "./execution/merge-awareness-runner.js"
+import { OverlapAwarenessRunner } from "./execution/overlap-awareness-runner.js"
 import { emit } from "./tui-protocol.js"
 import {
     createVerifyPlan,
@@ -663,6 +664,7 @@ export async function orchestrate(
     let shutdownWorktrees: WorktreeManager | null = null
     let continuousGate: ContinuousGateRunner | null = null
     let mergeAwareness: MergeAwarenessRunner | null = null
+    let overlapAwareness: OverlapAwarenessRunner | null = null
     let shutdownCollaborationBridge: CollaborationBridge | null = null
     let workerShutdownDrained = false
     let goalReviewProviderSettled = true
@@ -1208,6 +1210,16 @@ export async function orchestrate(
             ...(repositoryAuthority ? { integrationAuthority: repositoryAuthority } : {}),
         })
         mergeAwareness.join(env)
+        // Sentry has detected overlapping writes all along and emitted a
+        // Coordination notice nobody consumed. Deliver it to the agents that
+        // are in it, while both can still act — the host detects, they decide.
+        if (sentry) {
+            overlapAwareness = new OverlapAwarenessRunner({
+                runId,
+                detectionAuthority: sentry,
+            })
+            overlapAwareness.join(env)
+        }
         leaseBroker = new LeaseBroker({
             runId,
             parallel: collectiveParallel,
