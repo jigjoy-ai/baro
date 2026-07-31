@@ -38,6 +38,20 @@ export interface MergeAwarenessRunnerOptions {
     resolveRoot?(agentId: string): string | null
 }
 
+/**
+ * The same directory under both names macOS gives it.
+ *
+ * Measured: agents report `/private/var/folders/…/S12/internal/x_test.go`
+ * while the worktree is recorded as `/var/folders/…/S12`, because `/var` is a
+ * symlink to `/private/var` and the agent's tool resolved it. Every path
+ * stayed absolute, so no two stories were ever seen to touch one file.
+ */
+export function pathAliases(root: string): string[] {
+    if (root.startsWith("/private/")) return [root, root.slice("/private".length)]
+    if (root.startsWith("/")) return [root, `/private${root}`]
+    return [root]
+}
+
 export class MergeAwarenessRunner extends BaseObserver {
     /** agentId → files it has written so far. */
     private readonly writes = new Map<string, Set<string>>()
@@ -89,8 +103,11 @@ export class MergeAwarenessRunner extends BaseObserver {
     /** One name per file, whichever worktree it was written in. */
     private repositoryRelative(agentId: string, path: string): string {
         const root = this.opts.resolveRoot?.(agentId)
-        if (root && path.startsWith(root)) {
-            return path.slice(root.length).replace(/^[/\\]+/u, "")
+        if (!root) return path
+        for (const candidate of pathAliases(root)) {
+            if (path.startsWith(candidate)) {
+                return path.slice(candidate.length).replace(/^[/\\]+/u, "")
+            }
         }
         return path
     }
