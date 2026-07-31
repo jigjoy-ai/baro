@@ -196,7 +196,7 @@ function execFileCliRaw(
         child.on("exit", () => {
             processTree.markRootClosed()
         })
-        child.on("close", (code) => {
+        child.on("close", (code, signal) => {
             if (terminationError) {
                 void processTree.done.then(finishTerminated)
                 return
@@ -209,10 +209,21 @@ function execFileCliRaw(
                         resolve({ stdout, stderr })
                         return
                     }
+                    // Reaching here means none of our own termination paths
+                    // ran, so a signal came from outside. Naming it is the
+                    // difference between "our git died" and an attributable
+                    // fault; without it the report was `code null` and silence.
                     const err = new Error(
-                        `${command} exited with code ${code}\n${stderr.toString("utf8")}`,
-                    ) as Error & { code: number | null; stdout: Buffer; stderr: Buffer }
+                        `${command} ${signal ? `was killed by ${signal}` : `exited with code ${code}`}` +
+                            `\n${stderr.toString("utf8")}`,
+                    ) as Error & {
+                        code: number | null
+                        signal: NodeJS.Signals | null
+                        stdout: Buffer
+                        stderr: Buffer
+                    }
                     err.code = code
+                    err.signal = signal
                     err.stdout = stdout
                     err.stderr = stderr
                     reject(err)

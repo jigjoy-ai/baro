@@ -45,6 +45,8 @@ export class RepositoryCommandError extends Error {
     readonly timedOut: boolean
     readonly killed: boolean
     readonly code: number | string | null | undefined
+    /** The signal that ended it, when something outside our code sent one. */
+    readonly signal: NodeJS.Signals | null
     readonly stdout: string
     readonly stderr: string
     /** Exact captured bytes when the byte-preserving command path was used. */
@@ -78,6 +80,7 @@ export class RepositoryCommandError extends Error {
         this.timedOut = timedOut
         this.killed = source.killed === true
         this.code = source.code
+        this.signal = source.signal ?? null
         this.stdout = source.stdout
         this.stderr = source.stderr
         this.stdoutBuffer = rawFailureBuffer(cause, "stdout")
@@ -196,6 +199,7 @@ export function isRepositoryCommandSignalDeath(
 ): error is RepositoryCommandError {
     if (!(error instanceof RepositoryCommandError)) return false
     if (error.timedOut) return false
+    if (error.signal) return true
     if (error.code === null || error.code === undefined) return true
     return typeof error.code === "string" && /^SIG[A-Z]+$/u.test(error.code)
 }
@@ -219,6 +223,7 @@ function asCommandFailure(error: unknown): {
     message: string
     killed?: boolean
     code?: number | string | null
+    signal?: NodeJS.Signals | null
     stdout: string
     stderr: string
 } {
@@ -232,6 +237,7 @@ function asCommandFailure(error: unknown): {
     const failure = error as Error & {
         killed?: boolean
         code?: number | string | null
+        signal?: NodeJS.Signals | null
         stdout?: unknown
         stderr?: unknown
     }
@@ -239,6 +245,7 @@ function asCommandFailure(error: unknown): {
         message: failure.message,
         killed: failure.killed,
         code: failure.code,
+        signal: failure.signal,
         stdout: typeof failure.stdout === "string"
             ? failure.stdout
             : Buffer.isBuffer(failure.stdout)

@@ -350,6 +350,12 @@ describe("a git process the machine killed", () => {
                 false,
                 "the deadline was never reached; the machine intervened",
             )
+            assert.equal(
+                failure.signal,
+                "SIGKILL",
+                "which signal it was is the whole diagnosis",
+            )
+            assert.match(failure.message, /was killed by SIGKILL/u)
         })
     })
 
@@ -368,6 +374,8 @@ describe("a git process the machine killed", () => {
             }
             assert.ok(failure instanceof RepositoryCommandError)
             assert.equal(isRepositoryCommandSignalDeath(failure), false)
+            assert.equal(failure.signal, null)
+            assert.equal(failure.code, 128)
         })
     })
 })
