@@ -53,6 +53,11 @@ export interface ContinuousGateRunnerOptions {
 
 const DEFAULT_SETTLE_MS = 4_000
 
+/** `exited with code null` means a signal, not a verdict about the patch. */
+function wasKilled(command: { status: string; tail?: string }): boolean {
+    return command.status !== "passed" && /exited with code null/u.test(command.tail ?? "")
+}
+
 export class ContinuousGateRunner extends BaseObserver {
     private readonly lastDelivered = new Map<string, GateOutcome>()
     private readonly timers = new Map<string, NodeJS.Timeout>()
@@ -147,6 +152,12 @@ export class ContinuousGateRunner extends BaseObserver {
             signal: this.controller.signal,
             ...(this.opts.plan ? { plan: this.opts.plan } : {}),
         })
+        // A command we killed (no exit status) says nothing about the agent's
+        // work. Reporting it as a failure once told an agent its tests were
+        // broken when only our own gate had been cut short.
+        if (result.commands.some((command) => wasKilled(command))) {
+            throw new Error("a gate command was killed before it reported")
+        }
         return result.commands.map((command) => ({
             label: command.command,
             passed: command.status === "passed",

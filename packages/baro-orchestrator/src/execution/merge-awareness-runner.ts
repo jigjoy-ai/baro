@@ -53,6 +53,17 @@ export class MergeAwarenessRunner extends BaseObserver {
     }
 
     override onExternalEvent(source: Participant, event: SemanticEvent<unknown>): void {
+        // See overlap-awareness: a throw here escapes the runtime uncaught.
+        try {
+            this.react(source, event)
+        } catch (error) {
+            process.stderr.write(
+                `[merge-awareness] ignored a malformed event: ${error instanceof Error ? error.message : String(error)}\n`,
+            )
+        }
+    }
+
+    private react(source: Participant, event: SemanticEvent<unknown>): void {
         if (StoryResult.is(event) && event.data.runId === this.opts.runId) {
             // A finished agent cannot act on news and may already be gone.
             this.finished.add(event.data.storyId)
