@@ -117,6 +117,7 @@ import {
 } from "./semantic-events.js"
 import { criticCallTimeoutMs } from "./harness/one-shot/critic.js"
 import { ContinuousGateRunner } from "./verification/continuous-gate-runner.js"
+import { MergeAwarenessRunner } from "./execution/merge-awareness-runner.js"
 import { emit } from "./tui-protocol.js"
 import {
     createVerifyPlan,
@@ -661,6 +662,7 @@ export async function orchestrate(
     let shutdownStoryFactories: StoryFactory[] = []
     let shutdownWorktrees: WorktreeManager | null = null
     let continuousGate: ContinuousGateRunner | null = null
+    let mergeAwareness: MergeAwarenessRunner | null = null
     let shutdownCollaborationBridge: CollaborationBridge | null = null
     let workerShutdownDrained = false
     let goalReviewProviderSettled = true
@@ -1197,6 +1199,15 @@ export async function orchestrate(
             })
             continuousGate.join(env)
         }
+        // Tell still-working agents what a sibling landed. A story once wrote
+        // two files, then died at integration against stories that had merged
+        // while it worked — the bus carried every one of those merges and no
+        // participant turned them into anything an agent could act on.
+        mergeAwareness = new MergeAwarenessRunner({
+            runId,
+            ...(repositoryAuthority ? { integrationAuthority: repositoryAuthority } : {}),
+        })
+        mergeAwareness.join(env)
         leaseBroker = new LeaseBroker({
             runId,
             parallel: collectiveParallel,

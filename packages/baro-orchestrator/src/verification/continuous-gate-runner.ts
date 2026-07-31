@@ -18,6 +18,7 @@
 import type { FunctionCallItem, Participant, SemanticEvent } from "../runtime/mozaik.js"
 import { AgentTargetedMessage } from "../events/collaboration.js"
 import { BaseObserver } from "../runtime/mozaik.js"
+import { isFileMutationTool } from "../harness/tool-classification.js"
 import { participantAgentId } from "../runtime/participant-identity.js"
 import {
     renderGateReport,
@@ -52,19 +53,6 @@ export interface ContinuousGateRunnerOptions {
 
 const DEFAULT_SETTLE_MS = 4_000
 
-function isWriteTool(name: string): boolean {
-    return [
-        "write",
-        "write_file",
-        "edit",
-        "edit_file",
-        "multiedit",
-        "multi_edit",
-        "apply_patch",
-        "patch",
-    ].includes(name.trim().toLowerCase())
-}
-
 export class ContinuousGateRunner extends BaseObserver {
     private readonly lastDelivered = new Map<string, GateOutcome>()
     private readonly timers = new Map<string, NodeJS.Timeout>()
@@ -80,7 +68,7 @@ export class ContinuousGateRunner extends BaseObserver {
 
     override onExternalFunctionCall(source: Participant, item: FunctionCallItem): void {
         if (this.stopped) return
-        if (!isWriteTool(item.name)) return
+        if (!isFileMutationTool(item.name)) return
         const agentId = participantAgentId(source)
         if (!agentId) {
             this.note("saw a write from a participant with no agent id")
