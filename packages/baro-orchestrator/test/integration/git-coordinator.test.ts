@@ -18,7 +18,24 @@ import {
     WorkspaceCleanupFailed,
     WorkspaceCleanupRequested,
 } from "../../src/semantic-events.js"
+import { RepositoryCommandError } from "../../src/integration/repository-command.js"
 import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
+
+/** What the OS killing a git process actually produced in a live run. */
+function killedGitCommand(): RepositoryCommandError {
+    const cause = Object.assign(new Error("git exited with code null"), {
+        code: null,
+        killed: false,
+        stdout: "",
+        stderr: "",
+    })
+    return new RepositoryCommandError(
+        "git",
+        ["rev-parse", "--is-inside-work-tree"],
+        { cwd: "/tmp/wt", timeoutMs: 600_000, maxBuffer: 1024 },
+        cause,
+    )
+}
 
 const BOARD = source("board")
 const BROKER = source("broker")
@@ -448,3 +465,121 @@ describe("GitCoordinator", () => {
 function git(cwd: string, args: string[]): string {
     return execFileSync("git", args, { cwd, encoding: "utf8" }).trim()
 }
+
+describe("a merge the machine killed, not the repository", () => {
+    // Live run: ten worktrees building at once exhausted the machine, the OS
+    // killed `git rev-parse --is-inside-work-tree` during merge-back, and S5 —
+    // already accepted by the critic, its commit on its own branch — was
+    // written off as an unrecoverable integration failure and never landed.
+    async function integrate(
+        dir: string,
+        worktrees: WorktreeManager,
+    ): Promise<ReturnType<typeof joinWithCapture>> {
+        const coordinator = new GitCoordinator({
+            cwd: dir,
+            gitGate: new GitGate(),
+            worktrees,
+            emitTui: false,
+            eventDriven: true,
+            runId: "run-killed-merge",
+            push: false,
+            mergeRetryDelayMs: 1,
+        })
+        coordinator.setEventAuthority(BOARD)
+        coordinator.setLeaseAuthority(BROKER)
+        const env = joinWithCapture(coordinator)
+        env.deliverSemanticEvent(
+            BROKER,
+            WorkLeaseGranted.create({
+                runId: "run-killed-merge",
+                offerId: "offer-1",
+                leaseId: "lease-1",
+                workerId: "worker",
+                generation: 1,
+                request: {
+                    storyId: "S1",
+                    prompt: "write the tests",
+                    retries: 0,
+                    timeoutSecs: 60,
+                },
+            }),
+        )
+        env.deliverSemanticEvent(
+            BOARD,
+            StoryIntegrationRequested.create({
+                runId: "run-killed-merge",
+                leaseId: "lease-1",
+                storyId: "S1",
+                attempts: 1,
+                durationSecs: 1,
+            }),
+        )
+        await coordinator.idle()
+        return env
+    }
+
+    it("merges again instead of writing the story off", async () => {
+        await withTempDir("git-killed-merge-", async (dir) => {
+            let attempts = 0
+            const env = await integrate(dir, {
+                mergeBack: async () => {
+                    attempts += 1
+                    if (attempts === 1) throw killedGitCommand()
+                    return true
+                },
+                branchName: (storyId: string) => `baro-wt/run/${storyId}`,
+            } as unknown as WorktreeManager)
+
+            assert.equal(attempts, 2)
+            assert.equal(
+                env.events.some(StoryMergeFailed.is),
+                false,
+                "the merge succeeded; nothing failed",
+            )
+        })
+    })
+
+    it("keeps the story recoverable when there is no worktree left to preserve", async () => {
+        await withTempDir("git-killed-merge-final-", async (dir) => {
+            let attempts = 0
+            const env = await integrate(dir, {
+                mergeBack: async () => {
+                    attempts += 1
+                    throw killedGitCommand()
+                },
+                prepareConflictRetry: async () => {
+                    throw new Error("story S1 has no preserved worktree to recover")
+                },
+                branchName: (storyId: string) => `baro-wt/run/${storyId}`,
+            } as unknown as WorktreeManager)
+
+            assert.equal(attempts, 3, "bounded, but it does try")
+            const failure = env.events.find(StoryMergeFailed.is)
+            assert.ok(failure)
+            assert.equal(
+                failure.data.retryable,
+                true,
+                "the run branch was never touched, so there is nothing lost",
+            )
+        })
+    })
+
+    it("still writes off a story the repository itself refused", async () => {
+        await withTempDir("git-real-conflict-", async (dir) => {
+            let attempts = 0
+            const env = await integrate(dir, {
+                mergeBack: async () => {
+                    attempts += 1
+                    throw new Error("story S1 conflicts with already-merged work")
+                },
+                prepareConflictRetry: async () => {
+                    throw new Error("story S1 has no preserved worktree to recover")
+                },
+                branchName: (storyId: string) => `baro-wt/run/${storyId}`,
+            } as unknown as WorktreeManager)
+
+            assert.equal(attempts, 1, "a conflict does not get better by repeating")
+            assert.equal(env.events.find(StoryMergeFailed.is)?.data.retryable, false)
+        })
+    })
+})

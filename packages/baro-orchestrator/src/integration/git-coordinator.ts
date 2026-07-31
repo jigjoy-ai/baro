@@ -43,11 +43,17 @@ import type {
     WorktreeManager,
 } from "./worktree.js"
 import { captureCriticRepositoryFingerprint } from "../acceptance/critic-evidence.js"
+import { isRepositoryCommandSignalDeath } from "./repository-command.js"
 import {
     SerializedObserver,
     type SerializedEventContext,
     type SerializedObserverFailure,
 } from "../runtime/serialized-observer.js"
+
+const MERGE_SIGNAL_ATTEMPTS = 3
+const MERGE_SIGNAL_BACKOFF_MS = 5_000
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 export interface GitCoordinatorOptions {
     cwd: string
@@ -61,6 +67,8 @@ export interface GitCoordinatorOptions {
     prdPath?: string
     /** Push commits to the configured remote. Default true. */
     push?: boolean
+    /** Wait before re-merging after the machine killed a git process. */
+    mergeRetryDelayMs?: number
 }
 
 interface LeaseCorrelation {
@@ -306,6 +314,36 @@ export class GitCoordinator extends SerializedObserver {
         }
     }
 
+    /**
+     * Retry a merge whose git process was killed by the OS rather than by the
+     * repository. Nothing about the merge is known in that case, and the wait
+     * is there to let whatever exhausted the machine finish.
+     */
+    private async mergeSurvivingSignals(
+        storyId: string,
+        merge: () => Promise<boolean>,
+    ): Promise<boolean> {
+        for (let attempt = 1; ; attempt += 1) {
+            try {
+                return await merge()
+            } catch (error) {
+                if (
+                    !isRepositoryCommandSignalDeath(error) ||
+                    attempt >= MERGE_SIGNAL_ATTEMPTS
+                ) {
+                    throw error
+                }
+                const backoff =
+                    (this.opts.mergeRetryDelayMs ?? MERGE_SIGNAL_BACKOFF_MS) * attempt
+                this.log(
+                    storyId,
+                    `[git] merge-back was killed by the machine, not the repository; retrying in ${Math.round(backoff / 1000)}s`,
+                )
+                await delay(backoff)
+            }
+        }
+    }
+
     async onStoryPassed(
         storyId: string,
         correlation?: LeaseCorrelation,
@@ -329,7 +367,10 @@ export class GitCoordinator extends SerializedObserver {
             )
             let merged = false
             try {
-                merged = await worktrees.mergeBack(storyId, candidateSeal)
+                merged = await this.mergeSurvivingSignals(
+                    storyId,
+                    () => worktrees.mergeBack(storyId, candidateSeal),
+                )
             } catch (e) {
                 const error = (e as Error)?.message ?? String(e)
                 let branch = worktrees.branchName(storyId)
@@ -344,6 +385,11 @@ export class GitCoordinator extends SerializedObserver {
                 } catch (prepareError) {
                     preparationError =
                         (prepareError as Error)?.message ?? String(prepareError)
+                    // A killed git process leaves the story's commit on its own
+                    // branch and the run branch untouched, so there is nothing
+                    // to preserve and nothing lost — the merge simply never
+                    // ran. Giving up here is what dropped an accepted story.
+                    retryable = isRepositoryCommandSignalDeath(e)
                 }
                 this.emitBus(
                     StoryMergeFailed.create({

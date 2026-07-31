@@ -183,6 +183,23 @@ export function isRepositoryCommandTimeout(
     return error instanceof RepositoryCommandError && error.timedOut
 }
 
+/**
+ * A git process that died from a signal tells us nothing about the repository.
+ *
+ * Measured: with ten worktrees building at once the machine ran out, the OS
+ * killed `git rev-parse --is-inside-work-tree` during merge-back, and the
+ * story — already accepted by the critic, its commit sitting on its branch —
+ * was recorded as an unrecoverable integration failure and lost.
+ */
+export function isRepositoryCommandSignalDeath(
+    error: unknown,
+): error is RepositoryCommandError {
+    if (!(error instanceof RepositoryCommandError)) return false
+    if (error.timedOut) return false
+    if (error.code === null || error.code === undefined) return true
+    return typeof error.code === "string" && /^SIG[A-Z]+$/u.test(error.code)
+}
+
 function repositoryOperation(command: string, args: readonly string[]): string {
     const executable = basename(command) || command
     const subcommand = args[0]?.trim()

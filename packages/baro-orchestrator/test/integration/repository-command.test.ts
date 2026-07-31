@@ -9,6 +9,8 @@ import { StoryFactory } from "../../src/market/story-factory.js"
 import type { StoryExecutor } from "../../src/execution/story-executor.js"
 import {
     RepositoryCommandError,
+    isRepositoryCommandSignalDeath,
+    isRepositoryCommandTimeout,
     runRepositoryCommand,
 } from "../../src/integration/repository-command.js"
 import { classifyStoryFailure } from "../../src/harness/provider-failure.js"
@@ -320,6 +322,52 @@ if (args[0] === "rev-parse" && args[1] === "HEAD") {
                         previousTimeout
                 }
             }
+        })
+    })
+})
+
+describe("a git process the machine killed", () => {
+    // Measured: ten worktrees building at once exhausted the machine, the OS
+    // killed `git rev-parse` during merge-back, and a story the critic had
+    // already accepted was recorded as an unrecoverable integration failure.
+    it("is told apart from a repository that refused the command", async () => {
+        await withTempDir("baro-repository-signal-", async (dir) => {
+            const cli = writeCli(
+                dir,
+                "fake-killed-command.mjs",
+                `process.kill(process.pid, "SIGKILL");\nsetInterval(() => {}, 10_000);\n`,
+            )
+            let failure: unknown
+            try {
+                await runRepositoryCommand(process.execPath, [cli], { cwd: dir })
+            } catch (error) {
+                failure = error
+            }
+            assert.ok(failure instanceof RepositoryCommandError)
+            assert.equal(isRepositoryCommandSignalDeath(failure), true)
+            assert.equal(
+                isRepositoryCommandTimeout(failure),
+                false,
+                "the deadline was never reached; the machine intervened",
+            )
+        })
+    })
+
+    it("is not confused with a command the repository rejected", async () => {
+        await withTempDir("baro-repository-rejected-", async (dir) => {
+            const cli = writeCli(
+                dir,
+                "fake-rejecting-command.mjs",
+                `process.stderr.write("fatal: not a git repository");\nprocess.exit(128);\n`,
+            )
+            let failure: unknown
+            try {
+                await runRepositoryCommand(process.execPath, [cli], { cwd: dir })
+            } catch (error) {
+                failure = error
+            }
+            assert.ok(failure instanceof RepositoryCommandError)
+            assert.equal(isRepositoryCommandSignalDeath(failure), false)
         })
     })
 })
