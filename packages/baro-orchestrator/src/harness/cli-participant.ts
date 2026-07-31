@@ -32,6 +32,8 @@ import { appendCliDiagnosticTail } from "./cli-story-failure.js"
 
 export interface CliRunSummaryCore {
     exitCode: number | null
+    /** Set when the OS ended the process; its work was never judged. */
+    exitSignal: NodeJS.Signals | null
     error: Error | null
 }
 
@@ -74,6 +76,7 @@ export abstract class CliParticipant<
     protected envRef: AgenticEnvironment | null = null
     private currentPhase: AgentPhase = "idle"
     protected exitCode: number | null = null
+    protected exitSignal: NodeJS.Signals | null = null
     protected spawnError: Error | null = null
     private doneSettled = false
     private readySettled = false
@@ -264,20 +267,31 @@ export abstract class CliParticipant<
         // `exit` can precede the final stdout/stderr data. `close` is the
         // terminal boundary for the normal path because it fires only after
         // those streams close; the `error` path above still settles directly.
-        proc.on("close", (code) => {
+        proc.on("close", (code, signal) => {
             this.clearCloseDrainWatchdog()
             if (this.doneSettled) return
             this.exitCode = code
+            this.exitSignal = signal
             this.failReady(
                 this.spawnError ?? new Error(this.readyFailureMessage(code)),
             )
+            // A process ended by a signal read as `done` here: code is null,
+            // so neither branch of the old test caught it. Seven of ten
+            // stories in one run were killed this way, recorded as finished,
+            // retried to exhaustion, and then diagnosed as too broad to do.
             const finalPhase: AgentPhase =
-                this.spawnError != null || (code != null && code !== 0)
+                this.spawnError != null ||
+                signal != null ||
+                (code != null && code !== 0)
                     ? "failed"
                     : "done"
             this.transition(
                 finalPhase,
-                code != null ? `exit code ${code}` : "no exit code",
+                signal != null
+                    ? `killed by ${signal}`
+                    : code != null
+                      ? `exit code ${code}`
+                      : "no exit code",
             )
             this.settleDone(this.summarize())
         })

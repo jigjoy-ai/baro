@@ -28,6 +28,7 @@ import {
     boardOwnsCliRecovery,
     describeCliStoryFailure,
     isCliFailureSignal,
+    killedWorkerFailure,
 } from "../cli-story-failure.js"
 import {
     OneShotTurnReview,
@@ -66,6 +67,8 @@ export interface OneShotStoryCoreSpec {
 
 export interface OneShotRunSummaryBase {
     exitCode: number | null
+    /** Set when the OS ended the worker; its work was never judged. */
+    exitSignal?: NodeJS.Signals | null
     error?: { message: string } | null
     stderrTail: string | null
 }
@@ -586,6 +589,12 @@ export abstract class OneShotStoryAgent<
         const reportedFailure = failureSignals.some((signal) =>
             isCliFailureSignal(signal, ""),
         )
+        // A signal outranks every message heuristic: nothing the process said
+        // can describe work it was killed in the middle of.
+        const killed = killedWorkerFailure(summary.exitSignal)
+        if (killed) {
+            return { success: false, summary, ...killed }
+        }
         if (
             summary.exitCode !== 0 ||
             summary.error != null ||

@@ -316,6 +316,8 @@ export type InfrastructureFailureCode =
     | "tool_unavailable"
     | "command_timeout"
     | "process_spawn_failed"
+    /** The worker was ended by a signal, so its work was never judged. */
+    | "process_killed"
     | "process_quiescence_uncertified"
     | "worktree_unavailable"
     | "decision_unknown"

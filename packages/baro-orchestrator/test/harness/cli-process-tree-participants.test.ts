@@ -12,6 +12,7 @@ import {
     processTreeObserverStats,
     signalAllProcessTrees,
 } from "../../src/harness/process-tree.js"
+import { killedWorkerFailure } from "../../src/harness/cli-story-failure.js"
 import { captureEnv, withTempDir } from "../execution/helpers.js"
 
 describe("CLI participant process-tree lifecycle", () => {
@@ -621,3 +622,57 @@ async function withDeadline<T>(
         if (timer !== undefined) clearTimeout(timer)
     }
 }
+
+describe("a worker the OS ended", () => {
+    // Live run: seven of ten stories were killed by a signal. `close` fires
+    // with code null, which the old phase test read as an ordinary finish, so
+    // each was recorded `done`, retried to exhaustion, reported as `non-zero
+    // exit null`, and finally read by the Guardian as proof the story was too
+    // broad for one session — which it proposed to split. The DAG was being
+    // rewritten around a signal.
+    it(
+        "is recorded as failed and names the signal",
+        { skip: process.platform === "win32" },
+        async () => {
+            await withTempDir("baro-killed-worker-", async (dir) => {
+                const bin = join(dir, "self-killing-claude.mjs")
+                writeFileSync(
+                    bin,
+                    `#!/usr/bin/env node
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "s" }));
+setTimeout(() => process.kill(process.pid, "SIGKILL"), 50);
+setInterval(() => {}, 1000);
+`,
+                )
+                chmodSync(bin, 0o755)
+                const participant = new ClaudeCliParticipant("claude-killed", {
+                    cwd: dir,
+                    claudeBin: bin,
+                })
+                participant.start(captureEnv())
+                const summary = await participant.done
+
+                assert.equal(summary.exitCode, null)
+                assert.equal(summary.exitSignal, "SIGKILL")
+                assert.equal(
+                    participant.getPhase(),
+                    "failed",
+                    "a killed worker did not finish its work",
+                )
+            })
+        },
+    )
+
+    it("is classified as infrastructure, never as the agent's doing", () => {
+        const killed = killedWorkerFailure("SIGKILL")
+        assert.ok(killed)
+        assert.equal(killed.failure.kind, "infrastructure")
+        assert.equal(killed.failure.code, "process_killed")
+        assert.match(killed.error, /SIGKILL/u)
+        assert.equal(
+            killedWorkerFailure(null),
+            undefined,
+            "an ordinary exit is not this",
+        )
+    })
+})

@@ -101,6 +101,7 @@ export class CodexCliParticipant extends CliParticipant<CodexRunSummary> {
         return {
             threadId: this.threadId,
             exitCode: this.exitCode,
+            exitSignal: this.exitSignal,
             error: this.spawnError,
             stderrTail: this.stderrTail,
         }

@@ -88,6 +88,7 @@ export class PiCliParticipant extends CliParticipant<PiRunSummary> {
         return {
             sessionId: this.sessionId,
             exitCode: this.exitCode,
+            exitSignal: this.exitSignal,
             error: this.spawnError,
             stderrTail: this.stderrTail,
             sawAgentEnd: this.sawAgentEnd,

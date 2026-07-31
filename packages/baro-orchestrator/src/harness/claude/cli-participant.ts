@@ -160,6 +160,7 @@ export class ClaudeCliParticipant extends CliParticipant<ClaudeRunSummary> {
         return {
             sessionId: this.sessionId,
             exitCode: this.exitCode,
+            exitSignal: this.exitSignal,
             error: this.spawnError,
             lastResult: this.lastResult,
         }

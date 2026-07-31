@@ -33,6 +33,7 @@ import {
     ClaudeCliParticipant,
     ClaudeRunSummary,
 } from "./cli-participant.js"
+import { killedWorkerFailure } from "../cli-story-failure.js"
 import {
     correlationOf,
     type StoryOutcome,
@@ -661,6 +662,10 @@ function describeClaudeFailure(
     error: string
     failure?: StoryFailureData
 } {
+    // A signal outranks every message heuristic below: nothing the process
+    // said can be trusted to describe work it was killed in the middle of.
+    const killed = killedWorkerFailure(summary.exitSignal)
+    if (killed) return killed
     const result = summary.lastResult
     const failure = classifyStoryFailure(
         capacitySignal,

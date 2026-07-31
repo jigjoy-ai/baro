@@ -77,6 +77,24 @@ export function describeCliStoryFailure(
     return { error, failure: fallback }
 }
 
+/**
+ * A worker the OS ended never produced a judgement about its own work.
+ *
+ * Measured: seven of ten stories in one run were killed this way. Each was
+ * retried to exhaustion, reported as `non-zero exit null`, and then read by
+ * the Guardian as evidence that the story was too broad for one session,
+ * which it proposed to split. The DAG was being rewritten around a signal.
+ */
+export function killedWorkerFailure(
+    signal: NodeJS.Signals | null | undefined,
+): DescribedCliStoryFailure | undefined {
+    if (!signal) return undefined
+    return {
+        error: `worker was killed by ${signal} before it reported`,
+        failure: { kind: "infrastructure", code: "process_killed" },
+    }
+}
+
 /** Keep only envelopes that can explain a terminal CLI failure. */
 export function isCliFailureSignal(value: unknown, eventType: string): boolean {
     if (classifyStoryFailure(value)) return true
