@@ -119,6 +119,7 @@ import { criticCallTimeoutMs } from "./harness/one-shot/critic.js"
 import { ContinuousGateRunner } from "./verification/continuous-gate-runner.js"
 import { MergeAwarenessRunner } from "./execution/merge-awareness-runner.js"
 import { OverlapAwarenessRunner } from "./execution/overlap-awareness-runner.js"
+import { AttemptRecallRunner } from "./execution/attempt-recall-runner.js"
 import { emit } from "./tui-protocol.js"
 import {
     createVerifyPlan,
@@ -665,6 +666,7 @@ export async function orchestrate(
     let continuousGate: ContinuousGateRunner | null = null
     let mergeAwareness: MergeAwarenessRunner | null = null
     let overlapAwareness: OverlapAwarenessRunner | null = null
+    let attemptRecall: AttemptRecallRunner | null = null
     let shutdownCollaborationBridge: CollaborationBridge | null = null
     let workerShutdownDrained = false
     let goalReviewProviderSettled = true
@@ -1222,6 +1224,17 @@ export async function orchestrate(
             })
             overlapAwareness.join(env)
         }
+        // A killed worker takes its reasoning with it. S2 of one migration was
+        // SIGKILLed twice after proving, by probing the compiler three times,
+        // which zod form keeps a defaulted field optional — and derived it from
+        // nothing on the third attempt. Agents do share findings, but only when
+        // they report, and a killed attempt never reports.
+        attemptRecall = new AttemptRecallRunner({
+            runId,
+            resolveRoot: (storyId) =>
+                resolveCriticRepositoryTarget(worktrees, storyId)?.cwd ?? null,
+        })
+        attemptRecall.join(env)
         leaseBroker = new LeaseBroker({
             runId,
             parallel: collectiveParallel,
