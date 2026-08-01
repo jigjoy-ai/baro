@@ -33,6 +33,7 @@ import { runArchitectClaude } from "../src/planning/adapters/architect-claude.js
 import { runArchitectCodex } from "../src/planning/adapters/architect-codex.js"
 import type { ArchitectInvocationObserver } from "../src/planning/adapters/architect-invocation.js"
 import { compileArchitectObligationSegments } from "../src/planning/domain/architect-obligation-segments.js"
+import { attachGoalConstraintContract } from "../src/goal/goal-constraint-appendix.js"
 import { runArchitectOpenAI } from "../src/planning/adapters/architect-openai.js"
 import { runArchitectOpenCode } from "../src/planning/adapters/architect-opencode.js"
 import { runArchitectPi } from "../src/planning/adapters/architect-pi.js"
@@ -416,10 +417,16 @@ async function main(): Promise<void> {
                     decisionOnly: true,
                 })
             }
+            // Both machine-readable appendices are attached here, once, where
+            // the outcome is accepted. Attaching inside the validator made a
+            // second validation of the same document fail on the fence the
+            // first one wrote: a validator that transforms its input is the
+            // same defect this appendix exists to catch elsewhere.
             const completeOutcome = decisionOutcome.kind === "ready"
                 ? {
                       ...decisionOutcome,
-                      decisionDocument: await compileObligations({
+                      decisionDocument: attachGoalConstraintContract(
+                          await compileObligations({
                           args,
                           decisionDocument: decisionOutcome.decisionDocument,
                           goalEnvelope: trustedGoalEnvelope!,
@@ -428,7 +435,9 @@ async function main(): Promise<void> {
                           billingRunId,
                           startedAtMs: t0,
                           resolvedModel: resolvedArchitectRoute.model,
-                      }),
+                          }),
+                          decisionOutcome.constraintPredicates,
+                      ),
                   }
                 : decisionOutcome
 

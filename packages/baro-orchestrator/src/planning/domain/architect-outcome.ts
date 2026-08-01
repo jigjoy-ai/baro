@@ -10,7 +10,6 @@ import type { GoalEnvelope } from "../../conversation/session/conversation-contr
 import { deriveGoalContract } from "../../goal/goal-contract.js"
 import {
     MAX_CONSTRAINT_PREDICATES,
-    attachGoalConstraintContract,
     type GoalConstraintPredicateWireV1,
     validateGoalConstraintPredicates,
 } from "../../goal/goal-constraint-appendix.js"
@@ -351,13 +350,7 @@ export function validateArchitectOutcome(
             message,
             questions: [] as const,
             evidence: [] as const,
-            // The appendix is attached by the host after the ADR shape has
-            // been validated: it is machine-readable state, not a decision,
-            // and the model is never asked to write the fence itself.
-            decisionDocument: attachGoalConstraintContract(
-                decisionDocument,
-                constraintPredicates,
-            ),
+            decisionDocument,
             constraintPredicates,
         })
     }

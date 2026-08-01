@@ -6,9 +6,11 @@ import {
     GoalConstraintContractError,
     attachGoalConstraintContract,
     goalPredicatesFromWire,
+    hasGoalConstraintFence,
     parseGoalConstraintContract,
     validateGoalConstraintPredicates,
 } from "../../src/goal/goal-constraint-appendix.js"
+import { validateArchitectOutcome } from "../../src/planning/domain/architect-outcome.js"
 
 const ABSENT = {
     invariantId: "G-C1",
@@ -155,5 +157,43 @@ describe("what the host refuses to evaluate", () => {
             "```",
         ].join("\n")
         assert.throws(() => parseGoalConstraintContract(future), /schemaVersion/u)
+    })
+})
+
+describe("attaching is not validating", () => {
+    // A run died at "already contains the reserved baro-constraints-v1 fence"
+    // after the appendix was attached inside validateArchitectOutcome: the
+    // same outcome is validated more than once, and the second pass saw the
+    // fence the first pass wrote. A validator that transforms its input is the
+    // very defect this appendix exists to catch elsewhere.
+    it("lets the same outcome be validated twice", () => {
+        const outcome = {
+            schemaVersion: 1,
+            kind: "ready",
+            message: "Planning may proceed.",
+            questions: [],
+            evidence: [],
+            constraintPredicates: [ABSENT],
+            decisionDocument: {
+                existingContext: "A repository.",
+                decisions: [
+                    {
+                        title: "Keep the contract",
+                        context: "Something is true.",
+                        decision: "Do the thing.",
+                        consequences: "Nothing else changes.",
+                    },
+                ],
+            },
+        }
+        const first = validateArchitectOutcome(outcome, { decisionOnly: true })
+        const second = validateArchitectOutcome(outcome, { decisionOnly: true })
+        assert.equal(first.decisionDocument, second.decisionDocument)
+        assert.equal(
+            hasGoalConstraintFence(String(first.decisionDocument)),
+            false,
+            "validation reports what it read; the host attaches on acceptance",
+        )
+        assert.deepEqual(first.constraintPredicates, [ABSENT])
     })
 })
