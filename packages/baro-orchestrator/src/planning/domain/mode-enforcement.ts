@@ -8,7 +8,7 @@
  */
 
 import type { PrdExecutionMode, PrdFile, PrdStory } from "../../prd.js"
-import { pruneUnsupportedEdges } from "./dependency-evidence.js"
+import { pruneUnsupportedEdges, writeSurfaceOf } from "./dependency-evidence.js"
 import { deriveGoalContract } from "../../goal/goal-contract.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
@@ -116,6 +116,15 @@ export function enforceModeContract(prdJson: string, contract: ModeContract, goa
     // A declared edge that no file supports serializes work for nothing. One
     // migration paid ~1000s for S1→S2→S3→S4 whose three tails wrote disjoint
     // directories. Evidence is required to remove an edge, never to keep one.
+    // Silence here is not "no unsupported edges" — it is "no evidence either
+    // way". Without it the check is inert and a chain sails through, which is
+    // exactly what happened on the run after the rule shipped.
+    const declaring = stories.filter((story) => writeSurfaceOf(story).length > 0)
+    if (declaring.length === 0 && stories.some((s) => (s.dependsOn ?? []).length > 0)) {
+        process.stderr.write(
+            "[run-planner] no story declared a write surface; dependency edges cannot be checked\n",
+        )
+    }
     const pruned2 = pruneUnsupportedEdges(stories)
     if (pruned2.removed.length > 0) {
         process.stderr.write(

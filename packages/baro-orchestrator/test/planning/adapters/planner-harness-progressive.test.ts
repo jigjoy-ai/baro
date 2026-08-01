@@ -286,6 +286,11 @@ describe("progressive planner harness MCP", () => {
                 "tests",
                 "goalInvariantIds",
                 "model",
+                // A story that does not say what it writes cannot have its
+                // dependency edges checked, and an optional field is one the
+                // planner quietly omits: the run after the check shipped
+                // declared no write surface at all, leaving it inert.
+                "writes",
             ])
             assert.equal(storyItems.additionalProperties, false)
 

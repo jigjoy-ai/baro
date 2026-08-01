@@ -129,6 +129,7 @@ const FINAL_PRD_STORY_INPUT_SCHEMA: Record<string, unknown> = {
         "tests",
         "goalInvariantIds",
         "model",
+        "writes",
     ],
     additionalProperties: false,
 }
@@ -335,8 +336,8 @@ const FINAL_PRD_STORY_KEYS = [
     "model",
 ] as const
 
-/** Present since the host began pruning dependency edges against it, but a
- *  planner that omits it must still normalize — the edge then simply stays. */
+/** Required of the model by the tool schema, tolerated by the host: a planner
+ *  that omits it should lose edge checking, not lose its fragment. */
 const OPTIONAL_PRD_STORY_KEYS = ["writes"] as const
 
 /**

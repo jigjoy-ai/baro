@@ -115,6 +115,14 @@ export interface PrdPlanningFragmentDecision {
     fingerprint: string
     storyIds: string[]
     graphVersion: number
+    /**
+     * The stories exactly as the planner published them, before any host
+     * repair. The runtime graph holds the repaired ones because that is what
+     * executes; the planner can only be held to what it actually said, and
+     * comparing it against a repaired copy fails a promise it never made.
+     * Absent on state written before this record existed.
+     */
+    authoredStories?: PrdStory[]
 }
 
 /** Durable planner-stream latch and idempotency ledger. It lives beside the

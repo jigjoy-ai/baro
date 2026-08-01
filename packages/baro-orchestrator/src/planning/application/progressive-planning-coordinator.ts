@@ -267,6 +267,8 @@ export class ProgressivePlanningCoordinator {
         }
 
         let validated
+        /** Exactly what the planner published, kept out of every host repair. */
+        let authored: PrdStory[] = []
         let fingerprint: string
         try {
             const envelope = {
@@ -277,6 +279,7 @@ export class ProgressivePlanningCoordinator {
                 stories: fragment.stories,
             }
             const parsed = validateProgressivePlanFragment(envelope)
+            authored = parsed.stories.map((story) => structuredClone(story))
             const goalContract = deriveGoalContract(state.prd.goalEnvelope)
             const obligationContract = architectureObligationsFromDecision(
                 state.prd.decisionDocument,
@@ -408,6 +411,7 @@ export class ProgressivePlanningCoordinator {
                     fingerprint,
                     storyIds: validated.stories.map((story) => story.id),
                     graphVersion: predictedGraphVersion,
+                    authoredStories: authored,
                 },
             ],
         }
@@ -518,10 +522,10 @@ export class ProgressivePlanningCoordinator {
                     "final PRD metadata differs from the bootstrap contract",
                 )
             }
-            const admittedStories = plannerStorySnapshots(
-                state.prd,
-                planning.admittedStoryIds,
-            )
+            // Against the authored record, never the runtime graph. The graph
+            // holds host repairs the planner never saw, and every one of them
+            // would read as the planner changing its mind.
+            const admittedStories = authoredPrefix(planning, state.prd)
             finalStories = reconcileProgressivePlanStories(
                 admittedStories,
                 finalPrd,
@@ -731,6 +735,29 @@ function controlText(value: string, fallback: string): string {
         .trim()
         .slice(0, 2_048)
     return normalized || fallback
+}
+
+/**
+ * What the planner published, in admission order.
+ *
+ * Falls back to the runtime graph for a session that predates the authored
+ * record — an older in-flight run keeps its previous behaviour rather than
+ * failing to finalize at all.
+ */
+function authoredPrefix(
+    planning: PrdProgressivePlanningState,
+    prd: PrdFile,
+): PrdStory[] {
+    const authored: PrdStory[] = []
+    for (const fragment of [...planning.fragments].sort(
+        (left, right) => left.ordinal - right.ordinal,
+    )) {
+        if (!fragment.authoredStories) {
+            return plannerStorySnapshots(prd, planning.admittedStoryIds)
+        }
+        authored.push(...fragment.authoredStories.map((story) => structuredClone(story)))
+    }
+    return authored
 }
 
 function plannerStorySnapshots(

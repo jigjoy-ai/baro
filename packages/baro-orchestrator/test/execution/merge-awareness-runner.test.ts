@@ -9,6 +9,7 @@ import {
 import { StoryMerged } from "../../src/events/integration.js"
 import { StoryResult } from "../../src/semantic-events.js"
 import { MergeAwarenessRunner } from "../../src/execution/merge-awareness-runner.js"
+import { pathAliases } from "../../src/runtime/worktree-path.js"
 
 class FakeAgent extends BaseObserver {
     constructor(readonly agentId: string) {
@@ -253,5 +254,16 @@ describe("one file, one name across worktrees", () => {
             "one file under two names is still one file",
         )
         assert.doesNotMatch(delivered[0]!.text, /\/private|\/var\/folders/u)
+    })
+})
+
+describe("one directory, both names macOS gives it", () => {
+    it("accepts a recorded root reported under its resolved name", () => {
+        assert.deepEqual(pathAliases("/var/wt/S2"), ["/var/wt/S2", "/private/var/wt/S2"])
+        assert.deepEqual(pathAliases("/private/var/wt/S2"), [
+            "/private/var/wt/S2",
+            "/var/wt/S2",
+        ])
+        assert.deepEqual(pathAliases("relative/path"), ["relative/path"])
     })
 })

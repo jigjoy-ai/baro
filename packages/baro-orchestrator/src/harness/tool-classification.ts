@@ -26,6 +26,13 @@ export function normalizeToolName(name: string): string {
     return name.trim().toLowerCase().replace(/[^a-z0-9]/g, "")
 }
 
+const SHELL_TOOLS = new Set(["bash", "shell", "run", "execute", "terminal"])
+
+/** A tool that runs a command, whatever each harness happens to call it. */
+export function isShellTool(name: string): boolean {
+    return SHELL_TOOLS.has(normalizeToolName(name))
+}
+
 export function isFileMutationTool(name: string): boolean {
     return FILE_MUTATION_TOOLS.has(normalizeToolName(name))
 }

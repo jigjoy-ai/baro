@@ -7,7 +7,7 @@ import type { SemanticEvent } from "../../../src/runtime/mozaik.js"
 
 import { CollectiveBoard } from "../../../src/execution/collective-board.js"
 import { ProgressivePlanningCoordinator } from "../../../src/planning/application/progressive-planning-coordinator.js"
-import type { PrdFile, PrdStory } from "../../../src/prd.js"
+import type { PrdProgressivePlanningState, PrdFile, PrdStory } from "../../../src/prd.js"
 import {
     deriveGoalContract,
     GoalInvariantLedger,
@@ -778,6 +778,98 @@ function bootstrapPrd(userStories: PrdStory[] = []): PrdFile {
         userStories,
     }
 }
+
+describe("what the planner published, kept apart from what the host derived", () => {
+    // Four runs died on "final PRD story N does not exactly match admitted
+    // prefix story 'SX'". The prefix rule is right; what was wrong is what it
+    // compared. The host repairs a fragment on admission — obligation
+    // acceptance, implied invariants, dependency edges — kept only the
+    // repaired copy, and then held the planner to it. The planner never saw
+    // the repair, so it could not repeat it, and every host transformation
+    // became a promise the planner was judged on and never made.
+    it("records the fragment as published, not as repaired", () => {
+        const runId = "run-authored-prefix"
+        const planningId = "planning-authored-prefix"
+        const currentPrd: PrdFile = {
+            ...bootstrapPrd(),
+            goalEnvelope: {
+                objective: "Keep the authored record.",
+                acceptanceCriteria: ["First behavior"],
+                constraints: [],
+                nonGoals: [],
+                assumptions: [],
+            },
+            runtimeGraph: {
+                runId,
+                version: 1,
+                dynamicStories: 0,
+                policyStories: 0,
+                appliedDecisions: [],
+                planning: {
+                    schemaVersion: 1,
+                    runId,
+                    planningId,
+                    status: "open",
+                    nextOrdinal: 1,
+                    admittedStoryIds: [],
+                    fragments: [],
+                },
+            },
+        }
+        let proposedPlanning: PrdProgressivePlanningState | undefined
+        const coordinator = new ProgressivePlanningCoordinator({
+            runId,
+            planningId,
+            host: {
+                snapshot: () => ({
+                    phase: "running",
+                    prd: currentPrd,
+                    graphVersion: 1,
+                    wave: null,
+                }),
+                commitPrd: () => undefined,
+                admitGraph: ({ proposal, planningState }) => {
+                    proposedPlanning = planningState
+                    return {
+                        event: RuntimeReplanRejected.create({
+                            runId,
+                            proposalId: proposal.proposalId,
+                            sourceStoryId: proposal.sourceStoryId,
+                            leaseId: proposal.leaseId,
+                            generation: proposal.generation,
+                            baseGraphVersion: proposal.baseGraphVersion,
+                            currentGraphVersion: 1,
+                            code: "invalid_proposal",
+                            reason: "test stops after the record is built",
+                        }),
+                    }
+                },
+                emit: () => undefined,
+                afterAdmission: () => undefined,
+                afterClose: () => undefined,
+                terminate: () => undefined,
+            },
+        })
+
+        const published = story("S1", [], { goalInvariantIds: ["G-A1"] })
+        coordinator.handleEvent(
+            fragment(runId, planningId, "authored-1", 1, [published]),
+        )
+
+        const record = proposedPlanning?.fragments.at(-1)
+        assert.ok(record, "the fragment reached graph admission")
+        assert.ok(
+            record.authoredStories,
+            "the authored record is what the planner will be held to",
+        )
+        assert.deepEqual(
+            record.authoredStories?.[0]?.acceptance,
+            published.acceptance,
+            "the planner's own words survive admission untouched",
+        )
+        assert.equal(record.authoredStories?.[0]?.description, published.description)
+    })
+})
 
 function story(
     id: string,

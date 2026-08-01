@@ -19,9 +19,10 @@ import { StoryResult, WorkLeaseGranted } from "../semantic-events.js"
 import {
     filePathFromToolCall,
     isFileMutationTool,
-    normalizeToolName,
+    isShellTool,
 } from "../harness/tool-classification.js"
 import { participantAgentId } from "../runtime/participant-identity.js"
+import { repositoryRelativePath } from "../runtime/worktree-path.js"
 import {
     type AttemptRecord,
     emptyAttempt,
@@ -38,8 +39,6 @@ export interface AttemptRecallRunnerOptions {
     /** Repository root per story, so a path means the same thing after restart. */
     resolveRoot?(agentId: string): string | null
 }
-
-const SHELL_TOOLS = new Set(["bash", "shell", "run", "execute", "terminal"])
 
 export class AttemptRecallRunner extends BaseObserver {
     /** What the attempt currently running for this story has established. */
@@ -81,7 +80,7 @@ export class AttemptRecallRunner extends BaseObserver {
                 }
                 return
             }
-            if (!SHELL_TOOLS.has(normalizeToolName(item.name))) return
+            if (!isShellTool(item.name)) return
             const command = shellCommandOf(item.args)
             if (command) this.pending.set(item.callId, { agentId, command })
         })
@@ -141,16 +140,8 @@ export class AttemptRecallRunner extends BaseObserver {
         return this.live.get(agentId) ?? emptyAttempt()
     }
 
-    /** See merge-awareness: agents report a path macOS has already resolved. */
     private relative(agentId: string, path: string): string {
-        const root = this.opts.resolveRoot?.(agentId)
-        if (!root) return path
-        for (const candidate of [root, `/private${root}`]) {
-            if (path.startsWith(candidate)) {
-                return path.slice(candidate.length).replace(/^[/\\]+/u, "")
-            }
-        }
-        return path
+        return repositoryRelativePath(this.opts.resolveRoot?.(agentId) ?? null, path)
     }
 
     private deliver(recipientId: string, text: string): void {
