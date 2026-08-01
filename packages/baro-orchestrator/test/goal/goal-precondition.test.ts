@@ -108,3 +108,55 @@ describe("constraints the repository already contradicts", () => {
         assert.match(renderGoalPreconditionConflict(conflict), /and 13 more/u)
     })
 })
+
+describe("the scope the Architect stated is the scope the host evaluates", () => {
+    // Run 11, verbatim: the Architect scoped the ban to src/**/*.dto.ts and
+    // froze src/**/*.spec.ts. The mapping dropped the suffix from the absent
+    // predicate, the host evaluated "nowhere under src/", and reported a
+    // conflict the Architect never stated. Scoped correctly, these predicates
+    // do not conflict: no file ends in both .dto.ts and .spec.ts, which is
+    // exactly how the Architect resolved the goal's contradiction.
+    it("finds no conflict in the predicates that resolved the goal", () => {
+        const conflicts = goalPreconditionConflicts(
+            [
+                { kind: "absent", invariantId: "G-C1", pathPrefix: "src/", pathSuffix: ".dto.ts", text: "class-validator" },
+                { kind: "unchanged", invariantId: "G-C2", pathPrefix: "src/", pathSuffix: ".spec.ts" },
+            ],
+            [
+                file("src/shops/dtos/createShop.dto.ts", "import 'class-validator'"),
+                file("src/shops/dtos/__tests__/createShop.spec.ts", "import 'class-validator'"),
+            ],
+        )
+        assert.deepEqual(conflicts, [])
+    })
+
+    it("does not trap a file outside the frozen predicate's prefix", () => {
+        const conflicts = goalPreconditionConflicts(
+            [
+                FORBID_CV,
+                { kind: "unchanged", invariantId: "G-C2", pathPrefix: "src/", pathSuffix: ".spec.ts" },
+            ],
+            [file("src/a.spec.ts", "import 'class-validator'")],
+        )
+        assert.equal(conflicts.length, 1)
+        const outside = goalPreconditionConflicts(
+            [
+                { kind: "absent", invariantId: "G-C1", pathPrefix: "", pathSuffix: ".spec.ts", text: "class-validator" },
+                { kind: "unchanged", invariantId: "G-C2", pathPrefix: "src/", pathSuffix: ".spec.ts" },
+            ],
+            [file("test/legacy/old.spec.ts", "import 'class-validator'")],
+        )
+        assert.deepEqual(outside, [], "the freeze names src/, not test/")
+    })
+
+    it("covers nothing when a scope states nothing", () => {
+        const conflicts = goalPreconditionConflicts(
+            [
+                { kind: "absent", invariantId: "G-C1", text: "class-validator" },
+                FREEZE_SPECS,
+            ],
+            [file("src/a.spec.ts", "import 'class-validator'")],
+        )
+        assert.deepEqual(conflicts, [], "an unscoped claim proves nothing")
+    })
+})

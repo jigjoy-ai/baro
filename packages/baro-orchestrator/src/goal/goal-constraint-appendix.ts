@@ -140,24 +140,33 @@ function text(value: unknown, label: string, allowEmpty = false): string {
     return trimmed
 }
 
-/** The domain form, which knows nothing about the wire's empty strings. */
+/**
+ * The domain form, which knows nothing about the wire's empty strings. Every
+ * stated scope part survives for every kind: this mapping once dropped the
+ * suffix from absent predicates and the prefix from unchanged ones, and each
+ * omission turned the Architect's claim into a different, wider claim.
+ */
 export function goalPredicatesFromWire(
     predicates: readonly GoalConstraintPredicateWireV1[],
 ): GoalPredicate[] {
-    return predicates.map((predicate) =>
-        predicate.kind === "absent"
+    return predicates.map((predicate) => {
+        const scope = {
+            ...(predicate.pathPrefix ? { pathPrefix: predicate.pathPrefix } : {}),
+            ...(predicate.pathSuffix ? { pathSuffix: predicate.pathSuffix } : {}),
+        }
+        return predicate.kind === "absent"
             ? ({
                   kind: "absent",
                   invariantId: predicate.invariantId,
-                  pathPrefix: predicate.pathPrefix,
+                  ...scope,
                   text: predicate.text,
               } satisfies AbsentPredicate)
             : ({
                   kind: "unchanged",
                   invariantId: predicate.invariantId,
-                  pathSuffix: predicate.pathSuffix,
-              } satisfies UnchangedPredicate),
-    )
+                  ...scope,
+              } satisfies UnchangedPredicate)
+    })
 }
 
 export function hasGoalConstraintFence(decisionDocument: string): boolean {

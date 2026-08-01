@@ -22,21 +22,36 @@
  * stage that actually reads the repository, and never inferred here.
  */
 
-export interface AbsentPredicate {
+/**
+ * Which files a predicate covers. One concept for both kinds: the Architect
+ * scopes each constraint to the files it read it against, and evaluating a
+ * wider or narrower scope than it stated is how the host once reported a
+ * conflict the Architect never claimed.
+ */
+export interface PathScope {
+    /** Repository-relative prefix, e.g. "src/". */
+    readonly pathPrefix?: string
+    /** File-kind suffix, e.g. ".dto.ts" or "_test.go". */
+    readonly pathSuffix?: string
+}
+
+export function scopeCovers(scope: PathScope, path: string): boolean {
+    if (scope.pathPrefix && !path.startsWith(scope.pathPrefix)) return false
+    if (scope.pathSuffix && !path.endsWith(scope.pathSuffix)) return false
+    return Boolean(scope.pathPrefix || scope.pathSuffix)
+}
+
+export interface AbsentPredicate extends PathScope {
     readonly kind: "absent"
     /** Constraint this came from, so a report can point back at it. */
     readonly invariantId: string
-    /** Repository-relative prefix the constraint covers, e.g. "src/". */
-    readonly pathPrefix: string
     /** Text that must not appear in any covered file, e.g. "class-validator". */
     readonly text: string
 }
 
-export interface UnchangedPredicate {
+export interface UnchangedPredicate extends PathScope {
     readonly kind: "unchanged"
     readonly invariantId: string
-    /** Suffix of the protected files, e.g. ".spec.ts". */
-    readonly pathSuffix: string
 }
 
 export type GoalPredicate = AbsentPredicate | UnchangedPredicate
@@ -77,13 +92,13 @@ export function goalPreconditionConflicts(
     for (const forbidden of absent) {
         const violating = files.filter(
             (file) =>
-                file.path.startsWith(forbidden.pathPrefix) &&
+                scopeCovers(forbidden, file.path) &&
                 file.text.includes(forbidden.text),
         )
         if (violating.length === 0) continue
         for (const frozen of unchanged) {
             const trapped = violating
-                .filter((file) => file.path.endsWith(frozen.pathSuffix))
+                .filter((file) => scopeCovers(frozen, file.path))
                 .map((file) => file.path)
                 .sort()
             if (trapped.length === 0) continue
