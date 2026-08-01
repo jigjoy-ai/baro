@@ -31,6 +31,9 @@ export interface PrdStory {
     title: string
     description: string
     dependsOn: string[]
+    /** Files this story will write. The host checks declared dependencies
+     * against it: an edge no file supports serializes work for nothing. */
+    writes?: string[]
     retries: number
     acceptance: string[]
     tests: string[]

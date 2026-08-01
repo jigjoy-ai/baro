@@ -8,6 +8,7 @@
  */
 
 import type { PrdExecutionMode, PrdFile, PrdStory } from "../../prd.js"
+import { pruneUnsupportedEdges } from "./dependency-evidence.js"
 import { deriveGoalContract } from "../../goal/goal-contract.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
@@ -110,6 +111,18 @@ export function enforceModeContract(prdJson: string, contract: ModeContract, goa
                 `with maximum width ${width}. Refusing single-worker fallback.`,
             )
         }
+    }
+
+    // A declared edge that no file supports serializes work for nothing. One
+    // migration paid ~1000s for S1→S2→S3→S4 whose three tails wrote disjoint
+    // directories. Evidence is required to remove an edge, never to keep one.
+    const pruned2 = pruneUnsupportedEdges(stories)
+    if (pruned2.removed.length > 0) {
+        process.stderr.write(
+            `[run-planner] dropped ${pruned2.removed.length} dependency edge(s) with no shared file: ` +
+                `${pruned2.removed.map((edge) => `${edge.from}->${edge.to}`).join(", ")}\n`,
+        )
+        stories = pruned2.stories
     }
 
     prd.userStories = stories

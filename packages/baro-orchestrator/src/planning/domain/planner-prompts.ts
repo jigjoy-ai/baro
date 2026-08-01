@@ -127,6 +127,15 @@ Dependency rules:
     have run at once, and costs the run the difference. Before writing
     dependsOn, ask what this story actually reads — not what happens to precede
     it in your listing.
+  - EVERY dependsOn EDGE MUST NAME A FILE. Before adding "S2" to dependsOn,
+    say which file S2 writes that this story writes too, or reads. If you
+    cannot name one, the edge does not exist — delete it. "It feels safer in
+    order" and "they touch the same area" are not files. The host checks this
+    and drops edges no file supports.
+  - Give every story a "writes" array listing the files it will create or
+    modify. Config and test-runner files that every story happens to run
+    (package.json, tsconfig.json, the test command) are not a write surface
+    unless this story actually edits them.
   - Decorative chains are bad, but unsafe parallel edits are worse.
 
 Output ONLY valid JSON matching this exact schema (no markdown, no explanation, just JSON):
@@ -141,6 +150,7 @@ Output ONLY valid JSON matching this exact schema (no markdown, no explanation, 
       "title": "short title",
       "description": "what to implement",
       "dependsOn": [],
+      "writes": ["src/path/this/story/edits.ts"],
       "retries": 2,
       "acceptance": ["testable criterion"],
       "tests": ["npm test"],
@@ -269,7 +279,7 @@ export function renderModeContract(decision: ModeContract): string {
         )
     } else if (decision.mode === "sequential") {
         lines.push(
-            "Planner rules: output a small ordered chain. Use dependsOn for real shared-surface dependencies.",
+            "Planner rules: order only what genuinely has to be ordered. Sequential mode means the run has an ordered spine, not that every story hangs off the previous one.",
             "Do not create parallel siblings that edit the same file/component/state/API. Keep each story cheap-model-capable.",
         )
     } else {
