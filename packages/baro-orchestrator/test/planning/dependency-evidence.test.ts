@@ -326,3 +326,42 @@ describe("the write surface reaches the graph, not only the record", () => {
         )
     })
 })
+
+describe("the finalization comparison cannot be failed by our own plumbing", () => {
+    // Run 11: the planner repeated its published story verbatim in the final
+    // PRD, normalizePrd dropped `writes` on the way in, and reconciliation
+    // reported "final PRD story 1 does not exactly match admitted prefix
+    // story 'S1'" — the seventh boundary to silently shed the same field.
+    // This is that comparison, end to end: what admission recorded versus
+    // what finalization reads back after normalization.
+    it("returns a story from normalizePrd exactly as the planner authored it", () => {
+        const authored = {
+            id: "S1",
+            priority: 1,
+            title: "foundation",
+            description: "build it",
+            dependsOn: [],
+            retries: 2,
+            acceptance: ["it works"],
+            tests: ["npm test"],
+            goalInvariantIds: ["G-A1"],
+            passes: false,
+            completedAt: null,
+            durationSecs: null,
+            model: "heavy",
+            writes: ["src/common/validation/zodDto.ts"],
+        }
+        const admitted = validateProgressivePlannerStory(authored)
+        const normalized = normalizePrd(
+            {
+                project: "p",
+                branchName: "b",
+                description: "d",
+                userStories: [authored],
+            },
+            "final-prd.json",
+        ).userStories[0]!
+        const final = validateProgressivePlannerStory(normalized)
+        assert.deepEqual(final, admitted)
+    })
+})

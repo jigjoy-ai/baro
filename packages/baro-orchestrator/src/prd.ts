@@ -672,6 +672,9 @@ function normalizeStory(
     const tests = Array.isArray(input.tests)
         ? input.tests.filter((t): t is string => typeof t === "string")
         : []
+    const writes = Array.isArray(input.writes)
+        ? input.writes.filter((w): w is string => typeof w === "string")
+        : []
     const goalInvariantIds = Array.isArray(input.goalInvariantIds)
         ? [
               ...new Set(
@@ -698,6 +701,7 @@ function normalizeStory(
         retries,
         acceptance,
         tests,
+        ...(writes.length > 0 ? { writes } : {}),
         ...(goalInvariantIds ? { goalInvariantIds } : {}),
         passes,
         completedAt,

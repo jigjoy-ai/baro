@@ -627,7 +627,15 @@ export async function orchestrate(
                 cwd: config.cwd,
                 files: listed.stdout.split("\0").filter(Boolean),
             },
-            (line) => process.stderr.write(`${line}\n`),
+            // Run 11 wrote this to stderr, which lands in a file under
+            // ~/.baro/runs that nobody watches. A finding the operator cannot
+            // see is a finding that did not happen.
+            (line) => {
+                process.stderr.write(`${line}\n`)
+                for (const part of line.split("\n")) {
+                    emit({ type: "story_log", id: "plan", line: part })
+                }
+            },
         )
     } catch {
         // A goal we cannot read here is one the Architect still sees.

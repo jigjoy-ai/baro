@@ -429,6 +429,7 @@ function validateAddedStoryShape(story: ReplanStoryAdd): string | null {
             "tests",
             "model",
             "goalInvariantIds",
+            "writes",
         ])
     ) return `added story '${story.id || "(missing)"}' has unknown fields`
     if (!validId(story.id)) return "added story id must be a non-empty, trimmed string"

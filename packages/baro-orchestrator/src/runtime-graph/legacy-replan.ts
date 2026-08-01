@@ -204,6 +204,7 @@ function parseAddedStory(
             "tests",
             "model",
             "goalInvariantIds",
+            "writes",
         ]) ||
         !validId(value.id) ||
         !Number.isInteger(value.priority) ||
