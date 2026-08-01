@@ -207,7 +207,7 @@ export function validateProgressivePlannerStory(
                 "completedAt",
                 "durationSecs",
             ],
-            ["model", "goalInvariantIds"],
+            ["model", "goalInvariantIds", "writes"],
         )
     ) {
         throw contractError(
@@ -295,6 +295,17 @@ export function validateProgressivePlannerStory(
     if (value.model !== undefined && !isSafeText(value.model)) {
         throw contractError("invalid_fragment", `${label} '${id}' has invalid model`)
     }
+    // The write surface has to survive admission: the host prunes dependency
+    // edges against it, and a fragment that arrives without it would be
+    // admitted unpruned while the final PRD is pruned — which the immutable
+    // prefix check then rejects, correctly, as a changed story.
+    if (
+        value.writes !== undefined &&
+        (!Array.isArray(value.writes) ||
+            !value.writes.every((entry) => isSafeText(entry)))
+    ) {
+        throw contractError("invalid_fragment", `${label} '${id}' has invalid writes`)
+    }
 
     return {
         id,
@@ -310,6 +321,9 @@ export function validateProgressivePlannerStory(
         completedAt: null,
         durationSecs: null,
         ...(value.model !== undefined ? { model: value.model } : {}),
+        ...(value.writes !== undefined
+            ? { writes: (value.writes as string[]).map((entry) => entry) }
+            : {}),
     }
 }
 
@@ -861,6 +875,7 @@ function snapshotStory(story: PrdStory): PrdStory {
         completedAt: story.completedAt,
         durationSecs: story.durationSecs,
         ...(story.model !== undefined ? { model: story.model } : {}),
+        ...(story.writes !== undefined ? { writes: [...story.writes] } : {}),
     }
 }
 

@@ -2,6 +2,8 @@ import type { SemanticEvent } from "../../runtime/mozaik.js"
 import { createHash } from "node:crypto"
 import { isDeepStrictEqual } from "node:util"
 
+import { pruneUnsupportedEdges } from "../domain/dependency-evidence.js"
+
 import {
     normalizePrd,
     type PrdFile,
@@ -283,9 +285,12 @@ export class ProgressivePlanningCoordinator {
             // Same repair as the final planner gate: a paraphrased host-owned
             // criterion is restored, and the parent invariants a claimed
             // obligation implies are completed instead of being fatal.
-            validated = {
-                ...parsed,
-                stories: parsed.stories.map((story) => {
+            // The same edge pruning the final planner gate applies. It has to
+            // happen before admission, not after: an admitted story is handed
+            // to a worker and the prefix is immutable from that moment. Each
+            // edge is judged from its own two stories alone, so pruning here
+            // and pruning the final PRD cannot disagree.
+            const repairedStories = parsed.stories.map((story) => {
                     const repaired = canonicalObligationAcceptance(
                         obligationContract,
                         story.acceptance,
@@ -298,7 +303,27 @@ export class ProgressivePlanningCoordinator {
                             repaired.invariantIds,
                         ),
                     }
-                }),
+            })
+            // Judged against the stories already admitted too, so an edge back
+            // into an earlier fragment can be checked against what it writes.
+            const fragmentStoryIds = new Set(repairedStories.map(({ id }) => id))
+            const prunedAll = pruneUnsupportedEdges([
+                ...state.prd.userStories.filter(
+                    ({ id }) => !fragmentStoryIds.has(id),
+                ),
+                ...repairedStories,
+            ])
+            if (prunedAll.removed.length > 0) {
+                process.stderr.write(
+                    `[progressive-planning] dropped ${prunedAll.removed.length} dependency edge(s) with no shared file: ` +
+                        `${prunedAll.removed.map((edge) => `${edge.from}->${edge.to}`).join(", ")}\n`,
+                )
+            }
+            validated = {
+                ...parsed,
+                stories: prunedAll.stories.filter(({ id }) =>
+                    fragmentStoryIds.has(id),
+                ),
             }
             validateGoalContractCoverage(
                 goalContract,

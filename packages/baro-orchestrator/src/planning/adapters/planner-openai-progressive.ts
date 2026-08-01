@@ -55,7 +55,9 @@ specified, dependency-closed prefix that is safe to execute, call publish_plan_f
 immediately. Do not wait for the full DAG or terminal PRD before publishing a safe prefix.
 
 Every published story uses exactly the final-PRD story fields: id, priority, title, description,
-dependsOn, retries, acceptance, tests, goalInvariantIds, and model. A published fragment is closed: each dependency
+dependsOn, retries, acceptance, tests, goalInvariantIds, model, and writes. "writes" lists the files
+this story will create or modify; the host prunes any dependsOn edge no file supports, so an edge
+you cannot justify with a file will be dropped whether you publish it or not. A published fragment is closed: each dependency
 must already have been published or be present in that same fragment. Published stories are
 immutable and become an exact, same-order prefix of the final PRD userStories array. The final PRD
 must repeat every published title, description, priority, dependency, retry count, acceptance
@@ -109,6 +111,11 @@ const FINAL_PRD_STORY_INPUT_SCHEMA: Record<string, unknown> = {
         model: {
             type: "string",
             enum: ["light", "standard", "heavy"],
+        },
+        writes: {
+            type: "array",
+            items: { type: "string" },
+            uniqueItems: true,
         },
     },
     required: [
@@ -328,6 +335,10 @@ const FINAL_PRD_STORY_KEYS = [
     "model",
 ] as const
 
+/** Present since the host began pruning dependency edges against it, but a
+ *  planner that omits it must still normalize — the edge then simply stays. */
+const OPTIONAL_PRD_STORY_KEYS = ["writes"] as const
+
 /**
  * The durable progressive contract deliberately remains execution-neutral,
  * while planners should not need to invent fields that do not exist in their
@@ -354,7 +365,10 @@ function isFinalPrdStoryRecord(
     const prototype = Object.getPrototypeOf(value)
     if (prototype !== Object.prototype && prototype !== null) return false
     const keys = Object.keys(value)
-    const expected = new Set<string>(FINAL_PRD_STORY_KEYS)
+    const expected = new Set<string>([
+        ...FINAL_PRD_STORY_KEYS,
+        ...OPTIONAL_PRD_STORY_KEYS,
+    ])
     return (
         FINAL_PRD_STORY_KEYS.every((key) => keys.includes(key)) &&
         keys.every((key) => expected.has(key))
@@ -376,6 +390,7 @@ function snapshotPlannerStory(story: PrdStory): PrdStory {
         completedAt: null,
         durationSecs: null,
         ...(story.model !== undefined ? { model: story.model } : {}),
+        ...(story.writes !== undefined ? { writes: [...story.writes] } : {}),
     }
 }
 

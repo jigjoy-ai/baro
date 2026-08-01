@@ -2,6 +2,8 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import type { PrdStory } from "../../src/prd.js"
+import { validateProgressivePlannerStory } from "../../src/planning/domain/progressive-plan.js"
+import { PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA } from "../../src/planning/adapters/planner-openai-progressive.js"
 import {
     pruneUnsupportedEdges,
     referencedPathsOf,
@@ -143,6 +145,124 @@ describe("evidence is required to remove an edge, never to keep one", () => {
         assert.deepEqual(
             writeSurfaceOf(story("A", { writes: "src/a.ts" } as never)),
             [],
+        )
+    })
+})
+
+describe("pruning and the immutable admitted prefix", () => {
+    // A run died at result_finalize_failed: "final PRD story 2 does not
+    // exactly match admitted prefix story 'S2'". Fragments were admitted with
+    // their edges intact because the fragment schema dropped the write
+    // surface, then the final PRD was pruned — and the prefix check correctly
+    // refused a story that had changed after a worker was given it.
+    it("gives the same answer for a fragment prefix as for the whole plan", () => {
+        const s1 = story("S1", { writes: ["src/common/validation/zodDto.ts"] })
+        const s2 = story("S2", {
+            dependsOn: ["S1"],
+            writes: ["src/shops/dtos/createShop.dto.ts"],
+            description: "Uses src/common/validation/zodDto.ts.",
+        })
+        const s3 = story("S3", {
+            dependsOn: ["S2"],
+            writes: ["src/menus/dtos/createMenu.dto.ts"],
+            description: "Same parity table as S2.",
+        })
+
+        const atAdmission = pruneUnsupportedEdges([s1, s2])
+        const atFinalize = pruneUnsupportedEdges([s1, s2, s3])
+
+        assert.deepEqual(
+            atAdmission.stories.map((entry) => entry.dependsOn),
+            atFinalize.stories.slice(0, 2).map((entry) => entry.dependsOn),
+            "an edge is judged from its own two stories, so context cannot change it",
+        )
+        assert.deepEqual(atFinalize.stories[2]!.dependsOn, [])
+    })
+
+    it("judges an edge reaching back into an earlier fragment", () => {
+        const admitted = story("S1", { writes: ["src/foundation.ts"] })
+        const arriving = story("S4", {
+            dependsOn: ["S1"],
+            writes: ["src/tables/dtos/createTable.dto.ts"],
+            description: "Imports the helpers from src/foundation.ts.",
+        })
+        assert.deepEqual(unsupportedEdges([admitted, arriving]), [])
+    })
+})
+
+describe("the write surface survives every hop it takes", () => {
+    // Four times in one afternoon a layer silently dropped this field, and each
+    // time the run died at result_finalize_failed because the admitted prefix
+    // and the final PRD no longer agreed. The field crosses: the MCP tool
+    // schema, fragment validation, the published-story snapshot, and the final
+    // story snapshot. A hop that forgets it is indistinguishable from a story
+    // that never declared one.
+    it("is carried by fragment validation", () => {
+        const story = validateProgressivePlannerStory({
+            id: "S1",
+            priority: 1,
+            title: "t",
+            description: "d",
+            dependsOn: [],
+            retries: 2,
+            acceptance: ["a"],
+            tests: ["npm test"],
+            goalInvariantIds: [],
+            passes: false,
+            completedAt: null,
+            durationSecs: null,
+            writes: ["src/a.ts", "src/b.ts"],
+        })
+        assert.deepEqual(story.writes, ["src/a.ts", "src/b.ts"])
+    })
+
+    it("is offered by the tool schema the planner actually sees", () => {
+        const schema = PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA as {
+            properties: {
+                stories: { items: { properties: Record<string, unknown> } }
+            }
+        }
+        assert.ok(
+            "writes" in schema.properties.stories.items.properties,
+            "a field the tool does not offer is a field the planner cannot send",
+        )
+    })
+
+    it("does not make a story that omits it unpublishable", () => {
+        const story = validateProgressivePlannerStory({
+            id: "S1",
+            priority: 1,
+            title: "t",
+            description: "d",
+            dependsOn: [],
+            retries: 2,
+            acceptance: ["a"],
+            tests: ["npm test"],
+            goalInvariantIds: [],
+            passes: false,
+            completedAt: null,
+            durationSecs: null,
+        })
+        assert.equal(story.writes, undefined)
+    })
+
+    it("rejects a write surface that is not a list of paths", () => {
+        assert.throws(() =>
+            validateProgressivePlannerStory({
+                id: "S1",
+                priority: 1,
+                title: "t",
+                description: "d",
+                dependsOn: [],
+                retries: 2,
+                acceptance: ["a"],
+                tests: ["npm test"],
+                goalInvariantIds: [],
+                passes: false,
+                completedAt: null,
+                durationSecs: null,
+                writes: "src/a.ts",
+            }),
         )
     })
 })
