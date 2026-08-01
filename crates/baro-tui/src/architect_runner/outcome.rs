@@ -50,6 +50,12 @@ pub struct ArchitectOutcomeV1 {
     pub questions: Vec<ArchitectClarificationQuestionV1>,
     pub evidence: Vec<ArchitectRepositoryEvidenceV1>,
     pub decision_document: Option<String>,
+    /// Repository-checkable constraints stated by the Architect. This host
+    /// carries them without reading them: the TypeScript side attaches them
+    /// to the decision document and evaluates them. Declared here only so a
+    /// correct outcome is not rejected for a field this host does not use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraint_predicates: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -471,6 +477,69 @@ fn validate_architecture_document(document: &str) -> Result<(), ArchitectOutcome
 #[cfg(test)]
 mod tests {
 
+    /// Deserialization is the first gate and rejects before any key check
+    /// runs; a run died on the struct after the key check had already been
+    /// taught the field. Both gates have to know it.
+    #[test]
+    fn deserializes_an_outcome_carrying_the_new_field() {
+        let raw = r#"{
+            "schemaVersion": 1,
+            "sessionId": "s",
+            "goalRequestId": "g",
+            "architectRequestId": "a",
+            "outcome": {
+                "schemaVersion": 1,
+                "kind": "ready",
+                "message": "Planning may proceed.",
+                "questions": [],
+                "evidence": [],
+                "decisionDocument": "Existing context",
+                "constraintPredicates": [
+                    {"invariantId":"G-C1","kind":"absent","pathPrefix":"internal/",
+                     "pathSuffix":"","text":"github.com/jackc/pgx/v5"}
+                ]
+            }
+        }"#;
+        let transport: ArchitectOutcomeTransportV1 =
+            serde_json::from_str(raw).expect("outcome with the new field deserializes");
+        assert!(transport.outcome.constraint_predicates.is_some());
+    }
+
+    #[test]
+    fn deserializes_an_outcome_without_it() {
+        let raw = r#"{
+            "schemaVersion": 1,
+            "sessionId": "s",
+            "goalRequestId": "g",
+            "architectRequestId": "a",
+            "outcome": {
+                "schemaVersion": 1,
+                "kind": "ready",
+                "message": "m",
+                "questions": [],
+                "evidence": [],
+                "decisionDocument": "d"
+            }
+        }"#;
+        let transport: ArchitectOutcomeTransportV1 =
+            serde_json::from_str(raw).expect("an older outcome still deserializes");
+        assert!(transport.outcome.constraint_predicates.is_none());
+    }
+
+    #[test]
+    fn still_rejects_a_field_nobody_declared() {
+        let raw = r#"{
+            "schemaVersion": 1,
+            "kind": "ready",
+            "message": "m",
+            "questions": [],
+            "evidence": [],
+            "decisionDocument": "d",
+            "somethingInvented": true
+        }"#;
+        assert!(serde_json::from_str::<ArchitectOutcomeV1>(raw).is_err());
+    }
+
     /// The TypeScript side gained a field the Rust side had never heard of,
     /// and a ten-minute run died on "must use the exact v1 shape" with the
     /// outcome otherwise correct. A key known to only one of the two hosts
@@ -483,7 +552,7 @@ mod tests {
             "message": "Planning may proceed.",
             "questions": [],
             "evidence": [],
-            "decisionDocument": "## Existing context\nA repository.",
+            "decisionDocument": "Existing context",
             "constraintPredicates": [],
         });
         assert!(exact_keys_with_optional(

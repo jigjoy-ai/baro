@@ -439,6 +439,7 @@ mod tests {
                 fact: "Both APIs are public.".to_string(),
             }],
             decision_document: None,
+            constraint_predicates: None,
         }
     }
 
