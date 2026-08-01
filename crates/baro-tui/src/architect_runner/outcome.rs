@@ -164,7 +164,7 @@ fn validate_exact_json_shapes(
         ],
     )?;
     let outcome = value.get("outcome").expect("exact_keys checked outcome");
-    exact_keys(
+    exact_keys_with_optional(
         outcome,
         "architect outcome",
         &[
@@ -175,6 +175,7 @@ fn validate_exact_json_shapes(
             "evidence",
             "decisionDocument",
         ],
+        &["constraintPredicates"],
     )?;
 
     let questions = outcome
@@ -219,10 +220,27 @@ fn exact_keys(
     label: &str,
     expected: &[&str],
 ) -> Result<(), ArchitectOutcomeContractError> {
+    exact_keys_with_optional(value, label, expected, &[])
+}
+
+/// A field the provider schema requires but an older backend may omit is
+/// tolerated here, never demanded. The host that reads the outcome and the
+/// host that writes it are different processes; a key known to only one of
+/// them rejects a run that is otherwise correct.
+fn exact_keys_with_optional(
+    value: &serde_json::Value,
+    label: &str,
+    expected: &[&str],
+    optional: &[&str],
+) -> Result<(), ArchitectOutcomeContractError> {
     let object = value
         .as_object()
         .ok_or_else(|| ArchitectOutcomeContractError::new(format!("{label} must be an object")))?;
-    if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
+    let missing = expected.iter().any(|key| !object.contains_key(*key));
+    let unknown = object
+        .keys()
+        .any(|key| !expected.contains(&key.as_str()) && !optional.contains(&key.as_str()));
+    if missing || unknown {
         return Err(ArchitectOutcomeContractError::new(format!(
             "{label} must use the exact v1 shape"
         )));
@@ -452,6 +470,89 @@ fn validate_architecture_document(document: &str) -> Result<(), ArchitectOutcome
 
 #[cfg(test)]
 mod tests {
+
+    /// The TypeScript side gained a field the Rust side had never heard of,
+    /// and a ten-minute run died on "must use the exact v1 shape" with the
+    /// outcome otherwise correct. A key known to only one of the two hosts
+    /// must not reject the run.
+    #[test]
+    fn tolerates_a_key_this_host_does_not_know_yet() {
+        let outcome = serde_json::json!({
+            "schemaVersion": 1,
+            "kind": "ready",
+            "message": "Planning may proceed.",
+            "questions": [],
+            "evidence": [],
+            "decisionDocument": "## Existing context\nA repository.",
+            "constraintPredicates": [],
+        });
+        assert!(exact_keys_with_optional(
+            &outcome,
+            "architect outcome",
+            &[
+                "schemaVersion",
+                "kind",
+                "message",
+                "questions",
+                "evidence",
+                "decisionDocument",
+            ],
+            &["constraintPredicates"],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn still_rejects_a_key_nobody_declared() {
+        let outcome = serde_json::json!({
+            "schemaVersion": 1,
+            "kind": "ready",
+            "message": "m",
+            "questions": [],
+            "evidence": [],
+            "decisionDocument": "d",
+            "somethingInvented": true,
+        });
+        assert!(exact_keys_with_optional(
+            &outcome,
+            "architect outcome",
+            &[
+                "schemaVersion",
+                "kind",
+                "message",
+                "questions",
+                "evidence",
+                "decisionDocument",
+            ],
+            &["constraintPredicates"],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn still_rejects_a_missing_required_key() {
+        let outcome = serde_json::json!({
+            "schemaVersion": 1,
+            "kind": "ready",
+            "message": "m",
+            "questions": [],
+            "evidence": [],
+        });
+        assert!(exact_keys_with_optional(
+            &outcome,
+            "architect outcome",
+            &[
+                "schemaVersion",
+                "kind",
+                "message",
+                "questions",
+                "evidence",
+                "decisionDocument",
+            ],
+            &["constraintPredicates"],
+        )
+        .is_err());
+    }
     use super::*;
 
     const READY_DOCUMENT: &str = "## Existing context\nObserved repository.\n\n## ADR-001: Keep the existing boundary\n**Status:** Accepted\n**Context:** Existing code uses it.\n**Decision:** Keep it.\n**Consequences:** Tests cover it.";
