@@ -1,7 +1,7 @@
 //! Opt-in bootstrap primitives for progressive planning.
 //!
 //! Nothing in this module changes process launch order. It only constructs the
-//! empty, durable PRD that the opt-in headless collective path hands to the
+//! empty, durable PRD that the opt-in collective path hands to the
 //! orchestrator while the Planner continues producing fragments.
 
 use std::fmt;
@@ -22,31 +22,27 @@ const MAX_GOAL_CHARS: usize = 8_000;
 const BRANCH_SLUG_CHARS: usize = 48;
 static ID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// Explicitly gated compatibility predicate. Merely running headless or using
-/// the collective does not change startup semantics; one of the flag/env
-/// inputs must also opt in.
+/// Explicitly gated compatibility predicate. Using the collective does not
+/// change startup semantics on its own; one of the flag/env inputs must also
+/// opt in.
+///
+/// Interactive runs are allowed. What they give up is the review screen: there
+/// is no complete plan to approve when stories start before planning ends, so
+/// the operator watches fragments arrive and interrupts if they disagree,
+/// rather than gating each one. Gating would need a verdict the Planner can
+/// hear, and PlanFragmentAdmitted/Rejected currently reach nothing upstream.
 #[allow(dead_code)]
-pub(crate) fn progressive_planning_enabled(
-    headless: bool,
-    coordination: &str,
-    explicit_flag: bool,
-) -> bool {
+pub(crate) fn progressive_planning_enabled(coordination: &str, explicit_flag: bool) -> bool {
     let env_value = std::env::var(PROGRESSIVE_PLANNING_ENV).ok();
-    progressive_planning_enabled_with_env(
-        headless,
-        coordination,
-        explicit_flag,
-        env_value.as_deref(),
-    )
+    progressive_planning_enabled_with_env(coordination, explicit_flag, env_value.as_deref())
 }
 
 fn progressive_planning_enabled_with_env(
-    headless: bool,
     coordination: &str,
     explicit_flag: bool,
     env_value: Option<&str>,
 ) -> bool {
-    headless && coordination == "collective" && (explicit_flag || env_value.is_some_and(truthy_env))
+    coordination == "collective" && (explicit_flag || env_value.is_some_and(truthy_env))
 }
 
 fn truthy_env(value: &str) -> bool {
@@ -387,32 +383,29 @@ mod tests {
     use crate::executor::PrdFile;
 
     #[test]
-    fn opt_in_requires_headless_collective_and_explicit_switch() {
+    fn opt_in_requires_the_collective_and_an_explicit_switch() {
+        assert!(progressive_planning_enabled_with_env("collective", true, None));
         assert!(progressive_planning_enabled_with_env(
-            true,
-            "collective",
-            true,
-            None
-        ));
-        assert!(progressive_planning_enabled_with_env(
-            true,
             "collective",
             false,
             Some("YES")
         ));
-        for (headless, coordination, flag, env) in [
-            (false, "collective", true, Some("1")),
-            (true, "legacy", true, Some("1")),
-            (true, "collective", false, None),
-            (true, "collective", false, Some("false")),
+        for (coordination, flag, env) in [
+            ("legacy", true, Some("1")),
+            ("collective", false, None),
+            ("collective", false, Some("false")),
         ] {
-            assert!(!progressive_planning_enabled_with_env(
-                headless,
-                coordination,
-                flag,
-                env
-            ));
+            assert!(!progressive_planning_enabled_with_env(coordination, flag, env));
         }
+    }
+
+    /// An interactive run watches instead of approving. Refusing it here was
+    /// never a limit of progressive planning — only of the review screen,
+    /// which has no complete plan to show.
+    #[test]
+    fn an_interactive_run_may_opt_in_and_watch() {
+        assert!(progressive_planning_enabled_with_env("collective", true, None));
+        assert!(progressive_planning_enabled_with_env("collective", false, Some("1")));
     }
 
     #[test]

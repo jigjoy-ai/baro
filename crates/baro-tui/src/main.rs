@@ -228,10 +228,10 @@ fn current_coordination_has_runtime_dialogue() -> bool {
     std::env::var("BARO_COORDINATION").is_ok_and(|mode| coordination_has_runtime_dialogue(&mode))
 }
 
-fn progressive_planning_enabled(headless: bool) -> bool {
+fn progressive_planning_enabled() -> bool {
     let coordination =
         std::env::var("BARO_COORDINATION").unwrap_or_else(|_| "collective".to_string());
-    progressive_planning::progressive_planning_enabled(headless, &coordination, false)
+    progressive_planning::progressive_planning_enabled(&coordination, false)
 }
 
 enum AppEvent {
@@ -3615,7 +3615,7 @@ fn spawn_planner(
             mode_json,
             goal_envelope_json,
         };
-        if progressive_planning_enabled(headless) {
+        if progressive_planning_enabled() {
             let _ = tx.send(AppEvent::ProgressivePlanningPrepared(spec)).await;
         } else {
             run_planner_and_report(spec, tx, headless, None).await;
@@ -3903,7 +3903,7 @@ async fn begin_progressive_execution(
 ) -> Result<(), String> {
     if app.is_followup || app.is_resume {
         return Err(
-            "progressive planning v1 supports fresh headless runs only; resume/follow-up keeps the complete-plan barrier"
+            "progressive planning v1 supports fresh runs only; resume/follow-up keeps the complete-plan barrier"
                 .to_string(),
         );
     }
