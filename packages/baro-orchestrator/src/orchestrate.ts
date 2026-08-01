@@ -95,6 +95,8 @@ import { RunVerifier } from "./verification/run-verifier.js"
 import { Sentry } from "./execution/sentry.js"
 import { StoryFactory } from "./market/story-factory.js"
 import { WorkContextProvider } from "./market/work-context-provider.js"
+import { reportGoalPreconditions } from "./goal/goal-precondition-report.js"
+import { runRepositoryCommand } from "./integration/repository-command.js"
 import { type StoryAgent } from "./harness/claude/story-agent.js"
 import {
     type PrdSnapshot,
@@ -609,6 +611,26 @@ export async function orchestrate(
         await ensureGreenfieldRepo(config.cwd, (line) =>
             process.stderr.write(`${line}\n`),
         ).catch(() => {})
+    }
+    // Constraints the repository already contradicts, said out loud once,
+    // before any model runs. It reports and never refuses: the predicates come
+    // from English, and a wrong reading must not be able to stop work.
+    try {
+        const listed = await runRepositoryCommand(
+            "git",
+            ["ls-files", "-z"],
+            { cwd: config.cwd },
+        )
+        reportGoalPreconditions(
+            loadPrd(config.prdPath).decisionDocument,
+            {
+                cwd: config.cwd,
+                files: listed.stdout.split("\0").filter(Boolean),
+            },
+            (line) => process.stderr.write(`${line}\n`),
+        )
+    } catch {
+        // A goal we cannot read here is one the Architect still sees.
     }
     const useGit = config.withGit ?? (await isInsideGitRepo(config.cwd))
     const gitGate = new GitGate()

@@ -587,6 +587,7 @@ function validStoredRuntimeStory(value: unknown): boolean {
             "tests",
             "goalInvariantIds",
             "model",
+            "writes",
         ])
     ) return false
     return (
@@ -798,6 +799,7 @@ export function applyReplanWithEffectiveDelta(
                 ...(applied.goalInvariantIds
                     ? { goalInvariantIds: [...applied.goalInvariantIds] }
                     : {}),
+                ...(applied.writes ? { writes: [...applied.writes] } : {}),
                 passes: false,
                 completedAt: null,
                 durationSecs: null,
@@ -845,6 +847,7 @@ function cloneReplanStoryAdd(story: ReplanStoryAdd): ReplanStoryAdd {
         ...(story.goalInvariantIds
             ? { goalInvariantIds: [...story.goalInvariantIds] }
             : {}),
+        ...(story.writes ? { writes: [...story.writes] } : {}),
     }
 }
 

@@ -14,6 +14,8 @@ export interface ReplanStoryAdd {
     model?: string
     /** Goal-contract invariants for which this story must produce evidence. */
     goalInvariantIds?: readonly string[]
+    /** Files this story will write, used to check its dependency edges. */
+    writes?: readonly string[]
 }
 
 export interface ReplanData {

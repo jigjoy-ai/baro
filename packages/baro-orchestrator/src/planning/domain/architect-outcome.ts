@@ -9,6 +9,12 @@
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import { deriveGoalContract } from "../../goal/goal-contract.js"
 import {
+    MAX_CONSTRAINT_PREDICATES,
+    attachGoalConstraintContract,
+    type GoalConstraintPredicateWireV1,
+    validateGoalConstraintPredicates,
+} from "../../goal/goal-constraint-appendix.js"
+import {
     ArchitectureDecisionDocumentError,
     parseArchitectureDecisionDocument,
     renderArchitectureDecisionDocument,
@@ -64,6 +70,9 @@ export interface ArchitectReadyOutcomeV1 extends ArchitectOutcomeBaseV1 {
     readonly questions: readonly []
     readonly evidence: readonly []
     readonly decisionDocument: string
+    /** Repository-checkable form of the goal's constraints, stated here
+     *  because this is the only stage that inspected the checkout. */
+    readonly constraintPredicates: readonly GoalConstraintPredicateWireV1[]
 }
 
 export interface ArchitectNeedsInputOutcomeV1 extends ArchitectOutcomeBaseV1 {
@@ -71,6 +80,8 @@ export interface ArchitectNeedsInputOutcomeV1 extends ArchitectOutcomeBaseV1 {
     readonly questions: readonly ArchitectClarificationQuestionV1[]
     readonly evidence: readonly ArchitectRepositoryEvidenceV1[]
     readonly decisionDocument: null
+    /** Always empty: nothing was decided, so nothing is stated about it. */
+    readonly constraintPredicates: readonly []
 }
 
 export type ArchitectOutcomeV1 =
@@ -114,6 +125,7 @@ function architectOutcomeJsonSchema(decisionOnly: boolean) {
             "questions",
             "evidence",
             "decisionDocument",
+            "constraintPredicates",
         ],
         properties: {
             schemaVersion: { type: "integer", const: 1 },
@@ -154,6 +166,31 @@ function architectOutcomeJsonSchema(decisionOnly: boolean) {
                             ],
                         },
                         fact: { type: "string", minLength: 1, maxLength: MAX_EVIDENCE_FACT_LENGTH },
+                    },
+                },
+            },
+            // Stated by the one stage that reads the repository. The host
+            // evaluates these against the checkout and never interprets the
+            // constraint prose itself.
+            constraintPredicates: {
+                type: "array",
+                maxItems: MAX_CONSTRAINT_PREDICATES,
+                items: {
+                    type: "object",
+                    additionalProperties: false,
+                    required: [
+                        "invariantId",
+                        "kind",
+                        "pathPrefix",
+                        "pathSuffix",
+                        "text",
+                    ],
+                    properties: {
+                        invariantId: { type: "string", minLength: 1, maxLength: 16 },
+                        kind: { type: "string", enum: ["absent", "unchanged"] },
+                        pathPrefix: { type: "string", maxLength: 200 },
+                        pathSuffix: { type: "string", maxLength: 200 },
+                        text: { type: "string", maxLength: 200 },
                     },
                 },
             },
@@ -258,7 +295,7 @@ export function validateArchitectOutcome(
         "questions",
         "evidence",
         "decisionDocument",
-    ])) {
+    ], ["constraintPredicates"])) {
         throw new ArchitectOutcomeContractError(
             "architect outcome must use the exact v1 schema",
         )
@@ -269,6 +306,9 @@ export function validateArchitectOutcome(
     const message = boundedText(value.message, MAX_MESSAGE_LENGTH, "architect message")
     const questions = parseQuestions(value.questions)
     const evidence = parseEvidence(value.evidence)
+    const constraintPredicates = validateGoalConstraintPredicates(
+        value.constraintPredicates ?? [],
+    )
 
     if (value.kind === "ready") {
         if (questions.length !== 0 || evidence.length !== 0) {
@@ -311,7 +351,14 @@ export function validateArchitectOutcome(
             message,
             questions: [] as const,
             evidence: [] as const,
-            decisionDocument,
+            // The appendix is attached by the host after the ADR shape has
+            // been validated: it is machine-readable state, not a decision,
+            // and the model is never asked to write the fence itself.
+            decisionDocument: attachGoalConstraintContract(
+                decisionDocument,
+                constraintPredicates,
+            ),
+            constraintPredicates,
         })
     }
 
@@ -337,6 +384,7 @@ export function validateArchitectOutcome(
             message,
             questions,
             evidence,
+            constraintPredicates: [] as const,
             decisionDocument: null,
         })
     }
@@ -622,10 +670,15 @@ function assertArchitectureDocument(text: string): void {
 function exactRecord(
     value: unknown,
     keys: readonly string[],
+    optional: readonly string[] = [],
 ): value is Record<string, unknown> {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return false
     const actual = Object.keys(value)
-    return actual.length === keys.length && keys.every((key) => actual.includes(key))
+    const allowed = new Set([...keys, ...optional])
+    return (
+        keys.every((key) => actual.includes(key)) &&
+        actual.every((key) => allowed.has(key))
+    )
 }
 
 function deepFreeze<T>(value: T): T {

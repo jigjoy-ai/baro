@@ -121,8 +121,21 @@ user-owned ambiguity and not a valid reason for needsInput.
   product or compatibility choice that requires user authority. Do not ask the
   user anything repository inspection can answer.
 
+constraintPredicates restate the goal's constraints in the form the host can
+check against this checkout, and you are the only stage that has read it. Emit
+one entry per constraint you can express as a fact about files, using the
+repository's own layout and its real import spellings; emit none for the
+others. Every entry carries all five keys, with "" where a key does not apply:
+{"invariantId":"G-C2","kind":"absent","pathPrefix":"internal/","pathSuffix":"","text":"github.com/jackc/pgx/v5"}
+{"invariantId":"G-C3","kind":"unchanged","pathPrefix":"","pathSuffix":"_test.go","text":""}
+"absent" means that text must appear in no file under that prefix. "unchanged"
+means files ending in that suffix must not be edited. invariantId must be a
+supplied GoalContract id. Do not guess a path that is not in this repository,
+and do not use a suffix so broad it names every source file. Emit [] when no
+constraint reduces to such a fact.
+
 Return ONLY one JSON object with exactly these keys and no markdown fence:
-{"schemaVersion":1,"kind":"ready|needsInput","message":"bounded user-facing summary","questions":[],"evidence":[],"decisionDocument":null}`
+{"schemaVersion":1,"kind":"ready|needsInput","message":"bounded user-facing summary","questions":[],"evidence":[],"decisionDocument":null,"constraintPredicates":[]}`
 
 const ARCHITECT_OUTCOME_FIELD_RULES = `Question objects contain exactly {"id":"q1","text":"question","reason":"why repository evidence makes this answer necessary"}.
 The non-empty reason field is required; never omit it or set it to null. Evidence objects contain exactly

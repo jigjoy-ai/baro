@@ -46,6 +46,7 @@ const NEEDS_INPUT = {
         line: 12,
         fact: "The public v1 serializer remains exported.",
     }],
+    constraintPredicates: [],
     decisionDocument: null,
 } as const
 
@@ -585,6 +586,7 @@ function writePhasedFakeClaude(dir: string, capture: string): string {
         message: "Repository validation is complete.",
         questions: [],
         evidence: [],
+        constraintPredicates: [],
         decisionDocument: DECISION_DOCUMENT,
     }
     const segment = {
@@ -640,6 +642,7 @@ function writePhasedFakeCodex(
         message: "Repository validation is complete.",
         questions: [],
         evidence: [],
+        constraintPredicates: [],
         decisionDocument: DECISION_DOCUMENT,
     }
     const segment = {
@@ -687,6 +690,7 @@ function writePhasedFakeLocalHarness(
         message: "Repository validation is complete.",
         questions: [],
         evidence: [],
+        constraintPredicates: [],
         decisionDocument: DECISION_DOCUMENT,
     }
     const segment = {

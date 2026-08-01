@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import type { PrdStory } from "../../src/prd.js"
+import { applyReplan, normalizePrd } from "../../src/prd.js"
 import { validateProgressivePlannerStory } from "../../src/planning/domain/progressive-plan.js"
 import { PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA } from "../../src/planning/adapters/planner-openai-progressive.js"
 import {
@@ -263,6 +264,65 @@ describe("the write surface survives every hop it takes", () => {
                 durationSecs: null,
                 writes: "src/a.ts",
             }),
+        )
+    })
+})
+
+describe("the write surface reaches the graph, not only the record", () => {
+    // Five boundaries dropped this field before anyone noticed, each one an
+    // independent list of allowed keys. The sixth was the runtime graph: the
+    // planner declared a write surface in full, the audit carried it, and
+    // prd.json showed none — so a live run was reported as "the planner never
+    // declares it" when the planner had.
+    it("survives a replan into the stored graph", () => {
+        const prd = normalizePrd(
+            {
+                project: "p",
+                branchName: "b",
+                description: "d",
+                userStories: [
+                    {
+                        id: "S0",
+                        priority: 1,
+                        title: "seed",
+                        description: "seed",
+                        dependsOn: [],
+                        retries: 2,
+                        acceptance: ["ok"],
+                        tests: ["npm test"],
+                        passes: false,
+                        completedAt: null,
+                        durationSecs: null,
+                    },
+                ],
+            },
+            "test-prd.json",
+        )
+        const replanned = applyReplan(prd, {
+            source: "planner:test",
+            reason: "admit a fragment",
+            addedStories: [
+                {
+                    id: "S1",
+                    priority: 2,
+                    title: "foundation",
+                    description: "build it",
+                    dependsOn: [],
+                    retries: 2,
+                    acceptance: ["it works"],
+                    tests: ["npm test"],
+                    writes: ["src/common/validation/zodDto.ts"],
+                },
+            ],
+            removedStoryIds: [],
+            modifiedDeps: {},
+        })
+        const stored = replanned.userStories.find((story) => story.id === "S1")
+        assert.ok(stored, "the story reached the graph")
+        assert.deepEqual(
+            stored.writes,
+            ["src/common/validation/zodDto.ts"],
+            "a story in the graph must still say what it writes",
         )
     })
 })

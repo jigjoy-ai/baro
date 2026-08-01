@@ -220,6 +220,7 @@ describe("ArchitectOpenAI bounded finalization", () => {
             message: "The repository supports a concrete architecture.",
             questions: [],
             evidence: [],
+            constraintPredicates: [],
             decisionDocument: DECISION_DOCUMENT,
         }
         const tool = fakeTool(async () => "file contents")
@@ -401,6 +402,7 @@ describe("ArchitectOpenAI bounded finalization", () => {
             message: "Planning may proceed.",
             questions: [],
             evidence: [],
+            constraintPredicates: [],
             decisionDocument: OBLIGATION_DOCUMENT,
         }
         const decisionOnly = {
@@ -444,6 +446,7 @@ describe("ArchitectOpenAI bounded finalization", () => {
                 line: 10,
                 fact: "The v1 serializer remains publicly exported.",
             }],
+            constraintPredicates: [],
             decisionDocument: null,
         }
         const tool = fakeTool(async () => "file contents")
@@ -477,6 +480,7 @@ describe("ArchitectOpenAI bounded finalization", () => {
             message: "Planning may proceed.",
             questions: [],
             evidence: [],
+            constraintPredicates: [],
             decisionDocument: DECISION_DOCUMENT,
         }
         const withObligations = {
@@ -515,6 +519,7 @@ describe("ArchitectOpenAI bounded finalization", () => {
             message: "Planning may proceed.",
             questions: [],
             evidence: [],
+            constraintPredicates: [],
             decisionDocument: OBLIGATION_DOCUMENT.replace("G-A1", "G-A2"),
         }
         const corrected = {

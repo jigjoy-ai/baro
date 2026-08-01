@@ -436,6 +436,7 @@ export class ProgressivePlanningCoordinator {
                     ...(story.goalInvariantIds
                         ? { goalInvariantIds: [...story.goalInvariantIds] }
                         : {}),
+                    ...(story.writes ? { writes: [...story.writes] } : {}),
                     model: story.model,
                 })),
                 removedStoryIds: [],
