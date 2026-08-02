@@ -29,7 +29,8 @@ import {
     observeArchitectInvocation,
     type ArchitectInvocationObserver,
 } from "./architect-invocation.js"
-import { effortTimeoutMs } from "./planner-claude.js"
+import { llmIdleTimeoutMs } from "../../harness/liveness.js"
+import { ClaudeStreamResultCollector } from "../../harness/claude/stream-result.js"
 import type { ModeContract } from "../domain/planner-prompts.js"
 
 export interface RunArchitectClaudeOptions {
@@ -40,8 +41,8 @@ export interface RunArchitectClaudeOptions {
     projectContext?: string
     modeContract?: ModeContract
     claudeBin?: string
-    /** Defaults scale with `effort` ({@link effortTimeoutMs}) — a flat
-     *  3-minute timeout SIGTERM'd `--effort max` turns mid-thought. */
+    /** Explicit total wall-clock cap (pre-accept phase budget). Left unset,
+     *  the turn is bounded only by the idle watchdog. */
     timeoutMs?: number
     /** Emit the strict provider payload instead of legacy markdown. */
     outcomeMode?: boolean
@@ -72,13 +73,16 @@ export async function runArchitectClaude(
         : ARCHITECT_OUTCOME_JSON_SCHEMA
     const requestedModel = opts.model ?? "opus"
     let stdout: string
+    const collector = new ClaudeStreamResultCollector()
     try {
-        const result = await execFileCli(
+        await execFileCli(
             opts.claudeBin ?? "claude",
             [
                 "--print",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
                 "--model",
                 requestedModel,
                 ...(opts.effort ? ["--effort", opts.effort] : []),
@@ -107,11 +111,13 @@ export async function runArchitectClaude(
             {
                 cwd: opts.cwd,
                 env: harnessChildEnvironment(),
-                timeout: opts.timeoutMs ?? effortTimeoutMs(opts.effort),
+                ...(opts.timeoutMs ? { timeout: opts.timeoutMs } : {}),
+                idleTimeoutMs: llmIdleTimeoutMs(),
                 maxBuffer: 16 * 1024 * 1024,
+                onStdoutData: (chunk) => collector.feed(chunk),
             },
         )
-        stdout = result.stdout
+        stdout = collector.resultLine() ?? ""
     } catch (error) {
         if (!isArchitectProcessLaunchFailure(error)) {
             const timedOut = isRunnerTimeoutError(error)

@@ -6,6 +6,8 @@
  */
 
 import { execFileCli } from "../../harness/exec-file-cli.js"
+import { llmIdleTimeoutMs } from "../../harness/liveness.js"
+import { ClaudeStreamResultCollector } from "../../harness/claude/stream-result.js"
 
 import { harnessChildEnvironment } from "../../harness/environment.js"
 
@@ -38,23 +40,10 @@ export interface RunPlannerClaudeOptions {
     claudeBin?: string
     /** Collective-only early-plan tool exposed through an isolated MCP server. */
     progressive?: PlannerHarnessProgressiveConfig
-    /** Defaults scale with `effort` ({@link effortTimeoutMs}) — the flat
-     *  4-minute default was SIGTERM'ing `--effort max` runs mid-thought. */
+    /** Explicit total wall-clock cap. Left unset, the turn is bounded only by
+     *  the idle watchdog: run 12's planner was killed by the effort ladder
+     *  8 minutes into a productive turn, right after publishing a fragment. */
     timeoutMs?: number
-}
-
-/** Higher effort = longer single `--print` turns, so the watchdog waits longer. */
-export function effortTimeoutMs(effort?: string): number {
-    switch (effort) {
-        case "max":
-            return 1_200_000 // 20 min
-        case "xhigh":
-            return 900_000 // 15 min
-        case "high":
-            return 480_000 // 8 min
-        default:
-            return 240_000 // 4 min (low | medium | unset)
-    }
 }
 
 export async function runPlannerClaude(
@@ -98,12 +87,18 @@ export async function runPlannerClaude(
             : null
         const progressiveTool =
             `mcp__${PROGRESSIVE_PLANNER_MCP_SERVER_NAME}__publish_plan_fragment`
-        const { stdout } = await execFileCli(
+        // stream-json with partial messages turns the turn into a per-token
+        // heartbeat: the idle watchdog then only fires on a genuinely stalled
+        // process, never on a long think.
+        const collector = new ClaudeStreamResultCollector()
+        await execFileCli(
             opts.claudeBin ?? "claude",
             [
                 "--print",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
                 ...(mcpConfig
                     ? [
                           // `--safe-mode` disables even explicitly supplied
@@ -138,12 +133,20 @@ export async function runPlannerClaude(
                     ...harnessChildEnvironment(),
                     ...(progressive.mcpConnection?.providerEnvironment ?? {}),
                 },
-                timeout: opts.timeoutMs ?? effortTimeoutMs(opts.effort),
+                ...(opts.timeoutMs ? { timeout: opts.timeoutMs } : {}),
+                idleTimeoutMs: llmIdleTimeoutMs(),
                 maxBuffer: 16 * 1024 * 1024,
+                onStdoutData: (chunk) => collector.feed(chunk),
             },
         )
 
-        const wrapper = JSON.parse(stdout) as { result?: string }
+        const resultLine = collector.resultLine()
+        if (!resultLine) {
+            throw new Error(
+                "PlannerClaude: stream ended without a result event",
+            )
+        }
+        const wrapper = JSON.parse(resultLine) as { result?: string }
         const planText = typeof wrapper.result === "string" ? wrapper.result.trim() : ""
         if (!planText) {
             throw new Error("PlannerClaude: claude returned empty result")
@@ -187,7 +190,8 @@ export async function runClaudeIntake(opts: RunPlannerClaudeOptions) {
         {
             cwd: opts.cwd,
             env: harnessChildEnvironment(),
-            timeout: Math.min(opts.timeoutMs ?? effortTimeoutMs(opts.effort), 180_000),
+            ...(opts.timeoutMs ? { timeout: Math.min(opts.timeoutMs, 180_000) } : {}),
+            idleTimeoutMs: llmIdleTimeoutMs(),
             maxBuffer: 2 * 1024 * 1024,
         },
     )

@@ -39,7 +39,6 @@ import { runArchitectOpenCode } from "../src/planning/adapters/architect-opencod
 import { runArchitectPi } from "../src/planning/adapters/architect-pi.js"
 import { providerCallTimeoutError } from "../src/harness/openai/runtime.js"
 import { emitPlanLine } from "../src/planning/application/plan-events.js"
-import { effortTimeoutMs } from "../src/planning/adapters/planner-claude.js"
 import {
     appendRepairNote,
     outcomeByteOverrun,
@@ -699,9 +698,11 @@ async function compileObligations(input: {
     }
 }
 
+// Pre-accept only: the Rust front-door owns this budget and normally passes
+// --timeout-ms explicitly; the fallback mirrors its 30-minute default. Inner
+// turns are bounded by the idle watchdog, not by this.
 function architectPhaseBudgetMs(args: Args): number {
-    return args.timeoutMs ??
-        (args.llm === "claude" ? effortTimeoutMs(args.effort) : 600_000)
+    return args.timeoutMs ?? 1_800_000
 }
 
 function architectDeadlineError(totalBudgetMs: number, stage: string): Error {

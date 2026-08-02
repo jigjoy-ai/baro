@@ -164,6 +164,7 @@ describe("Architect CLI backend invocation telemetry", () => {
 
             const claudeBin = executable(dir, "telemetry-claude.mjs", `
 console.log(JSON.stringify({
+  type: "result",
   result: ${JSON.stringify(DECISION_DOCUMENT)},
   duration_ms: 123,
   total_cost_usd: 0.004,
@@ -418,7 +419,7 @@ function writeFakeClaude(dir: string, name: string, capture: string): string {
 import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(capture)}, JSON.stringify(process.argv.slice(2)));
 const payload = ${JSON.stringify(DECISION_OUTCOME)};
-console.log(JSON.stringify({ result: JSON.stringify(payload), structured_output: payload }));
+console.log(JSON.stringify({ type: "result", result: JSON.stringify(payload), structured_output: payload }));
 `)
 }
 

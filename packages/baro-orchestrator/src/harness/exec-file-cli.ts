@@ -22,6 +22,10 @@ export interface ExecFileCliOptions {
     env?: NodeJS.ProcessEnv
     /** SIGTERM the child after this many ms; the promise rejects (killed=true). */
     timeout?: number
+    /** SIGTERM the child after this many ms WITHOUT any stdout/stderr output.
+     *  Unlike `timeout`, every output chunk resets the clock: a process that
+     *  is visibly working is never killed, only one that has gone silent. */
+    idleTimeoutMs?: number
     /** Grace after SIGTERM before the complete CLI tree is SIGKILLed. */
     terminationGraceMs?: number
     /** Optional caller cancellation; abort follows the same tree cleanup path. */
@@ -30,6 +34,11 @@ export interface ExecFileCliOptions {
     maxBuffer?: number
     /** Optional exact UTF-8 stdin payload; stdin is otherwise closed/ignored. */
     input?: string
+    /** Stream stdout to the caller instead of buffering it; the resolved
+     *  stdout is then empty and maxBuffer no longer applies to stdout. Lets
+     *  high-volume streams (per-token NDJSON) feed the idle watchdog without
+     *  holding the whole transcript in memory. */
+    onStdoutData?: (chunk: Buffer) => void
 }
 
 export interface ExecFileCliBufferResult {
@@ -110,6 +119,7 @@ function execFileCliRaw(
         let stderrCapped = false
         let settled = false
         let timer: ReturnType<typeof setTimeout> | undefined
+        let idleTimer: ReturnType<typeof setTimeout> | undefined
         let terminationError: Error | undefined
         let treeRefreshed = false
 
@@ -117,6 +127,7 @@ function execFileCliRaw(
             if (settled) return
             settled = true
             if (timer) clearTimeout(timer)
+            if (idleTimer) clearTimeout(idleTimer)
             options.signal?.removeEventListener("abort", onAbort)
             fn()
         }
@@ -155,11 +166,29 @@ function execFileCliRaw(
                 terminate(err)
             }, options.timeout)
         }
+        const idleMs = options.idleTimeoutMs
+        const petIdle = (): void => {
+            if (!idleMs || idleMs <= 0 || settled || terminationError) return
+            if (idleTimer) clearTimeout(idleTimer)
+            idleTimer = setTimeout(() => {
+                const err = new Error(
+                    `${command} produced no output for ${idleMs}ms — presumed hung`,
+                ) as Error & { killed: boolean }
+                err.killed = true
+                terminate(err)
+            }, idleMs)
+        }
+        petIdle()
         options.signal?.addEventListener("abort", onAbort, { once: true })
         if (options.signal?.aborted) onAbort()
 
         child.stdout?.on("data", (d: Buffer) => {
             refreshProcessTree()
+            petIdle()
+            if (options.onStdoutData) {
+                options.onStdoutData(d)
+                return
+            }
             if (stdoutCapped) return
             const remaining = Math.max(0, maxBuffer - stdoutBytes)
             if (remaining > 0) {
@@ -173,6 +202,7 @@ function execFileCliRaw(
         })
         child.stderr?.on("data", (d: Buffer) => {
             refreshProcessTree()
+            petIdle()
             if (stderrCapped) return
             const remaining = Math.max(0, maxBuffer - stderrBytes)
             if (remaining > 0) {

@@ -455,7 +455,7 @@ const server = harness === "claude"
 if (server) await exerciseBaroMcp(server);
 
 if (harness === "claude") {
-    process.stdout.write(JSON.stringify({ result: finalPrd }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "result", result: finalPrd }) + "\\n");
 } else {
     process.stdout.write(JSON.stringify({
         type: "item.completed",

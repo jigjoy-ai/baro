@@ -131,6 +131,56 @@ setInterval(() => {}, 10_000);
         })
     })
 
+    it("never kills a process that keeps producing output, however long it runs", async () => {
+        await withTempDir("baro-exec-idle-alive-", async (dir) => {
+            const bin = writeCli(dir, `
+let ticks = 0;
+const timer = setInterval(() => {
+    process.stdout.write("tick " + ticks + "\\n");
+    if (++ticks >= 10) { clearInterval(timer); }
+}, 250);
+`)
+            // Total runtime (~2.5s) spans several idle windows (900ms):
+            // only the per-chunk reset can explain survival.
+            const result = await execFileCli(bin, [], { idleTimeoutMs: 900 })
+            assert.match(result.stdout, /tick 9/)
+        })
+    })
+
+    it("kills a process that has gone silent for the whole idle window", async () => {
+        await withTempDir("baro-exec-idle-hung-", async (dir) => {
+            const bin = writeCli(dir, `
+process.stdout.write("starting\\n");
+setInterval(() => {}, 10_000);
+`)
+            await assert.rejects(
+                execFileCli(bin, [], {
+                    idleTimeoutMs: 600,
+                    terminationGraceMs: 75,
+                }),
+                (error: Error & { killed?: boolean }) => {
+                    assert.equal(error.killed, true)
+                    assert.match(error.message, /no output for 600ms/)
+                    return true
+                },
+            )
+        })
+    })
+
+    it("counts stderr as proof of life for the idle watchdog", async () => {
+        await withTempDir("baro-exec-idle-stderr-", async (dir) => {
+            const bin = writeCli(dir, `
+let ticks = 0;
+const timer = setInterval(() => {
+    process.stderr.write("diagnostic " + ticks + "\\n");
+    if (++ticks >= 10) { clearInterval(timer); process.stdout.write("done\\n"); }
+}, 250);
+`)
+            const result = await execFileCli(bin, [], { idleTimeoutMs: 900 })
+            assert.equal(result.stdout, "done\n")
+        })
+    })
+
     it(
         "cleans an inherited-stdio descendant after a natural root exit",
         { skip: process.platform === "win32" },
