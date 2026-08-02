@@ -127,6 +127,10 @@ export function mapClaudeEvent(
                     resultText:
                         typeof event.result === "string" ? event.result : null,
                     usage: event.usage ?? null,
+                    modelUsage:
+                        event.modelUsage && typeof event.modelUsage === "object"
+                            ? event.modelUsage
+                            : null,
                     totalCostUsd:
                         typeof event.total_cost_usd === "number"
                             ? event.total_cost_usd

@@ -53,6 +53,8 @@ export interface AgentResultData {
     isError: boolean
     resultText: string | null
     usage: Readonly<Record<string, unknown>> | null
+    /** Per-model usage from the CLI result, keyed by resolved model id. */
+    modelUsage?: Readonly<Record<string, unknown>> | null
     totalCostUsd: number | null
     numTurns: number | null
     durationMs: number | null

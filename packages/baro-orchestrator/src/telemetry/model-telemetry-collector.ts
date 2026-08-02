@@ -50,6 +50,8 @@ interface InvocationObservation {
     agentId: string
     backend: string
     model: string | null
+    /** The route's model selector; null when the route named none. */
+    requestedModel: string | null
     status: ModelInvocationStatus
     granularity: ModelInvocationGranularity
     durationMs: Metric
@@ -232,7 +234,7 @@ export class ModelTelemetryCollector extends SerializedObserver {
             round: observation.granularity === "round" ? sequence : null,
             backend: observation.backend,
             provider: observation.provider ?? null,
-            requestedModel: null,
+            requestedModel: observation.requestedModel,
             resolvedModel: observation.model,
             status: observation.status,
             durationMs: observation.durationMs,
@@ -274,7 +276,8 @@ export class ModelTelemetryCollector extends SerializedObserver {
         return {
             agentId: item.agentId,
             backend: route.backend,
-            model: route.model,
+            model: primaryModelOf(item.modelUsage) ?? route.model,
+            requestedModel: requestedOf(route),
             status: item.isError ? "failed" : "succeeded",
             granularity: route.backend === "openai" ? "turn" : "process",
             durationMs: metricFromKeys(
@@ -298,6 +301,7 @@ export class ModelTelemetryCollector extends SerializedObserver {
             agentId: item.agentId,
             backend: route.backend,
             model: route.model,
+            requestedModel: requestedOf(route),
             status: "succeeded",
             granularity: "turn",
             durationMs: unknownMetric("not_reported"),
@@ -318,6 +322,7 @@ export class ModelTelemetryCollector extends SerializedObserver {
             agentId: item.agentId,
             backend: route.backend,
             model: route.model,
+            requestedModel: requestedOf(route),
             status: "succeeded",
             granularity: "round",
             durationMs: unknownMetric("not_reported"),
@@ -349,6 +354,7 @@ export class ModelTelemetryCollector extends SerializedObserver {
                 typeof message.model === "string" && message.model.trim()
                     ? message.model
                     : route.model,
+            requestedModel: requestedOf(route),
             status: "succeeded",
             granularity: "turn",
             durationMs: unknownMetric("not_reported"),
@@ -555,6 +561,38 @@ function record(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value)
         ? (value as Record<string, unknown>)
         : {}
+}
+
+/** "default" is the route-unknown placeholder, not a real request. */
+function requestedOf(route: RouteInfo): string | null {
+    return route.model === "default" ? null : route.model
+}
+
+/**
+ * Resolved model id from the CLI's per-model usage map. With several models
+ * in one process (e.g. a haiku sub-turn), the one with the most output
+ * tokens is the invocation's primary model.
+ */
+function primaryModelOf(
+    modelUsage: Readonly<Record<string, unknown>> | null | undefined,
+): string | null {
+    if (!modelUsage) return null
+    let best: string | null = null
+    let bestOutput = -1
+    for (const [model, raw] of Object.entries(modelUsage)) {
+        const usage = record(raw)
+        const output =
+            typeof usage.outputTokens === "number"
+                ? usage.outputTokens
+                : typeof usage.output_tokens === "number"
+                  ? usage.output_tokens
+                  : 0
+        if (output > bestOutput) {
+            best = model
+            bestOutput = output
+        }
+    }
+    return best
 }
 
 function routeKey(

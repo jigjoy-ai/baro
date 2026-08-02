@@ -44,6 +44,11 @@ describe("ModelTelemetryCollector", () => {
                     cache_creation_input_tokens: 5,
                     output_tokens: 7,
                 },
+                // The sub-turn haiku entry must not displace the primary model.
+                modelUsage: {
+                    "claude-haiku-4-5": { outputTokens: 1 },
+                    "claude-sonnet-5": { outputTokens: 6 },
+                },
                 totalCostUsd: 0.1,
                 numTurns: 1,
                 durationMs: 25,
@@ -63,6 +68,10 @@ describe("ModelTelemetryCollector", () => {
                     cache_read_input_tokens: 90,
                     cache_creation_input_tokens: 5,
                     output_tokens: 7,
+                },
+                modelUsage: {
+                    "claude-haiku-4-5": { outputTokens: 1 },
+                    "claude-sonnet-5": { outputTokens: 6 },
                 },
                 totalCostUsd: 0.1,
                 numTurns: 1,
@@ -157,6 +166,11 @@ describe("ModelTelemetryCollector", () => {
         assert.deepEqual(byStory.get("C")?.tokens.cachedInput, knownMetric(90, "provider_response"))
         assert.deepEqual(byStory.get("C")?.cost.equivalentUsd, knownMetric(0.1, "cli_result"))
         assert.equal(byStory.get("C")?.evidence.providerRequestId, null)
+        // The route is the request; the CLI's modelUsage is the resolution.
+        assert.equal(byStory.get("C")?.requestedModel, "sonnet")
+        assert.equal(byStory.get("C")?.resolvedModel, "claude-sonnet-5")
+        assert.equal(byStory.get("X")?.requestedModel, "gpt-5.3-codex")
+        assert.equal(byStory.get("P")?.requestedModel, "deepseek-v4")
 
         assert.deepEqual(byStory.get("O")?.tokens.inputTotal, knownMetric(100, "provider_response"))
         assert.deepEqual(byStory.get("O")?.cost.providerUsd, unknownMetric("pending_gateway_meter"))
