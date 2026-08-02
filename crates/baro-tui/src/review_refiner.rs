@@ -244,6 +244,7 @@ mod tests {
             acceptance: vec!["Metadata remains observable".into()],
             tests: vec!["cargo test -p baro-tui".into()],
             goal_invariant_ids: vec!["G-A1".into()],
+            writes: None,
             completed,
             model: Some("heavy".into()),
         }

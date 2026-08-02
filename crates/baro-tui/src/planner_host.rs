@@ -383,6 +383,8 @@ pub(crate) struct PrdStoryOutput {
     #[serde(default, rename = "goalInvariantIds")]
     goal_invariant_ids: Vec<String>,
     #[serde(default)]
+    writes: Option<Vec<String>>,
+    #[serde(default)]
     model: Option<String>,
 }
 
@@ -402,6 +404,7 @@ impl From<PrdStoryOutput> for ReviewStory {
             acceptance: story.acceptance,
             tests: story.tests,
             goal_invariant_ids: story.goal_invariant_ids,
+            writes: story.writes,
             completed: false,
             model: story.model,
         }

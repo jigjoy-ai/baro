@@ -1140,6 +1140,7 @@ mod tests {
                 acceptance: Vec::new(),
                 tests: Vec::new(),
                 goal_invariant_ids: Vec::new(),
+                writes: None,
                 completed: false,
                 model: None,
             }]);

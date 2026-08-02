@@ -46,6 +46,59 @@ export interface PrdStory {
     model?: string
 }
 
+/**
+ * Every PrdStory field, as one runtime list. A story crosses ~8 independently
+ * maintained field lists across two hosts (planner prompt, fragment schema,
+ * MCP tool schema, graph snapshots, Rust serde, normalizePrd, final-PRD
+ * parser); `goalInvariantIds` and `writes` were each silently shed by most of
+ * them, one lost run at a time. The boundary-conformance test walks every one
+ * of those lists against these constants — add a field HERE first and the
+ * test names every gate that still doesn't know it.
+ */
+export const PRD_STORY_FIELDS = [
+    "id",
+    "priority",
+    "title",
+    "description",
+    "dependsOn",
+    "writes",
+    "retries",
+    "acceptance",
+    "tests",
+    "goalInvariantIds",
+    "passes",
+    "completedAt",
+    "durationSecs",
+    "model",
+] as const satisfies readonly (keyof PrdStory)[]
+
+// Compile-time exhaustiveness: adding a PrdStory field without listing it
+// above refuses to build.
+type MissingPrdStoryField = Exclude<
+    keyof PrdStory,
+    (typeof PRD_STORY_FIELDS)[number]
+>
+const _prdStoryFieldsComplete: MissingPrdStoryField extends never
+    ? true
+    : ["PRD_STORY_FIELDS is missing", MissingPrdStoryField] = true
+void _prdStoryFieldsComplete
+
+/** The subset a planner may author; execution state (passes, completedAt,
+ * durationSecs) is host-owned and excluded from planner-facing gates. */
+export const PLANNER_AUTHORED_STORY_FIELDS = [
+    "id",
+    "priority",
+    "title",
+    "description",
+    "dependsOn",
+    "writes",
+    "retries",
+    "acceptance",
+    "tests",
+    "goalInvariantIds",
+    "model",
+] as const satisfies readonly (keyof PrdStory)[]
+
 /** Intake's (or the user's) execution-mode decision, stamped by run-planner. */
 export interface PrdExecutionMode {
     mode: "focused" | "sequential" | "parallel"

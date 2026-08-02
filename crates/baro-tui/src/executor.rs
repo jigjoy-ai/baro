@@ -69,6 +69,10 @@ pub struct PrdStory {
     pub description: String,
     #[serde(rename = "dependsOn", default)]
     pub depends_on: Vec<String>,
+    // The ninth hand-written story field list; serde silently drops what it
+    // does not name, so every PRD round-trip through this host shed `writes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writes: Option<Vec<String>>,
     #[serde(default = "default_retries")]
     pub retries: u32,
     #[serde(default)]
@@ -327,6 +331,7 @@ fn prd_story_from_review(story: &ReviewStory) -> PrdStory {
         acceptance: story.acceptance.clone(),
         tests: story.tests.clone(),
         goal_invariant_ids: story.goal_invariant_ids.clone(),
+        writes: story.writes.clone(),
         passes: false,
         completed_at: None,
         duration_secs: None,
@@ -419,6 +424,7 @@ mod tests {
             ],
             tests: vec!["cargo test -p baro-tui".to_string()],
             goal_invariant_ids: vec!["G-A1".to_string(), "G-C1".to_string()],
+            writes: None,
             completed: false,
             model: Some("heavy".to_string()),
         }];
@@ -499,6 +505,7 @@ mod tests {
             acceptance: vec!["new behavior".into()],
             tests: vec!["cargo test".into()],
             goal_invariant_ids: vec!["G-A1".into()],
+            writes: None,
             completed: true, // untrusted planner output must not grant a pass
             model: Some("light".into()),
         }];
@@ -560,6 +567,7 @@ mod tests {
             acceptance: vec!["refined".into()],
             tests: vec!["test refined".into()],
             goal_invariant_ids: vec![],
+            writes: None,
             completed: false,
             model: Some("standard".into()),
         };

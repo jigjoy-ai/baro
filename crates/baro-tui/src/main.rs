@@ -175,6 +175,7 @@ fn review_stories_from_prd(prd: &executor::PrdFile) -> Vec<ReviewStory> {
             acceptance: s.acceptance.clone(),
             tests: s.tests.clone(),
             goal_invariant_ids: s.goal_invariant_ids.clone(),
+            writes: s.writes.clone(),
             completed: s.passes,
             model: s.model.clone(),
         })
