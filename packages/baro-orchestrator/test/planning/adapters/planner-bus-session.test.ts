@@ -261,6 +261,47 @@ describe("planner bus session", () => {
         })
     })
 
+    it("adopts the bootstrap-seeded planning latch instead of minting its own", async () => {
+        await withTempDir("baro-planner-bus-seeded-", async (dir) => {
+            const env = new AgenticEnvironment("planner-bus-seeded")
+            const feed = new StubFeed()
+            feed.join(env)
+
+            const result = await runPlannerBusSession({
+                runId: "run-bus-2",
+                cwd: dir,
+                env,
+                feed,
+                goalEnvelope: ENVELOPE,
+                claudeBin: writeFakeClaude(dir),
+                existingPlanningId: "planning-rust-seeded-1",
+                mcpServer: {
+                    command: process.execPath,
+                    args: [
+                        "--import",
+                        TSX_LOADER,
+                        RUN_PLANNER_ENTRY,
+                        PROGRESSIVE_PLANNER_MCP_MODE,
+                    ],
+                },
+            })
+
+            assert.deepEqual(feed.failures, [])
+            assert.equal(result.status, "completed")
+            // The Rust bootstrap already installed the latch; a second open
+            // (or a fresh id) would be rejected as planning_id_mismatch.
+            assert.equal(feed.opened.length, 0)
+            assert.equal(
+                feed.fragments[0]!.planning_id,
+                "planning-rust-seeded-1",
+            )
+            assert.equal(
+                feed.completions[0]!.planning_id,
+                "planning-rust-seeded-1",
+            )
+        })
+    })
+
     it("renders the trusted envelope as the planner goal", () => {
         const text = goalTextFromEnvelope(ENVELOPE)
         assert.match(text, /^Exercise the bus planner session end to end\./)

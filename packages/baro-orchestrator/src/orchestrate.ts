@@ -1722,6 +1722,7 @@ export async function orchestrate(
                     integrationAuthority: gitCoordinator ?? undefined,
                 })
                 awareness.join(env)
+                const seededPlanning = busPrd.runtimeGraph?.planning
                 busPlannerDone = runPlannerBusSession({
                     runId,
                     cwd: config.cwd,
@@ -1732,6 +1733,10 @@ export async function orchestrate(
                     model: config.busPlanner.model,
                     effort: config.busPlanner.effort,
                     claudeBin: config.busPlanner.claudeBin,
+                    existingPlanningId:
+                        seededPlanning?.status === "open"
+                            ? seededPlanning.planningId
+                            : undefined,
                 }).catch((error: unknown) => {
                     const reason =
                         error instanceof Error ? error.message : String(error)

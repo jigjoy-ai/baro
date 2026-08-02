@@ -61,6 +61,11 @@ export interface PlannerBusSessionOptions {
     idleTimeoutMs?: number
     /** Test override; defaults to this process entry serving the MCP mode. */
     mcpServer?: PlannerMcpServerCommand
+    /** The Rust bootstrap PRD pre-seeds the planning latch with its own
+     *  planningId; fragments must carry THAT id or the Board rejects them
+     *  with planning_id_mismatch. When set, the session adopts it and skips
+     *  its own planning_open. */
+    existingPlanningId?: string
 }
 
 /** The planner's stable bus identity; awareness runners address this. */
@@ -176,7 +181,8 @@ export interface PlannerBusSessionResult {
 export async function runPlannerBusSession(
     opts: PlannerBusSessionOptions,
 ): Promise<PlannerBusSessionResult> {
-    const planningId = `planning-bus-${randomUUID().slice(0, 13)}`
+    const planningId =
+        opts.existingPlanningId ?? `planning-bus-${randomUUID().slice(0, 13)}`
     const agentId = plannerBusAgentId(opts.runId)
     const goal = goalTextFromEnvelope(opts.goalEnvelope)
     const modeContract =
@@ -186,11 +192,13 @@ export async function runPlannerBusSession(
             decisionDocument: opts.decisionDocument,
         })
 
-    opts.feed.open({
-        type: "planning_open",
-        run_id: opts.runId,
-        planning_id: planningId,
-    })
+    if (!opts.existingPlanningId) {
+        opts.feed.open({
+            type: "planning_open",
+            run_id: opts.runId,
+            planning_id: planningId,
+        })
+    }
 
     const fail = (code: string, reason: string): PlannerBusSessionResult => {
         opts.feed.failed({
