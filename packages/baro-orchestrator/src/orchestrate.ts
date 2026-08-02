@@ -91,6 +91,11 @@ import { MemoryLibrarian } from "./execution/memory-librarian.js"
 import { ModelTelemetryCollector } from "./telemetry/model-telemetry-collector.js"
 import { Operator } from "./execution/operator.js"
 import { PlanningFeed } from "./execution/planning-feed.js"
+import { PlannerAwarenessRunner } from "./execution/planner-awareness-runner.js"
+import {
+    plannerBusAgentId,
+    runPlannerBusSession,
+} from "./planning/adapters/planner-bus-session.js"
 import { RunVerifier } from "./verification/run-verifier.js"
 import { Sentry } from "./execution/sentry.js"
 import { StoryFactory } from "./market/story-factory.js"
@@ -373,6 +378,15 @@ export interface OrchestrateConfig {
     /** Opt-in, collective-only Planner stream identity. Omit to preserve the
      * existing full-plan startup barrier exactly. */
     progressivePlanningId?: string
+    /** Run the progressive planner INSIDE the orchestrator as a bus
+     * participant (BARO_PLANNER_BUS): authoritative tool receipts, execution
+     * awareness on its open stdin, no subprocess wire lane. Requires a
+     * PRD with a trusted goal envelope; collective mode only. */
+    busPlanner?: {
+        model?: string
+        effort?: string
+        claudeBin?: string
+    }
     /** Called only after the Board has opened/persisted the planning latch. */
     onPlanningFeedReady?: (feed: PlanningFeed) => void
     /** Extra participants to attach to the bus before the run starts. */
@@ -1181,7 +1195,7 @@ export async function orchestrate(
         finalizer?.setCoordinationAuthority(conductor)
         coordinationDone = conductor.done
     } else {
-        if (config.progressivePlanningId) {
+        if (config.progressivePlanningId || config.busPlanner) {
             planningFeed = new PlanningFeed()
         }
         const collectiveParallel = useGit ? effectiveParallel : 1
@@ -1674,13 +1688,69 @@ export async function orchestrate(
         operator,
         RunStartRequest.create({ reason: "orchestrate" }),
     )
+    let busPlannerDone: Promise<unknown> | null = null
     if (planningFeed && collectiveBoard) {
         // Do not expose the private ingress until start() has loaded the
         // bootstrap PRD and atomically installed the planning-open latch.
         await collectiveBoard.idle()
         config.onPlanningFeedReady?.(planningFeed)
+        if (config.busPlanner) {
+            const busPrd = loadPrd(config.prdPath)
+            if (!busPrd.goalEnvelope) {
+                // Close the stream we will never feed: an orphaned planning
+                // latch would stall the Board forever.
+                process.stderr.write(
+                    "[planner-bus] no trusted goal envelope in the PRD — bus planner not started\n",
+                )
+                planningFeed.open({
+                    type: "planning_open",
+                    run_id: runId,
+                    planning_id: "planning-bus-unavailable",
+                })
+                planningFeed.failed({
+                    type: "plan_failed",
+                    run_id: runId,
+                    planning_id: "planning-bus-unavailable",
+                    code: "planner_failed",
+                    reason: "bus planner requires a trusted goal envelope in the PRD",
+                })
+            } else {
+                const feed = planningFeed
+                const awareness = new PlannerAwarenessRunner({
+                    runId,
+                    plannerAgentId: plannerBusAgentId(runId),
+                    integrationAuthority: gitCoordinator ?? undefined,
+                })
+                awareness.join(env)
+                busPlannerDone = runPlannerBusSession({
+                    runId,
+                    cwd: config.cwd,
+                    env,
+                    feed,
+                    goalEnvelope: busPrd.goalEnvelope,
+                    decisionDocument: busPrd.decisionDocument,
+                    model: config.busPlanner.model,
+                    effort: config.busPlanner.effort,
+                    claudeBin: config.busPlanner.claudeBin,
+                }).catch((error: unknown) => {
+                    const reason =
+                        error instanceof Error ? error.message : String(error)
+                    process.stderr.write(`[planner-bus] session crashed: ${reason}\n`)
+                    feed.failed({
+                        type: "plan_failed",
+                        run_id: runId,
+                        planning_id: "planning-bus-crashed",
+                        code: "planner_failed",
+                        reason,
+                    })
+                }).finally(() => {
+                    awareness.leave(env)
+                })
+            }
+        }
     }
     const summary = await coordinationDone
+    if (busPlannerDone) await busPlannerDone
     if (coordinationMode === "collective" && useGit) {
         baseSha = gitCoordinator?.runBaseSha() ?? null
     }

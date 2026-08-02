@@ -29,9 +29,14 @@ export interface PlannerOpenAIProgressiveConfig {
     trustedGoalEnvelope?: GoalEnvelope
     /** Architect-authored document used only with the host-owned goal. */
     trustedDecisionDocument?: string
+    /** May return host feedback (authoritative admission: graph version,
+     *  dropped edges) that is merged into the tool result the planner sees. */
     publish(
         event: PlannerOpenAIPlanFragmentEvent,
-    ): void | Promise<void>
+    ):
+        | void
+        | Record<string, unknown>
+        | Promise<void | Record<string, unknown>>
 }
 
 /** Small policy surface consumed by the main Planner inference loop. */
@@ -234,7 +239,7 @@ export function createPlannerProgressivePublisher(
                 ordinal: admission.ordinal,
                 stories: fragment.stories.map(snapshotPlannerStory),
             }
-            await config.publish(event)
+            const hostFeedback = await config.publish(event)
             return {
                 ok: true,
                 disposition: admission.disposition,
@@ -243,6 +248,7 @@ export function createPlannerProgressivePublisher(
                 fingerprint: admission.fingerprint,
                 storyIds: admission.admittedStoryIds,
                 nextOrdinal: admission.nextOrdinal,
+                ...(hostFeedback ?? {}),
             }
         },
         reconcileFinalCandidate(candidate: string) {

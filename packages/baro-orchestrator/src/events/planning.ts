@@ -36,6 +36,10 @@ export interface PlanFragmentAdmittedData {
     graphVersion: number
     storyIds: readonly string[]
     replay: boolean
+    /** Dependency edges the host pruned for lack of a supporting file, as
+     * "from->to" labels. Carried so the planner can see what was actually
+     * admitted instead of learning it from a stderr file nobody reads. */
+    droppedEdges?: readonly string[]
 }
 
 export const PlanFragmentAdmitted =

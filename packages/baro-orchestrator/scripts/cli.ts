@@ -20,6 +20,10 @@ import { configureProviderOwnershipManifest } from "../src/provider-ownership-ma
 import type { Operator } from "../src/execution/operator.js"
 import type { PlanningFeed } from "../src/execution/planning-feed.js"
 import { handleStdinCommand } from "../src/stdin-commands.js"
+import {
+    parseProgressivePlannerMcpInvocation,
+    runProgressivePlannerMcpServer,
+} from "../src/planning/adapters/planner-harness-progressive.js"
 import { subscribeCommands, type BaroCommand } from "../src/tui-protocol.js"
 import type { CoordinationMode } from "../src/semantic-events.js"
 import { loadPrd } from "../src/prd.js"
@@ -413,6 +417,14 @@ function printHelp(): void {
 }
 
 async function main(): Promise<void> {
+    // The bus planner spawns this same entry as its stdio MCP server child.
+    const mcpInvocation = parseProgressivePlannerMcpInvocation(
+        process.argv.slice(2),
+    )
+    if (mcpInvocation) {
+        await runProgressivePlannerMcpServer(mcpInvocation)
+        return
+    }
     const args = parseArgs(process.argv.slice(2))
     if (args.help) {
         printHelp()
@@ -738,6 +750,17 @@ async function main(): Promise<void> {
             operatorRef = operator
         },
         progressivePlanningId,
+        busPlanner:
+            process.env.BARO_PLANNER_BUS === "1" &&
+            coordinationMode === "collective"
+                ? {
+                      model: process.env.BARO_PLANNER_BUS_MODEL || undefined,
+                      effort:
+                          process.env.BARO_PLANNER_BUS_EFFORT ||
+                          args.effort ||
+                          undefined,
+                  }
+                : undefined,
         onPlanningFeedReady: (planningFeed) => {
             planningFeedRef = planningFeed
             for (const command of pendingPlanningCommands.splice(0)) {

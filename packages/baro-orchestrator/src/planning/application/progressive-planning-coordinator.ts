@@ -270,6 +270,7 @@ export class ProgressivePlanningCoordinator {
         /** Exactly what the planner published, kept out of every host repair. */
         let authored: PrdStory[] = []
         let fingerprint: string
+        let droppedEdges: string[] = []
         try {
             const envelope = {
                 schemaVersion: 1,
@@ -316,10 +317,13 @@ export class ProgressivePlanningCoordinator {
                 ),
                 ...repairedStories,
             ])
+            droppedEdges = prunedAll.removed.map(
+                (edge) => `${edge.from}->${edge.to}`,
+            )
             if (prunedAll.removed.length > 0) {
                 process.stderr.write(
                     `[progressive-planning] dropped ${prunedAll.removed.length} dependency edge(s) with no shared file: ` +
-                        `${prunedAll.removed.map((edge) => `${edge.from}->${edge.to}`).join(", ")}\n`,
+                        `${droppedEdges.join(", ")}\n`,
                 )
             }
             validated = {
@@ -474,6 +478,7 @@ export class ProgressivePlanningCoordinator {
                 graphVersion: outcome.event.data.graphVersion,
                 storyIds: [...outcome.applied.addedStoryIds],
                 replay: false,
+                ...(droppedEdges.length > 0 ? { droppedEdges } : {}),
             }),
         )
         const current = this.opts.host.snapshot()

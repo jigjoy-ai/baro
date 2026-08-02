@@ -3969,6 +3969,14 @@ async fn begin_progressive_execution(
         headless,
         Some(planning_id.clone()),
     );
+    // BARO_PLANNER_BUS=1: the orchestrator hosts the planner on its own bus
+    // (authoritative receipts, execution awareness). No subprocess planner,
+    // no stdout wire lane, no host-issued planning_open — the bus session
+    // opens and closes its own planning stream.
+    if std::env::var("BARO_PLANNER_BUS").ok().as_deref() == Some("1") {
+        let _ = spec;
+        return Ok(());
+    }
     // Queue the open command immediately. The TS CLI has a bounded startup
     // buffer until the Board persists and exposes its PlanningFeed authority.
     orchestrator_stdin
