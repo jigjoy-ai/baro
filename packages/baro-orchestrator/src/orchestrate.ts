@@ -1730,6 +1730,20 @@ export async function orchestrate(
                     feed,
                     goalEnvelope: busPrd.goalEnvelope,
                     decisionDocument: busPrd.decisionDocument,
+                    // The Rust intake already decided the execution shape and
+                    // stamped it into the bootstrap PRD; falling back to the
+                    // heuristic here once collapsed a whole migration into a
+                    // single focused story.
+                    modeContract: busPrd.executionMode
+                        ? {
+                              mode: busPrd.executionMode.mode,
+                              confidence: busPrd.executionMode.confidence ?? 1,
+                              reason: busPrd.executionMode.reason,
+                              maxStories: busPrd.executionMode.maxStories,
+                              parallelism: busPrd.executionMode.parallelism,
+                              source: busPrd.executionMode.source,
+                          }
+                        : undefined,
                     model: config.busPlanner.model,
                     effort: config.busPlanner.effort,
                     claudeBin: config.busPlanner.claudeBin,
