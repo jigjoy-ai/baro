@@ -627,12 +627,20 @@ function boundedText(value: unknown, maximum: number, label: string): string {
         throw new ArchitectOutcomeContractError(`${label} must be a string`)
     }
     const normalized = value.replace(/\r\n?/g, "\n").trim()
-    if (
-        normalized.length === 0 ||
-        normalized.length > maximum ||
-        /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(normalized)
-    ) {
-        throw new ArchitectOutcomeContractError(`${label} is empty, too long, or unsafe`)
+    // Name the actual violation: "empty, too long, or unsafe" sent the model
+    // repairing blind (run 13 died on a length it was never told).
+    if (normalized.length === 0) {
+        throw new ArchitectOutcomeContractError(`${label} is empty`)
+    }
+    if (normalized.length > maximum) {
+        throw new ArchitectOutcomeContractError(
+            `${label} is ${normalized.length} characters; the limit is ${maximum} — restate it shorter`,
+        )
+    }
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(normalized)) {
+        throw new ArchitectOutcomeContractError(
+            `${label} contains forbidden control characters`,
+        )
     }
     return normalized
 }

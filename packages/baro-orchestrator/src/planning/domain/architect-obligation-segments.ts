@@ -88,7 +88,7 @@ export interface ArchitectObligationSegmentRequest {
     readonly batchId: string
     /** One-based ordinal of the original three-invariant batch. */
     readonly batchOrdinal: number
-    readonly attempt: 1 | 2
+    readonly attempt: 1 | 2 | 3
     readonly invariantIds: readonly string[]
 }
 
@@ -113,7 +113,7 @@ export type ArchitectObligationSegmentProgress = Readonly<{
     batchId: string
     batchOrdinal: number
     invariantIds: readonly string[]
-    attempt?: 1 | 2
+    attempt?: 1 | 2 | 3
     obligationCount?: number
     childBatchIds?: readonly [string, string]
 }>
@@ -230,7 +230,7 @@ async function compileBatch(input: CompileBatchInput): Promise<ArchitectureOblig
     // truncation repair halves the ADVERTISED quota so the retry is short by
     // construction. Validation still accepts up to the real batch quota.
     let requestedMaxObligations = input.maxObligations
-    for (const attempt of [1, 2] as const) {
+    for (const attempt of [1, 2, 3] as const) {
         throwIfAborted(input.options.signal)
         emitProgress(input, {
             type: "batch_started",
@@ -275,9 +275,9 @@ async function compileBatch(input: CompileBatchInput): Promise<ArchitectureOblig
                     Math.min(3, Math.floor(requestedMaxObligations / 2)),
                 )
             }
-            if (attempt === 2) {
+            if (attempt === 3) {
                 throw new ArchitectObligationSegmentError(
-                    `architect obligation batch ${input.batchId} remained invalid after one repair: ${safeReason(error)}`,
+                    `architect obligation batch ${input.batchId} remained invalid after two repairs: ${safeReason(error)}`,
                     { cause: error },
                 )
             }
@@ -350,7 +350,7 @@ function emitProgress(
 
 function buildRequest(
     input: CompileBatchInput,
-    attempt: 1 | 2,
+    attempt: 1 | 2 | 3,
     repairReason?: string,
     requestedMaxObligations?: number,
 ): ArchitectObligationSegmentRequest {
@@ -467,8 +467,28 @@ function parseSegmentResponse(
             !exactRecord(candidate, DRAFT_KEYS) &&
             !exactRecord(candidate, [...DRAFT_KEYS, "id"])
         ) {
+            // Name the actual drift: this error used to blame "an id" for
+            // every shape defect, so the repair attempt fixed the wrong
+            // thing (run 16 died on a draft whose defect was never an id).
+            const keys =
+                candidate && typeof candidate === "object"
+                    ? Object.keys(candidate as Record<string, unknown>)
+                    : []
+            const missing = DRAFT_KEYS.filter((key) => !keys.includes(key))
+            const unexpected = keys.filter(
+                (key) => key !== "id" && !(DRAFT_KEYS as readonly string[]).includes(key),
+            )
+            const detail = [
+                missing.length > 0 ? `missing: ${missing.join(", ")}` : null,
+                unexpected.length > 0
+                    ? `unexpected: ${unexpected.join(", ")}`
+                    : null,
+            ]
+                .filter(Boolean)
+                .join("; ")
             throw new ArchitectObligationSegmentError(
-                `architect obligation draft ${index + 1} must use the exact shape without an id`,
+                `architect obligation draft ${index + 1} must use exactly the fields ` +
+                    `${DRAFT_KEYS.join(", ")}${detail ? ` (${detail})` : ""}`,
             )
         }
         draftDecisionIds.push(validateDraftDecisionIds(

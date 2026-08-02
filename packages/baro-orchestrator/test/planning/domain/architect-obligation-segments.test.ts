@@ -388,7 +388,7 @@ describe("segmented Architect obligation compiler", () => {
         })
 
         assert.deepEqual(requests.map(({ attempt }) => attempt), [1, 2])
-        assert.match(requests[1]!.userPrompt, /exact shape without an id/u)
+        assert.match(requests[1]!.userPrompt, /must use exactly the fields .*unexpected: priority/u)
         assert.equal(result.contract.obligations[0]!.id, "O-001")
         assert.deepEqual(
             progress.map(({ type }) => type),
@@ -405,9 +405,9 @@ describe("segmented Architect obligation compiler", () => {
                     return "not-json"
                 },
             }),
-            /remained invalid after one repair/u,
+            /remained invalid after two repairs/u,
         )
-        assert.equal(calls, 2)
+        assert.equal(calls, 3)
     })
 
     it("rejects foreign invariant ids and requires complete target coverage", async () => {
@@ -434,7 +434,7 @@ describe("segmented Architect obligation compiler", () => {
                     return true
                 },
             )
-            assert.equal(calls, 2)
+            assert.equal(calls, 3)
         }
     })
 
@@ -452,7 +452,7 @@ describe("segmented Architect obligation compiler", () => {
                 }),
                 /invalid adrIds|unknown ADR/u,
             )
-            assert.equal(calls, 2)
+            assert.equal(calls, 3)
         }
     })
 

@@ -41,6 +41,7 @@ import { providerCallTimeoutError } from "../src/harness/openai/runtime.js"
 import { emitPlanLine } from "../src/planning/application/plan-events.js"
 import {
     appendRepairNote,
+    ArchitectOutcomeContractError,
     outcomeByteOverrun,
     parseArchitectOutcome,
     validateArchitectOutcomeCorrelation,
@@ -394,24 +395,43 @@ async function main(): Promise<void> {
                     decisionOnly: true,
                 })
             } catch (error) {
-                // Only length is worth another ten minutes: the decisions were
-                // sound, there were simply too many bytes of them. Every other
-                // contract breach means the content is wrong, and repeating the
-                // phase would just buy the same answer at the same price.
+                // A named violation is worth one more turn: since the
+                // contract gates started saying WHAT is wrong (draft, field,
+                // length), a corrective retry converges — a third of the
+                // zod-experiment runs died here on defects the model was
+                // never told about.
                 const overrun = outcomeByteOverrun(error)
-                if (!overrun || Date.now() - t0 >= architectPhaseBudgetMs(args)) {
+                const contractReason =
+                    !overrun && error instanceof ArchitectOutcomeContractError
+                        ? error.message
+                        : null
+                if (
+                    (!overrun && !contractReason) ||
+                    Date.now() - t0 >= architectPhaseBudgetMs(args)
+                ) {
                     throw error
                 }
-                process.stderr.write(
-                    `[run-architect] decision outcome was ${overrun.bytes} bytes against a ` +
-                        `${overrun.limit} byte limit; asking for the same decisions, stated shorter\n`,
-                )
-                result = await issueDecisionPhase(
-                    `Your previous decision-phase outcome was ${overrun.bytes} bytes of UTF-8, ` +
-                        `over the ${overrun.limit} byte limit, and was rejected unread. Send the ` +
-                        `same decisions again with the same ids and ordering, stated more ` +
-                        `briefly — drop restatement and background, keep every choice.`,
-                )
+                if (overrun) {
+                    process.stderr.write(
+                        `[run-architect] decision outcome was ${overrun.bytes} bytes against a ` +
+                            `${overrun.limit} byte limit; asking for the same decisions, stated shorter\n`,
+                    )
+                    result = await issueDecisionPhase(
+                        `Your previous decision-phase outcome was ${overrun.bytes} bytes of UTF-8, ` +
+                            `over the ${overrun.limit} byte limit, and was rejected unread. Send the ` +
+                            `same decisions again with the same ids and ordering, stated more ` +
+                            `briefly — drop restatement and background, keep every choice.`,
+                    )
+                } else {
+                    process.stderr.write(
+                        `[run-architect] decision outcome rejected (${contractReason}); asking for a corrected restatement\n`,
+                    )
+                    result = await issueDecisionPhase(
+                        `Your previous decision-phase outcome was rejected: ${contractReason}\n` +
+                            `Fix exactly that and resend the complete outcome — the same ` +
+                            `decisions, ids and ordering, with everything else unchanged.`,
+                    )
+                }
                 decisionOutcome = parseArchitectOutcome(result, {
                     decisionOnly: true,
                 })
