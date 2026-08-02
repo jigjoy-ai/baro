@@ -1729,6 +1729,11 @@ export async function orchestrate(
                     env,
                     feed,
                     goalEnvelope: busPrd.goalEnvelope,
+                    prdMetadata: {
+                        project: busPrd.project,
+                        branchName: busPrd.branchName,
+                        description: busPrd.description,
+                    },
                     decisionDocument: busPrd.decisionDocument,
                     // The Rust intake already decided the execution shape and
                     // stamped it into the bootstrap PRD; falling back to the

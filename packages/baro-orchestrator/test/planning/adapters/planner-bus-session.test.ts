@@ -266,6 +266,11 @@ describe("planner bus session", () => {
                 env,
                 feed,
                 goalEnvelope: ENVELOPE,
+                prdMetadata: {
+                    project: "baro",
+                    branchName: "bootstrap-branch",
+                    description: "Host-owned metadata.",
+                },
                 claudeBin: writeFakeClaude(dir),
                 mcpServer: {
                     command: process.execPath,
@@ -285,9 +290,13 @@ describe("planner bus session", () => {
             assert.equal(feed.fragments[0]!.fragment_id, "foundation")
             assert.equal(feed.completions.length, 1)
             const finalPrd = feed.completions[0]!.final_prd as {
+                project: string
+                branchName: string
                 userStories: Array<{ id: string }>
             }
             assert.equal(finalPrd.userStories[0]!.id, "S1")
+            // The model's metadata is ignored; the host's bootstrap wins.
+            assert.equal(finalPrd.branchName, "bootstrap-branch")
         })
     })
 
@@ -303,6 +312,11 @@ describe("planner bus session", () => {
                 env,
                 feed,
                 goalEnvelope: ENVELOPE,
+                prdMetadata: {
+                    project: "baro",
+                    branchName: "bootstrap-branch",
+                    description: "Host-owned metadata.",
+                },
                 claudeBin: writeFakeClaude(dir, { fumbleFinalization: true }),
                 mcpServer: {
                     command: process.execPath,
@@ -333,6 +347,11 @@ describe("planner bus session", () => {
                 env,
                 feed,
                 goalEnvelope: ENVELOPE,
+                prdMetadata: {
+                    project: "baro",
+                    branchName: "bootstrap-branch",
+                    description: "Host-owned metadata.",
+                },
                 claudeBin: writeFakeClaude(dir),
                 existingPlanningId: "planning-rust-seeded-1",
                 mcpServer: {
