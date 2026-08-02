@@ -669,46 +669,9 @@ describe("OpenAIStoryAgent", () => {
         })
     })
 
-    it("enforces the story attempt timeout across a pending native inference", async () => {
-        await withTempDir("openai-story-agent-attempt-timeout-", async (dir) => {
-            const agent = new OpenAIStoryAgent(
-                {
-                    id: "story-openai-attempt-timeout",
-                    prompt: "finish the story",
-                    cwd: dir,
-                    retries: 2,
-                    timeoutSecs: 0.01,
-                    quietTimeoutMs: 1,
-                    maxTurns: 1,
-                },
-                {
-                    model: "fake-model",
-                    maxRoundsPerTurn: 2,
-                    perRoundTimeoutSecs: 60,
-                },
-            )
-            Object.defineProperty(agent, "runRound", {
-                value: () => new Promise<never>(() => {}),
-            })
-            const env = captureEnv()
-
-            const outcome = await Promise.race([
-                agent.run(env),
-                new Promise<never>((_resolve, reject) =>
-                    setTimeout(
-                        () => reject(new Error("attempt timeout did not settle")),
-                        500,
-                    ),
-                ),
-            ])
-
-            assert.equal(outcome.success, false)
-            assert.equal(outcome.attempts, 1)
-            assert.equal(outcome.error, "attempt 1 timeout after 0.01s")
-            assert.equal(agent.getPhase(), "aborted")
-        })
-    })
-
+    // The attempt-level wall clock is gone: a pending native inference is
+    // bounded by the per-round timeout alone (covered below), so a long,
+    // visibly progressing attempt is never killed.
     it("does not overlap retries after a Mozaik inference-round timeout", async () => {
         await withTempDir("openai-story-agent-round-timeout-", async (dir) => {
             const agent = new OpenAIStoryAgent(
@@ -745,7 +708,7 @@ describe("OpenAIStoryAgent", () => {
         })
     })
 
-    it("cancels a native bash child and skips later writes when the story attempt times out", async () => {
+    it("cancels a native bash child and skips later writes when the hard kill timer fires", async () => {
         await withTempDir("openai-story-agent-bash-timeout-", async (dir) => {
             const marker = join(dir, "must-not-run-after-abort.txt")
             const agent = new OpenAIStoryAgent(
@@ -754,7 +717,8 @@ describe("OpenAIStoryAgent", () => {
                     prompt: "run a slow command",
                     cwd: dir,
                     retries: 0,
-                    timeoutSecs: 0.03,
+                    timeoutSecs: 60,
+                    hardTimeoutSecs: 0.03,
                     quietTimeoutMs: 1,
                     maxTurns: 1,
                 },
@@ -799,7 +763,7 @@ describe("OpenAIStoryAgent", () => {
 
             assert.equal(outcome.success, false)
             assert.equal(outcome.attempts, 1)
-            assert.equal(outcome.error, "attempt 1 timeout after 0.03s")
+            assert.equal(outcome.error, "hard timeout (0.03s) hit")
             assert.equal(agent.getPhase(), "aborted")
             assert.equal(existsSync(marker), false)
         })

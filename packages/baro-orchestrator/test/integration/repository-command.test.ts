@@ -168,7 +168,7 @@ setInterval(() => {}, 10_000);
             assert.ok(error instanceof RepositoryCommandError)
             assert.equal(error.timedOut, true)
             assert.equal(error.killed, true)
-            assert.match(error.message, /timed out after 2000ms/u)
+            assert.match(error.message, /produced no output for 2000ms/u)
             const releaseSecond = await within(contender)
             releaseSecond()
 
@@ -299,7 +299,7 @@ if (args[0] === "rev-parse" && args[1] === "HEAD") {
                 assert.equal(failure.data.leaseId, "lease-timeout")
                 assert.match(
                     failure.data.error,
-                    /repository command "git (?:rev-parse|worktree)" timed out/u,
+                    /repository command "git (?:rev-parse|worktree)" produced no output/u,
                 )
                 assert.deepEqual(failure.data.failure, {
                     kind: "infrastructure",

@@ -392,20 +392,10 @@ export class OpenAIStoryAgent extends BaseObserver {
             }
 
             attempts += 1
-            const attemptTimer =
-                this.spec.timeoutSecs > 0
-                    ? setTimeout(
-                          () =>
-                              this.abortWithReason(
-                                  `attempt ${attempts} timeout after ${this.spec.timeoutSecs}s`,
-                                  {
-                                      kind: "infrastructure",
-                                      code: "command_timeout",
-                                  },
-                              ),
-                          this.spec.timeoutSecs * 1000,
-                      )
-                    : null
+            // No attempt-level wall clock: every inference round is already
+            // individually bounded (perRoundTimeoutSecs) and round count is
+            // capped per turn, so a hung provider call cannot stall forever —
+            // while a long, visibly progressing attempt is never killed.
             try {
                 const result = await this.runOneAttempt(attempts)
                 if (this.currentPhase === "done") {
@@ -428,8 +418,6 @@ export class OpenAIStoryAgent extends BaseObserver {
                     : detail || "OpenAI story attempt failed"
                 this.transition("failed", lastError)
                 if (boardOwnsRecovery(lastFailure)) break
-            } finally {
-                if (attemptTimer) clearTimeout(attemptTimer)
             }
         }
 

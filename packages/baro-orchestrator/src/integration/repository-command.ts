@@ -62,10 +62,11 @@ export class RepositoryCommandError extends Error {
         cause: unknown,
     ) {
         const source = asCommandFailure(cause)
-        const timedOut = source.killed === true && /timed out/iu.test(source.message)
+        const timedOut = source.killed === true &&
+            /timed out|no output/iu.test(source.message)
         const operation = repositoryOperation(command, args)
         const detail = timedOut
-            ? `timed out after ${options.timeoutMs}ms`
+            ? `produced no output for ${options.timeoutMs}ms`
             : source.message
         super(
             `repository command ${operation} ${detail} ` +
@@ -120,7 +121,9 @@ export const runRepositoryCommand: RepositoryCommand = async (
             cwd: options.cwd,
             env: options.env,
             signal: options.signal,
-            timeout: timeoutMs,
+            // Idle window: git that streams progress (fetch/push/checkout)
+            // may run longer; only a silent, likely lock-wedged command dies.
+            idleTimeoutMs: timeoutMs,
             maxBuffer,
             terminationGraceMs: options.terminationGraceMs,
         })
@@ -153,7 +156,7 @@ export const runRepositoryCommandBuffer: RepositoryBufferCommand = async (
             cwd: options.cwd,
             env: options.env,
             signal: options.signal,
-            timeout: timeoutMs,
+            idleTimeoutMs: timeoutMs,
             maxBuffer,
             terminationGraceMs: options.terminationGraceMs,
         })

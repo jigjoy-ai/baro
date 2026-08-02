@@ -18,6 +18,7 @@ import type { SpawnOptions } from "child_process"
 import spawn from "cross-spawn"
 
 import { harnessChildEnvironment } from "../environment.js"
+import { ClaudeStreamResultCollector } from "./stream-result.js"
 import { ModelInvocationMeasured } from "../../semantic-events.js"
 import {
     knownMetric,
@@ -94,7 +95,9 @@ export class Critic extends OneShotCritic {
             [
                 "--print",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
                 "--model",
                 this.model,
                 // The evidence and agent summary below are untrusted.
@@ -118,10 +121,12 @@ export class Critic extends OneShotCritic {
             {
                 cwd: context.cwd,
                 timeout: context.timeoutMs,
-                maxBuffer: 4 * 1024 * 1024,
+                maxBuffer: 16 * 1024 * 1024,
             },
         )
-        return response.stdout
+        const collector = new ClaudeStreamResultCollector()
+        collector.feed(Buffer.from(response.stdout, "utf8"))
+        return collector.resultLine() ?? ""
     }
 
     protected override async evaluate(
@@ -292,20 +297,26 @@ function execFileWithStdin(
             fn()
         }
 
-        if (options.timeout > 0) {
+        // Idle watchdog: output on either stream resets the clock, so only a
+        // genuinely silent evaluation is presumed hung and killed.
+        const armIdle = (): void => {
+            if (options.timeout <= 0 || settled) return
+            if (timer) clearTimeout(timer)
             timer = setTimeout(() => {
                 child.kill("SIGTERM")
                 finish(() => {
                     const error = new Error(
-                        `${file} timed out after ${options.timeout}ms`,
+                        `${file} produced no output for ${options.timeout}ms`,
                     ) as Error & { killed: boolean }
                     error.killed = true
                     reject(error)
                 })
             }, options.timeout)
         }
+        armIdle()
 
         child.stdout?.on("data", (chunk: Buffer) => {
+            armIdle()
             stdout += chunk.toString()
             stdoutBytes += chunk.byteLength
             if (stdoutBytes > options.maxBuffer) {
@@ -316,6 +327,7 @@ function execFileWithStdin(
             }
         })
         child.stderr?.on("data", (chunk: Buffer) => {
+            armIdle()
             stderr += chunk.toString()
         })
         child.on("error", (error) => finish(() => reject(error)))

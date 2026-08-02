@@ -325,7 +325,7 @@ export async function runCodexOneShot(
                 `elapsed=${elapsedMs}ms`,
                 `exit=${code}`,
                 signal ? `signal=${signal}` : null,
-                timedOut ? `timedOut=true (cap=${timeoutMs}ms)` : null,
+                timedOut ? `timedOut=true (idle=${timeoutMs}ms)` : null,
                 aborted ? "aborted=true" : null,
                 `events=${eventCount}`,
                 `items=${itemCount}`,
@@ -426,12 +426,20 @@ export async function runCodexOneShot(
             terminate()
         }
 
-        const timer = setTimeout(() => {
+        // Idle watchdog, not a total cap: every stdout/stderr chunk re-arms
+        // it, so only a genuinely silent process is presumed hung and killed.
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const armIdle = (): void => {
             if (timedOut || aborted || finalized) return
-            timedOut = true
-            terminate()
-        }, timeoutMs)
-        timer.unref?.()
+            if (timer) clearTimeout(timer)
+            timer = setTimeout(() => {
+                if (timedOut || aborted || finalized) return
+                timedOut = true
+                terminate()
+            }, timeoutMs)
+            timer.unref?.()
+        }
+        armIdle()
         opts.signal?.addEventListener("abort", onAbort, { once: true })
         // Close the race between the pre-spawn check and listener install.
         if (opts.signal?.aborted) onAbort()
@@ -562,6 +570,7 @@ export async function runCodexOneShot(
         proc.stdout!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => {
             refreshProcessTree()
+            armIdle()
             consumeStdout(chunk)
         })
         proc.stdout!.on("end", () => {
@@ -579,6 +588,7 @@ export async function runCodexOneShot(
         proc.stderr!.setEncoding("utf8")
         proc.stderr!.on("data", (chunk: string) => {
             refreshProcessTree()
+            armIdle()
             rawStderr.write(chunk)
         })
         proc.stderr!.on("end", () => rawStderr.end())

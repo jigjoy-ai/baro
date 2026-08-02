@@ -1095,17 +1095,25 @@ function execClaudeStreaming(
             }, graceMs)
             hard.unref?.()
         }
-        const timer = setTimeout(() => {
-            kill()
-            settle(() => {
-                const error = new Error(
-                    `claude dialogue stream timed out after ${opts.timeoutMs}ms`,
-                ) as Error & { killed?: boolean }
-                error.killed = true
-                reject(error)
-            })
-        }, opts.timeoutMs)
-        timer.unref?.()
+        // Idle watchdog: stream output resets the clock, so only a genuinely
+        // silent dialogue turn is presumed hung and killed.
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const armIdle = (): void => {
+            if (settled) return
+            if (timer) clearTimeout(timer)
+            timer = setTimeout(() => {
+                kill()
+                settle(() => {
+                    const error = new Error(
+                        `claude dialogue stream produced no output for ${opts.timeoutMs}ms`,
+                    ) as Error & { killed?: boolean }
+                    error.killed = true
+                    reject(error)
+                })
+            }, opts.timeoutMs)
+            timer.unref?.()
+        }
+        armIdle()
         const onAbort = (): void => {
             kill()
             settle(() => {
@@ -1118,8 +1126,10 @@ function execClaudeStreaming(
         if (opts.signal?.aborted) onAbort()
         child.on("error", (error) => settle(() => reject(error)))
         child.stderr?.on("data", (chunk: Buffer) => {
+            armIdle()
             stderrTail = (stderrTail + chunk.toString("utf8")).slice(-2_000)
         })
+        child.stdout?.on("data", () => armIdle())
         const lines = createInterface({ input: child.stdout! })
         lines.on("line", (line) => {
             let event: unknown

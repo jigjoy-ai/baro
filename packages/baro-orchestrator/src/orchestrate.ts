@@ -400,26 +400,17 @@ export type GatewayBillingConfig = Omit<
 >
 
 /**
- * Per-story timeout (seconds). `--timeout N` is an absolute override in both
- * directions (the Rust CLI sends 0 to mean "auto"). The auto default scales
- * by effort because max-effort stories routinely exceeded 600s and got
- * SIGTERM'd, wasting a full retry.
+ * Per-story silence window (seconds). `--timeout N` is an absolute override
+ * in both directions (the Rust CLI sends 0 to mean "auto"). Story agents now
+ * measure silence, not elapsed time — output resets the clock — so effort no
+ * longer needs to scale this: thinking longer is not the same as hanging.
  */
 export function storyTimeoutSecs(
     configured: number | undefined,
     effort: string | undefined,
 ): number {
     if (typeof configured === "number" && configured > 0) return configured
-    switch (effort) {
-        case "max":
-            return 1500
-        case "xhigh":
-            return 1200
-        case "high":
-            return 900
-        default:
-            return 600
-    }
+    return 600
 }
 
 export function resolveGoalReviewTimeoutMs(

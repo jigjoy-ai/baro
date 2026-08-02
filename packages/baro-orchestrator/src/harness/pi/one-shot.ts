@@ -166,12 +166,19 @@ export async function runPiOneShot(
             aborted = true
             terminate()
         }
-        timer = setTimeout(() => {
+        // Idle watchdog, not a total cap: every stdout/stderr chunk re-arms
+        // it, so only a genuinely silent process is presumed hung and killed.
+        const armIdle = (): void => {
             if (timedOut || aborted || finalized) return
-            timedOut = true
-            terminate()
-        }, timeoutMs)
-        timer.unref?.()
+            if (timer !== null) clearTimeout(timer)
+            timer = setTimeout(() => {
+                if (timedOut || aborted || finalized) return
+                timedOut = true
+                terminate()
+            }, timeoutMs)
+            timer.unref?.()
+        }
+        armIdle()
         opts.signal?.addEventListener("abort", onAbort, { once: true })
         // Close the race between the pre-spawn check and listener install.
         if (opts.signal?.aborted) onAbort()
@@ -311,6 +318,7 @@ export async function runPiOneShot(
         proc.stdout!.setEncoding("utf8")
         proc.stdout!.on("data", (chunk: string) => {
             refreshProcessTree()
+            armIdle()
             consumeStdout(chunk)
         })
         // Flush a final newline-less line — dropping it would lose message_end
@@ -331,6 +339,7 @@ export async function runPiOneShot(
         proc.stderr!.setEncoding("utf8")
         proc.stderr!.on("data", (chunk: string) => {
             refreshProcessTree()
+            armIdle()
             const trimmed = chunk.trimEnd()
             if (trimmed) {
                 process.stderr.write(`[${label}/stderr] ${trimmed}\n`)

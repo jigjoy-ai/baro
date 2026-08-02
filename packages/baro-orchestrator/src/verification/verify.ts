@@ -28,7 +28,9 @@ import {
 
 export { MAX_DECLARED_VERIFY_COMMANDS } from "./declared-verification.js"
 
-const TIMEOUT_MS = 5 * 60_000
+// Max silence, not max duration: a test runner streaming progress may run
+// far longer; only a command with no output for the whole window is killed.
+const IDLE_TIMEOUT_MS = 5 * 60_000
 const COMMAND_SETTLEMENT_GRACE_MS = 5_000
 const COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS = 3_000
 const TAIL_BYTES = 1500
@@ -893,7 +895,7 @@ export function recommendedVerifyTimeoutMs(plan: VerifyPlan): number {
     ).length
     return Math.max(
         60_000,
-        executableCommands * (TIMEOUT_MS + COMMAND_SETTLEMENT_GRACE_MS) +
+        executableCommands * (IDLE_TIMEOUT_MS + COMMAND_SETTLEMENT_GRACE_MS) +
             executableCommands * COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS +
             60_000,
     )
@@ -910,7 +912,7 @@ export function recommendedMergedVerifyTimeoutMs(baseline: VerifyPlan): number {
     ).length
     return (
         (baselineCommands + MAX_FINAL_ADDED_VERIFY_COMMANDS) *
-            (TIMEOUT_MS +
+            (IDLE_TIMEOUT_MS +
                 COMMAND_SETTLEMENT_GRACE_MS +
                 COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS) +
         60_000
@@ -983,7 +985,7 @@ async function runCmd(
     try {
         const result = await execFileCli(c.tool, c.args, {
             cwd: commandCwd,
-            timeout: TIMEOUT_MS,
+            idleTimeoutMs: IDLE_TIMEOUT_MS,
             terminationGraceMs: COMMAND_SETTLEMENT_GRACE_MS,
             maxBuffer: 8 * 1024 * 1024,
             signal,

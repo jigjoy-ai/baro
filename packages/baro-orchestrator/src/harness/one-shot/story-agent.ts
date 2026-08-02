@@ -17,6 +17,7 @@ import {
 } from "../../runtime/mozaik.js"
 
 import { PROCESS_TREE_CAPABILITIES } from "../process-tree.js"
+import { IdleWatchdog } from "../liveness.js"
 import {
     AgentState,
     OneShotAttemptFinalized,
@@ -86,6 +87,8 @@ export interface OneShotStoryOutcome<TSummary> {
 
 export interface OneShotStoryRunner<TSummary> extends Participant {
     done: Promise<TSummary>
+    /** Liveness feed: fires per output chunk so an idle watchdog can pet. */
+    onActivity: (() => void) | null
     join(environment: AgenticEnvironment): void
     start(environment: AgenticEnvironment): void
     leave(environment: AgenticEnvironment): void
@@ -551,10 +554,10 @@ export abstract class OneShotStoryAgent<
 
         let summary: TSummary
         try {
-            summary = await raceWithTimeout(
-                runner.done,
+            summary = await raceWithIdleTimeout(
+                runner,
                 this.spec.timeoutSecs * 1000,
-                `attempt ${attempt} timeout after ${this.spec.timeoutSecs}s`,
+                `attempt ${attempt} produced no output for ${this.spec.timeoutSecs}s`,
             )
         } catch (e) {
             this.currentProcessQuiesced = await this.quiesceCurrentRunner()
@@ -752,18 +755,24 @@ export abstract class OneShotStoryAgent<
     }
 }
 
-function raceWithTimeout<T>(
-    p: Promise<T>,
+/** Rejects only after the runner has been silent for `ms`: output on either
+ *  stream resets the clock, so a visibly working agent is never killed. */
+function raceWithIdleTimeout<T>(
+    source: { done: Promise<T>; onActivity: (() => void) | null },
     ms: number,
     label: string,
 ): Promise<T> {
-    let timer: ReturnType<typeof setTimeout>
-    const timeout = new Promise<T>(
-        (_, rej) => {
-            timer = setTimeout(() => rej(new Error(label)), ms)
-        },
-    )
-    const settled = p.finally(() => clearTimeout(timer))
-    settled.catch(() => {})
-    return Promise.race([settled, timeout])
+    return new Promise<T>((resolve, reject) => {
+        const watchdog = new IdleWatchdog(ms, () => reject(new Error(label)))
+        source.onActivity = () => watchdog.pet()
+        const settle = (fn: () => void): void => {
+            watchdog.dispose()
+            source.onActivity = null
+            fn()
+        }
+        source.done.then(
+            (value) => settle(() => resolve(value)),
+            (error: unknown) => settle(() => reject(error)),
+        )
+    })
 }

@@ -4,6 +4,7 @@
  */
 
 import { execFileCli } from "../exec-file-cli.js"
+import { ClaudeStreamResultCollector } from "./stream-result.js"
 
 import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
 
@@ -303,12 +304,15 @@ export class Surgeon extends BaseObserver {
 
         let stdout: string
         try {
-            const response = await execFileCli(
+            const collector = new ClaudeStreamResultCollector()
+            await execFileCli(
                 this.opts.claudeBin,
                 [
                     "--print",
                     "--output-format",
-                    "json",
+                    "stream-json",
+                    "--verbose",
+                    "--include-partial-messages",
                     "--model",
                     this.opts.model,
                     "--permission-mode",
@@ -320,11 +324,12 @@ export class Surgeon extends BaseObserver {
                 ],
                 {
                     env: harnessChildEnvironment(),
-                    timeout: this.opts.timeoutMs,
+                    idleTimeoutMs: this.opts.timeoutMs,
                     maxBuffer: 4 * 1024 * 1024,
+                    onStdoutData: (chunk) => collector.feed(chunk),
                 },
             )
-            stdout = response.stdout
+            stdout = collector.resultLine() ?? ""
         } catch (err) {
             const timedOut = isExecTimeout(err)
             return surgeonLlmFallback(

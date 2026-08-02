@@ -89,6 +89,9 @@ export abstract class CliParticipant<
     public readonly ready: Promise<void>
     /** Resolves after stream close, or a bounded post-root-exit drain failure. */
     public readonly done: Promise<TSummary>
+    /** Fires on every stdout/stderr chunk — the liveness feed an idle
+     *  watchdog pets instead of counting wall-clock time. */
+    public onActivity: (() => void) | null = null
 
     private static readonly MAX_BUFFER_BYTES = 16 * 1024 * 1024
 
@@ -326,6 +329,7 @@ export abstract class CliParticipant<
     }
 
     private handleStdout(chunk: string): void {
+        this.onActivity?.()
         this.buffer += chunk
         let nl: number
         while ((nl = this.buffer.indexOf("\n")) >= 0) {
@@ -349,6 +353,7 @@ export abstract class CliParticipant<
     }
 
     private handleStderr(chunk: string): void {
+        this.onActivity?.()
         if (this.spec.captureStderrTail) {
             this.stderrTailValue = appendCliDiagnosticTail(
                 this.stderrTailValue,

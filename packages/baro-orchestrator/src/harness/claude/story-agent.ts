@@ -34,6 +34,7 @@ import {
     ClaudeRunSummary,
 } from "./cli-participant.js"
 import { killedWorkerFailure } from "../cli-story-failure.js"
+import { IdleWatchdog } from "../liveness.js"
 import {
     correlationOf,
     type StoryOutcome,
@@ -464,10 +465,10 @@ export class StoryAgent extends BaseObserver {
 
         let summary: ClaudeRunSummary
         try {
-            summary = await raceWithTimeout(
-                claude.done,
+            summary = await raceWithIdleTimeout(
+                claude,
                 this.spec.timeoutSecs * 1000,
-                `attempt ${attempt} timeout after ${this.spec.timeoutSecs}s`,
+                `attempt ${attempt} produced no output for ${this.spec.timeoutSecs}s`,
             )
         } catch (e) {
             multiTurn.cancel()
@@ -711,17 +712,28 @@ function describeClaudeResultError(result: AgentResultData): string {
     return `claude reported isError on result:${result.subtype}`
 }
 
-function raceWithTimeout<T>(
-    p: Promise<T>,
+/** Rejects only after the participant has been silent for `ms`: output on
+ *  either stream resets the clock, so a visibly working agent is never
+ *  killed, no matter how long the attempt runs. */
+function raceWithIdleTimeout<T>(
+    source: { done: Promise<T>; onActivity: (() => void) | null },
     ms: number,
     label: string,
 ): Promise<T> {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const timeout = new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new StoryAttemptTimeoutError(label)), ms)
-    })
-    return Promise.race([p, timeout]).finally(() => {
-        if (timer !== undefined) clearTimeout(timer)
+    return new Promise<T>((resolve, reject) => {
+        const watchdog = new IdleWatchdog(ms, () =>
+            reject(new StoryAttemptTimeoutError(label)),
+        )
+        source.onActivity = () => watchdog.pet()
+        const settle = (fn: () => void): void => {
+            watchdog.dispose()
+            source.onActivity = null
+            fn()
+        }
+        source.done.then(
+            (value) => settle(() => resolve(value)),
+            (error: unknown) => settle(() => reject(error)),
+        )
     })
 }
 
