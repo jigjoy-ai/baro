@@ -42,6 +42,8 @@ let linuxProcessTableBackend: LinuxProcessTableBackend | null = null
 const TERMINATE_WITH_TABLE = Symbol("terminateWithProcessTable")
 const pendingEscalations = new Set<ManagedProcessTree>()
 let escalationFlush: ReturnType<typeof setImmediate> | null = null
+const OWNERSHIP_REGISTRATION_GRACE_MS = 3_000
+
 let deferOwnershipPublish = false
 let ownershipPublishPending = false
 let ownershipPublisherForTests:
@@ -302,11 +304,27 @@ export class ManagedProcessTree {
             this.observe(rootTable)
             const publication = publishActiveProviderOwnership()
             if (!this.ownershipManifestRegistered) {
-                const reason =
-                    publication !== null && !publication.ok
-                        ? publication.error
-                        : "provider identity was unavailable for the complete ownership snapshot"
-                this.failClosedOwnershipRegistration(reason, rootTable)
+                if (publication !== null && !publication.ok) {
+                    this.failClosedOwnershipRegistration(publication.error, rootTable)
+                } else {
+                    // The synchronous `ps` misses under load (250ms timeout
+                    // races a busy box) and every provider spawned in such a
+                    // moment used to die on the spot — the serial kills of
+                    // runs 16-17. Identity that is merely late gets a bounded
+                    // grace: the shared observer registers the tree on a
+                    // later turn, and only an identity that never arrives
+                    // fails closed.
+                    const grace = setTimeout(() => {
+                        if (!this.ownershipManifestRegistered && !this.settled) {
+                            this.failClosedOwnershipRegistration(
+                                "provider identity did not become observable within the registration grace",
+                                null,
+                            )
+                        }
+                    }, OWNERSHIP_REGISTRATION_GRACE_MS)
+                    grace.unref?.()
+                    requestSharedObservation(0)
+                }
             }
         }
 
@@ -1628,7 +1646,7 @@ function readPsProcessRecordSync(pid: number): ProcessStateSnapshot | null {
             {
                 encoding: "utf8",
                 stdio: ["ignore", "pipe", "ignore"],
-                timeout: 250,
+                timeout: 1_000,
                 maxBuffer: 1024 * 1024,
             },
         )

@@ -1733,6 +1733,10 @@ export async function orchestrate(
                         project: busPrd.project,
                         branchName: busPrd.branchName,
                         description: busPrd.description,
+                        conversationSessionId: busPrd.conversationSessionId,
+                        goalEnvelope: busPrd.goalEnvelope,
+                        decisionDocument: busPrd.decisionDocument,
+                        executionMode: busPrd.executionMode,
                     },
                     decisionDocument: busPrd.decisionDocument,
                     // The Rust intake already decided the execution shape and

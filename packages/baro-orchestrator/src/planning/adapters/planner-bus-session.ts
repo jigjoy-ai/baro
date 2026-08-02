@@ -50,10 +50,18 @@ export interface PlannerBusSessionOptions {
     env: AgenticEnvironment
     feed: PlanningFeed
     goalEnvelope: GoalEnvelope
-    /** Host-owned final-PRD metadata: the coordinator rejects a completion
-     * whose metadata drifts from the bootstrap contract, and the model has
-     * no business restating what the host already decided. */
-    prdMetadata: { project: string; branchName: string; description: string }
+    /** Host-owned final-PRD metadata: the coordinator compares SEVEN fields
+     * against the bootstrap contract (progressiveMetadataMatches), and the
+     * model has no business restating any of them. */
+    prdMetadata: {
+        project: string
+        branchName: string
+        description: string
+        conversationSessionId?: string
+        goalEnvelope?: GoalEnvelope
+        decisionDocument?: string
+        executionMode?: unknown
+    }
     decisionDocument?: string
     projectContext?: string
     modeContract?: ModeContract
@@ -424,9 +432,7 @@ export async function runPlannerBusSession(
                 // Host metadata + host-composed stories: the model's own
                 // metadata restatement killed run 16 at the bootstrap check.
                 final_prd: {
-                    project: opts.prdMetadata.project,
-                    branchName: opts.prdMetadata.branchName,
-                    description: opts.prdMetadata.description,
+                    ...opts.prdMetadata,
                     userStories: composedFinalPrd.userStories,
                 },
             })
