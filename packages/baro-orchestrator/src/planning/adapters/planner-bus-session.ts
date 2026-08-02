@@ -134,22 +134,51 @@ class ReceiptObserver extends BaseObserver {
     }
 }
 
-/** Ends the planner's stdin once its terminal result event lands: with
- *  stream-json input the CLI otherwise waits forever for another turn. */
-class ResultCloser extends BaseObserver {
-    constructor(
-        private readonly agentId: string,
-        private readonly close: () => void,
-    ) {
+/** Hands each of the planner's terminal results to the session as it lands,
+ *  so a rejected final PRD can be answered with a correction on the still-open
+ *  stdin instead of killing the whole planning stream. */
+class ResultStream extends BaseObserver {
+    private readonly queue: string[] = []
+    private waiter: ((text: string | null) => void) | null = null
+    private closed = false
+
+    constructor(private readonly agentId: string) {
         super()
+    }
+
+    /** Resolves with the next result text, or null once the agent is gone. */
+    next(): Promise<string | null> {
+        if (this.queue.length > 0) {
+            return Promise.resolve(this.queue.shift()!)
+        }
+        if (this.closed) return Promise.resolve(null)
+        return new Promise((resolve) => {
+            this.waiter = resolve
+        })
+    }
+
+    end(): void {
+        this.closed = true
+        if (this.waiter) {
+            this.waiter(null)
+            this.waiter = null
+        }
     }
 
     override onExternalEvent(
         _source: Participant,
         event: SemanticEvent<unknown>,
     ): void {
-        if (AgentResult.is(event) && event.data.agentId === this.agentId) {
-            this.close()
+        if (!AgentResult.is(event) || event.data.agentId !== this.agentId) {
+            return
+        }
+        const text = event.data.isError ? null : event.data.resultText
+        if (typeof text !== "string") return
+        if (this.waiter) {
+            this.waiter(text)
+            this.waiter = null
+        } else {
+            this.queue.push(text)
         }
     }
 }
@@ -315,17 +344,21 @@ export async function runPlannerBusSession(
         process.env[name] = value
     }
 
-    const closer = new ResultCloser(agentId, () => planner.closeStdin())
+    const results = new ResultStream(agentId)
     let watchdog: IdleWatchdog | null = null
     try {
-        closer.join(opts.env)
+        results.join(opts.env)
         planner.join(opts.env)
         planner.start(opts.env)
         watchdog = new IdleWatchdog(
             opts.idleTimeoutMs ?? llmIdleTimeoutMs(),
-            () => void planner.abortAndWait(),
+            () => {
+                results.end()
+                void planner.abortAndWait()
+            },
         )
         planner.onActivity = () => watchdog?.pet()
+        void planner.done.then(() => results.end())
         planner.sendUserMessage(
             buildPlannerUserMessage({
                 goal,
@@ -334,36 +367,58 @@ export async function runPlannerBusSession(
                 modeContract,
             }),
         )
-        const summary = await planner.done
-        watchdog.dispose()
-        planner.onActivity = null
 
-        const resultText = summary.lastResult?.resultText
-        if (summary.lastResult?.isError || typeof resultText !== "string") {
-            return fail(
-                "planner_failed",
-                summary.error?.message ??
-                    `planner exited without a result (exit=${summary.exitCode}, signal=${summary.exitSignal})`,
-            )
+        // Run 13 died here the old way: one verbatim mismatch in the final
+        // PRD closed the whole stream. The planner's stdin is open — a
+        // rejected finalization is something it can be TOLD, so it gets the
+        // error back as a message and another turn to restate.
+        const maxFinalizationAttempts = 3
+        for (let attempt = 1; attempt <= maxFinalizationAttempts; attempt++) {
+            const resultText = await results.next()
+            if (resultText === null) {
+                const summary = await planner.done
+                return fail(
+                    "planner_failed",
+                    summary.error?.message ??
+                        `planner exited without a result (exit=${summary.exitCode}, signal=${summary.exitSignal})`,
+                )
+            }
+            let candidate: string
+            try {
+                candidate = extractJsonObject(resultText.trim())
+                progressive.assertInitialized()
+                progressive.reconcileFinalCandidate(candidate)
+            } catch (error) {
+                const reason =
+                    error instanceof Error ? error.message : String(error)
+                process.stderr.write(
+                    `[planner-bus] finalization attempt ${attempt}/${maxFinalizationAttempts} rejected: ${reason}\n`,
+                )
+                if (attempt === maxFinalizationAttempts) {
+                    planner.closeStdin()
+                    return fail("planner_failed", reason)
+                }
+                planner.sendUserMessage(
+                    `Your final PRD was rejected: ${reason}\n\n` +
+                        `Published fragments are immutable. The final PRD must repeat ` +
+                        `every published story as an exact, same-order prefix of ` +
+                        `userStories — every field byte-for-byte as published — and may ` +
+                        `only append new stories after that prefix. Reply with ONLY the ` +
+                        `corrected final PRD JSON.`,
+                )
+                continue
+            }
+            planner.closeStdin()
+            await planner.done
+            opts.feed.complete({
+                type: "plan_complete",
+                run_id: opts.runId,
+                planning_id: planningId,
+                final_prd: JSON.parse(candidate),
+            })
+            return { status: "completed" }
         }
-        let candidate: string
-        try {
-            candidate = extractJsonObject(resultText.trim())
-            progressive.assertInitialized()
-            progressive.reconcileFinalCandidate(candidate)
-        } catch (error) {
-            return fail(
-                "planner_failed",
-                error instanceof Error ? error.message : String(error),
-            )
-        }
-        opts.feed.complete({
-            type: "plan_complete",
-            run_id: opts.runId,
-            planning_id: planningId,
-            final_prd: JSON.parse(candidate),
-        })
-        return { status: "completed" }
+        return fail("planner_failed", "finalization attempts exhausted")
     } catch (error) {
         // Whatever went wrong, the open planning stream must be closed —
         // an orphaned latch would stall the Board forever.
@@ -373,8 +428,9 @@ export async function runPlannerBusSession(
         )
     } finally {
         watchdog?.dispose()
+        results.end()
         receipts.leave(opts.env)
-        closer.leave(opts.env)
+        results.leave(opts.env)
         if (planner.getEnvironments().includes(opts.env)) {
             planner.leave(opts.env)
         }

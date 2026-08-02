@@ -107,7 +107,7 @@ class StubFeed extends BaseObserver {
     }
 }
 
-function writeFakeClaude(dir: string): string {
+function writeFakeClaude(dir: string, { fumbleFinalization = false } = {}): string {
     const path = join(dir, "fake-bus-claude.mjs")
     writeFileSync(
         path,
@@ -117,6 +117,7 @@ import { createInterface } from "node:readline";
 
 const publishedStory = ${JSON.stringify(PUBLISHED_STORY)};
 const finalPrd = ${JSON.stringify(FINAL_PRD)};
+const fumbleFinalization = ${JSON.stringify(fumbleFinalization)};
 const argv = process.argv.slice(2);
 
 const configIndex = argv.indexOf("--mcp-config");
@@ -137,21 +138,41 @@ process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_i
 
 // The session writes the planner prompt as the first stdin user event.
 const lines = createInterface({ input: process.stdin });
-const firstMessage = await new Promise((resolve) => lines.once("line", resolve));
-const parsed = JSON.parse(firstMessage);
+const nextLine = () => new Promise((resolve) => lines.once("line", resolve));
+const parsed = JSON.parse(await nextLine());
 if (parsed.type !== "user" || typeof parsed.message?.content !== "string") {
     throw new Error("fixture expected a stream-json user event first");
 }
 
 await exerciseBaroMcp({ command: server.command, args: server.args, env });
 
-process.stdout.write(JSON.stringify({
+const emitResult = (payload) => process.stdout.write(JSON.stringify({
     type: "result",
     subtype: "success",
     is_error: false,
-    result: finalPrd,
+    result: payload,
     session_id: "bus-1",
 }) + "\\n");
+
+if (fumbleFinalization) {
+    // Restate the published story with a drifted title — the exact class of
+    // mistake that killed run 13's whole plan tail.
+    const broken = JSON.parse(finalPrd);
+    broken.userStories[0].title = "Open the progressive contract (reworded)";
+    emitResult(JSON.stringify(broken));
+    const correction = JSON.parse(await nextLine());
+    if (
+        correction.type !== "user" ||
+        !/rejected/.test(correction.message?.content ?? "") ||
+        !/differing fields: title/.test(correction.message?.content ?? "")
+    ) {
+        throw new Error(
+            "fixture expected a correction naming the differing field, got: " +
+                JSON.stringify(correction),
+        );
+    }
+}
+emitResult(finalPrd);
 process.exit(0);
 
 async function exerciseBaroMcp(target) {
@@ -258,6 +279,36 @@ describe("planner bus session", () => {
                 userStories: Array<{ id: string }>
             }
             assert.equal(finalPrd.userStories[0]!.id, "S1")
+        })
+    })
+
+    it("answers a rejected final PRD with a correction instead of failing the stream", async () => {
+        await withTempDir("baro-planner-bus-retry-", async (dir) => {
+            const env = new AgenticEnvironment("planner-bus-retry")
+            const feed = new StubFeed()
+            feed.join(env)
+
+            const result = await runPlannerBusSession({
+                runId: "run-bus-3",
+                cwd: dir,
+                env,
+                feed,
+                goalEnvelope: ENVELOPE,
+                claudeBin: writeFakeClaude(dir, { fumbleFinalization: true }),
+                mcpServer: {
+                    command: process.execPath,
+                    args: [
+                        "--import",
+                        TSX_LOADER,
+                        RUN_PLANNER_ENTRY,
+                        PROGRESSIVE_PLANNER_MCP_MODE,
+                    ],
+                },
+            })
+
+            assert.deepEqual(feed.failures, [])
+            assert.equal(result.status, "completed")
+            assert.equal(feed.completions.length, 1)
         })
     })
 

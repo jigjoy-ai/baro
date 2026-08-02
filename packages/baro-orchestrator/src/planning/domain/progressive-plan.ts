@@ -368,9 +368,23 @@ export function reconcileProgressivePlanStories(
         const expected = admitted[index]!
         const actual = finalStories[index]!
         if (canonicalJson(expected) !== canonicalJson(actual)) {
+            // Name the differing fields: a bare "does not exactly match" cost
+            // run 13 its whole plan tail because nobody could see WHAT.
+            const fields = [
+                ...new Set([...Object.keys(expected), ...Object.keys(actual)]),
+            ].filter(
+                (key) =>
+                    canonicalJson(
+                        (expected as unknown as Record<string, unknown>)[key] ?? null,
+                    ) !==
+                    canonicalJson(
+                        (actual as unknown as Record<string, unknown>)[key] ?? null,
+                    ),
+            )
             throw contractError(
                 "final_prd_mismatch",
-                `final PRD story ${index + 1} does not exactly match admitted prefix story '${expected.id}'`,
+                `final PRD story ${index + 1} does not exactly match admitted prefix story '${expected.id}' ` +
+                    `(differing fields: ${fields.join(", ") || "unknown"})`,
             )
         }
     }
