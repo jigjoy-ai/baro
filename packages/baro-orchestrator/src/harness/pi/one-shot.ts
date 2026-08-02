@@ -366,7 +366,7 @@ export async function runPiOneShot(
                 `elapsed=${elapsedMs}ms`,
                 `exit=${code}`,
                 signal ? `signal=${signal}` : null,
-                timedOut ? `timedOut=true (cap=${timeoutMs}ms)` : null,
+                timedOut ? `timedOut=true (idle=${timeoutMs}ms)` : null,
                 aborted ? "aborted=true" : null,
                 `events=${eventTypesSeen.length}`,
                 eventTypesSeen.length > 0

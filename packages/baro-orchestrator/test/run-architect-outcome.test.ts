@@ -310,7 +310,7 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
                         run.stderr,
                         backend === "claude"
                             ? /timed out after 50ms/
-                            : /timedOut=true \(cap=50ms\)/,
+                            : /timedOut=true \(idle=50ms\)/,
                     )
                     assert.equal(existsSync(join(dir, "outcome.json")), false)
                     assert.ok(
@@ -567,7 +567,7 @@ function writeFakeClaude(dir: string, payload: unknown, capture: string): string
 import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(capture)}, JSON.stringify(process.argv.slice(2)));
 const payload = ${JSON.stringify(payload)};
-console.log(JSON.stringify({ result: JSON.stringify(payload), structured_output: payload }));
+console.log(JSON.stringify({ type: "result", result: JSON.stringify(payload), structured_output: payload }));
 `)
 }
 
@@ -575,7 +575,7 @@ function writeFakeClaudeRaw(dir: string, raw: string, capture: string): string {
     return executable(dir, "fake-legacy-claude.mjs", `
 import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(capture)}, JSON.stringify(process.argv.slice(2)));
-console.log(JSON.stringify({ result: ${JSON.stringify(raw)} }));
+console.log(JSON.stringify({ type: "result", result: ${JSON.stringify(raw)} }));
 `)
 }
 
@@ -609,6 +609,7 @@ const payload = decisionPhase
   ? ${JSON.stringify(ready)}
   : ${JSON.stringify(segment)};
 console.log(JSON.stringify({
+  type: "result",
   result: JSON.stringify(payload),
   ...(decisionPhase ? { structured_output: payload } : {}),
   usage: { input_tokens: 10, output_tokens: 5 },
@@ -740,7 +741,7 @@ function writeSlowFakeHarness(
     delayMs: number,
 ): string {
     const output = backend === "claude"
-        ? `console.log(JSON.stringify({ result: JSON.stringify(payload), structured_output: payload }));`
+        ? `console.log(JSON.stringify({ type: "result", result: JSON.stringify(payload), structured_output: payload }));`
         : backend === "codex"
           ? `console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: JSON.stringify(payload) } }));
   console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 10, output_tokens: 5 } }));`
