@@ -41,6 +41,13 @@ const PUBLISHED_STORY = {
     model: "heavy",
 }
 
+const TAIL_FINAL_PRD = JSON.stringify({
+    project: "baro",
+    branchName: "planner-bus-session",
+    description: "Exercise the bus planner session.",
+    userStories: [],
+})
+
 const FINAL_PRD = JSON.stringify({
     project: "baro",
     branchName: "planner-bus-session",
@@ -117,6 +124,7 @@ import { createInterface } from "node:readline";
 
 const publishedStory = ${JSON.stringify(PUBLISHED_STORY)};
 const finalPrd = ${JSON.stringify(FINAL_PRD)};
+const tailFinalPrd = ${JSON.stringify(TAIL_FINAL_PRD)};
 const fumbleFinalization = ${JSON.stringify(fumbleFinalization)};
 const argv = process.argv.slice(2);
 
@@ -172,7 +180,8 @@ if (fumbleFinalization) {
         );
     }
 }
-emitResult(finalPrd);
+// Tail-only finalization: the host composes the plan; nothing to append.
+emitResult(tailFinalPrd);
 process.exit(0);
 
 async function exerciseBaroMcp(target) {

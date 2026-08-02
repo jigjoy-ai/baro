@@ -12,6 +12,7 @@ import {
 import { validateGoalContractCoverage } from "../domain/goal-contract-coverage.js"
 import {
     openProgressivePlanSession,
+    reconcileProgressivePlanStories,
     validateProgressivePlanFragment,
     type ProgressivePlanSession,
 } from "../domain/progressive-plan.js"
@@ -29,6 +30,9 @@ export interface PlannerOpenAIProgressiveConfig {
     trustedGoalEnvelope?: GoalEnvelope
     /** Architect-authored document used only with the host-owned goal. */
     trustedDecisionDocument?: string
+    /** Finalization carries only the appended tail; the host composes the
+     * full plan from its admitted record (see ProgressiveReconcileOptions). */
+    finalizationTailOnly?: boolean
     /** May return host feedback (authoritative admission: graph version,
      *  dropped edges) that is merged into the tool result the planner sees. */
     publish(
@@ -43,17 +47,19 @@ export interface PlannerOpenAIProgressiveConfig {
 export interface PlannerOpenAIProgressiveSupport {
     readonly extraTools: readonly Tool[]
     readonly systemInstruction: string | null
-    reconcileFinalCandidate(candidate: string): void
+    /** Returns the composed final PRD (admitted prefix + tail). */
+    reconcileFinalCandidate(candidate: string): Record<string, unknown>
     hasEarlyPlan(): boolean
 }
 
 export interface PlannerProgressivePublisher {
     publish(args: unknown): Promise<Record<string, unknown>>
-    reconcileFinalCandidate(candidate: string): void
+    /** Returns the composed final PRD (admitted prefix + tail). */
+    reconcileFinalCandidate(candidate: string): Record<string, unknown>
     hasEarlyPlan(): boolean
 }
 
-export const PROGRESSIVE_PLANNING_INSTRUCTION = `\
+const PROGRESSIVE_PLANNING_CORE = `\
 PROGRESSIVE PLANNING — act as soon as the evidence is sufficient:
 While repository tools are open, the moment one or more implementation stories form a fully
 specified, dependency-closed prefix that is safe to execute, call publish_plan_fragment
@@ -63,16 +69,40 @@ Every published story uses exactly the final-PRD story fields: id, priority, tit
 dependsOn, retries, acceptance, tests, goalInvariantIds, model, and writes. "writes" lists the files
 this story will create or modify; the host prunes any dependsOn edge no file supports, so an edge
 you cannot justify with a file will be dropped whether you publish it or not. A published fragment is closed: each dependency
-must already have been published or be present in that same fragment. Published stories are
+must already have been published or be present in that same fragment. `
+
+const PROGRESSIVE_REPEAT_FINALIZATION = `Published stories are
 immutable and become an exact, same-order prefix of the final PRD userStories array. The final PRD
 must repeat every published title, description, priority, dependency, retry count, acceptance
-criterion, test, and model unchanged; it may only append additional stories after that prefix.
+criterion, test, and model unchanged; it may only append additional stories after that prefix.`
+
+// Asking the model to re-transmit bytes the host already holds only
+// manufactures transcription mismatches (runs 13/14) — in tail-only mode the
+// host composes the plan and the model states only what is new.
+const PROGRESSIVE_TAIL_FINALIZATION = `Published stories are
+immutable and the host keeps them verbatim — do NOT repeat them at finalization. The terminal PRD
+JSON must contain ONLY the stories that come after the published prefix in userStories (use an
+empty userStories array when nothing remains), together with the usual project, branchName and
+description metadata. The host composes the complete plan from the published prefix plus your
+appended stories.`
+
+const PROGRESSIVE_SAFETY = `
 
 This directive is conditional on safety. Never force an unsafe or provisional split merely to
 publish early. If a story, dependency, write surface, or acceptance contract is still provisional,
 keep exploring. If no dependency-closed prefix becomes safe before finalization, do not publish a
 fragment; return the complete final PRD normally. The shared "Output ONLY JSON" rule applies only
 to the terminal response; publish_plan_fragment tool calls are allowed during exploration.`
+
+export function progressivePlanningInstruction(tailOnly: boolean): string {
+    return (
+        PROGRESSIVE_PLANNING_CORE +
+        (tailOnly ? PROGRESSIVE_TAIL_FINALIZATION : PROGRESSIVE_REPEAT_FINALIZATION) +
+        PROGRESSIVE_SAFETY
+    )
+}
+
+export const PROGRESSIVE_PLANNING_INSTRUCTION = progressivePlanningInstruction(false)
 
 export const PUBLISH_PLAN_FRAGMENT_DESCRIPTION =
     "Publish one closed, immutable batch of fully specified stories for early execution. " +
@@ -162,7 +192,8 @@ export const PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA: Record<string, unknown> = {
 const NO_PROGRESSIVE_SUPPORT: PlannerOpenAIProgressiveSupport = Object.freeze({
     extraTools: Object.freeze([]) as readonly Tool[],
     systemInstruction: null,
-    reconcileFinalCandidate: (_candidate: string) => undefined,
+    reconcileFinalCandidate: (candidate: string) =>
+        JSON.parse(candidate) as Record<string, unknown>,
     hasEarlyPlan: () => false,
 })
 
@@ -173,7 +204,9 @@ export function createPlannerOpenAIProgressiveSupport(
     const publisher = createPlannerProgressivePublisher(config)
     return {
         extraTools: [createPublishPlanFragmentTool(publisher)],
-        systemInstruction: PROGRESSIVE_PLANNING_INSTRUCTION,
+        systemInstruction: progressivePlanningInstruction(
+            config.finalizationTailOnly === true,
+        ),
         reconcileFinalCandidate: (candidate) =>
             publisher.reconcileFinalCandidate(candidate),
         hasEarlyPlan: () => publisher.hasEarlyPlan(),
@@ -252,13 +285,36 @@ export function createPlannerProgressivePublisher(
             }
         },
         reconcileFinalCandidate(candidate: string) {
+            const parsed = JSON.parse(candidate) as Record<string, unknown>
             const finalPrd = progressiveFinalPrd(candidate)
+            if (session.phase === "reconciled") {
+                // Replay identity (or conflict) is judged on the raw
+                // candidate, exactly as before composition existed.
+                session.reconcile(finalPrd)
+                const snapshot = session.snapshot()
+                return {
+                    ...parsed,
+                    userStories: [
+                        ...snapshot.stories,
+                        ...(snapshot.finalTail ?? []),
+                    ],
+                }
+            }
+            // Compose first, without touching session state: coverage and
+            // reconciliation must judge the COMPLETE plan, and a rejection
+            // must leave the session open for a corrected attempt.
+            const composed = reconcileProgressivePlanStories(
+                session.snapshot().stories,
+                finalPrd,
+                { tailOnly: config.finalizationTailOnly === true },
+            )
             validateArchitectureObligationCoverage(
                 obligationContract,
-                obligationMappingsForStories(finalPrd.userStories),
+                obligationMappingsForStories(composed.finalStories),
                 "complete",
             )
-            session.reconcile(finalPrd)
+            session.reconcile({ userStories: composed.finalStories })
+            return { ...parsed, userStories: composed.finalStories }
         },
         hasEarlyPlan() {
             return session.snapshot().stories.length > 0
@@ -325,6 +381,12 @@ function progressiveFinalPrd(candidate: string): { userStories: PrdStory[] } {
             completedAt: null,
             durationSecs: null,
             model: story.model as string,
+            // The eighth boundary for the same field: this parser silently
+            // shed `writes`, so every faithful final PRD failed reconciliation
+            // on a field the model never got wrong (runs 13/14).
+            ...(story.writes !== undefined
+                ? { writes: [...(story.writes as string[])] }
+                : {}),
         })),
     }
 }

@@ -255,6 +255,66 @@ describe("progressive plan v1", () => {
         )
     })
 
+    it("tolerates set-order restatement and keeps the admitted bytes", () => {
+        const admitted = [
+            story("S1", [], { writes: ["b.ts", "a.ts"], goalInvariantIds: ["G-A2", "G-A1"] }),
+            story("S2", ["S1"]),
+        ]
+        const restated = reconcileProgressivePlanStories(
+            admitted,
+            finalPrd([
+                story("S1", [], { writes: ["a.ts", "b.ts"], goalInvariantIds: ["G-A1", "G-A2"] }),
+                story("S2", ["S1"]),
+                story("S3", ["S2", "S1"]),
+            ]),
+        )
+        // The admitted record wins in the composed plan, reordered or not.
+        assert.deepEqual(restated.finalStories[0]!.writes, ["b.ts", "a.ts"])
+        assert.deepEqual(restated.tail.map((s) => s.id), ["S3"])
+    })
+
+    it("tail-only: composes the plan from admitted prefix plus appended stories", () => {
+        const admitted = [story("S1"), story("S2", ["S1"])]
+        const composed = reconcileProgressivePlanStories(
+            admitted,
+            finalPrd([story("S3", ["S2"])]),
+            { tailOnly: true },
+        )
+        assert.deepEqual(
+            composed.finalStories.map((s) => s.id),
+            ["S1", "S2", "S3"],
+        )
+        assert.deepEqual(composed.tail.map((s) => s.id), ["S3"])
+
+        const emptyTail = reconcileProgressivePlanStories(
+            admitted,
+            finalPrd([]),
+            { tailOnly: true },
+        )
+        assert.deepEqual(emptyTail.finalStories.map((s) => s.id), ["S1", "S2"])
+        assert.deepEqual(emptyTail.tail, [])
+    })
+
+    it("tail-only: still accepts a faithful full repeat, rejects a partial id reuse", () => {
+        const admitted = [story("S1"), story("S2", ["S1"])]
+        const repeat = reconcileProgressivePlanStories(
+            admitted,
+            finalPrd([story("S1"), story("S2", ["S1"]), story("S3", ["S1"])]),
+            { tailOnly: true },
+        )
+        assert.deepEqual(repeat.tail.map((s) => s.id), ["S3"])
+
+        expectCode(
+            () =>
+                reconcileProgressivePlanStories(
+                    admitted,
+                    finalPrd([story("S2", ["S1"]), story("S3", ["S2"])]),
+                    { tailOnly: true },
+                ),
+            "final_prd_mismatch",
+        )
+    })
+
     it("allows a nonempty final tail but rejects missing, reordered, or changed prefix", () => {
         const admitted = [story("S1"), story("S2", ["S1"])]
         const withTail = reconcileProgressivePlanStories(

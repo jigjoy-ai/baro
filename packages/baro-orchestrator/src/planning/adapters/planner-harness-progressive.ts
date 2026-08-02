@@ -21,7 +21,7 @@ import {
     createPlannerProgressivePublisher,
     PUBLISH_PLAN_FRAGMENT_DESCRIPTION,
     PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA,
-    PROGRESSIVE_PLANNING_INSTRUCTION,
+    progressivePlanningInstruction,
     type PlannerOpenAIProgressiveConfig,
     type PlannerProgressivePublisher,
 } from "./planner-openai-progressive.js"
@@ -74,7 +74,8 @@ export interface PlannerHarnessMcpConnection {
 export interface PlannerHarnessProgressiveSupport {
     readonly systemInstruction: string | null
     readonly mcpConnection: PlannerHarnessMcpConnection | null
-    reconcileFinalCandidate(candidate: string): void
+    /** Returns the composed final PRD (admitted prefix + tail). */
+    reconcileFinalCandidate(candidate: string): Record<string, unknown>
     assertInitialized(): void
     hasEarlyPlan(): boolean
     close(): Promise<void>
@@ -84,7 +85,8 @@ const NO_HARNESS_PROGRESSIVE_SUPPORT: PlannerHarnessProgressiveSupport =
     Object.freeze({
         systemInstruction: null,
         mcpConnection: null,
-        reconcileFinalCandidate: (_candidate: string) => undefined,
+        reconcileFinalCandidate: (candidate: string) =>
+            JSON.parse(candidate) as Record<string, unknown>,
         assertInitialized: () => undefined,
         hasEarlyPlan: () => false,
         close: async () => undefined,
@@ -102,8 +104,15 @@ export async function createPlannerHarnessProgressiveSupport(
         statusReporter(config.onStatus),
     )
     const connection = await relay.open(config.mcpServer)
+    connection.args = [
+        ...connection.args,
+        "--finalization",
+        config.finalizationTailOnly === true ? "tail" : "repeat",
+    ]
     return {
-        systemInstruction: PROGRESSIVE_PLANNING_INSTRUCTION,
+        systemInstruction: progressivePlanningInstruction(
+            config.finalizationTailOnly === true,
+        ),
         mcpConnection: connection,
         reconcileFinalCandidate: (candidate) =>
             publisher.reconcileFinalCandidate(candidate),
@@ -346,6 +355,7 @@ interface ProgressiveMcpInvocation {
     bridgeHost: typeof LOOPBACK_HOST
     bridgePort: number
     bridgeToken: string
+    finalizationTailOnly: boolean
 }
 
 /** Parse only the private alternate-mode flags accepted by the MCP child. */
@@ -356,6 +366,7 @@ export function parseProgressivePlannerMcpInvocation(
     if (argv[0] !== PROGRESSIVE_PLANNER_MCP_MODE) return null
     let bridgeHost: string | undefined
     let bridgePort: string | undefined
+    let finalization: string | undefined
     for (let index = 1; index < argv.length; index += 2) {
         const flag = argv[index]
         const value = argv[index + 1]
@@ -368,6 +379,12 @@ export function parseProgressivePlannerMcpInvocation(
                 break
             case "--bridge-port":
                 bridgePort = value
+                break
+            case "--finalization":
+                if (value !== "repeat" && value !== "tail") {
+                    throw new Error("progressive planner MCP finalization must be repeat or tail")
+                }
+                finalization = value
                 break
             default:
                 throw new Error(`unknown progressive planner MCP flag: ${flag}`)
@@ -388,6 +405,7 @@ export function parseProgressivePlannerMcpInvocation(
         bridgeHost,
         bridgePort: port,
         bridgeToken,
+        finalizationTailOnly: finalization === "tail",
     }
 }
 
@@ -466,7 +484,9 @@ async function handleMcpLine(
                             name: "baro-progressive-planner",
                             version: "1.0.0",
                         },
-                        instructions: PROGRESSIVE_PLANNING_INSTRUCTION,
+                        instructions: progressivePlanningInstruction(
+                            connection.finalizationTailOnly,
+                        ),
                     }),
                 )
                 return

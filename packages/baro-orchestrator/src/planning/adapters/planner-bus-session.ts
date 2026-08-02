@@ -252,6 +252,9 @@ export async function runPlannerBusSession(
             planningId,
             trustedGoalEnvelope: opts.goalEnvelope,
             trustedDecisionDocument: opts.decisionDocument,
+            // The host holds the admitted prefix; the model finalizes with
+            // only the appended tail and the host composes the full plan.
+            finalizationTailOnly: true,
             mcpServer: opts.mcpServer ?? currentPlannerMcpServerCommand(),
             publish: async (event: PlannerOpenAIPlanFragmentEvent) => {
                 const receipt = receipts.await(event.fragment_id)
@@ -383,11 +386,11 @@ export async function runPlannerBusSession(
                         `planner exited without a result (exit=${summary.exitCode}, signal=${summary.exitSignal})`,
                 )
             }
-            let candidate: string
+            let composedFinalPrd: Record<string, unknown>
             try {
-                candidate = extractJsonObject(resultText.trim())
+                const candidate = extractJsonObject(resultText.trim())
                 progressive.assertInitialized()
-                progressive.reconcileFinalCandidate(candidate)
+                composedFinalPrd = progressive.reconcileFinalCandidate(candidate)
             } catch (error) {
                 const reason =
                     error instanceof Error ? error.message : String(error)
@@ -400,11 +403,11 @@ export async function runPlannerBusSession(
                 }
                 planner.sendUserMessage(
                     `Your final PRD was rejected: ${reason}\n\n` +
-                        `Published fragments are immutable. The final PRD must repeat ` +
-                        `every published story as an exact, same-order prefix of ` +
-                        `userStories — every field byte-for-byte as published — and may ` +
-                        `only append new stories after that prefix. Reply with ONLY the ` +
-                        `corrected final PRD JSON.`,
+                        `The host already holds every published story verbatim — do not ` +
+                        `repeat them. Reply with ONLY the corrected final PRD JSON whose ` +
+                        `userStories contains just the stories that come after the ` +
+                        `published prefix (an empty array if nothing remains), plus the ` +
+                        `usual project, branchName and description metadata.`,
                 )
                 continue
             }
@@ -414,7 +417,7 @@ export async function runPlannerBusSession(
                 type: "plan_complete",
                 run_id: opts.runId,
                 planning_id: planningId,
-                final_prd: JSON.parse(candidate),
+                final_prd: composedFinalPrd,
             })
             return { status: "completed" }
         }

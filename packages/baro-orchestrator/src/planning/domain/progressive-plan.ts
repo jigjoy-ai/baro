@@ -332,15 +332,39 @@ export function progressivePlanFragmentFingerprint(value: unknown): string {
     return canonicalFingerprint(validateProgressivePlanFragment(value))
 }
 
+export interface ProgressiveReconcileOptions {
+    /** The final PRD may carry ONLY the stories appended after the published
+     * prefix; the host composes the complete plan from its own admitted
+     * record. Asking the model to re-transmit bytes the host already holds
+     * (runs 13/14) only manufactures transcription mismatches. */
+    tailOnly?: boolean
+}
+
+/** Set-valued fields compare as sets: writes, dependsOn and goalInvariantIds
+ * carry no order semantics, so a reordered restatement is the same story. */
+function comparableStory(story: PrdStory): Record<string, unknown> {
+    const record = story as unknown as Record<string, unknown>
+    return {
+        ...record,
+        dependsOn: [...story.dependsOn].sort(),
+        ...(story.goalInvariantIds
+            ? { goalInvariantIds: [...story.goalInvariantIds].sort() }
+            : {}),
+        ...(story.writes ? { writes: [...story.writes].sort() } : {}),
+    }
+}
+
 /**
- * Require every admitted story to be an exact, same-order prefix of the final
- * PRD. The final response may append a nonempty suffix that was intentionally
- * withheld from early execution. Metadata is outside this boundary and remains
- * owned by the final PRD validator.
+ * Reconcile the admitted prefix with the terminal Planner response. In repeat
+ * mode every admitted story must be restated as a same-order prefix (compared
+ * set-tolerantly; the admitted bytes win in the composed result). In tailOnly
+ * mode the final PRD may instead carry only the appended suffix. Metadata is
+ * outside this boundary and remains owned by the final PRD validator.
  */
 export function reconcileProgressivePlanStories(
     admittedStories: readonly PrdStory[],
     finalPrd: unknown,
+    options: ProgressiveReconcileOptions = {},
 ): ProgressivePlanStoryReconciliationV1 {
     if (!isPlainRecord(finalPrd) || !Array.isArray(finalPrd.userStories)) {
         throw contractError(
@@ -354,43 +378,66 @@ export function reconcileProgressivePlanStories(
     const finalStories = finalPrd.userStories.map((story, index) =>
         validateFinalStory(story, `final PRD story ${index + 1}`),
     )
-    assertCompleteFinalGraph(finalStories)
-    if (finalStories.length === 0) {
-        throw contractError("empty_plan", "final progressive plan must contain a story")
-    }
-    if (finalStories.length < admitted.length) {
-        throw contractError(
-            "final_prd_mismatch",
-            `final PRD has ${finalStories.length} stories; admitted prefix has ${admitted.length}`,
-        )
-    }
-    for (let index = 0; index < admitted.length; index += 1) {
-        const expected = admitted[index]!
-        const actual = finalStories[index]!
-        if (canonicalJson(expected) !== canonicalJson(actual)) {
-            // Name the differing fields: a bare "does not exactly match" cost
-            // run 13 its whole plan tail because nobody could see WHAT.
-            const fields = [
-                ...new Set([...Object.keys(expected), ...Object.keys(actual)]),
-            ].filter(
-                (key) =>
-                    canonicalJson(
-                        (expected as unknown as Record<string, unknown>)[key] ?? null,
-                    ) !==
-                    canonicalJson(
-                        (actual as unknown as Record<string, unknown>)[key] ?? null,
-                    ),
-            )
+
+    const admittedIds = new Set(admitted.map((story) => story.id))
+    const looksLikeRepeat =
+        finalStories.length >= admitted.length &&
+        admitted.every((story, index) => finalStories[index]!.id === story.id)
+
+    let composed: PrdStory[]
+    if (options.tailOnly && !looksLikeRepeat) {
+        const reused = finalStories.find((story) => admittedIds.has(story.id))
+        if (reused) {
             throw contractError(
                 "final_prd_mismatch",
-                `final PRD story ${index + 1} does not exactly match admitted prefix story '${expected.id}' ` +
-                    `(differing fields: ${fields.join(", ") || "unknown"})`,
+                `final PRD story '${reused.id}' reuses a published id without restating ` +
+                    `the exact published prefix; in tail-only finalization output only ` +
+                    `the appended stories`,
             )
         }
+        composed = [...admitted, ...finalStories]
+    } else {
+        if (finalStories.length < admitted.length) {
+            throw contractError(
+                "final_prd_mismatch",
+                `final PRD has ${finalStories.length} stories; admitted prefix has ${admitted.length}`,
+            )
+        }
+        for (let index = 0; index < admitted.length; index += 1) {
+            const expected = comparableStory(admitted[index]!)
+            const actual = comparableStory(finalStories[index]!)
+            if (canonicalJson(expected) !== canonicalJson(actual)) {
+                // Name the differing fields: a bare "does not exactly match"
+                // cost run 13 its whole plan tail because nobody could see WHAT.
+                const fields = [
+                    ...new Set([
+                        ...Object.keys(expected),
+                        ...Object.keys(actual),
+                    ]),
+                ].filter(
+                    (key) =>
+                        canonicalJson(expected[key] ?? null) !==
+                        canonicalJson(actual[key] ?? null),
+                )
+                throw contractError(
+                    "final_prd_mismatch",
+                    `final PRD story ${index + 1} does not exactly match admitted prefix story '${admitted[index]!.id}' ` +
+                        `(differing fields: ${fields.join(", ") || "unknown"})`,
+                )
+            }
+        }
+        // The admitted record is the host's truth; a set-tolerated restatement
+        // must not let restated bytes replace it in the composed plan.
+        composed = [...admitted, ...finalStories.slice(admitted.length)]
+    }
+
+    assertCompleteFinalGraph(composed)
+    if (composed.length === 0) {
+        throw contractError("empty_plan", "final progressive plan must contain a story")
     }
     return {
-        finalStories,
-        tail: finalStories.slice(admitted.length).map(snapshotStory),
+        finalStories: composed,
+        tail: composed.slice(admitted.length).map(snapshotStory),
     }
 }
 
@@ -432,6 +479,10 @@ export class ProgressivePlanSession {
     private readonly admittedStories: PrdStory[] = []
     private readonly admittedStoryIds = new Set<string>()
     private finalStoriesFingerprintValue: string | null = null
+    /** Fingerprint of the raw candidate that first reconciled, for replay
+     * identity — with set-tolerance and tail-only composition the composed
+     * plan is no longer byte-identical to what the planner sent. */
+    private reconciledCandidateFingerprint: string | null = null
     private finalTailValue: PrdStory[] | null = null
 
     constructor(value: unknown) {
@@ -518,7 +569,10 @@ export class ProgressivePlanSession {
         return this.admissionResult(rememberedFragment, "admitted")
     }
 
-    reconcile(finalPrd: PrdFile | unknown): ProgressivePlanReconciliationV1 {
+    reconcile(
+        finalPrd: PrdFile | unknown,
+        options: ProgressiveReconcileOptions = {},
+    ): ProgressivePlanReconciliationV1 {
         if (!isPlainRecord(finalPrd) || !Array.isArray(finalPrd.userStories)) {
             throw contractError(
                 "invalid_final_prd",
@@ -531,22 +585,27 @@ export class ProgressivePlanSession {
             ),
         )
         if (this.phaseValue === "reconciled") {
-            if (candidateFingerprint !== this.finalStoriesFingerprintValue) {
+            if (
+                candidateFingerprint !== this.reconciledCandidateFingerprint &&
+                candidateFingerprint !== this.finalStoriesFingerprintValue
+            ) {
                 throw contractError(
                     "final_prd_conflict",
                     "progressive planning session was already reconciled with a different final PRD",
                 )
             }
-            return this.reconciliationResult("replayed", candidateFingerprint)
+            return this.reconciliationResult("replayed", this.finalStoriesFingerprintValue!)
         }
 
         const reconciliation = reconcileProgressivePlanStories(
             this.admittedStories,
             finalPrd,
+            options,
         )
         const finalStoriesFingerprint = canonicalFingerprint(reconciliation.finalStories)
         this.phaseValue = "reconciled"
         this.finalStoriesFingerprintValue = finalStoriesFingerprint
+        this.reconciledCandidateFingerprint = candidateFingerprint
         this.finalTailValue = reconciliation.tail.map(snapshotStory)
         return this.reconciliationResult(
             "reconciled",
