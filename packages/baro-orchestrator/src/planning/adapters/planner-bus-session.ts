@@ -21,9 +21,12 @@ import {
 } from "../../runtime/mozaik.js"
 import {
     AgentResult,
+    ModelInvocationMeasured,
     PlanFragmentAdmitted,
     PlanFragmentRejected,
 } from "../../semantic-events.js"
+import { runnerMeasurement } from "../../telemetry/runner-measurement.js"
+import { normalizeClaudeRunnerObservation } from "../../conversation/dialogue-responder.js"
 import { ClaudeCliParticipant } from "../../harness/claude/cli-participant.js"
 import { IdleWatchdog, llmIdleTimeoutMs } from "../../harness/liveness.js"
 import type { PlanningFeed } from "../../execution/planning-feed.js"
@@ -195,6 +198,61 @@ class ResultStream extends BaseObserver {
     }
 }
 
+/** Publishes one ModelInvocationMeasured per planner CLI result. The bus
+ *  collector only admits story terminals with lease correlation, so the
+ *  session is the runner-evidence producer for its own participant. */
+class PlannerTelemetryObserver extends BaseObserver {
+    private turn = 0
+
+    constructor(
+        private readonly runId: string,
+        private readonly agentId: string,
+        private readonly requestedModel: string,
+    ) {
+        super()
+    }
+
+    override onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): void {
+        if (!AgentResult.is(event) || event.data.agentId !== this.agentId) {
+            return
+        }
+        const item = event.data
+        const turn = ++this.turn
+        const observation = normalizeClaudeRunnerObservation(
+            {
+                usage: item.usage ?? undefined,
+                modelUsage: item.modelUsage ?? undefined,
+                duration_ms: item.durationMs ?? undefined,
+                total_cost_usd: item.totalCostUsd ?? undefined,
+            },
+            this.requestedModel,
+        )
+        const measurement = ModelInvocationMeasured.create(
+            runnerMeasurement(
+                {
+                    invocationBaseId: `${this.runId}:planner:${turn}`,
+                    runId: this.runId,
+                    phase: "planner",
+                    storyId: null,
+                    turn,
+                    backend: "claude",
+                    requestedModel: this.requestedModel,
+                },
+                {
+                    ...observation,
+                    status: item.isError ? "failed" : "succeeded",
+                },
+            ),
+        )
+        for (const env of this.getEnvironments()) {
+            env.deliverSemanticEvent(this, measurement)
+        }
+    }
+}
+
 /** Render the trusted envelope as the planner's goal statement. */
 export function goalTextFromEnvelope(envelope: GoalEnvelope): string {
     const section = (title: string, items: readonly string[]): string =>
@@ -329,9 +387,12 @@ export async function runPlannerBusSession(
         },
     })
 
+    // Deterministic default: without it the CLI silently picks the user's
+    // account default and the run's planner model varies per machine.
+    const requestedModel = opts.model ?? "opus"
     const planner = new ClaudeCliParticipant(agentId, {
         cwd: opts.cwd,
-        model: opts.model,
+        model: requestedModel,
         effort: opts.effort,
         claudeBin: opts.claudeBin,
         includePartialMessages: true,
@@ -360,9 +421,15 @@ export async function runPlannerBusSession(
     }
 
     const results = new ResultStream(agentId)
+    const telemetry = new PlannerTelemetryObserver(
+        opts.runId,
+        agentId,
+        requestedModel,
+    )
     let watchdog: IdleWatchdog | null = null
     try {
         results.join(opts.env)
+        telemetry.join(opts.env)
         planner.join(opts.env)
         planner.start(opts.env)
         watchdog = new IdleWatchdog(
@@ -451,6 +518,7 @@ export async function runPlannerBusSession(
         results.end()
         receipts.leave(opts.env)
         results.leave(opts.env)
+        telemetry.leave(opts.env)
         if (planner.getEnvironments().includes(opts.env)) {
             planner.leave(opts.env)
         }

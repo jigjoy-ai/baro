@@ -44,6 +44,7 @@ import {
     type ModelTokenMetrics,
     type UnknownMetricReason,
 } from "../telemetry/model-telemetry.js"
+import { primaryClaudeModel } from "../telemetry/claude-model-usage.js"
 import type { RunnerInvocationObservation } from "../harness/runner-invocation.js"
 import { frontDoorBillingPhase } from "./session/frontdoor-billing.js"
 import {
@@ -744,7 +745,7 @@ function claudeObservation(
         },
         // Claude CLI can be configured for Anthropic, Bedrock, or Vertex.
         provider: null,
-        resolvedModel: requestedModel,
+        resolvedModel: primaryClaudeModel(wrapper.modelUsage) ?? requestedModel,
         // `session_id` is resumable harness state, not an upstream charge id.
         providerRequestId: null,
     }

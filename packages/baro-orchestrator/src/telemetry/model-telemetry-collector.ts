@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
 
 import type { SemanticEvent } from "../runtime/mozaik.js"
+import { primaryClaudeModel } from "./claude-model-usage.js"
 
 import {
     AgentResult,
@@ -276,7 +277,7 @@ export class ModelTelemetryCollector extends SerializedObserver {
         return {
             agentId: item.agentId,
             backend: route.backend,
-            model: primaryModelOf(item.modelUsage) ?? route.model,
+            model: primaryClaudeModel(item.modelUsage) ?? route.model,
             requestedModel: requestedOf(route),
             status: item.isError ? "failed" : "succeeded",
             granularity: route.backend === "openai" ? "turn" : "process",
@@ -566,33 +567,6 @@ function record(value: unknown): Record<string, unknown> {
 /** "default" is the route-unknown placeholder, not a real request. */
 function requestedOf(route: RouteInfo): string | null {
     return route.model === "default" ? null : route.model
-}
-
-/**
- * Resolved model id from the CLI's per-model usage map. With several models
- * in one process (e.g. a haiku sub-turn), the one with the most output
- * tokens is the invocation's primary model.
- */
-function primaryModelOf(
-    modelUsage: Readonly<Record<string, unknown>> | null | undefined,
-): string | null {
-    if (!modelUsage) return null
-    let best: string | null = null
-    let bestOutput = -1
-    for (const [model, raw] of Object.entries(modelUsage)) {
-        const usage = record(raw)
-        const output =
-            typeof usage.outputTokens === "number"
-                ? usage.outputTokens
-                : typeof usage.output_tokens === "number"
-                  ? usage.output_tokens
-                  : 0
-        if (output > bestOutput) {
-            best = model
-            bestOutput = output
-        }
-    }
-    return best
 }
 
 function routeKey(

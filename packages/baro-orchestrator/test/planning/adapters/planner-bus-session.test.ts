@@ -4,8 +4,16 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, it } from "node:test"
 
-import { AgenticEnvironment, BaseObserver } from "../../../src/runtime/mozaik.js"
-import { PlanFragmentAdmitted } from "../../../src/semantic-events.js"
+import {
+    AgenticEnvironment,
+    BaseObserver,
+    type Participant,
+    type SemanticEvent,
+} from "../../../src/runtime/mozaik.js"
+import {
+    ModelInvocationMeasured,
+    PlanFragmentAdmitted,
+} from "../../../src/semantic-events.js"
 import { PROGRESSIVE_PLANNER_MCP_MODE } from "../../../src/planning/adapters/planner-harness-progressive.js"
 import {
     goalTextFromEnvelope,
@@ -127,6 +135,11 @@ const finalPrd = ${JSON.stringify(FINAL_PRD)};
 const tailFinalPrd = ${JSON.stringify(TAIL_FINAL_PRD)};
 const fumbleFinalization = ${JSON.stringify(fumbleFinalization)};
 const argv = process.argv.slice(2);
+
+const modelIndex = argv.indexOf("--model");
+if (modelIndex < 0 || argv[modelIndex + 1] !== "opus") {
+    throw new Error("fixture expected the default --model opus, got: " + argv.join(" "));
+}
 
 const configIndex = argv.indexOf("--mcp-config");
 if (configIndex < 0) throw new Error("fixture expected --mcp-config");
@@ -253,12 +266,25 @@ async function exerciseBaroMcp(target) {
     return path
 }
 
+class EventCapture extends BaseObserver {
+    readonly events: SemanticEvent<unknown>[] = []
+
+    override onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): void {
+        this.events.push(event)
+    }
+}
+
 describe("planner bus session", () => {
     it("runs the planner on the bus with authoritative fragment receipts", async () => {
         await withTempDir("baro-planner-bus-", async (dir) => {
             const env = new AgenticEnvironment("planner-bus-session")
             const feed = new StubFeed()
             feed.join(env)
+            const capture = new EventCapture()
+            capture.join(env)
 
             const result = await runPlannerBusSession({
                 runId: "run-bus-1",
@@ -297,6 +323,15 @@ describe("planner bus session", () => {
             assert.equal(finalPrd.userStories[0]!.id, "S1")
             // The model's metadata is ignored; the host's bootstrap wins.
             assert.equal(finalPrd.branchName, "bootstrap-branch")
+
+            // The session is the runner-evidence producer for its planner.
+            const measured = capture.events.filter(ModelInvocationMeasured.is)
+            assert.equal(measured.length, 1)
+            assert.equal(measured[0]!.data.phase, "planner")
+            assert.equal(measured[0]!.data.runId, "run-bus-1")
+            assert.equal(measured[0]!.data.backend, "claude")
+            assert.equal(measured[0]!.data.requestedModel, "opus")
+            assert.equal(measured[0]!.data.status, "succeeded")
         })
     })
 
