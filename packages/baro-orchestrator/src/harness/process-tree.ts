@@ -1035,13 +1035,14 @@ function publishActiveProviderOwnership(): ProviderOwnershipPublishResult | null
         if (!tree.requiresOwnershipManifestEntry()) continue
         const groups = tree.ownershipSnapshots()
         if (groups === null) {
-            // Preserve the last complete generation. The caller which owns a
-            // newly spawned tree will fail it closed; already registered trees
-            // remain represented by the previous generation.
-            return {
-                ok: false,
-                error: "an active provider group has no identity-safe ownership snapshot",
-            }
+            // A tree without a snapshot is either freshly spawned (its first
+            // shared observation hasn't landed) or already drained. Failing
+            // the WHOLE publish here killed every concurrently spawning
+            // worker for one young neighbour — the serial SIGKILLs of runs
+            // 12–15. Skip it: an unregistered tree still fails ITSELF closed
+            // in its own registration path if its identity never arrives,
+            // and a drained tree has nothing left to protect.
+            continue
         }
         for (const group of groups) entries.push({ tree, group })
     }

@@ -757,6 +757,107 @@ describe("process-tree discovery", () => {
     )
 
     it(
+        "a young neighbour without a snapshot does not poison the batch publish",
+        {
+            skip:
+                process.platform !== "linux" &&
+                process.platform !== "darwin",
+        },
+        async () => {
+            let generation = 0
+            const publishedCounts: number[] = []
+            setProcessTreeOwnershipPublisherForTests((groups) => {
+                publishedCounts.push(groups.length)
+                return { ok: true, generation: ++generation }
+            })
+
+            const stable = spawn(
+                process.execPath,
+                ["-e", "setInterval(() => {}, 1000);"],
+                { detached: true, stdio: "ignore" },
+            )
+            const stableTree = new ManagedProcessTree(stable, {
+                ownsProcessGroup: true,
+                terminationGraceMs: 50,
+                pollIntervalMs: 10,
+                quiescenceTimeoutMs: 500,
+            })
+            stable.once("close", () => stableTree.markRootClosed())
+
+            let young: ReturnType<typeof spawn> | undefined
+            let youngTree: ManagedProcessTree | undefined
+            try {
+                const before = processTreeObserverStats()
+                stableTree.refresh()
+                await waitForCondition(
+                    () => generation >= 1,
+                    2_000,
+                )
+
+                // A neighbour whose root exits before any observation keeps
+                // an empty member table — ownershipSnapshots() stays null
+                // while the tree drains. This exact state used to fail the
+                // WHOLE publish and fail-closed-kill every concurrently
+                // spawning worker (the serial SIGKILLs of runs 12–15).
+                young = spawn(process.execPath, ["-e", "process.exit(0)"], {
+                    detached: true,
+                    stdio: "ignore",
+                })
+                youngTree = new ManagedProcessTree(young, {
+                    ownsProcessGroup: true,
+                    terminationGraceMs: 50,
+                    pollIntervalMs: 10,
+                    quiescenceTimeoutMs: 500,
+                })
+                const youngRef = young
+                const youngClosed = new Promise<void>((resolve) => {
+                    youngRef.once("close", () => {
+                        youngTree?.markRootClosed()
+                        resolve()
+                    })
+                })
+                await youngClosed
+
+                const generationBefore = generation
+                const scansBefore = processTreeObserverStats().scansCompleted
+                stableTree.refresh()
+                await waitForCondition(
+                    () =>
+                        processTreeObserverStats().scansCompleted >=
+                        scansBefore + 1,
+                    2_000,
+                )
+                await waitForCondition(
+                    () => generation > generationBefore,
+                    2_000,
+                )
+
+                assert.equal(isAlive(stable.pid!), true, "registered sibling survives")
+                assert.ok(
+                    publishedCounts.length > 0 &&
+                        publishedCounts[publishedCounts.length - 1]! >= 1,
+                    "the observed sibling still reaches the manifest",
+                )
+                void before
+            } finally {
+                stableTree.terminate("SIGKILL")
+                youngTree?.terminate("SIGKILL")
+                for (const proc of [stable, young]) {
+                    if (!proc?.pid) continue
+                    try {
+                        process.kill(-proc.pid, "SIGKILL")
+                    } catch {
+                        // already exited
+                    }
+                }
+                await stableTree.done
+                if (youngTree) await youngTree.done
+                setProcessTreeOwnershipPublisherForTests(null)
+            }
+        },
+    )
+
+    it(
         "uses taskkill while the Windows root is still live",
         { skip: process.platform !== "win32" },
         async () => {
