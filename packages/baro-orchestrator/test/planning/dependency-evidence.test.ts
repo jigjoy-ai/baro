@@ -403,6 +403,26 @@ describe("directory-level edge evidence", () => {
         assert.deepEqual(unsupportedEdges([helper, controller]), [])
     })
 
+    it("keeps an edge from a manifest-writing story without a path tie", () => {
+        // Install stories enable a package; dependents import "@nestjs/swagger",
+        // never a path the installer writes — no per-file tie can exist.
+        const installer = {
+            id: "S1",
+            title: "install swagger",
+            acceptance: [],
+            writes: ["package.json", "nest-cli.json"],
+        } as unknown as PrdStory
+        const controller = {
+            id: "S4",
+            title: "shops docs",
+            description: "Decorate handlers with @nestjs/swagger decorators.",
+            dependsOn: ["S1"],
+            acceptance: [],
+            writes: ["src/shops/shops.controller.ts"],
+        } as unknown as PrdStory
+        assert.deepEqual(unsupportedEdges([installer, controller]), [])
+    })
+
     it("still prunes an edge with no textual tie at all", () => {
         const stranger = {
             id: "S9",

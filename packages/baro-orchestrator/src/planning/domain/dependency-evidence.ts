@@ -81,6 +81,20 @@ function pathUnderDir(path: string, dir: string): boolean {
     return path.includes(`/${dir}/`)
 }
 
+const MANIFEST_PATTERN =
+    /(?:^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|nest-cli\.json|tsconfig(?:\.[a-z]+)?\.json|Cargo\.toml|Cargo\.lock|go\.mod|requirements\.txt|pyproject\.toml)$/u
+
+/**
+ * A story that edits the toolchain manifest (installs a package, enables a
+ * compiler plugin) is a global prerequisite: its dependents reference what it
+ * ENABLES ("@nestjs/swagger"), never a path it writes, so no per-file tie can
+ * exist. The swagger rerun dropped ten planner-declared install edges this
+ * way and rebuilt the discovery wave the previous fix had just cured.
+ */
+function writesManifest(story: PrdStory): boolean {
+    return writeSurfaceOf(story).some((path) => MANIFEST_PATTERN.test(path))
+}
+
 /**
  * Edges no file supports.
  *
@@ -102,6 +116,8 @@ export function unsupportedEdges(stories: readonly PrdStory[]): UnsupportedEdge[
             const dependencyWrites = writeSurfaceOf(dependency)
             // Silence from either side is not evidence of independence.
             if (dependencyWrites.length === 0 || ownWrites.size === 0) continue
+            // Manifest writers are prerequisites by nature; keep their edges.
+            if (writesManifest(dependency)) continue
             // Evidence is required to REMOVE an edge, never to keep one — a
             // directory or relative-import mention of a dependency's output
             // is enough tie to respect the planner's declared order.
