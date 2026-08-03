@@ -281,11 +281,13 @@ export function renderModeContract(decision: ModeContract): string {
         lines.push(
             "Planner rules: order only what genuinely has to be ordered. Sequential mode means the run has an ordered spine, not that every story hangs off the previous one.",
             "Do not create parallel siblings that edit the same file/component/state/API. Keep each story cheap-model-capable.",
+            "Evidence overrides maxStories: when the work enumerates over independent units (controllers, modules, packages), emit one story per unit and declare each story's `writes`. The host verifies pairwise-disjoint write surfaces and keeps the full width; batching provably disjoint units into one story puts them all on the critical path.",
         )
     } else {
         lines.push(
             "Planner rules: output parallel siblings only where write surfaces are independent.",
             "For each sibling story, name its expected write surface in the description. Shared files/components must be sequential.",
+            "Evidence overrides maxStories: declare each story's `writes` and the host keeps any width whose surfaces are pairwise disjoint.",
         )
     }
     return lines.join("\n")
@@ -319,9 +321,10 @@ export function buildIntakePrompt(args: {
         "",
         "Bias rules:",
         "- If several agents would edit the same file/component/state/schema, choose focused or sequential, not parallel.",
+        "- If the goal enumerates over N independent units (controllers, modules, packages, endpoints, files), prefer a story per unit: size maxStories to N plus any shared foundation. Disjoint write surfaces cannot conflict — the host serializes and verifies every merge — while batching N provably independent units into one story puts all of them on the critical path.",
         "- If the prompt is a follow-up bug report from screenshots/console output, choose focused unless it clearly spans independent surfaces.",
-        "- If uncertain, choose focused. Unsafe parallelism is worse than leaving speed on the table.",
-        "- maxStories is a cap for the planner, not a target.",
+        "- If uncertain AND the write surfaces overlap or are unknown, choose focused. Unsafe parallelism is worse than leaving speed on the table — but serializing provably disjoint units is also a real cost, not a free safety.",
+        "- maxStories is a cap for the planner, not a target; the planner may exceed it only with host-verified disjoint write surfaces.",
         "",
         args.projectContext?.trim()
             ? `Project context summary:\n${args.projectContext.trim().slice(0, 3000)}\n`

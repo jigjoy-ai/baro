@@ -107,3 +107,66 @@ function normalize(paths: readonly string[]): string[] {
     }
     return [...seen]
 }
+
+export interface DisjointWidthEvidence {
+    /** True when every story declares writes and no unordered pair overlaps. */
+    readonly proven: boolean
+    /** Stories that declared no write surface (silence is not evidence). */
+    readonly undeclared: readonly string[]
+    /** Unordered pairs whose declared writes overlap. */
+    readonly conflicts: readonly { a: string; b: string; path: string }[]
+}
+
+/**
+ * Can this plan's width stand on evidence? maxStories exists to protect a run
+ * from guessed-at parallel edits colliding; that risk is zero for stories
+ * whose declared write surfaces are pairwise disjoint (pairs ordered by a
+ * dependency path may overlap — the DAG already serializes them). A story
+ * that declares nothing keeps the cap: silence is not evidence.
+ */
+export function disjointWidthEvidence(
+    stories: readonly PrdStory[],
+): DisjointWidthEvidence {
+    const undeclared = stories
+        .filter((story) => writeSurfaceOf(story).length === 0)
+        .map((story) => story.id)
+
+    // Transitive reachability over dependsOn: ordered pairs may share files.
+    const ids = stories.map((story) => story.id)
+    const index = new Map(ids.map((id, i) => [id, i]))
+    const reachable: boolean[][] = ids.map(() => ids.map(() => false))
+    for (const story of stories) {
+        for (const dep of story.dependsOn ?? []) {
+            const from = index.get(dep)
+            const to = index.get(story.id)
+            if (from !== undefined && to !== undefined) reachable[from]![to] = true
+        }
+    }
+    for (let k = 0; k < ids.length; k++) {
+        for (let i = 0; i < ids.length; i++) {
+            if (!reachable[i]![k]) continue
+            for (let j = 0; j < ids.length; j++) {
+                if (reachable[k]![j]) reachable[i]![j] = true
+            }
+        }
+    }
+
+    const surfaces = stories.map((story) => new Set(writeSurfaceOf(story)))
+    const conflicts: { a: string; b: string; path: string }[] = []
+    for (let i = 0; i < stories.length; i++) {
+        for (let j = i + 1; j < stories.length; j++) {
+            if (reachable[i]![j] || reachable[j]![i]) continue
+            for (const path of surfaces[i]!) {
+                if (surfaces[j]!.has(path)) {
+                    conflicts.push({ a: ids[i]!, b: ids[j]!, path })
+                    break
+                }
+            }
+        }
+    }
+    return {
+        proven: undeclared.length === 0 && conflicts.length === 0,
+        undeclared,
+        conflicts,
+    }
+}

@@ -8,7 +8,7 @@
  */
 
 import type { PrdExecutionMode, PrdFile, PrdStory } from "../../prd.js"
-import { pruneUnsupportedEdges, writeSurfaceOf } from "./dependency-evidence.js"
+import { disjointWidthEvidence, pruneUnsupportedEdges, writeSurfaceOf } from "./dependency-evidence.js"
 import { deriveGoalContract } from "../../goal/goal-contract.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
@@ -80,19 +80,39 @@ export function enforceModeContract(prdJson: string, contract: ModeContract, goa
             },
         ]
     } else if (contract.maxStories && stories.length > contract.maxStories) {
-        process.stderr.write(
-            `[run-planner] contract violation: ${stories.length} stories > maxStories=${contract.maxStories} — trimming\n`,
-        )
-        const kept: PrdStory[] = []
-        const keptIds = new Set<string>()
-        for (const s of [...stories].sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))) {
-            if (kept.length >= contract.maxStories) break
-            if ((s.dependsOn ?? []).every((d) => keptIds.has(d))) {
-                kept.push(s)
-                keptIds.add(s.id)
+        // maxStories is the intake's GUESS at safe width, made before any
+        // write surface existed. Guessed caps yield to evidence: when every
+        // story declares its writes and no unordered pair overlaps, the
+        // collision the cap protects against cannot happen — the run that
+        // taught us this packed 10 provably disjoint controllers into one
+        // 33-minute story because the cap said 4.
+        const evidence = disjointWidthEvidence(stories)
+        if (evidence.proven) {
+            process.stderr.write(
+                `[run-planner] maxStories=${contract.maxStories} exceeded on evidence: ` +
+                    `${stories.length} stories declare pairwise-disjoint write surfaces — keeping all\n`,
+            )
+        } else {
+            const why = evidence.undeclared.length > 0
+                ? `undeclared writes: ${evidence.undeclared.join(", ")}`
+                : `overlapping writes: ${evidence.conflicts
+                      .map(({ a, b, path }) => `${a}~${b} (${path})`)
+                      .join(", ")}`
+            process.stderr.write(
+                `[run-planner] contract violation: ${stories.length} stories > maxStories=${contract.maxStories} ` +
+                    `and width is not evidence-backed (${why}) — trimming\n`,
+            )
+            const kept: PrdStory[] = []
+            const keptIds = new Set<string>()
+            for (const s of [...stories].sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0))) {
+                if (kept.length >= contract.maxStories) break
+                if ((s.dependsOn ?? []).every((d) => keptIds.has(d))) {
+                    kept.push(s)
+                    keptIds.add(s.id)
+                }
             }
+            if (kept.length > 0) stories = kept
         }
-        if (kept.length > 0) stories = kept
     }
 
     // A parallel stamp on a one-story or fully serial plan is actively
@@ -143,6 +163,17 @@ export function enforceModeContract(prdJson: string, contract: ModeContract, goa
         parallelism: contract.parallelism,
         source: contract.source ?? "contract",
     }
+    // Audit line for tuning the intake against reality: what was guessed vs
+    // what the plan can actually do. Achieved runtime concurrency is a Board
+    // fact; the plan's width ceiling is decided right here.
+    const widthEvidence = disjointWidthEvidence(stories)
+    process.stderr.write(
+        `[mode-telemetry] proposed mode=${contract.mode} maxStories=${contract.maxStories ?? "-"} ` +
+            `parallelism=${contract.parallelism ?? "-"} confidence=${contract.confidence} | ` +
+            `plan stories=${stories.length} widestLevel=${widestDagLevel(stories)} ` +
+            `writesDeclared=${stories.length - widthEvidence.undeclared.length}/${stories.length} ` +
+            `disjoint=${widthEvidence.proven}\n`,
+    )
     return JSON.stringify(prd)
 }
 

@@ -2,7 +2,7 @@ import type { SemanticEvent } from "../../runtime/mozaik.js"
 import { createHash } from "node:crypto"
 import { isDeepStrictEqual } from "node:util"
 
-import { pruneUnsupportedEdges } from "../domain/dependency-evidence.js"
+import { disjointWidthEvidence, pruneUnsupportedEdges } from "../domain/dependency-evidence.js"
 
 import {
     normalizePrd,
@@ -447,14 +447,39 @@ export class ProgressivePlanningCoordinator {
                 modifiedDeps: {},
             },
         }
+        // The intake's maxStories is a pre-plan guess; evidence overrides it.
+        // When every story on the board — already admitted plus this fragment —
+        // declares a write surface and no unordered pair overlaps, the
+        // collision the cap guards against cannot happen, so the fragment is
+        // admitted at its full width.
         const maxPlannerStories = state.prd.executionMode?.maxStories ?? 128
+        const existingStories = state.prd?.userStories ?? []
+        const boardStories = [
+            ...existingStories,
+            ...validated.stories.filter((story) =>
+                !existingStories.some((existing) => existing.id === story.id),
+            ),
+        ]
+        const widthEvidence = disjointWidthEvidence(boardStories)
+        if (
+            widthEvidence.proven &&
+            planning.admittedStoryIds.length + validated.stories.length > maxPlannerStories
+        ) {
+            process.stderr.write(
+                `[planner-bus] maxStories=${maxPlannerStories} exceeded on evidence: ` +
+                    `${boardStories.length} stories declare pairwise-disjoint write surfaces
+`,
+            )
+        }
         const outcome = this.opts.host.admitGraph({
             proposal,
             planningState: nextPlanning,
-            maxAddedStories: Math.max(
-                0,
-                maxPlannerStories - planning.admittedStoryIds.length,
-            ),
+            maxAddedStories: widthEvidence.proven
+                ? validated.stories.length
+                : Math.max(
+                      0,
+                      maxPlannerStories - planning.admittedStoryIds.length,
+                  ),
         })
         if (!outcome.applied || !RuntimeReplanApplied.is(outcome.event)) {
             this.opts.host.emit(outcome.event)

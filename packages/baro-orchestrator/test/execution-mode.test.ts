@@ -437,6 +437,50 @@ describe("enforceModeContract", () => {
         assert.equal(out.executionMode?.mode, "sequential")
     })
 
+    it("keeps width above maxStories when every pair of writes is disjoint", () => {
+        // The swagger run packed 10 provably disjoint controllers into one
+        // 33-minute story because the guessed cap said 4. Evidence wins now.
+        const out = JSON.parse(enforceModeContract(
+            prd([
+                { id: "S1", writes: ["src/common/openapi/helpers.ts"] },
+                { id: "S2", dependsOn: ["S1"], writes: ["src/shops/shops.controller.ts", "src/common/openapi/helpers.ts"] },
+                { id: "S3", dependsOn: ["S1"], writes: ["src/menus/menu.controller.ts"] },
+                { id: "S4", dependsOn: ["S1"], writes: ["src/tables/tables.controller.ts"] },
+                { id: "S5", dependsOn: ["S1"], writes: ["src/promotions/promotions.controller.ts"] },
+            ]),
+            { mode: "sequential", confidence: 0.7, reason: "guess", maxStories: 3, parallelism: 1 },
+            "goal",
+        )) as PrdFile
+        assert.deepEqual(out.userStories.map((s) => s.id), ["S1", "S2", "S3", "S4", "S5"])
+    })
+
+    it("still trims when any story is silent about its writes", () => {
+        const out = JSON.parse(enforceModeContract(
+            prd([
+                { id: "S1", writes: ["src/a.ts"] },
+                { id: "S2", writes: ["src/b.ts"] },
+                { id: "S3" },
+                { id: "S4", writes: ["src/d.ts"] },
+            ]),
+            { mode: "sequential", confidence: 0.7, reason: "guess", maxStories: 2, parallelism: 1 },
+            "goal",
+        )) as PrdFile
+        assert.equal(out.userStories.length, 2)
+    })
+
+    it("still trims when unordered stories overlap on a file", () => {
+        const out = JSON.parse(enforceModeContract(
+            prd([
+                { id: "S1", writes: ["src/a.ts"] },
+                { id: "S2", writes: ["src/shared.ts"] },
+                { id: "S3", writes: ["src/shared.ts"] },
+            ]),
+            { mode: "sequential", confidence: 0.7, reason: "guess", maxStories: 2, parallelism: 1 },
+            "goal",
+        )) as PrdFile
+        assert.equal(out.userStories.length, 2)
+    })
+
     it("leaves a compliant PRD alone apart from the stamp", () => {
         const out = JSON.parse(enforceModeContract(
             prd([{ id: "S1", model: "sonnet" }]),
