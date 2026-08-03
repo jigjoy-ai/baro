@@ -211,24 +211,40 @@ export function canonicalObligationAcceptance(
     let changed = false
     for (const criterion of acceptance) {
         const claim = OBLIGATION_CRITERION_CLAIM.exec(criterion)
-        const obligation = claim ? byId.get(claim[1] ?? "") : undefined
-        if (!obligation) {
+        // A compound claim ("[O-015/O-022]") is the same class of mistake as
+        // a paraphrase: WHICH obligations are meant is legible and the text
+        // is deterministically recoverable, so it expands to one canonical
+        // criterion per id. Any unknown part makes the whole claim
+        // fabrication and it stays untouched for the validator.
+        const claimedIds = claim ? splitClaimedObligationIds(claim[1] ?? "") : []
+        const obligations = claimedIds.map((id) => byId.get(id))
+        if (obligations.length === 0 || obligations.some((o) => o === undefined)) {
             result.push(criterion)
             continue
         }
-        if (claimed.has(obligation.id)) {
-            changed = true
-            continue
+        if (obligations.length > 1) changed = true
+        for (const obligation of obligations as ArchitectureObligationV1[]) {
+            if (claimed.has(obligation.id)) {
+                changed = true
+                continue
+            }
+            claimed.add(obligation.id)
+            for (const invariantId of obligation.invariantIds) {
+                if (!invariantIds.includes(invariantId)) invariantIds.push(invariantId)
+            }
+            const canonical = renderArchitectureObligationCriterion(obligation)
+            if (canonical !== criterion) changed = true
+            result.push(canonical)
         }
-        claimed.add(obligation.id)
-        for (const invariantId of obligation.invariantIds) {
-            if (!invariantIds.includes(invariantId)) invariantIds.push(invariantId)
-        }
-        const canonical = renderArchitectureObligationCriterion(obligation)
-        if (canonical !== criterion) changed = true
-        result.push(canonical)
     }
     return { acceptance: result, invariantIds, changed }
+}
+
+/** "O-015/O-022", "O-015, O-022" → the individual ids; [] unless every part is an id. */
+function splitClaimedObligationIds(raw: string): string[] {
+    const parts = raw.split(/[\s/,+&]+/u).filter(Boolean)
+    if (parts.length === 0) return []
+    return parts.every((part) => OBLIGATION_ID.test(part)) ? parts : []
 }
 
 /** Union the parent invariants a story's claims imply into what it declared. */
@@ -273,10 +289,13 @@ export function validateArchitectureObligationCoverage(
                 const claim = OBLIGATION_CRITERION_CLAIM.exec(criterion)
                 if (claim) {
                     const id = claim[1] ?? "unknown"
+                    const compound = splitClaimedObligationIds(id)
                     throw new ArchitectureObligationContractError(
-                        byId.has(id)
-                            ? `story ${mapping.storyId} altered canonical architecture obligation ${id}`
-                            : `story ${mapping.storyId} claims unknown architecture obligation ${id}`,
+                        compound.length > 1
+                            ? `story ${mapping.storyId} writes ${compound.length} obligation ids in one claim [${id}]; each obligation needs its own acceptance criterion`
+                            : byId.has(id)
+                              ? `story ${mapping.storyId} altered canonical architecture obligation ${id}`
+                              : `story ${mapping.storyId} claims unknown architecture obligation ${id}`,
                     )
                 }
                 continue

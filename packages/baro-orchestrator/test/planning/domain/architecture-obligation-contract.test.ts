@@ -285,6 +285,37 @@ describe("Architecture obligation contract", () => {
         )
     })
 
+    it("expands a compound claim into one canonical criterion per id", () => {
+        // A surgeon replan wrote "[O-015/O-022]" and the whole proposal died
+        // on "unknown obligation". WHICH obligations are meant is legible, so
+        // the repair lane expands it; the strict lane names the real mistake.
+        const contract = architectureObligationsFromDecision(decision(), goal)!
+        const repaired = canonicalObligationAcceptance(contract, [
+            "[O-001/O-002] both boundaries stay compatible",
+        ])
+        assert.deepEqual(repaired.acceptance, [
+            renderArchitectureObligationCriterion(contract.obligations[0]!),
+            renderArchitectureObligationCriterion(contract.obligations[1]!),
+        ])
+        assert.deepEqual(repaired.invariantIds, ["G-A1", "G-C1"])
+        assert.equal(repaired.changed, true)
+
+        // A compound claim with any unknown part is fabrication and stays.
+        assert.deepEqual(
+            canonicalObligationAcceptance(contract, ["[O-001/O-099] mixed"]).acceptance,
+            ["[O-001/O-099] mixed"],
+        )
+
+        assert.throws(
+            () => validateArchitectureObligationCoverage(contract, [{
+                storyId: "S2",
+                acceptance: ["[O-001/O-002] both boundaries stay compatible"],
+                invariantIds: ["G-A1", "G-C1"],
+            }], "partial"),
+            /writes 2 obligation ids in one claim \[O-001\/O-002\]; each obligation needs its own acceptance criterion/u,
+        )
+    })
+
     it("hands back the parent invariants a claim implies", () => {
         // A real opus plan claimed O-018 and listed every parent but G-C3, and
         // the run died at planning on work that was otherwise coherent. WHICH

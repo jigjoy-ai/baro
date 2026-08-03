@@ -1019,6 +1019,31 @@ interface RemediationTarget {
     invariant: GoalInvariant
 }
 
+/**
+ * A challenge reason is model-authored prose and can run to essay length —
+ * embedded verbatim in an acceptance criterion it can exceed the Critic's
+ * per-criterion lossless bound, which dead-ends the story (the Critic
+ * rightly refuses to judge a contract it cannot hold whole). The criterion
+ * carries a bounded cut at a sentence boundary; the description keeps the
+ * full text. Reasons within the bound pass through byte-for-byte, so replay
+ * of previously admitted PRDs is unaffected (oversized ones could never
+ * complete anyway).
+ */
+const MAX_CRITERION_REASON_CHARS = 1_200
+
+function boundedChallengeReason(reason: string): string {
+    if (reason.length <= MAX_CRITERION_REASON_CHARS) return reason
+    const window = reason.slice(0, MAX_CRITERION_REASON_CHARS)
+    const sentenceEnd = Math.max(
+        window.lastIndexOf(". "),
+        window.lastIndexOf(".\n"),
+    )
+    const cut = sentenceEnd > MAX_CRITERION_REASON_CHARS / 2
+        ? window.slice(0, sentenceEnd + 1)
+        : window.slice(0, Math.max(window.lastIndexOf(" "), 1))
+    return `${cut} … [truncated; the full reasoning is in the story description]`
+}
+
 function legacyRemediationStory(
     storyId: string,
     { challenge, invariant }: RemediationTarget,
@@ -1039,7 +1064,7 @@ function legacyRemediationStory(
         retries: 2,
         acceptance: [
             `[${invariant.id}] ${invariant.text}`,
-            `Challenge ${challenge.challengeId} is addressed: ${challenge.reason}`,
+            `Challenge ${challenge.challengeId} is addressed: ${boundedChallengeReason(challenge.reason)}`,
             "Focused regression evidence demonstrates the corrected behavior.",
         ],
         tests: ["git diff --check"],
@@ -1072,7 +1097,7 @@ function groupedRemediationStory(
             ...targets.map(({ invariant }) =>
                 `[${invariant.id}] ${invariant.text}`),
             ...targets.map(({ challenge }) =>
-                `Challenge ${challenge.challengeId} is addressed: ${challenge.reason}`),
+                `Challenge ${challenge.challengeId} is addressed: ${boundedChallengeReason(challenge.reason)}`),
             "Focused regression evidence demonstrates the corrected behavior.",
         ],
         tests: ["git diff --check"],

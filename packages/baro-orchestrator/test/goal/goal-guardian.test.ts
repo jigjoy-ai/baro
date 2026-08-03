@@ -207,6 +207,46 @@ describe("GoalGuardian", () => {
         assert.equal(forged?.data.contractId, null)
     })
 
+    it("bounds an essay-length challenge reason in the acceptance criterion", () => {
+        // A 3k-char model-authored reproduction embedded verbatim once pushed
+        // the criterion over the Critic's per-criterion bound and dead-ended
+        // the GREM story. The criterion gets a sentence-boundary cut; the
+        // description keeps every byte.
+        const runId = "run-bounded-reason"
+        const board = source("board")
+        const guardian = new GoalGuardian({
+            runId,
+            goalEnvelope: envelope,
+            storyMappings: [{ storyId: "S1", invariantIds: ["G-A1"] }],
+        })
+        guardian.setRequestAuthority(board)
+        const env = joinWithCapture(guardian)
+
+        const reason =
+            "The mandated test script cannot execute on this runtime. ".repeat(60).trim()
+        env.deliverSemanticEvent(
+            source("S1"),
+            GoalInvariantChallengeRaised.create({
+                runId,
+                challengeId: "challenge-essay",
+                invariantId: "G-A1",
+                raisedBy: "S1",
+                storyId: "S1",
+                reason,
+            }),
+        )
+
+        const proposal = env.events.find(GoalInvariantRemediationProposed.is)
+        assert.ok(proposal)
+        const criterion = proposal.data.story.acceptance.find((entry) =>
+            entry.startsWith("Challenge challenge-essay"),
+        )
+        assert.ok(criterion)
+        assert.ok(criterion.length <= 1_400, `criterion is ${criterion.length} chars`)
+        assert.match(criterion, /truncated; the full reasoning is in the story description/u)
+        assert.ok(proposal.data.story.description.includes(reason))
+    })
+
     it("turns a challenge into durable autonomous remediation and restores its evidence", () => {
         const runId = "run-autonomous-remediation"
         const contract = deriveGoalContract(envelope)!
