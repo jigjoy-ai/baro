@@ -122,6 +122,23 @@ export class ModelTelemetryCollector extends SerializedObserver {
         this.perRoundStoryRoutes.add(routeKey(data.storyId, correlation))
     }
 
+    /**
+     * Publish a planner runner measurement under this collector's identity.
+     * The bus planner is a session-internal participant with no lease
+     * correlation, so its evidence enters through the one source the
+     * presentation forwarders already trust for every phase.
+     */
+    publishPlannerMeasurement(data: ModelInvocationMeasuredData): void {
+        if (
+            data.runId !== this.opts.runId ||
+            data.phase !== "planner" ||
+            data.evidence.producer !== "runner"
+        ) {
+            throw new Error("invalid planner telemetry registration")
+        }
+        this.publish(ModelInvocationMeasured.create(data))
+    }
+
     protected override handleEvent(context: SerializedEventContext): void {
         const { event } = context
         if (StoryRouted.is(event)) {

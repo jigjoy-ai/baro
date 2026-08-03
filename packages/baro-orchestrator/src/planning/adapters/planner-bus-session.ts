@@ -25,6 +25,7 @@ import {
     PlanFragmentAdmitted,
     PlanFragmentRejected,
 } from "../../semantic-events.js"
+import type { ModelInvocationMeasuredData } from "../../telemetry/model-telemetry.js"
 import { runnerMeasurement } from "../../telemetry/runner-measurement.js"
 import { normalizeClaudeRunnerObservation } from "../../conversation/dialogue-responder.js"
 import { ClaudeCliParticipant } from "../../harness/claude/cli-participant.js"
@@ -71,6 +72,10 @@ export interface PlannerBusSessionOptions {
     model?: string
     effort?: string
     claudeBin?: string
+    /** Route planner measurements through an already-trusted telemetry
+     *  source (collective forwarders bind measurements to exact sources).
+     *  Without it the session publishes them under its own identity. */
+    publishMeasurement?: (data: ModelInvocationMeasuredData) => void
     /** Max silence before the planner is presumed hung. Activity on either
      *  stream resets it — a thinking planner is never killed. */
     idleTimeoutMs?: number
@@ -208,6 +213,9 @@ class PlannerTelemetryObserver extends BaseObserver {
         private readonly runId: string,
         private readonly agentId: string,
         private readonly requestedModel: string,
+        private readonly publishMeasurement?: (
+            data: ModelInvocationMeasuredData,
+        ) => void,
     ) {
         super()
     }
@@ -230,25 +238,28 @@ class PlannerTelemetryObserver extends BaseObserver {
             },
             this.requestedModel,
         )
-        const measurement = ModelInvocationMeasured.create(
-            runnerMeasurement(
-                {
-                    invocationBaseId: `${this.runId}:planner:${turn}`,
-                    runId: this.runId,
-                    phase: "planner",
-                    storyId: null,
-                    turn,
-                    backend: "claude",
-                    requestedModel: this.requestedModel,
-                },
-                {
-                    ...observation,
-                    status: item.isError ? "failed" : "succeeded",
-                },
-            ),
+        const measurement = runnerMeasurement(
+            {
+                invocationBaseId: `${this.runId}:planner:${turn}`,
+                runId: this.runId,
+                phase: "planner",
+                storyId: null,
+                turn,
+                backend: "claude",
+                requestedModel: this.requestedModel,
+            },
+            {
+                ...observation,
+                status: item.isError ? "failed" : "succeeded",
+            },
         )
+        if (this.publishMeasurement) {
+            this.publishMeasurement(measurement)
+            return
+        }
+        const measured = ModelInvocationMeasured.create(measurement)
         for (const env of this.getEnvironments()) {
-            env.deliverSemanticEvent(this, measurement)
+            env.deliverSemanticEvent(this, measured)
         }
     }
 }
@@ -425,6 +436,7 @@ export async function runPlannerBusSession(
         opts.runId,
         agentId,
         requestedModel,
+        opts.publishMeasurement,
     )
     let watchdog: IdleWatchdog | null = null
     try {

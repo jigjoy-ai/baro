@@ -1756,6 +1756,10 @@ export async function orchestrate(
                     model: config.busPlanner.model,
                     effort: config.busPlanner.effort,
                     claudeBin: config.busPlanner.claudeBin,
+                    publishMeasurement: (measurement) =>
+                        modelTelemetryCollector.publishPlannerMeasurement(
+                            measurement,
+                        ),
                     existingPlanningId:
                         seededPlanning?.status === "open"
                             ? seededPlanning.planningId
