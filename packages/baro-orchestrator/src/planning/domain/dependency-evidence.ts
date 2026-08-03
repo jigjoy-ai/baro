@@ -38,12 +38,47 @@ export function writeSurfaceOf(story: PrdStory): string[] {
 
 /** Every path the story's own text mentions, whether it writes it or not. */
 export function referencedPathsOf(story: PrdStory): string[] {
-    const text = [
+    const text = storyText(story)
+    return normalize(text.match(PATH_PATTERN) ?? [])
+}
+
+const DIR_PATTERN =
+    /(?:src|test|tests|lib|app|apps|packages|crates)\/[A-Za-z0-9_@/-]+/gu
+const RELATIVE_IMPORT_PATTERN = /['"`]((?:\.\.?\/)+[A-Za-z0-9_@./-]+)['"`]/gu
+
+function storyText(story: PrdStory): string {
+    return [
         story.description ?? "",
         ...(story.acceptance ?? []),
         ...(story.tests ?? []),
     ].join("\n")
-    return normalize(text.match(PATH_PATTERN) ?? [])
+}
+
+/**
+ * Directory-level references: "src/common/openapi" prose mentions and
+ * quoted relative imports ("../../common/openapi"), which name a
+ * dependency's output without naming one file in it. The swagger run's
+ * planner declared 17 correct edges this way and the file-exact matcher
+ * pruned every one — eight agents then rediscovered, one by one, the
+ * dependency the plan had already stated.
+ */
+export function referencedDirsOf(story: PrdStory): string[] {
+    const text = storyText(story)
+    const anchored = (text.match(DIR_PATTERN) ?? []).filter(
+        (path) => !/\.[A-Za-z0-9]+$/u.test(path),
+    )
+    const relative: string[] = []
+    for (const match of text.matchAll(RELATIVE_IMPORT_PATTERN)) {
+        const stripped = match[1]!.replace(/^(?:\.\.?\/)+/u, "")
+        if (stripped && !/\.[A-Za-z0-9]+$/u.test(stripped)) relative.push(stripped)
+    }
+    return normalize([...anchored, ...relative])
+}
+
+/** Does `path` live under `dir`, on segment boundaries, anywhere in the tree? */
+function pathUnderDir(path: string, dir: string): boolean {
+    if (path === dir || path.startsWith(`${dir}/`)) return true
+    return path.includes(`/${dir}/`)
 }
 
 /**
@@ -67,8 +102,15 @@ export function unsupportedEdges(stories: readonly PrdStory[]): UnsupportedEdge[
             const dependencyWrites = writeSurfaceOf(dependency)
             // Silence from either side is not evidence of independence.
             if (dependencyWrites.length === 0 || ownWrites.size === 0) continue
+            // Evidence is required to REMOVE an edge, never to keep one — a
+            // directory or relative-import mention of a dependency's output
+            // is enough tie to respect the planner's declared order.
+            const mentionedDirs = referencedDirsOf(story)
             const supported = dependencyWrites.some(
-                (path) => ownWrites.has(path) || mentioned.has(path),
+                (path) =>
+                    ownWrites.has(path) ||
+                    mentioned.has(path) ||
+                    mentionedDirs.some((dir) => pathUnderDir(path, dir)),
             )
             if (!supported) unsupported.push({ from: dependencyId, to: story.id })
         }

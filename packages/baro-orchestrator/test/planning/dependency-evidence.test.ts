@@ -365,3 +365,55 @@ describe("the finalization comparison cannot be failed by our own plumbing", () 
         assert.deepEqual(final, admitted)
     })
 })
+
+describe("directory-level edge evidence", () => {
+    // The swagger validation run: the planner declared S2→controllers edges,
+    // controllers referenced the helpers as a DIRECTORY ("src/common/openapi")
+    // or a relative import ("../../common/openapi") — and the file-exact
+    // matcher pruned all 17 edges. Eight agents then rediscovered the
+    // dependency one by one.
+    const helper = {
+        id: "S2",
+        title: "helpers",
+        acceptance: [],
+        writes: ["src/common/openapi/index.ts", "src/common/openapi/tags.ts"],
+    } as unknown as PrdStory
+
+    it("keeps an edge supported by a prose directory mention", () => {
+        const controller = {
+            id: "S4",
+            title: "shops docs",
+            description: "Import API_TAGS from the shared src/common/openapi helpers.",
+            dependsOn: ["S2"],
+            acceptance: [],
+            writes: ["src/shops/shops.controller.ts"],
+        } as unknown as PrdStory
+        assert.deepEqual(unsupportedEdges([helper, controller]), [])
+    })
+
+    it("keeps an edge supported by a quoted relative import", () => {
+        const controller = {
+            id: "S5",
+            title: "shopUser docs",
+            description: "Handlers import ApiUuidParam from '../../common/openapi'.",
+            dependsOn: ["S2"],
+            acceptance: [],
+            writes: ["src/shops/shopUser/shopUser.controller.ts"],
+        } as unknown as PrdStory
+        assert.deepEqual(unsupportedEdges([helper, controller]), [])
+    })
+
+    it("still prunes an edge with no textual tie at all", () => {
+        const stranger = {
+            id: "S9",
+            title: "tables docs",
+            description: "Decorate the tables controller.",
+            dependsOn: ["S2"],
+            acceptance: [],
+            writes: ["src/tables/tables.controller.ts"],
+        } as unknown as PrdStory
+        assert.deepEqual(unsupportedEdges([helper, stranger]), [
+            { from: "S2", to: "S9" },
+        ])
+    })
+})
