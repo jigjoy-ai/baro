@@ -35,6 +35,13 @@ import {
     runResearchQuestionRound,
 } from "../src/planning/adapters/architect-scouts.js"
 import { runArchitectResearchSession } from "../src/planning/adapters/architect-research-session.js"
+import { runArchitectBusSession } from "../src/planning/adapters/architect-bus-session.js"
+import {
+    ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
+    ARCHITECT_OUTCOME_SYSTEM_PROMPT,
+    ARCHITECT_SYSTEM_PROMPT,
+    buildArchitectUserMessage,
+} from "../src/planning/domain/architect-prompts.js"
 import { runArchitectCodex } from "../src/planning/adapters/architect-codex.js"
 import type { ArchitectInvocationObserver } from "../src/planning/adapters/architect-invocation.js"
 import { compileArchitectObligationSegments } from "../src/planning/domain/architect-obligation-segments.js"
@@ -45,6 +52,8 @@ import { runArchitectPi } from "../src/planning/adapters/architect-pi.js"
 import { providerCallTimeoutError } from "../src/harness/openai/runtime.js"
 import { emitPlanLine } from "../src/planning/application/plan-events.js"
 import {
+    ARCHITECT_DECISION_OUTCOME_JSON_SCHEMA,
+    ARCHITECT_OUTCOME_JSON_SCHEMA,
     appendRepairNote,
     ArchitectOutcomeContractError,
     outcomeByteOverrun,
@@ -532,6 +541,21 @@ async function main(): Promise<void> {
     }
 }
 
+/** The Architect lives on the bus for the whole phase (Claude path first). */
+function architectBusEnabled(args: Args): boolean {
+    return process.env.BARO_ARCHITECT_BUS === "1" && args.llm === "claude"
+}
+
+function architectSystemPrompt(
+    outcomeMode: boolean,
+    outcomeContractMode: "decision" | undefined,
+): string {
+    if (!outcomeMode) return ARCHITECT_SYSTEM_PROMPT
+    return outcomeContractMode === "decision"
+        ? ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT
+        : ARCHITECT_OUTCOME_SYSTEM_PROMPT
+}
+
 function architectScoutsEnabled(args: Args): boolean {
     // Claude path first: the scout shells out to the same CLI the Architect
     // uses, so the other backends stay untouched until they get their own.
@@ -668,6 +692,45 @@ async function runInitialArchitect(
             outcomeContractMode,
             onInvocation,
         })
+    }
+    if (architectBusEnabled(args)) {
+        const outcomeMode = args.outcomeFile !== undefined
+        const session = await runArchitectBusSession({
+            systemPrompt: architectSystemPrompt(outcomeMode, outcomeContractMode),
+            userMessage: buildArchitectUserMessage(
+                args.goal,
+                projectContext,
+                modeContract,
+            ),
+            goal: args.goal,
+            cwd: args.cwd,
+            model: args.model,
+            effort: args.effort,
+            claudeBin: args.claudeBin,
+            projectContext,
+            goalEnvelope: trustedGoalEnvelope,
+            ...(outcomeMode
+                ? {
+                      outcomeSchema:
+                          outcomeContractMode === "decision"
+                              ? ARCHITECT_DECISION_OUTCOME_JSON_SCHEMA
+                              : ARCHITECT_OUTCOME_JSON_SCHEMA,
+                      validateOutcome: (raw: string) => {
+                          parseArchitectOutcome(raw, {
+                              decisionOnly: outcomeContractMode === "decision",
+                          })
+                      },
+                  }
+                : {}),
+            onProgress: (line) => process.stderr.write(`${line}\n`),
+        })
+        process.stderr.write(
+            `[architect-bus] ${session.researchRounds} research round(s), ` +
+                `${session.findings.filter((finding) => finding.ok).length}/` +
+                `${session.findings.length} answered, ` +
+                `${session.outcomeAttempts} outcome attempt(s)\n`,
+        )
+        return session.outcome
     }
     return await runArchitectClaude({
         goal: args.goal,
