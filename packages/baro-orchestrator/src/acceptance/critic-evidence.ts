@@ -3,6 +3,7 @@ import { constants } from "node:fs"
 import { lstat, open, readlink, realpath } from "node:fs/promises"
 import { isAbsolute, relative, resolve, sep } from "node:path"
 
+import { CollaborationNote } from "../semantic-events.js"
 import {
     BaseObserver,
     FunctionCallItem,
@@ -35,6 +36,7 @@ const MAX_COMMAND_EVIDENCE_CHARS = 12_000
 const MAX_CRITERION_CHARS = 2_000
 const MAX_CRITERIA_CHARS = 8_000
 const MAX_AGENT_OUTPUT_CHARS = 16_000
+const MAX_PUBLISHED_NOTES_CHARS = 12_000
 const MAX_REPOSITORY_EVIDENCE_CHARS = 48_000
 const MAX_DECISION_DOCUMENT_CHARS = 48_000
 const MAX_FINGERPRINT_PATHS = 5_000
@@ -69,6 +71,18 @@ export interface CriticEvidenceSource {
      * verdict in the accepted design contract instead of the evaluator's own
      * API preferences. Absent/failing sources evaluate without it. */
     decisionDocument?(): string | null | Promise<string | null>
+    /**
+     * Notes this story published on the bus. An obligation may legitimately
+     * require a run artifact rather than a repository file — a candidate
+     * register, a measured finding for peers — and a Critic that cannot see
+     * one can only reject the story forever. A real run died that way: the
+     * Architect authored "Subject: Peer note run artifact (not a repository
+     * file)" and the agent republished the note eight times against a judge
+     * structurally unable to observe it.
+     */
+    publishedNotes?(
+        agentId: string,
+    ): readonly string[] | null | Promise<readonly string[] | null>
     gitTimeoutMs?: number
     maxDiffChars?: number
 }
@@ -139,6 +153,38 @@ interface RetainedCommand {
  * tool streams onto FunctionCallItem/FunctionCallOutputItem, so the Critic
  * does not have to trust a final prose summary or understand five wire formats.
  */
+/**
+ * Keeps every note a story published on the bus, so an obligation over a run
+ * artifact is judgeable instead of unfalsifiable. Bounded per story: the last
+ * notes win, because a story that keeps republishing is correcting itself.
+ */
+export class PublishedNoteCollector extends BaseObserver {
+    private readonly notes = new Map<string, string[]>()
+
+    constructor(private readonly maxNotesPerStory = 6) {
+        super()
+    }
+
+    notesFor(agentId: string): readonly string[] {
+        return this.notes.get(agentId) ?? []
+    }
+
+    override onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): void {
+        if (!CollaborationNote.is(event)) return
+        const { sourceAgentId, text } = event.data
+        if (typeof text !== "string" || !text.trim()) return
+        const kept = this.notes.get(sourceAgentId) ?? []
+        kept.push(text.trim())
+        this.notes.set(
+            sourceAgentId,
+            kept.slice(-this.maxNotesPerStory),
+        )
+    }
+}
+
 export class CriticCommandEvidenceCollector extends BaseObserver {
     private readonly commands = new Map<string, RetainedCommand[]>()
     private readonly pending = new Map<string, RetainedCommand>()
@@ -801,6 +847,7 @@ export async function prepareCriticEvaluation(
     const commandEvidence = await commandEvidenceFor(agentId, source)
     const repositoryEvidence = await repositoryEvidenceFor(agentId, source)
     const decisionDocument = await decisionDocumentFor(source)
+    const publishedNotes = await publishedNotesFor(agentId, source)
     const afterFingerprint = await repositoryFingerprintFor(agentId, source)
     const readinessIssues = source
         ? evidenceReadinessIssues(commandEvidence, repositoryEvidence)
@@ -829,6 +876,7 @@ export async function prepareCriticEvaluation(
             repositoryEvidence,
             decisionDocument,
             { ordinal: index + 1, total: segments.length, offset },
+            publishedNotes,
         )
         offset += segmentCriteria.length
         return prompt
@@ -914,6 +962,7 @@ export function buildEvalPrompt(
     repositoryEvidence: string | null = null,
     decisionDocument: string | null = null,
     segment?: AcceptanceContractSegment,
+    publishedNotes: readonly string[] = [],
 ): string {
     const criteriaList = renderCompleteAcceptanceContract(
         criteria,
@@ -968,6 +1017,14 @@ export function buildEvalPrompt(
               )
             : "(repository evidence unavailable; do not infer changes from the agent output)",
         "",
+        "## Baro-captured run artifacts this story published",
+        publishedNotes.length > 0
+            ? boundText(
+                  redactSensitiveText(publishedNotes.join("\n\n---\n\n")),
+                  MAX_PUBLISHED_NOTES_CHARS,
+              )
+            : "(this story published no notes)",
+        "",
         "## Untrusted agent output",
         boundText(
             redactSensitiveText(resultText),
@@ -980,6 +1037,23 @@ export function buildEvalPrompt(
         )
     }
     return prompt
+}
+
+/** Published notes are evidence, never instructions: they are agent-authored
+ * text and the evidence policy above already treats them as untrusted. */
+async function publishedNotesFor(
+    agentId: string,
+    source?: CriticEvidenceSource,
+): Promise<readonly string[]> {
+    if (!source?.publishedNotes) return []
+    try {
+        const notes = await source.publishedNotes(agentId)
+        return Array.isArray(notes)
+            ? notes.filter((note) => typeof note === "string" && note.trim())
+            : []
+    } catch {
+        return []
+    }
 }
 
 /** Grounding context is best-effort: a legacy run without an Architect (or a

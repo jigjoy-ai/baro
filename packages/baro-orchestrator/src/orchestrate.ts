@@ -56,6 +56,7 @@ import {
 import { Critic } from "./harness/claude/critic.js"
 import {
     CriticCommandEvidenceCollector,
+    PublishedNoteCollector,
     type CriticRepositoryTarget,
     type CriticEvidenceSource,
 } from "./acceptance/critic-evidence.js"
@@ -998,10 +999,15 @@ export async function orchestrate(
             resolveRepositoryTarget: resolveCriticTarget,
         })
         commandEvidence.join(env)
+        // Notes a story publishes are host-captured evidence: an obligation
+        // over a run artifact stays judgeable instead of unfalsifiable.
+        const publishedNotes = new PublishedNoteCollector()
+        publishedNotes.join(env)
         const criticEvidence: CriticEvidenceSource = {
             resolveRepositoryTarget: resolveCriticTarget,
             commandEvidence: (storyId) =>
                 commandEvidence.snapshotForEvaluation(storyId),
+            publishedNotes: (storyId) => publishedNotes.notesFor(storyId),
             // Read at evaluation time: a progressive run receives its
             // Architect document after this observer wiring completes.
             decisionDocument: () => {

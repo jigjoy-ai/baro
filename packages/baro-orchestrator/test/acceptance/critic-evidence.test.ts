@@ -21,6 +21,7 @@ import {
 import {
     CRITIC_MAX_PROMPT_CHARS,
     CriticCommandEvidenceCollector,
+    PublishedNoteCollector,
     buildEvalPrompt,
     prepareCriticEvalPrompts,
     mergeSegmentVerdicts,
@@ -32,7 +33,11 @@ import { CriticOpenCode } from "../../src/harness/opencode/critic.js"
 import { CriticPi } from "../../src/harness/pi/critic.js"
 import { Critic, VERDICT_SYSTEM_PROMPT } from "../../src/harness/claude/critic.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
-import { AgentResult, AgentState } from "../../src/semantic-events.js"
+import {
+    AgentResult,
+    AgentState,
+    CollaborationNote,
+} from "../../src/semantic-events.js"
 import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
 
 interface TestCritic {
@@ -197,6 +202,58 @@ describe("Critic repository evidence", () => {
         )
         assert.match(evidencePrompt, /self-consistent implementation and test/)
         assert.match(evidencePrompt, /counterexample\/event ordering/)
+    })
+
+    it("puts the story's published notes in front of the judge", async () => {
+        // A live run died here: the Architect authored an obligation whose
+        // subject was "Peer note run artifact (not a repository file)" and
+        // the agent republished the note eight times at a Critic that could
+        // not see it, until the retries ran out on work that was correct.
+        const prompt = buildEvalPrompt(
+            ["The candidate register lists every rejected candidate"],
+            "published the register",
+            "17 tests passed",
+            "diff --git a/session.ts b/session.ts",
+            null,
+            undefined,
+            ["S1 DEFECT LEDGER: six candidates, one confirmed by a failing test"],
+        )
+        assert.match(prompt, /run artifacts this story published/i)
+        assert.match(prompt, /six candidates, one confirmed by a failing test/)
+
+        const withoutNotes = buildEvalPrompt(
+            ["anything"],
+            "output",
+            null,
+            null,
+        )
+        assert.match(withoutNotes, /\(this story published no notes\)/)
+    })
+
+    it("collects a story's notes from the bus, keeping the latest", async () => {
+        const collector = new PublishedNoteCollector(2)
+        const env = joinWithCapture(collector)
+        for (const text of ["first", "second", "third"]) {
+            env.deliverSemanticEvent(
+                source("bridge"),
+                CollaborationNote.create({
+                    runId: "run-1",
+                    sourceAgentId: "S1",
+                    text,
+                }),
+            )
+        }
+        env.deliverSemanticEvent(
+            source("bridge"),
+            CollaborationNote.create({
+                runId: "run-1",
+                sourceAgentId: "S2",
+                text: "other story",
+            }),
+        )
+        assert.deepEqual(collector.notesFor("S1"), ["second", "third"])
+        assert.deepEqual(collector.notesFor("S2"), ["other story"])
+        assert.deepEqual(collector.notesFor("S3"), [])
     })
 
     it("grounds the verdict in the Architect decision contract when one exists", async () => {

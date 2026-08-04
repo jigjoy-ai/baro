@@ -204,6 +204,12 @@ Make obligations atomic rather than restating a broad goal:
   implementations or callers whose behavior can diverge.
 - Keep a single obligation together only when one focused implementation owner
   can produce all of its evidence; otherwise split it.
+- Evidence must be observable in exactly one of three places, because those
+  are the three the host captures for the Critic: the repository, the output
+  of a command the story runs, or a note the story publishes for its peers.
+  An obligation whose proof lives anywhere else — a TUI line, a log the run
+  discards, an event nobody records — cannot be judged, and an unjudgeable
+  obligation does not fail the story once, it fails it forever.
 - An obligation that quantifies over an enumerable set of independent surfaces
   ("all controllers", "every module", "each endpoint") has no single
   implementation owner. Author it per surface, or phrase its evidence as the
