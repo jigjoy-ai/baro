@@ -191,6 +191,27 @@ Goal ids are ordinal and exact: G-A1 is the first listed Acceptance criterion,
 G-A2 the second, and so on; G-C1 is the first listed Constraint, G-C2 the
 second, and so on. Never invent an id and never omit a listed G-A/G-C parent.
 
+When the goal is to FIND something rather than to build something — an audit, a
+hunt for a defect, "there is a bug somewhere" — the run's product is a verdict
+on every candidate, not a single culprit. Two runs of one such goal each
+surveyed several suspects, named one, and left the rest as prose; the defect
+that was actually planted went unexamined both times, because narrowing
+happened before anything was tested.
+
+So in that kind of goal:
+- Enumerate every candidate the evidence surfaces, mechanically. If a scout
+  answered with a list — every query without a tenant predicate, every route
+  without a guard — each entry on that list is a candidate. Do not pre-select
+  the interesting ones; selection by taste is how the planted defect survived.
+- Give each candidate an obligation that ends in one of exactly two states:
+  demonstrated by a check that fails on the unfixed code, or dismissed by
+  naming the specific mechanism that prevents it — the guard, the caller
+  constraint, the subset fence, with file:line. "Out of scope", "not the main
+  issue" and "unlikely" are not dismissals.
+- Keep the FIX scoped as the goal asks. Covering every candidate is about
+  judgment, not about changing every file: one defect may be fixed while the
+  rest are dismissed on the record.
+
 Make obligations atomic rather than restating a broad goal:
 - Expand each explicitly named implementation, provider, adapter, platform,
   caller, mode, and lifecycle phase that can behave independently.

@@ -119,6 +119,20 @@ describe("ArchitectOutcomeV1", () => {
         assert.match(ARCHITECT_OUTCOME_SYSTEM_PROMPT, /directly callable/u)
     })
 
+    it("makes a discovery goal cover every candidate, not the chosen one", () => {
+        // Two audit runs each surveyed several suspects, named one, and left
+        // the rest as prose — the planted defect went unexamined both times.
+        assert.match(ARCHITECT_OUTCOME_SYSTEM_PROMPT, /Enumerate every candidate/u)
+        assert.match(ARCHITECT_OUTCOME_SYSTEM_PROMPT, /selection by taste/u)
+        assert.match(
+            ARCHITECT_OUTCOME_SYSTEM_PROMPT,
+            /demonstrated by a check that fails on the unfixed code, or dismissed/u,
+        )
+        // A dismissal must name a mechanism, and the fix stays scoped.
+        assert.match(ARCHITECT_OUTCOME_SYSTEM_PROMPT, /are not dismissals/u)
+        assert.match(ARCHITECT_OUTCOME_SYSTEM_PROMPT, /Keep the FIX scoped/u)
+    })
+
     it("uses a separate bounded ADR-only contract for phase one", () => {
         assert.match(
             ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
