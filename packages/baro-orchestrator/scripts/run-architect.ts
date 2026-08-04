@@ -33,8 +33,8 @@ import { runArchitectClaude } from "../src/planning/adapters/architect-claude.js
 import {
     renderScoutFindings,
     runResearchQuestionRound,
-    runScoutRound,
 } from "../src/planning/adapters/architect-scouts.js"
+import { runArchitectResearchSession } from "../src/planning/adapters/architect-research-session.js"
 import { runArchitectCodex } from "../src/planning/adapters/architect-codex.js"
 import type { ArchitectInvocationObserver } from "../src/planning/adapters/architect-invocation.js"
 import { compileArchitectObligationSegments } from "../src/planning/domain/architect-obligation-segments.js"
@@ -567,11 +567,13 @@ async function researchProjectContext(input: {
         `[architect-scouts] dispatching ${questions.length} scouts in parallel\n`,
     )
     const started = Date.now()
-    const findings = await runScoutRound(questions, {
+    const findings = await runArchitectResearchSession({
+        questions,
         cwd: args.cwd,
         model: args.model,
+        effort: args.effort,
         claudeBin: args.claudeBin,
-        onScoutSettled: (finding) =>
+        onFinding: (finding) =>
             process.stderr.write(
                 `[architect-scouts] ${finding.id} ${finding.ok ? "answered" : "FAILED"}: ` +
                     `${finding.question.slice(0, 80)}\n`,
