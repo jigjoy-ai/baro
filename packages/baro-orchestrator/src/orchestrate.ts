@@ -116,6 +116,7 @@ import { SurgeonPi } from "./harness/pi/surgeon.js"
 import { Supervisor } from "./execution/supervisor.js"
 import { resolveEffectiveParallel } from "./planning/domain/mode-enforcement.js"
 import { PrdFile, loadPrd, savePrd } from "./prd.js"
+import { PremiseAmendmentAuthority } from "./planning/application/premise-amendments.js"
 import { readAuthoritativeDeclaredTests } from "./verification/prd-declared-tests.js"
 import {
     ModelInvocationMeasured,
@@ -1003,6 +1004,36 @@ export async function orchestrate(
         // over a run artifact stays judgeable instead of unfalsifiable.
         const publishedNotes = new PublishedNoteCollector()
         publishedNotes.join(env)
+        // A factual claim the repository refutes is withdrawn on evidence; the
+        // decisions above it stand. The Critic reads the document fresh at
+        // evaluation time, so an amendment reaches the very next verdict.
+        const premiseAmendments = new PremiseAmendmentAuthority({
+            runId,
+            read: () => {
+                try {
+                    return loadPrd(config.prdPath).decisionDocument ?? null
+                } catch {
+                    return null
+                }
+            },
+            persist: (document) => {
+                try {
+                    const current = loadPrd(config.prdPath)
+                    savePrd(config.prdPath, { ...current, decisionDocument: document })
+                } catch (error) {
+                    process.stderr.write(
+                        `[premise] could not persist the amendment: ${
+                            error instanceof Error ? error.message : String(error)
+                        }\n`,
+                    )
+                }
+            },
+            onProgress: (line) => {
+                process.stderr.write(`${line}\n`)
+                if (emitTui) emit({ type: "story_log", id: "plan", line })
+            },
+        })
+        premiseAmendments.join(env)
         const criticEvidence: CriticEvidenceSource = {
             resolveRepositoryTarget: resolveCriticTarget,
             commandEvidence: (storyId) =>

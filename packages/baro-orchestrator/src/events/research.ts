@@ -25,3 +25,40 @@ export interface ScoutFindingPublishedData {
 
 export const ScoutFindingPublished =
     defineSemanticEvent<ScoutFindingPublishedData>("scout_finding_published")
+
+/**
+ * A story proved a factual claim the contract makes about this repository or
+ * runtime to be false. A premise is not a decision: the ADR's decision stands,
+ * the claim is withdrawn, and the host — never the model — holds the pen.
+ */
+export interface ArchitecturePremiseDisputedData {
+    runId: string
+    storyId: string
+    /** The claim as the contract states it. */
+    claim: string
+    /** The command whose output withdraws it, and that output. */
+    command: string
+    output: string
+    /** The obligation whose text embeds the claim, when the story names one. */
+    obligationId?: string
+}
+
+export const ArchitecturePremiseDisputed =
+    defineSemanticEvent<ArchitecturePremiseDisputedData>(
+        "architecture_premise_disputed",
+    )
+
+/** The host's amendment, appended to the decision document the Critic reads. */
+export interface ArchitecturePremiseAmendedData {
+    runId: string
+    storyId: string
+    claim: string
+    obligationId?: string
+    /** Ordinal of this amendment within the run. */
+    ordinal: number
+}
+
+export const ArchitecturePremiseAmended =
+    defineSemanticEvent<ArchitecturePremiseAmendedData>(
+        "architecture_premise_amended",
+    )

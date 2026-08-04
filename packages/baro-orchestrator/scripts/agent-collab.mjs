@@ -19,7 +19,7 @@ if (command === "emit") {
     const kind = required("kind")
     let decisionWaitMs = null
     let decisionId = null
-    if (!["message", "help", "note", "discover", "replan", "block", "challenge"].includes(kind)) {
+    if (!["message", "help", "note", "discover", "replan", "block", "challenge", "dispute"].includes(kind)) {
         fail(`unsupported kind '${kind}'`)
     }
     const record = { kind }
@@ -29,7 +29,27 @@ if (command === "emit") {
             "--event-id",
         )
     }
-    if (kind === "challenge") {
+    if (kind === "dispute") {
+        // A premise is a factual claim the contract makes about this
+        // repository or runtime. Withdrawing one costs a command and its
+        // output — prose is not a dispute.
+        record.claim = required("claim").trim()
+        if (!record.claim) fail("--claim must contain non-whitespace text")
+        if (record.claim.length > 2_000) fail("--claim exceeds 2000 characters")
+        record.command = required("command").trim()
+        if (!record.command) fail("--command must contain non-whitespace text")
+        if (record.command.length > 1_000) fail("--command exceeds 1000 characters")
+        record.output = required("output")
+        if (!record.output.trim()) fail("--output must contain the command's output")
+        if (record.output.length > 8_000) fail("--output exceeds 8000 characters")
+        const obligation = flags.get("obligation")
+        if (obligation !== undefined) {
+            if (!/^O-\d{3}$/.test(obligation)) {
+                fail("--obligation must be an obligation id such as O-015")
+            }
+            record.obligationId = obligation
+        }
+    } else if (kind === "challenge") {
         record.challengeId = safeTransportId(
             flags.get("challenge-id") ?? `challenge-${randomUUID()}`,
             "--challenge-id",

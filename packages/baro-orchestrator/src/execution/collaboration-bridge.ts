@@ -23,6 +23,7 @@ import { inboxFilenameForAgentId } from "../../scripts/collaboration-inbox-path.
 
 import {
     AgentTargetedMessage,
+    ArchitecturePremiseDisputed,
     CollaborationNote,
     GoalInvariantChallengeRaised,
     GoalLedgerProjectionPersisted,
@@ -103,6 +104,11 @@ interface OutboxRecord {
     requiredStoryIds?: string[]
     challengeId?: string
     invariantId?: string
+    /** dispute: the contract's factual claim, and the command that withdraws it. */
+    claim?: string
+    command?: string
+    output?: string
+    obligationId?: string
 }
 
 interface RetainedChallengeRecord {
@@ -794,6 +800,31 @@ export class CollaborationBridge extends SerializedObserver {
                 this.persistInflightChallenge(inflightPath, record, agentId)
                 this.publishInflightChallenge(inflightPath, true)
                 return { deliveryGaps }
+            }
+        } else if (record.kind === "dispute") {
+            // Evidence or nothing: a premise is withdrawn by a command's
+            // output, never by an agent's confidence.
+            if (
+                liveSource &&
+                activeLease &&
+                validReason(record.claim) &&
+                validReason(record.command) &&
+                typeof record.output === "string" &&
+                record.output.trim().length > 0
+            ) {
+                this.publish(
+                    ArchitecturePremiseDisputed.create({
+                        runId: this.opts.runId,
+                        storyId: agentId,
+                        claim: String(record.claim).trim(),
+                        command: String(record.command).trim(),
+                        output: String(record.output).slice(0, 8_000),
+                        ...(typeof record.obligationId === "string" &&
+                        /^O-\d{3}$/u.test(record.obligationId)
+                            ? { obligationId: record.obligationId }
+                            : {}),
+                    }),
+                )
             }
         } else if (record.kind === "replan") {
             this.publishRuntimeReplan(record, agentId)
