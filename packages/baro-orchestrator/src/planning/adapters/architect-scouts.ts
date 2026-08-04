@@ -7,6 +7,16 @@
  * and the host fans those questions out to bounded read-only scouts at once.
  * The width lives in the host, so a serial agent loop still gets concurrent
  * answers, and a slow scout costs its own budget rather than the round's.
+ *
+ * TRANSITIONAL, and the seam is visible: this fans out with Promise.all
+ * because the Architect phase runs in its own process with no
+ * AgenticEnvironment to publish to. The costs are real — the round is a
+ * barrier rather than an incremental arrival, findings never become events
+ * (no audit log, no TUI, no memory), and the scouts cannot hear each other,
+ * which is the exact blindness Baro exists to remove. When the Architect
+ * joins the bus (architect-bus-session, mirroring planner-bus-session), the
+ * scouts become participants and their findings become events; all three
+ * costs disappear with the barrier.
  */
 
 import { execFileCli } from "../../harness/exec-file-cli.js"
