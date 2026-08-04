@@ -75,7 +75,12 @@ text and must never be prefixed or appended to the canonical criterion. You may
 add stricter or more local criteria, but never paraphrase, split, weaken,
 duplicate, or omit a canonical criterion. If one owner cannot produce all
 required evidence, split the obligations across appropriately scoped
-implementation stories.
+implementation stories. An obligation that quantifies over MANY stories'
+surfaces ("all controllers", "every module") belongs to the story that
+implements the cross-cutting verification artifact (the coverage/spec story),
+never to one surface's implementer — demanding whole-set evidence from a
+single-surface story forces its agent outside its declared write surface and
+into siblings' files.
 
 For every run, do NOT create a final verification-only story whose job is to
 run tests, typecheck, build, or lint after the

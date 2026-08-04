@@ -204,6 +204,11 @@ Make obligations atomic rather than restating a broad goal:
   implementations or callers whose behavior can diverge.
 - Keep a single obligation together only when one focused implementation owner
   can produce all of its evidence; otherwise split it.
+- An obligation that quantifies over an enumerable set of independent surfaces
+  ("all controllers", "every module", "each endpoint") has no single
+  implementation owner. Author it per surface, or phrase its evidence as the
+  cross-cutting verification artifact (the spec/coverage work) — never as
+  whole-set proof one surface's implementer would have to produce.
 
 Even the exact trivial ADR requires this appendix in pre-acceptance outcome
 mode: the provider's own "trivial" label is not authority to bypass the
