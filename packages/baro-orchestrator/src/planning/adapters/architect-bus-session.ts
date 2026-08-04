@@ -33,6 +33,8 @@ import {
     type ScoutQuestion,
 } from "./architect-scouts.js"
 import { runArchitectResearchSession } from "./architect-research-session.js"
+import { emitPlanLine } from "../application/plan-events.js"
+import { ScoutDispatched, ScoutFindingPublished } from "../../semantic-events.js"
 
 const DEFAULT_RESEARCH_ROUNDS = 2
 const DEFAULT_OUTCOME_REPAIRS = 2
@@ -67,6 +69,32 @@ export interface ArchitectBusSessionResult {
     findings: ScoutFinding[]
     researchRounds: number
     outcomeAttempts: number
+}
+
+/**
+ * Research happens on a bus; the run stream is where a human watches. This
+ * carries one to the other so a scout's question and its answer are part of
+ * the run's record, not stderr the log discards.
+ */
+class ResearchNarrator extends BaseObserver {
+    override onExternalEvent(
+        _source: Participant,
+        event: SemanticEvent<unknown>,
+    ): void {
+        if (ScoutDispatched.is(event)) {
+            emitPlanLine(
+                `scout dispatched: ${event.data.question}` +
+                    (event.data.scope ? ` (scope: ${event.data.scope})` : ""),
+            )
+            return
+        }
+        if (ScoutFindingPublished.is(event)) {
+            emitPlanLine(
+                `scout ${event.data.ok ? "answered" : "FAILED"}: ` +
+                    `${event.data.question} — ${event.data.answer.slice(0, 400)}`,
+            )
+        }
+    }
 }
 
 /** Hands each terminal reply to the session as it lands. */
@@ -147,6 +175,7 @@ export async function runArchitectBusSession(
     const agentId = `architect:${sessionId}`
     const env = opts.environment ?? new AgenticEnvironment("architect-bus")
     const replies = new ReplyStream(agentId)
+    const narrator = new ResearchNarrator()
     const architect = new ClaudeCliParticipant(agentId, {
         cwd: opts.cwd,
         model: opts.model,
@@ -184,6 +213,7 @@ export async function runArchitectBusSession(
 
     try {
         replies.join(env)
+        narrator.join(env)
         architect.join(env)
         architect.start(env)
         watchdog = new IdleWatchdog(llmIdleTimeoutMs(), () => {
@@ -247,6 +277,7 @@ export async function runArchitectBusSession(
         architect.closeStdin()
         void architect.abortAndWait()
         replies.leave(env)
+        narrator.leave(env)
         if (architect.getEnvironments().includes(env)) architect.leave(env)
     }
 }

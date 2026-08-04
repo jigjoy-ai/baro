@@ -87,6 +87,14 @@ describe("architect bus session", () => {
             const env = new AgenticEnvironment("architect-bus-test")
             const capture = new Capture()
             capture.join(env)
+            const lines: string[] = []
+            const previousPlanEvents = process.env.BARO_PLAN_EVENTS
+            const previousWrite = process.stdout.write.bind(process.stdout)
+            process.env.BARO_PLAN_EVENTS = "1"
+            process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+                lines.push(String(chunk))
+                return (previousWrite as (...args: unknown[]) => boolean)(chunk, ...rest)
+            }) as typeof process.stdout.write
 
             const result = await runArchitectBusSession({
                 systemPrompt: "You are the architect for this engineering run.",
@@ -101,6 +109,9 @@ describe("architect bus session", () => {
                     if (parsed.ok !== true) throw new Error("outcome must state ok:true")
                 },
             })
+            process.stdout.write = previousWrite
+            if (previousPlanEvents === undefined) delete process.env.BARO_PLAN_EVENTS
+            else process.env.BARO_PLAN_EVENTS = previousPlanEvents
 
             assert.equal(result.researchRounds, 1)
             assert.equal(result.outcomeAttempts, 2, "the rejected outcome was repaired")
@@ -113,6 +124,16 @@ describe("architect bus session", () => {
                 published.length,
                 2,
                 "the Architect's research is on the same bus, as events",
+            )
+            // Research also reaches the run stream a human actually watches.
+            const narrated = lines.filter((line) => line.includes("scout"))
+            assert.ok(
+                narrated.some((line) => line.includes("scout dispatched")),
+                "each question is narrated to the run",
+            )
+            assert.ok(
+                narrated.some((line) => line.includes("scout answered")),
+                "each answer is narrated to the run",
             )
         })
     })
