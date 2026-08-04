@@ -30,11 +30,6 @@ import {
 import { createDialogueResponder } from "../src/conversation/dialogue-responder.js"
 import { withTransientRetry } from "../src/harness/transient-retry.js"
 import { runArchitectClaude } from "../src/planning/adapters/architect-claude.js"
-import {
-    renderScoutFindings,
-    runResearchQuestionRound,
-} from "../src/planning/adapters/architect-scouts.js"
-import { runArchitectResearchSession } from "../src/planning/adapters/architect-research-session.js"
 import { runArchitectBusSession } from "../src/planning/adapters/architect-bus-session.js"
 import {
     ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
@@ -51,9 +46,8 @@ import { runArchitectOpenCode } from "../src/planning/adapters/architect-opencod
 import { runArchitectPi } from "../src/planning/adapters/architect-pi.js"
 import { providerCallTimeoutError } from "../src/harness/openai/runtime.js"
 import { emitPlanLine } from "../src/planning/application/plan-events.js"
+import { extractModelJsonObject } from "../src/model-json.js"
 import {
-    ARCHITECT_DECISION_OUTCOME_JSON_SCHEMA,
-    ARCHITECT_OUTCOME_JSON_SCHEMA,
     appendRepairNote,
     ArchitectOutcomeContractError,
     outcomeByteOverrun,
@@ -363,26 +357,6 @@ async function main(): Promise<void> {
                 },
             })
         }
-        // The Architect states what it needs to know and the host answers all of
-        // it at once. Research is advisory: a failed round leaves the decision
-        // phase exactly as it was before scouts existed.
-        if (architectScoutsEnabled(args)) {
-            try {
-                const research = await researchProjectContext({
-                    args,
-                    projectContext,
-                    goalEnvelope: trustedGoalEnvelope,
-                })
-                if (research) projectContext = research
-            } catch (error) {
-                process.stderr.write(
-                    `[architect-scouts] research round skipped: ${
-                        error instanceof Error ? error.message : String(error)
-                    }\n`,
-                )
-            }
-        }
-
         const issueDecisionPhase = (repairNote?: string) =>
             withTransientRetry(
                 () =>
@@ -556,64 +530,6 @@ function architectSystemPrompt(
         : ARCHITECT_OUTCOME_SYSTEM_PROMPT
 }
 
-function architectScoutsEnabled(args: Args): boolean {
-    // Claude path first: the scout shells out to the same CLI the Architect
-    // uses, so the other backends stay untouched until they get their own.
-    return process.env.BARO_ARCHITECT_SCOUTS === "1" && args.llm === "claude"
-}
-
-/**
- * Ask the Architect what it needs to know, answer every question in parallel,
- * and hand the answers back as repository context. Returns undefined when the
- * Architect asks nothing, which is a valid outcome — the context it already
- * has may be enough.
- */
-async function researchProjectContext(input: {
-    args: Args
-    projectContext: string | undefined
-    goalEnvelope: GoalEnvelope | undefined
-}): Promise<string | undefined> {
-    const { args, projectContext, goalEnvelope } = input
-    const questions = await runResearchQuestionRound({
-        goal: args.goal,
-        cwd: args.cwd,
-        model: args.model,
-        effort: args.effort,
-        claudeBin: args.claudeBin,
-        projectContext,
-        goalEnvelope,
-    })
-    if (questions.length === 0) {
-        process.stderr.write("[architect-scouts] no questions asked\n")
-        return undefined
-    }
-    process.stderr.write(
-        `[architect-scouts] dispatching ${questions.length} scouts in parallel\n`,
-    )
-    const started = Date.now()
-    const findings = await runArchitectResearchSession({
-        questions,
-        cwd: args.cwd,
-        model: args.model,
-        effort: args.effort,
-        claudeBin: args.claudeBin,
-        onFinding: (finding) =>
-            process.stderr.write(
-                `[architect-scouts] ${finding.id} ${finding.ok ? "answered" : "FAILED"}: ` +
-                    `${finding.question.slice(0, 80)}\n`,
-            ),
-    })
-    const answered = findings.filter((finding) => finding.ok).length
-    process.stderr.write(
-        `[architect-scouts] ${answered}/${findings.length} answered in ` +
-            `${Math.round((Date.now() - started) / 1000)}s\n`,
-    )
-    if (answered === 0) return undefined
-    return [projectContext?.trim(), renderScoutFindings(findings)]
-        .filter(Boolean)
-        .join("\n\n")
-}
-
 async function runInitialArchitect(
     args: Args,
     projectContext: string | undefined,
@@ -711,10 +627,7 @@ async function runInitialArchitect(
             goalEnvelope: trustedGoalEnvelope,
             ...(outcomeMode
                 ? {
-                      outcomeSchema:
-                          outcomeContractMode === "decision"
-                              ? ARCHITECT_DECISION_OUTCOME_JSON_SCHEMA
-                              : ARCHITECT_OUTCOME_JSON_SCHEMA,
+                      normalizeOutcome: (raw: string) => extractModelJsonObject(raw),
                       validateOutcome: (raw: string) => {
                           parseArchitectOutcome(raw, {
                               decisionOnly: outcomeContractMode === "decision",

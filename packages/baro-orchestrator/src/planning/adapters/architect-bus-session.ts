@@ -51,8 +51,13 @@ export interface ArchitectBusSessionOptions {
     claudeBin?: string
     projectContext?: string
     goalEnvelope?: GoalEnvelope
-    /** Structured-output schema, when the phase has one. */
-    outcomeSchema?: unknown
+    /**
+     * Canonicalize a reply before validation — the phase's own JSON extractor.
+     * A structured-output schema cannot be used here: it would force the
+     * research turn to answer in the outcome's shape, which is how the first
+     * live session reported zero research rounds while its scouts ran.
+     */
+    normalizeOutcome?: (raw: string) => string
     maxResearchRounds?: number
     maxOutcomeRepairs?: number
     roundBudgetMs?: number
@@ -192,9 +197,6 @@ export async function runArchitectBusSession(
             "--mcp-config",
             '{"mcpServers":{}}',
             "--no-session-persistence",
-            ...(opts.outcomeSchema
-                ? ["--json-schema", JSON.stringify(opts.outcomeSchema)]
-                : []),
             "--system-prompt",
             opts.systemPrompt,
         ],
@@ -329,9 +331,12 @@ async function settleOutcome(
             throw new Error("architect bus session: the Architect exited mid-repair")
         }
         try {
-            opts.validateOutcome?.(reply)
+            const canonical = opts.normalizeOutcome
+                ? opts.normalizeOutcome(reply)
+                : reply
+            opts.validateOutcome?.(canonical)
             return {
-                outcome: reply,
+                outcome: canonical,
                 findings,
                 researchRounds,
                 outcomeAttempts: attempt,

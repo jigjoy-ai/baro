@@ -72,7 +72,7 @@ for await (const line of lines) {
     if (!content.includes("rejected")) {
         throw new Error("a rejected outcome must come back as a correction");
     }
-    emit(JSON.stringify({ ok: true, saw: "scout answer" }));
+    emit("Here is my outcome: " + JSON.stringify({ ok: true, saw: "scout answer" }));
 }
 process.exit(0);
 `,
@@ -104,6 +104,7 @@ describe("architect bus session", () => {
                 claudeBin: writeFakeClaude(dir),
                 environment: env,
                 roundBudgetMs: 20_000,
+                normalizeOutcome: (raw) => raw.slice(raw.indexOf("{")),
                 validateOutcome: (raw) => {
                     const parsed = JSON.parse(raw) as { ok?: unknown }
                     if (parsed.ok !== true) throw new Error("outcome must state ok:true")
