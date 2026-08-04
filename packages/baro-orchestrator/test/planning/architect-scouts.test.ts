@@ -7,8 +7,6 @@ import {
     parseResearchQuestions,
     renderScoutFindings,
     runResearchQuestionRound,
-    runScoutRound,
-    type ScoutQuestion,
 } from "../../src/planning/adapters/architect-scouts.js"
 
 describe("architect scouts", () => {
@@ -51,30 +49,6 @@ describe("architect scouts", () => {
         assert.deepEqual(questions.map((q) => q.question), [
             "Which DTOs already use zod?",
         ])
-    })
-
-    it("answers every question concurrently and survives a failed scout", async () => {
-        const questions: ScoutQuestion[] = [
-            { id: "Q1", question: "Which module owns menu visibility?" },
-            { id: "Q2", question: "Where is the pagination convention?" },
-            { id: "Q3", question: "Who validates the shop id?" },
-        ]
-        let inFlight = 0
-        let peak = 0
-        const findings = await runScoutRound(questions, {
-            cwd: "/tmp",
-            ask: async (question) => {
-                inFlight += 1
-                peak = Math.max(peak, inFlight)
-                await new Promise((resolve) => setTimeout(resolve, 5))
-                inFlight -= 1
-                if (question.id === "Q2") throw new Error("scout timed out")
-                return `${question.id} answer (src/x.ts:1)`
-            },
-        })
-        assert.equal(peak, 3, "the round must be concurrent, not a queue")
-        assert.deepEqual(findings.map((finding) => finding.ok), [true, false, true])
-        assert.match(findings[1]!.answer, /unanswered: scout timed out/)
     })
 
     it("renders findings as the Architect's own questions, answered", () => {

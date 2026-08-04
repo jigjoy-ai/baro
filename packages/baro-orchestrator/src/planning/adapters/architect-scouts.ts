@@ -3,20 +3,12 @@
  *
  * The pre-existing scout is one process taking up to 64 serial model steps
  * before the Architect starts, and it answers a question nobody asked: it
- * produces a generic brief. Here the Architect states what it needs to know,
- * and the host fans those questions out to bounded read-only scouts at once.
- * The width lives in the host, so a serial agent loop still gets concurrent
- * answers, and a slow scout costs its own budget rather than the round's.
+ * produces a generic brief. Here the Architect states what it needs to know
+ * and bounded read-only scouts answer, each one a participant of its own.
  *
- * TRANSITIONAL, and the seam is visible: this fans out with Promise.all
- * because the Architect phase runs in its own process with no
- * AgenticEnvironment to publish to. The costs are real — the round is a
- * barrier rather than an incremental arrival, findings never become events
- * (no audit log, no TUI, no memory), and the scouts cannot hear each other,
- * which is the exact blindness Baro exists to remove. When the Architect
- * joins the bus (architect-bus-session, mirroring planner-bus-session), the
- * scouts become participants and their findings become events; all three
- * costs disappear with the barrier.
+ * This module owns the asking and the rendering; the answering happens in
+ * architect-research-session, where each scout is a participant and each
+ * finding is an event. Nothing here fans work out by hand.
  */
 
 import { execFileCli } from "../../harness/exec-file-cli.js"
@@ -43,17 +35,6 @@ export interface ScoutFinding {
     question: string
     answer: string
     ok: boolean
-}
-
-export interface ScoutRoundOptions {
-    cwd: string
-    model?: string
-    claudeBin?: string
-    timeoutMs?: number
-    /** Test seam; production shells out to the Claude CLI. */
-    ask?: (question: ScoutQuestion) => Promise<string>
-    onScoutStart?: (question: ScoutQuestion) => void
-    onScoutSettled?: (finding: ScoutFinding) => void
 }
 
 const SCOUT_SYSTEM_PROMPT = `You are a Baro repository scout. You answer exactly \
@@ -238,92 +219,6 @@ export async function runResearchQuestionRound(
     return typeof wrapper.result === "string"
         ? parseResearchQuestions(wrapper.result)
         : []
-}
-
-async function askClaudeScout(
-    question: ScoutQuestion,
-    opts: ScoutRoundOptions,
-): Promise<string> {
-    const collector = new ClaudeStreamResultCollector()
-    await execFileCli(
-        opts.claudeBin ?? "claude",
-        [
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            ...(opts.model ? ["--model", opts.model] : []),
-            "--tools",
-            "Read,Glob,Grep",
-            "--safe-mode",
-            "--disable-slash-commands",
-            "--strict-mcp-config",
-            "--mcp-config",
-            '{"mcpServers":{}}',
-            "--no-session-persistence",
-            "--permission-mode",
-            "dontAsk",
-            "--system-prompt",
-            SCOUT_SYSTEM_PROMPT,
-            "-p",
-            question.scope
-                ? `${question.question}\n\nStart looking here: ${question.scope}`
-                : question.question,
-        ],
-        {
-            cwd: opts.cwd,
-            env: harnessChildEnvironment(),
-            timeout: opts.timeoutMs ?? DEFAULT_SCOUT_TIMEOUT_MS,
-            idleTimeoutMs: llmIdleTimeoutMs(),
-            maxBuffer: 8 * 1024 * 1024,
-            onStdoutData: (chunk) => collector.feed(chunk),
-        },
-    )
-    const line = collector.resultLine()
-    if (!line) throw new Error("scout returned no result")
-    const wrapper = JSON.parse(line) as { result?: unknown }
-    const text = typeof wrapper.result === "string" ? wrapper.result.trim() : ""
-    if (!text) throw new Error("scout returned an empty answer")
-    return text
-}
-
-/**
- * Answer every question at once. One scout's failure is its own finding, never
- * the round's: the Architect decides with what came back and is told what did
- * not, which is strictly more than it knows today.
- */
-export async function runScoutRound(
-    questions: readonly ScoutQuestion[],
-    opts: ScoutRoundOptions,
-): Promise<ScoutFinding[]> {
-    const ask = opts.ask ?? ((question: ScoutQuestion) => askClaudeScout(question, opts))
-    return await Promise.all(
-        questions.slice(0, MAX_SCOUT_QUESTIONS).map(async (question) => {
-            opts.onScoutStart?.(question)
-            let finding: ScoutFinding
-            try {
-                const answer = await ask(question)
-                finding = {
-                    id: question.id,
-                    question: question.question,
-                    answer: answer.slice(0, MAX_FINDING_CHARS),
-                    ok: true,
-                }
-            } catch (error) {
-                finding = {
-                    id: question.id,
-                    question: question.question,
-                    answer: `unanswered: ${
-                        error instanceof Error ? error.message : String(error)
-                    }`,
-                    ok: false,
-                }
-            }
-            opts.onScoutSettled?.(finding)
-            return finding
-        }),
-    )
 }
 
 /** Findings as the Architect sees them: its own questions, answered. */
