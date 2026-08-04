@@ -96,6 +96,29 @@ function writesManifest(story: PrdStory): boolean {
 }
 
 /**
+ * A dependent names a prerequisite that does not exist yet by its exported
+ * symbol — `AuditService`, `AuditModule` — never by the path that will hold
+ * it, because no such path exists on any branch at planning time. Measured on
+ * the audit-trail run: seven declared edges dropped for "no shared file", then
+ * seven agents rediscovered the same missing foundation one at a time.
+ *
+ * So a filename is also a symbol: `audit.service.ts` answers to `AuditService`
+ * once separators are dropped. Only multi-word stems count — `index.ts` and
+ * `service.ts` name nothing in particular, and every story mentions "service".
+ */
+function symbolStemOf(path: string): string | null {
+    const base = (path.split("/").pop() ?? path).replace(/\.[A-Za-z0-9]+$/u, "")
+    const parts = base.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/u).filter(Boolean)
+    if (parts.length < 2) return null
+    const stem = parts.join("").toLowerCase()
+    return stem.length >= 8 ? stem : null
+}
+
+function symbolTextOf(story: PrdStory): string {
+    return storyText(story).replace(/[^A-Za-z0-9]/gu, "").toLowerCase()
+}
+
+/**
  * Edges no file supports.
  *
  * An edge A→B survives if B writes something A writes — they would collide —
@@ -119,15 +142,16 @@ export function unsupportedEdges(stories: readonly PrdStory[]): UnsupportedEdge[
             // Manifest writers are prerequisites by nature; keep their edges.
             if (writesManifest(dependency)) continue
             // Evidence is required to REMOVE an edge, never to keep one — a
-            // directory or relative-import mention of a dependency's output
-            // is enough tie to respect the planner's declared order.
+            // directory, relative-import or exported-symbol mention of a
+            // dependency's output ties the planner's declared order to a file.
             const mentionedDirs = referencedDirsOf(story)
-            const supported = dependencyWrites.some(
-                (path) =>
-                    ownWrites.has(path) ||
-                    mentioned.has(path) ||
-                    mentionedDirs.some((dir) => pathUnderDir(path, dir)),
-            )
+            const symbolText = symbolTextOf(story)
+            const supported = dependencyWrites.some((path) => {
+                if (ownWrites.has(path) || mentioned.has(path)) return true
+                if (mentionedDirs.some((dir) => pathUnderDir(path, dir))) return true
+                const stem = symbolStemOf(path)
+                return stem !== null && symbolText.includes(stem)
+            })
             if (!supported) unsupported.push({ from: dependencyId, to: story.id })
         }
     }

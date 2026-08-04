@@ -121,6 +121,53 @@ describe("what makes a dependency edge real", () => {
     })
 })
 
+// The audit-trail run. Seven instrumentation stories named the foundation by
+// the only name it had before it existed — its exported symbols — and all
+// seven edges were dropped for "no shared file". Every one of them then
+// suspended itself on discovering the foundation missing.
+describe("a prerequisite that does not exist yet is named by symbol", () => {
+    const foundation = story("S1", {
+        writes: [
+            "src/audit/audit.service.ts",
+            "src/audit/audit.module.ts",
+            "src/entities/auditLog.entity.ts",
+        ],
+    })
+
+    it("keeps the edge when the dependent names the dependency's exports", () => {
+        const dependent = story("S4", {
+            dependsOn: ["S1"],
+            writes: ["src/shops/shopUser/shopUser.service.ts"],
+            description:
+                "Inject AuditService and import AuditModule so every shopUser mutation records an AuditLogEntity.",
+        })
+        assert.deepEqual(unsupportedEdges([foundation, dependent]), [])
+    })
+
+    it("still drops an edge to a story whose output is never named", () => {
+        const dependent = story("S4", {
+            dependsOn: ["S1"],
+            writes: ["src/shops/shopUser/shopUser.service.ts"],
+            description: "Rename the shopUser service methods.",
+        })
+        assert.deepEqual(unsupportedEdges([foundation, dependent]), [
+            { from: "S1", to: "S4" },
+        ])
+    })
+
+    it("does not let a one-word filename stand in for a symbol", () => {
+        const generic = story("A", { writes: ["src/common/index.ts"] })
+        const dependent = story("B", {
+            dependsOn: ["A"],
+            writes: ["src/menus/menu.service.ts"],
+            description: "Update the menu index page and its service.",
+        })
+        assert.deepEqual(unsupportedEdges([generic, dependent]), [
+            { from: "A", to: "B" },
+        ])
+    })
+})
+
 describe("evidence is required to remove an edge, never to keep one", () => {
     it("keeps every edge when the planner declared no write surface", () => {
         const a = story("A")
