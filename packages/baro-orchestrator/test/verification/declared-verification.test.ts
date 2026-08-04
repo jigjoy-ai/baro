@@ -359,6 +359,44 @@ describe("declared verification policy", () => {
         })
     })
 
+    it("subsumes path-scoped runs under the full suite instead of failing the budget", async () => {
+        // A 12-story plan went fully green and was stamped failed: its
+        // stories' `npm run test -- <path>` requirements overflowed the
+        // bounded budget AFTER the automatic full `npm run test` had passed.
+        await withTempDir("baro-verify-subsume-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "v",
+                    scripts: { build: "exit 0", test: "exit 0", lint: "exit 0" },
+                }),
+            )
+            const plan = createVerifyPlan(dir, {
+                declaredTests: Array.from(
+                    { length: MAX_DECLARED_VERIFY_COMMANDS * 2 },
+                    (_unused, index) => ({
+                        storyId: `S${index + 1}`,
+                        command: `npm run test -- src/module-${index}`,
+                    }),
+                ),
+            })
+            assert.equal(
+                plan.commands.some((command) =>
+                    command.label.includes("beyond bounded budget"),
+                ),
+                false,
+                "subsumed path-scoped runs must not trip the overflow",
+            )
+            // Below the budget scoped runs stay admitted as focused evidence.
+            assert.equal(
+                plan.commands.some((command) =>
+                    command.args.includes("src/module-0"),
+                ),
+                true,
+            )
+        })
+    })
+
     it("canonicalizes and batches A13-shaped npx rstest declarations", async () => {
         await withTempDir("baro-verify-rstest-batch-", async (dir) => {
             writeFileSync(

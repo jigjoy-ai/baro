@@ -283,3 +283,40 @@ test("collective supervision authenticates the active worker and correlates abor
     )
     assert.equal(interventions(env).length, 1)
 })
+
+test("running the gates extends the wall-clock stall window", async () => {
+    // A spec story re-running the suite while waiting on a sibling's merge
+    // was aborted as stalled. Verification is work; the wall clock must
+    // follow it. Loops are still caught by the other heuristics.
+    let clock = 0
+    const { sup, env } = supervised({
+        softCapMs: 10_000,
+        noProgressToolCalls: 1_000,
+        now: () => clock,
+    })
+    for (let i = 0; i < 6; i++) {
+        clock += 8_000
+        await feed(sup, "S1", "Bash", `npx jest --ci src/case-${i}.spec.ts`)
+    }
+    assert.equal(interventions(env).length, 0, "verification kept the story alive")
+
+    clock += 11_000
+    await feed(sup, "S1", "Read", `{"path":"notes.md"}`)
+    const got = interventions(env)
+    assert.equal(got.length, 1, "a silent stretch after verification still trips")
+    assert.match(got[0]!.reason, /min (since last recognized file change|elapsed with zero recognized file changes)/)
+})
+
+test("non-verification shell calls do not extend the wall clock", async () => {
+    let clock = 0
+    const { sup, env } = supervised({
+        softCapMs: 10_000,
+        noProgressToolCalls: 1_000,
+        now: () => clock,
+    })
+    for (let i = 0; i < 3; i++) {
+        clock += 6_000
+        await feed(sup, "S1", "Bash", `ls -la src/dir-${i}`)
+    }
+    assert.equal(interventions(env).length, 1, "browsing the tree is not progress")
+})

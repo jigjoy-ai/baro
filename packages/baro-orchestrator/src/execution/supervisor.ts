@@ -60,6 +60,8 @@ export interface SupervisorOptions {
 
 interface StoryProgress {
     lastProgressAt: number
+    /** Last test/build/lint invocation — verification is work, not wandering. */
+    lastVerificationAt: number
     fileChanges: number
     sinceLastChange: number
     sigCounts: Map<string, number>
@@ -186,6 +188,15 @@ export class Supervisor extends BaseObserver {
             st.sigCounts.clear()
         } else {
             st.sinceLastChange += 1
+            // A story running its gates is converging, not exploring — the
+            // wall-clock stall must not fire mid-verification (it once aborted
+            // a spec story that was legitimately re-running the suite while
+            // waiting on a sibling's merge). Loops stay caught: an identical
+            // repeated invocation trips the signature heuristic and endless
+            // exploration trips the tool-call count.
+            if (isVerificationCommand(item)) {
+                st.lastVerificationAt = this.opts.now()
+            }
         }
 
         const sig = `${normalizeToolName(item.name)}:${String(item.args ?? "").slice(0, 160)}`
@@ -227,7 +238,8 @@ export class Supervisor extends BaseObserver {
         if (repeats >= this.opts.repeatThreshold && st.sinceLastChange >= this.opts.repeatsNeedNoProgress) {
             return `same tool call repeated ${repeats}× with no file change — stuck in a loop`
         }
-        const sinceProgress = this.opts.now() - st.lastProgressAt
+        const sinceProgress =
+            this.opts.now() - Math.max(st.lastProgressAt, st.lastVerificationAt)
         if (sinceProgress >= this.opts.softCapMs) {
             const minutes = Math.round(sinceProgress / 60_000)
             return st.fileChanges === 0
@@ -243,6 +255,7 @@ export class Supervisor extends BaseObserver {
             const now = this.opts.now()
             st = {
                 lastProgressAt: now,
+                lastVerificationAt: now,
                 fileChanges: 0,
                 sinceLastChange: 0,
                 sigCounts: new Map(),
@@ -279,4 +292,13 @@ export class Supervisor extends BaseObserver {
         ) return null
         return active
     }
+}
+
+const VERIFICATION_COMMAND_PATTERN =
+    /\b(?:jest|rstest|vitest|mocha|pytest|tsc\b|nest build|cargo (?:test|check|build)|go (?:test|build|vet)|(?:npm|pnpm|yarn)(?: run)? (?:test|lint|build|typecheck))\b/iu
+
+/** A shell invocation of the project's gates (tests, build, lint). */
+function isVerificationCommand(item: FunctionCallItem): boolean {
+    if (!/^bash$/iu.test(normalizeToolName(item.name))) return false
+    return VERIFICATION_COMMAND_PATTERN.test(String(item.args ?? "").slice(0, 400))
 }

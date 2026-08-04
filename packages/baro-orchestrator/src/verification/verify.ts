@@ -573,6 +573,37 @@ function compactCanonicalRstestCommands(
     return compacted
 }
 
+/**
+ * A declared `manager run <script> -- <paths…>` proves a strict subset of the
+ * bare `manager run <script>`. Below the budget the scoped run is still
+ * admitted (fresh, focused evidence); past the budget it is covered evidence
+ * and must not trip the fail-closed overflow — a 12-story plan once went
+ * fully green and was stamped failed because its per-path test requirements
+ * overflowed the budget AFTER the full suite had already passed.
+ */
+function subsumedByFullScript(
+    command: VerifyCommandSpec,
+    present: readonly VerifyCommandSpec[],
+): boolean {
+    const details = javascriptCommandDetails(command)
+    if (!details || details.trailingArgs[0] !== "--") return false
+    const scoped = details.trailingArgs.slice(1)
+    if (
+        scoped.length === 0 ||
+        scoped.some((value) => value.startsWith("-") || value.includes("="))
+    ) return false
+    return present.some((candidate) => {
+        const full = javascriptCommandDetails(candidate)
+        return (
+            full !== null &&
+            full.manager === details.manager &&
+            full.script === details.script &&
+            full.trailingArgs.length === 0 &&
+            (candidate.cwd ?? null) === (command.cwd ?? null)
+        )
+    })
+}
+
 function boundedDeclaredCommands(
     automatic: readonly VerifyCommandSpec[],
     declared: readonly VerifyCommandSpec[],
@@ -586,7 +617,10 @@ function boundedDeclaredCommands(
         if (seen.has(identity)) continue
         seen.add(identity)
         if (admitted >= MAX_DECLARED_VERIFY_COMMANDS) {
-            omitted += 1
+            // Overflow is only a defect when the dropped command proves
+            // something nothing else on the list proves. A path-scoped run
+            // whose full suite is already admitted is covered evidence.
+            if (!subsumedByFullScript(command, commands)) omitted += 1
             continue
         }
         admitted += 1
