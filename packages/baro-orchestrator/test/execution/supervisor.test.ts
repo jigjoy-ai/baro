@@ -284,10 +284,10 @@ test("collective supervision authenticates the active worker and correlates abor
     assert.equal(interventions(env).length, 1)
 })
 
-test("running the gates extends the wall-clock stall window", async () => {
-    // A spec story re-running the suite while waiting on a sibling's merge
-    // was aborted as stalled. Verification is work; the wall clock must
-    // follow it. Loops are still caught by the other heuristics.
+test("any command the story runs extends the wall-clock stall window", async () => {
+    // A story that had already landed its fix was aborted at "14 min since
+    // last recognized file change" while running 23 commands to prove it.
+    // The wall clock detects silence; convergence is the other heuristics.
     let clock = 0
     const { sup, env } = supervised({
         softCapMs: 10_000,
@@ -296,7 +296,7 @@ test("running the gates extends the wall-clock stall window", async () => {
     })
     for (let i = 0; i < 6; i++) {
         clock += 8_000
-        await feed(sup, "S1", "Bash", `npx jest --ci src/case-${i}.spec.ts`)
+        await feed(sup, "S1", "Bash", `git worktree add /tmp/probe-${i} HEAD~1`)
     }
     assert.equal(interventions(env).length, 0, "verification kept the story alive")
 
@@ -307,7 +307,9 @@ test("running the gates extends the wall-clock stall window", async () => {
     assert.match(got[0]!.reason, /min (since last recognized file change|elapsed with zero recognized file changes)/)
 })
 
-test("non-verification shell calls do not extend the wall clock", async () => {
+test("reading alone does not extend the wall clock", async () => {
+    // Reads are not evidence that anything is happening: an agent stuck in a
+    // read loop is exactly what the stall check exists for.
     let clock = 0
     const { sup, env } = supervised({
         softCapMs: 10_000,
@@ -316,7 +318,7 @@ test("non-verification shell calls do not extend the wall clock", async () => {
     })
     for (let i = 0; i < 3; i++) {
         clock += 6_000
-        await feed(sup, "S1", "Bash", `ls -la src/dir-${i}`)
+        await feed(sup, "S1", "Read", `{"path":"src/file-${i}.ts"}`)
     }
-    assert.equal(interventions(env).length, 1, "browsing the tree is not progress")
+    assert.equal(interventions(env).length, 1, "reading in place is not progress")
 })

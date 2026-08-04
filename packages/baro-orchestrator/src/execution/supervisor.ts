@@ -188,13 +188,16 @@ export class Supervisor extends BaseObserver {
             st.sigCounts.clear()
         } else {
             st.sinceLastChange += 1
-            // A story running its gates is converging, not exploring — the
-            // wall-clock stall must not fire mid-verification (it once aborted
-            // a spec story that was legitimately re-running the suite while
-            // waiting on a sibling's merge). Loops stay caught: an identical
-            // repeated invocation trips the signature heuristic and endless
-            // exploration trips the tool-call count.
-            if (isVerificationCommand(item)) {
+            // The wall clock is the silence detector, so any command the story
+            // runs resets it — proving a defect means probes, scratch
+            // worktrees and filtered test runs, none of which write a file and
+            // only some of which look like a gate. Matching command shapes was
+            // too narrow: a story that had already landed its fix was aborted
+            // at "14 min since last recognized file change" while running 23
+            // commands. Non-convergence is still caught, by the heuristics
+            // built for it — an identical repeated call trips the signature
+            // check, and endless exploration trips the tool-call count.
+            if (isShellCommand(item)) {
                 st.lastVerificationAt = this.opts.now()
             }
         }
@@ -294,11 +297,7 @@ export class Supervisor extends BaseObserver {
     }
 }
 
-const VERIFICATION_COMMAND_PATTERN =
-    /\b(?:jest|rstest|vitest|mocha|pytest|tsc\b|nest build|cargo (?:test|check|build)|go (?:test|build|vet)|(?:npm|pnpm|yarn)(?: run)? (?:test|lint|build|typecheck))\b/iu
-
-/** A shell invocation of the project's gates (tests, build, lint). */
-function isVerificationCommand(item: FunctionCallItem): boolean {
-    if (!/^bash$/iu.test(normalizeToolName(item.name))) return false
-    return VERIFICATION_COMMAND_PATTERN.test(String(item.args ?? "").slice(0, 400))
+/** A shell invocation: work the story is doing, whatever its shape. */
+function isShellCommand(item: FunctionCallItem): boolean {
+    return /^bash$/iu.test(normalizeToolName(item.name))
 }

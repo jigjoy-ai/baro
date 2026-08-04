@@ -19,7 +19,13 @@ import { extractModelJsonObject } from "../../model-json.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 
 export const MAX_SCOUT_QUESTIONS = 6
-const MAX_QUESTION_CHARS = 400
+/**
+ * A question is cheap text and its scope list is the whole point: at 400 the
+ * enumeration question of a live audit was cut mid-path
+ * ("…tableSession.service.ts, sr"), silently dropping services from the very
+ * list that was meant to be exhaustive.
+ */
+const MAX_QUESTION_CHARS = 4_000
 const MAX_FINDING_CHARS = 4_000
 const DEFAULT_SCOUT_TIMEOUT_MS = 4 * 60 * 1000
 
@@ -128,12 +134,21 @@ export function parseResearchQuestions(text: string): ScoutQuestion[] {
             ? (entry as { question?: unknown }).question
             : entry
         if (typeof question !== "string" || question.trim().length < 8) continue
+        if (question.trim().length > MAX_QUESTION_CHARS) {
+            // Loudly refused, never quietly trimmed: a half a scope list reads
+            // as a complete one to the scout that receives it.
+            process.stderr.write(
+                `[architect-scouts] dropped a question of ${question.trim().length} chars; ` +
+                    `the limit is ${MAX_QUESTION_CHARS}\n`,
+            )
+            continue
+        }
         const scope = typeof entry === "object" && entry !== null
             ? (entry as { scope?: unknown }).scope
             : undefined
         questions.push({
             id: `Q${questions.length + 1}`,
-            question: question.trim().slice(0, MAX_QUESTION_CHARS),
+            question: question.trim(),
             ...(typeof scope === "string" && scope.trim()
                 ? { scope: scope.trim().slice(0, 200) }
                 : {}),
