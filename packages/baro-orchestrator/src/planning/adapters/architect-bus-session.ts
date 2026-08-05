@@ -23,7 +23,9 @@ import {
     type SemanticEvent,
 } from "../../runtime/mozaik.js"
 import { AgentResult } from "../../semantic-events.js"
-import { ClaudeCliParticipant } from "../../harness/claude/cli-participant.js"
+import { laneAdapterFor } from "../../harness/lane-registry.js"
+import type { InteractiveModelParticipant } from "../../harness/interactive-participant.js"
+import type { OpenAIConnection } from "../../harness/openai/runtime.js"
 import { IdleWatchdog, llmIdleTimeoutMs } from "../../harness/liveness.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
@@ -49,6 +51,10 @@ export interface ArchitectBusSessionOptions {
     model?: string
     effort?: string
     claudeBin?: string
+    /** Which lane holds the Architect. Defaults to the CLI this began on. */
+    backend?: string
+    /** Endpoint for a lane that calls a model directly. */
+    connection?: OpenAIConnection
     projectContext?: string
     goalEnvelope?: GoalEnvelope
     /**
@@ -181,26 +187,24 @@ export async function runArchitectBusSession(
     const env = opts.environment ?? new AgenticEnvironment("architect-bus")
     const replies = new ReplyStream(agentId)
     const narrator = new ResearchNarrator()
-    const architect = new ClaudeCliParticipant(agentId, {
-        cwd: opts.cwd,
-        model: opts.model,
-        effort: opts.effort,
-        claudeBin: opts.claudeBin,
-        includePartialMessages: true,
-        permissionMode: "dontAsk",
-        extraArgs: [
-            "--tools",
-            "Read,Glob,Grep",
-            "--safe-mode",
-            "--disable-slash-commands",
-            "--strict-mcp-config",
-            "--mcp-config",
-            '{"mcpServers":{}}',
-            "--no-session-persistence",
-            "--system-prompt",
-            opts.systemPrompt,
-        ],
+    const lane = laneAdapterFor({
+        backend: opts.backend ?? "claude",
+        ...(opts.connection ? { connection: opts.connection } : {}),
+        ...(opts.claudeBin ? { claudeBin: opts.claudeBin } : {}),
     })
+    // The Architect reads the repository and decides; it never writes, and it
+    // needs nothing of ours called. That is why any lane can hold this phase.
+    const grant = await lane.grant([{ kind: "read-repo", cwd: opts.cwd }])
+    const architect = lane.create(
+        {
+            agentId,
+            cwd: opts.cwd,
+            ...(opts.model ? { model: opts.model } : {}),
+            ...(opts.effort ? { effort: opts.effort } : {}),
+            systemPrompt: opts.systemPrompt,
+        },
+        grant,
+    )
 
     const maxRounds = Math.max(0, opts.maxResearchRounds ?? DEFAULT_RESEARCH_ROUNDS)
     const maxRepairs = Math.max(0, opts.maxOutcomeRepairs ?? DEFAULT_OUTCOME_REPAIRS)
@@ -315,7 +319,7 @@ async function settleOutcome(
     firstReply: string,
     input: {
         opts: ArchitectBusSessionOptions
-        architect: ClaudeCliParticipant
+        architect: InteractiveModelParticipant<unknown>
         replies: ReplyStream
         findings: ScoutFinding[]
         researchRounds: number

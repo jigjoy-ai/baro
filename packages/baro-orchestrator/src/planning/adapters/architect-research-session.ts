@@ -23,7 +23,9 @@ import {
     ScoutDispatched,
     ScoutFindingPublished,
 } from "../../semantic-events.js"
-import { ClaudeCliParticipant } from "../../harness/claude/cli-participant.js"
+import { laneAdapterFor } from "../../harness/lane-registry.js"
+import type { InteractiveModelParticipant } from "../../harness/interactive-participant.js"
+import type { OpenAIConnection } from "../../harness/openai/runtime.js"
 import { IdleWatchdog, llmIdleTimeoutMs } from "../../harness/liveness.js"
 import type { ScoutFinding, ScoutQuestion } from "./architect-scouts.js"
 
@@ -178,6 +180,10 @@ export interface ResearchSessionOptions {
     model?: string
     effort?: string
     claudeBin?: string
+    /** Which lane holds the scouts. Defaults to the CLI this began on. */
+    backend?: string
+    /** Endpoint for a lane that calls a model directly. */
+    connection?: OpenAIConnection
     /** Whole-round budget; a scout still reading when it expires is aborted. */
     roundBudgetMs?: number
     /** Called as each answer lands, before the round ends. */
@@ -202,7 +208,15 @@ export async function runArchitectResearchSession(
             question,
         ]),
     )
-    const scouts = new Map<string, ClaudeCliParticipant>()
+    const lane = laneAdapterFor({
+        backend: opts.backend ?? "claude",
+        ...(opts.connection ? { connection: opts.connection } : {}),
+        ...(opts.claudeBin ? { claudeBin: opts.claudeBin } : {}),
+    })
+    // A scout reads and never writes; that is the whole of what it needs, and
+    // stating it as a capability is what lets any lane hold one.
+    const grant = await lane.grant([{ kind: "read-repo", cwd: opts.cwd }])
+    const scouts = new Map<string, InteractiveModelParticipant<unknown>>()
     // A scout keeps its stdin open so peers' findings can reach it mid-read;
     // closing it is what lets the process exit once its own answer is in.
     const board = new ResearchBoard(questions, sessionId, opts.onFinding, (agentId) => {
@@ -211,30 +225,21 @@ export async function runArchitectResearchSession(
     board.join(env)
 
     for (const [agentId, question] of questions) {
-        const scout = new ClaudeCliParticipant(agentId, {
-            cwd: opts.cwd,
-            model: opts.model,
-            effort: opts.effort,
-            claudeBin: opts.claudeBin,
-            includePartialMessages: true,
-            permissionMode: "dontAsk",
-            // The board is the only voice a scout listens to; the synthetic
-            // correlation is what the authenticated delivery path checks.
-            targetedMessageAuthority: board,
-            targetedMessageCorrelation: scoutCorrelation(sessionId, agentId),
-            extraArgs: [
-                "--tools",
-                "Read,Glob,Grep",
-                "--safe-mode",
-                "--disable-slash-commands",
-                "--strict-mcp-config",
-                "--mcp-config",
-                '{"mcpServers":{}}',
-                "--no-session-persistence",
-                "--system-prompt",
-                SCOUT_SESSION_SYSTEM_PROMPT,
-            ],
-        })
+        const scout = lane.create(
+            {
+                agentId,
+                cwd: opts.cwd,
+                ...(opts.model ? { model: opts.model } : {}),
+                ...(opts.effort ? { effort: opts.effort } : {}),
+                systemPrompt: SCOUT_SESSION_SYSTEM_PROMPT,
+                // The board is the only voice a scout listens to; the
+                // synthetic correlation is what the authenticated delivery
+                // path checks.
+                targetedMessageAuthority: board,
+                targetedMessageCorrelation: scoutCorrelation(sessionId, agentId),
+            },
+            grant,
+        )
         scouts.set(agentId, scout)
     }
 
