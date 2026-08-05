@@ -112,6 +112,87 @@ The boundary is independently callable.
         })
     })
 
+    // The merge gate has always refused a diff reaching outside a story's
+    // declared writes; the story was never told what those were, so it learned
+    // the boundary by losing an hour of work to it.
+    it("hands each story its own write surface and names the owner of the rest", async () => {
+        await withTempDir("conductor-surface-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            const prd = oneStoryPrd()
+            prd.userStories[0] = {
+                ...prd.userStories[0]!,
+                writes: ["src/tables/tables.service.ts"],
+            } as (typeof prd.userStories)[0]
+            prd.userStories.push({
+                ...prd.userStories[0]!,
+                id: "S2",
+                title: "Foundation",
+                dependsOn: [],
+                writes: ["src/audit/audit.service.ts"],
+            } as (typeof prd.userStories)[0])
+            writeFileSync(prdPath, JSON.stringify(prd, null, 2) + "\n")
+
+            const conductor = new Conductor({
+                prdPath,
+                cwd: dir,
+                parallel: 2,
+                timeoutSecs: 45,
+                defaultModel: "sonnet",
+                intraLevelDelaySecs: 0,
+            })
+            const env = joinWithCapture(conductor)
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "unit test" }),
+            )
+
+            const spawn = await waitForEvent(env.events, StorySpawnRequest.is)
+            const surface = spawn.data.surface
+            assert.ok(surface, "spawn request carries a write surface")
+            assert.deepEqual(surface.writes, ["src/tables/tables.service.ts"])
+            assert.equal(
+                surface.ownedElsewhere["src/audit/audit.service.ts"],
+                "S2",
+            )
+            assert.equal(
+                surface.ownedElsewhere["src/tables/tables.service.ts"],
+                undefined,
+                "a story never appears as a stranger in its own surface",
+            )
+
+            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            env.deliverSemanticEvent(source("S2"), passResult("S2"))
+            await waitForEvent(env.events, RunCompleted.is)
+        })
+    })
+
+    it("says nothing about a surface when the plan declared no writes", async () => {
+        await withTempDir("conductor-no-surface-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(oneStoryPrd(), null, 2) + "\n")
+
+            const conductor = new Conductor({
+                prdPath,
+                cwd: dir,
+                parallel: 1,
+                timeoutSecs: 45,
+                defaultModel: "sonnet",
+                intraLevelDelaySecs: 0,
+            })
+            const env = joinWithCapture(conductor)
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "unit test" }),
+            )
+
+            const spawn = await waitForEvent(env.events, StorySpawnRequest.is)
+            assert.equal(spawn.data.surface, undefined)
+
+            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            await waitForEvent(env.events, RunCompleted.is)
+        })
+    })
+
     it("emits run, level, spawn, and completion events for a passing story", async () => {
         await withTempDir("conductor-test-", async (dir) => {
             const prdPath = join(dir, "prd.json")

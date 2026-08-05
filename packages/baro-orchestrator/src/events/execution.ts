@@ -230,6 +230,20 @@ export interface StorySpawnRequestData {
      * Critic has reviewed its exact terminal turn. */
     requiresQualityReview?: boolean
     workerId?: string
+    /**
+     * The write surface the merge gate holds this story to, and who owns the
+     * paths it does not. Enforced since worktrees existed but never told to
+     * the agent, so one that needed a two-line fix in a peer's file had no
+     * way to know it was a peer's file, and no rule to reach for instead of
+     * the edit. Measured twice: a swagger story rejected for proving a claim
+     * outside its surface, an audit story for correcting an import in the
+     * foundation's service.
+     */
+    surface?: {
+        readonly writes: readonly string[]
+        /** path → the story that declared it; never this story's own. */
+        readonly ownedElsewhere: Readonly<Record<string, string>>
+    }
 }
 
 export const StorySpawnRequest =

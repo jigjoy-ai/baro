@@ -69,8 +69,10 @@ import {
     StorySpawnRequest,
     type RunVerificationEvidence,
     type StoryResultData,
+    type StorySpawnRequestData,
 } from "../semantic-events.js"
 import { validateLegacyReplan } from "../runtime-graph/legacy-replan.js"
+import { writeSurfaceOf } from "../planning/domain/dependency-evidence.js"
 
 export { applyReplan } from "../prd.js"
 
@@ -630,8 +632,30 @@ export class Conductor extends BaseObserver {
                 model,
                 retries: story.retries,
                 timeoutSecs: this.opts.timeoutSecs,
+                surface: this.surfaceFor(story),
             }),
         )
+    }
+
+    /**
+     * What this story may write, and who owns what it may not. Silence is
+     * left silent: a plan whose stories declared no writes yields nothing
+     * here, and the agent is told no boundary rather than a wrong one.
+     */
+    private surfaceFor(story: PrdStory): StorySpawnRequestData["surface"] {
+        const writes = writeSurfaceOf(story)
+        const ownedElsewhere: Record<string, string> = {}
+        for (const peer of this.prd?.userStories ?? []) {
+            if (peer.id === story.id) continue
+            for (const path of writeSurfaceOf(peer)) {
+                if (writes.includes(path)) continue
+                ownedElsewhere[path] ??= peer.id
+            }
+        }
+        if (writes.length === 0 && Object.keys(ownedElsewhere).length === 0) {
+            return undefined
+        }
+        return { writes, ownedElsewhere }
     }
 
     private async completeLevel(): Promise<void> {

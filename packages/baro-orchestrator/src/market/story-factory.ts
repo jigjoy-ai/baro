@@ -1015,6 +1015,12 @@ export class StoryFactory extends BaseObserver {
                                     this.opts.worktrees !== undefined &&
                                         this.supportsCooperativeSuspend(route),
                                 ),
+                                this.writeSurfaceInstructions(
+                                    req.surface,
+                                    `node ${JSON.stringify(collaboration.commandPath)}`,
+                                    `--endpoint ${JSON.stringify(collaboration.endpoint)} ` +
+                                        `--token ${JSON.stringify(collaboration.token)}`,
+                                ),
                             ]
                           : []),
                   ].filter(Boolean).join("\n\n"),
@@ -1243,6 +1249,59 @@ export class StoryFactory extends BaseObserver {
             ...messages.map((message) => `- ${JSON.stringify(message)}`),
             "",
             "Treat these as authenticated peer input for this exact lease.",
+        ].join("\n")
+    }
+
+    /**
+     * The boundary the merge gate already enforces, said out loud.
+     *
+     * A story whose diff reaches outside its declared writes is refused at
+     * integration — correct, and until now unannounced: the agent learned the
+     * rule by breaking it, an hour of work later. Both measured rejections
+     * were an agent doing something reasonable (proving a contract claim,
+     * repairing an import that failed in its own tree) inside a file it had
+     * no way to know belonged to someone else.
+     */
+    private writeSurfaceInstructions(
+        surface: StorySpawnRequestData["surface"],
+        command: string,
+        capability: string,
+    ): string {
+        if (!surface || surface.writes.length === 0) return ""
+        const owners = Object.entries(surface.ownedElsewhere)
+        return [
+            "## Your write surface",
+            "",
+            "The files this story declared it would write, and the only ones",
+            "the merge gate will accept from you:",
+            "",
+            ...surface.writes.map((path) => `- ${path}`),
+            "",
+            ...(owners.length > 0
+                ? [
+                      "Owned by other stories in this run. A diff touching one of",
+                      "these is refused at integration, however small and however",
+                      "right it is:",
+                      "",
+                      ...owners
+                          .slice(0, 40)
+                          .map(([path, owner]) => `- ${path} → ${owner}`),
+                      ...(owners.length > 40
+                          ? [`- …and ${owners.length - 40} more`]
+                          : []),
+                      "",
+                  ]
+                : []),
+            "If you need a change in a file you do not own — a bug, a wrong",
+            "import, a missing helper — do NOT edit it and do NOT copy it into",
+            "your own surface. One of these instead:",
+            `- Ask the owner, who can still act: ${command} emit ${capability} --kind help --reason ${JSON.stringify("WHAT NEEDS CHANGING IN <FILE>, PLUS THE COMMAND AND OUTPUT THAT SHOW WHY")}`,
+            "- If the architecture contract is what is wrong, withdraw that claim",
+            "  with the dispute command above instead of repairing around it.",
+            "- If you cannot honestly finish without the change, block on the",
+            "  owning story rather than reaching into it.",
+            "Working outside your surface loses the whole story at the gate, not",
+            "just the stray edit.",
         ].join("\n")
     }
 

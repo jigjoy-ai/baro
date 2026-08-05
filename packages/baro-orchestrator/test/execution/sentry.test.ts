@@ -4,7 +4,7 @@ import { describe, it } from "node:test"
 import { FunctionCallItem } from "../../src/runtime/mozaik.js"
 
 import { Sentry } from "../../src/execution/sentry.js"
-import { Coordination } from "../../src/semantic-events.js"
+import { Coordination, StorySpawnRequest } from "../../src/semantic-events.js"
 import { joinWithCapture, source } from "./helpers.js"
 
 function call(name: string, args: Record<string, unknown>): FunctionCallItem {
@@ -77,5 +77,81 @@ describe("Sentry", () => {
         assert.equal(sentry.getTouches().length, 2)
         assert.deepEqual(overlaps, [{ path: "src/shared.ts", agents: ["S2", "S1"] }])
         assert.equal(env.events.filter(Coordination.is).length, 0)
+    })
+})
+
+// The measured case: the owner had finished and merged long before a peer
+// edited its file, so two agents were never live on it and nothing fired.
+describe("Sentry warns about a file whose owner already finished", () => {
+    async function declare(
+        sentry: Sentry,
+        storyId: string,
+        writes: string[],
+    ): Promise<void> {
+        await sentry.onExternalEvent(
+            source("conductor"),
+            StorySpawnRequest.create({
+                storyId,
+                prompt: "",
+                model: "opus",
+                retries: 2,
+                timeoutSecs: 600,
+                surface: { writes, ownedElsewhere: {} },
+            }),
+        )
+    }
+
+    it("tells the writing agent whose file it is, with no second agent live", async () => {
+        const sentry = new Sentry()
+        const env = joinWithCapture(sentry)
+        await declare(sentry, "S1", ["src/audit/audit.service.ts"])
+        await declare(sentry, "S6", ["src/tables/tables.service.ts"])
+
+        await sentry.onExternalFunctionCall(
+            source("S6"),
+            call("Edit", {
+                file_path: "src/audit/audit.service.ts",
+                old_string: "a",
+                new_string: "b",
+            }),
+        )
+
+        const notices = env.events.filter(Coordination.is)
+        assert.equal(notices.length, 1)
+        assert.equal(notices[0]!.data.recipientId, "S6")
+        assert.match(notices[0]!.data.reason, /declared by story S1/)
+        assert.match(notices[0]!.data.reason, /help message|dispute|block/)
+    })
+
+    it("says nothing when a story writes its own declared file", async () => {
+        const sentry = new Sentry()
+        const env = joinWithCapture(sentry)
+        await declare(sentry, "S1", ["src/audit/audit.service.ts"])
+
+        await sentry.onExternalFunctionCall(
+            source("S1"),
+            call("Write", { file_path: "src/audit/audit.service.ts", content: "x" }),
+        )
+
+        assert.equal(env.events.filter(Coordination.is).length, 0)
+    })
+
+    it("warns once per agent and path, not on every edit", async () => {
+        const sentry = new Sentry()
+        const env = joinWithCapture(sentry)
+        await declare(sentry, "S1", ["src/audit/audit.service.ts"])
+
+        for (let i = 0; i < 3; i++) {
+            await sentry.onExternalFunctionCall(
+                source("S6"),
+                call("Edit", {
+                    file_path: "src/audit/audit.service.ts",
+                    old_string: `a${i}`,
+                    new_string: `b${i}`,
+                }),
+            )
+        }
+
+        assert.equal(env.events.filter(Coordination.is).length, 1)
     })
 })
