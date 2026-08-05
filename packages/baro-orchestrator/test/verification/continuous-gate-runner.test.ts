@@ -1,8 +1,10 @@
 import assert from "node:assert/strict"
+import { tmpdir } from "node:os"
 import { describe, it } from "node:test"
 
 import { ContinuousGateRunner } from "../../src/verification/continuous-gate-runner.js"
 import type { GateCommandOutcome } from "../../src/verification/continuous-gate.js"
+import type { VerifyPlan } from "../../src/verification/verify.js"
 
 const GREEN: GateCommandOutcome[] = [{ label: "go build ./...", passed: true, detail: "" }]
 const RED: GateCommandOutcome[] = [
@@ -34,6 +36,34 @@ function harness(gates: () => Promise<readonly GateCommandOutcome[]>) {
             { name: "Write", callId: "c", arguments: "{}" } as never,
         )
     return { runner, delivered, write, runCount: () => runs }
+}
+
+/**
+ * Drives the real verifyBuild path (no `runGates` hook), so the three-state
+ * command result actually flows through the runner's own projection — the
+ * `runGates` harness above hands the runner pre-projected two-state outcomes
+ * and cannot exercise it.
+ */
+function harnessWithPlan(plan: VerifyPlan) {
+    const delivered: Array<{ recipientId: string; text: string }> = []
+    const environment = {
+        deliverSemanticEvent(_source: unknown, event: { data: unknown }) {
+            delivered.push(event.data as { recipientId: string; text: string })
+        },
+    }
+    const runner = new ContinuousGateRunner({
+        runId: "run-1",
+        resolveTarget: () => ({ cwd: tmpdir() }),
+        settleMs: 5,
+        plan,
+    })
+    ;(runner as unknown as { getEnvironments(): unknown[] }).getEnvironments = () => [environment]
+    const write = (agentId: string) =>
+        runner.onExternalFunctionCall(
+            { agentId } as never,
+            { name: "Write", callId: "c", arguments: "{}" } as never,
+        )
+    return { runner, delivered, write }
 }
 
 const settle = (ms = 40) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -159,6 +189,35 @@ describe("the gate runs when it is worth running, not constantly", () => {
         await settle(300)
         assert.equal(peak, 1, "the machine runs one build at a time")
         assert.equal(h.runCount(), 4, "each story still gets checked")
+        h.runner.stop()
+    })
+
+    it("does not report a gate we could not run as a failing gate", async () => {
+        // A repo whose gate tool is absent on the host (cargo not installed,
+        // ENOENT, containment cut short) makes verifyBuild return status
+        // "skipped" — which says nothing about the agent's patch. Reporting it
+        // as FAIL once told an agent its build was broken when only our own
+        // gate never ran. The passing command must still be reported; the
+        // skipped one must not turn the report red.
+        const plan: VerifyPlan = {
+            commands: [
+                { label: "node noop", tool: process.execPath, args: ["-e", ""] },
+                {
+                    label: "cargo build",
+                    tool: "cargo",
+                    args: ["build"],
+                    incompleteReason: "cargo is not installed",
+                },
+            ],
+        }
+        const h = harnessWithPlan(plan)
+        h.write("S1")
+        await settle(200)
+        assert.equal(h.delivered.length, 1)
+        const text = h.delivered[0]!.text
+        assert.match(text, /PASS {2}node noop/u)
+        assert.doesNotMatch(text, /FAIL/u)
+        assert.doesNotMatch(text, /cargo build/u)
         h.runner.stop()
     })
 

@@ -186,11 +186,17 @@ export class ContinuousGateRunner extends BaseObserver {
         if (result.commands.some((command) => wasKilled(command))) {
             throw new Error("a gate command was killed before it reported")
         }
-        return result.commands.map((command) => ({
-            label: command.command,
-            passed: command.status === "passed",
-            detail: command.status === "passed" ? "" : command.tail ?? "",
-        }))
+        // A skipped command (tool not installed, containment cut short, a
+        // requirement we could not run) never touched the patch, so it is not
+        // the agent's failure — same reason as the killed guard above. Drop it
+        // rather than reporting a two-state FAIL the agent would chase.
+        return result.commands
+            .filter((command) => command.status !== "skipped")
+            .map((command) => ({
+                label: command.command,
+                passed: command.status === "passed",
+                detail: command.status === "passed" ? "" : command.tail ?? "",
+            }))
     }
 
     private deliver(agentId: string, outcome: GateOutcome): void {
