@@ -56,6 +56,7 @@ import {
 } from "../provider-failure.js"
 import { acceptsTargetedMessage } from "../../runtime/targeted-message-authority.js"
 import { correlationOf, type StoryOutcome, type StorySpec } from "../story-contract.js"
+import { pickInferenceModel as pickModel } from "../mozaik/pick-model.js"
 import {
     CooperativeSuspension,
     settledWithinBound,
@@ -1273,28 +1274,6 @@ export class OpenAIStoryAgent extends BaseObserver {
     }
 }
 
-function pickModel(name: string, connection?: OpenAIConnection): GenerativeModel {
-    // Per-story endpoints must use GenericOpenAIModel — the built-in gpt-5.x
-    // classes bind to OpenAI's own endpoint and can't be redirected.
-    if (connection?.baseURL) {
-        return new GenericOpenAIModel(name, connection)
-    }
-    switch (name) {
-        case "gpt-5.5":
-            return new Gpt55()
-        case "gpt-5.4":
-            return new Gpt54()
-        case "gpt-5.4-mini":
-            return new Gpt54Mini()
-        case "gpt-5.4-nano":
-            return new Gpt54Nano()
-        default:
-            process.stderr.write(
-                `[pickModel] Using model "${name}" as-is with the OpenAI API.\n`,
-            )
-            return new GenericOpenAIModel(name)
-    }
-}
 
 function setModelTools(model: GenerativeModel, tools: Tool[]): void {
     const m = model as unknown as { setTools?: (t: Tool[]) => void }

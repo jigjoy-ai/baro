@@ -82,6 +82,8 @@ export abstract class CliParticipant<
     private readySettled = false
     private closeDrainTimer: ReturnType<typeof setTimeout> | null = null
     private resolveDone!: (summary: TSummary) => void
+    /** Retained so `sessionEndDetail` can explain a session that stopped. */
+    private settledSummary: TSummary | null = null
     private resolveReady!: () => void
     private rejectReady!: (e: Error) => void
 
@@ -140,6 +142,21 @@ export abstract class CliParticipant<
         return this.proc?.stdin ?? null
     }
 
+    /**
+     * How this session ended, in the terms a process has. The planning
+     * sessions ask for this when a session stopped before producing what they
+     * needed; normalising it here keeps `exitCode` out of shared code.
+     */
+    sessionEndDetail(): string {
+        const summary = this.settledSummary
+        if (!summary) return "session is still running"
+        if (summary.error) return summary.error.message
+        if (summary.exitSignal) {
+            return `process ended on ${summary.exitSignal}`
+        }
+        return `process exited with code ${summary.exitCode ?? "unknown"}`
+    }
+
     getPhase(): AgentPhase {
         return this.currentPhase
     }
@@ -153,6 +170,7 @@ export abstract class CliParticipant<
         this.clearCloseDrainWatchdog()
         if (this.doneSettled) return
         this.doneSettled = true
+        this.settledSummary = summary
         const releaseTreeOwnership = (): void => {
             CliParticipant.active.delete(this as unknown as CliParticipant<never>)
         }
