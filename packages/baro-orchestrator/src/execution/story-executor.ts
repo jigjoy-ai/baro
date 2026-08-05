@@ -13,6 +13,7 @@ import type { StorySpawnRequestData } from "../semantic-events.js"
 import type { StoryRoute } from "../market/routing.js"
 import type { CollaborationDeliveryMode } from "./collaboration-bridge.js"
 import { PROCESS_TREE_CAPABILITIES } from "../harness/process-tree.js"
+import { laneQuiescenceWitness } from "../harness/cooperative-suspension.js"
 import { CodexStoryAgent } from "../harness/codex/story-agent.js"
 import { OpenAIStoryAgent } from "../harness/openai/story-agent.js"
 import { OpenCodeStoryAgent } from "../harness/opencode/story-agent.js"
@@ -124,16 +125,9 @@ interface TerminalSourceRegistrant {
 /** In-process executor: builds the backend agent for the resolved route. */
 export class LocalStoryExecutor implements StoryExecutor {
     supportsCooperativeSuspend(route: StoryRoute): boolean {
-        // Native OpenAI tools currently cannot prove that an underlying tool
-        // promise stopped writing after AbortSignal wins its outer race.
-        // CLI routes additionally require an OS-owned process group plus
-        // identity-table observation. This is a cooperative no-daemon
-        // contract, not full process containment; Windows needs a Job Object
-        // before it can advertise even this post-root-close boundary.
-        return (
-            route.backend !== "openai" &&
-            PROCESS_TREE_CAPABILITIES.cooperativeQuiescenceObservation
-        )
+        return laneQuiescenceWitness(route.backend) === "self"
+            ? true
+            : PROCESS_TREE_CAPABILITIES.cooperativeQuiescenceObservation
     }
 
     start(

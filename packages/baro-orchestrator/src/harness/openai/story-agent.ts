@@ -56,6 +56,11 @@ import {
 } from "../provider-failure.js"
 import { acceptsTargetedMessage } from "../../runtime/targeted-message-authority.js"
 import { correlationOf, type StoryOutcome, type StorySpec } from "../story-contract.js"
+import {
+    CooperativeSuspension,
+    settledWithinBound,
+    type CooperativeSuspensionSummary,
+} from "../cooperative-suspension.js"
 import type { StoryCollaborationAccess } from "../../execution/story-executor.js"
 import {
     createRuntimeReplanTool,
@@ -118,6 +123,13 @@ export interface OpenAIStoryAgentOptions {
     transportRetriesPerRound?: number
     transportRetryDelayMs?: number
     /**
+     * How long an accepted dependency suspension waits for already-running
+     * tools to finish before it refuses to certify quiescence. Refusing costs
+     * a retained worktree; certifying early would cost a silent write into a
+     * branch the host has already snapshotted.
+     */
+    suspensionQuiescenceTimeoutMs?: number
+    /**
      * Per-story OpenAI-compatible endpoint. Overrides the process-global
      * `OPENAI_BASE_URL` for this story only and forces `GenericOpenAIModel`
      * (the built-in gpt-5.x classes are hard-wired to OpenAI). Lets one run
@@ -149,6 +161,7 @@ interface ResolvedOpenAIStoryAgentOptions {
     perRoundTimeoutSecs: number
     transportRetriesPerRound: number
     transportRetryDelayMs: number
+    suspensionQuiescenceTimeoutMs: number
     baseUrl: string
     apiKey: string
     runtimeReplanDecisionAuthority: Participant | null
@@ -198,6 +211,21 @@ export class OpenAIStoryAgent extends BaseObserver {
     private readonly turnMessages = new TurnMessageMailbox<string>()
     private readonly turnReviews = new TurnReviewMailbox()
 
+    /**
+     * Tool invocations that have started and not yet settled.
+     *
+     * A CLI backend gets its quiescence proof from the operating system: the
+     * process is gone, so nothing of its can still be writing. In process
+     * there is no such witness, and aborting does not make one — the abort
+     * wins its race while the write it interrupted carries on. Owning the
+     * loop supplies a better witness than the process table ever did: no
+     * invocation can start once a suspension is requested, so an empty set is
+     * proof rather than inference.
+     */
+    private readonly inFlightTools = new Set<Promise<string>>()
+    private readonly suspension: CooperativeSuspension
+    private attemptsMade = 0
+
     constructor(spec: StorySpec, opts: OpenAIStoryAgentOptions = {}) {
         super()
         this.spec = {
@@ -227,6 +255,10 @@ export class OpenAIStoryAgent extends BaseObserver {
             transportRetryDelayMs: Math.max(
                 0,
                 Math.floor(opts.transportRetryDelayMs ?? 1_000),
+            ),
+            suspensionQuiescenceTimeoutMs: Math.max(
+                0,
+                Math.floor(opts.suspensionQuiescenceTimeoutMs ?? 30_000),
             ),
             baseUrl: opts.baseUrl ?? "",
             apiKey: opts.apiKey ?? "",
@@ -259,6 +291,15 @@ export class OpenAIStoryAgent extends BaseObserver {
                 : []),
         ]
         setModelTools(this.model, this.tools)
+
+        // The lane's whole contribution to suspension: what counts as proof
+        // that nothing of this story's can still write.
+        this.suspension = new CooperativeSuspension(
+            this.spec.id,
+            (timeoutMs) =>
+                settledWithinBound(() => [...this.inFlightTools], timeoutMs),
+            this.opts.suspensionQuiescenceTimeoutMs,
+        )
 
         this.done = new Promise<StoryOutcome>((res) => {
             this.resolveDone = res
@@ -381,6 +422,7 @@ export class OpenAIStoryAgent extends BaseObserver {
 
         for (let i = 0; i < maxAttempts; i++) {
             if (this.abortController.signal.aborted) break
+            if (this.suspension.blocksNewWork) break
             if (i > 0) {
                 this.transition("waiting", `retrying (attempt ${i + 1}/${maxAttempts})`)
                 try {
@@ -392,6 +434,7 @@ export class OpenAIStoryAgent extends BaseObserver {
             }
 
             attempts += 1
+            this.attemptsMade = attempts
             // No attempt-level wall clock: every inference round is already
             // individually bounded (perRoundTimeoutSecs) and round count is
             // capped per turn, so a hung provider call cannot stall forever —
@@ -425,6 +468,13 @@ export class OpenAIStoryAgent extends BaseObserver {
         if (this.abortController.signal.aborted) {
             lastError = this.abortReason ?? "story was aborted"
             lastFailure ??= this.abortFailure
+        }
+        // A suspension is a Board decision this story cooperated with, not a
+        // failure it should be recovered from; the worktree resumes.
+        if (this.suspension.blocksNewWork) {
+            lastError = this.suspension.outcomeText
+            lastFailure = undefined
+            this.transition("aborted", lastError)
         }
 
         const durationSecs = this.startedAt
@@ -844,6 +894,26 @@ export class OpenAIStoryAgent extends BaseObserver {
                 context = context.addContextItem(outItem)
             }
 
+            // A peer's finding lands at the turn boundary, not here. Draining
+            // it mid-round looks like an obvious win — the sibling's discovery
+            // reaches the model before it picks its next move — but the same
+            // mailbox also drives turns: a message waiting at the boundary is
+            // what makes the agent take another reviewed turn. Consuming it
+            // early silently converts three reviewed turns into one, and turn
+            // count is what the Critic, the collective and the Supervisor all
+            // read. Splitting "informs" from "asks for another turn" is the
+            // real fix, and it needs a live run to land safely.
+            if (this.suspension.blocksNewWork) {
+                return {
+                    context,
+                    success: false,
+                    assistantText,
+                    usage,
+                    error: this.suspension.outcomeText,
+                    retryable: false,
+                }
+            }
+
             if (
                 controlPlaneOutcomeUnknown ||
                 this.abortController.signal.aborted
@@ -1002,9 +1072,50 @@ export class OpenAIStoryAgent extends BaseObserver {
 
     private async runOrdinaryTool(call: FunctionCallItem): Promise<string> {
         const tool = this.tools.find((candidate) => candidate.name === call.name)
-        return tool
-            ? runToolSafely(tool, call.args, this.abortController.signal)
-            : `Error: tool '${call.name}' not registered`
+        if (!tool) return `Error: tool '${call.name}' not registered`
+        // The gate that makes an empty in-flight set mean something. Once a
+        // suspension is requested no further invocation may begin, so what is
+        // already running is all there will ever be.
+        if (this.suspension.blocksNewWork) return this.suspendedToolOutput()
+        const invocation = runToolSafely(
+            tool,
+            call.args,
+            this.abortController.signal,
+        )
+        // Track the invocation, never the abort race wrapped around it: the
+        // race is exactly what settles early while the write continues.
+        this.inFlightTools.add(invocation)
+        const settled = (): void => {
+            this.inFlightTools.delete(invocation)
+        }
+        invocation.then(settled, settled)
+        return invocation
+    }
+
+    private suspendedToolOutput(): string {
+        return (
+            "Error: this story is suspending on an accepted dependency block; " +
+            "no further tool calls will run in this session."
+        )
+    }
+
+    /**
+     * Stop taking work and resolve only once nothing of this story's can still
+     * write, so the host may snapshot the worktree. Inference is left to end
+     * on its own bound — a model call touches no files, and killing it would
+     * buy nothing the witness does not already give.
+     */
+    async suspend(blockId: string): Promise<CooperativeSuspensionSummary> {
+        const pending = this.suspension.request(blockId, () => ({
+            attempts: this.attemptsMade,
+            durationSecs: this.startedAt
+                ? Math.round((Date.now() - this.startedAt) / 1000)
+                : 0,
+        }))
+        // The block is recorded synchronously, so the loop can be released now
+        // rather than sitting out its quiet timeout while proof is gathered.
+        if (this.suspension.blocksNewWork) this.turnMessages.cancel()
+        return pending
     }
 
     private async proposeRuntimeReplan(call: FunctionCallItem): Promise<string> {

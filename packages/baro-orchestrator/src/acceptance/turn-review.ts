@@ -125,6 +125,20 @@ export class TurnMessageMailbox<T> {
         if (this.active) this.active(this.queued.shift()!)
     }
 
+    /**
+     * Everything waiting, without blocking for more. A backend that owns its
+     * own turn loop reads peer messages between inference rounds rather than
+     * only at the turn boundary, which is where `waitForNext` leaves them.
+     */
+    drainAll(): T[] {
+        return this.queued.splice(0, this.queued.length)
+    }
+
+    /** End an active wait now — a suspension must not sit out the quiet timeout. */
+    cancel(): void {
+        this.active?.(null)
+    }
+
     waitForNext(options: {
         timeoutMs: number
         signal?: AbortSignal
