@@ -255,6 +255,54 @@ describe("a session ends by reporting, never by throwing", () => {
     })
 })
 
+describe("a round that never answers is ended by its own deadline", () => {
+    it("stops a hung call instead of waiting forever behind a heartbeat", async () => {
+        const p = new MozaikModelParticipant({
+            agentId: "architect",
+            model: silentModel(),
+            systemPrompt: "you decide",
+            quietTimeoutMs: 5,
+            perRoundTimeoutSecs: 0.05,
+        })
+        Object.defineProperty(p, "runRound", {
+            // A call that never answers, exactly like the live one that held a
+            // connection open for seventeen minutes.
+            value: () => new Promise(() => {}),
+        })
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("go")
+
+        const summary = await p.done
+        assert.match(
+            summary.error?.message ?? "",
+            /timed out after 50ms/u,
+            "the round must end on its own deadline",
+        )
+    })
+
+    it("reports a deadline as a timeout, not as cancellation", async () => {
+        const p = new MozaikModelParticipant({
+            agentId: "architect",
+            model: silentModel(),
+            systemPrompt: "you decide",
+            quietTimeoutMs: 5,
+            perRoundTimeoutSecs: 0.05,
+        })
+        Object.defineProperty(p, "runRound", {
+            value: () => new Promise(() => {}),
+        })
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("go")
+        await p.done
+        // Telemetry and billing distinguish the two; a timeout dressed as a
+        // cancellation would be attributed to shutdown.
+        assert.equal(p.sessionEndDetail().includes("aborted"), false)
+        assert.match(p.sessionEndDetail(), /timed out/u)
+    })
+})
+
 describe("the session ends when the caller says so, not on a stopwatch", () => {
     it("closes after input is closed", async () => {
         const p = participant({ quietTimeoutMs: 50 })
