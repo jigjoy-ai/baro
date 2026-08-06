@@ -10,7 +10,7 @@ import {
     type Tool,
 } from "../../src/runtime/mozaik.js"
 import { MozaikModelParticipant } from "../../src/harness/mozaik/model-participant.js"
-import { AgentUserMessage } from "../../src/semantic-events.js"
+import { AgentResult, AgentUserMessage } from "../../src/semantic-events.js"
 import { joinWithCapture } from "./../execution/helpers.js"
 
 /** A model that never speaks — every round is stubbed by the test. */
@@ -112,6 +112,89 @@ describe("a phase that stays open and listens", () => {
             .filter(AgentUserMessage.is)
             .map((event) => event.data.text)
         assert.deepEqual(echoed, ["first"])
+    })
+})
+
+// Found by a live run, not by a test: the DeepSeek Architect sat with its
+// connection open and no round ever came back to the session. Every session
+// built on this port — the Architect's ReplyStream, the planner's ResultStream,
+// the research board — settles on AgentResult, which the CLI lane got for free
+// from Claude's `result` frame. A lane that never publishes one looks alive and
+// says nothing, until the idle watchdog ends the phase.
+describe("a finished turn is something the sessions can hear", () => {
+    it("publishes the turn's reply as the terminal event", async () => {
+        const p = participant()
+        stubRounds(p, [[message("here is the plan")]])
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("plan this goal")
+        await p.done
+
+        const results = env.events.filter(AgentResult.is)
+        assert.deepEqual(
+            results.map((event) => event.data.resultText),
+            ["here is the plan"],
+        )
+        assert.equal(results[0]!.data.agentId, "planner")
+        assert.equal(results[0]!.data.isError, false)
+    })
+
+    it("stays silent mid-turn, while the model is still calling tools", async () => {
+        const publish: Tool = {
+            type: "function",
+            name: "publish_plan_fragment",
+            description: "publish",
+            parameters: { type: "object", properties: {} },
+            invoke: async () => "{}",
+        } as unknown as Tool
+
+        const p = participant({ tools: [publish] })
+        stubRounds(p, [
+            [message("publishing S1 now"), call("publish_plan_fragment", {})],
+            [message("fragment admitted")],
+        ])
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("plan")
+        await p.done
+
+        // One turn, one terminal: a session that heard the mid-turn text would
+        // treat "publishing S1 now" as the plan.
+        assert.deepEqual(
+            env.events.filter(AgentResult.is).map((event) => event.data.resultText),
+            ["fragment admitted"],
+        )
+    })
+
+    it("carries the turn's token usage, which every cost figure is built on", async () => {
+        const p = participant()
+        let index = 0
+        Object.defineProperty(p, "runRound", {
+            value: async () => ({
+                items: [message(`round ${++index}`)],
+                usage: {
+                    inputTokens: 1_000,
+                    outputTokens: 40,
+                    totalTokens: 1_040,
+                    inputTokenDetails: { cached_tokens: 600 },
+                    outputTokenDetails: { reasoning_tokens: 12 },
+                },
+            }),
+        })
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("go")
+        await p.done
+
+        const usage = env.events.filter(AgentResult.is)[0]!.data.usage
+        assert.deepEqual(usage, {
+            input_tokens: 1_000,
+            output_tokens: 40,
+            total_tokens: 1_040,
+            cached_input_tokens: 600,
+            reasoning_tokens: 12,
+            rounds: 1,
+        })
     })
 })
 

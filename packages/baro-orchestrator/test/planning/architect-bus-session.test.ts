@@ -3,12 +3,26 @@ import { chmodSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
-import { AgenticEnvironment, BaseObserver } from "../../src/runtime/mozaik.js"
+import {
+    AgenticEnvironment,
+    BaseObserver,
+    ModelMessageItem,
+    type ContextItem,
+    type GenerativeModel,
+    type ModelContext,
+} from "../../src/runtime/mozaik.js"
 import {
     ScoutFindingPublished,
     type SemanticEvent,
 } from "../../src/semantic-events.js"
 import { runArchitectBusSession } from "../../src/planning/adapters/architect-bus-session.js"
+import { MozaikModelParticipant } from "../../src/harness/mozaik/model-participant.js"
+import { registerLane } from "../../src/harness/lane-registry.js"
+import type { InteractiveLaneAdapter, LaneGrant } from "../../src/harness/lane-adapter.js"
+import type {
+    InteractiveModelParticipant,
+    InteractiveParticipantRequest,
+} from "../../src/harness/interactive-participant.js"
 import { withTempDir } from "../execution/helpers.js"
 
 class Capture extends BaseObserver {
@@ -81,6 +95,69 @@ process.exit(0);
     return path
 }
 
+/** The scripted half of the native lane: one participant, no network. */
+class ScriptedNativeParticipant extends MozaikModelParticipant {
+    private turn = 0
+
+    constructor(agentId: string, private readonly scout: boolean) {
+        super({
+            agentId,
+            model: {
+                specification: { name: "scripted" },
+                setTools: () => {},
+            } as unknown as GenerativeModel,
+            systemPrompt: "scripted",
+        })
+    }
+
+    protected override async runRound(
+        context: ModelContext,
+    ): Promise<{ items: ContextItem[] }> {
+        const shown = JSON.stringify(context.getItems())
+        const say = (text: string): { items: ContextItem[] } => ({
+            items: [ModelMessageItem.rehydrate({ text })],
+        })
+        this.turn += 1
+        if (this.scout) return say("scout answer for this question (src/x.ts:7)")
+        if (this.turn === 1) {
+            assert.match(shown, /say what you must learn/u)
+            return say(
+                JSON.stringify({
+                    questions: [
+                        { question: "Which module owns menu visibility today?" },
+                        { question: "Where is the pagination convention defined?" },
+                    ],
+                }),
+            )
+        }
+        if (this.turn === 2) {
+            assert.match(shown, /scout answer for/u)
+            return say("NOT-AN-OUTCOME")
+        }
+        assert.match(shown, /rejected/u)
+        return say(
+            "Here is my outcome: " + JSON.stringify({ ok: true, saw: "scout answer" }),
+        )
+    }
+}
+
+class ScriptedNativeLane implements InteractiveLaneAdapter {
+    readonly backend = "fake-native"
+
+    async grant(): Promise<LaneGrant> {
+        return { close: async () => {} }
+    }
+
+    create(
+        request: InteractiveParticipantRequest,
+    ): InteractiveModelParticipant<unknown> {
+        return new ScriptedNativeParticipant(
+            request.agentId,
+            request.systemPrompt.includes("repository scout"),
+        ) as unknown as InteractiveModelParticipant<unknown>
+    }
+}
+
 describe("architect bus session", () => {
     it("asks, reads the answers, and repairs a rejected outcome", async () => {
         await withTempDir("baro-architect-bus-", async (dir) => {
@@ -135,6 +212,51 @@ describe("architect bus session", () => {
             assert.ok(
                 narrated.some((line) => line.includes("scout answered")),
                 "each answer is narrated to the run",
+            )
+        })
+    })
+
+    /**
+     * The same phase on the lane that has no process, with only the provider
+     * call scripted — the participant, the reply stream and the research board
+     * are the real ones.
+     *
+     * Five live DeepSeek runs died here and no test could see it: the phase
+     * held its connection open, every round returned, and the session heard
+     * nothing, because a native turn published no terminal event and every
+     * session settles on one.
+     */
+    it("completes on a lane with no process, not only on the CLI", async () => {
+        await withTempDir("baro-architect-bus-native-", async (dir) => {
+            registerLane("fake-native", () => new ScriptedNativeLane())
+            const env = new AgenticEnvironment("architect-bus-native-test")
+            const capture = new Capture()
+            capture.join(env)
+
+            const result = await runArchitectBusSession({
+                systemPrompt: "You are the architect for this engineering run.",
+                userMessage: "Migrate validation to zod.",
+                goal: "Migrate validation to zod.",
+                cwd: dir,
+                backend: "fake-native",
+                environment: env,
+                roundBudgetMs: 20_000,
+                normalizeOutcome: (raw) => raw.slice(raw.indexOf("{")),
+                validateOutcome: (raw) => {
+                    const parsed = JSON.parse(raw) as { ok?: unknown }
+                    if (parsed.ok !== true) throw new Error("outcome must state ok:true")
+                },
+            })
+
+            assert.equal(result.researchRounds, 1)
+            assert.equal(result.outcomeAttempts, 2, "the rejected outcome was repaired")
+            assert.equal(result.findings.length, 2)
+            assert.ok(result.findings.every((finding) => finding.ok))
+            assert.match(result.outcome, /"saw":"scout answer"/)
+            assert.equal(
+                capture.events.filter(ScoutFindingPublished.is).length,
+                2,
+                "scouts answer as participants on this lane too",
             )
         })
     })

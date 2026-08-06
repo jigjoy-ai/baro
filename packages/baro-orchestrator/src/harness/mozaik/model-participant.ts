@@ -24,9 +24,10 @@ import {
     type ContextItem,
     type GenerativeModel,
     type Tool,
+    type TokenUsage,
 } from "../../runtime/mozaik.js"
-import { AgentState, AgentUserMessage } from "../../semantic-events.js"
-import { runInferenceRound } from "../openai/runtime.js"
+import { AgentResult, AgentState, AgentUserMessage } from "../../semantic-events.js"
+import { runInferenceRound, UsageAccumulator } from "../openai/runtime.js"
 import { invokeTool, runBoundedRound } from "./round.js"
 import type { InteractiveModelParticipant } from "../interactive-participant.js"
 
@@ -132,6 +133,7 @@ export class MozaikModelParticipant
     private inputClosed = false
     private settled = false
     private rounds = 0
+    private turns = 0
     /** Resolves an idle wait early when something arrives. */
     private wake: (() => void) | null = null
 
@@ -204,8 +206,43 @@ export class MozaikModelParticipant
     protected async runRound(
         context: ModelContext,
         signal: AbortSignal,
-    ): Promise<{ items: ContextItem[] }> {
+    ): Promise<{ items: ContextItem[]; usage?: TokenUsage }> {
         return await runInferenceRound(context, this.opts.model, { signal })
+    }
+
+    /**
+     * The end of a turn, said out loud.
+     *
+     * Every session over this port settles on `AgentResult` — the Architect's
+     * reply stream, the planner's, the research board — because the CLI lane
+     * publishes one per turn from Claude's `result` frame. Without it a native
+     * phase completes its round, hands the reply to nobody, and waits with the
+     * connection open until the idle watchdog ends it.
+     *
+     * Usage rides along for the same reason it does on the story lane: this is
+     * the only place a native phase's tokens are ever reported.
+     */
+    private publishTurn(
+        env: AgenticEnvironment,
+        text: string,
+        usage: UsageAccumulator,
+    ): void {
+        this.turns += 1
+        env.deliverSemanticEvent(
+            this,
+            AgentResult.create({
+                agentId: this.agentId,
+                terminalId: `${this.agentId}:turn-${this.turns}`,
+                subtype: "success",
+                sessionId: null,
+                isError: false,
+                resultText: text,
+                usage: usage.isEmpty ? null : usage.toJSON(),
+                totalCostUsd: null,
+                numTurns: null,
+                durationMs: null,
+            }),
+        )
     }
 
     private emitState(phase: "starting" | "running" | "done" | "failed"): void {
@@ -226,6 +263,10 @@ export class MozaikModelParticipant
         // True when the last round ended in tool calls: the model has been
         // handed their results and owes an answer.
         let owesContinuation = false
+        // A turn spans every round until the model stops calling tools; both
+        // reset when it is published.
+        let turnText: string[] = []
+        let turnUsage = new UsageAccumulator()
         try {
             while (this.rounds < this.opts.maxRounds) {
                 if (this.abortController.signal.aborted) {
@@ -264,6 +305,7 @@ export class MozaikModelParticipant
                     onActivity: () => this.onActivity?.(),
                 })
                 this.onActivity?.()
+                turnUsage.add(round.usage)
 
                 const calls: FunctionCallItem[] = []
                 for (const item of round.items) {
@@ -274,7 +316,9 @@ export class MozaikModelParticipant
                     } else if (item.type === "message") {
                         await env.deliverModelMessage(this, item as ModelMessageItem)
                         context = context.addContextItem(item)
-                        this.messages.push(textOf(item as ModelMessageItem))
+                        const text = textOf(item as ModelMessageItem)
+                        this.messages.push(text)
+                        turnText.push(text)
                         this.onActivity?.()
                     } else if (item.type === "reasoning") {
                         context = context.addContextItem(item)
@@ -297,6 +341,19 @@ export class MozaikModelParticipant
                 // SESSION ends is the caller's call, made by handing it more to
                 // read or by closing input. The loop head decides both.
                 owesContinuation = calls.length > 0
+                if (!owesContinuation) {
+                    // The turn's LAST message, as the CLI lane reports it:
+                    // every consumer parses this text (questions, an outcome,
+                    // a plan fragment), and mid-turn narration prepended to it
+                    // is text their extractors have to survive.
+                    this.publishTurn(
+                        env,
+                        turnText[turnText.length - 1] ?? "",
+                        turnUsage,
+                    )
+                    turnText = []
+                    turnUsage = new UsageAccumulator()
+                }
             }
 
             this.settle("done", null)
