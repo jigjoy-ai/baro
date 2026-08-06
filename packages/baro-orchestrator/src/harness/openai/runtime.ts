@@ -61,17 +61,29 @@ const PROVIDER_CALL_TIMEOUT_CODE = "BARO_PROVIDER_CALL_TIMEOUT"
  * cancellation is intentionally not a timeout: shutdown/turn cancellation
  * must remain distinguishable in runner and billing telemetry.
  */
-export function providerCallTimeoutError(timeoutMs: number): Error {
+export function providerCallTimeoutError(
+    timeoutMs: number,
+    /** What timed out, when the caller can say something more useful than
+     * "inference provider call" — a round number, a phase. */
+    label = "inference provider call",
+): Error {
     const error = new Error(
-        `inference provider call timed out after ${timeoutMs}ms`,
+        `${label} timed out after ${timeoutMs}ms`,
     ) as Error & { code: string }
     error.name = "TimeoutError"
     error.code = PROVIDER_CALL_TIMEOUT_CODE
     return error
 }
 
-/** True only for Baro's typed inference-timeout abort reason. */
-export function isProviderCallTimeout(reason: unknown): boolean {
+/**
+ * True only for Baro's typed inference-timeout abort reason.
+ *
+ * A guard rather than a plain boolean: every caller that asks this question
+ * then wants the message off it, and narrowing here spares each of them a cast.
+ */
+export function isProviderCallTimeout(
+    reason: unknown,
+): reason is Error & { code: string } {
     return typeof reason === "object"
         && reason !== null
         && (reason as { code?: unknown }).code === PROVIDER_CALL_TIMEOUT_CODE

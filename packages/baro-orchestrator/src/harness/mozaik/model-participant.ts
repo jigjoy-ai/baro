@@ -26,10 +26,8 @@ import {
     type Tool,
 } from "../../runtime/mozaik.js"
 import { AgentState, AgentUserMessage } from "../../semantic-events.js"
-import {
-    providerCallTimeoutError,
-    runInferenceRound,
-} from "../openai/runtime.js"
+import { runInferenceRound } from "../openai/runtime.js"
+import { invokeTool, runBoundedRound } from "./round.js"
 import type { InteractiveModelParticipant } from "../interactive-participant.js"
 
 /**
@@ -89,8 +87,6 @@ const DEFAULT_MAX_ROUNDS = 60
  */
 const ROUND_BACKSTOP_SECS = 20 * 60
 const DEFAULT_QUIET_MS = 2_000
-/** How often an in-flight provider call reports that it is still a call. */
-const HEARTBEAT_MS = 5_000
 
 export class MozaikModelParticipant
     extends BaseObserver
@@ -189,60 +185,9 @@ export class MozaikModelParticipant
     /** One provider call. Separated so a test can drive the loop offline. */
     protected async runRound(
         context: ModelContext,
+        signal: AbortSignal,
     ): Promise<{ items: ContextItem[] }> {
-        return await runInferenceRound(context, this.opts.model, {
-            signal: this.abortController.signal,
-        })
-    }
-
-    /**
-     * The backstop the heartbeat depends on being real.
-     *
-     * `runInferenceRound` cancels on a signal but imposes no deadline of its
-     * own, so nothing ended a call that never answered — and the heartbeat had
-     * meanwhile silenced the watchdog that would have noticed. A timeout is
-     * reported as a timeout rather than as cancellation, which telemetry and
-     * billing attribute differently.
-     */
-    private async runBoundedRound(
-        context: ModelContext,
-    ): Promise<{ items: ContextItem[] }> {
-        const timeoutMs = this.opts.perRoundTimeoutSecs * 1000
-        let timer: ReturnType<typeof setTimeout> | undefined
-        const deadline = new Promise<never>((_, reject) => {
-            timer = setTimeout(() => {
-                this.abortController.abort()
-                reject(providerCallTimeoutError(timeoutMs))
-            }, timeoutMs)
-        })
-        try {
-            return await Promise.race([this.runRound(context), deadline])
-        } finally {
-            if (timer) clearTimeout(timer)
-        }
-    }
-
-    /**
-     * A provider call in flight is not silence.
-     *
-     * A CLI participant streams tokens, so the watchdog that ends a stalled
-     * session sees a heartbeat for free. This lane gets one response at the
-     * end of a round, so a long call looked exactly like a hang and the
-     * watchdog aborted a phase that was working — which is how the first live
-     * run on this lane died.
-     *
-     * This cannot hide a real hang only because `runBoundedRound` gives the
-     * round a deadline of its own — the first version of this comment claimed
-     * that bound existed when it did not, and a hung call ran unbounded
-     * behind a heartbeat that kept the watchdog quiet.
-     */
-    private async withHeartbeat<T>(work: Promise<T>): Promise<T> {
-        const beat = setInterval(() => this.onActivity?.(), HEARTBEAT_MS)
-        try {
-            return await work
-        } finally {
-            clearInterval(beat)
-        }
+        return await runInferenceRound(context, this.opts.model, { signal })
     }
 
     private emitState(phase: "starting" | "running" | "done" | "failed"): void {
@@ -294,7 +239,12 @@ export class MozaikModelParticipant
 
                 this.rounds += 1
                 this.emitState("running")
-                const round = await this.withHeartbeat(this.runBoundedRound(context))
+                const round = await runBoundedRound({
+                    round: (signal) => this.runRound(context, signal),
+                    timeoutMs: this.opts.perRoundTimeoutSecs * 1000,
+                    parentSignal: this.abortController.signal,
+                    onActivity: () => this.onActivity?.(),
+                })
                 this.onActivity?.()
 
                 const calls: FunctionCallItem[] = []
@@ -314,7 +264,11 @@ export class MozaikModelParticipant
                 }
 
                 for (const call of calls) {
-                    const output = await this.invokeTool(call)
+                    const output = await invokeTool(
+                        this.opts.tools ?? [],
+                        { name: call.name, args: call.args },
+                        this.abortController.signal,
+                    )
                     const outItem = FunctionCallOutputItem.create(call.callId, output)
                     await env.deliverFunctionCallOutput(this, outItem)
                     context = context.addContextItem(outItem)
@@ -356,24 +310,6 @@ export class MozaikModelParticipant
         })
     }
 
-    private async invokeTool(call: FunctionCallItem): Promise<string> {
-        const tool = (this.opts.tools ?? []).find(
-            (candidate) => candidate.name === call.name,
-        )
-        if (!tool) return `Error: tool '${call.name}' is not available here`
-        let args: unknown
-        try {
-            args = JSON.parse(call.args)
-        } catch (error) {
-            return `Error: tool args were not valid JSON: ${messageOf(error)}`
-        }
-        try {
-            const result = await tool.invoke(args)
-            return typeof result === "string" ? result : JSON.stringify(result)
-        } catch (error) {
-            return `Error running ${tool.name}: ${messageOf(error)}`
-        }
-    }
 }
 
 function textOf(item: ModelMessageItem): string {

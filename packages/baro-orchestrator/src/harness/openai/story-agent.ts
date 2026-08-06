@@ -29,6 +29,7 @@ import {
 import { AgenticEnvironment } from "../../runtime/mozaik.js"
 import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import {
+    isProviderCallTimeout,
     GenericOpenAIModel,
     type OpenAIConnection,
     UsageAccumulator,
@@ -57,6 +58,7 @@ import {
 import { acceptsTargetedMessage } from "../../runtime/targeted-message-authority.js"
 import { correlationOf, type StoryOutcome, type StorySpec } from "../story-contract.js"
 import { pickInferenceModel as pickModel } from "../mozaik/pick-model.js"
+import { invokeTool, runBoundedRound } from "../mozaik/round.js"
 import {
     CooperativeSuspension,
     settledWithinBound,
@@ -805,7 +807,7 @@ export class OpenAIStoryAgent extends BaseObserver {
                         retryable: false,
                     }
                 }
-                if (e instanceof InferenceRoundTimeoutError) {
+                if (isProviderCallTimeout(e)) {
                     return {
                         context,
                         success: false,
@@ -816,8 +818,9 @@ export class OpenAIStoryAgent extends BaseObserver {
                             kind: "transport",
                             code: "request_timeout",
                         },
-                        // Mozaik 3.12 does not expose a provider AbortSignal.
-                        // Do not overlap a retry with the still-settling request.
+                        // The deadline cancelled the request, so nothing is
+                        // still on its way back; the attempt is over rather
+                        // than merely abandoned.
                         retryable: false,
                     }
                 }
@@ -989,12 +992,14 @@ export class OpenAIStoryAgent extends BaseObserver {
         attempt: number,
         turn: number,
         round: number,
+        signal: AbortSignal,
     ) {
         return runInferenceRound(
             context,
             this.model,
             this.billingCoordinator
                 ? {
+                      signal,
                       billing: {
                           coordinator: this.billingCoordinator,
                           context: {
@@ -1009,7 +1014,7 @@ export class OpenAIStoryAgent extends BaseObserver {
                           },
                       },
                   }
-                : {},
+                : { signal },
         )
     }
 
@@ -1026,32 +1031,23 @@ export class OpenAIStoryAgent extends BaseObserver {
             reconnect++
         ) {
             try {
-                const roundPromise = this.runRound(
-                    context,
-                    attempt,
-                    turn,
-                    round,
-                )
-                // A local watchdog cannot cancel Mozaik 3.12's provider
-                // request. Never overlap it with a retry while it may settle.
-                let roundTimer: ReturnType<typeof setTimeout> | undefined
-                const timeoutPromise = new Promise<never>((_, reject) => {
-                    roundTimer = setTimeout(
-                        () =>
-                            reject(
-                                new InferenceRoundTimeoutError(
-                                    `round ${round} timed out after ${perRoundMs}ms`,
-                                ),
-                            ),
-                        perRoundMs,
-                    )
-                })
+                // Shared with the interactive lane: the deadline CANCELS the
+                // request rather than only ending the wait for it. The older
+                // version here could not, so it had to refuse to retry while
+                // a call might still be on its way back; an aborted request
+                // cannot come back, so that hazard is gone with it.
                 return await this.withAbort(
-                    Promise.race([roundPromise, timeoutPromise]),
-                ).finally(() => clearTimeout(roundTimer))
+                    runBoundedRound({
+                        round: (signal) =>
+                            this.runRound(context, attempt, turn, round, signal),
+                        timeoutMs: perRoundMs,
+                        parentSignal: this.abortController.signal,
+                        label: `round ${round}`,
+                    }),
+                )
             } catch (error) {
                 if (
-                    error instanceof InferenceRoundTimeoutError ||
+                    isProviderCallTimeout(error) ||
                     this.abortController.signal.aborted
                 ) throw error
                 const failure = classifyStoryFailure(error)
@@ -1072,15 +1068,13 @@ export class OpenAIStoryAgent extends BaseObserver {
     }
 
     private async runOrdinaryTool(call: FunctionCallItem): Promise<string> {
-        const tool = this.tools.find((candidate) => candidate.name === call.name)
-        if (!tool) return `Error: tool '${call.name}' not registered`
         // The gate that makes an empty in-flight set mean something. Once a
         // suspension is requested no further invocation may begin, so what is
         // already running is all there will ever be.
         if (this.suspension.blocksNewWork) return this.suspendedToolOutput()
-        const invocation = runToolSafely(
-            tool,
-            call.args,
+        const invocation = invokeTool(
+            this.tools,
+            { name: call.name, args: call.args },
             this.abortController.signal,
         )
         // Track the invocation, never the abort race wrapped around it: the
@@ -1331,33 +1325,6 @@ function finalStoryRepairInstruction(): string {
     ].join("\n")
 }
 
-async function runToolSafely(
-    tool: Tool,
-    argsJson: string,
-    signal?: AbortSignal,
-): Promise<string> {
-    let parsed: unknown
-    try {
-        parsed = JSON.parse(argsJson)
-    } catch (e) {
-        return `Error: tool args were not valid JSON: ${(e as Error)?.message ?? String(e)}`
-    }
-    try {
-        const signalAware = tool as Tool & {
-            invokeWithSignal?: (
-                args: unknown,
-                signal: AbortSignal,
-            ) => Promise<unknown>
-        }
-        const result =
-            signal && signalAware.invokeWithSignal
-                ? await signalAware.invokeWithSignal(parsed, signal)
-                : await tool.invoke(parsed)
-        return typeof result === "string" ? result : JSON.stringify(result)
-    } catch (e) {
-        return `Error running ${tool.name}: ${(e as Error)?.message ?? String(e)}`
-    }
-}
 
 function sleep(ms: number): Promise<void> {
     return new Promise((res) => setTimeout(res, ms))
@@ -1372,7 +1339,6 @@ function runtimeToolStatus(output: string): string | null {
     }
 }
 
-class InferenceRoundTimeoutError extends Error {}
 
 function failureSummary(failure: StoryFailureData): string {
     switch (failure.kind) {
