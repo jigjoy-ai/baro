@@ -390,18 +390,36 @@ async function inferChatRound(
 ) {
     const runtime = getChatRuntime(connection, !billed)
     if (billed) disableOpenAiSdkRetries(runtime)
-    if (!signal) return runtime.infer(request)
 
     const internals = runtime as unknown as ChatRuntimeInternals
     assertChatRuntimeInternals(internals)
     const response = await internals.client.chat.completions.create(
-        internals.buildRequest(request),
-        { signal },
+        withParallelToolCalls(internals.buildRequest(request)),
+        signal ? { signal } : undefined,
     )
     return {
         contextItems: internals.extractContextItems(response),
         tokenUsage: internals.extractTokenUsage(response),
     }
+}
+
+/**
+ * Ask for what the round is already able to receive.
+ *
+ * Mozaik 3.12 never sends `parallel_tool_calls`, though its response reader
+ * turns every `tool_calls` entry into its own item and our loop runs them all.
+ * OpenAI defaults it on; an OpenAI-compatible endpoint need not, and a live
+ * GLM-5.2 Architect emitted exactly one call in each of sixty rounds — sixty
+ * provider round-trips to read sixty files. The flag is only legal alongside
+ * tools, and an explicit value from the caller wins.
+ */
+function withParallelToolCalls(
+    body: Record<string, unknown>,
+): Record<string, unknown> {
+    const tools = body.tools
+    if (!Array.isArray(tools) || tools.length === 0) return body
+    if (body.parallel_tool_calls !== undefined) return body
+    return { ...body, parallel_tool_calls: true }
 }
 
 interface ProviderRequestOptions {

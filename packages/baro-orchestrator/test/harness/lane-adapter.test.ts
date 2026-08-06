@@ -104,11 +104,13 @@ describe("a capability costs what the lane charges for it", () => {
         ])
         const names = (grant.tools ?? []).map((tool) => tool.name).sort()
         assert.deepEqual(names, [
+            "batch",
             "file_tree",
             "glob",
             "grep",
             "list_files",
             "read_file",
+            "read_files",
         ])
         assert.ok(
             !names.includes("bash") && !names.includes("write_file"),

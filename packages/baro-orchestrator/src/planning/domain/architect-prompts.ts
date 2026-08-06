@@ -48,7 +48,11 @@ Do NOT produce 20 ADRs for a one-line edit. Do NOT enumerate every file in the r
 
 Your job (when the goal is NON-TRIVIAL): read the relevant parts of the existing codebase, then pin down EVERY cross-cutting design decision the implementation agents would otherwise disagree on — as a series of ADRs. They will all receive your output as authoritative spec. If you leave something vague, multiple agents will each pick a different answer and the run will produce inconsistent code that needs retroactive fixes.
 
-Use your tools (read_file, list_files, file_tree, grep, glob, bash) actively. Look at:
+Use your repository tools actively, and in as few steps as possible: issue
+independent lookups together rather than one at a time, prefer a tool that
+takes several paths over one call per file, and search before you read — a
+pattern that returns the lines answering your question beats pulling in whole
+files. Your tools are read-only; there is no shell in this phase. Look at:
 - The project's stack (package.json, Cargo.toml, pyproject.toml, go.mod, ...)
 - Existing naming conventions (file paths, casing, suffix patterns)
 - Existing infrastructure relevant to the goal (current schema, current API style, current frontend client pattern)

@@ -82,13 +82,207 @@ export function createCodebaseTools(
 ): Tool[] {
     const tools: Tool[] = [
         readFileTool(cwd),
+        readFilesTool(cwd),
         listFilesTool(cwd),
         fileTreeTool(cwd),
         grepTool(cwd),
         globTool(cwd),
     ]
     if (options.includeBash !== false) tools.push(bashTool(cwd, options))
+    // A snapshot, not the live array: dispatching from the array it is pushed
+    // into would let a batch call a batch, and nesting multiplies both the work
+    // and the output behind one bound.
+    tools.push(batchTool([...tools]))
     return tools
+}
+
+const MAX_BATCH_CALLS = 20
+const MAX_BATCH_OUTPUT_CHARS = 60_000
+const MAX_READ_FILES_PATHS = 20
+
+/**
+ * Read several files in one call.
+ *
+ * A round-trip per file is the whole cost of exploration on a lane where the
+ * model issues one call at a time: a live Architect spent sixty rounds and a
+ * 141k context reading a service file by file. Whether a model batches calls
+ * on its own is a property of that model; a tool that takes a list is not.
+ */
+function readFilesTool(cwd: string): Tool {
+    return {
+        type: "function",
+        name: "read_files",
+        description:
+            "Read several files at once. Prefer this over repeated read_file: " +
+            "one call, up to 20 paths, each returned under a '=== path ===' " +
+            "header. Missing files are reported in place rather than failing " +
+            "the call.",
+        strict: true,
+        parameters: {
+            type: "object",
+            properties: {
+                paths: {
+                    type: "array",
+                    items: { type: "string" },
+                    description:
+                        "Paths relative to the project root. Up to 20 per call.",
+                },
+            },
+            required: ["paths"],
+            additionalProperties: false,
+        },
+        async invoke(args: { paths: string[] }) {
+            if (!Array.isArray(args?.paths) || args.paths.length === 0) {
+                return "Error: read_files requires a non-empty 'paths' array."
+            }
+            const paths = args.paths.slice(0, MAX_READ_FILES_PATHS)
+            const sections = paths.map((filePath) => {
+                const body = readOneFile(cwd, String(filePath))
+                return `=== ${filePath} ===\n${body}`
+            })
+            if (args.paths.length > paths.length) {
+                sections.push(
+                    `... (${args.paths.length - paths.length} more path(s) ignored; ` +
+                        `max ${MAX_READ_FILES_PATHS} per call)`,
+                )
+            }
+            return capOutput(sections.join("\n\n"))
+        },
+    } as Tool
+}
+
+/**
+ * Run several tool calls in one round, and keep only the lines that matter.
+ *
+ * This is the vendor-neutral half of what Anthropic and OpenAI call
+ * programmatic tool calling: the expensive part was never the round-trip, it
+ * was every intermediate result landing in the model's context. `match` filters
+ * each call's output here, in the host, so the context receives the finding
+ * rather than the file.
+ */
+function batchTool(tools: readonly Tool[]): Tool {
+    return {
+        type: "function",
+        name: "batch",
+        description:
+            "Run up to 20 tool calls in one step and get one combined result. " +
+            "Use it whenever the next calls do not depend on each other's " +
+            "output. Each entry is {tool, args, match?}; 'match' is a regular " +
+            "expression that keeps only matching lines of that call's output, " +
+            "which is how you look through many files without reading them all.",
+        // Not strict: one entry's `args` is whatever the named tool takes, and
+        // a schema that must enumerate every property cannot say that.
+        strict: false,
+        parameters: {
+            type: "object",
+            properties: {
+                calls: {
+                    type: "array",
+                    items: {
+                        type: "object",
+                        properties: {
+                            tool: { type: "string" },
+                            args: { type: "object" },
+                            match: {
+                                type: "string",
+                                description:
+                                    "Optional regex; only matching output lines are returned.",
+                            },
+                        },
+                        required: ["tool", "args"],
+                    },
+                    description: "The calls to run, in order.",
+                },
+            },
+            required: ["calls"],
+            additionalProperties: false,
+        },
+        async invoke(args: {
+            calls: Array<{ tool: string; args: unknown; match?: string }>
+        }) {
+            if (!Array.isArray(args?.calls) || args.calls.length === 0) {
+                return "Error: batch requires a non-empty 'calls' array."
+            }
+            const calls = args.calls.slice(0, MAX_BATCH_CALLS)
+            const sections: string[] = []
+            for (const call of calls) {
+                const name = String(call?.tool ?? "")
+                const tool = tools.find((candidate) => candidate.name === name)
+                if (!tool) {
+                    sections.push(
+                        `=== ${name} ===\nError: tool '${name}' is not available here`,
+                    )
+                    continue
+                }
+                let output: string
+                try {
+                    const result = await tool.invoke(call.args as never)
+                    output = typeof result === "string" ? result : JSON.stringify(result)
+                } catch (error) {
+                    output = `Error running ${name}: ${(error as Error)?.message ?? String(error)}`
+                }
+                sections.push(
+                    `=== ${name} ${compactArgs(call.args)} ===\n` +
+                        applyMatch(output, call.match),
+                )
+            }
+            if (args.calls.length > calls.length) {
+                sections.push(
+                    `... (${args.calls.length - calls.length} more call(s) ignored; ` +
+                        `max ${MAX_BATCH_CALLS} per batch)`,
+                )
+            }
+            return capOutput(sections.join("\n\n"))
+        },
+    } as Tool
+}
+
+/** Keep only matching lines; a bad pattern is reported, never thrown. */
+function applyMatch(output: string, pattern: string | undefined): string {
+    if (!pattern) return output
+    let expression: RegExp
+    try {
+        expression = new RegExp(pattern)
+    } catch (error) {
+        return (
+            `Error: match '${pattern}' is not a valid regular expression ` +
+            `(${(error as Error)?.message ?? "unknown"}); returning the full output.\n` +
+            output
+        )
+    }
+    const kept = output.split("\n").filter((line) => expression.test(line))
+    return kept.length > 0
+        ? kept.join("\n")
+        : `(no line matched /${pattern}/)`
+}
+
+function compactArgs(args: unknown): string {
+    const text = JSON.stringify(args ?? {})
+    return text.length > 120 ? `${text.slice(0, 120)}…` : text
+}
+
+function capOutput(text: string): string {
+    return text.length > MAX_BATCH_OUTPUT_CHARS
+        ? `${text.slice(0, MAX_BATCH_OUTPUT_CHARS)}\n... (batch output truncated)`
+        : text
+}
+
+/** The body of one file, or the reason there is none. Shared by both readers. */
+function readOneFile(cwd: string, filePath: string): string {
+    const target = safePath(cwd, filePath)
+    if (!target) return `Error: path '${filePath}' escapes the project root.`
+    if (!fs.existsSync(target)) return `File not found: ${filePath}`
+    const stat = fs.statSync(target)
+    if (stat.isDirectory()) {
+        return `${filePath} is a directory — use list_files or file_tree.`
+    }
+    if (stat.size > 500_000) {
+        return `File too large (${(stat.size / 1024).toFixed(0)} KB) — skip or grep instead.`
+    }
+    const content = fs.readFileSync(target, "utf-8")
+    return content.length > MAX_FILE_BYTES
+        ? content.slice(0, MAX_FILE_BYTES) + "\n... (truncated)"
+        : content
 }
 
 function readFileTool(cwd: string): Tool {
@@ -112,21 +306,7 @@ function readFileTool(cwd: string): Tool {
             additionalProperties: false,
         },
         async invoke(args: { path: string }) {
-            const target = safePath(cwd, args.path)
-            if (!target) return `Error: path '${args.path}' escapes the project root.`
-            if (!fs.existsSync(target)) return `File not found: ${args.path}`
-            const stat = fs.statSync(target)
-            if (stat.isDirectory()) {
-                return `${args.path} is a directory — use list_files or file_tree.`
-            }
-            if (stat.size > 500_000) {
-                return `File too large (${(stat.size / 1024).toFixed(0)} KB) — skip or grep instead.`
-            }
-            let content = fs.readFileSync(target, "utf-8")
-            if (content.length > MAX_FILE_BYTES) {
-                content = content.slice(0, MAX_FILE_BYTES) + "\n... (truncated)"
-            }
-            return content
+            return readOneFile(cwd, args.path)
         },
     }
 }
