@@ -70,7 +70,13 @@ export interface MozaikModelParticipantOptions {
     readonly model: GenerativeModel
     readonly systemPrompt: string
     readonly tools?: readonly Tool[]
-    /** Rounds before the session is cut off. A conversation, not a budget. */
+    /**
+     * Provider calls one turn may spend before it must answer. A turn is one
+     * question and its answer; the session is the whole conversation, and the
+     * two are not the same budget.
+     */
+    readonly maxRoundsPerTurn?: number
+    /** Runaway guard for the whole session, far above any real phase. */
     readonly maxRounds?: number
     /** Per-round inference bound; silence beyond it ends the round. */
     readonly perRoundTimeoutSecs?: number
@@ -97,7 +103,27 @@ export interface MozaikModelParticipantOptions {
     }
 }
 
-const DEFAULT_MAX_ROUNDS = 60
+/**
+ * A turn's tool budget, and the session's runaway guard.
+ *
+ * These were one number, sixty, spent by the whole session — a bound written
+ * for a lane where fifty tool steps happen inside one CLI process and are
+ * never counted. Held to it, a live Architect spent every one of its sixty
+ * calls reading the repository, hit the cap mid-research and took the run
+ * down without ever asking its scouts a question.
+ *
+ * A turn that runs out is now told to answer with what it has: the last
+ * rounds of its budget come with no working tools, which is what the story
+ * lane already does. Only a session that has spent an implausible number of
+ * calls across ALL its turns is stopped outright.
+ */
+const DEFAULT_MAX_ROUNDS_PER_TURN = 60
+const DEFAULT_FINALIZATION_ROUNDS = 2
+const DEFAULT_MAX_ROUNDS = 400
+const TURN_BUDGET_SPENT =
+    "Your tool budget for this turn is spent. Answer now with what you " +
+    "already have, and state anything still unknown as an assumption. " +
+    "Further tool calls will not run."
 /**
  * The last resort for a call that will never answer, and deliberately far
  * above anything real work does.
@@ -149,7 +175,10 @@ export class MozaikModelParticipant
     private readonly opts: Required<
         Pick<
             MozaikModelParticipantOptions,
-            "maxRounds" | "perRoundTimeoutSecs" | "quietTimeoutMs"
+            | "maxRounds"
+            | "maxRoundsPerTurn"
+            | "perRoundTimeoutSecs"
+            | "quietTimeoutMs"
         >
     > &
         MozaikModelParticipantOptions
@@ -175,6 +204,8 @@ export class MozaikModelParticipant
         this.agentId = options.agentId
         this.opts = {
             maxRounds: options.maxRounds ?? DEFAULT_MAX_ROUNDS,
+            maxRoundsPerTurn:
+                options.maxRoundsPerTurn ?? DEFAULT_MAX_ROUNDS_PER_TURN,
             perRoundTimeoutSecs:
                 options.perRoundTimeoutSecs ?? ROUND_BACKSTOP_SECS,
             quietTimeoutMs: options.quietTimeoutMs ?? NO_QUIET_DEADLINE,
@@ -242,7 +273,7 @@ export class MozaikModelParticipant
         if (this.failure) return this.failure.message
         if (this.abortController.signal.aborted) return "session was aborted"
         if (this.rounds >= this.opts.maxRounds) {
-            return `session hit its round cap (${this.opts.maxRounds})`
+            return `session hit its runaway guard (${this.opts.maxRounds} rounds)`
         }
         return `session ended after ${this.rounds} round(s) with ${this.messages.length} reply(ies)`
     }
@@ -346,6 +377,10 @@ export class MozaikModelParticipant
         // reset when it is published.
         let turnText: string[] = []
         let turnUsage = new UsageAccumulator()
+        const explorationBudget = Math.max(
+            1,
+            this.opts.maxRoundsPerTurn - DEFAULT_FINALIZATION_ROUNDS,
+        )
         try {
             while (this.rounds < this.opts.maxRounds) {
                 if (this.abortController.signal.aborted) {
@@ -425,12 +460,19 @@ export class MozaikModelParticipant
                     }
                 }
 
+                // Past the exploration budget every call is answered, but
+                // none runs: a function_call left without its output is an
+                // invalid context, and refusing in the output is what makes
+                // the model answer instead of reaching for another read.
+                const budgetSpent = this.roundInTurn >= explorationBudget
                 for (const call of calls) {
-                    const output = await invokeTool(
-                        this.opts.tools ?? [],
-                        { name: call.name, args: call.args },
-                        this.abortController.signal,
-                    )
+                    const output = budgetSpent
+                        ? `Error: ${TURN_BUDGET_SPENT}`
+                        : await invokeTool(
+                              this.opts.tools ?? [],
+                              { name: call.name, args: call.args },
+                              this.abortController.signal,
+                          )
                     const outItem = FunctionCallOutputItem.create(call.callId, output)
                     await env.deliverFunctionCallOutput(this, outItem)
                     context = context.addContextItem(outItem)
@@ -441,6 +483,16 @@ export class MozaikModelParticipant
                 // SESSION ends is the caller's call, made by handing it more to
                 // read or by closing input. The loop head decides both.
                 owesContinuation = calls.length > 0
+                if (owesContinuation && budgetSpent) {
+                    context = context.addContextItem(
+                        UserMessageItem.create(TURN_BUDGET_SPENT),
+                    )
+                }
+                // A turn that will not stop asking still ends as a turn: the
+                // session stays open for whatever the caller says next.
+                if (owesContinuation && this.roundInTurn >= this.opts.maxRoundsPerTurn) {
+                    owesContinuation = false
+                }
                 if (!owesContinuation) {
                     // The turn's LAST message, as the CLI lane reports it:
                     // every consumer parses this text (questions, an outcome,

@@ -552,6 +552,108 @@ describe("a dropped connection costs the round, not the phase", () => {
     })
 })
 
+// What ended the second jigjoy run: the Architect spent all sixty of the
+// session's rounds reading the repository and the session closed mid-research,
+// before it had asked its scouts anything. Sixty was a bound written for a
+// lane where fifty tool steps hide inside one CLI process and are never
+// counted.
+describe("a turn that runs out of tools answers, and the session lives on", () => {
+    const reader: Tool = {
+        type: "function",
+        name: "read_file",
+        description: "read",
+        parameters: { type: "object", properties: {} },
+        invoke: async () => "file contents",
+    } as unknown as Tool
+
+    /** A model that only ever wants to read one more file. */
+    function endlessReader(p: MozaikModelParticipant, answerWhenRefused: boolean) {
+        const outputs: string[] = []
+        Object.defineProperty(p, "runRound", {
+            value: async (context: ModelContext) => {
+                const items = context.getItems()
+                const last = JSON.stringify(items[items.length - 1] ?? {})
+                outputs.push(last)
+                if (answerWhenRefused && /budget for this turn is spent/u.test(last)) {
+                    return { items: [message("answering with what I have")] }
+                }
+                return { items: [call("read_file", { path: "src/a.ts" })] }
+            },
+        })
+        return outputs
+    }
+
+    it("refuses the tool, says so, and takes the answer", async () => {
+        const p = new MozaikModelParticipant({
+            agentId: "architect",
+            model: silentModel(),
+            systemPrompt: "you decide",
+            tools: [reader],
+            maxRoundsPerTurn: 6,
+            quietTimeoutMs: 5,
+        })
+        endlessReader(p, true)
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("what must you learn?")
+
+        const summary = await p.done
+        assert.equal(summary.error, null)
+        assert.equal(summary.lastMessage, "answering with what I have")
+        // The turn still published a terminal event — the session heard it.
+        assert.equal(
+            env.events.filter(AgentResult.is)[0]!.data.resultText,
+            "answering with what I have",
+        )
+    })
+
+    it("ends the turn even if the model never stops asking", async () => {
+        const p = new MozaikModelParticipant({
+            agentId: "architect",
+            model: silentModel(),
+            systemPrompt: "you decide",
+            tools: [reader],
+            maxRoundsPerTurn: 4,
+            quietTimeoutMs: 5,
+        })
+        endlessReader(p, false)
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("what must you learn?")
+
+        const summary = await p.done
+        assert.equal(summary.rounds, 4, "the turn spent its budget and stopped")
+        assert.equal(summary.error, null, "a spent turn is not a dead session")
+        assert.equal(
+            env.events.filter(AgentResult.is).length,
+            1,
+            "the caller is told the turn ended, whatever the model did",
+        )
+    })
+
+    it("keeps a session-wide runaway guard, far above one turn", async () => {
+        const p = new MozaikModelParticipant({
+            agentId: "architect",
+            model: silentModel(),
+            systemPrompt: "you decide",
+            tools: [reader],
+            maxRoundsPerTurn: 3,
+            maxRounds: 5,
+            quietTimeoutMs: 5,
+        })
+        endlessReader(p, false)
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("first")
+        await new Promise((r) => setTimeout(r, 2))
+        p.sendUserMessage("second")
+
+        const summary = await p.done
+        assert.ok(summary.rounds <= 5)
+        assert.match(p.sessionEndDetail(), /runaway guard|ended after/u)
+    })
+})
+
 describe("a round that never answers is ended by its own deadline", () => {
     it("stops a hung call instead of waiting forever behind a heartbeat", async () => {
         const p = new MozaikModelParticipant({
