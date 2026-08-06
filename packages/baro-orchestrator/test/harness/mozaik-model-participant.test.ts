@@ -195,6 +195,53 @@ describe("tools are functions here, not a protocol", () => {
 // Both of these were found by a live run rather than by a test: the first
 // took the phase down as an unhandled rejection, the second let a watchdog
 // abort a session that was working.
+// The failure this pins: the Architect declared itself finished and exited
+// while its scouts were still reading the repository, because waiting had a
+// two-second deadline. Waiting is not idleness when the next message depends
+// on other agents finishing work.
+describe("waiting for the caller is not idleness", () => {
+    it("stays open past any quiet stretch until input is closed", async () => {
+        const p = new MozaikModelParticipant({
+            agentId: "architect",
+            model: silentModel(),
+            systemPrompt: "you decide",
+        })
+        const seen = stubRounds(p, [
+            [message("what do the scouts say?")],
+            [message("decided")],
+        ])
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("design this")
+
+        // Longer than the old two-second deadline: research takes minutes.
+        await new Promise((r) => setTimeout(r, 60))
+        assert.equal(seen.length, 1, "still open, still waiting for findings")
+
+        p.sendUserMessage("scout finding: transactions use dataSource.transaction")
+        p.closeStdin()
+
+        const summary = await p.done
+        assert.equal(summary.rounds, 2)
+        assert.equal(summary.lastMessage, "decided")
+    })
+
+    it("honours an explicit quiet deadline when a caller asks for one", async () => {
+        const p = new MozaikModelParticipant({
+            agentId: "probe",
+            model: silentModel(),
+            systemPrompt: "brief",
+            quietTimeoutMs: 5,
+        })
+        stubRounds(p, [[message("done")]])
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("go")
+        const summary = await p.done
+        assert.equal(summary.rounds, 1)
+    })
+})
+
 describe("a session ends by reporting, never by throwing", () => {
     it("resolves with the failure when a round throws", async () => {
         const p = participant()

@@ -58,7 +58,10 @@ export interface MozaikModelParticipantOptions {
     readonly maxRounds?: number
     /** Per-round inference bound; silence beyond it ends the round. */
     readonly perRoundTimeoutSecs?: number
-    /** Ms of quiet after a round before the session is considered finished. */
+    /**
+     * Optional deadline on waiting for more input. Off by default, and it
+     * should stay off for a real phase — see `waitForInput`.
+     */
     readonly quietTimeoutMs?: number
 }
 
@@ -86,7 +89,22 @@ const DEFAULT_MAX_ROUNDS = 60
  * it should be deleted — not tuned — the day a chunk can feed `onActivity`.
  */
 const ROUND_BACKSTOP_SECS = 20 * 60
-const DEFAULT_QUIET_MS = 2_000
+/**
+ * No deadline on waiting, by default.
+ *
+ * A phase ends when the caller says it does. The CLI lane works exactly that
+ * way — it holds stdin open and finishes when stdin closes — and all three
+ * sessions are written to it: they hand the model more to read whenever they
+ * have it, and close input when the conversation is over.
+ *
+ * This lane briefly ended a session after two seconds of quiet instead, which
+ * meant the Architect declared itself finished and exited while its scouts
+ * were still reading the repository. Waiting is not idleness when the next
+ * message depends on other agents finishing work; a session that genuinely
+ * hangs is caught by its round deadline and by the run's own watchdog, both
+ * of which measure something real.
+ */
+const NO_QUIET_DEADLINE = 0
 
 export class MozaikModelParticipant
     extends BaseObserver
@@ -124,7 +142,7 @@ export class MozaikModelParticipant
             maxRounds: options.maxRounds ?? DEFAULT_MAX_ROUNDS,
             perRoundTimeoutSecs:
                 options.perRoundTimeoutSecs ?? ROUND_BACKSTOP_SECS,
-            quietTimeoutMs: options.quietTimeoutMs ?? DEFAULT_QUIET_MS,
+            quietTimeoutMs: options.quietTimeoutMs ?? NO_QUIET_DEADLINE,
             ...options,
         }
         setModelTools(options.model, [...(options.tools ?? [])])
@@ -301,11 +319,15 @@ export class MozaikModelParticipant
             const finish = (value: boolean): void => {
                 if (settled) return
                 settled = true
-                clearTimeout(timer)
+                if (timer) clearTimeout(timer)
                 this.wake = null
                 resolve(value)
             }
-            const timer = setTimeout(() => finish(false), this.opts.quietTimeoutMs)
+            // Zero means wait for the caller, however long that takes.
+            const timer =
+                this.opts.quietTimeoutMs > 0
+                    ? setTimeout(() => finish(false), this.opts.quietTimeoutMs)
+                    : undefined
             this.wake = () => finish(this.inbox.length > 0)
         })
     }
