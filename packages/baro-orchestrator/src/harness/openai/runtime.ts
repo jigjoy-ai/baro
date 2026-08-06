@@ -8,6 +8,8 @@
  * owns the ModelContext ⇄ chat-message conversion.
  */
 
+import { createRequire } from "node:module"
+
 import {
     ContextItem,
     Gpt54,
@@ -395,13 +397,61 @@ async function inferChatRound(
     assertChatRuntimeInternals(internals)
     const response = await internals.client.chat.completions.create(
         withParallelToolCalls(internals.buildRequest(request)),
-        signal ? { signal } : undefined,
+        { ...(signal ? { signal } : {}), ...uncappedTransport() },
     )
     return {
         contextItems: internals.extractContextItems(response),
         tokenUsage: internals.extractTokenUsage(response),
     }
 }
+
+/**
+ * A working request is never ended by a stopwatch — including one we did not
+ * choose.
+ *
+ * Baro removed its wall-clock caps in 0.82.0 because a visibly working process
+ * must not be killed by the clock. Node's fetch then reimposed one nobody
+ * declared: undici defaults `headersTimeout` and `bodyTimeout` to 300s
+ * (`lib/dispatcher/client.js`: `headersTimeout != null ? headersTimeout :
+ * 300e3`). A non-streamed completion sends no header until the whole answer
+ * exists, so any single generation longer than five minutes died at 301s —
+ * three times in one live run, each costing five minutes of a thirty-minute
+ * phase, while the model was answering correctly the whole time.
+ *
+ * The provider SDK's own timeout is ten minutes and we never reach it. The
+ * round's deadline, the phase's budget and the idle watchdog remain; what goes
+ * is the transport's opinion about how long an answer may take.
+ */
+function uncappedTransport(): { fetchOptions: { dispatcher: unknown } } | Record<string, never> {
+    const dispatcher = noTimeoutDispatcher()
+    return dispatcher ? { fetchOptions: { dispatcher } } : {}
+}
+
+let cachedDispatcher: unknown
+let dispatcherResolved = false
+
+function noTimeoutDispatcher(): unknown {
+    if (dispatcherResolved) return cachedDispatcher
+    dispatcherResolved = true
+    try {
+        // Node ships undici as its fetch; a runtime without it keeps its own
+        // defaults rather than failing a round over transport tuning.
+        const load = createRequire(import.meta.url)
+        const undici = load("undici") as {
+            Agent: new (options: Record<string, unknown>) => unknown
+        }
+        cachedDispatcher = new undici.Agent({
+            headersTimeout: 0,
+            bodyTimeout: 0,
+        })
+    } catch {
+        cachedDispatcher = undefined
+    }
+    return cachedDispatcher
+}
+
+/** Test seam: what a round hands the provider client for transport. */
+export const __testUncappedTransport = uncappedTransport
 
 /**
  * Ask for what the round is already able to receive.
@@ -487,7 +537,7 @@ async function inferResponsesWithExtension(
             ...internals.buildRequest(request),
             ...extension,
         },
-        signal ? { signal } : undefined,
+        { ...(signal ? { signal } : {}), ...uncappedTransport() },
     )
     return {
         contextItems: internals.extractContextItems(response),
