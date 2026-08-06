@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
+    BaseObserver,
     FunctionCallItem,
     ModelContext,
     ModelMessageItem,
@@ -10,7 +11,11 @@ import {
     type Tool,
 } from "../../src/runtime/mozaik.js"
 import { MozaikModelParticipant } from "../../src/harness/mozaik/model-participant.js"
-import { AgentResult, AgentUserMessage } from "../../src/semantic-events.js"
+import {
+    AgentResult,
+    AgentTargetedMessage,
+    AgentUserMessage,
+} from "../../src/semantic-events.js"
 import { joinWithCapture } from "./../execution/helpers.js"
 
 /** A model that never speaks — every round is stubbed by the test. */
@@ -195,6 +200,76 @@ describe("a finished turn is something the sessions can hear", () => {
             reasoning_tokens: 12,
             rounds: 1,
         })
+    })
+})
+
+// The research board addresses a peer's finding to a scout still reading, and
+// the CLI lane forwards it to stdin. A native scout that never listened lost
+// horizontal awareness silently: it still answered, only alone.
+describe("a peer's finding reaches a session that is still reading", () => {
+    const note = (recipientId: string, correlated: boolean) =>
+        AgentTargetedMessage.create({
+            recipientId,
+            text: "[peer Q2] transactions use dataSource.transaction (src/db.ts:12)",
+            metadata: { source: "research-board" },
+            ...(correlated
+                ? { runId: "research:s1", leaseId: "scout:s1:Q1", generation: 0 }
+                : {}),
+        })
+
+    function scout(authority: BaseObserver) {
+        return new MozaikModelParticipant({
+            agentId: "scout:s1:Q1",
+            model: silentModel(),
+            systemPrompt: "you scout",
+            targetedMessageAuthority: authority,
+            targetedMessageCorrelation: {
+                runId: "research:s1",
+                leaseId: "scout:s1:Q1",
+                generation: 0,
+            },
+        })
+    }
+
+    it("hands it to the model as something to read", async () => {
+        const board = new (class extends BaseObserver {})()
+        const p = scout(board)
+        const seen = stubRounds(p, [[message("answer one")], [message("answer two")]])
+        const env = joinWithCapture(p)
+        board.join(env)
+        p.start(env)
+        p.sendUserMessage("Which module owns menu visibility?")
+
+        await new Promise((r) => setTimeout(r, 5))
+        env.deliverSemanticEvent(board, note("scout:s1:Q1", true))
+        p.closeStdin()
+
+        const summary = await p.done
+        assert.equal(summary.rounds, 2)
+        assert.match(
+            JSON.stringify(seen[1]!.getItems()),
+            /dataSource.transaction/u,
+        )
+    })
+
+    it("ignores a note from anyone but its own board", async () => {
+        const board = new (class extends BaseObserver {})()
+        const impostor = new (class extends BaseObserver {})()
+        const p = scout(board)
+        stubRounds(p, [[message("answer one")]])
+        const env = joinWithCapture(p)
+        board.join(env)
+        impostor.join(env)
+        p.start(env)
+        p.sendUserMessage("Which module owns menu visibility?")
+
+        await new Promise((r) => setTimeout(r, 5))
+        env.deliverSemanticEvent(impostor, note("scout:s1:Q1", true))
+        env.deliverSemanticEvent(board, note("scout:s1:Q2", true))
+        p.closeStdin()
+
+        const summary = await p.done
+        assert.equal(summary.rounds, 1, "neither note was for this session to read")
     })
 })
 

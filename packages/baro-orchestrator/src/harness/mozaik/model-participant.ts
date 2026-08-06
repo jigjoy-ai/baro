@@ -23,10 +23,18 @@ import {
     type AgenticEnvironment,
     type ContextItem,
     type GenerativeModel,
+    type Participant,
+    type SemanticEvent,
     type Tool,
     type TokenUsage,
 } from "../../runtime/mozaik.js"
-import { AgentResult, AgentState, AgentUserMessage } from "../../semantic-events.js"
+import {
+    AgentResult,
+    AgentState,
+    AgentTargetedMessage,
+    AgentUserMessage,
+} from "../../semantic-events.js"
+import { acceptsTargetedMessage } from "../../runtime/targeted-message-authority.js"
 import { runInferenceRound, UsageAccumulator } from "../openai/runtime.js"
 import { invokeTool, runBoundedRound } from "./round.js"
 import type { InteractiveModelParticipant } from "../interactive-participant.js"
@@ -64,6 +72,13 @@ export interface MozaikModelParticipantOptions {
      * should stay off for a real phase — see `waitForInput`.
      */
     readonly quietTimeoutMs?: number
+    /** The only bus voice allowed to hand this session a targeted message. */
+    readonly targetedMessageAuthority?: Participant
+    readonly targetedMessageCorrelation?: {
+        runId: string
+        leaseId: string
+        generation: number
+    }
 }
 
 const DEFAULT_MAX_ROUNDS = 60
@@ -165,6 +180,31 @@ export class MozaikModelParticipant
         this.inbox.push(text)
         this.wake?.()
         this.onActivity?.()
+    }
+
+    /**
+     * A peer's note, read between rounds.
+     *
+     * Horizontal awareness is delivered as an addressed bus event, and the CLI
+     * lane forwards it to stdin. Without the same forwarding here a native
+     * scout hears nothing its peers found, and the loss is silent — the round
+     * still answers, only alone.
+     */
+    override onExternalEvent(
+        source: Participant,
+        event: SemanticEvent<unknown>,
+    ): void {
+        if (!AgentTargetedMessage.is(event)) return
+        if (
+            !acceptsTargetedMessage(
+                source,
+                event.data,
+                this.agentId,
+                this.opts.targetedMessageAuthority,
+                this.opts.targetedMessageCorrelation ?? {},
+            )
+        ) return
+        this.sendUserMessage(event.data.text)
     }
 
     /** No more input is coming. The session ends after the model settles. */
