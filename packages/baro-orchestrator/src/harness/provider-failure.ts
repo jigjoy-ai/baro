@@ -264,6 +264,13 @@ function classifyTransportMessage(message: string): StoryFailureData | undefined
     if (/\bECONNREFUSED\b|connection refused|network is unreachable/i.test(text)) {
         return { kind: "transport", code: "connection_failed" }
     }
+    // What the OpenAI SDK says when it could not reach the endpoint at all
+    // (`APIConnectionError`). Unclassified, it ended a run that one retry
+    // would have carried: the phase gave up because nothing called it
+    // transient.
+    if (/^connection error\b|\bAPIConnectionError\b/i.test(text)) {
+        return { kind: "transport", code: "connection_failed" }
+    }
     if (/\bENOTFOUND\b|\bEAI_AGAIN\b|dns (?:lookup )?(?:failed|error)/i.test(text)) {
         return { kind: "transport", code: "dns_failed" }
     }

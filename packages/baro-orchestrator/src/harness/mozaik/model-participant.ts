@@ -37,7 +37,12 @@ import {
 import { acceptsTargetedMessage } from "../../runtime/targeted-message-authority.js"
 import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import type { ModelInvocationPhase } from "../../telemetry/model-telemetry.js"
-import { runInferenceRound, UsageAccumulator } from "../openai/runtime.js"
+import {
+    isProviderCallTimeout,
+    runInferenceRound,
+    UsageAccumulator,
+} from "../openai/runtime.js"
+import { withTransientRetry } from "../transient-retry.js"
 import { invokeTool, runBoundedRound } from "./round.js"
 import type { InteractiveModelParticipant } from "../interactive-participant.js"
 
@@ -373,12 +378,32 @@ export class MozaikModelParticipant
                 this.rounds += 1
                 this.roundInTurn += 1
                 this.emitState("running")
-                const round = await runBoundedRound({
-                    round: (signal) => this.runRound(context, signal),
-                    timeoutMs: this.opts.perRoundTimeoutSecs * 1000,
-                    parentSignal: this.abortController.signal,
-                    onActivity: () => this.onActivity?.(),
-                })
+                // A dropped connection costs this round, not the phase. The
+                // CLI lane retries inside its own client, so a blip there is
+                // invisible; here it surfaced as the Architect losing ten
+                // rounds of research and starting over from an empty context.
+                const round = await withTransientRetry(
+                    () =>
+                        runBoundedRound({
+                            round: (signal) => this.runRound(context, signal),
+                            timeoutMs: this.opts.perRoundTimeoutSecs * 1000,
+                            parentSignal: this.abortController.signal,
+                            onActivity: () => this.onActivity?.(),
+                        }),
+                    {
+                        maxAttempts: 3,
+                        // Our own backstop already waited longer than any real
+                        // call takes; waiting it out again is a second hang,
+                        // not a retry.
+                        retryable: (error) => !isProviderCallTimeout(error),
+                        notice: (message) => {
+                            this.onActivity?.()
+                            process.stderr.write(
+                                `[${this.agentId}] round ${this.rounds}: ${message}\n`,
+                            )
+                        },
+                    },
+                )
                 this.onActivity?.()
                 turnUsage.add(round.usage)
 

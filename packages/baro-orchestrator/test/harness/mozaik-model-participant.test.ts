@@ -502,6 +502,56 @@ describe("a session ends by reporting, never by throwing", () => {
     })
 })
 
+// The failure that ended the first jigjoy run: round ten of the Architect's
+// research dropped its connection, and the phase restarted from an empty
+// context — ten rounds and their tokens spent twice, then abandoned. A CLI
+// lane never shows this because its client retries inside itself.
+describe("a dropped connection costs the round, not the phase", () => {
+    it("re-issues the call and keeps the context it had", async () => {
+        const p = participant()
+        let attempts = 0
+        const seen: ModelContext[] = []
+        Object.defineProperty(p, "runRound", {
+            value: async (context: ModelContext) => {
+                seen.push(context)
+                attempts += 1
+                if (attempts === 1) throw new Error("Connection error.")
+                return { items: [message("answered on the retry")] }
+            },
+        })
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("go")
+
+        const summary = await p.done
+        assert.equal(attempts, 2)
+        assert.equal(summary.error, null)
+        assert.equal(summary.lastMessage, "answered on the retry")
+        // Same context both times: a retry resumes the conversation, it does
+        // not restart it.
+        assert.deepEqual(
+            JSON.stringify(seen[0]!.getItems()),
+            JSON.stringify(seen[1]!.getItems()),
+        )
+    })
+
+    it("gives up on a failure that is not transport", async () => {
+        const p = participant()
+        let attempts = 0
+        Object.defineProperty(p, "runRound", {
+            value: async () => {
+                attempts += 1
+                throw new Error("model does not implement tool calling")
+            },
+        })
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("go")
+        await p.done
+        assert.equal(attempts, 1, "a deterministic failure repeats deterministically")
+    })
+})
+
 describe("a round that never answers is ended by its own deadline", () => {
     it("stops a hung call instead of waiting forever behind a heartbeat", async () => {
         const p = new MozaikModelParticipant({
