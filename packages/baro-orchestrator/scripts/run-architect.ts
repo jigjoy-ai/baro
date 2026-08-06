@@ -559,6 +559,7 @@ async function runInitialArchitect(
             args,
             projectContext,
             modeContract,
+            trustedGoalEnvelope,
             outcomeContractMode,
         })
     }
@@ -656,10 +657,18 @@ async function runArchitectOnBus(input: {
     args: Args
     projectContext: string | undefined
     modeContract: ModeContract | undefined
+    /** The validated envelope, threaded in rather than captured from a scope. */
+    trustedGoalEnvelope: GoalEnvelope | undefined
     /** Derived once by the caller; both must agree on what the phase owes. */
     outcomeContractMode: "decision" | undefined
 }): Promise<string> {
-    const { args, projectContext, modeContract, outcomeContractMode } = input
+    const {
+        args,
+        projectContext,
+        modeContract,
+        trustedGoalEnvelope,
+        outcomeContractMode,
+    } = input
     const outcomeMode = args.outcomeFile !== undefined
     const session = await runArchitectBusSession({
         systemPrompt: architectSystemPrompt(outcomeMode, outcomeContractMode),

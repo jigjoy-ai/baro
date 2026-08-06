@@ -29,13 +29,23 @@ import { AgentState, AgentUserMessage } from "../../semantic-events.js"
 import { runInferenceRound } from "../openai/runtime.js"
 import type { InteractiveModelParticipant } from "../interactive-participant.js"
 
-/** What a finished session hands back. Text is what these phases produce. */
+/**
+ * What a finished session hands back.
+ *
+ * `done` SETTLES BY RESOLVING, always — a failed session reports itself here
+ * rather than throwing. The CLI lane behaves the same way, and the sessions
+ * are written to it: they attach `.then` to react to a session ending, with no
+ * `.catch`, because a session ending is not an exception. A participant that
+ * rejected instead took the whole phase down as an unhandled rejection.
+ */
 export interface MozaikSessionSummary {
     /** Every assistant message, in order. */
     readonly messages: readonly string[]
     /** The last assistant message, which is what callers usually parse. */
     readonly lastMessage: string
     readonly rounds: number
+    /** Why the session stopped early, if it did. */
+    readonly error: Error | null
 }
 
 export interface MozaikModelParticipantOptions {
@@ -54,6 +64,8 @@ export interface MozaikModelParticipantOptions {
 const DEFAULT_MAX_ROUNDS = 60
 const DEFAULT_ROUND_TIMEOUT_SECS = 300
 const DEFAULT_QUIET_MS = 2_000
+/** How often an in-flight provider call reports that it is still a call. */
+const HEARTBEAT_MS = 5_000
 
 export class MozaikModelParticipant
     extends BaseObserver
@@ -75,7 +87,7 @@ export class MozaikModelParticipant
     private readonly inbox: string[] = []
     private readonly messages: string[] = []
     private resolveDone!: (summary: MozaikSessionSummary) => void
-    private rejectDone!: (error: Error) => void
+    private failure: Error | null = null
     private envRef: AgenticEnvironment | null = null
     private started = false
     private inputClosed = false
@@ -95,9 +107,8 @@ export class MozaikModelParticipant
             ...options,
         }
         setModelTools(options.model, [...(options.tools ?? [])])
-        this.done = new Promise<MozaikSessionSummary>((resolve, reject) => {
+        this.done = new Promise<MozaikSessionSummary>((resolve) => {
             this.resolveDone = resolve
-            this.rejectDone = reject
         })
     }
 
@@ -124,20 +135,30 @@ export class MozaikModelParticipant
     async abortAndWait(_signal?: NodeJS.Signals): Promise<boolean> {
         this.abortController.abort()
         this.wake?.()
-        try {
-            await this.done
-        } catch {
-            // A session aborted mid-round rejects; the caller asked for that.
-        }
+        await this.done
         return true
     }
 
     sessionEndDetail(): string {
+        if (this.failure) return this.failure.message
         if (this.abortController.signal.aborted) return "session was aborted"
         if (this.rounds >= this.opts.maxRounds) {
             return `session hit its round cap (${this.opts.maxRounds})`
         }
         return `session ended after ${this.rounds} round(s) with ${this.messages.length} reply(ies)`
+    }
+
+    private settle(phase: "done" | "failed", failure: Error | null): void {
+        if (this.settled) return
+        this.settled = true
+        this.failure = failure
+        this.emitState(phase)
+        this.resolveDone({
+            messages: [...this.messages],
+            lastMessage: this.messages[this.messages.length - 1] ?? "",
+            rounds: this.rounds,
+            error: failure,
+        })
     }
 
     /** One provider call. Separated so a test can drive the loop offline. */
@@ -147,6 +168,28 @@ export class MozaikModelParticipant
         return await runInferenceRound(context, this.opts.model, {
             signal: this.abortController.signal,
         })
+    }
+
+    /**
+     * A provider call in flight is not silence.
+     *
+     * A CLI participant streams tokens, so the watchdog that ends a stalled
+     * session sees a heartbeat for free. This lane gets one response at the
+     * end of a round, so a long call looked exactly like a hang and the
+     * watchdog aborted a phase that was working — which is how the first live
+     * run on this lane died.
+     *
+     * This cannot hide a real hang: it stops when the round settles, and the
+     * round is separately bounded by its own timeout. It only keeps a blunter
+     * timer from firing first.
+     */
+    private async withHeartbeat<T>(work: Promise<T>): Promise<T> {
+        const beat = setInterval(() => this.onActivity?.(), HEARTBEAT_MS)
+        try {
+            return await work
+        } finally {
+            clearInterval(beat)
+        }
     }
 
     private emitState(phase: "starting" | "running" | "done" | "failed"): void {
@@ -198,7 +241,7 @@ export class MozaikModelParticipant
 
                 this.rounds += 1
                 this.emitState("running")
-                const round = await this.runRound(context)
+                const round = await this.withHeartbeat(this.runRound(context))
                 this.onActivity?.()
 
                 const calls: FunctionCallItem[] = []
@@ -231,17 +274,10 @@ export class MozaikModelParticipant
                 owesContinuation = calls.length > 0
             }
 
-            this.settled = true
-            this.emitState("done")
-            this.resolveDone({
-                messages: [...this.messages],
-                lastMessage: this.messages[this.messages.length - 1] ?? "",
-                rounds: this.rounds,
-            })
+            this.settle("done", null)
         } catch (error) {
-            this.settled = true
-            this.emitState("failed")
-            this.rejectDone(
+            this.settle(
+                "failed",
                 error instanceof Error ? error : new Error(String(error)),
             )
         }

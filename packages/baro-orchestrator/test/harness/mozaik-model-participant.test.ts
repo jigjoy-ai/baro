@@ -192,6 +192,69 @@ describe("tools are functions here, not a protocol", () => {
     })
 })
 
+// Both of these were found by a live run rather than by a test: the first
+// took the phase down as an unhandled rejection, the second let a watchdog
+// abort a session that was working.
+describe("a session ends by reporting, never by throwing", () => {
+    it("resolves with the failure when a round throws", async () => {
+        const p = participant()
+        Object.defineProperty(p, "runRound", {
+            value: async () => {
+                throw new Error("Request was aborted")
+            },
+        })
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("go")
+
+        const summary = await p.done
+        assert.equal(summary.error?.message, "Request was aborted")
+        assert.match(p.sessionEndDetail(), /Request was aborted/u)
+    })
+
+    it("never rejects, because the sessions attach .then without .catch", async () => {
+        const p = participant()
+        Object.defineProperty(p, "runRound", {
+            value: async () => {
+                throw new Error("provider exploded")
+            },
+        })
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("go")
+
+        let rejected = false
+        // Exactly how the phases consume it — a rejection here is an
+        // unhandled rejection that ends the process.
+        void p.done.then(() => undefined, () => {
+            rejected = true
+        })
+        await p.done
+        assert.equal(rejected, false)
+    })
+
+    it("reports activity while a provider call is in flight", async () => {
+        const p = participant()
+        let beats = 0
+        p.onActivity = () => {
+            beats += 1
+        }
+        Object.defineProperty(p, "runRound", {
+            // Longer than one heartbeat interval would be in a real run; the
+            // test asserts the beat exists, not its period.
+            value: async () => {
+                await new Promise((r) => setTimeout(r, 20))
+                return { items: [message("done")] }
+            },
+        })
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("go")
+        await p.done
+        assert.ok(beats > 0, "a call in flight must not look like silence")
+    })
+})
+
 describe("the session ends when the caller says so, not on a stopwatch", () => {
     it("closes after input is closed", async () => {
         const p = participant({ quietTimeoutMs: 50 })
