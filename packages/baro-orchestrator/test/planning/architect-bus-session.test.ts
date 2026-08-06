@@ -241,6 +241,60 @@ class EndlessReaderLane implements InteractiveLaneAdapter {
     }
 }
 
+/** A scout that reads for a while, reporting progress as it goes. */
+class SlowScoutParticipant extends MozaikModelParticipant {
+    constructor(agentId: string, private readonly scout: boolean) {
+        super({
+            agentId,
+            model: {
+                specification: { name: "scripted" },
+                setTools: () => {},
+            } as unknown as GenerativeModel,
+            systemPrompt: "scripted",
+        })
+    }
+
+    protected override async runRound(
+        context: ModelContext,
+    ): Promise<{ items: ContextItem[] }> {
+        const items = context.getItems()
+        const last = JSON.stringify(items[items.length - 1] ?? {})
+        const say = (text: string) => ({
+            items: [ModelMessageItem.rehydrate({ text })] as ContextItem[],
+        })
+        if (this.scout) {
+            // Long enough to outlast the session's idle window several times
+            // over, reporting activity the way a streamed round does.
+            for (let tick = 0; tick < 6; tick += 1) {
+                await new Promise((resolve) => setTimeout(resolve, 60))
+                this.onActivity?.()
+            }
+            return say("scout answer after a long read (src/x.ts:7)")
+        }
+        if (/scout answer/u.test(last)) {
+            return say("Here is my outcome: " + JSON.stringify({ ok: true }))
+        }
+        return say(JSON.stringify({ questions: [{ question: "What owns visibility?" }] }))
+    }
+}
+
+class SlowScoutLane implements InteractiveLaneAdapter {
+    readonly backend = "fake-slow-scout"
+
+    async grant(): Promise<LaneGrant> {
+        return { close: async () => {} }
+    }
+
+    create(
+        request: InteractiveParticipantRequest,
+    ): InteractiveModelParticipant<unknown> {
+        return new SlowScoutParticipant(
+            request.agentId,
+            request.systemPrompt.includes("repository scout"),
+        ) as unknown as InteractiveModelParticipant<unknown>
+    }
+}
+
 describe("architect bus session", () => {
     it("asks, reads the answers, and repairs a rejected outcome", async () => {
         await withTempDir("baro-architect-bus-", async (dir) => {
@@ -373,6 +427,40 @@ describe("architect bus session", () => {
             assert.equal(result.researchRounds, 1)
             assert.equal(result.findings.length, 1)
             assert.ok(result.findings[0]!.ok)
+        })
+    })
+
+    // What killed a live run at six minutes: the Architect asked six questions
+    // and then, correctly, said nothing while its scouts read. The session's
+    // watchdog measures the Architect's silence, so it aborted the phase for
+    // waiting on work it had itself commissioned.
+    it("does not call waiting for its own scouts idleness", async () => {
+        await withTempDir("baro-architect-bus-idle-", async (dir) => {
+            registerLane("fake-slow-scout", () => new SlowScoutLane())
+            const env = new AgenticEnvironment("architect-bus-idle-test")
+
+            const result = await runArchitectBusSession({
+                systemPrompt: "You are the architect for this engineering run.",
+                userMessage: "Migrate validation to zod.",
+                goal: "Migrate validation to zod.",
+                cwd: dir,
+                backend: "fake-slow-scout",
+                environment: env,
+                roundBudgetMs: 20_000,
+                // Shorter than the scout takes: without scout activity petting
+                // it, this window closes mid-research and the phase dies.
+                idleTimeoutMs: 120,
+                normalizeOutcome: (raw) => raw.slice(raw.indexOf("{")),
+                validateOutcome: (raw) => {
+                    if ((JSON.parse(raw) as { ok?: unknown }).ok !== true) {
+                        throw new Error("outcome must state ok:true")
+                    }
+                },
+            })
+
+            assert.equal(result.researchRounds, 1)
+            assert.equal(result.findings.length, 1)
+            assert.ok(result.findings[0]!.ok, "the slow scout still answered")
         })
     })
 

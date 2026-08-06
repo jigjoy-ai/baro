@@ -83,6 +83,8 @@ export interface ArchitectBusSessionOptions {
     maxResearchRounds?: number
     maxOutcomeRepairs?: number
     roundBudgetMs?: number
+    /** Silence that ends the phase. Test seam; a run uses the shared default. */
+    idleTimeoutMs?: number
     /** Host validation; throws with a reason the Architect can act on. */
     validateOutcome?: (raw: string) => void
     onFinding?: (finding: ScoutFinding) => void
@@ -252,7 +254,7 @@ export async function runArchitectBusSession(
         narrator.join(env)
         architect.join(env)
         architect.start(env)
-        watchdog = new IdleWatchdog(llmIdleTimeoutMs(), () => {
+        watchdog = new IdleWatchdog(opts.idleTimeoutMs ?? llmIdleTimeoutMs(), () => {
             replies.end()
             void architect.abortAndWait()
         })
@@ -294,7 +296,14 @@ export async function runArchitectBusSession(
             opts.onProgress?.(
                 `[architect-bus] research round ${researchRounds}: ${questions.length} question(s)`,
             )
-            const round = await runResearch(questions, env, opts)
+            // A scout answering is the phase proving it is alive. Without
+            // this the watchdog reads the Architect's wait as silence and
+            // aborts the phase mid-research — which is exactly what killed a
+            // live run whose second round of questions took the scouts six
+            // minutes to answer. Waiting for work you asked for is not idling.
+            const round = await runResearch(questions, env, opts, () =>
+                watchdog?.pet(),
+            )
             findings.push(...round)
             architect.sendUserMessage(
                 decideTurnInstruction(findings, researchRounds >= maxRounds),
@@ -332,6 +341,7 @@ async function runResearch(
     questions: readonly ScoutQuestion[],
     env: AgenticEnvironment,
     opts: ArchitectBusSessionOptions,
+    onScoutActivity?: () => void,
 ): Promise<ScoutFinding[]> {
     return await runArchitectResearchSession({
         questions,
@@ -348,7 +358,9 @@ async function runResearch(
             : {}),
         environment: env,
         ...(opts.roundBudgetMs ? { roundBudgetMs: opts.roundBudgetMs } : {}),
+        ...(onScoutActivity ? { onScoutActivity } : {}),
         onFinding: (finding) => {
+            onScoutActivity?.()
             opts.onProgress?.(
                 `[architect-bus] ${finding.id} ${finding.ok ? "answered" : "FAILED"}: ` +
                     `${finding.question.slice(0, 80)}`,

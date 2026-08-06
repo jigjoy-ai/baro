@@ -191,6 +191,12 @@ export interface ResearchSessionOptions {
     roundBudgetMs?: number
     /** Called as each answer lands, before the round ends. */
     onFinding?: (finding: ScoutFinding) => void
+    /**
+     * Any sign that a scout is working. The caller's own watchdog measures
+     * the Architect's silence, and while its scouts read, that silence is the
+     * phase working exactly as designed.
+     */
+    onScoutActivity?: () => void
     /** Test seam: an environment the caller owns and observes. */
     environment?: AgenticEnvironment
 }
@@ -272,7 +278,10 @@ export async function runArchitectResearchSession(
                 board.recordUnanswered(agentId, "no output within the idle budget")
                 void scout.abortAndWait()
             })
-            scout.onActivity = () => watchdog.pet()
+            scout.onActivity = () => {
+                watchdog.pet()
+                opts.onScoutActivity?.()
+            }
             watchdogs.set(agentId, watchdog)
             scout.sendUserMessage(
                 question.scope
