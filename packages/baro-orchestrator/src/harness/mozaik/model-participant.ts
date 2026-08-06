@@ -65,7 +65,29 @@ export interface MozaikModelParticipantOptions {
 }
 
 const DEFAULT_MAX_ROUNDS = 60
-const DEFAULT_ROUND_TIMEOUT_SECS = 300
+/**
+ * The last resort for a call that will never answer, and deliberately far
+ * above anything real work does.
+ *
+ * Baro removed its wall-clock caps in 0.82.0 for a good reason: silence is the
+ * only honest clock, and a visibly working process must never be killed by a
+ * stopwatch. A CLI lane earns that treatment by streaming tokens — every one
+ * is proof of life, so the idle watchdog can tell working from hung.
+ *
+ * This lane cannot, yet. Mozaik 3.12 does expose `stream()`, but its
+ * OpenAI-compatible adapter yields raw `chat.completion.chunk` events without
+ * assembling them into items, and requests no `stream_options.include_usage`
+ * — so a streamed round arrives with no token usage at all. Cache-accurate
+ * usage is what every cost figure and the gateway's receipts are built on, so
+ * trading it for a liveness signal would be the wrong trade.
+ *
+ * Until Mozaik streams with usage, a request in flight is genuinely
+ * indistinguishable from a hang, and something has to end the latter: a live
+ * run held one connection open for seventeen minutes with no error. This is
+ * that something. It is set where it cannot plausibly fire on real work, and
+ * it should be deleted — not tuned — the day a chunk can feed `onActivity`.
+ */
+const ROUND_BACKSTOP_SECS = 20 * 60
 const DEFAULT_QUIET_MS = 2_000
 /** How often an in-flight provider call reports that it is still a call. */
 const HEARTBEAT_MS = 5_000
@@ -105,7 +127,7 @@ export class MozaikModelParticipant
         this.opts = {
             maxRounds: options.maxRounds ?? DEFAULT_MAX_ROUNDS,
             perRoundTimeoutSecs:
-                options.perRoundTimeoutSecs ?? DEFAULT_ROUND_TIMEOUT_SECS,
+                options.perRoundTimeoutSecs ?? ROUND_BACKSTOP_SECS,
             quietTimeoutMs: options.quietTimeoutMs ?? DEFAULT_QUIET_MS,
             ...options,
         }
@@ -174,15 +196,13 @@ export class MozaikModelParticipant
     }
 
     /**
-     * The bound the heartbeat below depends on being real.
+     * The backstop the heartbeat depends on being real.
      *
      * `runInferenceRound` cancels on a signal but imposes no deadline of its
-     * own, so nothing ended a call that never answered. A run on this lane sat
-     * seventeen minutes on one request with the connection open and the
-     * watchdog kept quiet by the heartbeat — a hang made invisible by the very
-     * thing that was supposed to be safe because "the round is bounded".
-     * It is bounded here, and a timeout is reported as a timeout rather than
-     * as cancellation, which telemetry and billing distinguish.
+     * own, so nothing ended a call that never answered — and the heartbeat had
+     * meanwhile silenced the watchdog that would have noticed. A timeout is
+     * reported as a timeout rather than as cancellation, which telemetry and
+     * billing attribute differently.
      */
     private async runBoundedRound(
         context: ModelContext,
