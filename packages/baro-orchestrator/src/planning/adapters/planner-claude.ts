@@ -69,6 +69,8 @@ export async function runPlannerClaude(
         const systemPrompt = progressive.systemInstruction
             ? `${PLANNER_SYSTEM_PROMPT}\n\n${progressive.systemInstruction}`
             : PLANNER_SYSTEM_PROMPT
+        // A spawned CLI is exactly who the relay exists for.
+        if (opts.progressive) await progressive.openMcpConnection()
         const mcpConfig = progressive.mcpConnection
             ? JSON.stringify({
                   mcpServers: {

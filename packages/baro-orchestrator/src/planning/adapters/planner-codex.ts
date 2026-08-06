@@ -60,6 +60,8 @@ export async function runPlannerCodex(
     const progressive = await createPlannerHarnessProgressiveSupport(
         opts.progressive,
     )
+    // A spawned CLI is exactly who the relay exists for.
+    if (opts.progressive) await progressive.openMcpConnection()
     try {
         const prompt = progressive.systemInstruction
             ? `${PLANNER_SYSTEM_PROMPT}\n\n${userMessage}\n\n${progressive.systemInstruction}`

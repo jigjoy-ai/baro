@@ -379,8 +379,9 @@ export async function runPlannerBusSession(
     // knows a server was ever involved.
     const bridge: CliHostFunctionBridge = {
         expose: async () => {
-            const mcp = progressive.mcpConnection
-            if (!mcp) throw new Error("progressive MCP relay unavailable")
+            // Asking is what opens it: a lane in this loop never does, so no
+            // socket is bound and nothing unused can fail the run.
+            const mcp = await progressive.openMcpConnection()
             return {
                 cliExtraArgs: [
                     "--mcp-config",

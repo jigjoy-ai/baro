@@ -217,6 +217,7 @@ describe("progressive planner harness MCP", () => {
                 args: ["--import", "tsx", runPlanner, PROGRESSIVE_PLANNER_MCP_MODE],
             },
         })
+        await support.openMcpConnection()
         assert.ok(support.mcpConnection)
 
         const client = spawnMcpClient(
@@ -419,6 +420,7 @@ describe("progressive planner harness MCP", () => {
                 args: [PROGRESSIVE_PLANNER_MCP_MODE],
             },
         })
+        await support.openMcpConnection()
         assert.ok(support.mcpConnection)
         const invocation = parseProgressivePlannerMcpInvocation(
             support.mcpConnection.args,
@@ -510,6 +512,7 @@ describe("progressive planner harness MCP", () => {
                 args: [PROGRESSIVE_PLANNER_MCP_MODE],
             },
         })
+        await support.openMcpConnection()
         assert.ok(support.mcpConnection)
         const invocation = parseProgressivePlannerMcpInvocation(
             support.mcpConnection.args,

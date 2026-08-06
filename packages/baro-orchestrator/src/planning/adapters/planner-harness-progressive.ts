@@ -46,6 +46,8 @@ export interface PlannerMcpServerCommand {
 
 export interface PlannerHarnessProgressiveConfig
     extends PlannerOpenAIProgressiveConfig {
+    /** The command a relay would point a spawned MCP child at. Nothing is
+     *  spawned or bound until a lane asks — see `openMcpConnection`. */
     mcpServer: PlannerMcpServerCommand
     /** Run-local lifecycle telemetry. Events intentionally carry no tool
      * arguments, story content, relay coordinates, or authentication data. */
@@ -74,10 +76,17 @@ export interface PlannerHarnessMcpConnection {
 export interface PlannerHarnessProgressiveSupport {
     readonly systemInstruction: string | null
     /**
-     * How a model in ANOTHER process reaches `publish`. Null when nothing
-     * needs to: a planner running in this loop is handed the function below.
+     * How a model in ANOTHER process reaches `publish` — null until some lane
+     * has asked for it. A planner running in this loop is handed the function
+     * below, and never causes a socket to be bound.
      */
     readonly mcpConnection: PlannerHarnessMcpConnection | null
+    /**
+     * Open the parent side of the relay. Called by the lanes that spawn a
+     * program, at the moment they need one; opening it for every lane bound a
+     * port nothing would dial and made an unused relay able to fail a run.
+     */
+    openMcpConnection(): Promise<PlannerHarnessMcpConnection>
     /**
      * Admit a plan fragment and return the host's receipt.
      *
@@ -97,6 +106,9 @@ const NO_HARNESS_PROGRESSIVE_SUPPORT: PlannerHarnessProgressiveSupport =
     Object.freeze({
         systemInstruction: null,
         mcpConnection: null,
+        openMcpConnection: async () => {
+            throw new Error("progressive planning is not enabled for this run")
+        },
         publish: async () => {
             throw new Error("progressive planning is not enabled for this run")
         },
@@ -112,32 +124,50 @@ export async function createPlannerHarnessProgressiveSupport(
     config: PlannerHarnessProgressiveConfig | undefined,
 ): Promise<PlannerHarnessProgressiveSupport> {
     if (!config) return NO_HARNESS_PROGRESSIVE_SUPPORT
-    validateMcpServerCommand(config.mcpServer)
     const publisher = createPlannerProgressivePublisher(config)
     const relay = new ProgressivePlannerRelay(
         publisher,
         statusReporter(config.onStatus),
     )
-    const connection = await relay.open(config.mcpServer)
-    connection.args = [
-        ...connection.args,
-        "--finalization",
-        config.finalizationTailOnly === true ? "tail" : "repeat",
-    ]
+    let connection: PlannerHarnessMcpConnection | null = null
+    let opening: Promise<PlannerHarnessMcpConnection> | null = null
     return {
         systemInstruction: progressivePlanningInstruction(
             config.finalizationTailOnly === true,
         ),
-        mcpConnection: connection,
+        get mcpConnection() {
+            return connection
+        },
+        openMcpConnection: async () => {
+            if (connection) return connection
+            if (!opening) {
+                validateMcpServerCommand(config.mcpServer)
+                opening = relay.open(config.mcpServer).then((opened) => {
+                    opened.args = [
+                        ...opened.args,
+                        "--finalization",
+                        config.finalizationTailOnly === true ? "tail" : "repeat",
+                    ]
+                    connection = opened
+                    return opened
+                })
+            }
+            return await opening
+        },
         publish: async (args) => {
             const receipt = await publisher.publish(args)
             return typeof receipt === "string" ? receipt : JSON.stringify(receipt)
         },
         reconcileFinalCandidate: (candidate) =>
             publisher.reconcileFinalCandidate(candidate),
-        assertInitialized: () => relay.assertInitialized(),
+        // A relay nobody opened has nothing to have initialized.
+        assertInitialized: () => {
+            if (connection) relay.assertInitialized()
+        },
         hasEarlyPlan: () => publisher.hasEarlyPlan(),
-        close: () => relay.close(),
+        close: async () => {
+            if (opening) await relay.close()
+        },
     }
 }
 
