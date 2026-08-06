@@ -515,9 +515,15 @@ async function main(): Promise<void> {
     }
 }
 
-/** The Architect lives on the bus for the whole phase (Claude path first). */
-function architectBusEnabled(args: Args): boolean {
-    return process.env.BARO_ARCHITECT_BUS === "1" && args.llm === "claude"
+/**
+ * The Architect lives on the bus for the whole phase.
+ *
+ * This was Claude-only while the session could only be held by a CLI. It asks
+ * for a capability now — read this repository — which every lane can grant, so
+ * the backend no longer decides whether the phase gets to be a conversation.
+ */
+function architectBusEnabled(_args: Args): boolean {
+    return process.env.BARO_ARCHITECT_BUS === "1"
 }
 
 function architectSystemPrompt(
@@ -623,6 +629,7 @@ async function runInitialArchitect(
             model: args.model,
             effort: args.effort,
             claudeBin: args.claudeBin,
+            backend: args.llm,
             projectContext,
             goalEnvelope: trustedGoalEnvelope,
             ...(outcomeMode

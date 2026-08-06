@@ -28,7 +28,9 @@ import {
 import type { ModelInvocationMeasuredData } from "../../telemetry/model-telemetry.js"
 import { runnerMeasurement } from "../../telemetry/runner-measurement.js"
 import { normalizeClaudeRunnerObservation } from "../../conversation/dialogue-responder.js"
-import { ClaudeCliParticipant } from "../../harness/claude/cli-participant.js"
+import { laneAdapterFor } from "../../harness/lane-registry.js"
+import type { CliHostFunctionBridge } from "../../harness/claude/lane-adapter.js"
+import type { OpenAIConnection } from "../../harness/openai/runtime.js"
 import { IdleWatchdog, llmIdleTimeoutMs } from "../../harness/liveness.js"
 import type { PlanningFeed } from "../../execution/planning-feed.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
@@ -45,7 +47,10 @@ import {
     PROGRESSIVE_PLANNER_MCP_TOOL_NAME,
     type PlannerMcpServerCommand,
 } from "./planner-harness-progressive.js"
-import type { PlannerOpenAIPlanFragmentEvent } from "./planner-openai-progressive.js"
+import {
+    PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA,
+    type PlannerOpenAIPlanFragmentEvent,
+} from "./planner-openai-progressive.js"
 import { extractJsonObject } from "../domain/planner-prompts.js"
 
 export interface PlannerBusSessionOptions {
@@ -72,6 +77,10 @@ export interface PlannerBusSessionOptions {
     model?: string
     effort?: string
     claudeBin?: string
+    /** Which lane holds the planner. Defaults to the CLI this began on. */
+    backend?: string
+    /** Endpoint for a lane that calls a model directly. */
+    connection?: OpenAIConnection
     /** Route planner measurements through an already-trusted telemetry
      *  source (collective forwarders bind measurements to exact sources).
      *  Without it the session publishes them under its own identity. */
@@ -372,61 +381,97 @@ export async function runPlannerBusSession(
     const systemPrompt = progressive.systemInstruction
         ? `${PLANNER_SYSTEM_PROMPT}\n\n${progressive.systemInstruction}`
         : PLANNER_SYSTEM_PROMPT
-    const mcp = progressive.mcpConnection
-    if (!mcp) {
-        receipts.leave(opts.env)
-        await progressive.close()
-        return fail("planner_failed", "progressive MCP relay unavailable")
-    }
     const progressiveTool =
         `mcp__${PROGRESSIVE_PLANNER_MCP_SERVER_NAME}__${PROGRESSIVE_PLANNER_MCP_TOOL_NAME}`
-    const mcpConfig = JSON.stringify({
-        mcpServers: {
-            [PROGRESSIVE_PLANNER_MCP_SERVER_NAME]: {
-                type: "stdio",
-                command: mcp.command,
-                args: mcp.args,
-                // Claude expands ${VAR} from its own environment, so the
-                // relay secret never enters argv.
-                env: Object.fromEntries(
-                    Object.keys(mcp.providerEnvironment).map((name) => [
-                        name,
-                        `\${${name}}`,
-                    ]),
-                ),
-            },
+
+    // The relay this session already owns, stated as what a process-bound lane
+    // needs: the CLI is pointed at a server, and this is the only place that
+    // knows a server was ever involved.
+    const bridge: CliHostFunctionBridge = {
+        expose: async () => {
+            const mcp = progressive.mcpConnection
+            if (!mcp) throw new Error("progressive MCP relay unavailable")
+            return {
+                cliExtraArgs: [
+                    "--mcp-config",
+                    JSON.stringify({
+                        mcpServers: {
+                            [PROGRESSIVE_PLANNER_MCP_SERVER_NAME]: {
+                                type: "stdio",
+                                command: mcp.command,
+                                args: mcp.args,
+                                // Claude expands ${VAR} from its own
+                                // environment, so the relay secret never
+                                // enters argv.
+                                env: Object.fromEntries(
+                                    Object.keys(mcp.providerEnvironment).map(
+                                        (name) => [name, `\${${name}}`],
+                                    ),
+                                ),
+                            },
+                        },
+                    }),
+                    "--allowed-tools",
+                    progressiveTool,
+                ],
+                close: async () => {},
+            }
         },
-    })
+    }
 
     // Deterministic default: without it the CLI silently picks the user's
     // account default and the run's planner model varies per machine.
     const requestedModel = opts.model ?? "opus"
-    const planner = new ClaudeCliParticipant(agentId, {
-        cwd: opts.cwd,
-        model: requestedModel,
-        effort: opts.effort,
-        claudeBin: opts.claudeBin,
-        includePartialMessages: true,
-        permissionMode: "dontAsk",
-        extraArgs: [
-            "--setting-sources",
-            "",
-            "--disable-slash-commands",
-            "--no-session-persistence",
-            "--strict-mcp-config",
-            "--mcp-config",
-            mcpConfig,
-            "--tools",
-            `Read,Glob,Grep,${progressiveTool}`,
-            "--allowed-tools",
-            progressiveTool,
-            "--system-prompt",
-            systemPrompt,
-        ],
+    const lane = laneAdapterFor({
+        backend: opts.backend ?? "claude",
+        ...(opts.connection ? { connection: opts.connection } : {}),
+        ...(opts.claudeBin ? { claudeBin: opts.claudeBin } : {}),
+        hostFunctionBridge: bridge,
     })
+    // What the planner needs, in the only terms that mean the same thing on
+    // every lane: read the repository, and call the one function that admits
+    // a fragment. Whether that costs a spawned server is the lane's business.
+    let grant
+    try {
+        grant = await lane.grant([
+            { kind: "read-repo", cwd: opts.cwd },
+            {
+                kind: "host-function",
+                fn: {
+                    name: PROGRESSIVE_PLANNER_MCP_TOOL_NAME,
+                    description:
+                        "Publish a plan fragment and receive the host's admission receipt.",
+                    parameters: PUBLISH_PLAN_FRAGMENT_INPUT_SCHEMA,
+                    invoke: (args) => progressive.publish(args),
+                },
+            },
+        ])
+    } catch (error) {
+        receipts.leave(opts.env)
+        await progressive.close()
+        return fail(
+            "planner_failed",
+            error instanceof Error ? error.message : String(error),
+        )
+    }
+    const planner = lane.create(
+        {
+            agentId,
+            cwd: opts.cwd,
+            model: requestedModel,
+            ...(opts.effort ? { effort: opts.effort } : {}),
+            systemPrompt,
+            cliExtraArgs: ["--setting-sources", ""],
+        },
+        grant,
+    )
 
+    // Only a lane that spawns a process needs the relay secret in the
+    // environment it will inherit; a planner in this loop never sees one.
     const previousEnv: Record<string, string | undefined> = {}
-    for (const [name, value] of Object.entries(mcp.providerEnvironment)) {
+    for (const [name, value] of Object.entries(
+        progressive.mcpConnection?.providerEnvironment ?? {},
+    )) {
         previousEnv[name] = process.env[name]
         process.env[name] = value
     }
@@ -470,11 +515,10 @@ export async function runPlannerBusSession(
         for (let attempt = 1; attempt <= maxFinalizationAttempts; attempt++) {
             const resultText = await results.next()
             if (resultText === null) {
-                const summary = await planner.done
+                await planner.done.catch(() => undefined)
                 return fail(
                     "planner_failed",
-                    summary.error?.message ??
-                        `planner exited without a result (exit=${summary.exitCode}, signal=${summary.exitSignal})`,
+                    `planner produced no result: ${planner.sessionEndDetail()}`,
                 )
             }
             let composedFinalPrd: Record<string, unknown>

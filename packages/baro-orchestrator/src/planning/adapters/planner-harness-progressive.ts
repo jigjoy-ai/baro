@@ -73,7 +73,19 @@ export interface PlannerHarnessMcpConnection {
 
 export interface PlannerHarnessProgressiveSupport {
     readonly systemInstruction: string | null
+    /**
+     * How a model in ANOTHER process reaches `publish`. Null when nothing
+     * needs to: a planner running in this loop is handed the function below.
+     */
     readonly mcpConnection: PlannerHarnessMcpConnection | null
+    /**
+     * Admit a plan fragment and return the host's receipt.
+     *
+     * This is what the whole MCP apparatus exists to carry — a spawned server,
+     * a wire protocol and a secret, so a subprocess can call this one method.
+     * A lane that runs inside this process calls it.
+     */
+    publish(args: unknown): Promise<string>
     /** Returns the composed final PRD (admitted prefix + tail). */
     reconcileFinalCandidate(candidate: string): Record<string, unknown>
     assertInitialized(): void
@@ -85,6 +97,9 @@ const NO_HARNESS_PROGRESSIVE_SUPPORT: PlannerHarnessProgressiveSupport =
     Object.freeze({
         systemInstruction: null,
         mcpConnection: null,
+        publish: async () => {
+            throw new Error("progressive planning is not enabled for this run")
+        },
         reconcileFinalCandidate: (candidate: string) =>
             JSON.parse(candidate) as Record<string, unknown>,
         assertInitialized: () => undefined,
@@ -114,6 +129,10 @@ export async function createPlannerHarnessProgressiveSupport(
             config.finalizationTailOnly === true,
         ),
         mcpConnection: connection,
+        publish: async (args) => {
+            const receipt = await publisher.publish(args)
+            return typeof receipt === "string" ? receipt : JSON.stringify(receipt)
+        },
         reconcileFinalCandidate: (candidate) =>
             publisher.reconcileFinalCandidate(candidate),
         assertInitialized: () => relay.assertInitialized(),

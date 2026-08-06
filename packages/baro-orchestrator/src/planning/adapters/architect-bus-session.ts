@@ -299,6 +299,10 @@ async function runResearch(
         model: opts.model,
         effort: opts.effort,
         claudeBin: opts.claudeBin,
+        // Scouts run on whatever lane the Architect is on: one phase, one
+        // kind of model, so a finding never crosses a provider boundary.
+        ...(opts.backend ? { backend: opts.backend } : {}),
+        ...(opts.connection ? { connection: opts.connection } : {}),
         environment: env,
         ...(opts.roundBudgetMs ? { roundBudgetMs: opts.roundBudgetMs } : {}),
         onFinding: (finding) => {
