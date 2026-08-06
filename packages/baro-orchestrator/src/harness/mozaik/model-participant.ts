@@ -299,6 +299,10 @@ export class MozaikModelParticipant
         const billing = this.opts.billing
         return await runInferenceRound(context, this.opts.model, {
             signal,
+            // A streamed round proves it is alive per chunk; the watchdog then
+            // measures silence rather than duration, which is the doctrine the
+            // round backstop stands in for until every lane can stream.
+            onActivity: () => this.onActivity?.(),
             ...(billing
                 ? {
                       billing: {

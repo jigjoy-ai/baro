@@ -10,6 +10,8 @@
 
 import { createRequire } from "node:module"
 
+import { streamChatRound, type ChatStreamClient } from "./chat-stream.js"
+
 import {
     ContextItem,
     Gpt54,
@@ -50,6 +52,11 @@ export type InferenceBillingContext = Omit<
 export interface InferenceRoundOptions {
     /** Cancels the actual provider request, not only the caller's wait. */
     readonly signal?: AbortSignal
+    /**
+     * Proof of life while the round runs. Only a streamed round can produce
+     * it; a non-streamed one has nothing to report until it is finished.
+     */
+    readonly onActivity?: () => void
     readonly billing?: {
         readonly coordinator: GatewayBillingCoordinator
         readonly context: InferenceBillingContext
@@ -346,6 +353,7 @@ export async function runInferenceRound(
                       },
                       dispatch !== null,
                       options.signal,
+                      options.onActivity,
                   )
         // An adapter may fulfil after ignoring an abort. The abort winner is
         // authoritative: never publish success after its caller's watchdog
@@ -389,20 +397,49 @@ async function inferChatRound(
     connection: OpenAIConnection,
     billed: boolean,
     signal?: AbortSignal,
+    onActivity?: () => void,
 ) {
     const runtime = getChatRuntime(connection, !billed)
     if (billed) disableOpenAiSdkRetries(runtime)
 
     const internals = runtime as unknown as ChatRuntimeInternals
     assertChatRuntimeInternals(internals)
-    const response = await internals.client.chat.completions.create(
-        withParallelToolCalls(internals.buildRequest(request)),
-        { ...(signal ? { signal } : {}), ...uncappedTransport() },
-    )
+    const body = withParallelToolCalls(internals.buildRequest(request))
+
+    if (nativeStreamingEnabled()) {
+        const streamed = await streamChatRound(
+            internals.client as unknown as ChatStreamClient,
+            body,
+            {
+                ...(signal ? { signal } : {}),
+                ...(onActivity ? { onActivity } : {}),
+                requestOptions: uncappedTransport(),
+            },
+        )
+        return { contextItems: streamed.items, tokenUsage: streamed.usage }
+    }
+
+    const response = await internals.client.chat.completions.create(body, {
+        ...(signal ? { signal } : {}),
+        ...uncappedTransport(),
+    })
     return {
         contextItems: internals.extractContextItems(response),
         tokenUsage: internals.extractTokenUsage(response),
     }
+}
+
+/**
+ * Streaming is opt-in for exactly one measured run.
+ *
+ * What it buys is liveness — progress a watchdog can see — and what it risks
+ * is usage: a provider that ignores `stream_options.include_usage` streams no
+ * token counts, and every cost figure and gateway receipt is built on them.
+ * One live run on the endpoint we bill through settles that; the day it does,
+ * this predicate becomes `true` and then goes away entirely.
+ */
+function nativeStreamingEnabled(): boolean {
+    return process.env.BARO_NATIVE_STREAM === "1"
 }
 
 /**
