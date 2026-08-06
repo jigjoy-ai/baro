@@ -26,6 +26,7 @@ import { AgentResult } from "../../semantic-events.js"
 import { laneAdapterFor } from "../../harness/lane-registry.js"
 import type { InteractiveModelParticipant } from "../../harness/interactive-participant.js"
 import type { OpenAIConnection } from "../../harness/openai/runtime.js"
+import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import { IdleWatchdog, llmIdleTimeoutMs } from "../../harness/liveness.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
@@ -55,6 +56,8 @@ export interface ArchitectBusSessionOptions {
     backend?: string
     /** Endpoint for a lane that calls a model directly. */
     connection?: OpenAIConnection
+    /** Meters the rounds this process issues; a CLI reports its own. */
+    billingCoordinator?: GatewayBillingCoordinator
     projectContext?: string
     goalEnvelope?: GoalEnvelope
     /**
@@ -202,6 +205,14 @@ export async function runArchitectBusSession(
             ...(opts.model ? { model: opts.model } : {}),
             ...(opts.effort ? { effort: opts.effort } : {}),
             systemPrompt: opts.systemPrompt,
+            ...(opts.billingCoordinator
+                ? {
+                      billing: {
+                          coordinator: opts.billingCoordinator,
+                          phase: "architect" as const,
+                      },
+                  }
+                : {}),
         },
         grant,
     )
@@ -313,6 +324,9 @@ async function runResearch(
         // kind of model, so a finding never crosses a provider boundary.
         ...(opts.backend ? { backend: opts.backend } : {}),
         ...(opts.connection ? { connection: opts.connection } : {}),
+        ...(opts.billingCoordinator
+            ? { billingCoordinator: opts.billingCoordinator }
+            : {}),
         environment: env,
         ...(opts.roundBudgetMs ? { roundBudgetMs: opts.roundBudgetMs } : {}),
         onFinding: (finding) => {

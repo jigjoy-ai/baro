@@ -35,6 +35,8 @@ import {
     AgentUserMessage,
 } from "../../semantic-events.js"
 import { acceptsTargetedMessage } from "../../runtime/targeted-message-authority.js"
+import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
+import type { ModelInvocationPhase } from "../../telemetry/model-telemetry.js"
 import { runInferenceRound, UsageAccumulator } from "../openai/runtime.js"
 import { invokeTool, runBoundedRound } from "./round.js"
 import type { InteractiveModelParticipant } from "../interactive-participant.js"
@@ -78,6 +80,15 @@ export interface MozaikModelParticipantOptions {
         runId: string
         leaseId: string
         generation: number
+    }
+    /**
+     * Gateway billing for this session's own rounds. Omitted for an endpoint
+     * we do not meter; without it a phase held by this lane spends real money
+     * and reports nothing, because there is no CLI wrapper to read usage from.
+     */
+    readonly billing?: {
+        readonly coordinator: GatewayBillingCoordinator
+        readonly phase: ModelInvocationPhase
     }
 }
 
@@ -149,6 +160,8 @@ export class MozaikModelParticipant
     private settled = false
     private rounds = 0
     private turns = 0
+    /** Round index within the current turn; billing correlates on both. */
+    private roundInTurn = 0
     /** Resolves an idle wait early when something arrives. */
     private wake: (() => void) | null = null
 
@@ -247,7 +260,28 @@ export class MozaikModelParticipant
         context: ModelContext,
         signal: AbortSignal,
     ): Promise<{ items: ContextItem[]; usage?: TokenUsage }> {
-        return await runInferenceRound(context, this.opts.model, { signal })
+        const billing = this.opts.billing
+        return await runInferenceRound(context, this.opts.model, {
+            signal,
+            ...(billing
+                ? {
+                      billing: {
+                          coordinator: billing.coordinator,
+                          context: {
+                              // The coordinator stamps its own run id.
+                              runId: null,
+                              phase: billing.phase,
+                              storyId: null,
+                              leaseId: null,
+                              generation: null,
+                              attempt: null,
+                              turn: this.turns + 1,
+                              round: this.roundInTurn,
+                          },
+                      },
+                  }
+                : {}),
+        })
     }
 
     /**
@@ -337,6 +371,7 @@ export class MozaikModelParticipant
                 }
 
                 this.rounds += 1
+                this.roundInTurn += 1
                 this.emitState("running")
                 const round = await runBoundedRound({
                     round: (signal) => this.runRound(context, signal),
@@ -393,6 +428,7 @@ export class MozaikModelParticipant
                     )
                     turnText = []
                     turnUsage = new UsageAccumulator()
+                    this.roundInTurn = 0
                 }
             }
 

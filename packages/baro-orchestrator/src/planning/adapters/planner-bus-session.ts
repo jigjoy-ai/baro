@@ -18,17 +18,22 @@ import {
     type AgenticEnvironment,
     type Participant,
     type SemanticEvent,
+    type TokenUsage,
 } from "../../runtime/mozaik.js"
 import {
     AgentResult,
+    type AgentResultData,
     ModelInvocationMeasured,
     PlanFragmentAdmitted,
     PlanFragmentRejected,
 } from "../../semantic-events.js"
 import type { ModelInvocationMeasuredData } from "../../telemetry/model-telemetry.js"
 import { runnerMeasurement } from "../../telemetry/runner-measurement.js"
-import { normalizeClaudeRunnerObservation } from "../../conversation/dialogue-responder.js"
-import { laneAdapterFor } from "../../harness/lane-registry.js"
+import {
+    normalizeClaudeRunnerObservation,
+    normalizeOpenAIRunnerObservation,
+} from "../../conversation/dialogue-responder.js"
+import { isNativeLane, laneAdapterFor } from "../../harness/lane-registry.js"
 import type { CliHostFunctionBridge } from "../../harness/claude/lane-adapter.js"
 import type { OpenAIConnection } from "../../harness/openai/runtime.js"
 import { IdleWatchdog, llmIdleTimeoutMs } from "../../harness/liveness.js"
@@ -212,7 +217,7 @@ class ResultStream extends BaseObserver {
     }
 }
 
-/** Publishes one ModelInvocationMeasured per planner CLI result. The bus
+/** Publishes one ModelInvocationMeasured per planner turn. The bus
  *  collector only admits story terminals with lease correlation, so the
  *  session is the runner-evidence producer for its own participant. */
 class PlannerTelemetryObserver extends BaseObserver {
@@ -222,6 +227,10 @@ class PlannerTelemetryObserver extends BaseObserver {
         private readonly runId: string,
         private readonly agentId: string,
         private readonly requestedModel: string,
+        /** The lane that actually answered. Reporting every planner as Claude
+         *  priced a DeepSeek turn on Anthropic's card and hid which model the
+         *  run was measuring. */
+        private readonly backend: string,
         private readonly publishMeasurement?: (
             data: ModelInvocationMeasuredData,
         ) => void,
@@ -236,32 +245,13 @@ class PlannerTelemetryObserver extends BaseObserver {
         if (!AgentResult.is(event) || event.data.agentId !== this.agentId) {
             return
         }
-        const item = event.data
-        const turn = ++this.turn
-        const observation = normalizeClaudeRunnerObservation(
-            {
-                usage: item.usage ?? undefined,
-                modelUsage: item.modelUsage ?? undefined,
-                duration_ms: item.durationMs ?? undefined,
-                total_cost_usd: item.totalCostUsd ?? undefined,
-            },
-            this.requestedModel,
-        )
-        const measurement = runnerMeasurement(
-            {
-                invocationBaseId: `${this.runId}:planner:${turn}`,
-                runId: this.runId,
-                phase: "planner",
-                storyId: null,
-                turn,
-                backend: "claude",
-                requestedModel: this.requestedModel,
-            },
-            {
-                ...observation,
-                status: item.isError ? "failed" : "succeeded",
-            },
-        )
+        const measurement = plannerTurnMeasurement({
+            runId: this.runId,
+            backend: this.backend,
+            requestedModel: this.requestedModel,
+            turn: ++this.turn,
+            result: event.data,
+        })
         if (this.publishMeasurement) {
             this.publishMeasurement(measurement)
             return
@@ -481,6 +471,7 @@ export async function runPlannerBusSession(
         opts.runId,
         agentId,
         requestedModel,
+        opts.backend ?? "claude",
         opts.publishMeasurement,
     )
     let watchdog: IdleWatchdog | null = null
@@ -584,4 +575,73 @@ export async function runPlannerBusSession(
             else process.env[name] = value
         }
     }
+}
+
+/**
+ * One planner turn as a runner measurement.
+ *
+ * Which lane answered decides how the usage is read AND how it is priced: the
+ * Claude wrapper reports its own totals and cost, a native turn reports the
+ * accumulator's sum of its rounds. Labelling every planner "claude" priced a
+ * DeepSeek turn on Anthropic's card.
+ */
+export function plannerTurnMeasurement(input: {
+    runId: string
+    backend: string
+    requestedModel: string
+    turn: number
+    result: AgentResultData
+}): ModelInvocationMeasuredData {
+    const { runId, backend, requestedModel, turn, result } = input
+    const observation = isNativeLane(backend)
+        ? normalizeOpenAIRunnerObservation(
+              nativeTurnUsage(result.usage),
+              requestedModel,
+              true,
+          )
+        : normalizeClaudeRunnerObservation(
+              {
+                  usage: result.usage ?? undefined,
+                  modelUsage: result.modelUsage ?? undefined,
+                  duration_ms: result.durationMs ?? undefined,
+                  total_cost_usd: result.totalCostUsd ?? undefined,
+              },
+              requestedModel,
+          )
+    return runnerMeasurement(
+        {
+            invocationBaseId: `${runId}:planner:${turn}`,
+            runId,
+            phase: "planner",
+            storyId: null,
+            turn,
+            backend,
+            requestedModel,
+        },
+        {
+            ...observation,
+            // A native turn is the sum of its rounds, not one round.
+            ...(isNativeLane(backend) ? { granularity: "turn" as const } : {}),
+            status: result.isError ? "failed" : "succeeded",
+        },
+    )
+}
+
+/**
+ * The native lane reports a turn as its rounds summed, in the accumulator's
+ * snake_case; the shared normalizer reads Mozaik's shape.
+ */
+function nativeTurnUsage(
+    usage: Readonly<Record<string, unknown>> | null,
+): TokenUsage | undefined {
+    if (!usage) return undefined
+    const count = (key: string): number | undefined =>
+        typeof usage[key] === "number" ? (usage[key] as number) : undefined
+    return {
+        inputTokens: count("input_tokens") ?? 0,
+        outputTokens: count("output_tokens") ?? 0,
+        totalTokens: count("total_tokens") ?? 0,
+        inputTokenDetails: { cached_tokens: count("cached_input_tokens") },
+        outputTokenDetails: { reasoning_tokens: count("reasoning_tokens") },
+    } as unknown as TokenUsage
 }

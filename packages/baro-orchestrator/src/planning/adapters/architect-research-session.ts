@@ -26,6 +26,7 @@ import {
 import { laneAdapterFor } from "../../harness/lane-registry.js"
 import type { InteractiveModelParticipant } from "../../harness/interactive-participant.js"
 import type { OpenAIConnection } from "../../harness/openai/runtime.js"
+import type { GatewayBillingCoordinator } from "../../telemetry/billing/index.js"
 import { IdleWatchdog, llmIdleTimeoutMs } from "../../harness/liveness.js"
 import type { ScoutFinding, ScoutQuestion } from "./architect-scouts.js"
 
@@ -184,6 +185,8 @@ export interface ResearchSessionOptions {
     backend?: string
     /** Endpoint for a lane that calls a model directly. */
     connection?: OpenAIConnection
+    /** Meters the rounds this process issues; a CLI reports its own. */
+    billingCoordinator?: GatewayBillingCoordinator
     /** Whole-round budget; a scout still reading when it expires is aborted. */
     roundBudgetMs?: number
     /** Called as each answer lands, before the round ends. */
@@ -237,6 +240,14 @@ export async function runArchitectResearchSession(
                 // path checks.
                 targetedMessageAuthority: board,
                 targetedMessageCorrelation: scoutCorrelation(sessionId, agentId),
+                ...(opts.billingCoordinator
+                    ? {
+                          billing: {
+                              coordinator: opts.billingCoordinator,
+                              phase: "architect" as const,
+                          },
+                      }
+                    : {}),
             },
             grant,
         )

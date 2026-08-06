@@ -17,6 +17,8 @@
  */
 
 import type { AgenticEnvironment, Participant, Tool } from "../runtime/mozaik.js"
+import type { GatewayBillingCoordinator } from "../telemetry/billing/index.js"
+import type { ModelInvocationPhase } from "../telemetry/model-telemetry.js"
 
 export interface InteractiveModelParticipant<TSummary> extends Participant {
     /** Stable bus identity; observers attribute events to it. */
@@ -69,5 +71,14 @@ export interface InteractiveParticipantRequest {
         runId: string
         leaseId: string
         generation: number
+    }
+    /**
+     * Gateway billing for rounds this process issues itself. A lane that
+     * spawns a program ignores it: the program's own wrapper reports what it
+     * spent, and nothing of ours is between it and the endpoint.
+     */
+    readonly billing?: {
+        readonly coordinator: GatewayBillingCoordinator
+        readonly phase: ModelInvocationPhase
     }
 }

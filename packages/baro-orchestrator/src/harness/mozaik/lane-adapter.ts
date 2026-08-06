@@ -72,6 +72,7 @@ export class MozaikLaneAdapter implements InteractiveLaneAdapter {
                           request.targetedMessageCorrelation,
                   }
                 : {}),
+            ...(request.billing ? { billing: request.billing } : {}),
         }) as unknown as InteractiveModelParticipant<unknown>
     }
 }

@@ -561,6 +561,7 @@ async function runInitialArchitect(
             modeContract,
             trustedGoalEnvelope,
             outcomeContractMode,
+            billing,
         })
     }
 
@@ -661,6 +662,8 @@ async function runArchitectOnBus(input: {
     trustedGoalEnvelope: GoalEnvelope | undefined
     /** Derived once by the caller; both must agree on what the phase owes. */
     outcomeContractMode: "decision" | undefined
+    /** Meters the session's own rounds; a CLI lane reports its own spend. */
+    billing: GatewayBillingCoordinator | null
 }): Promise<string> {
     const {
         args,
@@ -668,6 +671,7 @@ async function runArchitectOnBus(input: {
         modeContract,
         trustedGoalEnvelope,
         outcomeContractMode,
+        billing,
     } = input
     const outcomeMode = args.outcomeFile !== undefined
     const session = await runArchitectBusSession({
@@ -683,6 +687,7 @@ async function runArchitectOnBus(input: {
         effort: args.effort,
         claudeBin: args.claudeBin,
         backend: args.llm,
+        ...(billing ? { billingCoordinator: billing } : {}),
         projectContext,
         goalEnvelope: trustedGoalEnvelope,
         ...(outcomeMode

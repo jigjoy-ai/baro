@@ -273,6 +273,48 @@ describe("a peer's finding reaches a session that is still reading", () => {
     })
 })
 
+// A phase on this lane spends real money with nothing between it and the
+// endpoint: no CLI wrapper reports what it cost, so the gateway's own
+// correlation is the only record there will ever be.
+describe("a native phase's rounds are billed like any other", () => {
+    it("correlates each round to its phase, turn and round", async () => {
+        const dispatched: Array<Record<string, unknown>> = []
+        const coordinator = {
+            prepareDispatch: (
+                _baseUrl: string | undefined,
+                _apiKey: string | undefined,
+                context: Record<string, unknown>,
+            ) => {
+                dispatched.push(context)
+                return null // untrusted endpoint: nothing to bill, nothing to send
+            },
+        }
+
+        const p = new MozaikModelParticipant({
+            agentId: "architect",
+            model: silentModel(),
+            systemPrompt: "you decide",
+            quietTimeoutMs: 5,
+            billing: {
+                coordinator: coordinator as never,
+                phase: "architect",
+            },
+        })
+        // The real round runs: only the endpoint is absent, so the call fails
+        // after the dispatch we are asserting on.
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("design this")
+        await p.done
+
+        assert.equal(dispatched.length, 1)
+        assert.equal(dispatched[0]!.phase, "architect")
+        assert.equal(dispatched[0]!.turn, 1)
+        assert.equal(dispatched[0]!.round, 1)
+        assert.equal(dispatched[0]!.storyId, null)
+    })
+})
+
 describe("tools are functions here, not a protocol", () => {
     it("calls the tool it was handed and feeds the result back", async () => {
         const seenArgs: unknown[] = []
