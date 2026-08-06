@@ -132,11 +132,24 @@ const TEXT_BASENAMES = new Set([
     "yarn.lock",
 ])
 
+/**
+ * Words a goal sentence is made of. The measured bar below catches whatever
+ * this misses — this list only saves the work of measuring the obvious.
+ */
 const STOP_WORDS = new Set([
-    "about", "after", "again", "also", "build", "change", "code", "could",
-    "from", "have", "into", "make", "need", "please", "repo", "repository",
-    "should", "that", "this", "with", "would", "onda", "kako", "koji", "koja",
-    "koje", "moze", "mozes", "treba", "uradi", "sada", "onda", "bismo", "bude",
+    "about", "after", "again", "against", "all", "already", "also", "and",
+    "any", "are", "because", "been", "before", "both", "build", "but", "can",
+    "change", "code", "could", "does", "each", "even", "ever", "every",
+    "everything", "for", "from", "given", "has", "have", "how", "into", "its",
+    "just", "make", "many", "may", "more", "most", "must", "need", "never",
+    "not", "one", "only", "other", "over", "please", "repo", "repository",
+    "same", "should", "some", "such", "than", "that", "the", "their", "them",
+    "then", "there", "these", "they", "this", "those", "through", "under",
+    "use", "used", "uses", "using", "very", "was", "were", "what", "when",
+    "where", "which", "while", "who", "why", "will", "with", "within",
+    "without", "would", "you", "your",
+    "onda", "kako", "koji", "koja", "koje", "moze", "mozes", "treba", "uradi",
+    "sada", "bismo", "bude", "sve", "svaki", "svaka", "svako", "mora",
 ])
 
 export interface RepositoryContextScanRequest {
@@ -170,6 +183,10 @@ interface IndexedFile {
     path: string
     score: number
     matchedTerms: readonly string[]
+    /** Kept apart because they are scored apart, and a term can be dropped
+     *  after indexing once its frequency is known. */
+    pathTerms: readonly string[]
+    contentTerms: readonly string[]
     firstMatchLine?: number
     pathMatch: boolean
     contentMatch: boolean
@@ -278,7 +295,9 @@ export class DeterministicRepositoryScanner implements RepositoryContextScanner 
         await this.walk(this.root, "", state, signal)
         throwIfAborted(signal)
 
-        const ranked = [...state.files].sort(compareIndexedFiles)
+        const ranked = [...dropUndiscriminatingTerms(state)].sort(
+            compareIndexedFiles,
+        )
         const matched = ranked.filter((file) => file.score > 0)
         const relevant = matched
             .slice(0, this.maxRelevantPaths)
@@ -561,11 +580,12 @@ function indexFile(
         if (firstMatchIndex === undefined || index < firstMatchIndex) firstMatchIndex = index
     }
     const matchedTerms = [...new Set([...pathTerms, ...contentTerms])].slice(0, 8)
-    const important = entryPointScore(path)
     return {
         path,
-        score: important + pathTerms.length * 30 + contentTerms.length * 8,
+        score: scoreOf(path, pathTerms, contentTerms),
         matchedTerms,
+        pathTerms,
+        contentTerms,
         ...(firstMatchIndex !== undefined
             ? { firstMatchLine: lineNumberAt(content, firstMatchIndex) }
             : {}),
@@ -596,6 +616,82 @@ function repositoryFact(file: IndexedFile): RepositoryFactV1 {
         ...(file.firstMatchLine !== undefined ? { line: file.firstMatchLine } : {}),
         confidence,
     }
+}
+
+/**
+ * A word most of the repository contains is not evidence about the goal.
+ *
+ * A goal is written in sentences, so its terms include the words sentences are
+ * made of. A live brief ranked forty-eight files and explained each one with
+ * "Matched bounded goal term(s): use, the, only, never, every" — every file
+ * matches those, so the ranking was noise and the Architect, handed eleven
+ * kilobytes of it, went and read the repository itself.
+ *
+ * A fixed stop-word list cannot fix this: which words are common is a property
+ * of the repository, not of English — `service` and `shop` carry nothing in a
+ * shop service, and `dataSource` carries everything. So the bar is measured
+ * here, after indexing: a term matched by most files explains nothing about
+ * which file to open.
+ */
+const MAX_TERM_DOCUMENT_SHARE = 0.4
+/**
+ * Frequency is only evidence once there is a population to be frequent in. In
+ * a two-file repository the one term that matters matches half the files, and
+ * a share bound would throw away the only signal there is.
+ */
+const MIN_FILES_FOR_TERM_FREQUENCY = 20
+const MIN_FILES_FOR_A_COMMON_TERM = 8
+
+function dropUndiscriminatingTerms(state: ScanState): IndexedFile[] {
+    const indexed = state.files.length
+    if (indexed < MIN_FILES_FOR_TERM_FREQUENCY) return state.files
+    const documentFrequency = new Map<string, number>()
+    for (const file of state.files) {
+        for (const term of file.matchedTerms) {
+            documentFrequency.set(term, (documentFrequency.get(term) ?? 0) + 1)
+        }
+    }
+    const tooCommon = new Set(
+        [...documentFrequency.entries()]
+            .filter(
+                ([, count]) =>
+                    count >= MIN_FILES_FOR_A_COMMON_TERM &&
+                    count / indexed > MAX_TERM_DOCUMENT_SHARE,
+            )
+            .map(([term]) => term),
+    )
+    if (tooCommon.size === 0) return state.files
+    return state.files.map((file) => {
+        const kept = file.matchedTerms.filter((term) => !tooCommon.has(term))
+        if (kept.length === file.matchedTerms.length) return file
+        // Scored again from what is left, not discounted: a path match is
+        // worth several content matches, so subtracting a flat amount would
+        // leave a file ranked on words that explain nothing.
+        const pathTerms = file.pathTerms.filter((term) => !tooCommon.has(term))
+        const contentTerms = file.contentTerms.filter(
+            (term) => !tooCommon.has(term),
+        )
+        return {
+            ...file,
+            matchedTerms: kept,
+            pathTerms,
+            contentTerms,
+            pathMatch: pathTerms.length > 0,
+            contentMatch: contentTerms.length > 0,
+            score:
+                kept.length === 0
+                    ? 0
+                    : scoreOf(file.path, pathTerms, contentTerms),
+        }
+    })
+}
+
+function scoreOf(
+    path: string,
+    pathTerms: readonly string[],
+    contentTerms: readonly string[],
+): number {
+    return entryPointScore(path) + pathTerms.length * 30 + contentTerms.length * 8
 }
 
 function compareIndexedFiles(left: IndexedFile, right: IndexedFile): number {

@@ -14,6 +14,69 @@ import { describe, it } from "node:test"
 import { DeterministicRepositoryScanner } from "../../../src/conversation/session/repository-scanner.js"
 import { withTempDir } from "../../execution/helpers.js"
 
+// What a live brief handed the Architect: forty-eight ranked files, each
+// explained with "Matched bounded goal term(s): use, the, only, never, every".
+// Every file matches those, so the ranking said nothing and eleven kilobytes
+// of it went into the Architect's context, which then read the repository
+// itself for nine rounds.
+describe("a word most of the repository contains is not evidence", () => {
+    /**
+     * A service repository: every file is a "service" for a "shop", which is
+     * exactly why neither word says which file to open. Big enough that
+     * frequency means something — the bar is measured, not listed.
+     */
+    async function scan(dir: string, query: string) {
+        const root = join(dir, "repo")
+        mkdirSync(join(root, "src"), { recursive: true })
+        for (let index = 0; index < 24; index += 1) {
+            writeFileSync(
+                join(root, "src", `module${index}.service.ts`),
+                `// the service used by every shop\n` +
+                    `export class Module${index}Service { save() { return this.repo.save() } }\n`,
+            )
+        }
+        // One file, and only one, actually knows about transactions.
+        writeFileSync(
+            join(root, "src", "audit.helper.ts"),
+            "export function withAudit(dataSource) { return dataSource.transaction(cb) }\n",
+        )
+        const scanner = new DeterministicRepositoryScanner(root)
+        return await scanner.scan({ query, intent: "goal" }, new AbortController().signal)
+    }
+
+    it("stops explaining a file by the words every file contains", async () => {
+        await withTempDir("baro-scanner-terms-", async (dir) => {
+            const brief = await scan(
+                dir,
+                "Record every write in the same transaction as the write it describes, using dataSource.transaction",
+            )
+            const explanations = brief.facts.map((fact) => fact.statement).join(" ")
+            // "service" and "shop" are in no stop-word list and never could be:
+            // they are common HERE, which only counting can know.
+            for (const noise of ["use", "the", "every", "same", "service", "shop"]) {
+                assert.ok(
+                    !new RegExp(`term\\(s\\)[^.]*\\b${noise}\\b`, "u").test(explanations),
+                    `"${noise}" matches every file and must not explain any of them`,
+                )
+            }
+        })
+    })
+
+    it("ranks the file that knows the distinctive term first", async () => {
+        await withTempDir("baro-scanner-rank-", async (dir) => {
+            const brief = await scan(
+                dir,
+                "Record every write in the same transaction as the write it describes for every shop service, using dataSource.transaction",
+            )
+            assert.equal(
+                brief.relevantPaths[0],
+                "src/audit.helper.ts",
+                "the one file that mentions dataSource.transaction is the one to open",
+            )
+        })
+    })
+})
+
 describe("DeterministicRepositoryScanner", () => {
     it("is goal-aware, root-contained, secret-excluding, deterministic, and read-only", async () => {
         await withTempDir("baro-repository-scout-", async (dir) => {
