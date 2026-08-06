@@ -388,6 +388,10 @@ export interface OrchestrateConfig {
         model?: string
         effort?: string
         claudeBin?: string
+        /** Which lane holds the planner; defaults to the run's own backend. */
+        backend?: string
+        /** Endpoint for a lane that calls a model directly. */
+        connection?: import("./harness/openai/runtime.js").OpenAIConnection
     }
     /** Called only after the Board has opened/persisted the planning latch. */
     onPlanningFeedReady?: (feed: PlanningFeed) => void
@@ -1793,6 +1797,12 @@ export async function orchestrate(
                     model: config.busPlanner.model,
                     effort: config.busPlanner.effort,
                     claudeBin: config.busPlanner.claudeBin,
+                    // Without this the planner defaults to a CLI and would
+                    // spawn Claude in the middle of a run on another backend.
+                    backend: config.busPlanner.backend ?? llm,
+                    ...(config.busPlanner.connection
+                        ? { connection: config.busPlanner.connection }
+                        : {}),
                     publishMeasurement: (measurement) =>
                         modelTelemetryCollector.publishPlannerMeasurement(
                             measurement,
