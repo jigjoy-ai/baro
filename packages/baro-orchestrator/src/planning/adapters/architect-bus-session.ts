@@ -238,7 +238,13 @@ export async function runArchitectBusSession(
         // Research rounds: the Architect asks, scouts answer beside it.
         while (researchRounds < maxRounds) {
             const reply = await replies.next()
-            if (reply === null) failed("the Architect exited during research")
+            if (reply === null) {
+                // The participant knows why it stopped; without this the
+                // phase reports only that it did, and a diagnosis costs a run.
+                failed(
+                    `the Architect exited during research: ${architect.sessionEndDetail()}`,
+                )
+            }
             const questions = parseResearchQuestions(reply!)
             if (questions.length === 0) {
                 // No questions means this reply IS the outcome attempt. Waiting
@@ -266,7 +272,11 @@ export async function runArchitectBusSession(
         }
 
         const reply = await replies.next()
-        if (reply === null) failed("the Architect exited before an outcome")
+        if (reply === null) {
+            failed(
+                `the Architect exited before an outcome: ${architect.sessionEndDetail()}`,
+            )
+        }
         outcomeAttempts = 1
         return await settleOutcome(reply!, {
             opts,
