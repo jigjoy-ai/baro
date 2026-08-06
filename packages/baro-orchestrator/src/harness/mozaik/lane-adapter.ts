@@ -63,6 +63,9 @@ export class MozaikLaneAdapter implements InteractiveLaneAdapter {
             ),
             systemPrompt: request.systemPrompt,
             ...(grant.tools ? { tools: grant.tools } : {}),
+            ...(request.maxRoundsPerTurn
+                ? { maxRoundsPerTurn: request.maxRoundsPerTurn }
+                : {}),
             ...(request.targetedMessageAuthority
                 ? { targetedMessageAuthority: request.targetedMessageAuthority }
                 : {}),

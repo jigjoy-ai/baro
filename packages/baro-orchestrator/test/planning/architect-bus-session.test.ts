@@ -6,6 +6,7 @@ import { describe, it } from "node:test"
 import {
     AgenticEnvironment,
     BaseObserver,
+    FunctionCallItem,
     ModelMessageItem,
     type ContextItem,
     type GenerativeModel,
@@ -158,6 +159,88 @@ class ScriptedNativeLane implements InteractiveLaneAdapter {
     }
 }
 
+/** An Architect that would read forever, and scouts that answer at once. */
+class EndlessReaderParticipant extends MozaikModelParticipant {
+    constructor(agentId: string, private readonly scout: boolean) {
+        super({
+            agentId,
+            model: {
+                specification: { name: "scripted" },
+                setTools: () => {},
+            } as unknown as GenerativeModel,
+            systemPrompt: "scripted",
+            tools: [
+                {
+                    type: "function",
+                    name: "read_file",
+                    description: "read",
+                    parameters: { type: "object", properties: {} },
+                    invoke: async () => "some file",
+                } as unknown as never,
+            ],
+            maxRoundsPerTurn: 4,
+        })
+    }
+
+    protected override async runRound(
+        context: ModelContext,
+    ): Promise<{ items: ContextItem[] }> {
+        const items = context.getItems()
+        const last = JSON.stringify(items[items.length - 1] ?? {})
+        if (this.scout) {
+            return { items: [ModelMessageItem.rehydrate({ text: "scout answer (src/x.ts:7)" })] }
+        }
+        // Only the host's refusal stops it reading; then it asks, and once the
+        // findings come back it produces the outcome.
+        if (/scout answer/u.test(last)) {
+            return {
+                items: [
+                    ModelMessageItem.rehydrate({
+                        text: "Here is my outcome: " + JSON.stringify({ ok: true }),
+                    }),
+                ],
+            }
+        }
+        if (/budget for this turn is spent/u.test(last)) {
+            return {
+                items: [
+                    ModelMessageItem.rehydrate({
+                        text: JSON.stringify({
+                            questions: [{ question: "Which module owns visibility?" }],
+                        }),
+                    }),
+                ],
+            }
+        }
+        return {
+            items: [
+                FunctionCallItem.rehydrate({
+                    callId: `call-${items.length}`,
+                    name: "read_file",
+                    args: JSON.stringify({ path: "src/a.ts" }),
+                }),
+            ],
+        }
+    }
+}
+
+class EndlessReaderLane implements InteractiveLaneAdapter {
+    readonly backend = "fake-reader"
+
+    async grant(): Promise<LaneGrant> {
+        return { close: async () => {} }
+    }
+
+    create(
+        request: InteractiveParticipantRequest,
+    ): InteractiveModelParticipant<unknown> {
+        return new EndlessReaderParticipant(
+            request.agentId,
+            request.systemPrompt.includes("repository scout"),
+        ) as unknown as InteractiveModelParticipant<unknown>
+    }
+}
+
 describe("architect bus session", () => {
     it("asks, reads the answers, and repairs a rejected outcome", async () => {
         await withTempDir("baro-architect-bus-", async (dir) => {
@@ -258,6 +341,38 @@ describe("architect bus session", () => {
                 2,
                 "scouts answer as participants on this lane too",
             )
+        })
+    })
+
+    // A model with a repository and a way to ask others to read it tends to
+    // read: a live GLM-5.2 Architect spent seventeen rounds surveying and sent
+    // no scout a single question. The turn's budget is what bounds the look.
+    it("stops surveying and asks, when the turn's budget is spent", async () => {
+        await withTempDir("baro-architect-bus-budget-", async (dir) => {
+            registerLane("fake-reader", () => new EndlessReaderLane())
+            const env = new AgenticEnvironment("architect-bus-budget-test")
+
+            const result = await runArchitectBusSession({
+                systemPrompt: "You are the architect for this engineering run.",
+                userMessage: "Migrate validation to zod.",
+                goal: "Migrate validation to zod.",
+                cwd: dir,
+                backend: "fake-reader",
+                environment: env,
+                roundBudgetMs: 20_000,
+                normalizeOutcome: (raw) => raw.slice(raw.indexOf("{")),
+                validateOutcome: (raw) => {
+                    if ((JSON.parse(raw) as { ok?: unknown }).ok !== true) {
+                        throw new Error("outcome must state ok:true")
+                    }
+                },
+            })
+
+            // It read until it was told to stop, then asked — and the scouts
+            // ran, which is the whole point of the phase.
+            assert.equal(result.researchRounds, 1)
+            assert.equal(result.findings.length, 1)
+            assert.ok(result.findings[0]!.ok)
         })
     })
 

@@ -63,6 +63,12 @@ export interface InteractiveParticipantRequest {
     readonly systemPrompt: string
     /** Native tools. Ignored by the CLI lane, which names its own instead. */
     readonly tools?: readonly Tool[]
+    /**
+     * Provider calls one turn may spend before it must answer. Ignored by the
+     * CLI lane, whose tool steps happen inside its own process and are never
+     * counted here.
+     */
+    readonly maxRoundsPerTurn?: number
     /** CLI-only extras (`--tools Read,Glob,Grep`, mcp config, safe mode). */
     readonly cliExtraArgs?: readonly string[]
     /** Exact bus authority allowed to deliver a targeted message to it. */

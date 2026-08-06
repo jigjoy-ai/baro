@@ -41,6 +41,19 @@ import { ScoutDispatched, ScoutFindingPublished } from "../../semantic-events.js
 
 const DEFAULT_RESEARCH_ROUNDS = 2
 const DEFAULT_OUTCOME_REPAIRS = 2
+/**
+ * Provider calls one Architect turn may spend before it must answer.
+ *
+ * The phase hands this model both a repository and a way to ask others to
+ * read it, and a model with tools in hand tends to read. A live GLM-5.2
+ * Architect spent seventeen rounds surveying the service and never sent a
+ * single scout question — the whole research collective, and the horizontal
+ * awareness built into it, sat idle. Claude resolves the same ambiguity the
+ * other way, which is why nobody noticed.
+ *
+ * A look is fine; a full survey is the scouts' job. This bounds the look.
+ */
+const ARCHITECT_ROUNDS_PER_TURN = 12
 
 export interface ArchitectBusSessionOptions {
     /** The Architect's own contract prompt; this session never rewrites it. */
@@ -157,6 +170,11 @@ const RESEARCH_TURN_INSTRUCTION = [
     "Before you decide, say what you must learn about this repository.",
     "Scouts will read the code and answer in parallel, with file:line citations.",
     "",
+    "Do NOT survey the repository yourself in this turn. A quick look to make",
+    "a question precise is fine; reading the modules the goal touches is not,",
+    "because that is the work the scouts do — in parallel, and they tell each",
+    "other what they find while they read.",
+    "",
     "A good question is one whose answer changes a decision: which module owns",
     "a behavior, whether a convention already exists, what a boundary actually",
     "validates, which callers depend on a shape. Ask nothing you can already",
@@ -205,6 +223,7 @@ export async function runArchitectBusSession(
             ...(opts.model ? { model: opts.model } : {}),
             ...(opts.effort ? { effort: opts.effort } : {}),
             systemPrompt: opts.systemPrompt,
+            maxRoundsPerTurn: ARCHITECT_ROUNDS_PER_TURN,
             ...(opts.billingCoordinator
                 ? {
                       billing: {
