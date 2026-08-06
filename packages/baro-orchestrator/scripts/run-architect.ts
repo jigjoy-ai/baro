@@ -548,6 +548,21 @@ async function runInitialArchitect(
     const outcomeContractMode = args.outcomeFile ? "decision" as const : undefined
     const timeoutMs = args.timeoutMs ??
         (args.outcomeFile ? architectPhaseBudgetMs(args) : undefined)
+
+    // Before any per-backend branch: whether this phase is a conversation is
+    // no longer a property of the backend. Every one of the branches below
+    // ends the phase in a single call, so a backend check reached first would
+    // silently take the bus away from every lane that is not a CLI — which is
+    // exactly what it did until this was moved.
+    if (architectBusEnabled(args)) {
+        return await runArchitectOnBus({
+            args,
+            projectContext,
+            modeContract,
+            outcomeContractMode,
+        })
+    }
+
     if (args.llm === "openai") {
         if (!process.env.OPENAI_API_KEY) {
             throw new Error("--llm openai requires OPENAI_API_KEY to be set")
@@ -615,43 +630,6 @@ async function runInitialArchitect(
             onInvocation,
         })
     }
-    if (architectBusEnabled(args)) {
-        const outcomeMode = args.outcomeFile !== undefined
-        const session = await runArchitectBusSession({
-            systemPrompt: architectSystemPrompt(outcomeMode, outcomeContractMode),
-            userMessage: buildArchitectUserMessage(
-                args.goal,
-                projectContext,
-                modeContract,
-            ),
-            goal: args.goal,
-            cwd: args.cwd,
-            model: args.model,
-            effort: args.effort,
-            claudeBin: args.claudeBin,
-            backend: args.llm,
-            projectContext,
-            goalEnvelope: trustedGoalEnvelope,
-            ...(outcomeMode
-                ? {
-                      normalizeOutcome: (raw: string) => extractModelJsonObject(raw),
-                      validateOutcome: (raw: string) => {
-                          parseArchitectOutcome(raw, {
-                              decisionOnly: outcomeContractMode === "decision",
-                          })
-                      },
-                  }
-                : {}),
-            onProgress: (line) => process.stderr.write(`${line}\n`),
-        })
-        process.stderr.write(
-            `[architect-bus] ${session.researchRounds} research round(s), ` +
-                `${session.findings.filter((finding) => finding.ok).length}/` +
-                `${session.findings.length} answered, ` +
-                `${session.outcomeAttempts} outcome attempt(s)\n`,
-        )
-        return session.outcome
-    }
     return await runArchitectClaude({
         goal: args.goal,
         cwd: args.cwd,
@@ -666,6 +644,57 @@ async function runInitialArchitect(
         readOnly: args.outcomeFile !== undefined,
         onInvocation,
     })
+}
+
+/**
+ * The Architect phase as a conversation: it asks what it must learn, scouts
+ * answer as participants, and a refused outcome comes back as a correction.
+ * Held by whichever lane the run is on — the phase's shape stopped being a
+ * property of the backend.
+ */
+async function runArchitectOnBus(input: {
+    args: Args
+    projectContext: string | undefined
+    modeContract: ModeContract | undefined
+    /** Derived once by the caller; both must agree on what the phase owes. */
+    outcomeContractMode: "decision" | undefined
+}): Promise<string> {
+    const { args, projectContext, modeContract, outcomeContractMode } = input
+    const outcomeMode = args.outcomeFile !== undefined
+    const session = await runArchitectBusSession({
+        systemPrompt: architectSystemPrompt(outcomeMode, outcomeContractMode),
+        userMessage: buildArchitectUserMessage(
+            args.goal,
+            projectContext,
+            modeContract,
+        ),
+        goal: args.goal,
+        cwd: args.cwd,
+        model: args.model,
+        effort: args.effort,
+        claudeBin: args.claudeBin,
+        backend: args.llm,
+        projectContext,
+        goalEnvelope: trustedGoalEnvelope,
+        ...(outcomeMode
+            ? {
+                  normalizeOutcome: (raw: string) => extractModelJsonObject(raw),
+                  validateOutcome: (raw: string) => {
+                      parseArchitectOutcome(raw, {
+                          decisionOnly: outcomeContractMode === "decision",
+                      })
+                  },
+              }
+            : {}),
+        onProgress: (line) => process.stderr.write(`${line}\n`),
+    })
+    process.stderr.write(
+        `[architect-bus] ${session.researchRounds} research round(s), ` +
+            `${session.findings.filter((finding) => finding.ok).length}/` +
+            `${session.findings.length} answered, ` +
+            `${session.outcomeAttempts} outcome attempt(s)\n`,
+    )
+    return session.outcome
 }
 
 async function compileObligations(input: {
