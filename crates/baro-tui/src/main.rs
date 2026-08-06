@@ -3360,13 +3360,63 @@ async fn accept_conversation_response(
             {
                 Some(text) => submit_conversation_message(app, cwd, tx, text)
                     .map_err(|error| format!("cannot continue conversation: {error}")),
-                None => Err(
-                    "conversation requires another user message, but the headless stdin transport closed"
-                        .to_string(),
-                ),
+                // Nobody is there, by design: headless is started and left
+                // alone until it opens a pull request. A question it cannot
+                // ask must not end the run — the finding is worth keeping,
+                // the blocking is not, so it becomes a decision the model
+                // makes and records where the human will read it.
+                None => resolve_clarification_without_a_human(app, cwd, tx, &message),
             }
         }
     }
+}
+
+/// How many times one headless run may answer its own clarification before
+/// the goal is declared unsatisfiable. Two rounds cover "the constraints
+/// collide, pick one" plus one follow-on; beyond that the model is not
+/// deciding, it is asking again in different words.
+const MAX_HEADLESS_CLARIFICATIONS: u8 = 2;
+
+const HEADLESS_CLARIFICATION_DIRECTIVE: &str = "\
+This run is headless: there is no one to answer you, and no answer is coming. \
+Do not ask again. Choose the resolution that violates the fewest stated \
+constraints, and record — in the decision itself — the contradiction you \
+found, the file:line evidence for it, the option you chose and what it costs. \
+If every available option breaks a constraint the goal states outright, say so \
+in one sentence beginning \"UNSATISFIABLE:\" and name the two constraints that \
+cannot both hold.";
+
+/// A clarification nobody can answer, resolved the only honest way: the model
+/// decides and states what it assumed, or names the goal unsatisfiable.
+fn resolve_clarification_without_a_human(
+    app: &mut App,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+    clarification: &str,
+) -> Result<(), String> {
+    if app.headless_clarifications_resolved >= MAX_HEADLESS_CLARIFICATIONS {
+        return Err(format!(
+            "goal cannot be satisfied as stated, and this run has no one to decide: {}",
+            clarification.trim(),
+        ));
+    }
+    app.headless_clarifications_resolved += 1;
+    println!(
+        "{}",
+        serde_json::json!({
+            "type": "conversation_clarification_resolved",
+            "session_id": app.conversation.session_id(),
+            "attempt": app.headless_clarifications_resolved,
+            "clarification": clarification,
+        })
+    );
+    submit_conversation_message(
+        app,
+        cwd,
+        tx,
+        HEADLESS_CLARIFICATION_DIRECTIVE.to_string(),
+    )
+    .map_err(|error| format!("cannot continue conversation: {error}"))
 }
 
 fn start_planning_from_conversation(
@@ -4292,6 +4342,47 @@ mod tests {
             "https://explicit.example/v1",
         );
         assert_eq!(preferred_jigjoy_gateway_url(None, None), JIGJOY_GATEWAY_URL);
+    }
+
+    // A headless run is started and left alone until it opens a pull request.
+    // A clarification it cannot ask once ended the run on a transport error,
+    // throwing away both the work and the finding that provoked it.
+    // Submission spawns onto the runtime, so this needs one.
+    #[tokio::test]
+    async fn headless_answers_its_own_clarification_a_bounded_number_of_times() {
+        use crate::{resolve_clarification_without_a_human, MAX_HEADLESS_CLARIFICATIONS};
+
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let cwd = std::path::Path::new(".");
+        let clarification = "specs pin non-transactional behaviour; the goal demands a transaction";
+
+        // The first rounds are answered on the user's behalf — the model is
+        // told to decide and to record what it assumed.
+        for attempt in 1..=MAX_HEADLESS_CLARIFICATIONS {
+            let outcome = resolve_clarification_without_a_human(
+                &mut app,
+                cwd,
+                tx.clone(),
+                clarification,
+            );
+            assert_eq!(app.headless_clarifications_resolved, attempt);
+            // Submission may still be refused by conversation state in a bare
+            // App; what this pins is that the run was never told to stop.
+            if let Err(error) = outcome {
+                let error: String = error;
+                assert!(
+                    !error.contains("cannot be satisfied as stated"),
+                    "attempt {attempt} must not declare the goal unsatisfiable: {error}"
+                );
+            }
+        }
+
+        // Past the bound it stops asking in different words and says why.
+        let error = resolve_clarification_without_a_human(&mut app, cwd, tx, clarification)
+            .expect_err("an unbounded loop is the failure this guards");
+        assert!(error.contains("cannot be satisfied as stated"), "{error}");
+        assert!(error.contains("specs pin non-transactional behaviour"), "{error}");
     }
 
     #[test]

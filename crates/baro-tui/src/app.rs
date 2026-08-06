@@ -455,6 +455,11 @@ pub struct App {
     /// Exact previously established branch that authorizes a follow-up. A
     /// terminal conversation phase alone is never sufficient branch authority.
     pub continuation_branch: Option<String>,
+    /// Clarifications a headless run has already answered on the user's
+    /// behalf. Headless is fire-and-forget by contract, so a question it
+    /// cannot ask becomes a decision it must record — but only for a bounded
+    /// number of rounds, or an unsatisfiable goal loops forever.
+    pub headless_clarifications_resolved: u8,
     pub refining: bool,
 
     // Config
@@ -666,6 +671,7 @@ impl App {
             refine_input: None,
             is_followup: false,
             continuation_branch: None,
+            headless_clarifications_resolved: 0,
             refining: false,
             parallel_limit: 0,
             timeout_secs: 0, // 0 = auto (orchestrator effort-scales the per-story timeout)
