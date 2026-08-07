@@ -60,7 +60,15 @@ type SignalAwareTool = Tool & {
     invokeWithSignal: (args: any, signal: AbortSignal) => Promise<unknown>
 }
 
+/** What a story may write, and who owns what it may not. */
+export interface StoryWriteSurface {
+    readonly writes: readonly string[]
+    readonly ownedElsewhere: Readonly<Record<string, string>>
+}
+
 export interface CodebaseToolOptions {
+    /** Enforced by the write tools; absent means no boundary is known. */
+    surface?: StoryWriteSurface
     /** Set false for inspection-only roles that must never receive a shell. */
     includeBash?: boolean
     /**

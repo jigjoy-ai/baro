@@ -38,6 +38,15 @@ export interface StorySpec {
     maxTurns?: number
     /** Hard cap in seconds for the whole story across all attempts; <= 0 disables. */
     hardTimeoutSecs?: number
+    /**
+     * What this story may write, and who owns what it may not. The prompt
+     * states it; the tools enforce it — a cheap model reads the sentence and
+     * edits the file anyway.
+     */
+    surface?: {
+        readonly writes: readonly string[]
+        readonly ownedElsewhere: Readonly<Record<string, string>>
+    }
     /** Await an exact Critic verdict before completing each candidate turn. */
     requiresQualityReview?: boolean
     /** Object-identity authority allowed to review this worker's turns. */

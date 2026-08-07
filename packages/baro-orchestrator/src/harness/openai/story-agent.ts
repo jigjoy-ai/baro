@@ -288,6 +288,7 @@ export class OpenAIStoryAgent extends BaseObserver {
         this.tools = [
             ...createStoryTools(spec.cwd, {
                 collaboration: opts.collaboration,
+                ...(spec.surface ? { surface: spec.surface } : {}),
             }),
             ...(this.runtimeReplanEnabled()
                 ? [createRuntimeReplanTool(this.runtimeGraphVersion!)]

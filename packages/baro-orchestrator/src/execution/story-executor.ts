@@ -225,6 +225,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                           timeoutSecs: req.timeoutSecs,
                           graphVersion: req.graphVersion,
                           requiresQualityReview: req.requiresQualityReview,
+                          ...(req.surface ? { surface: req.surface } : {}),
                           handoffInconclusiveToAcceptanceGate:
                               opts.handoffInconclusiveToAcceptanceGate,
                           targetedMessageAuthority:

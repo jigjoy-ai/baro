@@ -14,6 +14,7 @@ import {
     createCodebaseTools,
     safePath,
     type CodebaseToolOptions,
+    type StoryWriteSurface,
 } from "./codebase-tools.js"
 
 const MAX_WRITE_BYTES = 500_000
@@ -30,12 +31,60 @@ export function createStoryTools(
 ): Tool[] {
     return [
         ...createCodebaseTools(cwd, options),
-        writeFileTool(cwd),
-        editFileTool(cwd),
+        writeFileTool(cwd, options.surface),
+        editFileTool(cwd, options.surface),
     ]
 }
 
-function writeFileTool(cwd: string): Tool {
+/**
+ * The write surface, enforced where the model acts.
+ *
+ * The story prompt already names every file this story may write, every file
+ * another story owns, and the three things to do instead of reaching into one.
+ * A live run read all of it and edited four other stories' services anyway:
+ * the foundation story wanted to prove its service worked end to end, so it
+ * instrumented the consumers. Nothing stopped it, its own test evidence then
+ * described a tree it had changed underneath itself, and the Critic could only
+ * answer "unverifiable" — one story lost, and the nine that depended on it
+ * skipped.
+ *
+ * Prose is advice to a model that does not have to take it. This is the same
+ * boundary as a refusal the model reads in the round it tried, while the edit
+ * costs one tool call instead of an hour and a whole level of the plan.
+ */
+function surfaceRefusal(
+    path: string,
+    surface: StoryWriteSurface | undefined,
+): string | null {
+    if (!surface) return null
+    const normalized = path.replace(/^\.\//u, "")
+    const owner = surface.ownedElsewhere[normalized]
+    if (!owner) return null
+    return (
+        `Error: ${normalized} belongs to story ${owner}, not to this story. ` +
+        `A diff touching it is refused at integration, so writing it here ` +
+        `loses this whole story rather than just the edit. Ask ${owner} for ` +
+        `the change, block on ${owner}, or dispute the contract claim that ` +
+        `made you reach for it — see "Your write surface" in your instructions.`
+    )
+}
+
+/** Outside the declaration but owned by nobody: allowed, and said out loud. */
+function surfaceNote(
+    path: string,
+    surface: StoryWriteSurface | undefined,
+): string {
+    if (!surface || surface.writes.length === 0) return ""
+    const normalized = path.replace(/^\.\//u, "")
+    if (surface.writes.includes(normalized)) return ""
+    return (
+        `\nNote: ${normalized} is not in this story's declared write surface. ` +
+        `Nobody else owns it, so this write stands, but the merge gate is the ` +
+        `authority on what it accepts.`
+    )
+}
+
+function writeFileTool(cwd: string, surface?: StoryWriteSurface): Tool {
     return {
         type: "function",
         name: "write_file",
@@ -61,6 +110,8 @@ function writeFileTool(cwd: string): Tool {
             additionalProperties: false,
         },
         async invoke(args: { path: string; content: string }) {
+            const refusal = surfaceRefusal(args.path, surface)
+            if (refusal) return refusal
             const target = safePath(cwd, args.path)
             if (!target) return `Error: path '${args.path}' escapes the project root.`
             if (args.content.length > MAX_WRITE_BYTES) {
@@ -70,7 +121,10 @@ function writeFileTool(cwd: string): Tool {
                 const dir = path.dirname(target)
                 fs.mkdirSync(dir, { recursive: true })
                 fs.writeFileSync(target, args.content, "utf-8")
-                return `Wrote ${args.path} (${args.content.length} bytes).`
+                return (
+                    `Wrote ${args.path} (${args.content.length} bytes).` +
+                    surfaceNote(args.path, surface)
+                )
             } catch (e) {
                 return `Error writing ${args.path}: ${(e as Error)?.message ?? String(e)}`
             }
@@ -78,7 +132,7 @@ function writeFileTool(cwd: string): Tool {
     }
 }
 
-function editFileTool(cwd: string): Tool {
+function editFileTool(cwd: string, surface?: StoryWriteSurface): Tool {
     return {
         type: "function",
         name: "edit_file",
@@ -111,6 +165,8 @@ function editFileTool(cwd: string): Tool {
             additionalProperties: false,
         },
         async invoke(args: { path: string; old: string; new: string }) {
+            const refusal = surfaceRefusal(args.path, surface)
+            if (refusal) return refusal
             const target = safePath(cwd, args.path)
             if (!target) return `Error: path '${args.path}' escapes the project root.`
             if (!fs.existsSync(target)) {
@@ -142,7 +198,10 @@ function editFileTool(cwd: string): Tool {
                 fs.writeFileSync(target, updated, "utf-8")
                 const delta = updated.length - original.length
                 const sign = delta >= 0 ? "+" : ""
-                return `Edited ${args.path} (${sign}${delta} bytes).`
+                return (
+                    `Edited ${args.path} (${sign}${delta} bytes).` +
+                    surfaceNote(args.path, surface)
+                )
             } catch (e) {
                 return `Error writing ${args.path}: ${(e as Error)?.message ?? String(e)}`
             }
