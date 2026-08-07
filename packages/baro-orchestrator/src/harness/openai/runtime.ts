@@ -451,16 +451,13 @@ function finishedAtCeiling(response: unknown): boolean {
 }
 
 /**
- * Streaming is opt-in for exactly one measured run.
- *
- * What it buys is liveness — progress a watchdog can see — and what it risks
- * is usage: a provider that ignores `stream_options.include_usage` streams no
- * token counts, and every cost figure and gateway receipt is built on them.
- * One live run on the endpoint we bill through settles that; the day it does,
- * this predicate becomes `true` and then goes away entirely.
+ * Streaming makes a long generation distinguishable from a hang, which is
+ * what every idle watchdog here measures. `0` is the escape hatch for a
+ * provider that ignores `stream_options.include_usage`: without those counts
+ * a streamed round reports no tokens, and the cost figures depend on them.
  */
 function nativeStreamingEnabled(): boolean {
-    return process.env.BARO_NATIVE_STREAM === "1"
+    return process.env.BARO_NATIVE_STREAM !== "0"
 }
 
 /**

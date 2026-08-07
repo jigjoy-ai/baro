@@ -11,6 +11,7 @@ import {
 } from "../../../src/runtime/mozaik.js"
 
 import { knownMetric, unknownMetric } from "../../../src/telemetry/model-telemetry.js"
+import { streamRequested, streamedCompletion } from "./fake-completion.js"
 import { SurgeonOpenAI } from "../../../src/harness/openai/surgeon.js"
 import type { PrdSnapshot } from "../../../src/execution/surgeon.js"
 import {
@@ -62,7 +63,11 @@ const originalBaseUrl = process.env.OPENAI_BASE_URL
 describe("SurgeonOpenAI", () => {
     before(async () => {
         server = createServer((req, res) => {
-            req.resume()
+            let body = ""
+            req.on("data", (chunk: Buffer) => {
+                body += chunk.toString("utf8")
+            })
+            req.on("end", () => {
             if (responseMode === "error") {
                 res.writeHead(500, { "content-type": "application/json" })
                 res.end(JSON.stringify({ error: { message: "fake openai failure" } }))
@@ -70,6 +75,21 @@ describe("SurgeonOpenAI", () => {
             }
 
             assert.equal(req.url, "/chat/completions")
+            const usage = {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+            }
+            // The runtime streams by default; a fixture that only ever answers
+            // in one JSON body would exercise a transport no run takes.
+            if (streamRequested(body)) {
+                res.writeHead(200, { "content-type": "text/event-stream" })
+                for (const chunk of streamedCompletion(assistantText, usage)) {
+                    res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+                }
+                res.end("data: [DONE]\n\n")
+                return
+            }
             res.writeHead(200, { "content-type": "application/json" })
             res.end(
                 JSON.stringify({
@@ -82,13 +102,10 @@ describe("SurgeonOpenAI", () => {
                             finish_reason: "stop",
                         },
                     ],
-                    usage: {
-                        prompt_tokens: 1,
-                        completion_tokens: 1,
-                        total_tokens: 2,
-                    },
+                    usage,
                 }),
             )
+            })
         })
         server.listen(0, "127.0.0.1")
         await once(server, "listening")

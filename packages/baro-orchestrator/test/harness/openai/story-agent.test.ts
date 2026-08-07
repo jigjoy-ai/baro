@@ -1,5 +1,7 @@
 import assert from "node:assert/strict"
 import { createServer, type Server } from "node:http"
+
+import { streamRequested, streamedCompletion } from "./fake-completion.js"
 import { existsSync, mkdirSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
@@ -1569,29 +1571,42 @@ async function waitForCount<T>(
 }
 
 async function startFakeOpenAIServer(): Promise<Server> {
-    const server = createServer((_req, res) => {
-        res.writeHead(200, { "content-type": "application/json" })
-        res.end(
-            JSON.stringify({
-                id: "chatcmpl-test",
-                object: "chat.completion",
-                choices: [
-                    {
-                        index: 0,
-                        message: {
-                            role: "assistant",
-                            content: "story complete",
+    const usage = { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 }
+    const server = createServer((req, res) => {
+        let body = ""
+        req.on("data", (chunk: Buffer) => {
+            body += chunk.toString("utf8")
+        })
+        req.on("end", () => {
+            // The runtime streams by default; answering only in one JSON body
+            // would exercise a transport no run takes.
+            if (streamRequested(body)) {
+                res.writeHead(200, { "content-type": "text/event-stream" })
+                for (const chunk of streamedCompletion("story complete", usage)) {
+                    res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+                }
+                res.end("data: [DONE]\n\n")
+                return
+            }
+            res.writeHead(200, { "content-type": "application/json" })
+            res.end(
+                JSON.stringify({
+                    id: "chatcmpl-test",
+                    object: "chat.completion",
+                    choices: [
+                        {
+                            index: 0,
+                            message: {
+                                role: "assistant",
+                                content: "story complete",
+                            },
+                            finish_reason: "stop",
                         },
-                        finish_reason: "stop",
-                    },
-                ],
-                usage: {
-                    prompt_tokens: 1,
-                    completion_tokens: 2,
-                    total_tokens: 3,
-                },
-            }),
-        )
+                    ],
+                    usage,
+                }),
+            )
+        })
     })
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
     return server
