@@ -997,11 +997,13 @@ class DialogueRunTrigger extends BaseObserver {
 
 describe("orchestrate collective mode", () => {
     it("derives the default goal-review timeout from the effective story timeout", () => {
+        // `bfd1b63` made silence the only clock: effort no longer buys a
+        // longer wall-clock leash, so every effort derives the same budget.
         for (const [effort, expectedSecs] of [
             [undefined, 600],
-            ["high", 900],
-            ["xhigh", 1_200],
-            ["max", 1_500],
+            ["high", 600],
+            ["xhigh", 600],
+            ["max", 600],
         ] as const) {
             const storyTimeout = storyTimeoutSecs(undefined, effort)
             assert.equal(storyTimeout, expectedSecs)
@@ -1807,8 +1809,11 @@ describe("orchestrate collective mode", () => {
             const fakeBin = join(dir, "claude")
             writeFileSync(
                 fakeBin,
+                // Critic reads `--output-format stream-json`, so the fake must
+                // emit a newline-terminated `type:"result"` frame, not the
+                // single object the old `--output-format json` returned.
                 "#!/bin/sh\n" +
-                    "printf '%s' '{\"result\":\"{\\\"verdict\\\":\\\"pass\\\",\\\"reasoning\\\":\\\"criteria satisfied\\\",\\\"violated_criteria\\\":[]}\"}'\n",
+                    "printf '%s\\n' '{\"type\":\"result\",\"result\":\"{\\\"verdict\\\":\\\"pass\\\",\\\"reasoning\\\":\\\"criteria satisfied\\\",\\\"violated_criteria\\\":[]}\"}'\n",
             )
             chmodSync(fakeBin, 0o755)
             const oldPath = process.env.PATH
@@ -1908,7 +1913,7 @@ describe("orchestrate collective mode", () => {
                     '  const verdict = polluted',
                     '    ? { verdict: "fail", reasoning: "global sibling work leaked into local review", violated_criteria: ["global"] }',
                     '    : { verdict: "pass", reasoning: "local criteria satisfied", violated_criteria: [] }',
-                    '  process.stdout.write(JSON.stringify({ result: JSON.stringify(verdict) }))',
+                    '  process.stdout.write(JSON.stringify({ type: "result", result: JSON.stringify(verdict) }) + "\\n")',
                     "})",
                     "",
                 ].join("\n"),

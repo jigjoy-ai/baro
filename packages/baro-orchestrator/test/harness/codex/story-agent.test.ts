@@ -775,7 +775,10 @@ setInterval(() => {}, 1_000)
 
             assert.equal(outcome.success, false)
             assert.equal(outcome.attempts, 1)
-            assert.match(outcome.error ?? "", /attempt 1 timeout/)
+            // `bfd1b63` replaced the wall-clock attempt deadline with an idle
+            // one: a provider that keeps emitting is never cut off, and this
+            // fixture is killed for saying nothing, not for taking long.
+            assert.match(outcome.error ?? "", /attempt 1 produced no output/)
             assert.deepEqual(outcome.failure, {
                 kind: "infrastructure",
                 code: "command_timeout",

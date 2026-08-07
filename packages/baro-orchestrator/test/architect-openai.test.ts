@@ -469,7 +469,22 @@ describe("ArchitectOpenAI bounded finalization", () => {
         )
         assert.deepEqual(
             createCodebaseTools("/unused", { includeBash: false }).map((item) => item.name),
-            ["read_file", "list_files", "file_tree", "grep", "glob"],
+            [
+                "read_file",
+                "read_files",
+                "list_files",
+                "file_tree",
+                "grep",
+                "glob",
+                "batch",
+            ],
+        )
+        // The list above only means something if the flag is what removes bash,
+        // rather than the read-only surface never having offered it.
+        assert.ok(
+            createCodebaseTools("/unused", { includeBash: true })
+                .map((item) => item.name)
+                .includes("bash"),
         )
     })
 
