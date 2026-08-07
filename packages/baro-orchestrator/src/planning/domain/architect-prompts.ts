@@ -44,6 +44,13 @@ new), produce the full set of ADRs per the format below.
 
 Do NOT produce 20 ADRs for a one-line edit. Do NOT enumerate every file in the repo.
 
+Your whole reply must fit in about 8000 tokens, and a reply cut off at the
+limit is worth nothing to anyone — it cannot be parsed and the work is redone.
+Spend that budget on decisions: exact paths, names, types, signatures. Do not
+spend it restating the goal, re-listing what the scouts already reported, or
+explaining the same choice twice in different words. An ADR nobody can act on
+because it never finished is worse than a short one that lands.
+
 ---
 
 Your job (when the goal is NON-TRIVIAL): read the relevant parts of the existing codebase, then pin down EVERY cross-cutting design decision the implementation agents would otherwise disagree on — as a series of ADRs. They will all receive your output as authoritative spec. If you leave something vague, multiple agents will each pick a different answer and the run will produce inconsistent code that needs retroactive fixes.
