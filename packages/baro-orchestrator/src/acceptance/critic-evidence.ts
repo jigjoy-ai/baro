@@ -1131,16 +1131,27 @@ interface ResolvedCommandEvidence {
 const STALE_COMMAND_EVIDENCE = "command evidence is stale or unverifiable"
 
 /**
- * The one readiness issue an agent can repair itself: it ran its checks, then
- * kept editing, so the evidence no longer describes the candidate. Every other
- * issue needs the host or the evaluator, never another agent turn.
+ * Readiness is one question — is there a command that is fresh, terminal and
+ * unblocked — so its complaints describe the whole command set, not one entry.
+ * A sandbox-blocked probe alongside a stale test run is still repairable: the
+ * agent re-runs the test and the set gains what it lacked. Only a broken
+ * repository or collector needs the host, and those must still fail closed.
  */
+const COMMAND_ISSUES_A_RERUN_CAN_CLEAR: ReadonlySet<string> = new Set([
+    STALE_COMMAND_EVIDENCE,
+    "a verification command has no terminal output",
+    "verification command was blocked by the sandbox",
+    "command evidence has no usable fresh terminal command",
+])
+
 function staleCommandsToRerun(
     commandEvidence: ResolvedCommandEvidence,
     issues: readonly string[],
 ): readonly string[] {
     if (issues.length === 0) return []
-    if (!issues.every((issue) => issue === STALE_COMMAND_EVIDENCE)) return []
+    if (!issues.every((issue) => COMMAND_ISSUES_A_RERUN_CAN_CLEAR.has(issue))) {
+        return []
+    }
     return (commandEvidence.commands ?? [])
         .filter(
             (command) =>

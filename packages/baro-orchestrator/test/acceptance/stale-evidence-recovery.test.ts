@@ -82,7 +82,7 @@ describe("stale command evidence is repaired, not fatal", () => {
         assert.deepEqual(snapshot.staleCommands, ["npm test"])
     })
 
-    it("names stale commands only when staleness is the sole blocker", async () => {
+    it("names what a re-run would fix, and nothing the host owes", async () => {
         await withTempDir("baro-stale-evidence-", async (repo) => {
             git(repo, "init", "--quiet")
             writeFileSync(join(repo, "tracked.ts"), "export const value = 1\n")
@@ -142,7 +142,8 @@ describe("stale command evidence is repaired, not fatal", () => {
             assert.equal(unrepairable.status, "inconclusive")
             assert.deepEqual(unrepairable.staleCommands, [])
 
-            // A sandbox-blocked command is not evidence the agent can refresh.
+            // A sandbox-blocked command can never become evidence, so it is
+            // never offered for a re-run.
             const blocked = await prepareCriticEvaluation(
                 ["criterion"],
                 "output",
@@ -158,6 +159,31 @@ describe("stale command evidence is repaired, not fatal", () => {
                 } satisfies CriticEvidenceSource,
             )
             assert.deepEqual(blocked.staleCommands, [])
+
+            // ...but it must not veto the stale test run standing beside it.
+            // A real run died exactly here: a blocked `psql` probe next to a
+            // stale `npm test` made a repairable candidate unjudgeable.
+            const mixed = await prepareCriticEvaluation(
+                ["criterion"],
+                "output",
+                "S1",
+                {
+                    resolveRepositoryTarget: () => ({ cwd: repo, baseSha }),
+                    commandEvidence: () => ({
+                        text: "### Command 1\ncommand: npm test\n",
+                        commands: [
+                            {
+                                command: "psql -c 'select 1'",
+                                terminal: true,
+                                freshness: "fresh" as const,
+                                sandboxBlocked: true,
+                            },
+                            staleCommand,
+                        ],
+                    }),
+                } satisfies CriticEvidenceSource,
+            )
+            assert.deepEqual(mixed.staleCommands, ["npm test -- src/audit"])
         })
     })
 })
