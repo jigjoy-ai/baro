@@ -32,6 +32,7 @@ import {
 } from "../../conversation/dialogue-responder.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 
+import { withTransientRetry } from "../../harness/transient-retry.js"
 import {
     ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_OUTCOME_SYSTEM_PROMPT,
@@ -267,43 +268,7 @@ async function runArchitectOpenAIWithinBudget(
         // Do not remove the schemas during finalization. Some compatible
         // models otherwise serialize their next tool call into message text.
         let result: Awaited<ReturnType<typeof inferRound>>
-        try {
-            const roundPromise = inferRound(context, model, {
-                ...(phaseSignal ? { signal: phaseSignal } : {}),
-                ...(opts.billingCoordinator
-                    ? {
-                          billing: {
-                              coordinator: opts.billingCoordinator,
-                              context: {
-                                  runId: null,
-                                  phase: "architect",
-                                  storyId: null,
-                                  leaseId: null,
-                                  generation: null,
-                                  attempt: 1,
-                                  turn: round,
-                                  round,
-                              },
-                          },
-                      }
-                    : {}),
-            })
-            let timer: ReturnType<typeof setTimeout> | undefined
-            result = perRoundTimeoutMs === undefined
-                ? await roundPromise
-                : await Promise.race([
-                      roundPromise,
-                      new Promise<never>((_, reject) => {
-                          timer = setTimeout(
-                              () => reject(new Error(
-                                  `round ${round} timed out after ${perRoundTimeoutMs}ms`,
-                              )),
-                              perRoundTimeoutMs,
-                          )
-                      }),
-                  ]).finally(() => clearTimeout(timer))
-            assertArchitectPhaseDeadline(opts.timeoutMs, phaseDeadlineAt)
-        } catch (error) {
+        const observeRoundFailure = (error: unknown): void => {
             const timedOut = isRunnerTimeoutError(error) ||
                 (phaseSignal?.aborted === true &&
                     isRunnerTimeoutError(phaseSignal.reason))
@@ -319,6 +284,76 @@ async function runArchitectOpenAIWithinBudget(
                 },
                 inferenceFailureMeasurementPublished(error),
             )
+        }
+        let failureObserved = false
+        try {
+            // A dropped connection costs this round, not the phase. Without
+            // this the only retry left is the one wrapping the whole phase,
+            // which restarts from an empty context: one reset in the seventh
+            // round threw away six rounds of research, four times over.
+            result = await withTransientRetry(
+                (attempt) => {
+                    const roundPromise = inferRound(context, model, {
+                        ...(phaseSignal ? { signal: phaseSignal } : {}),
+                        ...(opts.billingCoordinator
+                            ? {
+                                  billing: {
+                                      coordinator: opts.billingCoordinator,
+                                      context: {
+                                          runId: null,
+                                          phase: "architect",
+                                          storyId: null,
+                                          leaseId: null,
+                                          generation: null,
+                                          attempt,
+                                          turn: round,
+                                          round,
+                                      },
+                                  },
+                              }
+                            : {}),
+                    })
+                    let timer: ReturnType<typeof setTimeout> | undefined
+                    return (perRoundTimeoutMs === undefined
+                        ? roundPromise
+                        : Promise.race([
+                              roundPromise,
+                              new Promise<never>((_, reject) => {
+                                  timer = setTimeout(
+                                      () => reject(new Error(
+                                          `round ${round} timed out after ${perRoundTimeoutMs}ms`,
+                                      )),
+                                      perRoundTimeoutMs,
+                                  )
+                              }),
+                          ]).finally(() => clearTimeout(timer))
+                    ).catch((error: unknown) => {
+                        // Each dead dispatch stays visible: a retried round
+                        // that reported nothing is still a round we paid for.
+                        observeRoundFailure(error)
+                        failureObserved = true
+                        throw error
+                    })
+                },
+                {
+                    maxAttempts: 3,
+                    retryable: (error) =>
+                        // The per-round timeout already waited longer than any
+                        // real call takes; waiting it out again is a second hang.
+                        !isRunnerTimeoutError(error) &&
+                        // Sleeping through the rest of the phase budget trades
+                        // a named provider failure for an unnamed deadline one.
+                        retryFitsInPhase(phaseDeadlineAt),
+                    notice: (message) =>
+                        process.stderr.write(
+                            `[architect-openai] round ${round} ${message}\n`,
+                        ),
+                },
+            )
+            failureObserved = false
+            assertArchitectPhaseDeadline(opts.timeoutMs, phaseDeadlineAt)
+        } catch (error) {
+            if (!failureObserved) observeRoundFailure(error)
             throw error
         }
         usage.add(result.usage)
@@ -464,6 +499,18 @@ function architectPhaseTimeoutError(timeoutMs: number): Error {
     )
     error.name = "TimeoutError"
     return error
+}
+
+/**
+ * A retry is worth starting only if the wait plus another round can still
+ * land inside the phase. The first backoff is 5s and a round is not instant,
+ * so anything under this leaves no room to actually use the retry.
+ */
+const MIN_RETRY_HEADROOM_MS = 30_000
+
+function retryFitsInPhase(deadlineAt: number | undefined): boolean {
+    if (deadlineAt === undefined) return true
+    return deadlineAt - Date.now() > MIN_RETRY_HEADROOM_MS
 }
 
 function assertArchitectPhaseDeadline(

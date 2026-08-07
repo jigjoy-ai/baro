@@ -523,7 +523,10 @@ async function main(): Promise<void> {
  * the backend no longer decides whether the phase gets to be a conversation.
  */
 function architectBusEnabled(_args: Args): boolean {
-    return process.env.BARO_ARCHITECT_BUS === "1"
+    // Default on: a lane that misses this reads the repository alone, never
+    // reaches a scout, and loses the whole exploration to one dropped
+    // connection. `0` remains for bisecting against the single-call shape.
+    return process.env.BARO_ARCHITECT_BUS !== "0"
 }
 
 function architectSystemPrompt(

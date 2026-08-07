@@ -805,7 +805,11 @@ function runScript(
     return new Promise((resolve, reject) => {
         const child = spawn(TSX, [RUN_ARCHITECT, ...args], {
             cwd: REPO_ROOT,
-            env: environment,
+            // Every case in this file asserts the single-call shape: which
+            // flags reach the backend CLI, how one invocation fails. The
+            // conversation shape is the default and is covered by
+            // architect-bus-session.test.ts.
+            env: { ...environment, BARO_ARCHITECT_BUS: "0" },
             stdio: ["ignore", "pipe", "pipe"],
         })
         let stdout = ""

@@ -751,7 +751,9 @@ async function main(): Promise<void> {
         },
         progressivePlanningId,
         busPlanner:
-            process.env.BARO_PLANNER_BUS === "1" &&
+            // Default on, like the Architect's: planning is a conversation on
+            // every lane. `0` remains for bisecting against the MCP-relay shape.
+            process.env.BARO_PLANNER_BUS !== "0" &&
             coordinationMode === "collective"
                 ? {
                       model: process.env.BARO_PLANNER_BUS_MODEL || undefined,
