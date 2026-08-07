@@ -23,9 +23,29 @@ export interface BoundedRoundOptions<T> {
      * not be tripped by a round running out of time. Conflating them turns an
      * attempt that timed out into a story that was cancelled, and the two are
      * neither retried nor billed the same way.
+     *
+     * The second argument is how the call reports that the provider delivered
+     * something. Every report pushes the deadline out, because what the
+     * deadline is for is silence.
      */
-    readonly round: (signal: AbortSignal) => Promise<T>
-    /** Deadline for that call. A backstop, not a budget for the work. */
+    readonly round: (signal: AbortSignal, progress: () => void) => Promise<T>
+    /**
+     * How long the call may stay SILENT. Not how long it may take.
+     *
+     * Baro removed wall-clock caps on work in 0.82.0 and left this one because
+     * a request in flight was indistinguishable from a dead socket: with
+     * nothing arriving, elapsed time was the only measurable thing. That is no
+     * longer true where the lane streams — every chunk is proof — so this
+     * became what it always meant to be.
+     *
+     * It mattered: a story lane carried three minutes here, a number from when
+     * rounds were short. DeepSeek Flash writes fifteen thousand tokens in a
+     * round and takes about that long, so the deadline stopped measuring
+     * failure and started cutting healthy work, three stories in one run.
+     *
+     * A call that reports nothing — a lane that cannot stream — still gets the
+     * old meaning, which is the only honest reading when nothing is arriving.
+     */
     readonly timeoutMs: number
     /** The caller's abort. When it fires, this round is cancelled with it. */
     readonly parentSignal?: AbortSignal
@@ -50,6 +70,7 @@ export interface BoundedRoundOptions<T> {
 export async function runBoundedRound<T>(
     options: BoundedRoundOptions<T>,
 ): Promise<T> {
+    let progressed: (() => void) | undefined
     const controller = new AbortController()
     const parent = options.parentSignal
     const onParentAbort = (): void => controller.abort(parent?.reason)
@@ -57,18 +78,37 @@ export async function runBoundedRound<T>(
     else parent?.addEventListener("abort", onParentAbort, { once: true })
 
     let timer: ReturnType<typeof setTimeout> | undefined
+    let settled = false
+    // The heartbeat keeps the caller's watchdogs fed while a call is in
+    // flight, and deliberately does NOT touch the deadline: it fires whether
+    // or not anything is arriving, so a deadline it could postpone would never
+    // fire at all.
     const beat = options.onActivity
         ? setInterval(options.onActivity, HEARTBEAT_MS)
         : undefined
     const deadline = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-            controller.abort()
-            reject(providerCallTimeoutError(options.timeoutMs, options.label))
-        }, options.timeoutMs)
+        const arm = (): void => {
+            timer = setTimeout(() => {
+                if (settled) return
+                controller.abort()
+                reject(providerCallTimeoutError(options.timeoutMs, options.label))
+            }, options.timeoutMs)
+        }
+        arm()
+        progressed = (): void => {
+            if (settled) return
+            if (timer) clearTimeout(timer)
+            arm()
+            options.onActivity?.()
+        }
     })
     try {
-        return await Promise.race([options.round(controller.signal), deadline])
+        return await Promise.race([
+            options.round(controller.signal, () => progressed?.()),
+            deadline,
+        ])
     } finally {
+        settled = true
         if (timer) clearTimeout(timer)
         if (beat) clearInterval(beat)
         parent?.removeEventListener("abort", onParentAbort)

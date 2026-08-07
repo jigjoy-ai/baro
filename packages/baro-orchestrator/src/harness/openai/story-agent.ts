@@ -994,13 +994,19 @@ export class OpenAIStoryAgent extends BaseObserver {
         turn: number,
         round: number,
         signal: AbortSignal,
+        progress?: () => void,
     ) {
+        // Every chunk pushes this round's silence deadline out. Without it the
+        // deadline measured duration, and a model that writes fifteen thousand
+        // tokens in a round was cut off for working.
+        const onActivity = () => progress?.()
         return runInferenceRound(
             context,
             this.model,
             this.billingCoordinator
                 ? {
                       signal,
+                      onActivity,
                       billing: {
                           coordinator: this.billingCoordinator,
                           context: {
@@ -1015,7 +1021,7 @@ export class OpenAIStoryAgent extends BaseObserver {
                           },
                       },
                   }
-                : { signal },
+                : { signal, onActivity },
         )
     }
 
@@ -1039,8 +1045,15 @@ export class OpenAIStoryAgent extends BaseObserver {
                 // cannot come back, so that hazard is gone with it.
                 return await this.withAbort(
                     runBoundedRound({
-                        round: (signal) =>
-                            this.runRound(context, attempt, turn, round, signal),
+                        round: (signal, progress) =>
+                            this.runRound(
+                                context,
+                                attempt,
+                                turn,
+                                round,
+                                signal,
+                                progress,
+                            ),
                         timeoutMs: perRoundMs,
                         parentSignal: this.abortController.signal,
                         label: `round ${round}`,

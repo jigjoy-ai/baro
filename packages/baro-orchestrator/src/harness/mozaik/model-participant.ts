@@ -300,14 +300,18 @@ export class MozaikModelParticipant
     protected async runRound(
         context: ModelContext,
         signal: AbortSignal,
+        progress?: () => void,
     ): Promise<{ items: ContextItem[]; usage?: TokenUsage; truncated?: boolean }> {
         const billing = this.opts.billing
         return await runInferenceRound(context, this.opts.model, {
             signal,
-            // A streamed round proves it is alive per chunk; the watchdog then
-            // measures silence rather than duration, which is the doctrine the
-            // round backstop stands in for until every lane can stream.
-            onActivity: () => this.onActivity?.(),
+            // Every chunk is proof of life: it feeds the caller's watchdog and
+            // pushes this round's silence deadline out. Duration stopped being
+            // the measure the moment the lane could stream.
+            onActivity: () => {
+                progress?.()
+                this.onActivity?.()
+            },
             ...(billing
                 ? {
                       billing: {
@@ -429,7 +433,8 @@ export class MozaikModelParticipant
                 const round = await withTransientRetry(
                     () =>
                         runBoundedRound({
-                            round: (signal) => this.runRound(context, signal),
+                            round: (signal, progress) =>
+                                this.runRound(context, signal, progress),
                             timeoutMs: this.opts.perRoundTimeoutSecs * 1000,
                             parentSignal: this.abortController.signal,
                             onActivity: () => this.onActivity?.(),
