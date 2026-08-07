@@ -26,6 +26,9 @@ export interface CritiqueData {
      * evidence capture. Present only when that live repository snapshot stayed
      * stable; collective integration rechecks it immediately before merge. */
     repositoryFingerprint?: string
+    /** Present when the sole blocker is evidence the agent invalidated by
+     * editing after it ran these commands — repairable by another turn. */
+    staleCommands?: readonly string[]
 }
 
 export const Critique = defineSemanticEvent<CritiqueData>("critique")

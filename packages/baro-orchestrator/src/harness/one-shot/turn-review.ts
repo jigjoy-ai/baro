@@ -9,6 +9,7 @@ import {
 import {
     TurnReviewMailbox,
     snapshotTurnReview,
+    staleEvidenceFeedback,
     turnReviewDisposition,
     turnReviewTimeoutFailure,
 } from "../../acceptance/turn-review.js"
@@ -254,6 +255,20 @@ export function oneShotSurgicalRevisionPrompt(
     originalContract: string,
     review: CritiqueData,
 ): string {
+    // Nothing was rejected here, so a repair prompt would send a fresh process
+    // hunting for a defect that was never named.
+    if (review.staleCommands && review.staleCommands.length > 0) {
+        return [
+            "The candidate in this worktree was never judged: its verification evidence predates its own last edit.",
+            "The previous process has exited; its files and commits remain, but you do not share its conversation context.",
+            "Change nothing unless a command fails.",
+            "",
+            "Original story contract:",
+            originalContract,
+            "",
+            staleEvidenceFeedback(review.staleCommands),
+        ].join("\n")
+    }
     const criteria = review.violatedCriteria.length > 0
         ? review.violatedCriteria.map((item) => `- ${item}`).join("\n")
         : "- Re-check every acceptance criterion and provide fresh test evidence."

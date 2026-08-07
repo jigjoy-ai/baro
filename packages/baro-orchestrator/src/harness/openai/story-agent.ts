@@ -103,9 +103,14 @@ Rules:
   the match unique. write_file is for new files or full rewrites only.
 - After your edits, run the test commands the story specified. Use the
   bash tool. Fix any failures and re-run.
+- Verification must be the LAST thing you do. Your evidence is bound to
+  the exact file contents present when the command ran, so any edit
+  afterwards voids it and leaves your work unjudgeable. If you change
+  anything — including adding a test — run the commands again.
 - When you're done, run \`git add -A && git commit -m "..."\` via bash
-  with a concise message. Then respond with a brief summary message
-  (no more tool calls) — that signals the turn is over.
+  with a concise message (git operations alone do not void evidence).
+  Then respond with a brief summary message (no more tool calls) —
+  that signals the turn is over.
 
 You may be sent corrective feedback after your turn. If you receive a
 follow-up user message, treat it as additional acceptance criteria

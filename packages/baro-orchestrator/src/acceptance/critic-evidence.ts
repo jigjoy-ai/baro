@@ -90,6 +90,8 @@ export interface CriticEvidenceSource {
 export type CriticCommandFreshness = "fresh" | "stale" | "unverifiable"
 
 export interface CriticCommandEvidenceEntry {
+    /** Redacted command text, so a stale verdict can name what to re-run. */
+    command: string
     /** A FunctionCallOutputItem was observed for this command. */
     terminal: boolean
     /** Whether this command is bound to the current changed repository bytes. */
@@ -114,6 +116,9 @@ export interface CriticEvaluationPreparation {
     prompts: readonly string[]
     status: "ready" | "inconclusive"
     issues: readonly string[]
+    /** Commands the agent can re-run to make its own evidence current again.
+     * Non-empty only when staleness is the sole thing blocking evaluation. */
+    staleCommands: readonly string[]
     /** Present only when the complete evidence capture was bracketed by the
      * same exact changed-content fingerprint. */
     repositoryFingerprint: string | null
@@ -298,6 +303,7 @@ export class CriticCommandEvidenceCollector extends BaseObserver {
                 chronologicalIndex: index,
                 command: entry.command,
                 readiness: {
+                    command: entry.command,
                     terminal: output !== null,
                     freshness: freshness.state,
                     sandboxBlocked:
@@ -885,6 +891,7 @@ export async function prepareCriticEvaluation(
         prompts,
         status: issues.length > 0 ? "inconclusive" : "ready",
         issues,
+        staleCommands: staleCommandsToRerun(commandEvidence, issues),
         repositoryFingerprint:
             issues.length === 0 ? afterFingerprint.value : null,
     }
@@ -1121,6 +1128,33 @@ interface ResolvedCommandEvidence {
     hookConfigured: boolean
 }
 
+const STALE_COMMAND_EVIDENCE = "command evidence is stale or unverifiable"
+
+/**
+ * The one readiness issue an agent can repair itself: it ran its checks, then
+ * kept editing, so the evidence no longer describes the candidate. Every other
+ * issue needs the host or the evaluator, never another agent turn.
+ */
+function staleCommandsToRerun(
+    commandEvidence: ResolvedCommandEvidence,
+    issues: readonly string[],
+): readonly string[] {
+    if (issues.length === 0) return []
+    if (!issues.every((issue) => issue === STALE_COMMAND_EVIDENCE)) return []
+    return (commandEvidence.commands ?? [])
+        .filter(
+            (command) =>
+                command.freshness !== "fresh" &&
+                command.terminal &&
+                !command.sandboxBlocked &&
+                // The evidence source is a caller-supplied hook, so an entry
+                // without command text is possible and simply unnameable.
+                typeof command.command === "string" &&
+                command.command.trim().length > 0,
+        )
+        .map((command) => command.command.trim())
+}
+
 function evidenceReadinessIssues(
     commandEvidence: ResolvedCommandEvidence,
     repositoryEvidence: string | null,
@@ -1156,7 +1190,7 @@ function evidenceReadinessIssues(
                     (command) => command.freshness !== "fresh",
                 )
             ) {
-                issues.push("command evidence is stale or unverifiable")
+                issues.push(STALE_COMMAND_EVIDENCE)
             }
             if (commandEvidence.commands.some((command) => !command.terminal)) {
                 issues.push("a verification command has no terminal output")
@@ -1170,7 +1204,7 @@ function evidenceReadinessIssues(
             }
             if (
                 !issues.some((issue) =>
-                    issue === "command evidence is stale or unverifiable" ||
+                    issue === STALE_COMMAND_EVIDENCE ||
                     issue === "a verification command has no terminal output" ||
                     issue === "verification command was blocked by the sandbox"
                 )
@@ -1187,7 +1221,7 @@ function evidenceReadinessIssues(
                 commandEvidence.text,
             )
         ) {
-            issues.push("command evidence is stale or unverifiable")
+            issues.push(STALE_COMMAND_EVIDENCE)
         }
         if (
             /^runtime status:\s*pending\/no output observed/im.test(
@@ -1222,6 +1256,7 @@ function parseRenderedCommandEvidence(
             ? ""
             : block.slice(outputMarker.index + outputMarker[0].length)
         const runtime = /^runtime status:\s*(.+)$/m.exec(metadata)?.[1]?.trim()
+        const command = /^command:\s*(.+)$/m.exec(metadata)?.[1]?.trim() ?? ""
         const freshnessText = /^freshness:\s*(.+)$/m.exec(metadata)?.[1]?.trim()
         const freshness: CriticCommandFreshness =
             freshnessText?.startsWith("fresh") === true
@@ -1230,6 +1265,7 @@ function parseRenderedCommandEvidence(
                   ? "unverifiable"
                   : "stale"
         return {
+            command,
             terminal: runtime?.startsWith("completed;") === true,
             freshness,
             sandboxBlocked: outputLooksSandboxBlocked(output),

@@ -159,6 +159,7 @@ export abstract class OneShotCritic extends BaseObserver {
 
         const work = (async () => {
             let repositoryFingerprint: string | null = null
+            let staleCommands: readonly string[] = []
             let preparationReady = false
             let evaluation: OneShotCriticEvaluation
             try {
@@ -169,6 +170,7 @@ export abstract class OneShotCritic extends BaseObserver {
                     this.evidence,
                 )
                 repositoryFingerprint = preparation.repositoryFingerprint
+                staleCommands = preparation.staleCommands
                 preparationReady = preparation.status === "ready"
                 evaluation = preparationReady
                     ? mergeSegmentVerdicts(
@@ -205,6 +207,7 @@ export abstract class OneShotCritic extends BaseObserver {
                 turn,
                 modelUsed: this.requestedModel ?? this.spec.defaultModelLabel,
                 ...(repositoryFingerprint ? { repositoryFingerprint } : {}),
+                ...(staleCommands.length > 0 ? { staleCommands } : {}),
             })
             for (const env of this.getEnvironments()) {
                 env.deliverSemanticEvent(this, critiqueEvent)

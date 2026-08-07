@@ -324,7 +324,29 @@ export function snapshotTurnReview(review: CritiqueData): CritiqueData {
     return {
         ...review,
         violatedCriteria: [...review.violatedCriteria],
+        ...(review.staleCommands
+            ? { staleCommands: [...review.staleCommands] }
+            : {}),
     }
+}
+
+/**
+ * Continuation prompt for the one inconclusive verdict the agent itself
+ * caused: it verified, then kept editing. The work is not rejected — only
+ * its proof expired, and one command restores it.
+ */
+export function staleEvidenceFeedback(
+    staleCommands: readonly string[],
+): string {
+    return [
+        "Your verification evidence no longer describes this candidate: you edited files after these commands ran, so their output proves an earlier state.",
+        "The work itself was not rejected — nothing was judged, because nothing current could be judged.",
+        "",
+        "Re-run in this same worktree, without further edits afterwards:",
+        ...staleCommands.map((command) => `- ${command}`),
+        "",
+        "If a re-run fails, fix the cause and run it again. Make a verification command the LAST thing you do before your final summary; any edit after it voids the evidence again.",
+    ].join("\n")
 }
 
 /** Backend-neutral continuation prompt derived from an authoritative review. */
@@ -350,6 +372,15 @@ export function turnReviewDisposition(
     options: { handoffInconclusiveToAcceptanceGate?: boolean } = {},
 ): TurnReviewDisposition {
     if (review.status === "inconclusive") {
+        // Staleness is the agent's own ordering, and it is still running: give
+        // it the turn that restores the proof instead of tearing down work no
+        // one has judged. Existing revision/turn caps bound the retry.
+        if (review.staleCommands && review.staleCommands.length > 0) {
+            return {
+                kind: "revise",
+                feedback: staleEvidenceFeedback(review.staleCommands),
+            }
+        }
         if (options.handoffInconclusiveToAcceptanceGate === true) {
             return { kind: "handoff" }
         }

@@ -260,6 +260,9 @@ export class CriticOpenAI extends BaseObserver {
                               preparation.repositoryFingerprint,
                       }
                     : {}),
+                ...(preparation.staleCommands.length > 0
+                    ? { staleCommands: preparation.staleCommands }
+                    : {}),
             })
             for (const env of this.getEnvironments()) {
                 env.deliverSemanticEvent(this, critiqueEvent)
