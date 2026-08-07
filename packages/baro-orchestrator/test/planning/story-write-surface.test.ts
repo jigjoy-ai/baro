@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { execFileSync } from "node:child_process"
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
@@ -95,6 +96,56 @@ describe("the write surface is enforced where the model acts", () => {
             assert.match(out, /^Wrote src\/audit\/audit\.helper\.ts/u)
             assert.match(out, /not in this story's declared write surface/u)
             assert.match(out, /merge gate is the authority/u)
+        })
+    })
+
+    // The write tools refuse; a shell does not go through them. A live story
+    // edited audit.module.ts with a command, nothing objected, it passed the
+    // Critic on its own work, and the merge gate found the collision only
+    // after the story was finished — so the whole story was redone.
+    it("names a file a command trespassed on, while the story can still revert", async () => {
+        await withTempDir("baro-surface-bash-", async (dir) => {
+            const root = repo(dir)
+            execFileSync("git", ["init", "-q"], { cwd: root })
+            execFileSync("git", ["config", "user.email", "t@t"], { cwd: root })
+            execFileSync("git", ["config", "user.name", "t"], { cwd: root })
+            execFileSync("git", ["add", "-A"], { cwd: root })
+            execFileSync("git", ["commit", "-qm", "base"], { cwd: root })
+
+            const bash = createStoryTools(root, {
+                surface: SURFACE,
+                includeBash: true,
+            }).find((tool) => tool.name === "bash")
+            const out = await call(bash, {
+                command: "printf 'export class MenuService { audited = true }\n' > src/menus/menu/menu.service.ts",
+            })
+
+            assert.match(out, /changes files another story owns/u)
+            assert.match(out, /src\/menus\/menu\/menu\.service\.ts → S6/u)
+            assert.match(out, /Revert those paths/u)
+        })
+    })
+
+    it("says nothing when a command stayed inside the story's own work", async () => {
+        await withTempDir("baro-surface-bash-clean-", async (dir) => {
+            const root = repo(dir)
+            execFileSync("git", ["init", "-q"], { cwd: root })
+            execFileSync("git", ["config", "user.email", "t@t"], { cwd: root })
+            execFileSync("git", ["config", "user.name", "t"], { cwd: root })
+            execFileSync("git", ["add", "-A"], { cwd: root })
+            execFileSync("git", ["commit", "-qm", "base"], { cwd: root })
+
+            const bash = createStoryTools(root, {
+                surface: SURFACE,
+                includeBash: true,
+            }).find((tool) => tool.name === "bash")
+            const out = await call(bash, {
+                command: "printf 'export class AuditService { record() {} }\n' > src/audit/audit.service.ts",
+            })
+            assert.ok(
+                !/another story owns/u.test(out),
+                "its own declared file must draw no complaint",
+            )
         })
     })
 

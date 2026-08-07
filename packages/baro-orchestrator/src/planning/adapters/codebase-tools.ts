@@ -731,15 +731,79 @@ function bashTool(cwd: string, options: CodebaseToolOptions): SignalAwareTool {
             additionalProperties: false,
         },
         async invoke(args: { command: string }) {
-            return runBash(cwd, args.command, options)
+            const output = await runBash(cwd, args.command, options)
+            return output + trespassNotice(cwd, options.surface)
         },
         async invokeWithSignal(
             args: { command: string },
             signal: AbortSignal,
         ) {
-            return runBash(cwd, args.command, options, signal)
+            const output = await runBash(cwd, args.command, options, signal)
+            return output + trespassNotice(cwd, options.surface)
         },
     }
+}
+
+/**
+ * A shell can write where the write tools refuse to.
+ *
+ * `write_file` and `edit_file` know the story's surface and turn a path
+ * another story owns into a refusal the model reads in the same round. A
+ * command does not go through them: a live story edited `audit.module.ts`
+ * with a shell, nothing objected, it passed the Critic on its own work, and
+ * only the merge gate found the collision — by then the story was finished
+ * and the whole thing had to be redone from scratch.
+ *
+ * The shell cannot be parsed, so this reads the result instead: after every
+ * command, what does the worktree say changed? A path owned elsewhere is
+ * named back to the model while it can still revert it.
+ */
+function trespassNotice(
+    cwd: string,
+    surface: StoryWriteSurface | undefined,
+): string {
+    if (!surface || Object.keys(surface.ownedElsewhere).length === 0) return ""
+    let changed: string[]
+    try {
+        // Tracked edits and new files alike; a story can trespass either way.
+        const tracked = execFileSync("git", ["diff", "--name-only", "HEAD"], {
+            cwd,
+            encoding: "utf8",
+            timeout: GIT_DISCOVERY_TIMEOUT_MS,
+            maxBuffer: GIT_DISCOVERY_MAX_BUFFER,
+        })
+        const untracked = execFileSync(
+            "git",
+            ["ls-files", "--others", "--exclude-standard"],
+            {
+                cwd,
+                encoding: "utf8",
+                timeout: GIT_DISCOVERY_TIMEOUT_MS,
+                maxBuffer: GIT_DISCOVERY_MAX_BUFFER,
+            },
+        )
+        changed = [...tracked.split("\n"), ...untracked.split("\n")]
+            .map((line) => line.trim())
+            .filter(Boolean)
+    } catch {
+        // No git, no answer. Saying nothing beats guessing at a boundary.
+        return ""
+    }
+    const trespasses = [...new Set(changed)]
+        .filter((path) => surface.ownedElsewhere[path])
+        .slice(0, 8)
+    if (trespasses.length === 0) return ""
+    return (
+        "\n\nError: this worktree now changes files another story owns:\n" +
+        trespasses
+            .map((path) => `- ${path} → ${surface.ownedElsewhere[path]}`)
+            .join("\n") +
+        "\nA diff touching one of these is refused at integration, so leaving " +
+        "it here loses this whole story rather than just the change. Revert " +
+        "those paths (git checkout -- <path>, or delete the file if you " +
+        "created it) and ask their owner, block on them, or dispute the " +
+        "contract claim that made you reach for them."
+    )
 }
 
 async function runBash(
