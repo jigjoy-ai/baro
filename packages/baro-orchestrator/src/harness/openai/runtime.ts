@@ -40,6 +40,8 @@ import type {
 export interface InferenceRound {
     items: ContextItem[]
     usage: TokenUsage | undefined
+    /** The provider stopped at the output ceiling; what came back is a piece. */
+    truncated?: boolean
     /** Present only for a call correlated through the trusted Baro Gateway. */
     billingInvocationId: string | null
 }
@@ -144,7 +146,11 @@ export class GenericOpenAIModel implements GenerativeModel {
             defaultReasoningEffort: undefined,
             supportStreaming: false,
             contextWindowSize: 128_000,
-            maxOutputTokens: 16_384,
+            // Above anything a healthy phase has produced, below the runaway
+            // that cost one: a live Architect wrote a 20.5k-token decision that
+            // parsed, and later a 36k one that did not — eleven minutes for a
+            // reply nothing could read.
+            maxOutputTokens: 32_768,
             supportFunctionCalling: true,
         }
     }
@@ -404,7 +410,10 @@ async function inferChatRound(
 
     const internals = runtime as unknown as ChatRuntimeInternals
     assertChatRuntimeInternals(internals)
-    const body = withParallelToolCalls(internals.buildRequest(request))
+    const body = withOutputCeiling(
+        withParallelToolCalls(internals.buildRequest(request)),
+        request,
+    )
 
     if (nativeStreamingEnabled()) {
         const streamed = await streamChatRound(
@@ -416,7 +425,11 @@ async function inferChatRound(
                 requestOptions: uncappedTransport(),
             },
         )
-        return { contextItems: streamed.items, tokenUsage: streamed.usage }
+        return {
+            contextItems: streamed.items,
+            tokenUsage: streamed.usage,
+            truncated: streamed.truncated,
+        }
     }
 
     const response = await internals.client.chat.completions.create(body, {
@@ -426,7 +439,15 @@ async function inferChatRound(
     return {
         contextItems: internals.extractContextItems(response),
         tokenUsage: internals.extractTokenUsage(response),
+        truncated: finishedAtCeiling(response),
     }
+}
+
+/** The non-streamed shape of the same fact. */
+function finishedAtCeiling(response: unknown): boolean {
+    const choices = (response as { choices?: Array<{ finish_reason?: string }> })
+        ?.choices
+    return Array.isArray(choices) && choices[0]?.finish_reason === "length"
 }
 
 /**
@@ -507,6 +528,32 @@ function withParallelToolCalls(
     if (!Array.isArray(tools) || tools.length === 0) return body
     if (body.parallel_tool_calls !== undefined) return body
     return { ...body, parallel_tool_calls: true }
+}
+
+/**
+ * State the ceiling instead of inheriting one.
+ *
+ * Mozaik sends no `max_tokens`, so how long a reply may be is whatever the
+ * endpoint happens to default to — unknown to us and different per provider.
+ * A live Architect answered with 36k tokens over eleven minutes, and the reply
+ * was unparseable when it arrived; nothing had said it was too long, and the
+ * host could only report "not valid JSON", which sends the model back to write
+ * the whole document again.
+ *
+ * With a stated ceiling the cut is ours: `finish_reason: "length"` is a fact
+ * the caller can act on and tell the model, instead of a malformed answer
+ * nobody can explain.
+ */
+function withOutputCeiling(
+    body: Record<string, unknown>,
+    request: InferenceRequest,
+): Record<string, unknown> {
+    if (body.max_tokens !== undefined) return body
+    const ceiling = (
+        request.model as { specification?: { maxOutputTokens?: number } }
+    ).specification?.maxOutputTokens
+    if (typeof ceiling !== "number" || ceiling <= 0) return body
+    return { ...body, max_tokens: ceiling }
 }
 
 interface ProviderRequestOptions {

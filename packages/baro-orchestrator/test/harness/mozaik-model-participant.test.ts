@@ -654,6 +654,53 @@ describe("a turn that runs out of tools answers, and the session lives on", () =
     })
 })
 
+// The measured loop: a reply cut off at the ceiling, a host that could only
+// say "not valid JSON", and a model that answered by writing the same document
+// again — eleven minutes an attempt, until the phase budget ran out.
+describe("a reply cut off at the ceiling is said to be cut off", () => {
+    it("tells the model its answer was a fragment, before it tries again", async () => {
+        const p = participant()
+        const seen: ModelContext[] = []
+        let round = 0
+        Object.defineProperty(p, "runRound", {
+            value: async (context: ModelContext) => {
+                seen.push(context)
+                round += 1
+                return round === 1
+                    ? { items: [message("## ADR-001 …")], truncated: true }
+                    : { items: [message("shorter")] }
+            },
+        })
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("decide")
+        await new Promise((r) => setTimeout(r, 2))
+        p.sendUserMessage("again")
+        p.closeStdin()
+        await p.done
+
+        const shown = JSON.stringify(seen[1]!.getItems())
+        assert.match(shown, /cut off at this run's output limit/u)
+        assert.match(shown, /answer again, shorter/iu)
+    })
+
+    it("says nothing when the reply ended on its own", async () => {
+        const p = participant()
+        const seen = stubRounds(p, [[message("complete")], [message("next")]])
+        const env = joinWithCapture(p)
+        p.start(env)
+        p.sendUserMessage("decide")
+        await new Promise((r) => setTimeout(r, 2))
+        p.sendUserMessage("again")
+        p.closeStdin()
+        await p.done
+        assert.ok(
+            !/cut off at this run/u.test(JSON.stringify(seen[1]!.getItems())),
+            "a finished reply must not be described as a fragment",
+        )
+    })
+})
+
 describe("a round that never answers is ended by its own deadline", () => {
     it("stops a hung call instead of waiting forever behind a heartbeat", async () => {
         const p = new MozaikModelParticipant({

@@ -44,6 +44,8 @@ export interface ChatStreamClient {
 /** The delta shape of the chat-completions stream, as far as a round cares. */
 export interface ChatCompletionChunk {
     readonly choices?: ReadonlyArray<{
+        /** "length" is the provider saying it stopped at the ceiling. */
+        readonly finish_reason?: string | null
         readonly delta?: {
             readonly content?: string | null
             /** Read for liveness only — see the assembly note below. */
@@ -79,6 +81,13 @@ export interface ChatStreamOptions {
 export interface ChatStreamRound {
     readonly items: ContextItem[]
     /**
+     * True when the provider stopped at the output ceiling rather than because
+     * the model was finished. Whatever came back is a fragment, and the caller
+     * owes the model that fact — "not valid JSON" sends it back to write the
+     * whole document again.
+     */
+    readonly truncated: boolean
+    /**
      * Undefined when the provider streamed no usage frame — a state the
      * caller must keep as "not reported" rather than zero. A missing number
      * and a free round are not the same fact.
@@ -113,6 +122,7 @@ export async function streamChatRound(
 
     let content = ""
     let usage: TokenUsage | undefined
+    let truncated = false
     // Keyed by the provider's index: a single call's name and arguments arrive
     // across many chunks, and arguments arrive as fragments of one JSON string.
     const calls = new Map<number, { id: string; name: string; args: string }>()
@@ -120,6 +130,7 @@ export async function streamChatRound(
     for await (const chunk of stream) {
         options.onActivity?.()
         if (chunk.usage) usage = tokenUsageOf(chunk.usage)
+        if (chunk.choices?.[0]?.finish_reason === "length") truncated = true
         const delta = chunk.choices?.[0]?.delta
         if (!delta) continue
         if (typeof delta.content === "string") content += delta.content
@@ -153,7 +164,7 @@ export async function streamChatRound(
             }),
         )
     }
-    return { items, usage }
+    return { items, usage, truncated }
 }
 
 function tokenUsageOf(

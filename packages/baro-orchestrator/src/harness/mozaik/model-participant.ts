@@ -120,6 +120,11 @@ export interface MozaikModelParticipantOptions {
 const DEFAULT_MAX_ROUNDS_PER_TURN = 60
 const DEFAULT_FINALIZATION_ROUNDS = 2
 const DEFAULT_MAX_ROUNDS = 400
+const TRUNCATED_NOTICE =
+    "Your last reply was cut off at this run's output limit, so what arrived " +
+    "is a fragment. Do not repeat it at the same length: answer again, " +
+    "shorter, keeping the parts that carry the decision and dropping " +
+    "restatement, and make sure the reply ends where you intend it to."
 const TURN_BUDGET_SPENT =
     "Your tool budget for this turn is spent. Answer now with what you " +
     "already have, and state anything still unknown as an assumption. " +
@@ -295,7 +300,7 @@ export class MozaikModelParticipant
     protected async runRound(
         context: ModelContext,
         signal: AbortSignal,
-    ): Promise<{ items: ContextItem[]; usage?: TokenUsage }> {
+    ): Promise<{ items: ContextItem[]; usage?: TokenUsage; truncated?: boolean }> {
         const billing = this.opts.billing
         return await runInferenceRound(context, this.opts.model, {
             signal,
@@ -486,6 +491,17 @@ export class MozaikModelParticipant
                 // A turn ends when the model stops calling tools; whether the
                 // SESSION ends is the caller's call, made by handing it more to
                 // read or by closing input. The loop head decides both.
+                // A reply cut off at the ceiling is a fragment, and the model
+                // is the only one who can shorten it. Told "not valid JSON" it
+                // writes the whole document again, at the same length, and is
+                // cut off again — which is how one phase spent eleven minutes
+                // per attempt until its budget ran out.
+                if (round.truncated) {
+                    context = context.addContextItem(
+                        UserMessageItem.create(TRUNCATED_NOTICE),
+                    )
+                }
+
                 owesContinuation = calls.length > 0
                 if (owesContinuation && budgetSpent) {
                     context = context.addContextItem(

@@ -139,6 +139,28 @@ describe("a streamed round is assembled into what a round returns", () => {
         assert.equal(round.usage, undefined)
     })
 
+    // A live Architect answered with 36k tokens over eleven minutes and the
+    // reply was unparseable when it landed. Nothing said it was too long: the
+    // host could only report "not valid JSON", which sends the model back to
+    // write the same document again, at the same length.
+    it("reports a reply the provider cut off at the ceiling", async () => {
+        const { client } = endpoint([
+            text("## ADR-001"),
+            { choices: [{ finish_reason: "length", delta: {} }] },
+        ])
+        const round = await streamChatRound(client, {})
+        assert.equal(round.truncated, true)
+    })
+
+    it("does not call a finished reply truncated", async () => {
+        const { client } = endpoint([
+            text("done"),
+            { choices: [{ finish_reason: "stop", delta: {} }] },
+        ])
+        const round = await streamChatRound(client, {})
+        assert.equal(round.truncated, false)
+    })
+
     it("proves it is alive on every chunk", async () => {
         const { client } = endpoint([text("a"), text("b"), text("c")])
         let beats = 0
