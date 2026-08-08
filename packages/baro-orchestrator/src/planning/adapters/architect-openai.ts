@@ -445,7 +445,12 @@ async function runArchitectOpenAIWithinBudget(
             }
             let normalizedOutcome: string | null = null
             let invalidReason: string | null = null
-            if (containsRawToolCall(doc)) {
+            // Checked before the shape checks: a truncated answer fails them
+            // all, and each failure names a defect the model did not make.
+            const hitCeiling = result.truncated === true
+            if (hitCeiling) {
+                invalidReason = "The previous response was cut off at the output ceiling before it was complete."
+            } else if (containsRawToolCall(doc)) {
                 invalidReason = "The previous response contained a literal <tool_call> instead of the final architecture result."
             } else if (opts.outcomeMode) {
                 try {
@@ -469,9 +474,11 @@ async function runArchitectOpenAIWithinBudget(
                     context = context.addContextItem(UserMessageItem.create(architectRepairInstruction(
                         invalidReason,
                         opts.outcomeMode === true,
+                        hitCeiling,
                     )))
-                    process.stderr.write(`[architect-openai] invalid final document — repair ${invalidFinalResponses}/${maxFinalizationRetries}\n`)
-                    emitPlanLine(`invalid architect document — repair ${invalidFinalResponses}/${maxFinalizationRetries}`)
+                    const what = hitCeiling ? "document hit the output ceiling" : "invalid final document"
+                    process.stderr.write(`[architect-openai] ${what} — repair ${invalidFinalResponses}/${maxFinalizationRetries}\n`)
+                    emitPlanLine(`architect ${what} — repair ${invalidFinalResponses}/${maxFinalizationRetries}`)
                     continue
                 }
                 throw new Error("ArchitectOpenAI: invalid document persisted after bounded finalization repairs")
@@ -537,9 +544,23 @@ function finalArchitectInstruction(summary: string, round: number, maxExploratio
     ].join("\n")
 }
 
-function architectRepairInstruction(reason: string, outcomeMode: boolean): string {
+function architectRepairInstruction(
+    reason: string,
+    outcomeMode: boolean,
+    truncated = false,
+): string {
     return [
         reason,
+        // A document that ran out of room is not a malformed one, and asking
+        // to repair it sends the model to write the same length again: two
+        // attempts came back at the identical ceiling, 406s apart, with the
+        // request unchanged between them.
+        ...(truncated
+            ? [
+                  "Your previous answer was cut off at the output ceiling — it was never finished, so there is nothing in it to repair.",
+                  "Write it again SHORTER so that it ends inside the ceiling. Keep every decision, invariant and obligation; cut the prose around them: no restated goal, no restated repository context, one sentence per rationale, no examples.",
+              ]
+            : []),
         "Do not call tools and do not emit <tool_call> tags; tool execution is closed.",
         outcomeMode
             ? "Output ONLY the exact ArchitectOutcomeV1 JSON object required by the system prompt. Do not use a markdown fence."

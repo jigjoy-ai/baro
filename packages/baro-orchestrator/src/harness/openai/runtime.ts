@@ -37,6 +37,15 @@ import type {
     UnknownMetricReason,
 } from "../../telemetry/model-telemetry.js"
 
+/** What one provider call returned, before billing correlation is attached.
+ * The Responses path does not report a ceiling stop yet, so it leaves
+ * `truncated` unset rather than claiming the answer was complete. */
+interface InferredRound {
+    contextItems: ContextItem[]
+    tokenUsage: TokenUsage | undefined
+    truncated?: boolean
+}
+
 export interface InferenceRound {
     items: ContextItem[]
     usage: TokenUsage | undefined
@@ -377,6 +386,11 @@ export async function runInferenceRound(
         return {
             items: response.contextItems,
             usage: response.tokenUsage,
+            // Computed one layer down and dropped here, so every caller saw a
+            // complete answer: an Architect wrote its decision to the ceiling
+            // twice, 406s each, and was told both times to repair a document
+            // it had never finished.
+            truncated: response.truncated === true,
             billingInvocationId: dispatch?.record.invocationId ?? null,
         }
     } catch (error) {
@@ -610,7 +624,7 @@ async function inferResponsesWithExtension(
     request: InferenceRequest,
     extension: GatewayBillingDispatch["requestExtension"],
     signal?: AbortSignal,
-): Promise<{ contextItems: ContextItem[]; tokenUsage: TokenUsage | undefined }> {
+): Promise<InferredRound> {
     const internals = responseInternals(runtime)
     disableOpenAiSdkRetries(runtime)
     const response = await internals.client.responses.create(
@@ -630,7 +644,7 @@ async function inferResponsesRound(
     runtime: OpenAIResponses,
     request: InferenceRequest,
     signal?: AbortSignal,
-): Promise<{ contextItems: ContextItem[]; tokenUsage: TokenUsage | undefined }> {
+): Promise<InferredRound> {
     if (!signal) {
         const response = await runtime.infer(request)
         return {

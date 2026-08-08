@@ -488,6 +488,48 @@ describe("ArchitectOpenAI bounded finalization", () => {
         )
     })
 
+    it("asks a ceiling-stopped answer for a shorter one, not for a repair", async () => {
+        // A live Architect wrote to the ceiling twice, 406s apart, and was told
+        // both times to repair a document it had never finished; the request
+        // between the two attempts grew by 35 tokens.
+        const tool = fakeTool(async () => "file contents")
+        const model = new GenericOpenAIModel("glm-5.2")
+        const contexts: ModelContext[] = []
+        let round = 0
+        const result = await runArchitectOpenAI({
+            goal: "Audit every mutation",
+            cwd: "/unused",
+            model: "glm-5.2",
+            modeContract: PARALLEL_MODE,
+            testRuntime: {
+                model,
+                tools: [tool],
+                inferRound: async (context) => {
+                    contexts.push(context)
+                    round += 1
+                    return round === 1
+                        ? {
+                              items: [message(DECISION_DOCUMENT.slice(0, 60))],
+                              usage: undefined,
+                              truncated: true,
+                          }
+                        : { items: [message(DECISION_DOCUMENT)], usage: undefined }
+                },
+            },
+        })
+
+        assert.equal(round, 2)
+        assert.match(result, /ADR-001/)
+        const retried = JSON.stringify(contexts[1]!.toJSON())
+        assert.match(retried, /cut off at the output ceiling/)
+        assert.match(retried, /SHORTER/)
+        assert.doesNotMatch(
+            retried,
+            /was not an ADR decision document/,
+            "an unfinished answer is not a malformed one",
+        )
+    })
+
     it("repairs a non-trivial ready outcome that omits semantic obligations", async () => {
         const withoutObligations = {
             schemaVersion: 1,
