@@ -753,6 +753,13 @@ export class CollaborationBridge extends SerializedObserver {
                 }),
             )
         } else if (record.kind === "note" && text && liveSource) {
+            // A published note reaches a story through its launch context,
+            // which is frozen when the Board asks for it — so a wave admitted
+            // in one instant learns nothing from itself. Two agents in one run
+            // rediscovered the same repository trap that way, the second long
+            // after the first had published it. A finding is worth most to the
+            // peers writing the same code right now.
+            deliveryGaps.push(...this.broadcastPeerNote(agentId, text))
             this.publish(
                 CollaborationNote.create({
                     runId: this.opts.runId,
@@ -1180,6 +1187,20 @@ export class CollaborationBridge extends SerializedObserver {
                 recipientId: agentId,
                 text: `${sourceAgentId} asks for help: ${text}`,
                 metadata: { kind: "peer_help", sourceAgentId },
+            })
+            if (result === "overflow") gaps.push(agentId)
+        }
+        return gaps
+    }
+
+    private broadcastPeerNote(sourceAgentId: string, text: string): string[] {
+        const gaps: string[] = []
+        for (const agentId of this.activeAgents) {
+            if (agentId === sourceAgentId) continue
+            const result = this.routeMessageIntent({
+                recipientId: agentId,
+                text: `${sourceAgentId} found this while working: ${text}`,
+                metadata: { kind: "peer_note", sourceAgentId },
             })
             if (result === "overflow") gaps.push(agentId)
         }

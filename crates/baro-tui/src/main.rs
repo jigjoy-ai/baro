@@ -4020,11 +4020,12 @@ async fn begin_progressive_execution(
         headless,
         Some(planning_id.clone()),
     );
-    // BARO_PLANNER_BUS=1: the orchestrator hosts the planner on its own bus
-    // (authoritative receipts, execution awareness). No subprocess planner,
-    // no stdout wire lane, no host-issued planning_open — the bus session
-    // opens and closes its own planning stream.
-    if std::env::var("BARO_PLANNER_BUS").ok().as_deref() == Some("1") {
+    // The orchestrator hosts the planner on its own bus by default
+    // (authoritative receipts, execution awareness): no subprocess planner, no
+    // stdout wire lane, no host-issued planning_open — the bus session opens
+    // and closes its own planning stream. Read the same way the TS side reads
+    // it, or the two disagree and both plan.
+    if std::env::var("BARO_PLANNER_BUS").ok().as_deref() != Some("0") {
         let _ = spec;
         return Ok(());
     }

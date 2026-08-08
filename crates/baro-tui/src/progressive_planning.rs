@@ -22,15 +22,17 @@ const MAX_GOAL_CHARS: usize = 8_000;
 const BRANCH_SLUG_CHARS: usize = 48;
 static ID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// Explicitly gated compatibility predicate. Using the collective does not
-/// change startup semantics on its own; one of the flag/env inputs must also
-/// opt in.
+/// The collective plans progressively. Waiting for a complete plan leaves the
+/// whole fleet idle through one long generation, and starts every story in the
+/// same instant afterwards — which is also when a peer's finding has nobody
+/// left to reach, since notes travel in launch context.
 ///
 /// Interactive runs are allowed. What they give up is the review screen: there
 /// is no complete plan to approve when stories start before planning ends, so
 /// the operator watches fragments arrive and interrupts if they disagree,
 /// rather than gating each one. Gating would need a verdict the Planner can
 /// hear, and PlanFragmentAdmitted/Rejected currently reach nothing upstream.
+/// Set the env to a falsy value to get the single-plan startup back.
 #[allow(dead_code)]
 pub(crate) fn progressive_planning_enabled(coordination: &str, explicit_flag: bool) -> bool {
     let env_value = std::env::var(PROGRESSIVE_PLANNING_ENV).ok();
@@ -42,7 +44,10 @@ fn progressive_planning_enabled_with_env(
     explicit_flag: bool,
     env_value: Option<&str>,
 ) -> bool {
-    coordination == "collective" && (explicit_flag || env_value.is_some_and(truthy_env))
+    if coordination != "collective" {
+        return false;
+    }
+    explicit_flag || env_value.map_or(true, truthy_env)
 }
 
 fn truthy_env(value: &str) -> bool {
@@ -383,17 +388,20 @@ mod tests {
     use crate::executor::PrdFile;
 
     #[test]
-    fn opt_in_requires_the_collective_and_an_explicit_switch() {
+    fn the_collective_plans_progressively_unless_told_otherwise() {
         assert!(progressive_planning_enabled_with_env("collective", true, None));
         assert!(progressive_planning_enabled_with_env(
             "collective",
             false,
             Some("YES")
         ));
+        // Silence means the default now, not a refusal.
+        assert!(progressive_planning_enabled_with_env("collective", false, None));
         for (coordination, flag, env) in [
             ("legacy", true, Some("1")),
-            ("collective", false, None),
+            ("legacy", false, None),
             ("collective", false, Some("false")),
+            ("collective", false, Some("0")),
         ] {
             assert!(!progressive_planning_enabled_with_env(coordination, flag, env));
         }
