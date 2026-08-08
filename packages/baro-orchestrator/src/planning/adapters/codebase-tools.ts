@@ -793,16 +793,43 @@ function trespassNotice(
         .filter((path) => surface.ownedElsewhere[path])
         .slice(0, 8)
     if (trespasses.length === 0) return ""
+    // Asking was not enough. Told to revert these itself, a story whose
+    // prerequisite was missing from its tree kept them and built the absent
+    // piece instead — one wrote 436 lines of a peer's spec, collided at the
+    // gate, and went round recovery three times. The gate refuses this diff
+    // either way; undoing it here costs the edit rather than the story.
+    const undone = new Set<string>()
+    for (const target of trespasses) {
+        try {
+            execFileSync("git", ["checkout", "--", target], {
+                cwd,
+                timeout: GIT_DISCOVERY_TIMEOUT_MS,
+            })
+            undone.add(target)
+        } catch {
+            // Untracked: git has no version to restore, so the file is the
+            // whole change and removing it is the revert.
+            try {
+                fs.rmSync(path.join(cwd, target), { force: true })
+                undone.add(target)
+            } catch {
+                // Left in place, and named as such below.
+            }
+        }
+    }
     return (
-        "\n\nError: this worktree now changes files another story owns:\n" +
+        "\n\nError: this worktree changed files another story owns, and those " +
+        "changes have been undone:\n" +
         trespasses
-            .map((path) => `- ${path} → ${surface.ownedElsewhere[path]}`)
+            .map((path) =>
+                `- ${path} → ${surface.ownedElsewhere[path]}` +
+                (undone.has(path) ? " (reverted)" : " (could not revert — remove it yourself)"),
+            )
             .join("\n") +
-        "\nA diff touching one of these is refused at integration, so leaving " +
-        "it here loses this whole story rather than just the change. Revert " +
-        "those paths (git checkout -- <path>, or delete the file if you " +
-        "created it) and ask their owner, block on them, or dispute the " +
-        "contract claim that made you reach for them."
+        "\nA diff touching one of these is refused at integration, so keeping " +
+        "them would lose this whole story rather than one edit. Do not write " +
+        "them again through any tool or shell command: ask their owner, block " +
+        "on them, or dispute the contract claim that made you reach for them."
     )
 }
 

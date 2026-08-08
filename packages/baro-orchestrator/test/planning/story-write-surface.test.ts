@@ -103,7 +103,7 @@ describe("the write surface is enforced where the model acts", () => {
     // edited audit.module.ts with a command, nothing objected, it passed the
     // Critic on its own work, and the merge gate found the collision only
     // after the story was finished — so the whole story was redone.
-    it("names a file a command trespassed on, while the story can still revert", async () => {
+    it("undoes what a command wrote into a peer file, and names the owner", async () => {
         await withTempDir("baro-surface-bash-", async (dir) => {
             const root = repo(dir)
             execFileSync("git", ["init", "-q"], { cwd: root })
@@ -120,9 +120,15 @@ describe("the write surface is enforced where the model acts", () => {
                 command: "printf 'export class MenuService { audited = true }\n' > src/menus/menu/menu.service.ts",
             })
 
-            assert.match(out, /changes files another story owns/u)
-            assert.match(out, /src\/menus\/menu\/menu\.service\.ts → S6/u)
-            assert.match(out, /Revert those paths/u)
+            assert.match(out, /changed files another story owns, and those changes have been undone/u)
+            assert.match(out, /src\/menus\/menu\/menu\.service\.ts → S6 \(reverted\)/u)
+            // Naming it was not enough: a story that needed the missing work
+            // kept the edit and built the rest of its peer's job around it.
+            assert.equal(
+                readFileSync(join(root, "src/menus/menu/menu.service.ts"), "utf8"),
+                "export class MenuService {}\n",
+                "the peer's file must be back to what its owner left",
+            )
         })
     })
 

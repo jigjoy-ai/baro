@@ -61,6 +61,13 @@ export interface CollaborationBridgeOptions {
     challengeInflightDir?: string
     /** Exact invariant ids from the run's derived GoalContract. */
     goalInvariantIds?: readonly string[]
+    /**
+     * Who owns a path right now, read from the live plan. "Which story owns
+     * this file" is a host fact, and leaving it to whichever peer happens to
+     * be listening answered none of the five times it was asked in one run —
+     * after which the agents built the missing pieces themselves.
+     */
+    pathOwner?: (path: string) => { storyId: string; integrated: boolean } | null
     pollMs?: number
     /** Explicit test-only bypass for object-identity authority binding. */
     unsafeAllowUnboundAuthorities?: boolean
@@ -744,6 +751,7 @@ export class CollaborationBridge extends SerializedObserver {
             })
             if (outcome === "overflow") deliveryGaps.push(record.to)
         } else if (record.kind === "help" && text && liveSource) {
+            this.answerOwnership(agentId, text)
             deliveryGaps.push(...this.broadcastPeerHelp(agentId, text))
             this.publish(
                 PeerHelpRequested.create({
@@ -1191,6 +1199,42 @@ export class CollaborationBridge extends SerializedObserver {
             if (result === "overflow") gaps.push(agentId)
         }
         return gaps
+    }
+
+    /**
+     * Answer the ownership half of a help request from the plan, immediately.
+     * Peers may still answer the rest; this part needs no one to be listening
+     * and no model to agree.
+     */
+    private answerOwnership(askerId: string, text: string): void {
+        const lookup = this.opts.pathOwner
+        if (!lookup) return
+        const seen = new Set<string>()
+        const lines: string[] = []
+        for (const candidate of text.match(/\b[\w./-]+\.[A-Za-z0-9]+\b/g) ?? []) {
+            const normalized = candidate.replace(/^\.\//u, "")
+            if (seen.has(normalized)) continue
+            seen.add(normalized)
+            const owner = lookup(normalized)
+            if (!owner || owner.storyId === askerId) continue
+            lines.push(
+                `- ${normalized} → ${owner.storyId}` +
+                    (owner.integrated
+                        ? " (already integrated; pull the latest run branch)"
+                        : " (not integrated yet; block on it or wait — do not write it)"),
+            )
+            if (lines.length >= 8) break
+        }
+        if (lines.length === 0) return
+        this.routeMessageIntent({
+            recipientId: askerId,
+            text: [
+                "Ownership answer from the plan:",
+                ...lines,
+                "Writing a path owned by another story loses your whole story at the merge gate, not just that edit.",
+            ].join("\n"),
+            metadata: { kind: "ownership_answer", sourceAgentId: "host" },
+        })
     }
 
     private broadcastPeerNote(sourceAgentId: string, text: string): string[] {

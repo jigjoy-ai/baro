@@ -868,6 +868,9 @@ export async function orchestrate(
               challengeInflightDir:
                   collaborationConfig.challengeInflightDir,
               goalInvariantIds: collaborationGoalInvariantIds,
+              // Resolved when asked, not when built: the Board is constructed
+              // later, and the plan it reads keeps growing after that.
+              pathOwner: (path) => collectiveBoard?.ownerOfPath(path) ?? null,
           })
         : null
     shutdownCollaborationBridge = collaborationBridge

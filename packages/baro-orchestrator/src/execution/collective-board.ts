@@ -116,6 +116,7 @@ import {
 } from "../runtime-graph/runtime-replan-coordinator.js"
 import { ProgressivePlanningCoordinator } from "../planning/application/progressive-planning-coordinator.js"
 import { OperationalRecoveryPolicy } from "./operational-recovery.js"
+import { writeSurfaceOf } from "../planning/domain/dependency-evidence.js"
 import { storyWriteSurface } from "./write-surface.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import { isProviderCapacityFailure } from "../harness/provider-failure.js"
@@ -2882,6 +2883,21 @@ export class CollectiveBoard extends SerializedObserver {
                 ]),
             ),
         )
+    }
+
+    /**
+     * Who owns a path, for the Bridge to answer a worker that asked. Reading
+     * the live plan rather than a snapshot matters while the plan is still
+     * growing: a story admitted early asked about a file whose owner did not
+     * exist yet at its own offer time.
+     */
+    ownerOfPath(path: string): { storyId: string; integrated: boolean } | null {
+        for (const story of this.prd?.userStories ?? []) {
+            if (writeSurfaceOf(story).includes(path)) {
+                return { storyId: story.id, integrated: story.passes === true }
+            }
+        }
+        return null
     }
 
     private offerStory(story: PrdStory, context: string | null): void {

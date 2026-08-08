@@ -317,6 +317,70 @@ describe("CollaborationBridge", () => {
         })
     })
 
+    it("answers the ownership half of a help request from the plan", async () => {
+        await withTempDir("collaboration-bridge-owner-", async (dir) => {
+            const bridge = new CollaborationBridge({
+                runId: "run-owner",
+                sessionDir: dir,
+                pollMs: 5,
+                unsafeAllowFilesystemTransport: true,
+                unsafeAllowUnboundAuthorities: true,
+                pathOwner: (path) =>
+                    path === "src/audit/audit.module.ts"
+                        ? { storyId: "S3", integrated: false }
+                        : path === "src/promotions/promotions.service.ts"
+                          ? { storyId: "S13", integrated: true }
+                          : null,
+            })
+            const env = joinWithCapture(bridge)
+            env.deliverSemanticEvent(
+                source("broker"),
+                WorkLeaseGranted.create({
+                    runId: "run-owner",
+                    offerId: "offer-S9",
+                    leaseId: "lease-9",
+                    workerId: "worker",
+                    generation: 1,
+                    request: {
+                        storyId: "S9",
+                        prompt: "S9",
+                        model: "standard",
+                        retries: 1,
+                        timeoutSecs: 60,
+                    },
+                }),
+            )
+            await bridge.idle()
+
+            writeFileSync(
+                join(dir, "outbox", "help.json"),
+                JSON.stringify({
+                    leaseId: "lease-9",
+                    kind: "help",
+                    text: "Which story owns src/audit/audit.module.ts? I also need src/promotions/promotions.service.ts and src/menus/menu/menu.service.ts.",
+                }),
+            )
+
+            // Five of these went unanswered in one run, and the agents built
+            // the missing pieces themselves rather than wait.
+            const answer = await waitFor(
+                env.events,
+                (event): event is ReturnType<typeof AgentTargetedMessage.create> =>
+                    AgentTargetedMessage.is(event) &&
+                    event.data.metadata.kind === "ownership_answer",
+            )
+            assert.equal(answer.data.recipientId, "S9")
+            assert.match(answer.data.text, /audit\.module\.ts → S3 \(not integrated yet/u)
+            assert.match(answer.data.text, /promotions\.service\.ts → S13 \(already integrated/u)
+            assert.doesNotMatch(
+                answer.data.text,
+                /menu\.service\.ts/u,
+                "a path nobody owns is not an ownership fact",
+            )
+            bridge.leave(env)
+        })
+    })
+
     it("validates a lease and republishes worker intent onto Mozaik", async () => {
         await withTempDir("collaboration-bridge-", async (dir) => {
             const bridge = new CollaborationBridge({
