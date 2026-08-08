@@ -519,8 +519,17 @@ export async function runPlannerBusSession(
                 progressive.assertInitialized()
                 composedFinalPrd = progressive.reconcileFinalCandidate(candidate)
             } catch (error) {
-                const reason =
+                let reason =
                     error instanceof Error ? error.message : String(error)
+                // The MCP child is spawned by the lane's CLI, not by us: the
+                // relay only knows whether anyone connected. Saying "not
+                // initialized" and nothing else sent one diagnosis looking
+                // through four correct links before asking the one process
+                // that saw the failure. Whatever the lane reported goes with it.
+                if (/was not initialized by the harness/.test(reason)) {
+                    const detail = planner.sessionEndDetail()
+                    if (detail) reason = `${reason} — the lane reported: ${detail}`
+                }
                 process.stderr.write(
                     `[planner-bus] finalization attempt ${attempt}/${maxFinalizationAttempts} rejected: ${reason}\n`,
                 )
