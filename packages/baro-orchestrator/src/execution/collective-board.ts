@@ -116,6 +116,7 @@ import {
 } from "../runtime-graph/runtime-replan-coordinator.js"
 import { ProgressivePlanningCoordinator } from "../planning/application/progressive-planning-coordinator.js"
 import { OperationalRecoveryPolicy } from "./operational-recovery.js"
+import { storyWriteSurface } from "./write-surface.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import { isProviderCapacityFailure } from "../harness/provider-failure.js"
 import {
@@ -2909,6 +2910,7 @@ export class CollectiveBoard extends SerializedObserver {
                 ...this.operationalRecovery.exclusions(story.id),
             ]),
         ].sort()
+        const surface = storyWriteSurface(story, this.prd?.userStories ?? [])
         const offered = WorkOffered.create({
             runId: this.opts.runId,
             offerId,
@@ -2930,6 +2932,7 @@ export class CollectiveBoard extends SerializedObserver {
                 story.acceptance.length > 0
                     ? { requiresQualityReview: true }
                     : {}),
+                ...(surface ? { surface } : {}),
                 ...(recovery ? { recovery } : {}),
             },
         })
