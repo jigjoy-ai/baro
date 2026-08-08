@@ -317,6 +317,66 @@ describe("CollaborationBridge", () => {
         })
     })
 
+    it("tells a working story about paths a later story just claimed", async () => {
+        await withTempDir("collaboration-bridge-claim-", async (dir) => {
+            const bridge = new CollaborationBridge({
+                runId: "run-claim",
+                sessionDir: dir,
+                pollMs: 5,
+                unsafeAllowFilesystemTransport: true,
+                unsafeAllowUnboundAuthorities: true,
+            })
+            const env = joinWithCapture(bridge)
+            const lease = (storyId: string, leaseId: string, writes?: string[]) =>
+                env.deliverSemanticEvent(
+                    source("broker"),
+                    WorkLeaseGranted.create({
+                        runId: "run-claim",
+                        offerId: `offer-${storyId}`,
+                        leaseId,
+                        workerId: "worker",
+                        generation: 1,
+                        request: {
+                            storyId,
+                            prompt: storyId,
+                            model: "standard",
+                            retries: 1,
+                            timeoutSecs: 60,
+                            ...(writes
+                                ? { surface: { writes, ownedElsewhere: {} } }
+                                : {}),
+                        },
+                    }),
+                )
+
+            lease("S9", "lease-9", ["src/menus/menu/menu.service.ts"])
+            await bridge.idle()
+            // S14 did not exist when S9's surface was drawn.
+            lease("S14", "lease-14", ["src/promotions/promotions.audit.spec.ts"])
+
+            const update = await waitFor(
+                env.events,
+                (event): event is ReturnType<typeof AgentTargetedMessage.create> =>
+                    AgentTargetedMessage.is(event) &&
+                    event.data.metadata.kind === "ownership_update",
+            )
+            assert.equal(update.data.recipientId, "S9")
+            assert.match(update.data.text, /S14 started and now owns/u)
+            assert.match(update.data.text, /promotions\.audit\.spec\.ts/u)
+            assert.equal(
+                env.events.filter(
+                    (event) =>
+                        AgentTargetedMessage.is(event) &&
+                        event.data.metadata.kind === "ownership_update" &&
+                        event.data.recipientId === "S14",
+                ).length,
+                0,
+                "a story is not told about its own paths",
+            )
+            bridge.leave(env)
+        })
+    })
+
     it("answers the ownership half of a help request from the plan", async () => {
         await withTempDir("collaboration-bridge-owner-", async (dir) => {
             const bridge = new CollaborationBridge({

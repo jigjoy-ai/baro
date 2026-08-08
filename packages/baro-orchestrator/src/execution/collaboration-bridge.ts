@@ -484,6 +484,7 @@ export class CollaborationBridge extends SerializedObserver {
             })
             this.activeLeaseByStory.set(agentId, event.data.leaseId)
             this.activeAgents.add(agentId)
+            this.announceNewOwnership(agentId, event.data.request.surface?.writes)
             // A stable story id may be leased repeatedly. Never expose a
             // previous execution's inbox to the new capability.
             this.resetInbox(agentId)
@@ -1235,6 +1236,33 @@ export class CollaborationBridge extends SerializedObserver {
             ].join("\n"),
             metadata: { kind: "ownership_answer", sourceAgentId: "host" },
         })
+    }
+
+    /**
+     * A story that started earlier was told what every other story owns as of
+     * its own offer. Progressive planning keeps adding stories after that, so
+     * that list goes stale while the agent works — one wrote a peer's spec
+     * that had no owner at all when it began. Ownership of newly claimed paths
+     * is announced to whoever is still writing.
+     */
+    private announceNewOwnership(
+        ownerId: string,
+        writes: readonly string[] | undefined,
+    ): void {
+        if (!writes || writes.length === 0) return
+        const claimed = writes.slice(0, 8)
+        for (const agentId of this.activeAgents) {
+            if (agentId === ownerId) continue
+            this.routeMessageIntent({
+                recipientId: agentId,
+                text: [
+                    `Story ${ownerId} started and now owns these paths:`,
+                    ...claimed.map((path) => `- ${path}`),
+                    "They were unclaimed when your own surface was drawn. Writing one now loses your whole story at the merge gate — ask its owner or block on it.",
+                ].join("\n"),
+                metadata: { kind: "ownership_update", sourceAgentId: "host" },
+            })
+        }
     }
 
     private broadcastPeerNote(sourceAgentId: string, text: string): string[] {
