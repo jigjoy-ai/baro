@@ -89,7 +89,12 @@ export class ClaudeCliParticipant extends CliParticipant<ClaudeRunSummary> {
             cwd: opts.cwd,
             stdinMode: "pipe",
             closeDrainTimeoutMs: opts.closeDrainTimeoutMs ?? 7_500,
-            captureStderrTail: false,
+            // Every other CLI lane keeps this tail, and it is the only place a
+            // Claude-side failure is written down: when its MCP child refused
+            // to start, the host could say only that nobody connected, and the
+            // one process that knew why was not being listened to. Bounded by
+            // appendCliDiagnosticTail, same as the rest.
+            captureStderrTail: true,
         })
         this.options = {
             ...opts,
