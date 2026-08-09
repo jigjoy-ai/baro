@@ -69,6 +69,12 @@ describe("a capability costs what the lane charges for it", () => {
             ["publish_plan_fragment"],
         )
         assert.match(grant.cliExtraArgs!.join(" "), /--mcp-config/u)
+        assert.ok(
+            !grant.cliExtraArgs!.includes("--safe-mode"),
+            "the CLI reads --safe-mode as: disable MCP servers, this run's included",
+        )
+        const sources = grant.cliExtraArgs!.indexOf("--setting-sources")
+        assert.ok(sources >= 0 && grant.cliExtraArgs![sources + 1] === "")
         assert.equal(grant.tools, undefined, "a CLI is told names, not functions")
         await grant.close()
         assert.equal(closed, 1, "the grant owns the relay it opened")
@@ -91,6 +97,7 @@ describe("a capability costs what the lane charges for it", () => {
         const args = grant.cliExtraArgs!.join(" ")
         assert.match(args, /--tools Read,Glob,Grep/u)
         assert.match(args, /--strict-mcp-config/u)
+        assert.match(args, /--safe-mode/u, "nothing here needs a server to live")
         assert.match(
             args,
             /--mcp-config \{"mcpServers":\{\}\}/u,

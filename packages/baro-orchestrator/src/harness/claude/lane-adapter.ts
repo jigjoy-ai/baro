@@ -66,11 +66,11 @@ export class ClaudeLaneAdapter implements InteractiveLaneAdapter {
         }
 
         if (readsRepo) args.push("--tools", READ_ONLY_TOOLS)
-        args.push("--safe-mode", "--disable-slash-commands", "--strict-mcp-config")
+        args.push("--disable-slash-commands", "--strict-mcp-config")
 
         if (functions.length === 0) {
             // Stated explicitly: no server, and no inherited user config either.
-            args.push("--mcp-config", '{"mcpServers":{}}')
+            args.push("--safe-mode", "--mcp-config", '{"mcpServers":{}}')
             args.push("--no-session-persistence")
             return { cliExtraArgs: args, close: async () => {} }
         }
@@ -82,8 +82,17 @@ export class ClaudeLaneAdapter implements InteractiveLaneAdapter {
                 `host-function (${functions.map((fn) => fn.name).join(", ")})`,
             )
         }
+        // `--safe-mode` disables MCP servers — including the run-scoped one
+        // this grant just opened, which the CLI then never spawns and the host
+        // only sees as a relay nobody reached. An empty setting-source list
+        // keeps ambient user config out without silencing our own server.
         const exposed = await bridge.expose(functions)
-        args.push(...exposed.cliExtraArgs, "--no-session-persistence")
+        args.push(
+            "--setting-sources",
+            "",
+            ...exposed.cliExtraArgs,
+            "--no-session-persistence",
+        )
         return { cliExtraArgs: args, close: () => exposed.close() }
     }
 

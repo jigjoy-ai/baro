@@ -141,6 +141,13 @@ if (modelIndex < 0 || argv[modelIndex + 1] !== "opus") {
     throw new Error("fixture expected the default --model opus, got: " + argv.join(" "));
 }
 
+// The real CLI documents --safe-mode as disabling MCP servers, including the
+// one this run supplies. A fixture that spawned the server anyway let a lane
+// that could never reach the relay pass every offline test.
+if (argv.includes("--safe-mode")) {
+    throw new Error("fixture: --safe-mode disables the run-scoped MCP server");
+}
+
 const configIndex = argv.indexOf("--mcp-config");
 if (configIndex < 0) throw new Error("fixture expected --mcp-config");
 const config = JSON.parse(argv[configIndex + 1]);

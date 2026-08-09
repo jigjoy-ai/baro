@@ -452,7 +452,6 @@ export async function runPlannerBusSession(
             model: requestedModel,
             ...(opts.effort ? { effort: opts.effort } : {}),
             systemPrompt,
-            cliExtraArgs: ["--setting-sources", ""],
         },
         grant,
     )
