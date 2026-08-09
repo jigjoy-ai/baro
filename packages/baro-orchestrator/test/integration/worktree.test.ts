@@ -583,6 +583,35 @@ describe("WorktreeManager — cleanup", () => {
         )
     })
 
+    it("names the operation that removed a worktree", async () => {
+        const path = (await mgr.create("S1"))!
+        logs.length = 0
+        await mgr.cleanup("S1")
+
+        const removal = logs.find((l) => l.includes("removed worktree"))
+        assert.ok(removal, `no removal was logged: ${JSON.stringify(logs)}`)
+        assert.ok(removal!.includes(path), "the removal names the path it took")
+        assert.match(removal!, /\(cleanup\)/u, "and the caller that asked for it")
+    })
+
+    it("says so when it force-removed a tree git would not release", async () => {
+        const path = (await mgr.create("S1"))!
+        // Break the link so `git worktree remove` refuses while the directory
+        // survives — the state a still-running agent process leaves behind.
+        rmSync(join(path, ".git"))
+        logs.length = 0
+        await mgr.cleanup("S1")
+
+        assert.equal(existsSync(path), false, "the directory goes either way")
+        const forced = logs.find((l) => l.includes("force-removed worktree"))
+        assert.ok(forced, `a forced removal was silent: ${JSON.stringify(logs)}`)
+        assert.match(
+            forced!,
+            /after git refused \(cleanup\)/u,
+            "the victim can only report ENOENT; this line names who did it",
+        )
+    })
+
     it("retains an explicitly unquiesced worktree while cleaning its siblings", async () => {
         const livePath = (await mgr.create("S-live"))!
         const settledPath = (await mgr.create("S-settled"))!

@@ -156,7 +156,7 @@ export class WorktreeManager {
             this.preserved.delete(storyId)
             // A leftover dir/branch from a crash would make `worktree add`
             // fail; best-effort clear first.
-            await this.removeWorktreeQuiet(path)
+            await this.removeWorktreeQuiet(path, "create:clear-leftover")
             await this.deleteBranchQuiet(branch)
 
             const { stdout: baseSha } = await exec("git", ["rev-parse", "HEAD"], {
@@ -251,7 +251,7 @@ export class WorktreeManager {
 
             // The backup now owns durability. Release the reusable story ref;
             // create(storyId) can safely start a fresh worktree at current HEAD.
-            await this.removeWorktreeQuiet(path)
+            await this.removeWorktreeQuiet(path, "releasePreserved")
             if (existsSync(path)) {
                 throw new Error(`could not release preserved worktree for story ${storyId}`)
             }
@@ -336,7 +336,7 @@ export class WorktreeManager {
             }
 
             if (!preserveForRecovery) {
-                await this.removeWorktreeQuiet(path)
+                await this.removeWorktreeQuiet(path, "cleanupFailed")
                 this.paths.delete(storyId)
                 this.baseShas.delete(storyId)
                 await this.deleteBranchQuiet(branch)
@@ -602,7 +602,7 @@ export class WorktreeManager {
         const release = await this.gate.acquire()
         try {
             if (path) {
-                await this.removeWorktreeQuiet(path)
+                await this.removeWorktreeQuiet(path, "cleanup")
                 this.paths.delete(storyId)
             }
             this.baseShas.delete(storyId)
@@ -657,7 +657,7 @@ export class WorktreeManager {
                         continue
                     }
                 }
-                await this.removeWorktreeQuiet(path)
+                await this.removeWorktreeQuiet(path, "cleanupAll")
                 this.paths.delete(storyId)
                 this.baseShas.delete(storyId)
                 if (this.preserved.has(storyId)) {
@@ -1014,7 +1014,7 @@ export class WorktreeManager {
         path: string,
         branch: string,
     ): Promise<void> {
-        await this.removeWorktreeQuiet(path)
+        await this.removeWorktreeQuiet(path, "releaseLogicalStory")
         if (existsSync(path)) {
             throw new Error(`could not release worktree for story ${storyId}`)
         }
@@ -1046,12 +1046,17 @@ export class WorktreeManager {
         }
     }
 
-    private async removeWorktreeQuiet(path: string): Promise<void> {
+    private async removeWorktreeQuiet(path: string, reason: string): Promise<void> {
         await execQuiet("git", ["worktree", "remove", "--force", path], this.repoRoot)
-        // If git refused (e.g. a still-running subprocess), force-remove the
-        // dir and prune the now-dangling administrative entry.
+        // Git refuses while something still holds the tree, and forcing it
+        // anyway is what makes an agent's directory vanish mid-turn. A removal
+        // that does that has to say who asked for it — otherwise the only
+        // trace left is the victim reporting ENOENT.
         if (existsSync(path)) {
+            this.log(`force-removed worktree ${path} after git refused (${reason})`)
             rmSyncQuiet(path)
+        } else {
+            this.log(`removed worktree ${path} (${reason})`)
         }
         // Also prune when the directory disappeared outside this process;
         // otherwise Git still considers its logical branch checked out.
@@ -1076,7 +1081,7 @@ export class WorktreeManager {
         this.paths.delete(storyId)
         this.baseShas.delete(storyId)
         this.preserved.delete(storyId)
-        await this.removeWorktreeQuiet(path)
+        await this.removeWorktreeQuiet(path, "rollbackCreate")
         await this.deleteBranchQuiet(branch)
 
         const { stdout: remainingBranch } = await exec(
