@@ -536,7 +536,12 @@ export async function orchestrate(
     // Shared by event correlation, memory sessions, and worktree names.
     // It is created before Operator so user conversation events carry the
     // same identity as the collective control plane from their first hop.
-    const runId = resolveOrchestrationRunId(config.runId, process.env.BARO_RUN_ID)
+    // Deliberately not read from the environment here. A story agent's shell
+    // carries the live run's BARO_RUN_ID, so any orchestrate() started under it
+    // — a test in the repository being worked on, most of all — would adopt that
+    // identity and, at teardown, delete the running run's worktree root. The
+    // entry point that legitimately inherits the id passes it in.
+    const runId = resolveOrchestrationRunId(config.runId, undefined)
     const outcomeAuthority = coordinationMode === "collective"
         ? new StoryOutcomeAuthority(runId)
         : undefined

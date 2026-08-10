@@ -746,6 +746,9 @@ async function main(): Promise<void> {
     const config: OrchestrateConfig = {
         prdPath,
         cwd,
+        // This process is the run the host started, so inheriting its identity
+        // is correct here and only here.
+        ...(process.env.BARO_RUN_ID ? { runId: process.env.BARO_RUN_ID } : {}),
         onOperatorReady: (operator) => {
             operatorRef = operator
         },

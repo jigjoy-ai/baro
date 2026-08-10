@@ -583,6 +583,29 @@ describe("WorktreeManager — cleanup", () => {
         )
     })
 
+    it("never removes a base directory it did not fill", async () => {
+        // The case that wiped live runs: a suite running inside a story's
+        // worktree inherits BARO_RUN_ID, builds a manager on the live run's id,
+        // creates nothing, and at teardown deletes every story's work.
+        const live = new WorktreeManager(repo, gate, runId, {
+            onLog: (l) => logs.push(l),
+        })
+        const livePath = (await live.create("S1"))!
+        const impostor = new WorktreeManager(repo, new GitGate(), runId, {
+            onLog: () => {},
+        })
+
+        await impostor.cleanupAll()
+
+        assert.equal(
+            existsSync(livePath),
+            true,
+            "a manager that created nothing must take nothing away",
+        )
+        await live.cleanupAll()
+        assert.equal(existsSync(livePath), false)
+    })
+
     it("names the operation that removed a worktree", async () => {
         const path = (await mgr.create("S1"))!
         logs.length = 0

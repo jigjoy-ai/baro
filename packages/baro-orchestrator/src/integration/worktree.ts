@@ -88,6 +88,9 @@ export class WorktreeManager {
     /** One-way run shutdown latch. No worktree may appear after the final
      * cleanup sweep has begun. */
     private shutdownStarted = false
+    /** Whether this manager ever put a worktree under `baseDir`; teardown may
+     * only remove a directory it filled. */
+    private createdWorktree = false
 
     constructor(
         private readonly repoRoot: string,
@@ -174,6 +177,7 @@ export class WorktreeManager {
             }
             this.paths.set(storyId, path)
             this.baseShas.set(storyId, baseSha.trim())
+            this.createdWorktree = true
             this.log(`created ${branch} at ${path}`)
             return path
         } catch (e) {
@@ -674,7 +678,13 @@ export class WorktreeManager {
                 this.baseShas.clear()
             }
             await execQuiet("git", ["worktree", "prune"], this.repoRoot)
-            if (!keptDirtyRecovery) rmSyncQuiet(this.baseDir)
+            // Only the manager that put worktrees there may take the directory
+            // away. Run ids are meant to be unique per process, but they travel
+            // in the environment, so one that arrives by inheritance can name a
+            // live run's directory — and this line would delete every story's
+            // work in it. Having created nothing is reason enough to remove
+            // nothing.
+            if (!keptDirtyRecovery && this.createdWorktree) rmSyncQuiet(this.baseDir)
         } finally {
             release()
         }
