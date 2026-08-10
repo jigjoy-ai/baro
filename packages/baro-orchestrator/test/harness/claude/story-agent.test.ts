@@ -25,15 +25,16 @@ import { criticInput } from "../../../src/acceptance/critic-input.js"
 import { StoryAgent } from "../../../src/harness/claude/story-agent.js"
 import {
     captureEnv,
+    FIXTURE_TIMEOUT_SECS,
+    SPAWNED_FIXTURE_DEADLINE_MS,
     source,
-    type CapturedEnvironment,
     withTempDir,
+    type CapturedEnvironment,
 } from "../../execution/helpers.js"
 
 // These tests exercise semantic outcomes, not the production attempt watchdog.
 // The full suite launches many fixture processes concurrently, so leave enough
 // scheduling headroom for the local child to start before asserting its result.
-const FIXTURE_TIMEOUT_SECS = 60
 const FIXTURE_WAIT_TIMEOUT_MS = 30_000
 
 describe("StoryAgent", () => {
@@ -687,7 +688,7 @@ process.exit(0)
                 maxTurns: 3,
                 requiresQualityReview: true,
                 turnReviewAuthority: reviewAuthority,
-                turnReviewTimeoutMs: 15_000,
+                turnReviewTimeoutMs: SPAWNED_FIXTURE_DEADLINE_MS,
             })
             agent.join(env)
 
@@ -874,7 +875,7 @@ process.exit(0)
             agent.join(env)
 
             const outcomePromise = agent.run(env)
-            const [terminal] = await waitForAgentResults(env, 1, 10_000)
+            const [terminal] = await waitForAgentResults(env, 1, SPAWNED_FIXTURE_DEADLINE_MS)
             const terminalId = criticInput(terminal)?.terminalId
             assert.ok(terminalId)
 
@@ -966,12 +967,12 @@ process.exit(0)
                 maxTurns: 2,
                 requiresQualityReview: true,
                 turnReviewAuthority: reviewAuthority,
-                turnReviewTimeoutMs: 15_000,
+                turnReviewTimeoutMs: SPAWNED_FIXTURE_DEADLINE_MS,
             })
             agent.join(env)
 
             const outcomePromise = agent.run(env)
-            const [terminal] = await waitForAgentResults(env, 1, 10_000)
+            const [terminal] = await waitForAgentResults(env, 1, SPAWNED_FIXTURE_DEADLINE_MS)
             const terminalId = criticInput(terminal)?.terminalId
             assert.ok(terminalId)
             env.deliverSemanticEvent(
@@ -1021,13 +1022,13 @@ process.exit(0)
                 maxTurns: 2,
                 requiresQualityReview: true,
                 turnReviewAuthority: reviewAuthority,
-                turnReviewTimeoutMs: 15_000,
+                turnReviewTimeoutMs: SPAWNED_FIXTURE_DEADLINE_MS,
                 handoffInconclusiveToAcceptanceGate: true,
             })
             agent.join(env)
 
             const outcomePromise = agent.run(env)
-            const [terminal] = await waitForAgentResults(env, 1, 10_000)
+            const [terminal] = await waitForAgentResults(env, 1, SPAWNED_FIXTURE_DEADLINE_MS)
             const terminalId = criticInput(terminal)?.terminalId
             assert.ok(terminalId)
             env.deliverSemanticEvent(

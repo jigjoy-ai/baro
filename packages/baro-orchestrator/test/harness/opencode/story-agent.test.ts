@@ -12,7 +12,13 @@ import {
     Critique,
     StoryResult,
 } from "../../../src/semantic-events.js"
-import { captureEnv, source, withTempDir } from "../../execution/helpers.js"
+import {
+    FIXTURE_TIMEOUT_SECS,
+    SPAWNED_FIXTURE_DEADLINE_MS,
+    captureEnv,
+    source,
+    withTempDir,
+} from "../../execution/helpers.js"
 
 describe("OpenCodeStoryAgent", () => {
     it("emits a successful terminal StoryResult from a fake OpenCode backend", async () => {
@@ -42,7 +48,7 @@ printf '%s\n' \
                 retries: 0,
                 // Corporate endpoint scanners can delay first execution of a
                 // freshly-created temp binary; this is not the behavior under test.
-                timeoutSecs: 60,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
             })
             const terminalSources: Participant[] = []
             agent.setTerminalSourceRegistrar((source) => terminalSources.push(source))
@@ -128,7 +134,7 @@ process.exit(0)
                     cwd,
                     opencodeBin,
                     retries: 0,
-                    timeoutSecs: 30,
+                    timeoutSecs: FIXTURE_TIMEOUT_SECS,
                     requiresQualityReview: true,
                     terminalTurnAuthority: projector,
                     turnReviewAuthority: critic,
@@ -263,7 +269,7 @@ printf '%s\n' \
                 opencodeBin,
                 retries: 1,
                 retryDelayMs: 0,
-                timeoutSecs: 30,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
             })
 
             const outcome = await agent.run(env)
@@ -318,7 +324,7 @@ process.exit(1)
                 retries: 2,
                 retryDelayMs: 0,
                 // Corporate endpoint scanners can delay fresh temp binaries.
-                timeoutSecs: 60,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
             })
             agent.join(env)
 
@@ -349,7 +355,7 @@ process.exit(1)
                 opencodeBin: join(dir, "missing-opencode"),
                 retries: 2,
                 retryDelayMs: 0,
-                timeoutSecs: 2,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
             })
 
             const outcome = await agent.run(env)
@@ -370,12 +376,14 @@ process.exit(1)
 
 async function waitUntil(
     predicate: () => boolean,
-    timeoutMs = 15_000,
+    timeoutMs = SPAWNED_FIXTURE_DEADLINE_MS,
 ): Promise<void> {
     const deadline = Date.now() + timeoutMs
     while (!predicate()) {
         if (Date.now() >= deadline) {
-            throw new Error("timed out waiting for test condition")
+            throw new Error(
+                `test condition not reached within ${timeoutMs}ms`,
+            )
         }
         await new Promise((resolve) => setTimeout(resolve, 5))
     }

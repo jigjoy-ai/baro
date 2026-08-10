@@ -7,7 +7,10 @@ import assert from "node:assert/strict"
 import { knownMetric, unknownMetric } from "../../../src/telemetry/model-telemetry.js"
 import { runCodexOneShot } from "../../../src/harness/codex/one-shot.js"
 import type { RunnerInvocationObservation } from "../../../src/harness/runner-invocation.js"
-import { withTempDir } from "../../execution/helpers.js"
+import {
+    SPAWNED_FIXTURE_DEADLINE_MS,
+    withTempDir,
+} from "../../execution/helpers.js"
 
 /** Fake codex: emits agent_message lines, then optionally hangs, then exits. */
 function writeFakeCodex(
@@ -75,7 +78,10 @@ process.exit(${opts.exitCode ?? 0});
     return bin
 }
 
-async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
+async function waitForFile(
+    path: string,
+    timeoutMs = SPAWNED_FIXTURE_DEADLINE_MS,
+): Promise<void> {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
         if (existsSync(path)) return

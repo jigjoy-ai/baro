@@ -11,7 +11,10 @@ import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 
 import { execFileCli, execFileCliBuffer } from "../../src/harness/exec-file-cli.js"
-import { withTempDir } from "../execution/helpers.js"
+import {
+    SPAWNED_FIXTURE_DEADLINE_MS,
+    withTempDir,
+} from "../execution/helpers.js"
 
 function writeCli(dir: string, source: string): string {
     const path = join(dir, "fake-cli.mjs")
@@ -20,7 +23,7 @@ function writeCli(dir: string, source: string): string {
     return path
 }
 
-async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
+async function waitForFile(path: string, timeoutMs = SPAWNED_FIXTURE_DEADLINE_MS): Promise<void> {
     const deadline = Date.now() + timeoutMs
     while (!existsSync(path)) {
         if (Date.now() >= deadline) {

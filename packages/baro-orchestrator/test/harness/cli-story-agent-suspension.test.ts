@@ -17,6 +17,7 @@ import { StoryAgent } from "../../src/harness/claude/story-agent.js"
 import { PROCESS_TREE_CAPABILITIES } from "../../src/harness/process-tree.js"
 import {
     captureEnv,
+    SPAWNED_FIXTURE_DEADLINE_MS,
     type CapturedEnvironment,
     withTempDir,
 } from "../execution/helpers.js"
@@ -48,7 +49,11 @@ describe("CLI StoryAgent cooperative suspension", () => {
                 agent.join(env)
                 agent.run(env)
 
-                await waitUntil(() => fixturePid(fixture) !== null, 10_000)
+                await waitUntil(
+                    () => fixturePid(fixture) !== null,
+                    SPAWNED_FIXTURE_DEADLINE_MS,
+                    "the fixture child announced its pid",
+                )
                 const pid = fixturePid(fixture)!
                 assert.equal(isAlive(pid), true)
 
@@ -95,7 +100,11 @@ describe("CLI StoryAgent cooperative suspension", () => {
                 agent.join(env)
                 agent.run(env)
 
-                await waitUntil(() => fixturePid(fixture) !== null, 10_000)
+                await waitUntil(
+                    () => fixturePid(fixture) !== null,
+                    SPAWNED_FIXTURE_DEADLINE_MS,
+                    "the fixture child announced its pid",
+                )
                 const pid = fixturePid(fixture)!
                 agent.abort()
                 const outcome = await agent.done
@@ -235,7 +244,11 @@ describe("one-shot CLI process ownership provenance", () => {
                     const env = captureEnv()
                     agent.join(env)
                     void agent.run(env)
-                    await waitUntil(() => fixturePid(fixture) !== null, 10_000)
+                    await waitUntil(
+                    () => fixturePid(fixture) !== null,
+                    SPAWNED_FIXTURE_DEADLINE_MS,
+                    "the fixture child announced its pid",
+                )
 
                     const cli = currentOneShotCli(agent, backend)
                     assert.ok(cli)
@@ -626,13 +639,14 @@ function invocationCount(fixture: BlockingHarness): number {
 async function waitUntil(
     predicate: () => boolean,
     timeoutMs: number,
+    what: string,
 ): Promise<void> {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
         if (predicate()) return
         await delay(10)
     }
-    assert.fail(`condition not reached within ${timeoutMs}ms`)
+    assert.fail(`${what}: not observed within ${timeoutMs}ms`)
 }
 
 async function withDeadline<T>(

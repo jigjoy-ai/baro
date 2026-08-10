@@ -20,7 +20,13 @@ import {
     StoryResult,
     WorkLeaseGranted,
 } from "../../../src/semantic-events.js"
-import { captureEnv, source, withTempDir } from "../../execution/helpers.js"
+import {
+    FIXTURE_TIMEOUT_SECS,
+    SPAWNED_FIXTURE_DEADLINE_MS,
+    captureEnv,
+    source,
+    withTempDir,
+} from "../../execution/helpers.js"
 
 describe("CodexStoryAgent", () => {
     it("emits a successful terminal StoryResult from a fake Codex backend", async () => {
@@ -47,7 +53,7 @@ process.exit(0)
                 cwd,
                 codexBin,
                 retries: 0,
-                timeoutSecs: 5,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
                 skipGitRepoCheck: true,
             })
             const terminalSources: Array<Participant & {
@@ -158,7 +164,7 @@ setTimeout(() => {
                     cwd,
                     codexBin,
                     retries: 0,
-                    timeoutSecs: 10,
+                    timeoutSecs: FIXTURE_TIMEOUT_SECS,
                     skipGitRepoCheck: true,
                     requiresQualityReview: true,
                     terminalTurnAuthority: projector,
@@ -186,7 +192,7 @@ setTimeout(() => {
                             storyId: correlation.storyId,
                             prompt: "finish the candidate",
                             retries: 0,
-                            timeoutSecs: 10,
+                            timeoutSecs: FIXTURE_TIMEOUT_SECS,
                         },
                     }),
                 )
@@ -272,7 +278,7 @@ setInterval(() => {}, 1000)
                     cwd,
                     codexBin,
                     retries: 0,
-                    timeoutSecs: 10,
+                    timeoutSecs: FIXTURE_TIMEOUT_SECS,
                     skipGitRepoCheck: true,
                     requiresQualityReview: true,
                     terminalTurnAuthority: projector,
@@ -300,7 +306,7 @@ setInterval(() => {}, 1000)
                             storyId: correlation.storyId,
                             prompt: "stage then wait",
                             retries: 0,
-                            timeoutSecs: 10,
+                            timeoutSecs: FIXTURE_TIMEOUT_SECS,
                         },
                     }),
                 )
@@ -424,7 +430,7 @@ setTimeout(() => process.exit(0), 500)
                     cwd,
                     codexBin,
                     retries: 0,
-                    timeoutSecs: 10,
+                    timeoutSecs: FIXTURE_TIMEOUT_SECS,
                     skipGitRepoCheck: true,
                     requiresQualityReview: true,
                     terminalTurnAuthority: projector,
@@ -452,7 +458,7 @@ setTimeout(() => process.exit(0), 500)
                             storyId: correlation.storyId,
                             prompt: "finish without background work",
                             retries: 0,
-                            timeoutSecs: 10,
+                            timeoutSecs: FIXTURE_TIMEOUT_SECS,
                         },
                     }),
                 )
@@ -516,7 +522,7 @@ process.exit(0)
                 cwd,
                 codexBin,
                 retries: 0,
-                timeoutSecs: 5,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
                 skipGitRepoCheck: true,
                 requiresQualityReview: true,
                 terminalTurnAuthority: projector,
@@ -637,7 +643,7 @@ process.exit(1)
                 codexBin,
                 retries: 1,
                 retryDelayMs: 0,
-                timeoutSecs: 5,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
                 skipGitRepoCheck: true,
             })
 
@@ -692,7 +698,7 @@ process.exit(1)
                 codexBin,
                 retries: 2,
                 retryDelayMs: 0,
-                timeoutSecs: 5,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
                 skipGitRepoCheck: true,
             })
             agent.join(env)
@@ -724,7 +730,7 @@ process.exit(1)
                 codexBin: join(dir, "missing-codex"),
                 retries: 2,
                 retryDelayMs: 0,
-                timeoutSecs: 2,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
                 skipGitRepoCheck: true,
             })
 
@@ -830,7 +836,7 @@ descendant.once("message", () => {
                     // to the fixture above from cwd.
                     codexBin: process.execPath,
                     retries: 0,
-                    timeoutSecs: 4,
+                    timeoutSecs: FIXTURE_TIMEOUT_SECS,
                     hardTimeoutSecs: 1,
                     skipGitRepoCheck: true,
                     requiresQualityReview: true,
@@ -902,7 +908,7 @@ process.exit(0)
                     codexBin,
                     retries: 2,
                     retryDelayMs: 0,
-                    timeoutSecs: 5,
+                    timeoutSecs: FIXTURE_TIMEOUT_SECS,
                     skipGitRepoCheck: true,
                 })
                 const internals = agent as unknown as {
@@ -929,12 +935,14 @@ process.exit(0)
 
 async function waitUntil(
     predicate: () => boolean,
-    timeoutMs = 5_000,
+    timeoutMs = SPAWNED_FIXTURE_DEADLINE_MS,
 ): Promise<void> {
     const deadline = Date.now() + timeoutMs
     while (!predicate()) {
         if (Date.now() >= deadline) {
-            throw new Error("timed out waiting for test condition")
+            throw new Error(
+                `test condition not reached within ${timeoutMs}ms`,
+            )
         }
         await new Promise((resolve) => setTimeout(resolve, 5))
     }

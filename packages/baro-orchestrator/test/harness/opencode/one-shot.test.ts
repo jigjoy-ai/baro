@@ -7,7 +7,10 @@ import { describe, it } from "node:test"
 import { knownMetric, unknownMetric } from "../../../src/telemetry/model-telemetry.js"
 import { runOpenCodeOneShot } from "../../../src/harness/opencode/one-shot.js"
 import type { RunnerInvocationObservation } from "../../../src/harness/runner-invocation.js"
-import { withTempDir } from "../../execution/helpers.js"
+import {
+    SPAWNED_FIXTURE_DEADLINE_MS,
+    withTempDir,
+} from "../../execution/helpers.js"
 
 function writeFakeOpenCode(
     dir: string,
@@ -356,10 +359,15 @@ setInterval(() => {}, 10_000);
     })
 })
 
-async function waitForFile(path: string, timeoutMs = 10_000): Promise<void> {
+async function waitForFile(
+    path: string,
+    timeoutMs = SPAWNED_FIXTURE_DEADLINE_MS,
+): Promise<void> {
     const deadline = Date.now() + timeoutMs
     while (!existsSync(path)) {
-        if (Date.now() >= deadline) throw new Error("descendant never started")
+        if (Date.now() >= deadline) {
+            throw new Error(`${path} never appeared within ${timeoutMs}ms`)
+        }
         await delay(25)
     }
 }

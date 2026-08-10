@@ -12,7 +12,13 @@ import {
     Critique,
     StoryResult,
 } from "../../../src/semantic-events.js"
-import { captureEnv, source, withTempDir } from "../../execution/helpers.js"
+import {
+    FIXTURE_TIMEOUT_SECS,
+    SPAWNED_FIXTURE_DEADLINE_MS,
+    captureEnv,
+    source,
+    withTempDir,
+} from "../../execution/helpers.js"
 
 // A freshly-created executable can be held by corporate endpoint scanning for
 // several seconds when the complete suite launches many child processes in
@@ -394,7 +400,7 @@ process.exit(1)
                 piBin: join(dir, "missing-pi"),
                 retries: 2,
                 retryDelayMs: 0,
-                timeoutSecs: 2,
+                timeoutSecs: FIXTURE_TIMEOUT_SECS,
             })
 
             const outcome = await agent.run(env)
@@ -415,12 +421,14 @@ process.exit(1)
 
 async function waitUntil(
     predicate: () => boolean,
-    timeoutMs = 5_000,
+    timeoutMs = SPAWNED_FIXTURE_DEADLINE_MS,
 ): Promise<void> {
     const deadline = Date.now() + timeoutMs
     while (!predicate()) {
         if (Date.now() >= deadline) {
-            throw new Error("timed out waiting for test condition")
+            throw new Error(
+                `test condition not reached within ${timeoutMs}ms`,
+            )
         }
         await new Promise((resolve) => setTimeout(resolve, 5))
     }

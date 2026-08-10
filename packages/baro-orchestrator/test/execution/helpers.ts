@@ -162,3 +162,30 @@ export function assertHarnessEnvironmentWasSanitized(path: string): void {
         unrelated: "keep-me",
     })
 }
+
+/**
+ * How long a test may wait for the operating system to start a spawned fixture
+ * and for that fixture to announce itself.
+ *
+ * None of these tests measure spawn latency — they measure what happens once
+ * the child exists. A wait returns the moment it appears, so a generous ceiling
+ * costs a healthy machine nothing, while a tight one fails correct code
+ * whenever the suite runs alongside anything else. The old 5–10s ceilings did
+ * exactly that: three suspension tests and two one-shot tests failed at 10.01s
+ * under load and passed in isolation, and the cost lands on whoever has to
+ * prove the red was not theirs.
+ */
+export const SPAWNED_FIXTURE_DEADLINE_MS = 60_000
+
+/**
+ * Per-attempt ceiling for harness tests whose subject is not the timeout.
+ *
+ * A ceiling near the cost of starting a process stops measuring the code and
+ * starts measuring the machine: under load a fixture that exits non-zero is
+ * cut off instead, which is a different failure class and one the agents
+ * deliberately do not retry locally — so a test counting attempts sees one
+ * where it required two. The lane whose tests already used a named generous
+ * ceiling is the one that never flaked. A test that really is about timeouts
+ * states a fractional ceiling and means it.
+ */
+export const FIXTURE_TIMEOUT_SECS = 60
