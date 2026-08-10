@@ -33,14 +33,39 @@ async function waitForFile(path: string, timeoutMs = SPAWNED_FIXTURE_DEADLINE_MS
     }
 }
 
-// The idle watchdog is proved reset by output only if its window sits BETWEEN
-// one heartbeat and the whole run: shorter than the run, or survival proves
-// nothing, and far longer than one beat, or a loaded machine kills a healthy
-// process and the test reports the machine instead of the code. A 250ms beat against a
-// 900ms window left a 3.6x margin and failed whenever the suite ran whole.
-const IDLE_WINDOW_MS = 2_000
-const HEARTBEAT_MS = 50
-const HEARTBEAT_COUNT = 80
+
+/** A clock the test drives. Records what the watchdogs asked for so their
+ *  behaviour can be asserted, and fires only when told to. */
+class RecordingClock {
+    readonly arms: number[] = []
+    cleared = 0
+    fired = 0
+    private pending: (() => void) | null = null
+
+    setTimeout(callback: () => void, ms: number): unknown {
+        this.arms.push(ms)
+        this.pending = callback
+        return this.arms.length
+    }
+
+    clearTimeout(_handle: unknown): void {
+        this.cleared += 1
+        this.pending = null
+    }
+
+    /** Wait for the watchdog to arm, then fire it. */
+    async fireWhenArmed(): Promise<void> {
+        const deadline = Date.now() + SPAWNED_FIXTURE_DEADLINE_MS
+        while (!this.pending) {
+            if (Date.now() >= deadline) throw new Error("watchdog never armed")
+            await delay(5)
+        }
+        const fire = this.pending
+        this.pending = null
+        this.fired += 1
+        fire()
+    }
+}
 
 describe("execFileCli process supervision", () => {
     it("returns clean CLI output", async () => {
@@ -143,57 +168,50 @@ setInterval(() => {}, 10_000);
         })
     })
 
-    it("never kills a process that keeps producing output, however long it runs", async () => {
-        await withTempDir("baro-exec-idle-alive-", async (dir) => {
+    it("rearms the idle clock on every chunk, and only on a chunk", async () => {
+        await withTempDir("baro-exec-idle-rearm-", async (dir) => {
             const bin = writeCli(dir, `
 let ticks = 0;
 const timer = setInterval(() => {
     process.stdout.write("tick " + ticks + "\\n");
-    if (++ticks >= ${HEARTBEAT_COUNT}) { clearInterval(timer); }
-}, ${HEARTBEAT_MS});
+    if (++ticks >= 4) { clearInterval(timer); }
+}, 5);
 `)
-            // The run spans several idle windows: only the per-chunk reset
-            // can explain survival.
+            const clock = new RecordingClock()
             const result = await execFileCli(bin, [], {
-                idleTimeoutMs: IDLE_WINDOW_MS,
+                idleTimeoutMs: 900,
+                timers: clock,
             })
-            assert.match(result.stdout, new RegExp(`tick ${HEARTBEAT_COUNT - 1}`))
-        })
-    })
 
-    it("kills a process that has gone silent for the whole idle window", async () => {
-        await withTempDir("baro-exec-idle-hung-", async (dir) => {
-            const bin = writeCli(dir, `
-process.stdout.write("starting\\n");
-setInterval(() => {}, 10_000);
-`)
-            await assert.rejects(
-                execFileCli(bin, [], {
-                    idleTimeoutMs: 600,
-                    terminationGraceMs: 75,
-                }),
-                (error: Error & { killed?: boolean }) => {
-                    assert.equal(error.killed, true)
-                    assert.match(error.message, /no output for 600ms/)
-                    return true
-                },
+            assert.match(result.stdout.toString(), /tick 3/)
+            // One arm before any output, then exactly one rearm per chunk, each
+            // cancelling the arm before it. Nothing here waited on the machine.
+            assert.ok(clock.arms.length >= 2, `armed ${clock.arms.length} times`)
+            assert.ok(
+                clock.arms.every((ms) => ms === 900),
+                "every arm uses the caller's window",
             )
+            assert.equal(
+                clock.cleared,
+                clock.arms.length,
+                "each rearm cancels its predecessor, and settling cancels the last",
+            )
+            assert.equal(clock.fired, 0, "a talking process is never presumed hung")
         })
     })
 
-    it("counts stderr as proof of life for the idle watchdog", async () => {
-        await withTempDir("baro-exec-idle-stderr-", async (dir) => {
-            const bin = writeCli(dir, `
-let ticks = 0;
-const timer = setInterval(() => {
-    process.stderr.write("diagnostic " + ticks + "\\n");
-    if (++ticks >= ${HEARTBEAT_COUNT}) { clearInterval(timer); process.stdout.write("done\\n"); }
-}, ${HEARTBEAT_MS});
-`)
-            const result = await execFileCli(bin, [], {
-                idleTimeoutMs: IDLE_WINDOW_MS,
+    it("kills a process the idle clock declares silent, without waiting for it", async () => {
+        await withTempDir("baro-exec-idle-silent-", async (dir) => {
+            const bin = writeCli(dir, `setInterval(() => {}, 10_000);`)
+            const clock = new RecordingClock()
+            const run = execFileCli(bin, [], {
+                idleTimeoutMs: 900,
+                timers: clock,
             })
-            assert.equal(result.stdout, "done\n")
+
+            // Drive the window rather than sleep through it.
+            await clock.fireWhenArmed()
+            await assert.rejects(run, /produced no output for 900ms/u)
         })
     })
 

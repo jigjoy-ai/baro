@@ -17,6 +17,24 @@ import {
     POSIX_PROCESS_GROUPS_SUPPORTED,
 } from "./process-tree.js"
 
+/**
+ * How the timeout and idle watchdogs measure time.
+ *
+ * Injected because the alternative is proving their behaviour by racing a real
+ * clock: a test then has to keep a child process talking faster than the
+ * window, and reports the machine's scheduling as often as the code. Driving
+ * the clock instead makes the same claim without a single sleep.
+ */
+export interface ExecFileCliTimers {
+    setTimeout(callback: () => void, ms: number): unknown
+    clearTimeout(handle: unknown): void
+}
+
+const REAL_TIMERS: ExecFileCliTimers = {
+    setTimeout: (callback, ms) => setTimeout(callback, ms),
+    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+}
+
 export interface ExecFileCliOptions {
     cwd?: string
     env?: NodeJS.ProcessEnv
@@ -39,6 +57,8 @@ export interface ExecFileCliOptions {
      *  high-volume streams (per-token NDJSON) feed the idle watchdog without
      *  holding the whole transcript in memory. */
     onStdoutData?: (chunk: Buffer) => void
+    /** Defaults to the real clock; see {@link ExecFileCliTimers}. */
+    timers?: ExecFileCliTimers
 }
 
 export interface ExecFileCliBufferResult {
@@ -118,16 +138,17 @@ function execFileCliRaw(
         let stdoutCapped = false
         let stderrCapped = false
         let settled = false
-        let timer: ReturnType<typeof setTimeout> | undefined
-        let idleTimer: ReturnType<typeof setTimeout> | undefined
+        const timers = options.timers ?? REAL_TIMERS
+        let timer: unknown
+        let idleTimer: unknown
         let terminationError: Error | undefined
         let treeRefreshed = false
 
         const finish = (fn: () => void): void => {
             if (settled) return
             settled = true
-            if (timer) clearTimeout(timer)
-            if (idleTimer) clearTimeout(idleTimer)
+            if (timer) timers.clearTimeout(timer)
+            if (idleTimer) timers.clearTimeout(idleTimer)
             options.signal?.removeEventListener("abort", onAbort)
             fn()
         }
@@ -158,7 +179,7 @@ function execFileCliRaw(
         const onAbort = (): void => terminate(abortError(command))
 
         if (options.timeout && options.timeout > 0) {
-            timer = setTimeout(() => {
+            timer = timers.setTimeout(() => {
                 const err = new Error(
                     `${command} timed out after ${options.timeout}ms`,
                 ) as Error & { killed: boolean }
@@ -169,8 +190,8 @@ function execFileCliRaw(
         const idleMs = options.idleTimeoutMs
         const petIdle = (): void => {
             if (!idleMs || idleMs <= 0 || settled || terminationError) return
-            if (idleTimer) clearTimeout(idleTimer)
-            idleTimer = setTimeout(() => {
+            if (idleTimer) timers.clearTimeout(idleTimer)
+            idleTimer = timers.setTimeout(() => {
                 const err = new Error(
                     `${command} produced no output for ${idleMs}ms — presumed hung`,
                 ) as Error & { killed: boolean }
