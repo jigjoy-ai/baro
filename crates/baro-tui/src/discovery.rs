@@ -32,6 +32,7 @@ pub fn locate_script(
         if let Some(parent) = exe.parent() {
             let sibling = parent.join(bundle_name);
             if sibling.exists() {
+                check_staged_dependency_link(parent)?;
                 return Ok(ScriptEntry::NodeJs(sibling));
             }
         }
@@ -65,6 +66,30 @@ pub fn locate_script(
     Ok(ScriptEntry::Tsx { tsx, script })
 }
 
+/// The staged bundles import their externalized dependencies through a
+/// `node_modules` link beside them. It can be left pointing at a directory that
+/// no longer exists — an install that ran from a temporary checkout claims the
+/// link, then that checkout goes away. Node then fails at import time, before
+/// any of our code runs, with a missing-package error naming neither the link
+/// nor the repair. Say it here instead, while there is still a sentence to say.
+pub fn check_staged_dependency_link(staged_dir: &Path) -> Result<(), String> {
+    let link = staged_dir.join("node_modules");
+    let Ok(target) = std::fs::read_link(&link) else {
+        return Ok(());
+    };
+    if target.exists() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} points at {}, which no longer exists, so the bundled orchestrator \
+         cannot import its dependencies. Re-run `npm install -g baro-ai` to \
+         restage it, or delete the link if the dependencies are already \
+         resolvable beside the bundles.",
+        link.display(),
+        target.display(),
+    ))
+}
+
 /// Walk upward from the running binary (fallback: `cwd`) to the first
 /// directory containing `REPO_MARKER`. Prefer `locate_script`, which
 /// also covers the production-bundle modes.
@@ -90,4 +115,39 @@ pub fn find_dev_repo(cwd: &Path) -> Option<PathBuf> {
 pub fn find_tsx(repo: &Path) -> Option<PathBuf> {
     let p = repo.join("node_modules/.bin/tsx");
     if p.exists() { Some(p) } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_staged_dependency_link;
+
+    #[test]
+    fn a_link_into_a_deleted_directory_is_named_before_node_trips_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("was-a-worktree");
+        std::fs::create_dir(&gone).unwrap();
+        std::os::unix::fs::symlink(&gone, dir.path().join("node_modules")).unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+
+        let error = check_staged_dependency_link(dir.path()).unwrap_err();
+        assert!(error.contains("node_modules"), "{error}");
+        assert!(error.contains("was-a-worktree"), "the dead target: {error}");
+        assert!(error.contains("npm install -g baro-ai"), "the repair: {error}");
+    }
+
+    #[test]
+    fn a_link_that_still_resolves_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("node_modules")).unwrap();
+
+        assert!(check_staged_dependency_link(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn no_link_at_all_is_not_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(check_staged_dependency_link(dir.path()).is_ok());
+    }
 }

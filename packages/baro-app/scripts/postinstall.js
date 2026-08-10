@@ -164,6 +164,25 @@ function printUsage() {
  * Best-effort: if it can't be wired, memory is simply unavailable (the
  * MemoryLibrarian already degrades gracefully) — never fail the install.
  */
+/** Whether this install may point the shared link at its own node_modules.
+ *  A link that still resolves belongs to whoever made it; only an absent or
+ *  dangling one is ours to write. */
+export function shouldClaimLink(existing, desired, exists) {
+    if (existing === null) return true
+    if (existing === desired) return false
+    return !exists(existing)
+}
+
+/** Where a link points, or null if it is absent or not a link. A dangling
+ *  link answers with its target: a broken link is ours to replace. */
+function readLinkTarget(link) {
+    try {
+        return fs.readlinkSync(link)
+    } catch {
+        return null
+    }
+}
+
 function wireMemoryDeps() {
     try {
         const entry = require.resolve("@xenova/transformers", { paths: [PACKAGE_ROOT] })
@@ -175,6 +194,19 @@ function wireMemoryDeps() {
         }
         const realNodeModules = entry.slice(0, idx + marker.length - 1) // .../node_modules
         const link = path.join(BARO_HOME, "node_modules")
+        // ~/.baro/bin is shared user-global state, and an install can run from
+        // a copy that will not outlive it — a git worktree in a temp dir, a CI
+        // scratch checkout, an agent building this repo. Claiming the link from
+        // there points the user's whole installation at a directory about to be
+        // deleted, and nothing notices until the next run cannot start. So:
+        // repair, never reassign.
+        const existing = readLinkTarget(link)
+        if (!shouldClaimLink(existing, realNodeModules, (p) => fs.existsSync(p))) {
+            if (existing !== realNodeModules) {
+                console.log(`memory deps already linked: ${link} -> ${existing}`)
+            }
+            return
+        }
         try { fs.rmSync(link, { recursive: true, force: true }) } catch {}
         fs.symlinkSync(realNodeModules, link, process.platform === "win32" ? "junction" : "dir")
         console.log(`memory deps linked: ${link} -> ${realNodeModules}`)
@@ -183,4 +215,6 @@ function wireMemoryDeps() {
     }
 }
 
-main()
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+    main()
+}
