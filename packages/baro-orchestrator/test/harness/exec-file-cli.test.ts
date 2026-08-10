@@ -33,6 +33,15 @@ async function waitForFile(path: string, timeoutMs = SPAWNED_FIXTURE_DEADLINE_MS
     }
 }
 
+// The idle watchdog is proved reset by output only if its window sits BETWEEN
+// one heartbeat and the whole run: shorter than the run, or survival proves
+// nothing, and far longer than one beat, or a loaded machine kills a healthy
+// process and the test reports the machine instead of the code. A 250ms beat against a
+// 900ms window left a 3.6x margin and failed whenever the suite ran whole.
+const IDLE_WINDOW_MS = 2_000
+const HEARTBEAT_MS = 50
+const HEARTBEAT_COUNT = 80
+
 describe("execFileCli process supervision", () => {
     it("returns clean CLI output", async () => {
         await withTempDir("baro-exec-cli-", async (dir) => {
@@ -140,13 +149,15 @@ setInterval(() => {}, 10_000);
 let ticks = 0;
 const timer = setInterval(() => {
     process.stdout.write("tick " + ticks + "\\n");
-    if (++ticks >= 10) { clearInterval(timer); }
-}, 250);
+    if (++ticks >= ${HEARTBEAT_COUNT}) { clearInterval(timer); }
+}, ${HEARTBEAT_MS});
 `)
-            // Total runtime (~2.5s) spans several idle windows (900ms):
-            // only the per-chunk reset can explain survival.
-            const result = await execFileCli(bin, [], { idleTimeoutMs: 900 })
-            assert.match(result.stdout, /tick 9/)
+            // The run spans several idle windows: only the per-chunk reset
+            // can explain survival.
+            const result = await execFileCli(bin, [], {
+                idleTimeoutMs: IDLE_WINDOW_MS,
+            })
+            assert.match(result.stdout, new RegExp(`tick ${HEARTBEAT_COUNT - 1}`))
         })
     })
 
@@ -176,10 +187,12 @@ setInterval(() => {}, 10_000);
 let ticks = 0;
 const timer = setInterval(() => {
     process.stderr.write("diagnostic " + ticks + "\\n");
-    if (++ticks >= 10) { clearInterval(timer); process.stdout.write("done\\n"); }
-}, 250);
+    if (++ticks >= ${HEARTBEAT_COUNT}) { clearInterval(timer); process.stdout.write("done\\n"); }
+}, ${HEARTBEAT_MS});
 `)
-            const result = await execFileCli(bin, [], { idleTimeoutMs: 900 })
+            const result = await execFileCli(bin, [], {
+                idleTimeoutMs: IDLE_WINDOW_MS,
+            })
             assert.equal(result.stdout, "done\n")
         })
     })
