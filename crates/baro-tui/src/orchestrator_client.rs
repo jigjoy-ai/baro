@@ -2,8 +2,10 @@
 //! streams its stdout (line-delimited BaroEvent JSON) into the TUI's
 //! event channel, and surfaces stderr to the operator.
 
+use std::collections::VecDeque;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -229,6 +231,11 @@ async fn run(
         .audit_log
         .as_ref()
         .map(|p| p.with_extension("stderr.txt"));
+    // The tee exists only when the run was given an audit log, which a headless
+    // run usually is not. Keep a bounded tail in memory regardless: a child that
+    // dies should be quoted, not reduced to an exit code.
+    let stderr_tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
+    let stderr_tail_writer = stderr_tail.clone();
     let stderr_task = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         let mut sink: Option<tokio::fs::File> = None;
@@ -248,6 +255,12 @@ async fn run(
                 let _ = f.write_all(line.as_bytes()).await;
                 let _ = f.write_all(b"\n").await;
                 let _ = f.flush().await;
+            }
+            if let Ok(mut tail) = stderr_tail_writer.lock() {
+                if tail.len() == STDERR_TAIL_LINES {
+                    tail.pop_front();
+                }
+                tail.push_back(trimmed.to_string());
             }
             let _ = stderr_tx
                 .send(BaroEvent::StoryLog {
@@ -278,12 +291,31 @@ async fn run(
     let _ = stdout_task.await;
     let _ = stderr_task.await;
     if !status.success() {
-        return Err(format!(
-            "orchestrator exited with code {}",
-            status.code().unwrap_or(-1)
+        return Err(orchestrator_exit_error(
+            status.code(),
+            &drain_tail(&stderr_tail),
         ));
     }
     Ok(())
+}
+
+const STDERR_TAIL_LINES: usize = 20;
+
+fn drain_tail(tail: &Arc<Mutex<VecDeque<String>>>) -> Vec<String> {
+    match tail.lock() {
+        Ok(lines) => lines.iter().cloned().collect(),
+        Err(poisoned) => poisoned.into_inner().iter().cloned().collect(),
+    }
+}
+
+/// A dead child's own words, or an explicit statement that it had none —
+/// silence and "we did not listen" must not read the same to whoever debugs it.
+fn orchestrator_exit_error(code: Option<i32>, tail: &[String]) -> String {
+    let code = code.map_or_else(|| "signal".to_string(), |c| c.to_string());
+    if tail.is_empty() {
+        return format!("orchestrator exited with code {code} and wrote nothing to stderr");
+    }
+    format!("orchestrator exited with code {code}: {}", tail.join(" | "))
 }
 
 /// Wait for the direct orchestrator root or an explicit host shutdown. On Unix,
@@ -518,8 +550,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        build_command, wait_for_child_or_shutdown, wait_for_child_or_shutdown_with_grace,
-        EphemeralConversationContextFile, OrchestratorConfig,
+        build_command, orchestrator_exit_error, wait_for_child_or_shutdown,
+        wait_for_child_or_shutdown_with_grace, EphemeralConversationContextFile,
+        OrchestratorConfig,
     };
     use crate::conversation::{
         ConversationKind, ConversationPhase, ConversationSession, ConversationWireResponse,
@@ -1215,5 +1248,36 @@ setInterval(() => {}, 1000)
             .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+
+    #[test]
+    fn a_dead_orchestrator_is_quoted_rather_than_numbered() {
+        let message = orchestrator_exit_error(
+            Some(1),
+            &[
+                "TypeError: cannot read properties of undefined".to_string(),
+                "    at loadBoard (cli.mjs:1)".to_string(),
+            ],
+        );
+        assert!(message.contains("code 1"), "{message}");
+        assert!(
+            message.contains("TypeError: cannot read properties of undefined"),
+            "the child's own words are what a debugger needs: {message}"
+        );
+    }
+
+    #[test]
+    fn silence_is_reported_as_silence_not_as_an_unread_channel() {
+        let message = orchestrator_exit_error(Some(1), &[]);
+        assert!(
+            message.contains("wrote nothing to stderr"),
+            "a child that said nothing must not read like one we ignored: {message}"
+        );
+    }
+
+    #[test]
+    fn a_signalled_orchestrator_does_not_claim_an_exit_code() {
+        let message = orchestrator_exit_error(None, &["killed".to_string()]);
+        assert!(message.contains("signal"), "{message}");
     }
 }
