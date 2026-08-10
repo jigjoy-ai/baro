@@ -38,9 +38,15 @@ const DEP_DIR_BY_MANIFEST: Record<string, string> = {
     "setup.py": ".venv",
     Pipfile: ".venv",
     "composer.json": "vendor",
+    // Measured on this repository: an unshared target costs 594MB and 38s of
+    // compilation per story, so a seven-story run spent four gigabytes and
+    // seven full rebuilds on the same crate. Cargo locks the directory, so
+    // sharing serializes the builds — which is what we want, since they were
+    // competing for the same cores anyway.
+    "Cargo.toml": "target",
 }
 // Artifact dir names (used to keep them out of commits at ANY depth).
-const DEP_DIR_NAMES = new Set(["node_modules", ".venv", "vendor"])
+const DEP_DIR_NAMES = new Set(["node_modules", ".venv", "vendor", "target"])
 // Dirs we never descend into when discovering package roots.
 const SCAN_SKIP = new Set(["node_modules", ".git", ".venv", "vendor", "dist", "build", "target", ".next", "out", "coverage"])
 // How deep to look for nested package manifests (covers the common monorepo layout).

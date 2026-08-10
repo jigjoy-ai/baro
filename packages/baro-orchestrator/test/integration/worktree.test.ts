@@ -738,6 +738,36 @@ describe("WorktreeManager — dependency dir symlink", () => {
         )
     })
 
+    it("shares the Rust build directory instead of rebuilding it per story", async () => {
+        // Measured before this was shared: 594MB and 38s of compilation per
+        // story, so a seven-story run paid four gigabytes and seven rebuilds
+        // of one crate — and the disk it filled took the run down with it.
+        writeFileSync(join(repo, "Cargo.toml"), '[package]\nname = "x"\n')
+        git(repo, "add", "Cargo.toml")
+        git(repo, "commit", "-m", "add Cargo.toml")
+        // Built, never committed — exactly how a build directory exists.
+        mkdirSync(join(repo, "target", "debug"), { recursive: true })
+        writeFileSync(join(repo, "target", "debug", "artifact"), "built once\n")
+
+        const p1 = (await mgr.create("S1"))!
+        const p2 = (await mgr.create("S2"))!
+
+        assert.equal(
+            readFileSync(join(p1, "target", "debug", "artifact"), "utf8"),
+            "built once\n",
+            "a story compiles against what the repository already built",
+        )
+        writeFileSync(join(p1, "target", "debug", "second"), "from S1\n")
+        assert.ok(
+            existsSync(join(p2, "target", "debug", "second")),
+            "and what one story builds, the next one links against",
+        )
+        assert.ok(
+            !git(p1, "status", "--porcelain").includes("target"),
+            "the shared directory never enters a commit",
+        )
+    })
+
     it("skips the symlink when disabled", async () => {
         mkdirSync(join(repo, "node_modules"), { recursive: true })
         const noLink = new WorktreeManager(repo, new GitGate(), "run-nolink", {
