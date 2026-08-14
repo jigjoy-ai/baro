@@ -259,6 +259,12 @@ export class CollectiveBoard extends SerializedObserver {
     private totalAttempts = 0
     private readonly completed: string[] = []
     private readonly failed = new Set<string>()
+    // A run that ends with stories incomplete used to list only their ids, so
+    // the one thing a reader needs — what stopped them — lived solely in the
+    // event log. Run 47 ended as "incomplete stories: S1, S2, S3, S4, S5, S6"
+    // while the board already knew all six were waiting on one infrastructure
+    // timeout.
+    private readonly lastFailureByStory = new Map<string, string>()
     private readonly dropped = new Set<string>()
     private readonly pendingDependencyBlocks = new Map<
         string,
@@ -1598,6 +1604,10 @@ export class CollectiveBoard extends SerializedObserver {
             | "verification",
     ): void {
         if (this.phase !== "running" || !this.wave?.pending.has(storyId)) return
+        this.lastFailureByStory.set(
+            storyId,
+            recoveryKind ? `${error} [${recoveryKind}]` : error,
+        )
         const lease = this.leases.get(storyId)
         if (recoveryKind) {
             const previousBranch = this.recoveryContext.get(storyId)?.branch
@@ -1705,6 +1715,7 @@ export class CollectiveBoard extends SerializedObserver {
             ...(failure.retryAfterMs === undefined
                 ? {}
                 : { retryAfterMs: failure.retryAfterMs }),
+            signature: `${failure.kind}:${failure.code ?? ""}`,
         })) {
             this.recoveryAborted.add(storyId)
             return
@@ -2803,7 +2814,7 @@ export class CollectiveBoard extends SerializedObserver {
         const incomplete = this.prd.userStories.filter((story) => !story.passes)
         if (incomplete.length > 0 || this.dropped.size > 0) {
             this.requestPush(
-                `collective run stopped with incomplete stories: ${incomplete.map((story) => story.id).join(", ") || "dropped work"}`,
+                `collective run stopped with incomplete stories: ${this.describeIncomplete(incomplete)}`,
             )
             return
         }
@@ -2974,8 +2985,16 @@ export class CollectiveBoard extends SerializedObserver {
             goalCompletionFailure ??
             (success
                 ? null
-                : `collective run stopped with incomplete stories: ${incomplete.map((story) => story.id).join(", ") || "dropped work"}`)
+                : `collective run stopped with incomplete stories: ${this.describeIncomplete(incomplete)}`)
         this.terminate(success, reason)
+    }
+
+    private describeIncomplete(incomplete: readonly PrdStory[]): string {
+        const described = incomplete.map((story) => {
+            const reason = this.lastFailureByStory.get(story.id)
+            return reason ? `${story.id} (${reason})` : story.id
+        })
+        return described.join(", ") || "dropped work"
     }
 
     private goalCompletionFailureReason(): string | null {

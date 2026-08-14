@@ -8,6 +8,7 @@ export class OperationalRecoveryPolicy {
     private readonly pendingStories = new Set<string>()
     private readonly routeExclusions = new Map<string, Set<string>>()
     private readonly notBefore = new Map<string, number>()
+    private readonly lastSignature = new Map<string, string>()
 
     constructor(
         private readonly opts: {
@@ -17,7 +18,10 @@ export class OperationalRecoveryPolicy {
         },
     ) {}
 
-    /** Returns false when the independent retry budget is exhausted. */
+    /**
+     * Returns false when the independent retry budget is exhausted, or when a
+     * retry would repeat identical work in an unchanged environment.
+     */
     prepare(
         storyId: string,
         options: {
@@ -25,6 +29,7 @@ export class OperationalRecoveryPolicy {
             excludeFailedRoute?: boolean
             retryAfterMs?: number
             now?: number
+            signature?: string
         } = {},
     ): boolean {
         const attempts = this.retryAttempts.get(storyId) ?? 0
@@ -35,6 +40,13 @@ export class OperationalRecoveryPolicy {
         }
 
         const failedRouteId = options.failedRouteId
+        const repeatsLastFailure =
+            options.signature !== undefined &&
+            this.lastSignature.get(storyId) === options.signature
+        if (options.signature !== undefined) {
+            this.lastSignature.set(storyId, options.signature)
+        }
+        let movesToAnotherRoute = false
         if (
             options.excludeFailedRoute !== false &&
             failedRouteId &&
@@ -53,8 +65,21 @@ export class OperationalRecoveryPolicy {
             )
             // A single-route setup still gets bounded reconnect attempts.
             if (!hasAlternate) excluded.clear()
+            movesToAnotherRoute = hasAlternate
         }
         const retryAfterMs = finiteNonNegative(options.retryAfterMs)
+        // The budget counts attempts, not whether an attempt can differ. A
+        // story whose environment cannot run its verification fails the same
+        // way every time, and each repeat costs a full attempt before the
+        // idle watchdog notices the silence — measured at three identical
+        // command timeouts spending 115 of a run's 118 minutes. A repeat is
+        // recovery only when something changed: another route to try, or a
+        // provider that asked us to wait.
+        if (repeatsLastFailure && !movesToAnotherRoute && retryAfterMs === 0) {
+            this.pendingStories.delete(storyId)
+            this.notBefore.delete(storyId)
+            return false
+        }
         if (retryAfterMs > 0) {
             const candidate = (options.now ?? Date.now()) + retryAfterMs
             this.notBefore.set(
