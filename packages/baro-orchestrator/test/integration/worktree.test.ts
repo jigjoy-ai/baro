@@ -738,33 +738,26 @@ describe("WorktreeManager — dependency dir symlink", () => {
         )
     })
 
-    it("shares the Rust build directory instead of rebuilding it per story", async () => {
-        // Measured before this was shared: 594MB and 38s of compilation per
-        // story, so a seven-story run paid four gigabytes and seven rebuilds
-        // of one crate — and the disk it filled took the run down with it.
+    it("never shares a build directory that records where it was built", async () => {
+        // Sharing one Cargo target across worktrees looked like pure savings —
+        // 594MB and 38s per story, measured here. It is not: cargo stamps
+        // artifacts with the absolute path of the worktree that produced them,
+        // so a sibling's build makes a story resolve CARGO_MANIFEST_DIR into a
+        // tree that is not its own, and into one that no longer exists once
+        // that story is cleaned up. Four tests failed that way before a clean
+        // rebuild returned them. Disk is cheaper than a test that passes
+        // against another story's files.
         writeFileSync(join(repo, "Cargo.toml"), '[package]\nname = "x"\n')
         git(repo, "add", "Cargo.toml")
         git(repo, "commit", "-m", "add Cargo.toml")
-        // Built, never committed — exactly how a build directory exists.
         mkdirSync(join(repo, "target", "debug"), { recursive: true })
-        writeFileSync(join(repo, "target", "debug", "artifact"), "built once\n")
+        writeFileSync(join(repo, "target", "debug", "artifact"), "built here\n")
 
         const p1 = (await mgr.create("S1"))!
-        const p2 = (await mgr.create("S2"))!
 
-        assert.equal(
-            readFileSync(join(p1, "target", "debug", "artifact"), "utf8"),
-            "built once\n",
-            "a story compiles against what the repository already built",
-        )
-        writeFileSync(join(p1, "target", "debug", "second"), "from S1\n")
         assert.ok(
-            existsSync(join(p2, "target", "debug", "second")),
-            "and what one story builds, the next one links against",
-        )
-        assert.ok(
-            !git(p1, "status", "--porcelain").includes("target"),
-            "the shared directory never enters a commit",
+            !existsSync(join(p1, "target")),
+            "a story builds Rust in its own worktree, not in the repository's",
         )
     })
 
