@@ -25,11 +25,24 @@ const BARO_INTERNAL_HOST_KEYS = [
     "BARO_INTERNAL_PROVIDER_OWNERSHIP_TOKEN",
 ] as const
 
+/**
+ * The CLI default truncates a shell command well below the runtime of an
+ * ordinary test suite, so a story backgrounds its own verification and spends
+ * its turn polling for it. A value the user set is theirs and is left alone.
+ */
+const CHILD_SHELL_TIMEOUTS: Readonly<Record<string, string>> = {
+    BASH_DEFAULT_TIMEOUT_MS: "900000",
+    BASH_MAX_TIMEOUT_MS: "3600000",
+}
+
 export function harnessChildEnvironment(
     source: Readonly<NodeJS.ProcessEnv> = process.env,
 ): NodeJS.ProcessEnv {
     const child = { ...source }
     for (const key of BARO_INTERNAL_HOST_KEYS) delete child[key]
+    for (const [key, value] of Object.entries(CHILD_SHELL_TIMEOUTS)) {
+        if (child[key] === undefined) child[key] = value
+    }
     if (child[BARO_JIGJOY_ENV_MARKER] !== "1") return child
     for (const key of BARO_OWNED_GATEWAY_KEYS) delete child[key]
     return child

@@ -7,6 +7,29 @@ import {
 } from "../../src/harness/environment.js"
 
 describe("subscription harness environment isolation", () => {
+    it("gives a verification command longer than the repository's own test suite", () => {
+        const child = harnessChildEnvironment({ PATH: "/usr/bin" })
+
+        assert.ok(
+            Number(child.BASH_DEFAULT_TIMEOUT_MS) > 600_000,
+            "an ordinary suite must be allowed to finish in the foreground",
+        )
+        assert.ok(
+            Number(child.BASH_MAX_TIMEOUT_MS) >=
+                Number(child.BASH_DEFAULT_TIMEOUT_MS),
+            "the ceiling cannot sit below the default it bounds",
+        )
+    })
+
+    it("leaves a shell timeout the user chose exactly as they set it", () => {
+        const child = harnessChildEnvironment({
+            PATH: "/usr/bin",
+            BASH_DEFAULT_TIMEOUT_MS: "60000",
+        })
+
+        assert.equal(child.BASH_DEFAULT_TIMEOUT_MS, "60000")
+    })
+
     it("never forwards the private provider ownership bootstrap", () => {
         const child = harnessChildEnvironment({
             PATH: "/usr/bin",
@@ -53,6 +76,9 @@ describe("subscription harness environment isolation", () => {
             BARO_GATEWAY_BILLING_URL: "https://explicit-user-gateway.example/v1",
             PATH: "/usr/bin",
         }
-        assert.deepEqual(harnessChildEnvironment(source), source)
+        const child = harnessChildEnvironment(source)
+        for (const [key, value] of Object.entries(source)) {
+            assert.equal(child[key], value)
+        }
     })
 })

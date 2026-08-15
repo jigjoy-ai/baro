@@ -176,9 +176,13 @@ export type BaroEvent =
           error: string
       }
 
-/** Caller must not include trailing newlines in any field. */
+/**
+ * Caller must not include trailing newlines in any field. Every line carries
+ * `ts`, because a consumer that sees only this stream — headless CI, an
+ * external harness — has no other way to tell how long anything took.
+ */
 export function emit(event: BaroEvent): void {
-    const line = JSON.stringify(event) + "\n"
+    const line = JSON.stringify({ ts: new Date().toISOString(), ...event }) + "\n"
     process.stdout.write(line)
 }
 

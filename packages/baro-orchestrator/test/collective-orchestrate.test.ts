@@ -2336,8 +2336,11 @@ describe("orchestrate collective mode", () => {
                     intraLevelDelaySecs: 0,
                     executor: new SynchronousExecutor(),
                 }),
+                // The claim is that the result is never lost, not that it
+                // arrives quickly; a deadline near the cost of the work under
+                // a loaded suite measures the machine instead.
                 new Promise<never>((_, reject) =>
-                    setTimeout(() => reject(new Error("synchronous result was lost")), 2_000),
+                    setTimeout(() => reject(new Error("synchronous result was lost")), 30_000),
                 ),
             ])
 

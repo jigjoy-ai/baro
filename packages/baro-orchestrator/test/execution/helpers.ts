@@ -62,6 +62,19 @@ export async function withTempDir(
     }
 }
 
+/**
+ * Every emitted line carries a wall-clock `ts`, which no assertion about an
+ * event's shape can predict; the stream's own test covers the timestamp.
+ */
+function withoutTimestamp(line: string): string {
+    try {
+        const { ts, ...rest } = JSON.parse(line) as Record<string, unknown>
+        return ts === undefined ? line : JSON.stringify(rest)
+    } catch {
+        return line
+    }
+}
+
 export async function captureStdout(fn: () => Promise<void> | void): Promise<string[]> {
     const lines: string[] = []
     let buffer = ""
@@ -78,7 +91,7 @@ export async function captureStdout(fn: () => Promise<void> | void): Promise<str
         let newline = buffer.indexOf("\n")
         while (newline !== -1) {
             const line = buffer.slice(0, newline).trim()
-            if (line) lines.push(line)
+            if (line) lines.push(withoutTimestamp(line))
             buffer = buffer.slice(newline + 1)
             newline = buffer.indexOf("\n")
         }
@@ -95,7 +108,7 @@ export async function captureStdout(fn: () => Promise<void> | void): Promise<str
     } finally {
         process.stdout.write = originalWrite
         const line = buffer.trim()
-        if (line) lines.push(line)
+        if (line) lines.push(withoutTimestamp(line))
     }
 
     return lines
