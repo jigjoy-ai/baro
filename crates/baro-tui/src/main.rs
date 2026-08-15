@@ -372,6 +372,17 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     if raw_args.get(1).map(|s| s.as_str()) == Some("login") {
         return run_login().await;
     }
+    // `baro runs` / `baro stop <id>` — inspect and end runs from another
+    // terminal. Before clap, like the two above: a run that cannot be named
+    // can only be ended by guessing at its command line.
+    if raw_args.get(1).map(|s| s.as_str()) == Some("runs") {
+        cli::run_registry::print_runs();
+        return Ok(());
+    }
+    if raw_args.get(1).map(|s| s.as_str()) == Some("stop") {
+        cli::run_registry::run_stop(&raw_args[2..])?;
+        return Ok(());
+    }
 
     // Update notice: the network check runs in the JS layer (no HTTP dep
     // here); this reads its cache. Printed AFTER the TUI restores the
@@ -379,6 +390,11 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     let update_notice = notify_update();
 
     let (cli, _lock) = cli::cli::parse()?;
+    // Held for the process's life; its Drop unregisters the run.
+    let _run_record = cli::run_registry::register(
+        cli.goal.as_deref().unwrap_or(""),
+        &cli.cwd,
+    );
     std::env::set_var("BARO_COORDINATION", &cli.coordination);
     if cli.local_only {
         std::env::set_var("BARO_LOCAL_ONLY", "1");

@@ -51,7 +51,7 @@ import { writeFileSync } from "node:fs";
 process.on("SIGTERM", () => {});
 setTimeout(() => writeFileSync(${JSON.stringify(opts.stubbornDescendant.escapedFile)}, "yes"), ${opts.stubbornDescendant.escapeDelayMs});
 writeFileSync(${JSON.stringify(opts.stubbornDescendant.startedFile)}, "yes");
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `)};
 fixtureSpawn(process.execPath, ["--input-type=module", "-e", descendantSource], {
     stdio: ["ignore", "inherit", "inherit"],
@@ -782,7 +782,7 @@ const descendantSource = ${JSON.stringify(`
 import { writeFileSync } from "node:fs";
 process.on("SIGTERM", () => {});
 writeFileSync(${JSON.stringify(descendantStarted)}, String(process.pid));
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `)};
 const descendant = spawn(process.execPath, ["--input-type=module", "-e", descendantSource], {
     stdio: ["ignore", "inherit", "inherit"],

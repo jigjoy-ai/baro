@@ -183,7 +183,7 @@ setTimeout(() => {
     writeFileSync(${JSON.stringify(descendantEscaped)}, "yes");
     process.exit(0);
 }, 12_000);
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `
                 const verifierSource = `
 import { spawn } from "node:child_process";
@@ -195,7 +195,7 @@ const descendant = spawn(
 );
 descendant.unref();
 setTimeout(() => process.exit(0), 12_000);
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `
                 const controller = new AbortController()
                 const pending = verifyBuild(dir, {

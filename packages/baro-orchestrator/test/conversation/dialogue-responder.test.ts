@@ -240,12 +240,12 @@ import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(started)}, "yes");
 process.on("SIGTERM", () => {});
 setTimeout(() => writeFileSync(${JSON.stringify(escaped)}, "yes"), 700);
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `
             writeFileSync(binary, `#!/usr/bin/env node
 import { spawn } from "node:child_process";
 spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(descendantSource)}], { stdio: "ignore" });
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `)
             chmodSync(binary, 0o755)
             const responder = createDialogueResponder({
@@ -904,7 +904,7 @@ process.stdin.on("end", () => {
             const binary = join(dir, "hanging-provider.mjs")
             writeFileSync(binary, `#!/usr/bin/env node
 process.on("SIGTERM", () => process.exit(0));
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `)
             chmodSync(binary, 0o755)
 
@@ -949,7 +949,7 @@ setInterval(() => {}, 10_000);
             const binary = join(dir, "hanging-provider.mjs")
             writeFileSync(binary, `#!/usr/bin/env node
 process.on("SIGTERM", () => process.exit(0));
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `)
             chmodSync(binary, 0o755)
 

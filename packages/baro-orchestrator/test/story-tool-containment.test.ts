@@ -172,7 +172,7 @@ setTimeout(() => {
     writeFileSync(${JSON.stringify(escaped)}, "yes");
     process.exit(0);
 }, 12_000);
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `
                 writeFileSync(
                     fixture,
@@ -186,7 +186,7 @@ const descendant = spawn(
 );
 descendant.unref();
 setTimeout(() => process.exit(0), 12_000);
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `,
                 )
                 chmodSync(fixture, 0o755)

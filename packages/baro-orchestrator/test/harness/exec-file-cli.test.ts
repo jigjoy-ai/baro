@@ -136,7 +136,7 @@ const descendant = spawn(process.execPath, ["--input-type=module", "-e", descend
     stdio: ["ignore", "inherit", "inherit"],
 });
 writeFileSync(process.env.BARO_TEST_STARTED, String(descendant.pid));
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `,
             )
 
@@ -202,7 +202,7 @@ const timer = setInterval(() => {
 
     it("kills a process the idle clock declares silent, without waiting for it", async () => {
         await withTempDir("baro-exec-idle-silent-", async (dir) => {
-            const bin = writeCli(dir, `setInterval(() => {}, 10_000);`)
+            const bin = writeCli(dir, `setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);`)
             const clock = new RecordingClock()
             const run = execFileCli(bin, [], {
                 idleTimeoutMs: 900,

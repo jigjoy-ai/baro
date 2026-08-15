@@ -110,14 +110,14 @@ import { writeFileSync } from "node:fs";
 process.on("SIGTERM", () => {});
 const descendantSource = ${JSON.stringify(`
 process.on("SIGTERM", () => {});
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `)};
 const descendant = spawn(process.execPath, ["--input-type=module", "-e", descendantSource], {
     env: process.env,
     stdio: ["ignore", "inherit", "inherit"],
 });
 writeFileSync(process.env.BARO_TEST_STARTED, String(descendant.pid));
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `,
             )
             const gate = new GitGate()
@@ -230,7 +230,7 @@ flood();
                 `
 const args = process.argv.slice(2);
 if (args[0] === "rev-parse" && args[1] === "HEAD") {
-    setInterval(() => {}, 10_000);
+    setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 } else {
     process.exit(0);
 }
@@ -335,7 +335,7 @@ describe("a git process the machine killed", () => {
             const cli = writeCli(
                 dir,
                 "fake-killed-command.mjs",
-                `process.kill(process.pid, "SIGKILL");\nsetInterval(() => {}, 10_000);\n`,
+                `process.kill(process.pid, "SIGKILL");\nsetTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);\n`,
             )
             let failure: unknown
             try {

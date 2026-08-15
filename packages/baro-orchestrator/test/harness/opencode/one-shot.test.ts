@@ -319,7 +319,7 @@ import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(started)}, "yes");
 process.on("SIGTERM", () => {});
 setTimeout(() => writeFileSync(${JSON.stringify(escaped)}, "yes"), 700);
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `
             writeFileSync(bin, `#!/usr/bin/env node
 import { spawn } from "node:child_process";
@@ -327,7 +327,7 @@ spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(descendan
     stdio: ["ignore", "inherit", "inherit"],
 });
 console.log(JSON.stringify({ type: "text", part: { text: "partial" } }));
-setInterval(() => {}, 10_000);
+setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_000);
 `)
             chmodSync(bin, 0o755)
 
