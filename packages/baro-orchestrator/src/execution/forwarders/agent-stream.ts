@@ -75,12 +75,16 @@ export class AgentStreamForwarder extends BaseObserver {
         const agentId = this.authorizedAgentId(source)
         if (!agentId) return
         const args = parseArgs(item.args)
-        const tool = item.name
+        // Lanes disagree on case: Claude Code sends "Bash"/"Edit"/"Write",
+        // Codex sends "shell"/"edit". A case-sensitive match dropped the
+        // capitalized ones into the generic branch, which knows nothing of
+        // `command` — so a Bash call surfaced as a bare name labeled "read".
+        const tool = item.name.toLowerCase()
 
         // Codex maps file_change → tool name "edit".
-        if (tool === "write_file" || tool === "edit_file" || tool === "edit") {
+        if (tool === "write_file" || tool === "edit_file" || tool === "edit" || tool === "write" || tool === "multiedit") {
             const path = strField(args, "path", "file_path", "file") ?? "(file)"
-            const op = tool === "write_file" ? "create" : "modify"
+            const op = tool === "write_file" || tool === "write" ? "create" : "modify"
             emit({ type: "activity", id: agentId, kind: "file_change", tool: "write", op, path, text: path })
             return
         }
@@ -92,8 +96,15 @@ export class AgentStreamForwarder extends BaseObserver {
             return
         }
         const target = strField(args, "path", "file_path", "pattern", "query", "file") ?? ""
-        const text = target ? `${tool} ${target}` : tool
-        emit({ type: "activity", id: agentId, kind: "tool_call", tool: "read", text: truncate(text, 140) })
+        const text = target ? `${item.name} ${target}` : item.name
+        const reads = ["read", "grep", "glob", "ls", "read_files", "search", "websearch", "webfetch", "cat"]
+        emit({
+            type: "activity",
+            id: agentId,
+            kind: "tool_call",
+            tool: reads.includes(tool) ? "read" : "other",
+            text: truncate(text, 140),
+        })
     }
 
     override async onExternalFunctionCallOutput(

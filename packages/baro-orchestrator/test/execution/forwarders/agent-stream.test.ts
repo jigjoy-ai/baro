@@ -60,6 +60,57 @@ describe("AgentStreamForwarder", () => {
         ])
     })
 
+    it("keeps a capitalized Bash call a bash call, command and all", async () => {
+        // Claude Code names its tools "Bash"/"Edit"/"Write"; Codex sends
+        // "shell"/"edit". A case-sensitive dispatch dropped the capitalized
+        // ones into the generic branch, which knows nothing of `command` —
+        // measured on one run, 440 tool calls surfaced as the bare word
+        // "Bash" labeled as a read.
+        const forwarder = new AgentStreamForwarder()
+        const agent = source("S1")
+
+        const events = parseEvents(await captureStdout(async () => {
+            await forwarder.onExternalFunctionCall(
+                agent,
+                FunctionCallItem.rehydrate({
+                    callId: "call-b",
+                    name: "Bash",
+                    args: JSON.stringify({ command: "npm test" }),
+                }),
+            )
+            await forwarder.onExternalFunctionCall(
+                agent,
+                FunctionCallItem.rehydrate({
+                    callId: "call-e",
+                    name: "Edit",
+                    args: JSON.stringify({ file_path: "src/app.ts" }),
+                }),
+            )
+            await forwarder.onExternalFunctionCall(
+                agent,
+                FunctionCallItem.rehydrate({
+                    callId: "call-t",
+                    name: "TodoWrite",
+                    args: JSON.stringify({ todos: [] }),
+                }),
+            )
+        }))
+
+        assert.deepEqual(events, [
+            { type: "activity", id: "S1", kind: "tool_call", tool: "bash", text: "npm test" },
+            {
+                type: "activity",
+                id: "S1",
+                kind: "file_change",
+                tool: "write",
+                op: "modify",
+                path: "src/app.ts",
+                text: "src/app.ts",
+            },
+            { type: "activity", id: "S1", kind: "tool_call", tool: "other", text: "TodoWrite" },
+        ])
+    })
+
     it("emits typed activity shapes for file changes and test results", async () => {
         const forwarder = new AgentStreamForwarder()
         const agent = source("S2")

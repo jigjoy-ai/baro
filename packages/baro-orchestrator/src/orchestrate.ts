@@ -1710,6 +1710,7 @@ export async function orchestrate(
         const prd = loadPrd(config.prdPath)
         emit({
             type: "init",
+            protocol: 3,
             project: prd.project,
             stories: prd.userStories.map((s) => ({
                 id: s.id,
@@ -1954,6 +1955,7 @@ export async function orchestrate(
             total_time_secs: summary.totalDurationSecs,
             success: summary.success,
             abort_reason: summary.abortReason ?? undefined,
+            abort_code: summary.abortCode,
             verification_status: summary.verificationStatus,
             verification: summary.verification
                 ? {

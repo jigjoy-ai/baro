@@ -265,6 +265,7 @@ export class CollectiveBoard extends SerializedObserver {
     // while the board already knew all six were waiting on one infrastructure
     // timeout.
     private readonly lastFailureByStory = new Map<string, string>()
+    private readonly lastFailureCodeByStory = new Map<string, string>()
     private readonly dropped = new Set<string>()
     private readonly pendingDependencyBlocks = new Map<
         string,
@@ -1473,6 +1474,7 @@ export class CollectiveBoard extends SerializedObserver {
                     !isPermanentCapacityFailure(result.failure?.code)
                   ? "transport"
                   : "execution",
+            result.failure?.code,
         )
     }
 
@@ -1602,12 +1604,14 @@ export class CollectiveBoard extends SerializedObserver {
             | "transport"
             | "infrastructure"
             | "verification",
+        code?: string,
     ): void {
         if (this.phase !== "running" || !this.wave?.pending.has(storyId)) return
         this.lastFailureByStory.set(
             storyId,
             recoveryKind ? `${error} [${recoveryKind}]` : error,
         )
+        if (code) this.lastFailureCodeByStory.set(storyId, code)
         const lease = this.leases.get(storyId)
         if (recoveryKind) {
             const previousBranch = this.recoveryContext.get(storyId)?.branch
@@ -3201,9 +3205,17 @@ export class CollectiveBoard extends SerializedObserver {
                   .filter((story) => !story.passes)
                   .map((story) => story.id)
             : [...this.failed]
+        const abortCode = success
+            ? undefined
+            : sharedAbortCode(
+                  failedStories.map((id) =>
+                      this.lastFailureCodeByStory.get(id),
+                  ),
+              )
         const summary: ConductorRunSummary = {
             success,
             abortReason,
+            ...(abortCode ? { abortCode } : {}),
             completedStories: [...this.completed],
             failedStories,
             droppedStories: [...this.dropped],
@@ -3682,4 +3694,18 @@ function failureImplicatesWorkerRoute(failure: StoryFailureData): boolean {
     return failure.code === "process_spawn_failed" ||
         failure.code === "tool_unavailable" ||
         failure.code === "authentication_failed"
+}
+
+/**
+ * One terminal code shared by every incomplete story is a fact worth
+ * reporting as such; a mixture — or a story that failed without a code —
+ * is prose, not a classification.
+ */
+export function sharedAbortCode(
+    codes: readonly (string | undefined)[],
+): string | undefined {
+    if (codes.length === 0) return undefined
+    const first = codes[0]
+    if (!first) return undefined
+    return codes.every((code) => code === first) ? first : undefined
 }

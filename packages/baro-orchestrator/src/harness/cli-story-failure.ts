@@ -42,6 +42,16 @@ export function describeCliStoryFailure(
         .filter(Boolean)
         .join(" ")
     if (
+        /context window|context.length|maximum context|prompt is too long|contextWindowExceeded|max.?output.?tokens? (?:reached|exceeded)|output token (?:limit|ceiling)/i.test(
+            diagnostic,
+        )
+    ) {
+        return {
+            error,
+            failure: { kind: "execution", code: "token_ceiling" },
+        }
+    }
+    if (
         /\b(?:401|403)\b|unauthori[sz]ed|authentication (?:failed|required)|invalid api key|missing (?:api key|credentials?)/i.test(
             diagnostic,
         )

@@ -8,8 +8,34 @@ import {
     compactProviderFailureDetail,
     isProviderCapacityFailure,
 } from "../../src/harness/provider-failure.js"
+import { describeCliStoryFailure } from "../../src/harness/cli-story-failure.js"
 
 describe("provider failure classification", () => {
+    it("reads a context-ceiling diagnostic as token_ceiling, not model_error", () => {
+        // Codex names it contextWindowExceeded; Anthropic says the prompt is
+        // too long. Both mean the same terminal fact, and an external
+        // consumer maps it to its own max-tokens vocabulary only if the code
+        // says so.
+        const fallback = { kind: "execution", code: "model_error" } as const
+        for (const text of [
+            "turn failed: contextWindowExceeded",
+            "prompt is too long: 210000 tokens > 200000 maximum context length",
+            "max output tokens reached before completion",
+        ]) {
+            const described = describeCliStoryFailure(text, fallback)
+            assert.deepEqual(
+                described.failure,
+                { kind: "execution", code: "token_ceiling" },
+                text,
+            )
+        }
+        assert.deepEqual(
+            describeCliStoryFailure("ordinary model refusal", fallback).failure,
+            fallback,
+            "an ordinary failure keeps the caller's fallback",
+        )
+    })
+
     it("prefers structured HTTP status and parses retry-after headers", () => {
         assert.deepEqual(
             classifyProviderFailure({

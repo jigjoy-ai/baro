@@ -5,7 +5,8 @@ import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import type { PrdFile } from "../../src/prd.js"
-import { CollectiveBoard } from "../../src/execution/collective-board.js"
+import {
+    sharedAbortCode, CollectiveBoard } from "../../src/execution/collective-board.js"
 import {
     deriveGoalContract,
     GoalInvariantLedger,
@@ -88,6 +89,25 @@ describe("CollectiveBoard", () => {
             )
             assert.equal(env.events.some(WorkContextRequested.is), false)
         })
+    })
+
+    it("classifies an abort only when every incomplete story says the same thing", () => {
+        assert.equal(
+            sharedAbortCode(["token_ceiling", "token_ceiling"]),
+            "token_ceiling",
+            "one shared code is a classification",
+        )
+        assert.equal(
+            sharedAbortCode(["token_ceiling", "command_timeout"]),
+            undefined,
+            "a mixture is prose, not a classification",
+        )
+        assert.equal(
+            sharedAbortCode(["token_ceiling", undefined]),
+            undefined,
+            "a story that failed without a code blocks the claim",
+        )
+        assert.equal(sharedAbortCode([]), undefined)
     })
 
     it("places accepted runtime amendments after the Architect baseline in later worker prompts", () => {

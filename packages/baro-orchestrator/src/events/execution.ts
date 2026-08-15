@@ -341,6 +341,8 @@ export type ExecutionFailureCode =
     | "model_error"
     | "quality_rejected"
     | "turn_limit"
+    /** The model hit its context or output-token ceiling before finishing. */
+    | "token_ceiling"
     | "no_work_product"
 
 export type VerificationFailureCode =

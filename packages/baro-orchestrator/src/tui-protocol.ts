@@ -50,7 +50,9 @@ export interface VerificationEvidenceInfo {
 }
 
 export type BaroEvent =
-    | { type: "init"; project: string; stories: StoryInfo[]; runner?: string; mode?: string; mode_reason?: string }
+    // `protocol` names the stream contract version (docs/tui-protocol-v3.md),
+    // so an external consumer can dispatch without sniffing field presence.
+    | { type: "init"; protocol?: number; project: string; stories: StoryInfo[]; runner?: string; mode?: string; mode_reason?: string }
     // The Architect's design/decision spec (markdown), emitted once after
     // planning so the dashboard can surface it.
     | { type: "decision_document"; document: string }
@@ -83,6 +85,9 @@ export type BaroEvent =
           stats: DoneStats
           success?: boolean
           abort_reason?: string
+          // Machine-readable failure classification (StoryFailureCode),
+          // present when every incomplete story shared one terminal code.
+          abort_code?: string
           verification_status?: "passed" | "failed" | "skipped"
           verification?: VerificationEvidenceInfo
       }

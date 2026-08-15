@@ -138,6 +138,12 @@ export interface ConductorRunSummary {
      * end-of-DAG completion.
      */
     abortReason: string | null
+    /**
+     * Machine-readable classification of the abort, present when every
+     * incomplete story's terminal failure shared one code — an external
+     * consumer maps it without parsing prose (e.g. token_ceiling).
+     */
+    abortCode?: string
     completedStories: string[]
     failedStories: string[]
     /**
