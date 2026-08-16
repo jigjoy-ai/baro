@@ -19,6 +19,9 @@ import { OpenAIStoryAgent } from "../harness/openai/story-agent.js"
 import { OpenCodeStoryAgent } from "../harness/opencode/story-agent.js"
 import { PiStoryAgent } from "../harness/pi/story-agent.js"
 import { StoryAgent } from "../harness/claude/story-agent.js"
+import { materializeStoryHooks } from "../harness/claude/hook-bridge.js"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 export interface StoryExecOpts {
     /** Default model for the OpenAI path when the route names none. */
@@ -250,6 +253,22 @@ export class LocalStoryExecutor implements StoryExecutor {
                       id: req.storyId,
                       prompt: req.prompt,
                       cwd,
+                      ...(() => {
+                          const settings = materializeStoryHooks(
+                              join(
+                                  tmpdir(),
+                                  `baro-hooks-${req.storyId}-${process.pid}`,
+                              ),
+                              req.surface,
+                              {
+                                  command:
+                                      opts.collaboration?.commandPath ??
+                                      "agent-collab",
+                                  capability: "note",
+                              },
+                          )
+                          return settings ? { cliSettingsPath: settings } : {}
+                      })(),
                       // undefined → StoryAgent applies its own default.
                       model: route.model,
                       effort: opts.effort,

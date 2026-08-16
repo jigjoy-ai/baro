@@ -14,6 +14,12 @@ import type {
 } from "../semantic-events.js"
 
 export interface StorySpec {
+    /**
+     * Claude Code --settings file materialized per story (hook-bridge.ts):
+     * write-surface refusals at the write and evidence-capture acknowledgments
+     * at the command, from the same registry the gates enforce.
+     */
+    cliSettingsPath?: string
     /** Story ID, used as agentId for observer attribution. */
     id: string
     prompt: string

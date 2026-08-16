@@ -103,18 +103,31 @@ const WRITE_SURFACE: GateDisclosure = {
                       "",
                   ]
                 : []),
-            "If you need a change in a file you do not own — a bug, a wrong",
-            "import, a missing helper — do NOT edit it and do NOT copy it into",
-            "your own surface. One of these instead:",
-            `- Ask the owner, who can still act: ${command} emit ${capability} --kind help --reason ${JSON.stringify("WHAT NEEDS CHANGING IN <FILE>, PLUS THE COMMAND AND OUTPUT THAT SHOW WHY")}`,
-            "- If the architecture contract is what is wrong, withdraw that claim",
-            "  with the dispute command above instead of repairing around it.",
-            "- If you cannot honestly finish without the change, block on the",
-            "  owning story rather than reaching into it.",
-            "Working outside your surface loses the whole story at the gate, not",
-            "just the stray edit.",
+            ...surfaceRemedyLines(command, capability),
         ].join("\n")
     },
+}
+
+/**
+ * The remedies for needing a change outside your surface — one source for
+ * the prompt disclosure and the write-time hook refusal.
+ */
+export function surfaceRemedyLines(
+    command: string,
+    capability: string,
+): string[] {
+    return [
+        "If you need a change in a file you do not own — a bug, a wrong",
+        "import, a missing helper — do NOT edit it and do NOT copy it into",
+        "your own surface. One of these instead:",
+        `- Ask the owner, who can still act: ${command} emit ${capability} --kind help --reason ${JSON.stringify("WHAT NEEDS CHANGING IN <FILE>, PLUS THE COMMAND AND OUTPUT THAT SHOW WHY")}`,
+        "- If the architecture contract is what is wrong, withdraw that claim",
+        "  with the dispute command above instead of repairing around it.",
+        "- If you cannot honestly finish without the change, block on the",
+        "  owning story rather than reaching into it.",
+        "Working outside your surface loses the whole story at the gate, not",
+        "just the stray edit.",
+    ]
 }
 
 /** Base-prompt gates: active for every story regardless of spawn context. */

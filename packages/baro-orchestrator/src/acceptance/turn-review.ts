@@ -345,6 +345,7 @@ export function staleEvidenceFeedback(
         "Re-run in this same worktree, without further edits afterwards:",
         ...staleCommands.map((command) => `- ${command}`),
         "",
+        "Each re-run's output is captured automatically as evidence [gate:evidence-capture]; shape it so the summary is visible and run it once.",
         "If a re-run fails, fix the cause and run it again. A command the sandbox refuses proves nothing however often you repeat it — verify with one that runs locally instead.",
         "Make a verification command the LAST thing you do before your final summary; any edit after it voids the evidence again.",
     ].join("\n")
@@ -364,6 +365,7 @@ export function turnReviewFeedback(review: CritiqueData): string {
         criteria,
         "",
         "Inspect the current changes, fix the underlying issue, re-run the relevant checks, and return a new terminal candidate.",
+        "The output of each check you run is captured automatically as evidence [gate:evidence-capture] — one shaped run per command suffices; do not re-run a passing check to reformat or archive its output.",
     ].join("\n")
 }
 

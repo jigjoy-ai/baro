@@ -419,6 +419,9 @@ export class StoryAgent extends BaseObserver {
 
         const claude = new ClaudeCliParticipant(this.spec.id, {
             cwd: this.spec.cwd,
+            ...(this.spec.cliSettingsPath
+                ? { extraArgs: ["--settings", this.spec.cliSettingsPath] }
+                : {}),
             model: this.spec.model,
             effort: this.spec.effort,
             claudeBin: this.spec.claudeBin,
