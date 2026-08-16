@@ -1873,13 +1873,13 @@ async fn run_app(
                     text: "architect is examining the repository and pinning the design".to_string(),
                 });
                 if headless {
-                    println!(r#"{{"type":"architect_start"}}"#);
+                    println!("{}", events::stamped_jsonl(serde_json::json!({"type": "architect_start"})));
                 }
                 app.architect_status = app::ArchitectStatus::Running;
             }
             Some(AppEvent::ArchitectComplete(doc)) => {
                 if headless {
-                    println!(r#"{{"type":"architect_complete"}}"#);
+                    println!("{}", events::stamped_jsonl(serde_json::json!({"type": "architect_complete"})));
                 }
                 app.architect_status = app::ArchitectStatus::Complete;
                 app.decision_document = Some(doc);
@@ -1888,10 +1888,10 @@ async fn run_app(
                 if headless {
                     println!(
                         "{}",
-                        serde_json::json!({
+                        events::stamped_jsonl(serde_json::json!({
                             "type": "architect_skipped",
                             "reason": &reason,
-                        })
+                        }))
                     );
                 }
                 app.architect_status = app::ArchitectStatus::Skipped(reason);

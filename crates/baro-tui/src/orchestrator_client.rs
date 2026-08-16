@@ -201,7 +201,11 @@ async fn run(
                 continue;
             }
             if echo_raw {
-                println!("{}", crate::events::jsonl_safe_line(trimmed, "_orchestrator"));
+                let safe = crate::events::jsonl_safe_line(trimmed, "_orchestrator");
+                match serde_json::from_str::<serde_json::Value>(&safe) {
+                    Ok(value) => println!("{}", crate::events::stamped_jsonl(value)),
+                    Err(_) => println!("{}", safe),
+                }
             }
             match serde_json::from_str::<BaroEvent>(trimmed) {
                 Ok(ev) => {
