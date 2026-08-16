@@ -564,13 +564,17 @@ exit 0
         cmd.env("BARO_TEST_DESCENDANT_PID", &descendant_pid)
             .arg("-c")
             .arg(
-                "(trap '' TERM; sleep 10) \
+                "(trap '' TERM; sleep 30) \
                  & \
                  echo \"$!\" > \"$BARO_TEST_DESCENDANT_PID\"; exit 7",
             );
 
+        // The claim is ONLY that the nonzero root is observed without waiting
+        // for the descendant's pipe EOF (30s away) — not that it is observed
+        // quickly. A ceiling near the cost of spawning a shell measures the
+        // machine; 8s stays far under the EOF hold with room for a loaded box.
         tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(8),
             spawn_and_stream_events(cmd, "nonzero-tree-test", |_| {}),
         )
         .await
