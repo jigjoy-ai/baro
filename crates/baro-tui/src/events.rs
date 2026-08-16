@@ -577,3 +577,77 @@ mod tests {
         }
     }
 }
+
+/// Stamp `ts` onto one JSONL line when the emitter did not provide it. The
+/// v3 stream contract promises a timestamp on every line, and the Rust host
+/// is the one emitter that does not route through the orchestrator's emit().
+pub fn stamped_jsonl(value: serde_json::Value) -> String {
+    let mut value = value;
+    if let serde_json::Value::Object(ref mut map) = value {
+        if !map.contains_key("ts") {
+            map.insert(
+                "ts".to_string(),
+                serde_json::Value::String(now_iso8601()),
+            );
+        }
+    }
+    value.to_string()
+}
+
+pub fn now_iso8601() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let millis = now.subsec_millis();
+    let days = secs / 86_400;
+    let (y, mo, d) = civil_from_days(days as i64);
+    let s = secs % 86_400;
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        y, mo, d, s / 3600, (s % 3600) / 60, s % 60, millis
+    )
+}
+
+/// Howard Hinnant's civil-from-days; avoids a chrono dependency for one stamp.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::*;
+
+    #[test]
+    fn a_line_without_ts_gains_the_moment_of_emission() {
+        let line = stamped_jsonl(serde_json::json!({"type": "story_log", "id": "plan", "line": "x"}));
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let ts = value["ts"].as_str().expect("ts present");
+        assert!(ts.ends_with('Z') && ts.contains('T'), "ISO-8601: {ts}");
+        assert_eq!(value["type"], "story_log");
+    }
+
+    #[test]
+    fn an_emitter_that_already_stamped_is_left_alone() {
+        let line = stamped_jsonl(serde_json::json!({"type": "init", "ts": "2026-01-01T00:00:00.000Z"}));
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["ts"], "2026-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn the_date_math_is_right_on_a_known_epoch() {
+        // 2026-08-16 is day 20681 since the epoch; a leap-year boundary bug
+        // would land this on the wrong civil date.
+        let (y, m, d) = civil_from_days(20_681);
+        assert_eq!((y, m, d), (2026, 8, 16));
+    }
+}

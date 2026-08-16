@@ -3512,11 +3512,9 @@ fn start_prevalidated_planning_from_conversation(
 fn plan_progress_sink(headless: bool, tx: mpsc::Sender<AppEvent>) -> impl Fn(&str) {
     move |msg: &str| {
         if headless {
-            if let Ok(line) = serde_json::to_string(&serde_json::json!({
+            println!("{}", events::stamped_jsonl(serde_json::json!({
                 "type": "story_log", "id": "plan", "line": msg,
-            })) {
-                println!("{}", line);
-            }
+            })));
         } else {
             let _ = tx.try_send(AppEvent::PlanProgress(msg.to_string()));
         }
@@ -3532,7 +3530,11 @@ fn plan_progress_sink(headless: bool, tx: mpsc::Sender<AppEvent>) -> impl Fn(&st
 fn plan_event_sink(headless: bool, tx: mpsc::Sender<AppEvent>) -> impl Fn(&str) {
     move |raw: &str| {
         if headless {
-            println!("{}", events::jsonl_safe_line(raw, "plan"));
+            let safe = events::jsonl_safe_line(raw, "plan");
+            match serde_json::from_str::<serde_json::Value>(&safe) {
+                Ok(value) => println!("{}", events::stamped_jsonl(value)),
+                Err(_) => println!("{}", safe),
+            }
         } else if let Some(line) = planner_host::line_from_event(raw) {
             let _ = tx.try_send(AppEvent::PlanProgress(line));
         }
@@ -4210,12 +4212,10 @@ async fn resolve_confirm_mode(contract: String) -> String {
         serde_json::from_str::<ModeContractView>(intake_runner::FALLBACK_CONTRACT)
             .expect("fallback contract is valid")
     });
-    if let Ok(line) = serde_json::to_string(&serde_json::json!({
+    println!("{}", events::stamped_jsonl(serde_json::json!({
         "type": "mode_proposal",
         "data": { "mode": view.mode, "confidence": view.confidence, "reason": view.reason },
-    })) {
-        println!("{}", line);
-    }
+    })));
     let proposed = view.mode.clone();
     match StdinHub::global()
         .await_confirm(Duration::from_secs(120))
