@@ -115,6 +115,7 @@ import { SurgeonOpenCode } from "./harness/opencode/surgeon.js"
 import { SurgeonPi } from "./harness/pi/surgeon.js"
 import { Supervisor } from "./execution/supervisor.js"
 import { resolveEffectiveParallel } from "./planning/domain/mode-enforcement.js"
+import { ALL_GATES } from "./execution/gate-registry.js"
 import { PrdFile, loadPrd, savePrd } from "./prd.js"
 import { PremiseAmendmentAuthority } from "./planning/application/premise-amendments.js"
 import { readAuthoritativeDeclaredTests } from "./verification/prd-declared-tests.js"
@@ -1720,6 +1721,14 @@ export async function orchestrate(
             runner: hostname(),
             mode: prd.executionMode?.mode,
             mode_reason: prd.executionMode?.reason,
+        })
+        emit({
+            type: "gates",
+            gates: ALL_GATES.map((gate) => ({
+                id: gate.id,
+                summary: gate.summary,
+                enforced_by: gate.enforcedBy,
+            })),
         })
         const dagLevels = buildDag(prd.userStories).map((lvl) =>
             lvl.storyIds.map((id) => ({ id })),

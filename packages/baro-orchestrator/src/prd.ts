@@ -3,6 +3,7 @@
  * `prd.json` schema the planner produces (shared with the Rust side).
  */
 
+import { BASE_GATES, announceGates } from "./execution/gate-registry.js"
 import { randomUUID } from "node:crypto"
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from "fs"
 
@@ -972,25 +973,11 @@ export function buildDefaultStoryPrompt(story: PrdStory): string {
         '  "GetShopsQueryFilter: numeric city throws in @Transform") so a later run or a',
         "  sibling agent can match it and skip. This holds even when several stories are each",
         "  told to file issues — the search-then-create check is what prevents duplicates.",
+
         "",
-        "IMPORTANT: Before you commit, you MUST verify the project builds successfully:",
-        "  - If Cargo.toml exists: run `cargo build` and fix all errors and warnings",
-        "  - If package.json exists: run `npm run build` (if a build script exists) and fix errors",
-        "  - If go.mod exists: run `go build ./...` and fix errors",
-        "  - If pyproject.toml or requirements.txt: ensure code is import-clean",
-        "  - Otherwise: ensure linting/typecheck passes",
-        "",
-        "VERIFICATION EVIDENCE (how the reviewer sees your proof):",
-        "- The output of every command you run is captured automatically, together with",
-        "  the exact bytes changed. That capture IS the evidence the reviewer judges —",
-        "  you never need to save, tee, or re-print output yourself.",
-        "- Run each verification command ONCE, shaped so its summary lands in the",
-        "  visible output (e.g. `npm test 2>&1 | tail -30`, `cargo test 2>&1 | tail -5`).",
-        "- Do NOT re-run a passing suite to reformat, slice, or archive its output.",
-        "  A re-run costs the suite's full runtime and adds no proof; the first run's",
-        "  captured output already counts.",
-        "- Make verification the LAST thing before your final summary: any edit after",
-        "  it voids the evidence and forces exactly the re-run you are avoiding.",
+        // Gate rules are projected, never hand-written here: the registry is
+        // the single source the conformance test joins against enforcement.
+        ...announceGates(BASE_GATES, {}),
         "",
         "SEMANTIC SELF-REVIEW (mandatory before commit):",
         "- Re-read every acceptance criterion and challenge the implementation independently",

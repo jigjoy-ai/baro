@@ -50,6 +50,9 @@ export interface VerificationEvidenceInfo {
 }
 
 export type BaroEvent =
+    // The boundaries that will judge this run's stories, announced before any
+    // story starts — the stream-visible half of "enforced means announced".
+    | { type: "gates"; gates: Array<{ id: string; summary: string; enforced_by: string }> }
     // `protocol` names the stream contract version (docs/tui-protocol-v3.md),
     // so an external consumer can dispatch without sniffing field presence.
     | { type: "init"; protocol?: number; project: string; stories: StoryInfo[]; runner?: string; mode?: string; mode_reason?: string }

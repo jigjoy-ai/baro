@@ -15,6 +15,7 @@ import {
     SemanticEvent,
 } from "../runtime/mozaik.js"
 
+import { SPAWN_GATES, announceGates } from "../execution/gate-registry.js"
 import { AgenticEnvironment } from "../runtime/mozaik.js"
 import type { GatewayBillingCoordinator } from "../telemetry/billing/index.js"
 import {
@@ -1267,42 +1268,14 @@ export class StoryFactory extends BaseObserver {
         command: string,
         capability: string,
     ): string {
-        if (!surface || surface.writes.length === 0) return ""
-        const owners = Object.entries(surface.ownedElsewhere)
-        return [
-            "## Your write surface",
-            "",
-            "The files this story declared it would write, and the only ones",
-            "the merge gate will accept from you:",
-            "",
-            ...surface.writes.map((path) => `- ${path}`),
-            "",
-            ...(owners.length > 0
-                ? [
-                      "Owned by other stories in this run. A diff touching one of",
-                      "these is refused at integration, however small and however",
-                      "right it is:",
-                      "",
-                      ...owners
-                          .slice(0, 40)
-                          .map(([path, owner]) => `- ${path} → ${owner}`),
-                      ...(owners.length > 40
-                          ? [`- …and ${owners.length - 40} more`]
-                          : []),
-                      "",
-                  ]
-                : []),
-            "If you need a change in a file you do not own — a bug, a wrong",
-            "import, a missing helper — do NOT edit it and do NOT copy it into",
-            "your own surface. One of these instead:",
-            `- Ask the owner, who can still act: ${command} emit ${capability} --kind help --reason ${JSON.stringify("WHAT NEEDS CHANGING IN <FILE>, PLUS THE COMMAND AND OUTPUT THAT SHOW WHY")}`,
-            "- If the architecture contract is what is wrong, withdraw that claim",
-            "  with the dispute command above instead of repairing around it.",
-            "- If you cannot honestly finish without the change, block on the",
-            "  owning story rather than reaching into it.",
-            "Working outside your surface loses the whole story at the gate, not",
-            "just the stray edit.",
-        ].join("\n")
+        // Projected from the gate registry — the same source the merge gate's
+        // conformance test joins against, so this section cannot silently
+        // diverge from what integration actually refuses.
+        return announceGates(SPAWN_GATES, {
+            ...(surface ? { surface } : {}),
+            collabCommand: command,
+            collabCapability: capability,
+        }).join("\n")
     }
 
     private collaborationInstructions(
