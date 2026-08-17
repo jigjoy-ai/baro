@@ -44,6 +44,27 @@ test("aborts a story exploring with no file changes", async () => {
     assert.match(got[0]!.reason, /no file change/)
 })
 
+test("shell commands are work for the call counter, not exploration", async () => {
+    const { sup, env } = supervised({ noProgressToolCalls: 5 })
+    await feed(sup, "S1", "read_file", `{"n":1}`)
+    await feed(sup, "S1", "read_file", `{"n":2}`)
+    // Waiting out a long verification the only way the tool allows —
+    // repeated shell probes — must not read as wandering.
+    for (let i = 0; i < 20; i++) {
+        await feed(sup, "S1", "bash", `{"command":"tail -n 5 suite-${i}.log"}`)
+    }
+    await feed(sup, "S1", "read_file", `{"n":3}`)
+    await feed(sup, "S1", "read_file", `{"n":4}`)
+    assert.equal(
+        interventions(env).length,
+        0,
+        "shell probes must not count toward the exploration threshold",
+    )
+    await feed(sup, "S1", "grep", `{"n":5}`) // 5th read-only call
+    assert.equal(interventions(env).length, 1)
+    assert.match(interventions(env)[0]!.reason, /no file change/)
+})
+
 test("a file change resets the no-progress counter", async () => {
     const { sup, env } = supervised({ noProgressToolCalls: 5 })
     for (let i = 0; i < 4; i++) await feed(sup, "S1", "read_file", `{"n":${i}}`)

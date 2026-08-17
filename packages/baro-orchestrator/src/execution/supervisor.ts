@@ -34,7 +34,9 @@ import {
 } from "../harness/tool-classification.js"
 
 export interface SupervisorOptions {
-    /** Consecutive tool calls with NO file change before we call it a non-converging loop. Default 80. */
+    /** Consecutive READ-ONLY tool calls with no file change before we call it
+     * a non-converging loop; shell commands are work, not exploration, and do
+     * not count. Default 80. */
     noProgressToolCalls?: number
     /** Same tool+args signature seen this many times → looping. Default 12. */
     repeatThreshold?: number
@@ -191,21 +193,19 @@ export class Supervisor extends BaseObserver {
             // Repeats before an actual file mutation are not evidence that
             // the post-progress sequence is looping.
             st.sigCounts.clear()
+        } else if (isShellCommand(item)) {
+            // A command is work for BOTH detectors. The wall clock has always
+            // said so — probes, scratch worktrees and filtered test runs are
+            // how a defect gets proven, and matching command shapes was too
+            // narrow. The call COUNT disagreed and judged the same behavior
+            // as wandering: a story waiting out its own long suite the only
+            // way the tool allows was aborted at "80 tool calls with no file
+            // change". A genuine poll-forever loop is still bounded by the
+            // per-turn round budget and turn cap.
+            st.lastVerificationAt = this.opts.now()
+            if (item.callId) st.pendingShell.add(item.callId)
         } else {
             st.sinceLastChange += 1
-            // The wall clock is the silence detector, so any command the story
-            // runs resets it — proving a defect means probes, scratch
-            // worktrees and filtered test runs, none of which write a file and
-            // only some of which look like a gate. Matching command shapes was
-            // too narrow: a story that had already landed its fix was aborted
-            // at "14 min since last recognized file change" while running 23
-            // commands. Non-convergence is still caught, by the heuristics
-            // built for it — an identical repeated call trips the signature
-            // check, and endless exploration trips the tool-call count.
-            if (isShellCommand(item)) {
-                st.lastVerificationAt = this.opts.now()
-                if (item.callId) st.pendingShell.add(item.callId)
-            }
         }
 
         const sig = `${normalizeToolName(item.name)}:${String(item.args ?? "").slice(0, 160)}`
