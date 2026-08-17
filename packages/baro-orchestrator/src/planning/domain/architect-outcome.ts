@@ -576,11 +576,16 @@ function isStatedDecisions(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-/** Accept the substance; the host owns ids, ordering and markup. */
+/**
+ * Accept the substance; the host owns ids, ordering and markup — and it
+ * strips surplus keys rather than refusing the outcome for them. A whole
+ * research session was lost because a sound decision arrived with one
+ * annotation field this parser had no name for.
+ */
 function renderStatedDecisions(value: Record<string, unknown>): string {
-    if (!exactRecord(value, ["existingContext", "decisions"])) {
+    if (!requiredKeys(value, ["existingContext", "decisions"])) {
         throw new ArchitectOutcomeContractError(
-            "stated architect decisions must use the exact decision schema",
+            "stated architect decisions must carry existingContext and a decisions array",
         )
     }
     const existingContext = boundedText(
@@ -604,9 +609,11 @@ function parseDecisionDrafts(value: readonly unknown[]): ArchitectureDecisionDra
         )
     }
     return value.map((entry, index) => {
-        if (!exactRecord(entry, ["title", "context", "decision", "consequences"])) {
+        if (
+            !requiredKeys(entry, ["title", "context", "decision", "consequences"])
+        ) {
             throw new ArchitectOutcomeContractError(
-                `architect decision ${index + 1} must use the exact decision schema`,
+                `architect decision ${index + 1} must carry title, context, decision and consequences`,
             )
         }
         return {
@@ -680,6 +687,17 @@ function exactRecord(
         keys.every((key) => actual.includes(key)) &&
         actual.every((key) => allowed.has(key))
     )
+}
+
+/** Required keys present; unknown keys tolerated (the caller ignores them). */
+function requiredKeys(
+    value: unknown,
+    keys: readonly string[],
+): value is Record<string, unknown> {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+        return false
+    }
+    return keys.every((key) => key in value)
 }
 
 function deepFreeze<T>(value: T): T {

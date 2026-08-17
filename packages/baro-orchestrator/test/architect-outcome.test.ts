@@ -555,6 +555,28 @@ describe("Architect states decisions, the host writes the document", () => {
         assert.equal(parsed.decisions[1]!.decision, drafts[1]!.decision)
     })
 
+    it("strips surplus keys from stated decisions instead of refusing the outcome", () => {
+        const annotated = structured()
+        annotated.decisionDocument = {
+            existingContext,
+            rationale: "annotation the schema has no name for",
+            decisions: [
+                {
+                    ...drafts[0]!,
+                    invariants: ["G-A1"],
+                    status: "Accepted",
+                },
+            ],
+        } as never
+        const outcome = parseArchitectOutcome(JSON.stringify(annotated), {
+            decisionOnly: true,
+        })
+        const parsed = parseArchitectureDecisionDocument(outcome.decisionDocument)
+        assert.equal(parsed.decisions.length, 1)
+        assert.equal(parsed.decisions[0]!.title, drafts[0]!.title)
+        assert.doesNotMatch(outcome.decisionDocument, /annotation the schema/)
+    })
+
     it("keeps the verbatim document form working for backends that send one", () => {
         const outcome = parseArchitectOutcome(JSON.stringify(ready()), {
             decisionOnly: true,
