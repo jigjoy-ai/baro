@@ -1033,6 +1033,81 @@ describe("OpenAIStoryAgent", () => {
         })
     })
 
+    it("injects peer awareness at the round boundary without spending a turn", async () => {
+        await withTempDir("openai-story-peer-note-", async (dir) => {
+            const bridge = source("collaboration-bridge")
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "S1",
+                    prompt: "implement S1",
+                    cwd: dir,
+                    retries: 0,
+                    // Wide enough that a note wrongly sitting in the turn
+                    // mailbox WOULD start a second turn and trip the stub.
+                    quietTimeoutMs: 50,
+                    maxTurns: 3,
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 6,
+                    perRoundTimeoutSecs: 60,
+                },
+            )
+            const env = captureEnv()
+            agent.join(env)
+
+            const noteText =
+                "S2 landed jest config changes; moduleNameMapper now resolves @app/*"
+            const contexts: ModelContext[] = []
+            const rounds: Array<
+                () => Promise<Array<FunctionCallItem | ModelMessageItem>>
+            > = [
+                async () => {
+                    env.deliverSemanticEvent(
+                        bridge,
+                        AgentTargetedMessage.create({
+                            recipientId: "S1",
+                            text: noteText,
+                            metadata: { kind: "peer_note", sourceAgentId: "S2" },
+                        }),
+                    )
+                    await delay(10)
+                    return [writeCall("call-own-write", "src/one.ts")]
+                },
+                async () => [
+                    ModelMessageItem.rehydrate({ text: "S1 complete" }),
+                ],
+            ]
+            let index = 0
+            Object.defineProperty(agent, "runRound", {
+                value: async (context: ModelContext) => {
+                    contexts.push(context)
+                    const round = rounds[index++]
+                    assert.ok(round, `unexpected inference round ${index}`)
+                    return { items: await round(), usage: undefined }
+                },
+            })
+
+            const outcome = await agent.run(env)
+
+            assert.equal(outcome.success, true)
+            assert.match(
+                JSON.stringify(contexts[1]!.toJSON()),
+                /moduleNameMapper now resolves/,
+            )
+            assert.equal(
+                env.events.filter(AgentResult.is).length,
+                1,
+                "an awareness note must not buy the story another turn",
+            )
+            const echoes = env.events
+                .filter(AgentUserMessage.is)
+                .filter((event) => event.data.text === noteText)
+            assert.equal(echoes.length, 1)
+            agent.leave(env)
+        })
+    })
+
     it("refuses propose_replan during finalization without emitting or waiting for a Board decision", async () => {
         await withTempDir("openai-replan-finalization-", async (dir) => {
             const board = source("collective-board")

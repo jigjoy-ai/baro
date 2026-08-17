@@ -246,8 +246,13 @@ export class OpenAIStoryAgent extends BaseObserver {
         ownedElsewhere: Record<string, string>
     } | null
     private readonly collaborationAccess: StoryCollaborationAccess | null
-    /** Rendered rule revisions awaiting the next inference round boundary. */
+    /** Rendered rule revisions awaiting the next inference round boundary.
+     * Cleared and re-seeded from the live rule state on each fresh attempt. */
     private readonly pendingRuleUpdates: string[] = []
+    /** Peer awareness awaiting the next round boundary. Survives attempts:
+     * a retry rebuilds context from the spawn prompt, which never carried
+     * these. */
+    private readonly pendingPeerNotes: string[] = []
     private appliedSurfaceGraphVersion = 0
 
     constructor(spec: StorySpec, opts: OpenAIStoryAgentOptions = {}) {
@@ -446,6 +451,15 @@ export class OpenAIStoryAgent extends BaseObserver {
                     source === this.spec.targetedMessageAuthority) &&
                 typeof event.data.metadata.terminalId === "string"
             ) return
+            // A peer's discovery informs the work in progress: it reaches the
+            // model at the next round boundary instead of the turn mailbox,
+            // because a turn message asks for another reviewed turn and a
+            // finished story must not reopen for a note. Corrective feedback
+            // keeps turn semantics — demanding another turn is its purpose.
+            if (isPeerAwareness(event.data.metadata)) {
+                this.pendingPeerNotes.push(event.data.text)
+                return
+            }
             this.turnMessages.deliver(event.data.text)
             return
         }
@@ -852,10 +866,14 @@ export class OpenAIStoryAgent extends BaseObserver {
                     retryable: false,
                 }
             }
-            // Rule revisions land at the round boundary, deliberately not in
-            // the turn mailbox: a turn message asks for another reviewed turn,
-            // while a revision only informs the very next inference call.
-            for (const update of this.pendingRuleUpdates.splice(0)) {
+            // Rule revisions and peer awareness land at the round boundary,
+            // deliberately not in the turn mailbox: a turn message asks for
+            // another reviewed turn, while these only inform the very next
+            // inference call.
+            for (const update of [
+                ...this.pendingRuleUpdates.splice(0),
+                ...this.pendingPeerNotes.splice(0),
+            ]) {
                 context = context.addContextItem(UserMessageItem.create(update))
                 this.envRef?.deliverSemanticEvent(
                     this,
@@ -1448,6 +1466,37 @@ function finalStoryRepairInstruction(): string {
 
 function sleep(ms: number): Promise<void> {
     return new Promise((res) => setTimeout(res, ms))
+}
+
+/**
+ * Producer-declared markers of awareness deliveries: the Bridge's peer
+ * kinds and the awareness runners' sources. Curated by enumeration, not
+ * guessed from text — an unlisted producer keeps turn semantics, which is
+ * the safe default for anything that might be a correction.
+ */
+const PEER_AWARENESS_KINDS = new Set([
+    "peer_message",
+    "peer_help",
+    "peer_note",
+    "ownership_answer",
+    "ownership_update",
+    "delivery_gap",
+])
+const PEER_AWARENESS_SOURCES = new Set([
+    "merge-awareness",
+    "librarian",
+    "attempt-recall",
+])
+
+function isPeerAwareness(
+    metadata: Readonly<Record<string, unknown>>,
+): boolean {
+    return (
+        (typeof metadata.kind === "string" &&
+            PEER_AWARENESS_KINDS.has(metadata.kind)) ||
+        (typeof metadata.source === "string" &&
+            PEER_AWARENESS_SOURCES.has(metadata.source))
+    )
 }
 
 function runtimeToolStatus(output: string): string | null {
