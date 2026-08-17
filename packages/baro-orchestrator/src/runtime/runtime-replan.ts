@@ -472,6 +472,12 @@ function validateAddedStoryShape(story: ReplanStoryAdd): string | null {
     ) {
         return `added story '${story.id}' has invalid goal invariant ids`
     }
+    if (
+        story.writes !== undefined &&
+        !validStringArray(story.writes, true)
+    ) {
+        return `added story '${story.id}' has invalid writes`
+    }
     return null
 }
 
@@ -517,6 +523,7 @@ function clonePrd(prd: PrdFile): PrdFile {
             ...(story.goalInvariantIds
                 ? { goalInvariantIds: [...story.goalInvariantIds] }
                 : {}),
+            ...(story.writes ? { writes: [...story.writes] } : {}),
         })),
     }
 }
@@ -534,6 +541,9 @@ function toPrdStory(story: ReplanStoryAdd): PrdStory {
         ...(story.goalInvariantIds
             ? { goalInvariantIds: [...story.goalInvariantIds] }
             : {}),
+        // Shedding this silently un-declares the story's surface: peers'
+        // ownership maps never learn its paths, yet the merge gate judges on.
+        ...(story.writes !== undefined ? { writes: [...story.writes] } : {}),
         passes: false,
         completedAt: null,
         durationSecs: null,
@@ -556,6 +566,7 @@ function snapshotStoryAdd(story: ReplanStoryAdd): ReplanStoryAdd {
         ...(story.goalInvariantIds !== undefined
             ? { goalInvariantIds: [...story.goalInvariantIds] }
             : {}),
+        ...(story.writes !== undefined ? { writes: [...story.writes] } : {}),
         ...(story.model !== undefined ? { model: story.model } : {}),
     }
 }

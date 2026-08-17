@@ -224,7 +224,8 @@ function parseAddedStory(
             (!validIdArray(value.goalInvariantIds) ||
                 value.goalInvariantIds.some(
                     (invariantId) => !/^G-[AC][1-9]\d*$/.test(invariantId),
-                )))
+                ))) ||
+        (value.writes !== undefined && !nonBlankStringArray(value.writes))
     ) {
         return { ok: false, reason: "legacy replan contains a malformed added story" }
     }
@@ -245,6 +246,7 @@ function parseAddedStory(
             ...(value.goalInvariantIds !== undefined
                 ? { goalInvariantIds: [...value.goalInvariantIds] }
                 : {}),
+            ...(value.writes !== undefined ? { writes: [...value.writes] } : {}),
             ...(value.model !== undefined ? { model: value.model } : {}),
         },
     }
