@@ -14,6 +14,7 @@ import * as path from "path"
 import { type Tool } from "../../runtime/mozaik.js"
 
 import { execFileCli } from "../../harness/exec-file-cli.js"
+import { STORY_SHELL_BUDGET_MS } from "../../harness/environment.js"
 
 const IGNORE = new Set([
     "node_modules",
@@ -43,7 +44,18 @@ const MAX_GLOB_VISITS = 50_000
 const MAX_GLOB_RESULTS = 200
 const MAX_GLOB_MATCH_WORK = 16_000_000
 const MAX_BASH_OUTPUT_BYTES = 8_000
-const DEFAULT_BASH_TIMEOUT_MS = 300_000
+// The CLI lane's story-shell budget, from the same constant — a lane-local
+// number here is how the native lane re-measured the failure the CLI lane
+// had already paid for.
+const DEFAULT_BASH_TIMEOUT_MS = STORY_SHELL_BUDGET_MS
+
+/** The applied per-command budget: env override, else the shared default. */
+export function bashCommandTimeoutMs(): number {
+    const configured = Number(process.env.BARO_BASH_TIMEOUT_MS)
+    return Number.isFinite(configured) && configured > 0
+        ? configured
+        : DEFAULT_BASH_TIMEOUT_MS
+}
 const GIT_DISCOVERY_TIMEOUT_MS = 10_000
 const GIT_DISCOVERY_MAX_BUFFER = 1024 * 1024
 
@@ -719,7 +731,11 @@ function bashTool(cwd: string, options: CodebaseToolOptions): SignalAwareTool {
         description:
             "Run a non-destructive read-only shell command in the project root. " +
             "Use for inspections like 'cat package.json | head', 'git log --oneline | head', " +
-            "'wc -l src/**/*.ts'. Caps output at 8 KB. Do NOT use for writes, edits, or installs.",
+            "'wc -l src/**/*.ts'. Caps output at 8 KB. Do NOT use for writes, edits, or installs. " +
+            `Each command has a ${Math.round(bashCommandTimeoutMs() / 60_000)}-minute budget — ` +
+            "run long commands (builds, full test suites) in the foreground and let them finish. " +
+            "Background processes do NOT survive the call: every descendant is reaped when the " +
+            "command returns, so `cmd &` plus polling loses the work.",
         strict: true,
         parameters: {
             type: "object",
@@ -850,10 +866,7 @@ async function runBash(
     }
 
     const sandbox = prepareShellSandbox(cwd, command, access)
-    const configuredTimeout = Number(process.env.BARO_BASH_TIMEOUT_MS)
-    const timeout = Number.isFinite(configuredTimeout) && configuredTimeout > 0
-        ? configuredTimeout
-        : DEFAULT_BASH_TIMEOUT_MS
+    const timeout = bashCommandTimeoutMs()
     try {
         const { stdout } = await execFileCli(
             sandbox.executable,

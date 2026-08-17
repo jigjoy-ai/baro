@@ -26,13 +26,19 @@ const BARO_INTERNAL_HOST_KEYS = [
 ] as const
 
 /**
- * The CLI default truncates a shell command well below the runtime of an
- * ordinary test suite, so a story backgrounds its own verification and spends
- * its turn polling for it. A value the user set is theirs and is left alone.
+ * One story-shell budget for every lane. A default that truncates a shell
+ * command below the runtime of an ordinary test suite makes a story
+ * background its own verification and spend its turn polling for it —
+ * measured on the CLI lane first, then again on the native lane, because
+ * the fix lived only where the first failure happened. Both lanes read THIS
+ * value now; a value the user set is theirs and is left alone.
  */
+export const STORY_SHELL_BUDGET_MS = 900_000
+export const STORY_SHELL_MAX_MS = 3_600_000
+
 const CHILD_SHELL_TIMEOUTS: Readonly<Record<string, string>> = {
-    BASH_DEFAULT_TIMEOUT_MS: "900000",
-    BASH_MAX_TIMEOUT_MS: "3600000",
+    BASH_DEFAULT_TIMEOUT_MS: String(STORY_SHELL_BUDGET_MS),
+    BASH_MAX_TIMEOUT_MS: String(STORY_SHELL_MAX_MS),
 }
 
 export function harnessChildEnvironment(

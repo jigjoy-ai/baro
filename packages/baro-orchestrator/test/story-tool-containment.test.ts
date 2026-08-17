@@ -153,6 +153,19 @@ async function withManagerDependencyLink(
 }
 
 describe("Story tool project containment", () => {
+    it("announces the shell budget and the background-reaping boundary", async () => {
+        await withProjectAndSibling(async (project) => {
+            const bash = namedTool(createStoryTools(project), "bash")
+            // The boundary that reaps descendants and bounds runtime judges
+            // every call; the tool must say so where the model reads it.
+            assert.match(bash.description ?? "", /\d+-minute budget/)
+            assert.match(
+                bash.description ?? "",
+                /Background processes do NOT survive/,
+            )
+        })
+    })
+
     it(
         "drains an inherited-stdio process tree and removes its sandbox before abort settles",
         { skip: process.platform === "win32" },
