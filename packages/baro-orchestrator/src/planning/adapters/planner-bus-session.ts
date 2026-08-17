@@ -532,19 +532,50 @@ export async function runPlannerBusSession(
                 process.stderr.write(
                     `[planner-bus] finalization attempt ${attempt}/${maxFinalizationAttempts} rejected: ${reason}\n`,
                 )
-                if (attempt === maxFinalizationAttempts) {
-                    planner.closeStdin()
+                if (attempt < maxFinalizationAttempts) {
+                    planner.sendUserMessage(
+                        `Your final PRD was rejected: ${reason}\n\n` +
+                            `The host already holds every published story verbatim — do not ` +
+                            `repeat them. Reply with ONLY the corrected final PRD JSON whose ` +
+                            `userStories contains just the stories that come after the ` +
+                            `published prefix (an empty array if nothing remains), plus the ` +
+                            `usual project, branchName and description metadata.`,
+                    )
+                    continue
+                }
+                planner.closeStdin()
+                // The host already holds every admitted story — the run is
+                // not missing a plan, only the planner's restatement of
+                // "nothing remains" in the terminal shape. Compose that shape
+                // here; reconciliation and obligation coverage still judge
+                // it, so a prefix that does not cover the goal contract
+                // fails exactly as before.
+                if (!progressive.hasEarlyPlan()) {
                     return fail("planner_failed", reason)
                 }
-                planner.sendUserMessage(
-                    `Your final PRD was rejected: ${reason}\n\n` +
-                        `The host already holds every published story verbatim — do not ` +
-                        `repeat them. Reply with ONLY the corrected final PRD JSON whose ` +
-                        `userStories contains just the stories that come after the ` +
-                        `published prefix (an empty array if nothing remains), plus the ` +
-                        `usual project, branchName and description metadata.`,
+                try {
+                    composedFinalPrd = progressive.reconcileFinalCandidate(
+                        JSON.stringify({
+                            project: opts.prdMetadata.project,
+                            branchName: opts.prdMetadata.branchName,
+                            description: opts.prdMetadata.description,
+                            userStories: [],
+                        }),
+                    )
+                } catch (composeError) {
+                    return fail(
+                        "planner_failed",
+                        `${reason}; host empty-tail composition also failed: ${
+                            composeError instanceof Error
+                                ? composeError.message
+                                : String(composeError)
+                        }`,
+                    )
+                }
+                process.stderr.write(
+                    "[planner-bus] terminal restatement never arrived — " +
+                        "host composed the published prefix with an empty tail\n",
                 )
-                continue
             }
             planner.closeStdin()
             await planner.done

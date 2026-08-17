@@ -122,7 +122,14 @@ class StubFeed extends BaseObserver {
     }
 }
 
-function writeFakeClaude(dir: string, { fumbleFinalization = false } = {}): string {
+function writeFakeClaude(
+    dir: string,
+    {
+        fumbleFinalization = false,
+        proseFinalization = false,
+        publishFragment = true,
+    } = {},
+): string {
     const path = join(dir, "fake-bus-claude.mjs")
     writeFileSync(
         path,
@@ -134,6 +141,8 @@ const publishedStory = ${JSON.stringify(PUBLISHED_STORY)};
 const finalPrd = ${JSON.stringify(FINAL_PRD)};
 const tailFinalPrd = ${JSON.stringify(TAIL_FINAL_PRD)};
 const fumbleFinalization = ${JSON.stringify(fumbleFinalization)};
+const proseFinalization = ${JSON.stringify(proseFinalization)};
+const publishFragment = ${JSON.stringify(publishFragment)};
 const argv = process.argv.slice(2);
 
 const modelIndex = argv.indexOf("--model");
@@ -172,7 +181,9 @@ if (parsed.type !== "user" || typeof parsed.message?.content !== "string") {
     throw new Error("fixture expected a stream-json user event first");
 }
 
-await exerciseBaroMcp({ command: server.command, args: server.args, env });
+if (publishFragment) {
+    await exerciseBaroMcp({ command: server.command, args: server.args, env });
+}
 
 const emitResult = (payload) => process.stdout.write(JSON.stringify({
     type: "result",
@@ -181,6 +192,27 @@ const emitResult = (payload) => process.stdout.write(JSON.stringify({
     result: payload,
     session_id: "bus-1",
 }) + "\\n");
+
+if (proseFinalization) {
+    // A planner that already published everything answers every terminal
+    // request in prose — semantically true, shapeless — until the host
+    // stops asking.
+    const prose = "The plan is complete and no further planning output is pending.";
+    emitResult(prose);
+    for (let i = 0; i < 2; i++) {
+        const correction = JSON.parse(await nextLine());
+        if (
+            correction.type !== "user" ||
+            !/rejected/.test(correction.message?.content ?? "")
+        ) {
+            throw new Error(
+                "fixture expected a rejection correction, got: " + JSON.stringify(correction),
+            );
+        }
+        emitResult(prose);
+    }
+    process.exit(0);
+}
 
 if (fumbleFinalization) {
     // Restate the published story with a drifted title — the exact class of
@@ -374,6 +406,91 @@ describe("planner bus session", () => {
             assert.deepEqual(feed.failures, [])
             assert.equal(result.status, "completed")
             assert.equal(feed.completions.length, 1)
+        })
+    })
+
+    it("composes the published prefix when the terminal restatement never arrives", async () => {
+        await withTempDir("baro-planner-bus-prose-", async (dir) => {
+            const env = new AgenticEnvironment("planner-bus-prose")
+            const feed = new StubFeed()
+            feed.join(env)
+
+            const result = await runPlannerBusSession({
+                runId: "run-bus-4",
+                cwd: dir,
+                env,
+                feed,
+                goalEnvelope: ENVELOPE,
+                prdMetadata: {
+                    project: "baro",
+                    branchName: "bootstrap-branch",
+                    description: "Host-owned metadata.",
+                },
+                claudeBin: writeFakeClaude(dir, { proseFinalization: true }),
+                mcpServer: {
+                    command: process.execPath,
+                    args: [
+                        "--import",
+                        TSX_LOADER,
+                        RUN_PLANNER_ENTRY,
+                        PROGRESSIVE_PLANNER_MCP_MODE,
+                    ],
+                },
+            })
+
+            // The host holds the admitted plan; a planner that can only say
+            // "done" in prose must not fail the run at the finish line.
+            assert.deepEqual(feed.failures, [])
+            assert.equal(result.status, "completed")
+            assert.equal(feed.completions.length, 1)
+            const finalPrd = feed.completions[0]!.final_prd as {
+                branchName: string
+                userStories: Array<{ id: string }>
+            }
+            assert.deepEqual(
+                finalPrd.userStories.map((story) => story.id),
+                ["S1"],
+            )
+            assert.equal(finalPrd.branchName, "bootstrap-branch")
+        })
+    })
+
+    it("still fails prose finalization when nothing was ever published", async () => {
+        await withTempDir("baro-planner-bus-prose-empty-", async (dir) => {
+            const env = new AgenticEnvironment("planner-bus-prose-empty")
+            const feed = new StubFeed()
+            feed.join(env)
+
+            const result = await runPlannerBusSession({
+                runId: "run-bus-5",
+                cwd: dir,
+                env,
+                feed,
+                goalEnvelope: ENVELOPE,
+                prdMetadata: {
+                    project: "baro",
+                    branchName: "bootstrap-branch",
+                    description: "Host-owned metadata.",
+                },
+                claudeBin: writeFakeClaude(dir, {
+                    proseFinalization: true,
+                    publishFragment: false,
+                }),
+                mcpServer: {
+                    command: process.execPath,
+                    args: [
+                        "--import",
+                        TSX_LOADER,
+                        RUN_PLANNER_ENTRY,
+                        PROGRESSIVE_PLANNER_MCP_MODE,
+                    ],
+                },
+            })
+
+            assert.equal(result.status, "failed")
+            assert.equal(feed.completions.length, 0)
+            assert.equal(feed.failures.length, 1)
+            assert.match(feed.failures[0]!.reason, /no valid JSON object/)
         })
     })
 
