@@ -9,6 +9,7 @@ import { CollectiveBoard } from "../../src/execution/collective-board.js"
 import type { PrdFile, PrdStory } from "../../src/prd.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
 import {
+    GateRuleAnnounced,
     RuntimeReplanApplied,
     RuntimeReplanProposed,
     RuntimeReplanRejected,
@@ -852,6 +853,68 @@ describe("CollectiveBoard runtime DAG adaptation", () => {
                 env.events.filter(WorkContextRequested.is).length,
                 3,
                 "an obsolete late ACK must not enqueue the restored story twice",
+            )
+        })
+    })
+
+    it("announces a revised write surface to the exact running lease it binds", async () => {
+        await withTempDir("runtime-replan-surface-", async (dir) => {
+            const runId = "run-surface-announce"
+            const prdPath = join(dir, "prd.json")
+            const input = runtimePrd()
+            Object.assign(input.userStories[0]!, { writes: ["src/one.ts"] })
+            Object.assign(input.userStories[1]!, { writes: ["src/two.ts"] })
+            writeFileSync(prdPath, JSON.stringify(input, null, 2) + "\n")
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                unsafeAllowUnboundRuntimeReplanAuthority: true,
+            })
+            const env = joinWithCapture(board)
+            const lease = await startAndLeaseFirst(env, runId)
+            assert.deepEqual(lease.request.surface?.writes, ["src/one.ts"])
+
+            const proposal = RuntimeReplanProposed.create({
+                runId,
+                proposalId: "proposal-surface",
+                sourceStoryId: "S1",
+                leaseId: lease.leaseId,
+                generation: lease.generation,
+                baseGraphVersion: 1,
+                reason: "a shared helper surfaced mid-story",
+                mutation: {
+                    addedStories: [
+                        {
+                            ...dynamicStory("S1b", ["S1"]),
+                            writes: ["src/shared.ts"],
+                        },
+                    ],
+                    removedStoryIds: [],
+                    modifiedDeps: {},
+                },
+            })
+            env.deliverSemanticEvent(source("S1"), proposal)
+
+            const announced = await waitFor(env.events, GateRuleAnnounced.is)
+            assert.equal(announced.data.storyId, "S1")
+            assert.equal(announced.data.leaseId, lease.leaseId)
+            assert.equal(announced.data.generation, lease.generation)
+            assert.equal(announced.data.gateId, "write-surface")
+            assert.equal(announced.data.graphVersion, 2)
+            assert.deepEqual(announced.data.surface?.writes, ["src/one.ts"])
+            assert.equal(
+                announced.data.surface?.ownedElsewhere["src/shared.ts"],
+                "S1b",
+            )
+
+            env.deliverSemanticEvent(source("S1"), proposal)
+            await waitForCount(env.events, RuntimeReplanApplied.is, 2)
+            assert.equal(
+                env.events.filter(GateRuleAnnounced.is).length,
+                1,
+                "an idempotent replay that changes no surface is not re-announced",
             )
         })
     })

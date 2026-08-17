@@ -67,7 +67,9 @@ export interface StoryWriteSurface {
 }
 
 export interface CodebaseToolOptions {
-    /** Enforced by the write tools; absent means no boundary is known. */
+    /** Enforced by the write tools; absent means no boundary is known.
+     * Read at every invocation, never snapshotted — a caller may revise the
+     * object's contents in place and enforcement follows immediately. */
     surface?: StoryWriteSurface
     /** Set false for inspection-only roles that must never receive a shell. */
     includeBash?: boolean

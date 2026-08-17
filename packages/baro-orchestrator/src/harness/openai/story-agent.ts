@@ -36,12 +36,14 @@ import {
     runInferenceRound,
 } from "./runtime.js"
 import { createStoryTools } from "../../planning/adapters/story-tools.js"
+import { SPAWN_GATES, announceGates } from "../../execution/gate-registry.js"
 import {
     AgentResult,
     AgentState,
     AgentTargetedMessage,
     AgentUserMessage,
     Critique,
+    GateRuleAnnounced,
     RuntimeReplanApplied,
     RuntimeReplanProposed,
     RuntimeReplanRejected,
@@ -234,6 +236,20 @@ export class OpenAIStoryAgent extends BaseObserver {
     private readonly suspension: CooperativeSuspension
     private attemptsMade = 0
 
+    /**
+     * The write surface as a live object: the story tools read it at every
+     * invocation, so replacing its contents in place retargets enforcement
+     * without rebuilding the tool set mid-conversation.
+     */
+    private readonly liveSurface: {
+        writes: string[]
+        ownedElsewhere: Record<string, string>
+    } | null
+    private readonly collaborationAccess: StoryCollaborationAccess | null
+    /** Rendered rule revisions awaiting the next inference round boundary. */
+    private readonly pendingRuleUpdates: string[] = []
+    private appliedSurfaceGraphVersion = 0
+
     constructor(spec: StorySpec, opts: OpenAIStoryAgentOptions = {}) {
         super()
         this.spec = {
@@ -290,10 +306,18 @@ export class OpenAIStoryAgent extends BaseObserver {
             ? { baseURL: opts.baseUrl, apiKey: opts.apiKey }
             : undefined
         this.model = pickModel(this.opts.model, connection)
+        // Cloned out of the (frozen) spawn event so rule revisions can mutate it.
+        this.liveSurface = spec.surface
+            ? {
+                  writes: [...spec.surface.writes],
+                  ownedElsewhere: { ...spec.surface.ownedElsewhere },
+              }
+            : null
+        this.collaborationAccess = opts.collaboration ?? null
         this.tools = [
             ...createStoryTools(spec.cwd, {
                 collaboration: opts.collaboration,
-                ...(spec.surface ? { surface: spec.surface } : {}),
+                ...(this.liveSurface ? { surface: this.liveSurface } : {}),
             }),
             ...(this.runtimeReplanEnabled()
                 ? [createRuntimeReplanTool(this.runtimeGraphVersion!)]
@@ -369,6 +393,38 @@ export class OpenAIStoryAgent extends BaseObserver {
                         : { status: "rejected", data: event.data },
                 )
             }
+            return
+        }
+        // Rule revisions ride the same authority as graph decisions because
+        // only a graph decision can change a running story's surface.
+        if (
+            GateRuleAnnounced.is(event) &&
+            source === this.opts.runtimeReplanDecisionAuthority &&
+            this.liveSurface !== null &&
+            event.data.gateId === "write-surface" &&
+            event.data.surface !== undefined &&
+            event.data.runId === this.spec.runId &&
+            event.data.storyId === this.spec.id &&
+            event.data.leaseId === this.spec.leaseId &&
+            event.data.generation === this.spec.generation &&
+            event.data.graphVersion > this.appliedSurfaceGraphVersion
+        ) {
+            this.appliedSurfaceGraphVersion = event.data.graphVersion
+            this.liveSurface.writes.splice(
+                0,
+                this.liveSurface.writes.length,
+                ...event.data.surface.writes,
+            )
+            for (const path of Object.keys(this.liveSurface.ownedElsewhere)) {
+                delete this.liveSurface.ownedElsewhere[path]
+            }
+            Object.assign(
+                this.liveSurface.ownedElsewhere,
+                event.data.surface.ownedElsewhere,
+            )
+            this.pendingRuleUpdates.push(
+                this.renderSurfaceRuleUpdate(event.data.graphVersion),
+            )
             return
         }
         if (
@@ -520,6 +576,15 @@ export class OpenAIStoryAgent extends BaseObserver {
         failure?: StoryFailureData
         retryable?: boolean
     }> {
+        // A fresh attempt rebuilds context from the spawn prompt, whose
+        // surface section a mid-flight revision may have superseded.
+        if (this.appliedSurfaceGraphVersion > 0) {
+            this.pendingRuleUpdates.length = 0
+            this.pendingRuleUpdates.push(
+                this.renderSurfaceRuleUpdate(this.appliedSurfaceGraphVersion),
+            )
+        }
+
         // Echo the prompt on the bus so Cartographer renders it the same
         // way as the Claude side's user echoes.
         const userMessageText = this.spec.prompt
@@ -716,6 +781,29 @@ export class OpenAIStoryAgent extends BaseObserver {
         )
     }
 
+    /** Rendered from the same registry source as the spawn prompt section, so
+     * the in-flight revision cannot drift from what integration refuses. */
+    private renderSurfaceRuleUpdate(graphVersion: number): string {
+        const collab = this.collaborationAccess
+        const rendered = announceGates(SPAWN_GATES, {
+            surface: this.liveSurface!,
+            ...(collab
+                ? {
+                      collabCommand: `node ${JSON.stringify(collab.commandPath)}`,
+                      collabCapability:
+                          `--endpoint ${JSON.stringify(collab.endpoint)} ` +
+                          `--token ${JSON.stringify(collab.token)}`,
+                  }
+                : {}),
+        }).join("\n\n")
+        return [
+            `RULE UPDATE [gate:write-surface] — the run's dependency graph changed (graphVersion ${graphVersion}).`,
+            "The write-surface rule below replaces the one in your instructions; the merge gate already enforces this revision.",
+            "",
+            rendered,
+        ].join("\n")
+    }
+
     private storySystemPrompt(): string {
         if (!this.runtimeReplanEnabled()) return STORY_SYSTEM_PROMPT
         return [
@@ -763,6 +851,19 @@ export class OpenAIStoryAgent extends BaseObserver {
                     error: this.abortReason ?? "story was aborted",
                     retryable: false,
                 }
+            }
+            // Rule revisions land at the round boundary, deliberately not in
+            // the turn mailbox: a turn message asks for another reviewed turn,
+            // while a revision only informs the very next inference call.
+            for (const update of this.pendingRuleUpdates.splice(0)) {
+                context = context.addContextItem(UserMessageItem.create(update))
+                this.envRef?.deliverSemanticEvent(
+                    this,
+                    AgentUserMessage.create({
+                        agentId: this.spec.id,
+                        text: update,
+                    }),
+                )
             }
             const calls: FunctionCallItem[] = []
             const toolsAllowed = !finalizationRequested

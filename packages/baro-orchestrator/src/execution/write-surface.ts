@@ -31,3 +31,17 @@ export function storyWriteSurface(
     }
     return { writes, ownedElsewhere }
 }
+
+/** Order-independent identity, so a re-computation that changed nothing is
+ * never re-announced to a running lease. */
+export function surfaceKey(surface: StorySpawnRequestData["surface"]): string {
+    if (!surface) return "none"
+    return JSON.stringify({
+        writes: [...surface.writes].sort(),
+        ownedElsewhere: Object.fromEntries(
+            Object.entries(surface.ownedElsewhere).sort(([a], [b]) =>
+                a.localeCompare(b),
+            ),
+        ),
+    })
+}

@@ -19,6 +19,7 @@ import {
     AgentTargetedMessage,
     AgentUserMessage,
     Critique,
+    GateRuleAnnounced,
     RuntimeReplanApplied,
     RuntimeReplanProposed,
     RuntimeReplanRejected,
@@ -923,6 +924,112 @@ describe("OpenAIStoryAgent", () => {
                 JSON.stringify(contexts[3]!.toJSON()),
                 /previous tool call was refused/i,
             )
+        })
+    })
+
+    it("injects a revised write-surface rule at the round boundary and retargets enforcement", async () => {
+        await withTempDir("openai-story-gate-rule-", async (dir) => {
+            const board = source("collective-board")
+            const agent = new OpenAIStoryAgent(
+                {
+                    id: "S1",
+                    prompt: "implement S1",
+                    cwd: dir,
+                    retries: 0,
+                    quietTimeoutMs: 1,
+                    maxTurns: 1,
+                    runId: "run-gate",
+                    leaseId: "lease-gate-1",
+                    generation: 0,
+                    surface: {
+                        writes: ["src/one.ts"],
+                        ownedElsewhere: { "src/two.ts": "S2" },
+                    },
+                },
+                {
+                    model: "fake-model",
+                    maxRoundsPerTurn: 6,
+                    perRoundTimeoutSecs: 60,
+                    runtimeReplanDecisionAuthority: board,
+                },
+            )
+            const env = captureEnv()
+            agent.join(env)
+
+            const revision = (graphVersion: number, leaseId: string) =>
+                GateRuleAnnounced.create({
+                    runId: "run-gate",
+                    storyId: "S1",
+                    leaseId,
+                    generation: 0,
+                    gateId: "write-surface",
+                    graphVersion,
+                    surface: {
+                        writes: ["src/one.ts"],
+                        ownedElsewhere: {
+                            "src/two.ts": "S2",
+                            "src/shared.ts": "S9",
+                        },
+                    },
+                })
+
+            const contexts: ModelContext[] = []
+            const rounds: Array<
+                () => Promise<Array<FunctionCallItem | ModelMessageItem>>
+            > = [
+                async () => {
+                    // Arrives while the round is in flight; the agent must
+                    // apply it before the next inference call.
+                    env.deliverSemanticEvent(
+                        board,
+                        revision(2, "lease-gate-1"),
+                    )
+                    await delay(10)
+                    return [writeCall("call-own-write", "src/one.ts")]
+                },
+                async () => {
+                    // Stale lease correlation: must be ignored entirely.
+                    env.deliverSemanticEvent(
+                        board,
+                        revision(3, "lease-gate-other"),
+                    )
+                    await delay(10)
+                    return [writeCall("call-newly-owned", "src/shared.ts")]
+                },
+                async () => [
+                    ModelMessageItem.rehydrate({ text: "S1 complete" }),
+                ],
+            ]
+            let index = 0
+            Object.defineProperty(agent, "runRound", {
+                value: async (context: ModelContext) => {
+                    contexts.push(context)
+                    const round = rounds[index++]
+                    assert.ok(round, `unexpected inference round ${index}`)
+                    return { items: await round(), usage: undefined }
+                },
+            })
+
+            const outcome = await agent.run(env)
+
+            assert.equal(outcome.success, true)
+            const round2 = JSON.stringify(contexts[1]!.toJSON())
+            assert.match(round2, /RULE UPDATE \[gate:write-surface\]/)
+            assert.match(round2, /graphVersion 2/)
+            assert.match(round2, /src\/shared\.ts → S9/)
+            assert.match(
+                functionOutput(contexts[2]!, "call-newly-owned"),
+                /belongs to story S9/,
+            )
+            assert.equal(existsSync(join(dir, "src/shared.ts")), false)
+            assert.equal(existsSync(join(dir, "src/one.ts")), true)
+            const round3 = JSON.stringify(contexts[2]!.toJSON())
+            assert.doesNotMatch(round3, /graphVersion 3/)
+            const ruleEchoes = env.events
+                .filter(AgentUserMessage.is)
+                .filter((event) => event.data.text.includes("RULE UPDATE"))
+            assert.equal(ruleEchoes.length, 1)
+            agent.leave(env)
         })
     })
 

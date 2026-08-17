@@ -90,6 +90,12 @@ carry no compat constraint beyond "don't rename once shipped"):
 - `frontdoor_conversation_completed` / `frontdoor_conversation_failed` — the
   exact bound Conversation participant closes the host request. A completed
   event carries the unchanged public ConversationResponse v1 contract.
+- `gate_rule_announced` — an applied graph decision revised a gate's rule for
+  one RUNNING lease (today: the write-surface ownership map). Emitted by the
+  Board to the exact run/story/lease/generation; the native in-process
+  executor injects the revised rule at its next inference round boundary and
+  retargets its write-tool enforcement. CLI lanes still learn revisions only
+  at spawn.
 
 `proposalId` is the runtime-replan idempotency key. The same ID and identical
 content replays the remembered decision; the same ID with different content

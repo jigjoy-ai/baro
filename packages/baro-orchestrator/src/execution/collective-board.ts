@@ -46,6 +46,7 @@ import {
     GoalInvariantRemediationProposed,
     GoalLedgerProjectionPersisted,
     GoalLedgerProjectionUpdated,
+    GateRuleAnnounced,
     GoalStoryInvariantMapped,
     LevelCompleted,
     LevelStarted,
@@ -117,7 +118,7 @@ import {
 import { ProgressivePlanningCoordinator } from "../planning/application/progressive-planning-coordinator.js"
 import { OperationalRecoveryPolicy } from "./operational-recovery.js"
 import { writeSurfaceOf } from "../planning/domain/dependency-evidence.js"
-import { storyWriteSurface } from "./write-surface.js"
+import { storyWriteSurface, surfaceKey } from "./write-surface.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
 import { isProviderCapacityFailure } from "../harness/provider-failure.js"
 import {
@@ -287,6 +288,9 @@ export class CollectiveBoard extends SerializedObserver {
             workerId: string
             route?: { routeId: string; backend: string; model: string }
             supportsCooperativeSuspend: boolean
+            /** Surface the worker was told at spawn; a graph decision that
+             * changes it is re-announced to this exact lease. */
+            announcedSurfaceKey: string
         }
     >()
     private readonly offers: WorkOfferDesk
@@ -2479,6 +2483,7 @@ export class CollectiveBoard extends SerializedObserver {
             ...(grant.route ? { route: { ...grant.route } } : {}),
             supportsCooperativeSuspend:
                 grant.supportsCooperativeSuspend === true,
+            announcedSurfaceKey: surfaceKey(grant.request.surface),
         })
     }
 
@@ -3268,6 +3273,38 @@ export class CollectiveBoard extends SerializedObserver {
                         `${event.data.graphVersion}:${story.id}`,
                     storyId: story.id,
                     invariantIds: [...(story.goalInvariantIds ?? [])],
+                }),
+            )
+        }
+        this.announceRevisedSurfaces(event.data.graphVersion)
+    }
+
+    /**
+     * An applied graph decision can change which paths belong to whom while a
+     * story is mid-flight; the boundary must not judge by a revision it kept
+     * to itself. Every call site swaps `this.prd` before emitting Applied, so
+     * the surfaces computed here are the ones integration will enforce.
+     */
+    private announceRevisedSurfaces(graphVersion: number): void {
+        const stories = this.prd?.userStories ?? []
+        const byId = new Map(stories.map((story) => [story.id, story]))
+        for (const [storyId, lease] of this.leases) {
+            const story = byId.get(storyId)
+            if (!story) continue
+            const surface = storyWriteSurface(story, stories)
+            const key = surfaceKey(surface)
+            if (key === lease.announcedSurfaceKey) continue
+            lease.announcedSurfaceKey = key
+            if (!surface) continue
+            this.emit(
+                GateRuleAnnounced.create({
+                    runId: this.opts.runId,
+                    storyId,
+                    leaseId: lease.leaseId,
+                    generation: lease.generation,
+                    gateId: "write-surface",
+                    graphVersion,
+                    surface,
                 }),
             )
         }

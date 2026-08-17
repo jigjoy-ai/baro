@@ -249,6 +249,27 @@ export interface StorySpawnRequestData {
 export const StorySpawnRequest =
     defineSemanticEvent<StorySpawnRequestData>("story_spawn_request")
 
+/**
+ * A gate's rule for one running lease changed after spawn — the prompt the
+ * agent launched with no longer says what the boundary will enforce. Only the
+ * graph decision authority announces these, and only to the exact lease the
+ * revision binds; an in-process executor injects the revised rule mid-flight.
+ */
+export interface GateRuleAnnouncedData {
+    runId: string
+    storyId: string
+    leaseId: string
+    generation: number
+    /** Registry id (`gate-registry.ts`); today only "write-surface" revises. */
+    gateId: string
+    /** Graph version whose application revised the rule. */
+    graphVersion: number
+    surface?: StorySpawnRequestData["surface"]
+}
+
+export const GateRuleAnnounced =
+    defineSemanticEvent<GateRuleAnnouncedData>("gate_rule_announced")
+
 export interface StorySpawnedData {
     storyId: string
 }
