@@ -735,7 +735,13 @@ function bashTool(cwd: string, options: CodebaseToolOptions): SignalAwareTool {
             `Each command has a ${Math.round(bashCommandTimeoutMs() / 60_000)}-minute budget — ` +
             "run long commands (builds, full test suites) in the foreground and let them finish. " +
             "Background processes do NOT survive the call: every descendant is reaped when the " +
-            "command returns, so `cmd &` plus polling loses the work.",
+            "command returns, so `cmd &` plus polling loses the work." +
+            (hasMacosWriteSandbox()
+                ? " Setuid binaries (notably /bin/ps) cannot execute inside this " +
+                  "sandbox — the OS denies them regardless of profile — so code or " +
+                  "tests that shell out to ps fail here even though they pass " +
+                  "outside; treat such failures as environmental, not as your bug."
+                : ""),
         strict: true,
         parameters: {
             type: "object",

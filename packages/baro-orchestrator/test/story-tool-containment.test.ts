@@ -163,6 +163,12 @@ describe("Story tool project containment", () => {
                 bash.description ?? "",
                 /Background processes do NOT survive/,
             )
+            if (process.platform === "darwin") {
+                assert.match(
+                    bash.description ?? "",
+                    /Setuid binaries \(notably \/bin\/ps\) cannot execute/,
+                )
+            }
         })
     })
 
