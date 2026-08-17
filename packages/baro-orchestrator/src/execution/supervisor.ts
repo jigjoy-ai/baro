@@ -12,6 +12,7 @@
 import {
     BaseObserver,
     FunctionCallItem,
+    FunctionCallOutputItem,
     Participant,
     SemanticEvent,
 } from "../runtime/mozaik.js"
@@ -59,6 +60,10 @@ export interface SupervisorOptions {
 }
 
 interface StoryProgress {
+    /** Shell calls in flight, by callId: a command's runtime is work, and its
+     * completion must move the clock — measuring from its START punished the
+     * story's first move after a long legitimate suite. */
+    pendingShell: Set<string>
     lastProgressAt: number
     /** Last test/build/lint invocation — verification is work, not wandering. */
     lastVerificationAt: number
@@ -199,6 +204,7 @@ export class Supervisor extends BaseObserver {
             // check, and endless exploration trips the tool-call count.
             if (isShellCommand(item)) {
                 st.lastVerificationAt = this.opts.now()
+                if (item.callId) st.pendingShell.add(item.callId)
             }
         }
 
@@ -228,6 +234,25 @@ export class Supervisor extends BaseObserver {
                         : {}),
                 }),
             )
+        }
+    }
+
+    override async onExternalFunctionCallOutput(
+        source: Participant,
+        item: FunctionCallOutputItem,
+    ): Promise<void> {
+        const id = (source as unknown as { agentId?: string }).agentId
+        if (typeof id !== "string") return
+        const st = this.stories.get(id)
+        if (!st) return
+        const callId =
+            (item as unknown as { callId?: string }).callId ??
+            (item.toJSON() as { call_id?: string }).call_id
+        if (callId && st.pendingShell.delete(callId)) {
+            // The command's whole runtime was work. Move the clock to its
+            // completion, or the story's first call after a long suite reads
+            // as that many minutes of silence and gets aborted for finishing.
+            st.lastVerificationAt = this.opts.now()
         }
     }
 
@@ -262,6 +287,7 @@ export class Supervisor extends BaseObserver {
                 fileChanges: 0,
                 sinceLastChange: 0,
                 sigCounts: new Map(),
+                pendingShell: new Set(),
                 intervened: false,
             }
             this.stories.set(id, st)

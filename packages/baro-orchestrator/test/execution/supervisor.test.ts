@@ -133,6 +133,39 @@ test("wall-clock cap is measured from the most recent recognized progress", asyn
     assert.match(got[0]!.reason, /since last recognized file change/)
 })
 
+test("a long suite is work: its completion moves the clock, not its start", async () => {
+    // Run 51, S4: a 15-minute verification under load returned, and the
+    // story's FIRST call afterwards read as 21 minutes of silence — aborted
+    // for finishing. The command's runtime is work; its output moves the
+    // clock.
+    let now = 0
+    const { sup, env } = supervised({
+        softCapMs: 1000,
+        noProgressToolCalls: 999,
+        repeatThreshold: 999,
+        now: () => now,
+    })
+    await sup.onExternalFunctionCall(
+        { agentId: "S1" } as never,
+        { name: "Bash", args: `{"command":"npm test"}`, callId: "c1" } as never,
+    )
+    now = 5000 // the suite ran far past the soft cap
+    await sup.onExternalFunctionCallOutput(
+        { agentId: "S1" } as never,
+        { callId: "c1", toJSON: () => ({ call_id: "c1" }) } as never,
+    )
+    now = 5500
+    await feed(sup, "S1", "read_file", `{"n":1}`)
+    assert.equal(
+        interventions(env).length,
+        0,
+        "the first call after a completed suite is not silence",
+    )
+    now = 7000 // and from completion, real silence still trips
+    await feed(sup, "S1", "read_file", `{"n":2}`)
+    assert.equal(interventions(env).length, 1)
+})
+
 test("does not false-positive on steady progress", async () => {
     let now = 0
     const { sup, env } = supervised({
