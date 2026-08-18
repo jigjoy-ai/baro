@@ -21,6 +21,7 @@ describe("gate registry — enforced means announced", () => {
                     writes: ["src/a.ts"],
                     ownedElsewhere: { "src/b.ts": "S2" },
                 },
+                hostRunsWholeTreeVerification: true,
             })
             assert.ok(text, `${gate.id} announces under an active context`)
             assert.ok(
@@ -60,6 +61,22 @@ describe("gate registry — enforced means announced", () => {
         })
         assert.equal(announced.length, 1)
         assert.ok(announced[0]!.includes("[gate:write-surface]"))
+    })
+
+    it("scopes story verification to its perimeter only when the run gate exists", () => {
+        // Without a run-level verifier the story's suite duty stays whole —
+        // announcing a narrower duty would be a rule nobody enforces.
+        const silent = announceGates(SPAWN_GATES, {
+            surface: { writes: ["src/a.ts"], ownedElsewhere: {} },
+            hostRunsWholeTreeVerification: false,
+        })
+        assert.equal(silent.some((t) => t.includes("run-verification")), false)
+        const announced = announceGates(SPAWN_GATES, {
+            hostRunsWholeTreeVerification: true,
+        })
+        assert.equal(announced.length, 1)
+        assert.ok(announced[0]!.includes("[gate:run-verification]"))
+        assert.match(announced[0]!, /Do NOT run the repository's full test suites/)
     })
 
     it("the projections cannot be quietly reverted to hand-written text", () => {

@@ -20,6 +20,9 @@ export interface GateAnnounceContext {
     /** Collaboration command + capability names for surface remedies. */
     collabCommand?: string
     collabCapability?: string
+    /** True when a run-level verifier proves the fully-merged tree once
+     * after integration, so stories owe only their own perimeter. */
+    hostRunsWholeTreeVerification?: boolean
 }
 
 export interface GateDisclosure {
@@ -136,8 +139,32 @@ export const BASE_GATES: readonly GateDisclosure[] = [
     BUILD_BEFORE_COMMIT,
 ]
 
+const RUN_VERIFICATION: GateDisclosure = {
+    id: "run-verification",
+    enforcedBy: "src/verification/run-verifier.ts",
+    summary:
+        "The fully-merged branch is built and tested once by the host after integration.",
+    announce: (ctx) => {
+        if (ctx.hostRunsWholeTreeVerification !== true) return null
+        return [
+            "VERIFICATION SCOPE [gate:run-verification]:",
+            "- Your duty is your story's perimeter: the test commands your story",
+            "  declares, plus targeted tests covering the files you changed.",
+            "- Do NOT run the repository's full test suites. The host proves the",
+            "  fully-merged tree once, after integration — a full-suite pass from",
+            "  your worktree costs its entire runtime under load and adds no",
+            "  proof the run gate does not already own.",
+            "- A whole-tree regression is the integration gate's verdict to give,",
+            "  not yours to pre-empt mid-story.",
+        ].join("\n")
+    },
+}
+
 /** Spawn-stage gates: need per-story context the base prompt does not have. */
-export const SPAWN_GATES: readonly GateDisclosure[] = [WRITE_SURFACE]
+export const SPAWN_GATES: readonly GateDisclosure[] = [
+    WRITE_SURFACE,
+    RUN_VERIFICATION,
+]
 
 export const ALL_GATES: readonly GateDisclosure[] = [
     ...BASE_GATES,

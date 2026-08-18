@@ -141,6 +141,11 @@ Dependency rules:
     modify. Config and test-runner files that every story happens to run
     (package.json, tsconfig.json, the test command) are not a write surface
     unless this story actually edits them.
+  - Declare story-scoped "tests" commands: target the files, package or test
+    names the story touches (e.g. "npm test -- test/env-flag.test.ts",
+    "cargo test env_flag"), never the whole repository suite. The host proves
+    the fully-merged tree once after integration; a story-level full suite
+    only repeats that proof at load-inflated cost.
   - Decorative chains are bad, but unsafe parallel edits are worse.
 
 Output ONLY valid JSON matching this exact schema (no markdown, no explanation, just JSON):

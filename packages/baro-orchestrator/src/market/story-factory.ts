@@ -1275,7 +1275,11 @@ export class StoryFactory extends BaseObserver {
             ...(surface ? { surface } : {}),
             collabCommand: command,
             collabCapability: capability,
-        }).join("\n")
+            // Collective runs end with the objective RunVerifier pass on the
+            // fully-merged branch, so a story owes only its own perimeter.
+            hostRunsWholeTreeVerification:
+                this.opts.coordinationMode === "collective",
+        }).join("\n\n")
     }
 
     private collaborationInstructions(
