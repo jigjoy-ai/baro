@@ -1,0 +1,8 @@
+# ADR-0005: Split into two parallel stories with disjoint writes and per-story targeted verification
+
+**Status:** Accepted
+**Context:** The two gaps share no files, and the repository already follows the disjoint-writes split (adr/0007-split-the-work-into-two-stories-with-disjoint-writes-and-per.md). Repository-wide suites are refused by the shell and both suites are already green, so each story verifies only its own perimeter.
+**Decision:** Story A — "patient dialogue retry". writes exactly: `packages/baro-orchestrator/src/harness/transient-retry.ts`, `packages/baro-orchestrator/src/harness/dialogue-retry-policy.ts`, `packages/baro-orchestrator/scripts/run-conversation.ts`, `packages/baro-orchestrator/test/harness/transient-retry.test.ts`. Verification: `cd packages/baro-orchestrator && node --import tsx --test test/harness/transient-retry.test.ts`.
+Story B — "shell no-progress counter". writes exactly: `packages/baro-orchestrator/src/execution/supervisor.ts`, `packages/baro-orchestrator/test/execution/supervisor.test.ts`. Verification: `cd packages/baro-orchestrator && node --import tsx --test test/execution/supervisor.test.ts`.
+Neither story edits package.json, package-lock.json, Cargo.toml or Cargo.lock; use only already-installed root dependencies. Neither story runs `npm test`, `npm run test:fast`/`test:slow`, or `cargo test`. A targeted test that fails under load may be rerun once in isolation and that rerun decides.
+**Consequences:** The two stories can run fully in parallel with no merge conflicts. Story B is the only writer of supervisor files; Story A is the only writer of harness/script files. The run-level gate verifies the merged tree once.
