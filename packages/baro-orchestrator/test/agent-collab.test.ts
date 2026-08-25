@@ -978,6 +978,23 @@ describe("agent-collab runtime replan transport", () => {
             assert.deepEqual(readdirSync(join(dir, "outbox")), [])
         })
     })
+
+    it("documents every collaboration kind it accepts", async () => {
+        // A worker discovers this CLI by running it: a kind missing from the
+        // usage text reads as a kind this build does not implement.
+        const { stdout } = await exec(process.execPath, [SCRIPT])
+        const accepted = readFileSync(SCRIPT, "utf8").match(
+            /if \(!\[([^\]]+)\]\.includes\(kind\)\)/u,
+        )?.[1]
+        assert.ok(accepted, "the CLI's accepted-kind allowlist moved")
+        const kinds = [...accepted.matchAll(/"([a-z]+)"/gu)].map(
+            (match) => match[1]!,
+        )
+        assert.ok(kinds.includes("dispute"))
+        for (const kind of kinds) {
+            assert.match(stdout, new RegExp(`--kind ${kind}\\b`, "u"))
+        }
+    })
 })
 
 async function listenLoopback(server: Server): Promise<string> {

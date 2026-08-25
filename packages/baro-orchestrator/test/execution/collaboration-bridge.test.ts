@@ -17,6 +17,7 @@ import type { PrdFile } from "../../src/prd.js"
 import { deriveGoalContract } from "../../src/goal/goal-contract.js"
 import {
     AgentTargetedMessage,
+    ArchitecturePremiseDisputed,
     CollaborationNote,
     GoalInvariantChallengeRaised,
     GoalLedgerProjectionPersisted,
@@ -1779,6 +1780,95 @@ describe("CollaborationBridge", () => {
                         event.data.text === "must not survive release",
                 ),
                 false,
+            )
+            await bridge.shutdown()
+        })
+    })
+
+    it("accepts an evidence-backed premise dispute over the broker", async () => {
+        await withTempDir("collaboration-broker-dispute-", async (dir) => {
+            const runId = "run-broker-dispute"
+            const broker = source("broker")
+            const bridge = new CollaborationBridge({ runId, sessionDir: dir })
+            bridge.setLeaseAuthority(broker)
+            const env = joinWithCapture(bridge)
+            await bridge.ready()
+            grantLease(env, broker, runId, "S1", "lease-S1", 1, 2)
+            await bridge.idle()
+            const capability = bridge.capabilityForLease({
+                runId,
+                storyId: "S1",
+                leaseId: "lease-S1",
+                generation: 1,
+                deliveryMode: "poll",
+            })
+            const accepted = await brokerFetch(capability, "/v1/events", {
+                method: "POST",
+                body: {
+                    kind: "dispute",
+                    claim: "agent-collab.mjs supports --kind dispute",
+                    command: "node agent-collab.mjs --help",
+                    output: "unsupported kind 'dispute'",
+                    obligationId: "O-011",
+                },
+            })
+            assert.equal(accepted.status, 202)
+            assert.equal(accepted.value.kind, "dispute")
+            const disputes = env.events.filter(ArchitecturePremiseDisputed.is)
+            assert.equal(disputes.length, 1)
+            assert.deepEqual(
+                {
+                    runId: disputes[0]!.data.runId,
+                    storyId: disputes[0]!.data.storyId,
+                    claim: disputes[0]!.data.claim,
+                    command: disputes[0]!.data.command,
+                    output: disputes[0]!.data.output,
+                    obligationId: disputes[0]!.data.obligationId,
+                },
+                {
+                    runId,
+                    storyId: "S1",
+                    claim: "agent-collab.mjs supports --kind dispute",
+                    command: "node agent-collab.mjs --help",
+                    output: "unsupported kind 'dispute'",
+                    obligationId: "O-011",
+                },
+            )
+            // Evidence or nothing: the broker must refuse exactly what the
+            // record handler would silently drop.
+            for (const body of [
+                {
+                    kind: "dispute",
+                    claim: "a claim",
+                    command: "a command",
+                    output: "   ",
+                },
+                {
+                    kind: "dispute",
+                    claim: "a claim",
+                    command: "a command",
+                    output: "real output",
+                    obligationId: "O-11",
+                },
+                {
+                    kind: "dispute",
+                    claim: "a claim",
+                    command: "a command",
+                    output: "real output",
+                    text: "prose instead of evidence",
+                },
+            ]) {
+                const rejected = await brokerFetch(capability, "/v1/events", {
+                    method: "POST",
+                    body,
+                })
+                assert.equal(rejected.status, 400)
+                assert.match(rejected.value.error, /dispute/)
+                assert.doesNotMatch(rejected.value.error, /unsupported kind/)
+            }
+            assert.equal(
+                env.events.filter(ArchitecturePremiseDisputed.is).length,
+                1,
             )
             await bridge.shutdown()
         })
