@@ -1,0 +1,10 @@
+# ADR-0004: Add lifecycle tests in a new test/acceptance/turn-review.test.ts
+
+**Status:** Accepted
+**Context:** No test file currently exercises `StreamingTurnLifecycle` or `TurnReviewMailbox`; test/acceptance/stale-evidence-recovery.test.ts covers only the pure helpers from the same module, and test/harness/one-shot/turn-review.test.ts covers a different class. Adding lifecycle tests to either existing file would blur ownership and would collide with the other story's writes.
+**Decision:** Create `packages/baro-orchestrator/test/acceptance/turn-review.test.ts` using `import { describe, it } from "node:test"`, `import assert from "node:assert/strict"`, importing `StreamingTurnLifecycle`/`TurnReviewMailbox` from `"../../src/acceptance/turn-review.js"`. Build review payloads as plain `CritiqueData` object literals via a local factory (the style of stale-evidence-recovery.test.ts:23-36), not via `Critique.create`. Cover exactly these cases, driving the lifecycle with `observeResult(...)` / `deliverReview(...)` and a small `options` fixture with a short `reviewTimeoutMs`:
+(a) `observeResult("t-1")` then `observeResult("t-2")`: `failure()` stays `null`, `onSupersede` fired once with `{supersededTerminalId:"t-1", terminalId:"t-2"}`, `supersededTerminals()` deep-equals `["t-1"]`, and a subsequent verdict for `t-2` decides the outcome (`onRevision` called for a fail verdict / `onFinish` for a pass verdict).
+(b) after supersession, `deliverReview` for `t-1` is ignored: no `onRevision`/`onFinish` for it and `failure()` stays `null` until the `t-2` verdict arrives.
+(c) `observeResult(null)` with `requiresReview: true` still yields `failure()` equal to `{kind:"infrastructure", code:"review_uncorrelated"}` with error message `"quality review requires a stable terminal turn identity"`.
+Do not modify test/harness/one-shot/turn-review.test.ts or test/acceptance/stale-evidence-recovery.test.ts.
+**Consequences:** This file is owned exclusively by the turn-review story. Because supersession resolves asynchronously through the mailbox, tests must await a microtask/timer tick before asserting post-verdict effects rather than assuming synchronous delivery.

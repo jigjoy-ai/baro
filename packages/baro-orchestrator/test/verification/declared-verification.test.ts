@@ -17,6 +17,7 @@ import {
     recommendedMergedVerifyTimeoutMs,
     verifyBuild,
 } from "../../src/verification/verify.js"
+import { translateDeclaredTests } from "../../src/verification/declared-verification.js"
 import { readAuthoritativeDeclaredTests } from "../../src/verification/prd-declared-tests.js"
 import { withTempDir } from "../execution/helpers.js"
 
@@ -718,6 +719,100 @@ describe("declared verification policy", () => {
                 recommendedMergedVerifyTimeoutMs(baseline),
                 (MAX_FINAL_ADDED_VERIFY_COMMANDS * 5 + 1) * 60_000 +
                     MAX_FINAL_ADDED_VERIFY_COMMANDS * 8_000,
+            )
+        })
+    })
+
+    it("unwraps paired quotes around declared node --test paths", async () => {
+        await withTempDir("baro-verify-quoted-path-", async (dir) => {
+            const first = "test/acceptance/turn-review.test.ts"
+            const second = "test/verification/declared-verification.test.ts"
+            mkdirSync(join(dir, "test", "acceptance"), { recursive: true })
+            mkdirSync(join(dir, "test", "verification"), { recursive: true })
+            writeFileSync(join(dir, first), "")
+            writeFileSync(join(dir, second), "")
+            const [double, single, both] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: `node --test "${first}"` },
+                    { storyId: "S1", command: `node --test '${second}'` },
+                    {
+                        storyId: "S1",
+                        command: `node --test "${first}" "${second}"`,
+                    },
+                ],
+                ["npm"],
+            )
+
+            assert.equal(double?.incompleteReason, undefined)
+            assert.deepEqual(double?.args, ["--test", first])
+            assert.equal(single?.incompleteReason, undefined)
+            assert.deepEqual(single?.args, ["--test", second])
+            assert.equal(both?.incompleteReason, undefined)
+            assert.deepEqual(both?.args, ["--test", first, second])
+            assert.equal(both?.label, `node --test ${first} ${second}`)
+        })
+    })
+
+    it("keeps rejecting unpaired, mid-token and unsafe quoting", async () => {
+        await withTempDir("baro-verify-quoted-reject-", async (dir) => {
+            const rejected =
+                "declared test contains unsupported quoting, shell, or glob syntax"
+            const path = "test/acceptance/turn-review.test.ts"
+            const specs = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: `echo "a; rm -rf /"` },
+                    { storyId: "S1", command: `node --test foo"bar` },
+                    { storyId: "S1", command: `node --test "${path}` },
+                    { storyId: "S1", command: `node --test ${path}"` },
+                    { storyId: "S1", command: `node --test ""` },
+                    { storyId: "S1", command: `node --test "'${path}'"` },
+                ],
+                ["npm"],
+            )
+
+            for (const spec of specs) {
+                assert.equal(spec.incompleteReason, rejected)
+                assert.deepEqual(spec.args, [])
+            }
+        })
+    })
+
+    it("gives a quoted token no capability its bare form lacks", async () => {
+        await withTempDir("baro-verify-quoted-capability-", async (dir) => {
+            const path = "test/acceptance/turn-review.test.ts"
+            mkdirSync(join(dir, "test", "acceptance"), { recursive: true })
+            writeFileSync(join(dir, path), "")
+            const [spaced, quoted, bare] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: `node --test "a b.test.ts"` },
+                    {
+                        storyId: "S1",
+                        command: `node --import tsx --test "${path}"`,
+                    },
+                    {
+                        storyId: "S1",
+                        command: `node --import tsx --test ${path}`,
+                    },
+                ],
+                ["npm"],
+            )
+
+            // Whitespace splits before unwrapping, so a quoted space can never
+            // be smuggled through as a single argument.
+            assert.equal(
+                spaced?.incompleteReason,
+                "declared test contains unsupported quoting, shell, or glob syntax",
+            )
+            // Unwrapping only removes the quotes: the translator judges the
+            // quoted spelling exactly as it judges the bare one, and
+            // '--import' is no more runnable quoted than unquoted.
+            assert.equal(quoted?.incompleteReason, bare?.incompleteReason)
+            assert.match(
+                quoted?.incompleteReason ?? "",
+                /node declarations are limited to/,
             )
         })
     })
