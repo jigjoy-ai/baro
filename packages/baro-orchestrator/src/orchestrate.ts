@@ -1059,6 +1059,9 @@ export async function orchestrate(
             commandEvidence: (storyId) =>
                 commandEvidence.snapshotForEvaluation(storyId),
             publishedNotes: (storyId) => publishedNotes.notesFor(storyId),
+            // Same predicate the spawn gate and story shell use, so the judge
+            // is bound by the perimeter rule the worker was bound by.
+            hostRunsWholeTreeVerification: coordinationMode === "collective",
             // Read at evaluation time: a progressive run receives its
             // Architect document after this observer wiring completes.
             decisionDocument: () => {
