@@ -12,6 +12,7 @@ mod conversation_runner;
 mod dag_state;
 mod discovery;
 mod doctor;
+mod env_flag;
 mod events;
 mod executor;
 mod gateway_credential;
@@ -64,6 +65,7 @@ use conversation_host::{
     finish_conversation_run, persist_conversation, restore_conversation_from_prd,
     restore_pre_prd_conversation,
 };
+use env_flag::env_flag_enabled;
 use events::BaroEvent;
 use headless_transport::StdinHub;
 pub(crate) use planner_host::PrdOutput;
@@ -4043,7 +4045,7 @@ async fn begin_progressive_execution(
     // stdout wire lane, no host-issued planning_open — the bus session opens
     // and closes its own planning stream. Read the same way the TS side reads
     // it, or the two disagree and both plan.
-    if std::env::var("BARO_PLANNER_BUS").ok().as_deref() != Some("0") {
+    if env_flag_enabled("BARO_PLANNER_BUS") {
         let _ = spec;
         return Ok(());
     }
