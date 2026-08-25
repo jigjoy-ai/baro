@@ -38,6 +38,11 @@ export interface SupervisorOptions {
      * a non-converging loop; shell commands are work, not exploration, and do
      * not count. Default 80. */
     noProgressToolCalls?: number
+    /** Consecutive SHELL invocations with no file change before we call it a
+     * non-converging probe loop. Independent of noProgressToolCalls, because a
+     * command's runtime is legitimate work and needs far more headroom.
+     * Default 240. */
+    noProgressShellCalls?: number
     /** Same tool+args signature seen this many times → looping. Default 12. */
     repeatThreshold?: number
     /**
@@ -71,6 +76,7 @@ interface StoryProgress {
     lastVerificationAt: number
     fileChanges: number
     sinceLastChange: number
+    shellSinceLastChange: number
     sigCounts: Map<string, number>
     intervened: boolean
 }
@@ -90,6 +96,7 @@ export class Supervisor extends BaseObserver {
         const noProgressToolCalls = opts.noProgressToolCalls ?? 80
         this.opts = {
             noProgressToolCalls,
+            noProgressShellCalls: opts.noProgressShellCalls ?? 240,
             repeatThreshold: opts.repeatThreshold ?? 12,
             repeatsNeedNoProgress: opts.repeatsNeedNoProgress ?? Math.floor(noProgressToolCalls / 2),
             softCapMs: opts.softCapMs ?? 12 * 60_000,
@@ -189,6 +196,7 @@ export class Supervisor extends BaseObserver {
         if (isFileMutationTool(item.name)) {
             st.fileChanges += 1
             st.sinceLastChange = 0
+            st.shellSinceLastChange = 0
             st.lastProgressAt = this.opts.now()
             // Repeats before an actual file mutation are not evidence that
             // the post-progress sequence is looping.
@@ -202,6 +210,7 @@ export class Supervisor extends BaseObserver {
             // way the tool allows was aborted at "80 tool calls with no file
             // change". A genuine poll-forever loop is still bounded by the
             // per-turn round budget and turn cap.
+            st.shellSinceLastChange += 1
             st.lastVerificationAt = this.opts.now()
             if (item.callId) st.pendingShell.add(item.callId)
         } else {
@@ -260,6 +269,12 @@ export class Supervisor extends BaseObserver {
         if (st.sinceLastChange >= this.opts.noProgressToolCalls) {
             return `${st.sinceLastChange} tool calls with no file change — exploring, not converging`
         }
+        // Commands are work, but a story running them forever without touching
+        // a file is probing, not converging — with far more headroom than the
+        // read-only counter gets.
+        if (st.shellSinceLastChange >= this.opts.noProgressShellCalls) {
+            return `${st.shellSinceLastChange} shell commands with no file change — probing, not converging`
+        }
         // A repeated call is only a loop if the story is also making no
         // progress — legitimately re-editing the same file keeps sinceLastChange
         // low, so we don't abort work that's actually changing the codebase.
@@ -286,6 +301,7 @@ export class Supervisor extends BaseObserver {
                 lastVerificationAt: now,
                 fileChanges: 0,
                 sinceLastChange: 0,
+                shellSinceLastChange: 0,
                 sigCounts: new Map(),
                 pendingShell: new Set(),
                 intervened: false,
