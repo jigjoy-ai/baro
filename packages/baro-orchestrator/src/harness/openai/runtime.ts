@@ -26,6 +26,7 @@ import {
     type ModelContext,
     type Tool,
 } from "../../runtime/mozaik.js"
+import { envFlag } from "../../runtime/env-flag.js"
 
 import type {
     BillingInvocationContext,
@@ -470,8 +471,8 @@ function finishedAtCeiling(response: unknown): boolean {
  * provider that ignores `stream_options.include_usage`: without those counts
  * a streamed round reports no tokens, and the cost figures depend on them.
  */
-function nativeStreamingEnabled(): boolean {
-    return process.env.BARO_NATIVE_STREAM !== "0"
+export function nativeStreamingEnabled(): boolean {
+    return envFlag("BARO_NATIVE_STREAM")
 }
 
 /**

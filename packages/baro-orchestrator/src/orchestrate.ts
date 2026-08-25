@@ -127,6 +127,7 @@ import {
 } from "./semantic-events.js"
 import { criticCallTimeoutMs } from "./harness/one-shot/critic.js"
 import { ContinuousGateRunner } from "./verification/continuous-gate-runner.js"
+import { envFlag } from "./runtime/env-flag.js"
 import { MergeAwarenessRunner } from "./execution/merge-awareness-runner.js"
 import { OverlapAwarenessRunner } from "./execution/overlap-awareness-runner.js"
 import { AttemptRecallRunner } from "./execution/attempt-recall-runner.js"
@@ -183,6 +184,12 @@ export async function withCriticEvidenceBarrier<T>(
 ): Promise<T> {
     if (critic) await critic.idle()
     return mutateRepository()
+}
+
+/** Opt-out env flag for the continuous verification gate: unset/missing or
+ * any non-"0" value → enabled; only the literal "0" → disabled. */
+export function continuousGateEnabled(): boolean {
+    return envFlag("BARO_CONTINUOUS_GATE")
 }
 
 export interface OrchestrateConfig {
@@ -1279,7 +1286,7 @@ export async function orchestrate(
         // same commands twice more anyway. Silent when the project declares
         // no gates — never tell an agent it is green because we had nothing
         // to run. Opt out with BARO_CONTINUOUS_GATE=0.
-        if (process.env.BARO_CONTINUOUS_GATE !== "0") {
+        if (continuousGateEnabled()) {
             continuousGate = new ContinuousGateRunner({
                 runId,
                 plan: verifyPlan,
