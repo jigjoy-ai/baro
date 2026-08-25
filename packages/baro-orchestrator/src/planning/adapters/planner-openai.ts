@@ -122,7 +122,7 @@ function pickModel(name: string): GenerativeModel {
  */
 export function resolvePlannerModelName(mode: ExecutionMode, ceiling: string | undefined): string {
     if (mode === "focused") {
-        return process.env.BARO_PLANNER_FOCUSED_MODEL || ceiling || "deepseek-v4-pro"
+        return process.env.BARO_PLANNER_FOCUSED_MODEL || ceiling || "deepseek-v4-flash"
     }
     return ceiling ?? "gpt-5.5"
 }

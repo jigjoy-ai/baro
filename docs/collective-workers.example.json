@@ -13,15 +13,15 @@
     }
   },
   {
-    "workerId": "deepseek-pro-worker",
-    "routeId": "baro-cloud-deepseek-pro",
-    "route": "openai:deepseek-v4-pro",
+    "workerId": "deepseek-flash-heavy-worker",
+    "routeId": "baro-cloud-deepseek-flash-heavy",
+    "route": "openai:deepseek-v4-flash",
     "tiers": ["heavy"],
     "maxConcurrent": 2,
     "estimate": {
-      "expectedCostUsd": 0.10,
-      "estimatedSuccessProbability": 0.84,
-      "estimatedLatencyMs": 55000,
+      "expectedCostUsd": 0.03,
+      "estimatedSuccessProbability": 0.68,
+      "estimatedLatencyMs": 45000,
       "estimateSource": "configured"
     }
   }
