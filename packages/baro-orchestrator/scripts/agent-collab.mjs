@@ -296,6 +296,7 @@ if (command === "emit") {
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind discover --story-json JSON [--reason TEXT] [--event-id ID]",
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind replan --base-version N --replan-json JSON [--reason TEXT] [--wait-ms N]",
         "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind block --requires-json JSON [--reason TEXT] [--wait-ms N]",
+        "  agent-collab.mjs emit --endpoint URL --token TOKEN --kind dispute --claim TEXT --command TEXT --output TEXT [--obligation O-011]",
         "  agent-collab.mjs decision --endpoint URL --token TOKEN --proposal ID [--wait-ms N]",
         "  agent-collab.mjs inbox --endpoint URL --token TOKEN",
         "  On outcome_unknown, retry with the returned --event-id or --challenge-id; never mint a replacement id.",
