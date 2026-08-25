@@ -230,6 +230,53 @@ describe("Critic repository evidence", () => {
         assert.match(withoutNotes, /\(this story published no notes\)/)
     })
 
+    it("bounds the judge to the story's perimeter when the host proves the tree", async () => {
+        // A live run charged one story with an obligation whose only possible
+        // evidence was a suite run over the fully-merged tree: the shell
+        // refuses repository-wide suites, its worktree held no sibling
+        // story's commits, and every other criterion of that story passed.
+        // The worker, the planner and the shell all knew the perimeter rule;
+        // only the judge did not, so the story could never finish green.
+        const source: CriticEvidenceSource = {
+            resolveRepositoryTarget: () => null,
+            hostRunsWholeTreeVerification: true,
+        }
+        const scoped = (
+            await prepareCriticEvaluation(
+                ["the modified packages' suites are green after integration"],
+                "ran my declared tests",
+                "S1",
+                source,
+            )
+        ).prompts.join("\n")
+        assert.match(scoped, /## Verification scope/)
+        assert.match(
+            scoped,
+            /never fail a criterion because this story did not run the repository's full suites/i,
+        )
+        assert.match(scoped, /no story is able or permitted to produce it/)
+        // The narrowing is one-directional: the story still owes its own tests.
+        assert.match(scoped, /Perimeter evidence stays mandatory/)
+        assert.ok(
+            scoped.indexOf("## Verification scope") <
+                scoped.indexOf("## Acceptance criteria"),
+            "the scope rule precedes the criteria it bounds",
+        )
+
+        // Without a run-level gate the section disappears and the unnarrowed
+        // contract stands: a legacy run has nobody else to prove the tree.
+        const unscoped = (
+            await prepareCriticEvaluation(
+                ["the modified packages' suites are green after integration"],
+                "ran my declared tests",
+                "S1",
+                { resolveRepositoryTarget: () => null },
+            )
+        ).prompts.join("\n")
+        assert.doesNotMatch(unscoped, /Verification scope/)
+        assert.doesNotMatch(buildEvalPrompt(["criterion"], "output"), /Verification scope/)
+    })
+
     it("collects a story's notes from the bus, keeping the latest", async () => {
         const collector = new PublishedNoteCollector(2)
         const env = joinWithCapture(collector)
