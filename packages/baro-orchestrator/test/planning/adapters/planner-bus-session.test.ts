@@ -215,22 +215,14 @@ if (proseFinalization) {
 }
 
 if (fumbleFinalization) {
-    // Restate the published story with a drifted title — the exact class of
-    // mistake that killed run 13's whole plan tail.
+    // Restate the published story with a drifted title — the class of
+    // mistake that killed run 13's whole plan tail. Under tail-only
+    // reconciliation the host's admitted copy wins and the restatement is
+    // discarded, so this now completes without any correction round.
     const broken = JSON.parse(finalPrd);
     broken.userStories[0].title = "Open the progressive contract (reworded)";
     emitResult(JSON.stringify(broken));
-    const correction = JSON.parse(await nextLine());
-    if (
-        correction.type !== "user" ||
-        !/rejected/.test(correction.message?.content ?? "") ||
-        !/differing fields: title/.test(correction.message?.content ?? "")
-    ) {
-        throw new Error(
-            "fixture expected a correction naming the differing field, got: " +
-                JSON.stringify(correction),
-        );
-    }
+    process.exit(0);
 }
 // Tail-only finalization: the host composes the plan; nothing to append.
 emitResult(tailFinalPrd);
@@ -374,7 +366,7 @@ describe("planner bus session", () => {
         })
     })
 
-    it("answers a rejected final PRD with a correction instead of failing the stream", async () => {
+    it("discards a drifted restatement and completes from the host's admitted copies", async () => {
         await withTempDir("baro-planner-bus-retry-", async (dir) => {
             const env = new AgenticEnvironment("planner-bus-retry")
             const feed = new StubFeed()
@@ -406,6 +398,15 @@ describe("planner bus session", () => {
             assert.deepEqual(feed.failures, [])
             assert.equal(result.status, "completed")
             assert.equal(feed.completions.length, 1)
+            const finalPrd = feed.completions[0]!.final_prd as {
+                userStories: Array<{ id: string; title: string }>
+            }
+            // The drifted restatement was discarded: the admitted title wins.
+            assert.equal(finalPrd.userStories[0]!.id, "S1")
+            assert.equal(
+                finalPrd.userStories[0]!.title,
+                "Open the progressive contract",
+            )
         })
     })
 

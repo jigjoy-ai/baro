@@ -94,6 +94,9 @@ export interface ProgressivePlanStoryReconciliationV1 {
     finalStories: PrdStory[]
     /** Nonempty or empty suffix that the final Planner response added. */
     tail: PrdStory[]
+    /** Tail-only mode: admitted ids the candidate restated; the host's
+     * verbatim copies won and these were discarded, not judged. */
+    droppedRestatements?: readonly string[]
 }
 
 export interface ProgressivePlanReconciliationV1 {
@@ -380,22 +383,24 @@ export function reconcileProgressivePlanStories(
     )
 
     const admittedIds = new Set(admitted.map((story) => story.id))
-    const looksLikeRepeat =
-        finalStories.length >= admitted.length &&
-        admitted.every((story, index) => finalStories[index]!.id === story.id)
 
     let composed: PrdStory[]
-    if (options.tailOnly && !looksLikeRepeat) {
-        const reused = finalStories.find((story) => admittedIds.has(story.id))
-        if (reused) {
-            throw contractError(
-                "final_prd_mismatch",
-                `final PRD story '${reused.id}' reuses a published id without restating ` +
-                    `the exact published prefix; in tail-only finalization output only ` +
-                    `the appended stories`,
-            )
-        }
-        composed = [...admitted, ...finalStories]
+    let droppedRestatements: readonly string[] = []
+    if (options.tailOnly) {
+        // The host already holds every admitted story verbatim; a restated
+        // copy — drifted or not — is discarded rather than judged. Judging it
+        // cost a run its plan: a planner that tried to attach obligations by
+        // restating the prefix burned every repair attempt on "does not
+        // exactly match", and its real blocker (unowned obligations) was
+        // never named. Discarding lets the rejection the model receives name
+        // the true failure.
+        droppedRestatements = finalStories
+            .filter((story) => admittedIds.has(story.id))
+            .map((story) => story.id)
+        const tailStories = finalStories.filter(
+            (story) => !admittedIds.has(story.id),
+        )
+        composed = [...admitted, ...tailStories]
     } else {
         if (finalStories.length < admitted.length) {
             throw contractError(
@@ -438,6 +443,7 @@ export function reconcileProgressivePlanStories(
     return {
         finalStories: composed,
         tail: composed.slice(admitted.length).map(snapshotStory),
+        ...(droppedRestatements.length > 0 ? { droppedRestatements } : {}),
     }
 }
 

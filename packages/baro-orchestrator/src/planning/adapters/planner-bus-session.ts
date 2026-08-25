@@ -513,8 +513,18 @@ export async function runPlannerBusSession(
                 )
             }
             let composedFinalPrd: Record<string, unknown>
+            let candidate: string | null = null
             try {
-                const candidate = extractJsonObject(resultText.trim())
+                candidate = extractJsonObject(resultText.trim())
+            } catch {
+                candidate = null
+            }
+            try {
+                if (candidate === null) {
+                    throw new Error(
+                        `no valid JSON object in response: ${resultText.trim().slice(0, 200)}`,
+                    )
+                }
                 progressive.assertInitialized()
                 composedFinalPrd = progressive.reconcileFinalCandidate(candidate)
             } catch (error) {
@@ -549,8 +559,11 @@ export async function runPlannerBusSession(
                 // "nothing remains" in the terminal shape. Compose that shape
                 // here; reconciliation and obligation coverage still judge
                 // it, so a prefix that does not cover the goal contract
-                // fails exactly as before.
-                if (!progressive.hasEarlyPlan()) {
+                // fails exactly as before. Composition covers ONLY the
+                // shapeless-prose case: a candidate that PARSED and was
+                // rejected carries planner intent this host must not
+                // silently overrule.
+                if (candidate !== null || !progressive.hasEarlyPlan()) {
                     return fail("planner_failed", reason)
                 }
                 try {

@@ -279,6 +279,21 @@ export function createPlannerProgressivePublisher(
                 stories: fragment.stories.map(snapshotPlannerStory),
             }
             const hostFeedback = await config.publish(event)
+            // Published stories are immutable, so an obligation that is not
+            // attached here can never be attached — say so on the receipt,
+            // in the round where it is still fixable, instead of at close.
+            const fragmentOwnsObligations = fragment.stories.some((story) =>
+                story.acceptance.some((criterion) => /\[O-\d+\]/u.test(criterion)),
+            )
+            const obligationNote =
+                (obligationContract?.obligations.length ?? 0) > 0 &&
+                !fragmentOwnsObligations
+                    ? "WARNING: no story in this fragment owns an architecture " +
+                      "obligation ([O-###] acceptance criterion). Published " +
+                      "stories are immutable — an obligation not attached at " +
+                      "publish time can never be attached, and planning closes " +
+                      "incomplete."
+                    : undefined
             return {
                 ok: true,
                 disposition: admission.disposition,
@@ -287,6 +302,7 @@ export function createPlannerProgressivePublisher(
                 fingerprint: admission.fingerprint,
                 storyIds: admission.admittedStoryIds,
                 nextOrdinal: admission.nextOrdinal,
+                ...(obligationNote ? { obligationNote } : {}),
                 ...(hostFeedback ?? {}),
             }
         },

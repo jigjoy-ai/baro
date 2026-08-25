@@ -295,7 +295,7 @@ describe("progressive plan v1", () => {
         assert.deepEqual(emptyTail.tail, [])
     })
 
-    it("tail-only: still accepts a faithful full repeat, rejects a partial id reuse", () => {
+    it("tail-only: a restated admitted id is discarded, drifted or not", () => {
         const admitted = [story("S1"), story("S2", ["S1"])]
         const repeat = reconcileProgressivePlanStories(
             admitted,
@@ -303,16 +303,28 @@ describe("progressive plan v1", () => {
             { tailOnly: true },
         )
         assert.deepEqual(repeat.tail.map((s) => s.id), ["S3"])
+        assert.deepEqual(repeat.droppedRestatements, ["S1", "S2"])
 
-        expectCode(
-            () =>
-                reconcileProgressivePlanStories(
-                    admitted,
-                    finalPrd([story("S2", ["S1"]), story("S3", ["S2"])]),
-                    { tailOnly: true },
-                ),
-            "final_prd_mismatch",
+        // A drifted restatement carries no authority: the host's admitted
+        // bytes win, the true tail still lands, and the drop is recorded so
+        // the rejection a planner receives can name its real blocker.
+        const drifted = reconcileProgressivePlanStories(
+            admitted,
+            finalPrd([
+                story("S2", ["S1"], { description: "reworded to smuggle [O-001]" }),
+                story("S3", ["S2"]),
+            ]),
+            { tailOnly: true },
         )
+        assert.deepEqual(
+            drifted.finalStories.map((s) => s.id),
+            ["S1", "S2", "S3"],
+        )
+        assert.equal(
+            drifted.finalStories[1]!.description,
+            story("S2", ["S1"]).description,
+        )
+        assert.deepEqual(drifted.droppedRestatements, ["S2"])
     })
 
     it("allows a nonempty final tail but rejects missing, reordered, or changed prefix", () => {
