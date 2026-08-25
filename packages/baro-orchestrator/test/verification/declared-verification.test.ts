@@ -784,21 +784,30 @@ describe("declared verification policy", () => {
             const path = "test/acceptance/turn-review.test.ts"
             mkdirSync(join(dir, "test", "acceptance"), { recursive: true })
             writeFileSync(join(dir, path), "")
-            const [spaced, quoted, bare] = translateDeclaredTests(
-                dir,
-                [
-                    { storyId: "S1", command: `node --test "a b.test.ts"` },
-                    {
-                        storyId: "S1",
-                        command: `node --import tsx --test "${path}"`,
-                    },
-                    {
-                        storyId: "S1",
-                        command: `node --import tsx --test ${path}`,
-                    },
-                ],
-                ["npm"],
-            )
+            const [spaced, quoted, bare, rejectedQuoted, rejectedBare] =
+                translateDeclaredTests(
+                    dir,
+                    [
+                        { storyId: "S1", command: `node --test "a b.test.ts"` },
+                        {
+                            storyId: "S1",
+                            command: `node --import tsx --test "${path}"`,
+                        },
+                        {
+                            storyId: "S1",
+                            command: `node --import tsx --test ${path}`,
+                        },
+                        {
+                            storyId: "S1",
+                            command: `node --import "other" --test "${path}"`,
+                        },
+                        {
+                            storyId: "S1",
+                            command: `node --import other --test ${path}`,
+                        },
+                    ],
+                    ["npm"],
+                )
 
             // Whitespace splits before unwrapping, so a quoted space can never
             // be smuggled through as a single argument.
@@ -807,13 +816,190 @@ describe("declared verification policy", () => {
                 "declared test contains unsupported quoting, shell, or glob syntax",
             )
             // Unwrapping only removes the quotes: the translator judges the
-            // quoted spelling exactly as it judges the bare one, and
-            // '--import' is no more runnable quoted than unquoted.
+            // quoted spelling exactly as it judges the bare one — both for the
+            // accepted '--import tsx' prefix and for a rejected loader value.
             assert.equal(quoted?.incompleteReason, bare?.incompleteReason)
+            assert.deepEqual(quoted?.args, bare?.args)
+            assert.equal(quoted?.label, bare?.label)
+            assert.equal(
+                rejectedQuoted?.incompleteReason,
+                rejectedBare?.incompleteReason,
+            )
             assert.match(
-                quoted?.incompleteReason ?? "",
+                rejectedQuoted?.incompleteReason ?? "",
                 /node declarations are limited to/,
             )
+        })
+    })
+
+    it("translates a literal '--import tsx' loader prefix", async () => {
+        await withTempDir("baro-verify-tsx-loader-", async (dir) => {
+            const first = "test/acceptance/turn-review.test.ts"
+            const second = "test/verification/declared-verification.test.ts"
+            writeFileSync(join(dir, "package.json"), "{}")
+            mkdirSync(join(dir, "test", "acceptance"), { recursive: true })
+            mkdirSync(join(dir, "test", "verification"), { recursive: true })
+            writeFileSync(join(dir, first), "")
+            writeFileSync(join(dir, second), "")
+            const [single, both, check] = translateDeclaredTests(
+                dir,
+                [
+                    {
+                        storyId: "S1",
+                        command: `node --import tsx --test ${first}`,
+                    },
+                    {
+                        storyId: "S1",
+                        command: `node --import tsx --test ${first} ${second}`,
+                    },
+                    {
+                        storyId: "S1",
+                        command: `node --import tsx --check ${first}`,
+                    },
+                ],
+                ["npm"],
+            )
+
+            assert.equal(single?.incompleteReason, undefined)
+            assert.equal(single?.tool, "node")
+            assert.deepEqual(single?.args, ["--import", "tsx", "--test", first])
+            assert.equal(single?.label, `node --import tsx --test ${first}`)
+            // The loader tokens are argv only; they must never be revalidated
+            // as repository paths before the spawn.
+            assert.deepEqual(single?.containedPaths, [
+                { path: first, requireFile: false },
+            ])
+
+            assert.equal(both?.incompleteReason, undefined)
+            assert.deepEqual(both?.args, [
+                "--import",
+                "tsx",
+                "--test",
+                first,
+                second,
+            ])
+            assert.equal(
+                both?.label,
+                `node --import tsx --test ${first} ${second}`,
+            )
+            assert.deepEqual(both?.containedPaths, [
+                { path: first, requireFile: false },
+                { path: second, requireFile: false },
+            ])
+
+            assert.equal(check?.incompleteReason, undefined)
+            assert.deepEqual(check?.args, ["--import", "tsx", "--check", first])
+            assert.equal(check?.label, `node --import tsx --check ${first}`)
+            assert.deepEqual(check?.containedPaths, [
+                { path: first, requireFile: true },
+            ])
+        })
+    })
+
+    it("rejects every loader form that is not exactly '--import tsx'", async () => {
+        await withTempDir("baro-verify-tsx-loader-reject-", async (dir) => {
+            const path = "test/acceptance/turn-review.test.ts"
+            writeFileSync(join(dir, "package.json"), "{}")
+            mkdirSync(join(dir, "test", "acceptance"), { recursive: true })
+            writeFileSync(join(dir, path), "")
+            const modeGate =
+                "node declarations are limited to '--check <file>' or " +
+                "'--test <contained paths>' (bare 'node <file>' only in " +
+                "repositories without package.json)"
+            const specs = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: "node --import other --test x" },
+                    {
+                        storyId: "S1",
+                        command: "node --import ./evil.mjs --test x",
+                    },
+                    { storyId: "S1", command: "node --import=tsx --test x" },
+                    { storyId: "S1", command: "node --loader tsx --test x" },
+                    { storyId: "S1", command: "node --require tsx --test x" },
+                    {
+                        storyId: "S1",
+                        command: `node --import tsx --import tsx --test ${path}`,
+                    },
+                ],
+                ["npm"],
+            )
+
+            for (const spec of specs) {
+                assert.equal(spec.incompleteReason, modeGate)
+                assert.deepEqual(spec.args, [])
+            }
+        })
+    })
+
+    it("leaves loaderless node declarations byte-identical", async () => {
+        await withTempDir("baro-verify-no-loader-", async (dir) => {
+            const path = "test/acceptance/turn-review.test.ts"
+            writeFileSync(join(dir, "package.json"), "{}")
+            mkdirSync(join(dir, "test", "acceptance"), { recursive: true })
+            writeFileSync(join(dir, path), "")
+            const [test, check, absolute, traversal, flag] =
+                translateDeclaredTests(
+                    dir,
+                    [
+                        { storyId: "S1", command: `node --test ${path}` },
+                        { storyId: "S1", command: `node --check ${path}` },
+                        { storyId: "S1", command: "node --test /etc/passwd" },
+                        {
+                            storyId: "S1",
+                            command: "node --test ../outside.test.ts",
+                        },
+                        { storyId: "S1", command: "node --test --reporter" },
+                    ],
+                    ["npm"],
+                )
+
+            assert.equal(test?.incompleteReason, undefined)
+            assert.deepEqual(test?.args, ["--test", path])
+            assert.equal(test?.label, `node --test ${path}`)
+            assert.equal(check?.incompleteReason, undefined)
+            assert.deepEqual(check?.args, ["--check", path])
+            assert.equal(check?.label, `node --check ${path}`)
+            assert.match(
+                absolute?.incompleteReason ?? "",
+                /unsafe or escaping path '\/etc\/passwd'/,
+            )
+            assert.match(
+                traversal?.incompleteReason ?? "",
+                /unsafe or escaping path '\.\.\/outside\.test\.ts'/,
+            )
+            assert.match(
+                flag?.incompleteReason ?? "",
+                /unsafe or escaping path '--reporter'/,
+            )
+        })
+    })
+
+    it("keeps the greenfield bare-file allowance under the loader prefix", async () => {
+        await withTempDir("baro-verify-greenfield-loader-", async (dir) => {
+            writeFileSync(join(dir, "test.js"), "process.exit(0)")
+            const [bare, loader] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: "node test.js" },
+                    { storyId: "S1", command: "node --import tsx test.js" },
+                ],
+                ["npm"],
+            )
+
+            assert.equal(bare?.incompleteReason, undefined)
+            assert.deepEqual(bare?.args, ["test.js"])
+            assert.equal(bare?.label, "node test.js")
+            assert.deepEqual(bare?.containedPaths, [
+                { path: "test.js", requireFile: true },
+            ])
+
+            assert.equal(loader?.incompleteReason, undefined)
+            assert.deepEqual(loader?.args, ["--import", "tsx", "test.js"])
+            assert.equal(loader?.label, "node --import tsx test.js")
+            assert.deepEqual(loader?.containedPaths, [
+                { path: "test.js", requireFile: true },
+            ])
         })
     })
 })
