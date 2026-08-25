@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
-import { emit } from "../src/tui-protocol.js"
+import { emit, toVerificationEvidenceInfo } from "../src/tui-protocol.js"
 
 function captureEmit(event: Parameters<typeof emit>[0]): Record<string, unknown> {
     const written: string[] = []
@@ -41,5 +41,61 @@ describe("headless event stream", () => {
         assert.equal(line.type, "story_log")
         assert.equal(line.id, "S1")
         assert.equal(line.line, "verified")
+    })
+
+    it("carries retry evidence into the emitted verification summary", () => {
+        const info = toVerificationEvidenceInfo({
+            verificationId: "V1",
+            status: "passed",
+            durationMs: 34,
+            commands: [
+                {
+                    command: "npm test",
+                    status: "passed",
+                    durationMs: 12,
+                    tail: "ok",
+                    retriedAfterFailure: true,
+                    firstFailureTail: "first attempt failed",
+                },
+            ],
+        })
+
+        assert.deepEqual(info, {
+            verification_id: "V1",
+            status: "passed",
+            duration_ms: 34,
+            commands: [
+                {
+                    command: "npm test",
+                    status: "passed",
+                    duration_ms: 12,
+                    tail: "ok",
+                    retried_after_failure: true,
+                    first_failure_tail: "first attempt failed",
+                },
+            ],
+        })
+    })
+
+    it("serializes a command without retry evidence exactly as before", () => {
+        const info = toVerificationEvidenceInfo({
+            verificationId: "V1",
+            status: "passed",
+            durationMs: 34,
+            commands: [{ command: "npm test", status: "passed", durationMs: 12 }],
+        })
+
+        assert.deepEqual(info.commands[0], {
+            command: "npm test",
+            status: "passed",
+            duration_ms: 12,
+        })
+        // deepEqual alone would accept a present-but-undefined key, which
+        // crosses the language boundary as an explicit null.
+        assert.deepEqual(Object.keys(info.commands[0] ?? {}), [
+            "command",
+            "status",
+            "duration_ms",
+        ])
     })
 })
