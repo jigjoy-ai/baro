@@ -1042,6 +1042,9 @@ export class StoryFactory extends BaseObserver {
                 ? { requireProcessQuiescenceCertification: true }
                 : {}),
             ...(this.opts.coordinationMode === "collective"
+                ? { scopedVerification: true }
+                : {}),
+            ...(this.opts.coordinationMode === "collective"
                 ? {
                       // Missing wiring fails closed: no external participant
                       // can have this exact factory identity. Production

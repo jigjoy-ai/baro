@@ -49,6 +49,61 @@ const MAX_BASH_OUTPUT_BYTES = 8_000
 // had already paid for.
 const DEFAULT_BASH_TIMEOUT_MS = STORY_SHELL_BUDGET_MS
 
+/**
+ * Repository-wide suite invocations, refused when the run-level gate owns
+ * whole-tree verification. Conservative by design: it catches the measured
+ * shapes — a bare package suite, a repo-wide test glob, an unfiltered
+ * cargo test — and a targeted command always passes.
+ */
+export function repoWideSuiteRejection(command: string): string | null {
+    const remedy =
+        "the run-level gate proves the whole tree once after integration. " +
+        "Run only your story's perimeter: a declared test command, a specific " +
+        "file (e.g. `npm test -- test/<area>/<file>.test.ts`), or a named " +
+        "filter (e.g. `cargo test <name>`)."
+    const npmSuite = /\bnpm\s+(?:run\s+)?test(?::[\w-]+)?(?!\S)/u
+    if (npmSuite.test(command) && !/\s--\s+\S/u.test(command)) {
+        return `Error: repository-wide suite refused — ${remedy}`
+    }
+    if (/--test\b/u.test(command) && /(?:["']|\s)test\/\*\*/u.test(command)) {
+        return `Error: repository-wide suite refused — ${remedy}`
+    }
+    const cargo = command.match(/\bcargo\s+test\b([^|;&]*)/u)
+    if (cargo) {
+        const valueFlags = new Set([
+            "--package",
+            "-p",
+            "--manifest-path",
+            "--features",
+            "-j",
+            "--jobs",
+        ])
+        const targetedFlags = new Set(["--test", "--bin", "--example"])
+        const tokens = cargo[1]!.trim().split(/\s+/u).filter(Boolean)
+        let hasFilter = false
+        for (let i = 0; i < tokens.length; i++) {
+            const token = tokens[i]!
+            if (token === "--") break
+            if (/[<>]/u.test(token)) continue
+            if (targetedFlags.has(token)) {
+                hasFilter = true
+                i += 1
+                continue
+            }
+            if (valueFlags.has(token)) {
+                i += 1
+                continue
+            }
+            if (token.startsWith("-")) continue
+            hasFilter = true
+        }
+        if (!hasFilter) {
+            return `Error: repository-wide suite refused — ${remedy}`
+        }
+    }
+    return null
+}
+
 /** The applied per-command budget: env override, else the shared default. */
 export function bashCommandTimeoutMs(): number {
     const configured = Number(process.env.BARO_BASH_TIMEOUT_MS)
@@ -85,6 +140,10 @@ export interface CodebaseToolOptions {
     surface?: StoryWriteSurface
     /** Set false for inspection-only roles that must never receive a shell. */
     includeBash?: boolean
+    /** True when a run-level gate proves the whole tree after integration:
+     * repository-wide suite commands are refused at the shell, because the
+     * announced rule alone was measured being ignored for a full hour. */
+    scopedVerification?: boolean
     /**
      * Exact manager-owned transport used by collective StoryAgents. The shell
      * guard recognizes only the helper executable. The loopback endpoint and
@@ -871,6 +930,10 @@ async function runBash(
         )
     }
 
+    if (options.scopedVerification === true) {
+        const rejection = repoWideSuiteRejection(command)
+        if (rejection) return Promise.resolve(rejection)
+    }
     const sandbox = prepareShellSandbox(cwd, command, access)
     const timeout = bashCommandTimeoutMs()
     try {

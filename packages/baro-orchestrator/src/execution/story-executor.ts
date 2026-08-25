@@ -33,6 +33,9 @@ export interface StoryExecOpts {
     runtimeReplanDecisionAuthority?: Participant
     /** Bound for a native story tool to receive its correlated decision. */
     runtimeReplanDecisionTimeoutMs?: number
+    /** A run-level gate proves the whole tree; the native shell refuses
+     * repository-wide suite commands so a story keeps to its perimeter. */
+    scopedVerification?: boolean
     /** Exact Critic participant whose terminal-turn verdict may resume a
      * continuation-capable worker. */
     turnReviewAuthority?: Participant
@@ -239,6 +242,7 @@ export class LocalStoryExecutor implements StoryExecutor {
                           model: route.model ?? opts.openaiModel,
                           baseUrl: route.baseUrl,
                           apiKey: route.apiKey,
+                          scopedVerification: opts.scopedVerification,
                           runtimeReplanDecisionAuthority:
                               opts.runtimeReplanDecisionAuthority,
                           runtimeReplanDecisionTimeoutMs:

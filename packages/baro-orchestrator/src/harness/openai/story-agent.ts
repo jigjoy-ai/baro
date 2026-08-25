@@ -162,6 +162,8 @@ export interface OpenAIStoryAgentOptions {
     collaboration?: StoryCollaborationAccess
     /** Trusted Gateway billing interceptor. Omitted for direct/unmetered endpoints. */
     billingCoordinator?: GatewayBillingCoordinator
+    /** Run-level gate owns whole-tree proof; the shell refuses repo-wide suites. */
+    scopedVerification?: boolean
 }
 
 interface ResolvedOpenAIStoryAgentOptions {
@@ -323,6 +325,9 @@ export class OpenAIStoryAgent extends BaseObserver {
             ...createStoryTools(spec.cwd, {
                 collaboration: opts.collaboration,
                 ...(this.liveSurface ? { surface: this.liveSurface } : {}),
+                ...(opts.scopedVerification === true
+                    ? { scopedVerification: true }
+                    : {}),
             }),
             ...(this.runtimeReplanEnabled()
                 ? [createRuntimeReplanTool(this.runtimeGraphVersion!)]

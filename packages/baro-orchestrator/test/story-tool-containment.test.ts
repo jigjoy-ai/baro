@@ -18,6 +18,7 @@ import assert from "node:assert/strict"
 import { type Tool } from "../src/runtime/mozaik.js"
 
 import { createStoryTools } from "../src/planning/adapters/story-tools.js"
+import { repoWideSuiteRejection } from "../src/planning/adapters/codebase-tools.js"
 
 function namedTool(tools: Tool[], name: string): Tool {
     const tool = tools.find((candidate) => candidate.name === name)
@@ -153,6 +154,38 @@ async function withManagerDependencyLink(
 }
 
 describe("Story tool project containment", () => {
+    it("refuses repository-wide suites under scoped verification, passes targeted forms", () => {
+        const refused = [
+            "cd packages/baro-orchestrator && npm test 2>&1 | tail -15",
+            "npm run test:fast 2>&1 | grep -E '^ℹ' | tail -30",
+            'cd packages/baro-orchestrator && node --import tsx --test --test-concurrency=2 "test/**/*.test.ts" 2>&1 | tail -60',
+            "cargo test 2>&1 | tail -5",
+            "cargo test --package baro-tui 2>&1 | tail -8",
+        ]
+        for (const command of refused) {
+            assert.match(
+                repoWideSuiteRejection(command) ?? "",
+                /repository-wide suite refused/,
+                `must refuse: ${command}`,
+            )
+        }
+        const allowed = [
+            "npm test -- test/runtime/env-flag.test.ts",
+            'node --import tsx --test "test/goal/**/*.test.ts" 2>&1 | tail -20',
+            "cargo test env_flag 2>&1 | tail -5",
+            "cargo test --package baro-tui planner_bus_flag_defaults 2>&1 | tail -8",
+            "npm run build 2>&1 | tail -20",
+            "git add -A && git commit -m 'done'",
+        ]
+        for (const command of allowed) {
+            assert.equal(
+                repoWideSuiteRejection(command),
+                null,
+                `must allow: ${command}`,
+            )
+        }
+    })
+
     it("announces the shell budget and the background-reaping boundary", async () => {
         await withProjectAndSibling(async (project) => {
             const bash = namedTool(createStoryTools(project), "bash")

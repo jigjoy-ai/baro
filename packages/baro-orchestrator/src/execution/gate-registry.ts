@@ -153,7 +153,9 @@ const RUN_VERIFICATION: GateDisclosure = {
             "- Do NOT run the repository's full test suites. The host proves the",
             "  fully-merged tree once, after integration — a full-suite pass from",
             "  your worktree costs its entire runtime under load and adds no",
-            "  proof the run gate does not already own.",
+            "  proof the run gate does not already own. The shell REFUSES",
+            "  repository-wide suite commands (bare `npm test`, unfiltered",
+            "  `cargo test`, repo-wide test globs) in this mode.",
             "- A whole-tree regression is the integration gate's verdict to give,",
             "  not yours to pre-empt mid-story.",
         ].join("\n")
