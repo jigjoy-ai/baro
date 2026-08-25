@@ -1,6 +1,11 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
+import {
+    DIALOGUE_RETRY_ATTEMPTS_ENV,
+    DIALOGUE_RETRY_MAX_WAIT_MS_ENV,
+    resolveDialogueRetryPolicy,
+} from "../../src/harness/dialogue-retry-policy.js"
 import { withTransientRetry } from "../../src/harness/transient-retry.js"
 
 /** The shape the OpenAI SDK throws when a socket dies mid-request. */
@@ -114,5 +119,133 @@ describe("withTransientRetry", () => {
             /Connection error/u,
         )
         assert.equal(calls, 1)
+    })
+})
+
+/** A provider cooldown, optionally carrying the provider's own retry-after. */
+function capacityError(retryAfterMs?: number): Error {
+    return Object.assign(new Error("rate limited"), {
+        status: 429,
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    })
+}
+
+describe("the dialogue retry policy", () => {
+    it("retries a capacity failure to the policy attempt count with growing waits", async () => {
+        const waits: number[] = []
+        let runCalls = 0
+        await assert.rejects(
+            withTransientRetry(
+                async () => {
+                    runCalls += 1
+                    throw capacityError()
+                },
+                {
+                    ...resolveDialogueRetryPolicy({}),
+                    sleep: async (ms) => {
+                        waits.push(ms)
+                    },
+                },
+            ),
+            /rate limited/u,
+        )
+        assert.equal(runCalls, 4)
+        assert.deepEqual(waits, [15_000, 45_000, 120_000])
+    })
+
+    it("keeps a provider-supplied retry-after as the base, still under the cap", async () => {
+        const waits: number[] = []
+        await assert.rejects(
+            withTransientRetry(
+                async () => {
+                    throw capacityError(30_000)
+                },
+                {
+                    ...resolveDialogueRetryPolicy({}),
+                    sleep: async (ms) => {
+                        waits.push(ms)
+                    },
+                },
+            ),
+            /rate limited/u,
+        )
+        // 270_000 on the third wait, capped at the policy ceiling.
+        assert.deepEqual(waits, [30_000, 90_000, 120_000])
+    })
+
+    it("still fails closed on a deterministic failure at attempt 1", async () => {
+        const waits: number[] = []
+        let runCalls = 0
+        await assert.rejects(
+            withTransientRetry(
+                async () => {
+                    runCalls += 1
+                    throw new Error("conversation contract is invalid")
+                },
+                {
+                    ...resolveDialogueRetryPolicy({}),
+                    sleep: async (ms) => {
+                        waits.push(ms)
+                    },
+                },
+            ),
+            /contract is invalid/u,
+        )
+        assert.equal(runCalls, 1)
+        assert.equal(waits.length, 0)
+    })
+
+    it("honors the attempt-count and wait-ceiling environment overrides", async () => {
+        const policy = resolveDialogueRetryPolicy({
+            [DIALOGUE_RETRY_ATTEMPTS_ENV]: "2",
+            [DIALOGUE_RETRY_MAX_WAIT_MS_ENV]: "20000",
+        })
+        assert.deepEqual(policy, {
+            maxAttempts: 2,
+            maxWaitMs: 20_000,
+            fallbackWaitMs: 15_000,
+        })
+        const waits: number[] = []
+        let runCalls = 0
+        await assert.rejects(
+            withTransientRetry(
+                async () => {
+                    runCalls += 1
+                    throw capacityError()
+                },
+                {
+                    ...policy,
+                    sleep: async (ms) => {
+                        waits.push(ms)
+                    },
+                },
+            ),
+            /rate limited/u,
+        )
+        assert.equal(runCalls, 2)
+        assert.deepEqual(waits, [15_000])
+    })
+
+    it("falls back or clamps rather than trusting a hostile environment value", async () => {
+        assert.deepEqual(resolveDialogueRetryPolicy({}), {
+            maxAttempts: 4,
+            maxWaitMs: 120_000,
+            fallbackWaitMs: 15_000,
+        })
+        const attempts = (raw: string): number =>
+            resolveDialogueRetryPolicy({ [DIALOGUE_RETRY_ATTEMPTS_ENV]: raw }).maxAttempts
+        assert.equal(attempts("abc"), 4)
+        assert.equal(attempts(""), 4)
+        assert.equal(attempts("2.5"), 4)
+        assert.equal(attempts("-1"), 4)
+        // Never zero attempts: that would silence the dialogue entirely.
+        assert.equal(attempts("0"), 1)
+        assert.equal(attempts("999"), 8)
+        const ceiling = (raw: string): number =>
+            resolveDialogueRetryPolicy({ [DIALOGUE_RETRY_MAX_WAIT_MS_ENV]: raw }).maxWaitMs
+        assert.equal(ceiling("abc"), 120_000)
+        assert.equal(ceiling("0"), 1_000)
+        assert.equal(ceiling("99999999"), 600_000)
+        assert.equal(ceiling("45000"), 45_000)
     })
 })

@@ -11,8 +11,12 @@ export interface TransientRetryOptions {
      * Raise it only where the caller's own budget covers the extra calls.
      */
     maxAttempts?: number
+    /** Base wait when the classified failure carries no retry-after (default 5000). */
+    fallbackWaitMs?: number
     /** Extra veto: return false to fail closed even for a transient class. */
     retryable?: (error: unknown) => boolean
+    /** Injection point so tests can assert the wait ladder without spending it. */
+    sleep?: (ms: number) => Promise<void>
     /** Surface the retry decision (stderr log line, telemetry). */
     notice?: (message: string) => void
     /** Error renderer for the notice; defaults to Error.message. */
@@ -36,6 +40,9 @@ export async function withTransientRetry<T>(
     options: TransientRetryOptions = {},
 ): Promise<T> {
     const maxAttempts = Math.max(1, options.maxAttempts ?? 2)
+    const sleep =
+        options.sleep ??
+        ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
     const describe =
         options.describe ??
         ((value: unknown) => (value instanceof Error ? value.message : String(value)))
@@ -58,15 +65,16 @@ export async function withTransientRetry<T>(
             // drops (VPN reroute, link flap) that outlive a few seconds, and
             // retrying inside the same outage just spends the budget without
             // moving. A provider-supplied retry-after still wins as the base.
+            const base = failure?.retryAfterMs ?? options.fallbackWaitMs ?? 5_000
             const waitMs = Math.min(
-                (failure?.retryAfterMs ?? 5_000) * 3 ** (attempt - 1),
+                base * 3 ** (attempt - 1),
                 options.maxWaitMs ?? 30_000,
             )
             options.notice?.(
                 `attempt ${attempt} failed (${failure!.kind}): ${describe(error)}; ` +
                     `retrying in ${waitMs}ms`,
             )
-            await new Promise((resolve) => setTimeout(resolve, waitMs))
+            await sleep(waitMs)
         }
     }
 }

@@ -47,6 +47,11 @@ import {
 } from "../src/conversation/session/repository-scanner.js"
 import { trustedFrontDoorBillingRunId } from "../src/conversation/session/frontdoor-billing.js"
 import { withTransientRetry } from "../src/harness/transient-retry.js"
+import {
+    DIALOGUE_RETRY_ATTEMPTS_ENV,
+    DIALOGUE_RETRY_MAX_WAIT_MS_ENV,
+    resolveDialogueRetryPolicy,
+} from "../src/harness/dialogue-retry-policy.js"
 
 interface Args {
     inputFile: string
@@ -266,16 +271,19 @@ async function main(): Promise<void> {
         const responder: ConversationResponder = {
             backend: args.llm,
             respond: async (request, signal) => {
-                // Fast transient provider failures (an error result mid-stream,
-                // capacity cooldowns) get one classified retry. Our own
-                // watchdog kills (`killed`) and user aborts fail closed: the
-                // turn budget only guarantees room for two provider calls.
+                // Transient provider failures (an error result mid-stream,
+                // capacity cooldowns) get several patient classified retries:
+                // the user is waiting on this one call, so a cooldown that
+                // outlives a few seconds is worth minutes here. Our own
+                // watchdog kills (`killed`) and user aborts still fail closed.
                 // A contract repair reissues the same requestId; keep the
                 // billing message id distinct so the second call is charged
                 // as its own message.
                 const baseMessageId = request.attempt === 1
                     ? request.requestId
                     : `${request.requestId}.repair${request.attempt - 1}`
+                const retryPolicy = resolveDialogueRetryPolicy()
+                let noticed = false
                 const result = await withTransientRetry(
                     (attempt) =>
                         dialogue(
@@ -293,12 +301,22 @@ async function main(): Promise<void> {
                             signal,
                         ),
                     {
-                        maxWaitMs: 10_000,
+                        maxAttempts: retryPolicy.maxAttempts,
+                        maxWaitMs: retryPolicy.maxWaitMs,
+                        fallbackWaitMs: retryPolicy.fallbackWaitMs,
                         retryable: (error) =>
                             signal?.aborted !== true &&
                             (error as { killed?: boolean }).killed !== true,
-                        notice: (message) =>
-                            process.stderr.write(`[run-conversation] ${message}\n`),
+                        notice: (message) => {
+                            const override = noticed
+                                ? ""
+                                : ` (override with ${DIALOGUE_RETRY_ATTEMPTS_ENV}=<attempts>` +
+                                  ` or ${DIALOGUE_RETRY_MAX_WAIT_MS_ENV}=<ms>)`
+                            noticed = true
+                            process.stderr.write(
+                                `[run-conversation] ${message}${override}\n`,
+                            )
+                        },
                     },
                 )
                 return typeof result === "string" ? result : result.text
