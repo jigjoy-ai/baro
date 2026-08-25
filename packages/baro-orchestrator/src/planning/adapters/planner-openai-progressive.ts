@@ -69,7 +69,13 @@ Every published story uses exactly the final-PRD story fields: id, priority, tit
 dependsOn, retries, acceptance, tests, goalInvariantIds, model, and writes. "writes" lists the files
 this story will create or modify; the host prunes any dependsOn edge no file supports, so an edge
 you cannot justify with a file will be dropped whether you publish it or not. A published fragment is closed: each dependency
-must already have been published or be present in that same fragment. `
+must already have been published or be present in that same fragment.
+
+Architecture obligations ride WITH their owner story: every obligation id the decision document
+assigns must appear as an acceptance criterion of the story that owns it, in the fragment where
+that story is published. Published stories are immutable, so an obligation cannot be attached,
+moved, or reworded at finalization — a plan whose published stories do not own every obligation
+by the time planning closes is rejected as incomplete. `
 
 const PROGRESSIVE_REPEAT_FINALIZATION = `Published stories are
 immutable and become an exact, same-order prefix of the final PRD userStories array. The final PRD
