@@ -32,6 +32,13 @@ export interface StreamingTurnLifecycleOptions {
     onFinish(): void
     onRevision(feedback: string, review: CritiqueData): void
     revisionFailure(error: unknown): TurnReviewFailure
+    /** Reports that a newer terminal candidate took over the pending review
+     * wait, so the supersession is visible outside this module. */
+    readonly onSupersede?: (event: {
+        readonly supersededTerminalId: string
+        readonly terminalId: string
+        readonly turnsObserved: number
+    }) => void
 }
 
 interface ActiveTurnReviewWait {
@@ -108,6 +115,11 @@ export class TurnReviewMailbox {
         this.active?.finish({ kind: "cancelled" })
     }
 
+    /** Drops an early-delivered verdict for a terminal no longer awaited. */
+    discard(terminalId: string): void {
+        this.queued.delete(terminalId)
+    }
+
     private dequeue(terminalId: string): CritiqueData | undefined {
         const review = this.queued.get(terminalId)
         this.queued.delete(terminalId)
@@ -176,6 +188,7 @@ export class StreamingTurnLifecycle {
     private turnsObserved = 0
     private quietTimer: ReturnType<typeof setTimeout> | null = null
     private waitingTerminalId: string | null = null
+    private readonly superseded: string[] = []
     private reviewFailure: TurnReviewFailure | null = null
     private finished = false
 
@@ -204,19 +217,25 @@ export class StreamingTurnLifecycle {
             })
             return
         }
-        if (this.waitingTerminalId) {
-            this.fail({
-                error:
-                    `received terminal ${terminalId} while awaiting review for ` +
-                    this.waitingTerminalId,
-                failure: {
-                    kind: "infrastructure",
-                    code: "review_uncorrelated",
-                },
-            })
-            return
-        }
+        // Latest candidate wins: a newer terminal supersedes the pending wait
+        // rather than failing the story. Claiming the slot before cancelling
+        // makes the cancelled wait's `applyWaitResult` hit its own guard.
+        const superseded = this.waitingTerminalId
         this.waitingTerminalId = terminalId
+        if (superseded !== null && superseded !== terminalId) {
+            this.reviews.cancelActive()
+            this.reviews.discard(superseded)
+            this.superseded.push(superseded)
+            try {
+                this.options.onSupersede?.({
+                    supersededTerminalId: superseded,
+                    terminalId,
+                    turnsObserved: this.turnsObserved,
+                })
+            } catch {
+                // Reporting must never decide the story.
+            }
+        }
         void this.reviews
             .waitFor(terminalId, { timeoutMs: this.options.reviewTimeoutMs })
             .then((result) => this.applyWaitResult(terminalId, result))
@@ -236,6 +255,11 @@ export class StreamingTurnLifecycle {
 
     failure(): TurnReviewFailure | null {
         return this.reviewFailure
+    }
+
+    /** Terminals whose review wait a newer candidate replaced, in arrival order. */
+    supersededTerminals(): readonly string[] {
+        return this.superseded
     }
 
     private applyWaitResult(

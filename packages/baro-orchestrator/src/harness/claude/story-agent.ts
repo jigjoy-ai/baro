@@ -550,6 +550,18 @@ export class StoryAgent extends BaseObserver {
                 if (this.turnLifecycle === lifecycle) this.turnLifecycle = null
             },
             onRevision: (feedback) => claude.sendUserMessage(feedback),
+            // `transition` drops a same-phase call, and the attempt is already
+            // `running` here, so state detail is emitted on the current phase.
+            onSupersede: ({ supersededTerminalId, terminalId }) => {
+                this.envRef?.deliverSemanticEvent(
+                    this,
+                    AgentState.create({
+                        agentId: this.spec.id,
+                        phase: this.currentPhase,
+                        detail: `superseded terminal ${supersededTerminalId} -> ${terminalId}`,
+                    }),
+                )
+            },
             revisionFailure: (error) => ({
                 error:
                     `could not continue reviewed Claude session: ` +
