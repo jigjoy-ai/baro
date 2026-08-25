@@ -99,6 +99,23 @@ export function translateDeclaredTests(
     })
 }
 
+// Only a whole token wrapped in a matching quote pair is unwrapped, and the
+// unwrapped value still faces SAFE_TOKEN — so quoting can never express more
+// than the bare token could. Anything else (stray, mid-token, or nested
+// quote, empty body) is null and stays rejected.
+function unwrapQuotedToken(token: string): string | null {
+    if (!/["']/.test(token)) return token
+    if (
+        token.length >= 2 &&
+        (token[0] === '"' || token[0] === "'") &&
+        token[token.length - 1] === token[0]
+    ) {
+        const inner = token.slice(1, -1)
+        return inner === "" || /["']/.test(inner) ? null : inner
+    }
+    return null
+}
+
 function tokenize(command: unknown): DeclaredTokens | string {
     if (typeof command !== "string") {
         return "declared test is empty"
@@ -108,13 +125,21 @@ function tokenize(command: unknown): DeclaredTokens | string {
     }
     const normalized = command.trim()
     if (normalized === "") return "declared test is empty"
-    if (/[^A-Za-z0-9_./:@+=,\-\s]/.test(normalized)) {
+    if (/[^A-Za-z0-9_./:@+=,\-\s"']/.test(normalized)) {
         return "declared test contains unsupported quoting, shell, or glob syntax"
     }
     if (/[\r\n\u0000-\u001f\u007f]/.test(normalized)) {
         return "declared test contains control characters"
     }
-    const tokens = normalized.split(/\s+/)
+    const raw = normalized.split(/\s+/)
+    const tokens: string[] = []
+    for (const token of raw) {
+        const unwrapped = unwrapQuotedToken(token)
+        if (unwrapped === null) {
+            return "declared test contains unsupported quoting, shell, or glob syntax"
+        }
+        tokens.push(unwrapped)
+    }
     if (tokens.some((token) => !SAFE_TOKEN.test(token))) {
         return "declared test contains an unsupported argument"
     }
