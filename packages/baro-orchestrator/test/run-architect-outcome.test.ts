@@ -261,16 +261,16 @@ describe("run-architect ArchitectOutcomeV1 mode", () => {
         await withTempDir("baro-architect-outcome-codex-budget-", async (dir) => {
             const capture = join(dir, "codex-phases.jsonl")
             const binary = writePhasedFakeCodex(dir, capture, {
-                decision: 100,
-                obligation: 800,
+                decision: 0,
+                obligation: 10_000,
             })
             const run = await runArchitect(dir, "codex", [
                 "--codex-bin", binary,
-                "--timeout-ms", "1200",
+                "--timeout-ms", "2000",
             ])
 
             assert.notEqual(run.code, 0, run.stderr)
-            assert.match(run.stderr, /shared 1200ms phase budget/u)
+            assert.match(run.stderr, /shared 2000ms phase budget/u)
             assert.equal(existsSync(join(dir, "outcome.json")), false)
             assert.ok(
                 modelUsageEvents(run.stdout).some((event) =>

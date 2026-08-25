@@ -1,0 +1,9 @@
+# ADR-0006: Assert the wire mapping in the existing test/tui-protocol.test.ts
+
+**Status:** Accepted
+**Context:** test/tui-protocol.test.ts already exists (node:test style). Testing the pure mapper avoids an end-to-end orchestrate run and makes both acceptance cases for gap (2) deterministic and sub-second.
+**Decision:** Append to `packages/baro-orchestrator/test/tui-protocol.test.ts` (do not create a new file) two `it(...)` cases against `toVerificationEvidenceInfo`:
+1. "carries retry evidence into the emitted verification summary": input evidence with one command `{command: "npm test", status: "passed", durationMs: 12, tail: "ok", retriedAfterFailure: true, firstFailureTail: "first attempt failed"}` → `assert.deepEqual` on the whole returned object, expecting `{verification_id, status, duration_ms, commands: [{command: "npm test", status: "passed", duration_ms: 12, tail: "ok", retried_after_failure: true, first_failure_tail: "first attempt failed"}]}`.
+2. "serializes a command without retry evidence exactly as before": input command `{command: "npm test", status: "passed", durationMs: 12}` → `assert.deepEqual(result.commands[0], {command: "npm test", status: "passed", duration_ms: 12})` AND `assert.deepEqual(Object.keys(result.commands[0] ?? {}), ["command", "status", "duration_ms"])` to prove no `undefined` keys were introduced (`deepEqual` alone does not catch a present-but-undefined key).
+Do not modify existing cases in that file, and do not add assertions to test/collective-orchestrate.test.ts or test/execution/collective-board.test.ts (owned by no story here).
+**Consequences:** Both acceptance cases of gap (2) are covered without touching the heavy orchestrate fixtures, and the key-set assertion is the load-bearing guard against `undefined`-valued keys crossing to the Rust side.

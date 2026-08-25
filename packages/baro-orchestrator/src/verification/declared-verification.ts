@@ -691,7 +691,14 @@ function translateNode(
     requirement: DeclaredTestRequirement,
     parsed: DeclaredTokens,
 ): VerifyCommandSpec {
-    const mode = parsed.tokens[1]
+    // Only the literal two-token pair `--import tsx` is skipped over; any
+    // other loader value, path or spelling falls through to the mode gate
+    // below and is rejected there.
+    const hasTsxLoader =
+        parsed.tokens[1] === "--import" && parsed.tokens[2] === "tsx"
+    const loaderArgs: readonly string[] = hasTsxLoader ? ["--import", "tsx"] : []
+    const rest = parsed.tokens.slice(1 + loaderArgs.length)
+    const mode = rest[0]
     // Greenfield allowance: with no package.json there is no manifest to
     // anchor a trusted script, so a bare `node <contained file>` is the
     // same trust class the manifest route grants elsewhere — repo content
@@ -699,7 +706,7 @@ function translateNode(
     // after the merge. Repos WITH a manifest keep the strict rule: declare
     // the script there instead.
     if (
-        parsed.tokens.length === 2 &&
+        rest.length === 1 &&
         typeof mode === "string" &&
         !mode.startsWith("-") &&
         !existsSync(join(cwd, "package.json"))
@@ -712,13 +719,13 @@ function translateNode(
             )
         }
         return {
-            label: `node ${contained.path}`,
+            label: ["node", ...loaderArgs, contained.path].join(" "),
             tool: "node",
-            args: [contained.path],
+            args: [...loaderArgs, contained.path],
             containedPaths: [{ path: contained.path, requireFile: true }],
         }
     }
-    const candidates = parsed.tokens.slice(2)
+    const candidates = rest.slice(1)
     if (
         !/^(--check|--test)$/.test(mode ?? "") ||
         candidates.length === 0 ||
@@ -741,9 +748,9 @@ function translateNode(
         paths.push(contained.path)
     }
     return {
-        label: ["node", mode!, ...paths].join(" "),
+        label: ["node", ...loaderArgs, mode!, ...paths].join(" "),
         tool: "node",
-        args: [mode!, ...paths],
+        args: [...loaderArgs, mode!, ...paths],
         containedPaths: paths.map((path) => ({
             path,
             requireFile: mode === "--check",

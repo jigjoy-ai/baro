@@ -11,6 +11,7 @@
 import { stdin } from "process"
 import { createInterface } from "readline"
 
+import type { RunVerificationEvidence } from "./events/verification.js"
 import type { ModelInvocationMeasuredData } from "./telemetry/model-telemetry.js"
 
 export interface StoryInfo {
@@ -46,7 +47,35 @@ export interface VerificationEvidenceInfo {
         status: "passed" | "failed" | "skipped"
         duration_ms: number
         tail?: string
+        retried_after_failure?: true
+        first_failure_tail?: string
     }>
+}
+
+/**
+ * The single camelCase→snake_case projection of run verification evidence onto
+ * the wire. Conditional spreads only: a key with an `undefined` value would
+ * cross to the Rust consumer as a present-but-null field. `output` is
+ * deliberately not mapped — the raw streams stay off the event stream.
+ */
+export function toVerificationEvidenceInfo(
+    evidence: RunVerificationEvidence,
+): VerificationEvidenceInfo {
+    return {
+        verification_id: evidence.verificationId,
+        status: evidence.status,
+        duration_ms: evidence.durationMs,
+        commands: evidence.commands.map((command) => ({
+            command: command.command,
+            status: command.status,
+            duration_ms: command.durationMs,
+            ...(command.tail ? { tail: command.tail } : {}),
+            ...(command.retriedAfterFailure ? { retried_after_failure: true as const } : {}),
+            ...(command.firstFailureTail !== undefined
+                ? { first_failure_tail: command.firstFailureTail }
+                : {}),
+        })),
+    }
 }
 
 export type BaroEvent =
