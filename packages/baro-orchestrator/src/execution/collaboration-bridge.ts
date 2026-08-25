@@ -2037,6 +2037,30 @@ function parseBrokerRecord(value: unknown): OutboxRecord | string {
             reason: record.reason,
         }
     }
+    if (kind === "dispute") {
+        // The story shell advertises this channel and processRecord
+        // implements it; without this branch the broker refuses it at the
+        // door. Evidence, not an id: a dispute carries no idempotency key.
+        if (!exactKeys("claim", "command", "output", "obligationId")) {
+            return "dispute has unsupported fields"
+        }
+        if (!validReason(record.claim)) return "dispute claim is invalid"
+        if (!validReason(record.command)) return "dispute command is invalid"
+        if (!validReason(record.output)) return "dispute output is invalid"
+        if (
+            record.obligationId !== undefined &&
+            !validObligationId(record.obligationId)
+        ) return "dispute obligation id is invalid"
+        return {
+            kind,
+            claim: record.claim,
+            command: record.command,
+            output: record.output,
+            ...(typeof record.obligationId === "string"
+                ? { obligationId: record.obligationId }
+                : {}),
+        }
+    }
     if (kind === "replan") {
         if (
             !exactKeys(
@@ -2214,6 +2238,10 @@ function validGoalInvariantIds(value: unknown): value is string[] {
         value.every(validGoalInvariantId) &&
         new Set(value).size === value.length
     )
+}
+
+function validObligationId(value: unknown): value is string {
+    return typeof value === "string" && /^O-\d{3}$/u.test(value)
 }
 
 function validReason(value: unknown): value is string {

@@ -6,6 +6,7 @@ import {
     type PrdFile,
     type PrdStory,
 } from "../prd.js"
+import { writeSurfaceOf } from "../planning/domain/dependency-evidence.js"
 import { isVerificationOnlyStory } from "../planning/domain/verification-stories.js"
 import { validateGoalContractCoverage } from "../planning/domain/goal-contract-coverage.js"
 import type {
@@ -222,7 +223,7 @@ export function validateRuntimeReplanMutation(
         candidate.userStories.push(toPrdStory(added))
     }
 
-    const graphFailure = validateCandidateGraph(prd, candidate)
+    const graphFailure = validateCandidateGraph(prd, candidate, addedStoryIds)
     if (graphFailure) return graphFailure
 
     return {
@@ -312,6 +313,7 @@ function validateInputs(
 function validateCandidateGraph(
     current: PrdFile,
     candidate: PrdFile,
+    addedStoryIds: readonly string[],
 ): RuntimeReplanValidationFailure | null {
     const storyIds = new Set(candidate.userStories.map((story) => story.id))
 
@@ -345,6 +347,16 @@ function validateCandidateGraph(
         return reject(
             "dependency_cycle",
             "runtime replan candidate contains a dependency cycle",
+        )
+    }
+
+    const overlap = findWriteSurfaceOverlap(candidate, addedStoryIds)
+    if (overlap) {
+        return reject(
+            "overlapping_write_surface",
+            `overlapping write surface: story '${overlap.addedStoryId}' ` +
+                `writes ${overlap.paths.join(", ")} ` +
+                `already owned by story '${overlap.ownerStoryId}'`,
         )
     }
 
@@ -406,6 +418,40 @@ function validateCandidateGraph(
         )
     }
     return null
+}
+
+/**
+ * Stories removed by this same mutation are already absent from `candidate`,
+ * and a story that passes no longer holds its files, so neither can own a
+ * conflict. Added-vs-added pairs are out of scope for this gate.
+ */
+function findWriteSurfaceOverlap(
+    candidate: PrdFile,
+    addedStoryIds: readonly string[],
+): { addedStoryId: string; ownerStoryId: string; paths: string[] } | undefined {
+    const added = new Set(addedStoryIds)
+    const owners = candidate.userStories.filter(
+        (story) => !added.has(story.id) && story.passes !== true,
+    )
+    if (owners.length === 0) return undefined
+
+    for (const addedStoryId of addedStoryIds) {
+        const subject = candidate.userStories.find(
+            (story) => story.id === addedStoryId,
+        )
+        if (!subject) continue
+        const subjectWrites = new Set(writeSurfaceOf(subject))
+        if (subjectWrites.size === 0) continue
+        for (const owner of owners) {
+            const shared = writeSurfaceOf(owner)
+                .filter((path) => subjectWrites.has(path))
+                .sort()
+            if (shared.length > 0) {
+                return { addedStoryId, ownerStoryId: owner.id, paths: shared }
+            }
+        }
+    }
+    return undefined
 }
 
 function goalContractMappings(stories: readonly PrdStory[]) {
