@@ -1515,6 +1515,13 @@ function bashContainmentRejection(
             continue
         }
 
+        if (
+            (commandName === "sed" || commandName === "awk") &&
+            isSedAwkScriptOperand(word)
+        ) {
+            continue
+        }
+
         const rejected = rejectPathOperand(
             cwd,
             currentDir,
@@ -1530,6 +1537,32 @@ function bashContainmentRejection(
     if (expectRedirectTarget) return "redirection is missing its target"
     if (cdAwaitingPath) return "cd without an explicit project-relative target is not allowed"
     return null
+}
+
+/**
+ * `sed`/`awk` addresses and scripts (`/panicked/,+8p`, `/start/,/end/p`)
+ * begin with `/` but are not file paths. Only exempt suffix shapes that are
+ * plainly sed/awk syntax, not arbitrary text after a leading slash.
+ */
+function isSedAwkScriptOperand(word: string): boolean {
+    if (!word.startsWith("/")) return false
+    let closingIndex = -1
+    for (let i = 1; i < word.length; i++) {
+        if (word[i] === "/" && word[i - 1] !== "\\") {
+            closingIndex = i
+            break
+        }
+    }
+    if (closingIndex < 0) return false
+    const suffix = word.slice(closingIndex + 1)
+    return (
+        suffix === "" ||
+        suffix.startsWith(",") ||
+        suffix.startsWith("!") ||
+        /^\s*\{/.test(suffix) ||
+        /^[pdqnNDPhHgGxl=zZF][;}!]?$/.test(suffix) ||
+        /^[sy][^A-Za-z0-9]/.test(suffix)
+    )
 }
 
 function rejectPathOperand(

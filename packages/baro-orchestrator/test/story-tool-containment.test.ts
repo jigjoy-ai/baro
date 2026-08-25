@@ -442,6 +442,43 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 
+    it("exempts sed/awk address and script operands from the absolute-path guard", async () => {
+        await withProjectAndSibling(async (project) => {
+            const bash = namedTool(createStoryTools(project), "bash")
+            writeFileSync(
+                join(project, "out.log"),
+                "before\nstart\npanicked\n1\n2\n3\n4\n5\n6\n7\n8\nend\nafter\n",
+            )
+
+            const passing = [
+                "sed -n '/panicked/,+8p' out.log",
+                "sed -n '/start/,/end/p' out.log",
+            ]
+            for (const command of passing) {
+                const result = await invoke(bash, { command })
+                assert.doesNotMatch(result, /containment guard/, command)
+            }
+
+            const rejected: Array<[string, RegExp]> = [
+                ["cat /etc/passwd", /absolute path '\/etc\/passwd' escapes the project root/],
+                ["ls /Users", /absolute path '\/Users' escapes the project root/],
+                [
+                    "sed /Users/me/x.txt",
+                    /absolute path '\/Users\/me\/x\.txt' escapes the project root/,
+                ],
+                [
+                    "sed -n p /etc/passwd",
+                    /absolute path '\/etc\/passwd' escapes the project root/,
+                ],
+            ]
+            for (const [command, reason] of rejected) {
+                const result = await invoke(bash, { command })
+                assert.match(result, /rejected by project containment guard/, command)
+                assert.match(result, reason, command)
+            }
+        })
+    })
+
     it("allows safe subdirectory builds, writes, and git commits", async () => {
         await withProjectAndSibling(async (project) => {
             const app = join(project, "packages", "app")
