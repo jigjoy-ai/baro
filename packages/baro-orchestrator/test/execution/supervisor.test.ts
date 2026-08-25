@@ -376,3 +376,40 @@ test("reading alone does not extend the wall clock", async () => {
     }
     assert.equal(interventions(env).length, 1, "reading in place is not progress")
 })
+
+test("a shell-only loop below the shell threshold does not intervene", async () => {
+    let now = 0
+    const { sup, env } = supervised({ noProgressShellCalls: 5, now: () => now })
+    for (let i = 0; i < 4; i++) {
+        await feed(sup, "S1", "bash", `{"command":"cargo test -- probe-${i}"}`)
+    }
+    assert.equal(interventions(env).length, 0, "probing under the shell budget is work")
+})
+
+test("consecutive shell commands with no file change eventually intervene", async () => {
+    let now = 0
+    const { sup, env } = supervised({ noProgressShellCalls: 4, now: () => now })
+    for (let i = 0; i < 3; i++) {
+        await feed(sup, "S1", "bash", `{"command":"ls dir-${i}"}`)
+    }
+    assert.equal(interventions(env).length, 0, "no trip before the shell threshold")
+    await feed(sup, "S1", "bash", `{"command":"ls dir-3"}`) // 4th shell call
+    const got = interventions(env)
+    assert.equal(got.length, 1)
+    assert.equal(got[0]!.storyId, "S1")
+    assert.equal(got[0]!.action, "abort")
+    assert.match(got[0]!.reason, /shell commands with no file change/u)
+})
+
+test("a file change resets the shell no-progress counter", async () => {
+    let now = 0
+    const { sup, env } = supervised({ noProgressShellCalls: 4, now: () => now })
+    for (let i = 0; i < 3; i++) {
+        await feed(sup, "S1", "bash", `{"command":"ls dir-${i}"}`)
+    }
+    await feed(sup, "S1", "write_file", `{"path":"a.ts"}`)
+    for (let i = 0; i < 3; i++) {
+        await feed(sup, "S1", "bash", `{"command":"ls again-${i}"}`)
+    }
+    assert.equal(interventions(env).length, 0, "a mutation restarts the shell budget")
+})
