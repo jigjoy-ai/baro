@@ -74,6 +74,7 @@ import {
     StoryQualityCompleted,
     StoryResult,
     StorySpawnFailed,
+    StorySpawned,
     WorkBlockAccepted,
     WorkBlocked,
     WorkBlockRejected,
@@ -100,6 +101,7 @@ import {
     type StoryFailureData,
     type StoryQualityCompletedData,
     type StoryResultData,
+    type StorySpawnedData,
     type WorkDiscoveredData,
     type WorkBlockedData,
     type WorkBlockRejectionCode,
@@ -244,6 +246,17 @@ const SoftDeadlineReached = defineSemanticEvent<SoftDeadlineReachedData>(
     "collective_soft_deadline_reached",
 )
 
+interface LeaseRecord {
+    leaseId: string
+    generation: number
+    workerId: string
+    route?: { routeId: string; backend: string; model: string }
+    supportsCooperativeSuspend: boolean
+    /** Surface the worker was told at spawn; a graph decision that
+     * changes it is re-announced to this exact lease. */
+    announcedSurfaceKey: string
+}
+
 type BoardPhase = "idle" | "preparing" | "running" | "verifying" | "pushing" | "done"
 
 const MAX_GOAL_REMEDIATION_ADMISSION_ATTEMPTS = 3
@@ -280,19 +293,13 @@ export class CollectiveBoard extends SerializedObserver {
         string,
         RememberedWorkBlockDecision
     >()
-    private readonly leases = new Map<
-        string,
-        {
-            leaseId: string
-            generation: number
-            workerId: string
-            route?: { routeId: string; backend: string; model: string }
-            supportsCooperativeSuspend: boolean
-            /** Surface the worker was told at spawn; a graph decision that
-             * changes it is re-announced to this exact lease. */
-            announcedSurfaceKey: string
-        }
-    >()
+    private readonly leases = new Map<string, LeaseRecord>()
+    /** Surface key the spawn request carries, per granted-but-unspawned
+     * story. A worker binds its live surface when its process starts and
+     * drops any revision announced before that, so until it spawns this is
+     * the only surface it can be holding. Dropped at spawn; a later grant
+     * for the same story replaces it. */
+    private readonly unspawnedGrantSurfaces = new Map<string, string>()
     private readonly offers: WorkOfferDesk
     private readonly replanGate: StagedReplanGate
 
@@ -666,6 +673,13 @@ export class CollectiveBoard extends SerializedObserver {
             (!this.opts.qualityAuthority || context.source === this.opts.qualityAuthority)
         ) {
             this.onStoryQuality(event.data)
+            return
+        }
+        // StorySpawnedData carries only a storyId (events/execution.ts), so the
+        // run-local lease map is the gate: an id this board never leased is
+        // ignored, and every field of the announcement comes from the record.
+        if (StorySpawned.is(event)) {
+            this.onStorySpawned(event.data)
             return
         }
         if (StorySpawnFailed.is(event) && event.data.runId === this.opts.runId) {
@@ -2485,6 +2499,10 @@ export class CollectiveBoard extends SerializedObserver {
                 grant.supportsCooperativeSuspend === true,
             announcedSurfaceKey: surfaceKey(grant.request.surface),
         })
+        this.unspawnedGrantSurfaces.set(
+            storyId,
+            surfaceKey(grant.request.surface),
+        )
     }
 
     private restoreRetractedStories(storyIds: readonly string[]): void {
@@ -3286,28 +3304,59 @@ export class CollectiveBoard extends SerializedObserver {
      * the surfaces computed here are the ones integration will enforce.
      */
     private announceRevisedSurfaces(graphVersion: number): void {
-        const stories = this.prd?.userStories ?? []
-        const byId = new Map(stories.map((story) => [story.id, story]))
         for (const [storyId, lease] of this.leases) {
-            const story = byId.get(storyId)
-            if (!story) continue
-            const surface = storyWriteSurface(story, stories)
-            const key = surfaceKey(surface)
-            if (key === lease.announcedSurfaceKey) continue
-            lease.announcedSurfaceKey = key
-            if (!surface) continue
-            this.emit(
-                GateRuleAnnounced.create({
-                    runId: this.opts.runId,
-                    storyId,
-                    leaseId: lease.leaseId,
-                    generation: lease.generation,
-                    gateId: "write-surface",
-                    graphVersion,
-                    surface,
-                }),
-            )
+            this.announceSurfaceRevision(storyId, lease, graphVersion)
         }
+    }
+
+    /** At-most-once per distinct surface per lease: the stored key is what
+     * makes a re-computation that changed nothing silent, whichever path
+     * (applied decision or spawn) recomputes it. */
+    private announceSurfaceRevision(
+        storyId: string,
+        lease: LeaseRecord,
+        graphVersion: number,
+    ): void {
+        const stories = this.prd?.userStories ?? []
+        const story = stories.find((candidate) => candidate.id === storyId)
+        if (!story) return
+        const surface = storyWriteSurface(story, stories)
+        const key = surfaceKey(surface)
+        if (key === lease.announcedSurfaceKey) return
+        lease.announcedSurfaceKey = key
+        if (!surface) return
+        this.emit(
+            GateRuleAnnounced.create({
+                runId: this.opts.runId,
+                storyId,
+                leaseId: lease.leaseId,
+                generation: lease.generation,
+                gateId: "write-surface",
+                graphVersion,
+                surface,
+            }),
+        )
+    }
+
+    /**
+     * A decision applied between the grant and the spawn announced into a gap:
+     * the worker's surface only goes live when its process exists, so anything
+     * `announceRevisedSurfaces` emitted before that could not be applied and
+     * must not count as told. Judge the spawn against the surface the request
+     * actually carries, so the boundary the worker holds is the one
+     * integration enforces.
+     */
+    private onStorySpawned(data: StorySpawnedData): void {
+        const lease = this.leases.get(data.storyId)
+        const granted = this.unspawnedGrantSurfaces.get(data.storyId)
+        if (!lease || granted === undefined) return
+        this.unspawnedGrantSurfaces.delete(data.storyId)
+        lease.announcedSurfaceKey = granted
+        this.announceSurfaceRevision(
+            data.storyId,
+            lease,
+            this.runtimeReplans.graphVersion,
+        )
     }
 
     private emit(event: SemanticEvent<unknown>): void {
