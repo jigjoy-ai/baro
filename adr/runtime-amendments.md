@@ -11,46 +11,42 @@
 ```json
 {
   "graphVersion": 2,
-  "proposalId": "run-progressive-d0828e29729ff92b:planner:3ff660f7b663e5c511427c6e16678860072c6a5cfecb98d69a7f0e2a8e1459a3",
-  "sourceStoryId": "planner:planning-d0828e29729ff92b-1",
-  "reason": "progressive planner admitted fragment baro-reliability-gaps-2",
-  "exactMutationSha256": "9deda988aa2cc677934255726951a25e5a0f376de37fa92e9a9ef9ffc904f473",
+  "proposalId": "run-progressive-2a69550a87d46bc5:planner:738c47057321ca55ec3c76f08352a44e89fcf20e311628fd6c45c27d473d18c4",
+  "sourceStoryId": "planner:planning-2a69550a87d46bc5-1",
+  "reason": "progressive planner admitted fragment verification-gaps-59-62-triple",
+  "exactMutationSha256": "156f50fa389ef919253c8a2b61df8b9ab9c83382052f0d226e1c63d2914ac8fc",
   "mutationSummary": {
     "addedStories": [
       {
         "id": "S1",
-        "title": "Patient dialogue retry policy",
+        "title": "Accept literal '--import tsx' loader prefix in translateNode",
         "dependsOn": [],
         "goalInvariantIds": [
           "G-A1",
-          "G-A2",
-          "G-A3",
-          "G-A4",
-          "G-A5",
           "G-C1",
           "G-C2",
-          "G-C3",
-          {
-            "omittedItems": 6
-          }
+          "G-C4",
+          "G-C5",
+          "G-C6"
         ]
       },
       {
         "id": "S2",
-        "title": "Shell no-progress counter in the supervisor",
+        "title": "Carry retry evidence to the TUI wire via one exported mapper",
         "dependsOn": [],
         "goalInvariantIds": [
-          "G-A6",
-          "G-A7",
-          "G-A8",
-          "G-A9",
-          "G-A10",
-          "G-C5",
-          "G-C6",
-          "G-C7",
-          {
-            "omittedItems": 2
-          }
+          "G-A2",
+          "G-C4"
+        ]
+      },
+      {
+        "id": "S3",
+        "title": "Make the shared-budget architect test deadline-dominant by construction",
+        "dependsOn": [],
+        "goalInvariantIds": [
+          "G-A3",
+          "G-C3",
+          "G-C4"
         ]
       }
     ],

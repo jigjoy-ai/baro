@@ -1,0 +1,10 @@
+# ADR-0001: Split the work into three stories with disjoint writes and per-story targeted verification
+
+**Status:** Accepted
+**Context:** Three independent gaps touch different modules. Parallel agents must not write the same file. adr/0007 already fixes the verification perimeter convention; nothing repo-wide is run per story.
+**Decision:** Exactly three stories, each declaring these repo-relative writes and no others:
+- Story A (declared node loader prefix): writes `packages/baro-orchestrator/src/verification/declared-verification.ts`, `packages/baro-orchestrator/test/verification/declared-verification.test.ts`. Verify from `packages/baro-orchestrator`: `node --import tsx --test "test/verification/declared-verification.test.ts"`.
+- Story B (retry fields on the TUI wire): writes `packages/baro-orchestrator/src/tui-protocol.ts`, `packages/baro-orchestrator/src/orchestrate.ts`, `packages/baro-orchestrator/test/tui-protocol.test.ts` (file already exists — append, do not recreate). Verify from `packages/baro-orchestrator`: `node --import tsx --test "test/tui-protocol.test.ts"` and, because this story alone edits shared types, `npx tsc -p tsconfig.json --noEmit`; pre-existing errors in files this story does not write are ignored, not fixed.
+- Story C (load-proof budget test): writes `packages/baro-orchestrator/test/run-architect-outcome.test.ts`. Verify from `packages/baro-orchestrator`: `node --import tsx --test "test/run-architect-outcome.test.ts"`.
+No story runs `npm test`, `npm run test:fast`, `npm run test:slow`, `cargo test`, `npm install`, or any glob wider than its own file(s). One isolated rerun of a single failing targeted file is allowed and the isolated result is authoritative. No story edits `packages/baro-orchestrator/scripts/run-architect.ts`, `src/verification/verify.ts`, `src/events/verification.ts`, or anything under `crates/`.
+**Consequences:** Writes are provably disjoint, so the three stories can run fully in parallel and integrate without conflict. Story B is the only story permitted a package-level typecheck; no story reproduces the repo-wide gate.
