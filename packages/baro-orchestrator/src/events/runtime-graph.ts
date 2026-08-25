@@ -105,6 +105,7 @@ export type RuntimeReplanRejectionCode =
     | "immutable_story"
     | "unknown_story"
     | "duplicate_story"
+    | "overlapping_write_surface"
     | "unknown_dependency"
     | "duplicate_dependency"
     | "self_dependency"

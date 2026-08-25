@@ -8,6 +8,7 @@ import type { SemanticEvent } from "../../src/runtime/mozaik.js"
 import { CollectiveBoard } from "../../src/execution/collective-board.js"
 import type { PrdFile, PrdStory } from "../../src/prd.js"
 import { StoryOutcomeAuthority } from "../../src/runtime/story-outcome-authority.js"
+import { validateRuntimeReplanMutation } from "../../src/runtime/runtime-replan.js"
 import {
     GateRuleAnnounced,
     RuntimeReplanApplied,
@@ -919,6 +920,84 @@ describe("CollectiveBoard runtime DAG adaptation", () => {
         })
     })
 })
+
+describe("runtime replan write-surface disjointness", () => {
+    it("rejects an added story writing files an active story already owns", () => {
+        const result = validateRuntimeReplanMutation(
+            surfacePrd(),
+            addOnly("S4", ["./src/two.ts", "src/alpha.ts"]),
+            surfaceOptions(),
+        )
+        assert.ok(!result.ok)
+        assert.equal(result.code, "overlapping_write_surface")
+        assert.equal(
+            result.reason,
+            "overlapping write surface: story 'S4' writes " +
+                "src/alpha.ts, src/two.ts already owned by story 'S2'",
+        )
+    })
+
+    it("admits an added story whose writes are disjoint from every owner", () => {
+        const result = validateRuntimeReplanMutation(
+            surfacePrd(),
+            addOnly("S4", ["src/four.ts"]),
+            surfaceOptions(),
+        )
+        assert.ok(result.ok)
+        assert.deepEqual(result.addedStoryIds, ["S4"])
+    })
+
+    it("admits an overlap with a story that already passes", () => {
+        const prd = surfacePrd()
+        prd.userStories[2] = { ...prd.userStories[2]!, passes: true }
+        const result = validateRuntimeReplanMutation(
+            prd,
+            addOnly("S4", ["src/three.ts"]),
+            surfaceOptions(),
+        )
+        assert.ok(result.ok)
+    })
+
+    it("admits an overlap with a story the same mutation removes", () => {
+        const result = validateRuntimeReplanMutation(
+            surfacePrd(),
+            {
+                ...addOnly("S4", ["src/three.ts"]),
+                removedStoryIds: ["S3"],
+            },
+            surfaceOptions(),
+        )
+        assert.ok(result.ok)
+        assert.deepEqual(result.removedStoryIds, ["S3"])
+    })
+})
+
+/** runtimePrd with every story declaring an exact, pairwise-disjoint surface. */
+function surfacePrd(): PrdFile {
+    const surfaces: Record<string, string[]> = {
+        S1: ["src/one.ts"],
+        S2: ["src/two.ts", "src/alpha.ts"],
+        S3: ["src/three.ts"],
+    }
+    const prd = runtimePrd()
+    prd.userStories = prd.userStories.map((story) => ({
+        ...story,
+        writes: surfaces[story.id]!,
+    }))
+    return prd
+}
+
+function addOnly(id: string, writes: string[]): RuntimeReplanMutation {
+    return {
+        addedStories: [{ ...dynamicStory(id, ["S1"]), writes }],
+        removedStoryIds: [],
+        modifiedDeps: {},
+    }
+}
+
+function surfaceOptions() {
+    return { immutableStoryIds: [], maxAddedStories: 5 }
+}
 
 function runtimePrd(): PrdFile {
     return {
