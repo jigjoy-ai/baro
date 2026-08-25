@@ -131,7 +131,7 @@ import { envFlag } from "./runtime/env-flag.js"
 import { MergeAwarenessRunner } from "./execution/merge-awareness-runner.js"
 import { OverlapAwarenessRunner } from "./execution/overlap-awareness-runner.js"
 import { AttemptRecallRunner } from "./execution/attempt-recall-runner.js"
-import { emit } from "./tui-protocol.js"
+import { emit, toVerificationEvidenceInfo } from "./tui-protocol.js"
 import {
     createVerifyPlan,
     recommendedMergedVerifyTimeoutMs,
@@ -1977,17 +1977,7 @@ export async function orchestrate(
             abort_code: summary.abortCode,
             verification_status: summary.verificationStatus,
             verification: summary.verification
-                ? {
-                      verification_id: summary.verification.verificationId,
-                      status: summary.verification.status,
-                      duration_ms: summary.verification.durationMs,
-                      commands: summary.verification.commands.map((command) => ({
-                          command: command.command,
-                          status: command.status,
-                          duration_ms: command.durationMs,
-                          ...(command.tail ? { tail: command.tail } : {}),
-                      })),
-                  }
+                ? toVerificationEvidenceInfo(summary.verification)
                 : undefined,
             stats: {
                 stories_completed: summary.completedStories.length,
