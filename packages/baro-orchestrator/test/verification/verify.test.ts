@@ -66,6 +66,48 @@ async function waitForProcessExit(pid: number, timeoutMs = 2_000): Promise<void>
 }
 
 describe("verifyBuild", () => {
+    it("retries a failed test command once and lets the retry decide", async () => {
+        await withTempDir("baro-verify-flake-retry-", async (dir) => {
+            const flakeScript =
+                "const fs = require('fs');" +
+                "if (!fs.existsSync('flake-marker')) {" +
+                "  fs.writeFileSync('flake-marker', '');" +
+                "  console.error('first attempt fails');" +
+                "  process.exit(1);" +
+                "}" +
+                "process.exit(0);"
+            const plan = {
+                commands: [
+                    {
+                        label: "npm run test (fixture)",
+                        tool: process.execPath,
+                        args: ["-e", flakeScript],
+                        cwd: dir,
+                    },
+                    {
+                        label: "npm run build (fixture)",
+                        tool: process.execPath,
+                        args: ["-e", "process.exit(1)"],
+                        cwd: dir,
+                    },
+                ],
+            } as ReturnType<typeof createVerifyPlan>
+
+            const result = await verifyBuild(dir, { plan })
+
+            const test = result.commands[0]!
+            assert.equal(test.status, "passed")
+            assert.equal(test.retriedAfterFailure, true)
+            assert.match(test.firstFailureTail ?? "", /first attempt fails/)
+
+            // A failed build is deterministic: no retry, single attempt.
+            const build = result.commands[1]!
+            assert.equal(build.status, "failed")
+            assert.equal(build.retriedAfterFailure, undefined)
+            assert.equal(result.ok, false)
+        })
+    })
+
     it("returns {ran:true, ok:false} when a test that runs exits non-zero", async () => {
         await withTempDir("baro-verify-", async (dir) => {
             writeFileSync(

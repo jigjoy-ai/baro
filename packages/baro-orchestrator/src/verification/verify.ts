@@ -60,6 +60,10 @@ export interface VerifyCommandResult {
     durationMs: number
     tail?: string
     output?: VerificationCommandOutput
+    /** A failed test command was re-run once; this status is the retry's. */
+    retriedAfterFailure?: true
+    /** Evidence of the first attempt when a retry decided the status. */
+    firstFailureTail?: string
 }
 
 export interface VerifyCommandSpec {
@@ -1050,6 +1054,11 @@ async function runCmd(
     }
 }
 
+/** Only test commands earn a flake retry; a failed build is deterministic. */
+function isTestCommandLabel(label: string): boolean {
+    return /\btest\b/iu.test(label)
+}
+
 function throwIfAborted(signal?: AbortSignal): void {
     if (!signal?.aborted) return
     throw signal.reason instanceof Error
@@ -1072,7 +1081,19 @@ export async function verifyBuild(
     const plan = options.plan ?? createVerifyPlan(cwd)
     for (const c of plan.commands) {
         throwIfAborted(options.signal)
-        const outcome = await runCmd(cwd, c, options.signal)
+        let outcome = await runCmd(cwd, c, options.signal)
+        let firstFailureTail: string | undefined
+        if (outcome.status === "failed" && isTestCommandLabel(c.label)) {
+            // The stories' rule, applied to the gate itself: a load failure
+            // is retried once and the retry decides. The first live gate
+            // pass failed a finished, green run on one timing test its
+            // stories never touched — a gate that cannot tell a flake from
+            // a regression mislabels finished work. Both attempts stay in
+            // the evidence.
+            throwIfAborted(options.signal)
+            firstFailureTail = outcome.tail
+            outcome = await runCmd(cwd, c, options.signal)
+        }
         commands.push({
             command: c.label,
             status: outcome.status,
@@ -1080,6 +1101,9 @@ export async function verifyBuild(
             ...("tail" in outcome && outcome.tail ? { tail: outcome.tail } : {}),
             ...("output" in outcome && outcome.output
                 ? { output: outcome.output }
+                : {}),
+            ...(firstFailureTail !== undefined
+                ? { retriedAfterFailure: true as const, firstFailureTail }
                 : {}),
         })
         if (outcome.status === "skipped") continue

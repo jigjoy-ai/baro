@@ -28,6 +28,10 @@ export interface VerificationCommandEvidence {
     tail?: string
     /** Absent when the command never executed (preflight/containment/ENOENT). */
     output?: VerificationCommandOutput
+    /** A failed test command was re-run once; this status is the retry's. */
+    retriedAfterFailure?: true
+    /** Evidence of the first attempt when a retry decided the status. */
+    firstFailureTail?: string
 }
 
 /** The coordinator has integrated all candidate work and requests an objective gate. */
