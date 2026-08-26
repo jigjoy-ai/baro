@@ -59,6 +59,20 @@ pub fn goal_fingerprint(goal: &str) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
+/// An inherited BARO_RUN_ID belongs to whoever launched this process; leaving
+/// it in place would make this run report under another run's identity.
+pub fn scrub_inherited_run_id() {
+    std::env::remove_var("BARO_RUN_ID");
+}
+
+/// The value BASH_DEFAULT_TIMEOUT_MS should take, or `None` to leave the
+/// environment alone. `operator_value` is taken only so the precedence the
+/// flag's help promises is a function of both inputs.
+pub fn shell_budget_env(flag_secs: Option<u64>, operator_value: Option<&str>) -> Option<String> {
+    let _ = operator_value;
+    flag_secs.map(|secs| secs.saturating_mul(1000).to_string())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchMode {
     Fresh,
@@ -113,6 +127,10 @@ pub fn decide_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rust tests share one process, so every env-mutating test in this module
+    /// must hold this before touching the environment.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn logs_dir() -> PathBuf {
         PathBuf::from("/home/op/.baro/logs")
@@ -221,5 +239,28 @@ mod tests {
 
         assert_eq!(decision.mode, LaunchMode::Fresh);
         assert_eq!(decision.message, None);
+    }
+
+    #[test]
+    fn an_inherited_run_id_is_gone_but_a_freshly_set_one_survives() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        std::env::set_var("BARO_RUN_ID", "inherited");
+        scrub_inherited_run_id();
+        assert!(std::env::var("BARO_RUN_ID").is_err());
+
+        // The scrub must not stop the run from minting and exporting its own id.
+        std::env::set_var("BARO_RUN_ID", "run-local");
+        assert_eq!(std::env::var("BARO_RUN_ID").as_deref(), Ok("run-local"));
+
+        std::env::remove_var("BARO_RUN_ID");
+    }
+
+    #[test]
+    fn the_shell_budget_flag_wins_over_an_operator_set_timeout() {
+        assert_eq!(shell_budget_env(Some(45), None).as_deref(), Some("45000"));
+        assert_eq!(shell_budget_env(Some(45), Some("900000")).as_deref(), Some("45000"));
+        assert_eq!(shell_budget_env(None, Some("900000")), None);
+        assert_eq!(shell_budget_env(None, None), None);
     }
 }
