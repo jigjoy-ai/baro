@@ -5,7 +5,7 @@ import {
     unlinkSync,
     writeFileSync,
 } from "node:fs"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
@@ -17,7 +17,10 @@ import {
     recommendedMergedVerifyTimeoutMs,
     verifyBuild,
 } from "../../src/verification/verify.js"
-import { translateDeclaredTests } from "../../src/verification/declared-verification.js"
+import {
+    revalidateContainedPaths,
+    translateDeclaredTests,
+} from "../../src/verification/declared-verification.js"
 import { readAuthoritativeDeclaredTests } from "../../src/verification/prd-declared-tests.js"
 import { withTempDir } from "../execution/helpers.js"
 
@@ -1002,6 +1005,624 @@ describe("declared verification policy", () => {
             ])
         })
     })
+
+    it("translates composer scripts anchored to a root composer.json", async () => {
+        await withTempDir("baro-verify-declared-composer-", async (dir) => {
+            writeFileSync(
+                join(dir, "composer.json"),
+                JSON.stringify({
+                    name: "acme/app",
+                    scripts: {
+                        test: "phpunit",
+                        check: ["phpunit", "phpstan analyse"],
+                        custom: "echo",
+                    },
+                }),
+            )
+            const [bare, viaRun, untrusted] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: "composer test" },
+                    { storyId: "S1", command: "composer run check" },
+                    { storyId: "S1", command: "composer run custom" },
+                ],
+                [{ manager: "npm" }],
+            )
+
+            assert.equal(bare?.incompleteReason, undefined)
+            assert.equal(bare?.label, "composer run test")
+            assert.equal(bare?.tool, "composer")
+            assert.deepEqual(bare?.args, ["run", "test"])
+            assert.equal(bare?.containedPaths, undefined)
+            assert.equal(bare?.cwd, undefined)
+            assert.equal(bare?.canonicalDeclaredFocus, undefined)
+
+            // An array script body is a legal Composer spelling.
+            assert.equal(viaRun?.incompleteReason, undefined)
+            assert.equal(viaRun?.label, "composer run check")
+            assert.equal(viaRun?.tool, "composer")
+            assert.deepEqual(viaRun?.args, ["run", "check"])
+            assert.equal(viaRun?.containedPaths, undefined)
+
+            assert.match(
+                untrusted?.incompleteReason ?? "",
+                /custom composer script 'custom' is not trusted by the baseline verifier policy/,
+            )
+            assert.deepEqual(untrusted?.args, [])
+        })
+    })
+
+    it("canonicalises both composer spellings onto one command identity", async () => {
+        await withTempDir("baro-verify-declared-composer-", async (dir) => {
+            writeFileSync(
+                join(dir, "composer.json"),
+                JSON.stringify({ scripts: { check: "phpunit" } }),
+            )
+            const [bare, viaRun] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: "composer check" },
+                    { storyId: "S1", command: "composer run check" },
+                ],
+                [{ manager: "npm" }],
+            )
+
+            assert.deepEqual(bare?.args, viaRun?.args)
+            assert.equal(bare?.tool, viaRun?.tool)
+            assert.equal(bare?.label, viaRun?.label)
+        })
+    })
+
+    it("rejects composer declarations the manifest or baseline does not license", async () => {
+        await withTempDir("baro-verify-declared-composer-", async (dir) => {
+            writeFileSync(
+                join(dir, "composer.json"),
+                JSON.stringify({ scripts: { test: "phpunit" } }),
+            )
+            const [trailing, undeclared, shape, runOnly, unsafeName] =
+                translateDeclaredTests(
+                    dir,
+                    [
+                        {
+                            storyId: "S1",
+                            command: "composer run test --filter x",
+                        },
+                        { storyId: "S1", command: "composer lint" },
+                        { storyId: "S1", command: "composer" },
+                        { storyId: "S1", command: "composer run" },
+                        { storyId: "S1", command: "composer run a/b" },
+                    ],
+                    [{ manager: "npm" }],
+                )
+
+            assert.match(
+                trailing?.incompleteReason ?? "",
+                /composer tests must not pass arguments after the script name/,
+            )
+            assert.deepEqual(trailing?.args, [])
+            assert.equal(trailing?.tool, "node")
+            assert.match(
+                undeclared?.incompleteReason ?? "",
+                /composer\.json does not declare script 'lint'/,
+            )
+            assert.match(
+                shape?.incompleteReason ?? "",
+                /composer tests must use 'composer <script>' or 'composer run <script>'/,
+            )
+            assert.match(
+                runOnly?.incompleteReason ?? "",
+                /composer tests must use 'composer <script>' or 'composer run <script>'/,
+            )
+            // Passes SAFE_TOKEN but not SAFE_SCRIPT_NAME.
+            assert.match(
+                unsafeName?.incompleteReason ?? "",
+                /unsafe composer script name 'a\/b'/,
+            )
+        })
+    })
+
+    it("requires a valid root composer.json before any composer script runs", async () => {
+        await withTempDir("baro-verify-declared-composer-", async (dir) => {
+            const [missing] = translateDeclaredTests(
+                dir,
+                [{ storyId: "S1", command: "composer test" }],
+                [{ manager: "npm" }],
+            )
+            assert.match(
+                missing?.incompleteReason ?? "",
+                /declared composer test requires a valid root composer\.json/,
+            )
+            assert.deepEqual(missing?.args, [])
+
+            // A present-but-unparseable manifest fails the same way, before
+            // the script-declaration and trusted-baseline checks.
+            writeFileSync(join(dir, "composer.json"), "{ not json")
+            const [invalid] = translateDeclaredTests(
+                dir,
+                [{ storyId: "S1", command: "composer test" }],
+                [{ manager: "npm" }],
+            )
+            assert.match(
+                invalid?.incompleteReason ?? "",
+                /declared composer test requires a valid root composer\.json/,
+            )
+
+            // A JSON array is valid JSON but not a manifest object.
+            writeFileSync(join(dir, "composer.json"), "[]")
+            const [notObject] = translateDeclaredTests(
+                dir,
+                [{ storyId: "S1", command: "composer test" }],
+                [{ manager: "npm" }],
+            )
+            assert.match(
+                notObject?.incompleteReason ?? "",
+                /declared composer test requires a valid root composer\.json/,
+            )
+        })
+    })
+
+    it("translates contained vendor/bin/phpunit declarations", async () => {
+        await withTempDir("baro-verify-declared-phpunit-", async (dir) => {
+            mkdirSync(join(dir, "vendor", "bin"), { recursive: true })
+            writeFileSync(join(dir, "vendor", "bin", "phpunit"), "")
+            writeFileSync(join(dir, "phpunit.xml"), "")
+            mkdirSync(join(dir, "tests", "Unit"), { recursive: true })
+            writeFileSync(join(dir, "tests", "UnitTest.php"), "")
+            const binary = join(dir, "vendor", "bin", "phpunit")
+            const [plain, suite, config, path, combined] =
+                translateDeclaredTests(
+                    dir,
+                    [
+                        { storyId: "S1", command: "vendor/bin/phpunit" },
+                        {
+                            storyId: "S1",
+                            command: "vendor/bin/phpunit --testsuite unit",
+                        },
+                        {
+                            storyId: "S1",
+                            command: "vendor/bin/phpunit -c phpunit.xml",
+                        },
+                        {
+                            storyId: "S1",
+                            command: "vendor/bin/phpunit tests/UnitTest.php",
+                        },
+                        {
+                            storyId: "S1",
+                            command:
+                                "vendor/bin/phpunit -c phpunit.xml tests/Unit",
+                        },
+                    ],
+                    [{ manager: "npm" }],
+                )
+
+            // The label keeps the declared relative form while the spawn
+            // target is absolute (cross-spawn resolves a relative command
+            // through PATH, not the command cwd).
+            assert.equal(plain?.incompleteReason, undefined)
+            assert.equal(plain?.label, "vendor/bin/phpunit")
+            assert.equal(plain?.tool, binary)
+            assert.deepEqual(plain?.args, [])
+            assert.deepEqual(plain?.containedPaths, [
+                { path: binary, requireFile: true },
+            ])
+
+            assert.equal(suite?.incompleteReason, undefined)
+            assert.equal(suite?.tool, binary)
+            assert.deepEqual(suite?.args, ["--testsuite", "unit"])
+            assert.equal(suite?.label, "vendor/bin/phpunit --testsuite unit")
+            assert.deepEqual(suite?.containedPaths, [
+                { path: binary, requireFile: true },
+            ])
+
+            assert.equal(config?.incompleteReason, undefined)
+            assert.deepEqual(config?.args, ["-c", join(dir, "phpunit.xml")])
+            assert.deepEqual(config?.containedPaths, [
+                { path: binary, requireFile: true },
+                { path: join(dir, "phpunit.xml"), requireFile: true },
+            ])
+
+            assert.equal(path?.incompleteReason, undefined)
+            assert.deepEqual(path?.args, [join(dir, "tests", "UnitTest.php")])
+            assert.deepEqual(path?.containedPaths, [
+                { path: binary, requireFile: true },
+                {
+                    path: join(dir, "tests", "UnitTest.php"),
+                    requireFile: false,
+                },
+            ])
+
+            // Binary first, then each path argument in declaration order.
+            assert.equal(combined?.incompleteReason, undefined)
+            assert.deepEqual(combined?.args, [
+                "-c",
+                join(dir, "phpunit.xml"),
+                join(dir, "tests", "Unit"),
+            ])
+            assert.deepEqual(combined?.containedPaths, [
+                { path: binary, requireFile: true },
+                { path: join(dir, "phpunit.xml"), requireFile: true },
+                { path: join(dir, "tests", "Unit"), requireFile: false },
+            ])
+        })
+    })
+
+    it("keeps every phpunit path revalidatable immediately pre-spawn", async () => {
+        await withTempDir("baro-verify-declared-phpunit-", async (dir) => {
+            mkdirSync(join(dir, "vendor", "bin"), { recursive: true })
+            writeFileSync(join(dir, "vendor", "bin", "phpunit"), "")
+            writeFileSync(join(dir, "phpunit.xml"), "")
+            mkdirSync(join(dir, "tests", "Unit"), { recursive: true })
+            const [spec] = translateDeclaredTests(
+                dir,
+                [
+                    {
+                        storyId: "S1",
+                        command: "vendor/bin/phpunit -c phpunit.xml tests/Unit",
+                    },
+                ],
+                [{ manager: "npm" }],
+            )
+
+            // The absolute entries this route emits must survive pre-spawn
+            // revalidation; a relative-only revalidator would reject them all
+            // and silently downgrade every phpunit command to "skipped".
+            assert.equal(spec?.incompleteReason, undefined)
+            assert.ok(
+                spec?.containedPaths?.every(({ path }) => isAbsolute(path)),
+            )
+            assert.equal(
+                revalidateContainedPaths(dir, spec?.containedPaths ?? []),
+                null,
+            )
+
+            // Accepting absolute entries grants no escape: one pointing
+            // outside cwd is still rejected.
+            assert.match(
+                revalidateContainedPaths(dir, [
+                    { path: join(dir, "..", "outside.php"), requireFile: true },
+                ]) ?? "",
+                /failed immediate pre-spawn containment/,
+            )
+
+            // A vanished contained path downgrades the command rather than
+            // letting it spawn against a missing file.
+            unlinkSync(join(dir, "phpunit.xml"))
+            assert.match(
+                revalidateContainedPaths(dir, spec?.containedPaths ?? []) ?? "",
+                /failed immediate pre-spawn containment/,
+            )
+        })
+    })
+
+    it("rejects phpunit declarations that escape containment or use unsupported flags", async () => {
+        await withTempDir("baro-verify-declared-phpunit-", async (dir) => {
+            mkdirSync(join(dir, "vendor", "bin"), { recursive: true })
+            writeFileSync(join(dir, "vendor", "bin", "phpunit"), "")
+            const grammar =
+                /phpunit arguments allow only --testsuite <name>, -c\/--configuration <file>, and contained test paths/
+            const [
+                escape,
+                filter,
+                joinedSuite,
+                joinedConfig,
+                separator,
+                relative,
+                bareName,
+                phar,
+                missingSuite,
+                missingConfig,
+            ] = translateDeclaredTests(
+                dir,
+                [
+                    {
+                        storyId: "S1",
+                        command: "vendor/bin/phpunit ../outside.php",
+                    },
+                    { storyId: "S1", command: "vendor/bin/phpunit --filter x" },
+                    {
+                        storyId: "S1",
+                        command: "vendor/bin/phpunit --testsuite=unit",
+                    },
+                    { storyId: "S1", command: "vendor/bin/phpunit -c=x" },
+                    { storyId: "S1", command: "vendor/bin/phpunit --" },
+                    { storyId: "S1", command: "./vendor/bin/phpunit" },
+                    { storyId: "S1", command: "phpunit" },
+                    { storyId: "S1", command: "vendor/bin/phpunit.phar" },
+                    {
+                        storyId: "S1",
+                        command: "vendor/bin/phpunit --testsuite",
+                    },
+                    { storyId: "S1", command: "vendor/bin/phpunit -c" },
+                ],
+                [{ manager: "npm" }],
+            )
+
+            assert.match(
+                escape?.incompleteReason ?? "",
+                /unsafe or escaping path '\.\.\/outside\.php'/,
+            )
+            assert.deepEqual(escape?.args, [])
+            assert.equal(escape?.containedPaths, undefined)
+            assert.match(filter?.incompleteReason ?? "", grammar)
+            assert.match(joinedSuite?.incompleteReason ?? "", grammar)
+            assert.match(joinedConfig?.incompleteReason ?? "", grammar)
+            assert.match(separator?.incompleteReason ?? "", grammar)
+            assert.match(
+                missingSuite?.incompleteReason ?? "",
+                /phpunit --testsuite requires a suite name/,
+            )
+            assert.match(
+                missingConfig?.incompleteReason ?? "",
+                /phpunit -c\/--configuration requires a configuration file/,
+            )
+            // Only the exact token routes to phpunit; every other spelling
+            // falls through to the catch-all rather than resolving a binary.
+            for (const spec of [relative, bareName, phar]) {
+                assert.match(
+                    spec?.incompleteReason ?? "",
+                    /unsupported declared test/,
+                )
+            }
+        })
+    })
+
+    it("rejects a phpunit declaration whose binary is not contained", async () => {
+        await withTempDir("baro-verify-declared-phpunit-", async (dir) => {
+            const [spec] = translateDeclaredTests(
+                dir,
+                [{ storyId: "S1", command: "vendor/bin/phpunit" }],
+                [{ manager: "npm" }],
+            )
+            assert.match(
+                spec?.incompleteReason ?? "",
+                /declared phpunit test requires a contained vendor\/bin\/phpunit executable/,
+            )
+            assert.equal(spec?.tool, "node")
+            assert.deepEqual(spec?.args, [])
+        })
+    })
+
+    it("wraps ddev exec transparently around composer and phpunit", async () => {
+        await withTempDir("baro-verify-declared-ddev-", async (dir) => {
+            mkdirSync(join(dir, ".ddev"), { recursive: true })
+            writeFileSync(join(dir, ".ddev", "config.yaml"), "name: app\n")
+            writeFileSync(
+                join(dir, "composer.json"),
+                JSON.stringify({ scripts: { test: "phpunit", check: "x" } }),
+            )
+            mkdirSync(join(dir, "vendor", "bin"), { recursive: true })
+            writeFileSync(join(dir, "vendor", "bin", "phpunit"), "")
+            const [composer, phpunit, labelled] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: "ddev exec composer run test" },
+                    {
+                        storyId: "S1",
+                        command: "ddev exec vendor/bin/phpunit --testsuite unit",
+                    },
+                    { storyId: "S1", command: "ddev exec composer run check" },
+                ],
+                [{ manager: "npm" }],
+            )
+
+            assert.equal(composer?.incompleteReason, undefined)
+            assert.equal(composer?.tool, "ddev")
+            assert.deepEqual(composer?.args, [
+                "exec",
+                "composer",
+                "run",
+                "test",
+            ])
+            assert.equal(composer?.containedPaths, undefined)
+            assert.equal(composer?.cwd, undefined)
+            assert.equal(composer?.canonicalDeclaredFocus, undefined)
+
+            // The container receives the declared relative inner token, while
+            // containedPaths still carry the host-side values to revalidate.
+            assert.equal(phpunit?.incompleteReason, undefined)
+            assert.equal(phpunit?.tool, "ddev")
+            assert.deepEqual(phpunit?.args, [
+                "exec",
+                "vendor/bin/phpunit",
+                "--testsuite",
+                "unit",
+            ])
+            assert.deepEqual(phpunit?.containedPaths, [
+                {
+                    path: join(dir, "vendor", "bin", "phpunit"),
+                    requireFile: true,
+                },
+            ])
+            assert.equal(
+                revalidateContainedPaths(dir, phpunit?.containedPaths ?? []),
+                null,
+            )
+
+            assert.equal(labelled?.label, "ddev exec composer run check")
+        })
+    })
+
+    it("lets ddev exec launder nothing the dispatcher would reject", async () => {
+        await withTempDir("baro-verify-declared-ddev-", async (dir) => {
+            mkdirSync(join(dir, ".ddev"), { recursive: true })
+            writeFileSync(join(dir, ".ddev", "config.yaml"), "name: app\n")
+            writeFileSync(
+                join(dir, "composer.json"),
+                JSON.stringify({ scripts: { custom: "echo" } }),
+            )
+            mkdirSync(join(dir, "vendor", "bin"), { recursive: true })
+            writeFileSync(join(dir, "vendor", "bin", "phpunit"), "")
+            const [
+                wrappedCustom,
+                directCustom,
+                wrappedMake,
+                directMake,
+                wrappedFilter,
+                wrappedEscape,
+                nested,
+            ] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: "ddev exec composer run custom" },
+                    { storyId: "S1", command: "composer run custom" },
+                    { storyId: "S1", command: "ddev exec make test" },
+                    { storyId: "S1", command: "make test" },
+                    {
+                        storyId: "S1",
+                        command: "ddev exec vendor/bin/phpunit --filter x",
+                    },
+                    {
+                        storyId: "S1",
+                        command: "ddev exec vendor/bin/phpunit ../outside.php",
+                    },
+                    {
+                        storyId: "S1",
+                        command: "ddev exec ddev exec composer run custom",
+                    },
+                ],
+                [{ manager: "npm" }],
+            )
+
+            assert.ok(wrappedCustom?.incompleteReason)
+            assert.equal(
+                wrappedCustom?.incompleteReason,
+                directCustom?.incompleteReason,
+            )
+            assert.equal(wrappedCustom?.tool, "node")
+            assert.deepEqual(wrappedCustom?.args, [])
+
+            assert.ok(wrappedMake?.incompleteReason)
+            assert.equal(
+                wrappedMake?.incompleteReason,
+                directMake?.incompleteReason,
+            )
+
+            assert.match(
+                wrappedFilter?.incompleteReason ?? "",
+                /phpunit arguments allow only/,
+            )
+            assert.match(
+                wrappedEscape?.incompleteReason ?? "",
+                /unsafe or escaping path '\.\.\/outside\.php'/,
+            )
+            assert.match(
+                nested?.incompleteReason ?? "",
+                /ddev exec must not wrap another ddev command/,
+            )
+        })
+    })
+
+    it("gates ddev on its subcommand shape and on .ddev/config.yaml", async () => {
+        await withTempDir("baro-verify-declared-ddev-", async (dir) => {
+            writeFileSync(
+                join(dir, "composer.json"),
+                JSON.stringify({ scripts: { test: "phpunit" } }),
+            )
+            const [missingConfig] = translateDeclaredTests(
+                dir,
+                [{ storyId: "S1", command: "ddev exec composer run test" }],
+                [{ manager: "npm" }],
+            )
+            assert.match(
+                missingConfig?.incompleteReason ?? "",
+                /declared ddev test requires \.ddev\/config\.yaml in the repository root/,
+            )
+            assert.deepEqual(missingConfig?.args, [])
+
+            mkdirSync(join(dir, ".ddev"), { recursive: true })
+            writeFileSync(join(dir, ".ddev", "config.yaml"), "name: app\n")
+            const [ssh, bare, empty, accepted] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: "ddev ssh" },
+                    { storyId: "S1", command: "ddev" },
+                    { storyId: "S1", command: "ddev exec" },
+                    { storyId: "S1", command: "ddev exec composer run test" },
+                ],
+                [{ manager: "npm" }],
+            )
+
+            assert.match(
+                ssh?.incompleteReason ?? "",
+                /ddev tests must use 'ddev exec <command>'/,
+            )
+            assert.match(
+                bare?.incompleteReason ?? "",
+                /ddev tests must use 'ddev exec <command>'/,
+            )
+            assert.match(
+                empty?.incompleteReason ?? "",
+                /ddev exec requires a command to run/,
+            )
+            assert.equal(accepted?.incompleteReason, undefined)
+        })
+    })
+
+    it("keeps npm, cargo, node and git routes bit-identical after the dispatcher split", async () => {
+        await withTempDir("baro-verify-declared-regression-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({ name: "regression", scripts: { test: "x" } }),
+            )
+            writeFileSync(join(dir, "Cargo.toml"), "[package]\nname = \"r\"\n")
+            writeFileSync(join(dir, "safe.js"), "")
+            const [npm, cargo, node, git] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: "npm test" },
+                    { storyId: "S1", command: "cargo test" },
+                    { storyId: "S1", command: "node --test safe.js" },
+                    { storyId: "S1", command: "git diff --check" },
+                ],
+                [{ manager: "npm" }],
+            )
+
+            for (const spec of [npm, cargo, node, git]) {
+                assert.equal(spec?.incompleteReason, undefined)
+            }
+            // No install/fetch subcommand: execution reuses the already
+            // installed root dependencies and cargo artefacts.
+            assert.deepEqual(
+                { label: npm?.label, tool: npm?.tool, args: npm?.args },
+                { label: "npm run test", tool: "npm", args: ["run", "test"] },
+            )
+            assert.deepEqual(
+                { label: cargo?.label, tool: cargo?.tool, args: cargo?.args },
+                { label: "cargo test", tool: "cargo", args: ["test"] },
+            )
+            assert.deepEqual(
+                { label: node?.label, tool: node?.tool, args: node?.args },
+                {
+                    label: "node --test safe.js",
+                    tool: "node",
+                    args: ["--test", "safe.js"],
+                },
+            )
+            assert.deepEqual(
+                { label: git?.label, tool: git?.tool, args: git?.args },
+                {
+                    label: "git diff --check",
+                    tool: "git",
+                    args: ["diff", "--no-ext-diff", "--no-textconv", "--check"],
+                },
+            )
+        })
+    })
+
+    it("names the php-ecosystem routes in the catch-all message", async () => {
+        await withTempDir("baro-verify-declared-catch-all-", async (dir) => {
+            const [spec] = translateDeclaredTests(
+                dir,
+                [{ storyId: "S1", command: "make test" }],
+                [{ manager: "npm" }],
+            )
+            assert.equal(
+                spec?.incompleteReason,
+                "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, git diff --check, composer, vendor/bin/phpunit, and ddev exec",
+            )
+        })
+    })
+
 })
 
 describe("greenfield bare node declarations", () => {

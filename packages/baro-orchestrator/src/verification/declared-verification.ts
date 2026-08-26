@@ -26,6 +26,15 @@ const MAX_COMMAND_LENGTH = 1_000
 export const MAX_DECLARED_VERIFY_COMMANDS = 8
 const SAFE_SCRIPT_NAME = /^[A-Za-z0-9_.:-]+$/
 const TRUSTED_PACKAGE_SCRIPTS = new Set(["build", "typecheck", "test", "lint"])
+// Deliberately separate from TRUSTED_PACKAGE_SCRIPTS: `check` is the
+// Composer-conventional gate name, and neither set may widen the other.
+const TRUSTED_COMPOSER_SCRIPTS = new Set([
+    "build",
+    "typecheck",
+    "test",
+    "lint",
+    "check",
+])
 const SAFE_TOKEN = /^[A-Za-z0-9_./:@+=,-]+$/
 const SAFE_CARGO_VALUE = /^[A-Za-z0-9_+.-]+(?:,[A-Za-z0-9_+.-]+)*$/
 const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/
@@ -50,53 +59,85 @@ export function translateDeclaredTests(
         }
         const parsed = tokenize(requirement.command)
         if (typeof parsed === "string") return incomplete(requirement, parsed)
-        // A declaration that is byte-identical to a trusted package script's
-        // body IS that script (planners often copy "node test.js" out of
-        // package.json). Route it through the script policy instead of
-        // skipping semantics the manifest already declares runnable.
-        const aliasScript = trustedScriptAlias(cwd, parsed.tokens)
-        if (aliasScript) {
-            const aliasTokens = tokenize(`npm run ${aliasScript}`)
-            if (typeof aliasTokens !== "string") {
-                return translatePackage(
-                    cwd,
-                    requirement,
-                    aliasTokens,
-                    packageManagers,
-                )
-            }
-        }
-        const tool = parsed.tokens[0]
-        if (/^(npm|pnpm|yarn)$/.test(tool ?? "")) {
-            return translatePackage(cwd, requirement, parsed, packageManagers)
-        }
-        if (tool === "npx") {
-            return translateNpxRstest(
+        return dispatchDeclared(
+            cwd,
+            requirement,
+            parsed,
+            packageManagers,
+            false,
+        )
+    })
+}
+
+// Re-entrant so `ddev exec <inner>` re-applies this exact policy to the
+// wrapped command; declarationError and tokenize stay in the caller so an
+// inner command is never re-parsed.
+function dispatchDeclared(
+    cwd: string,
+    requirement: DeclaredTestRequirement,
+    parsed: DeclaredTokens,
+    packageManagers: readonly VerifyJavaScriptPackageManager[],
+    insideDdev: boolean,
+): VerifyCommandSpec {
+    // A declaration that is byte-identical to a trusted package script's
+    // body IS that script (planners often copy "node test.js" out of
+    // package.json). Route it through the script policy instead of
+    // skipping semantics the manifest already declares runnable.
+    const aliasScript = trustedScriptAlias(cwd, parsed.tokens)
+    if (aliasScript) {
+        const aliasTokens = tokenize(`npm run ${aliasScript}`)
+        if (typeof aliasTokens !== "string") {
+            return translatePackage(
                 cwd,
                 requirement,
-                parsed,
+                aliasTokens,
                 packageManagers,
             )
         }
-        if (tool === "cargo") return translateCargo(cwd, requirement, parsed)
-        if (tool === "node") return translateNode(cwd, requirement, parsed)
-        if (
-            tool === "git" &&
-            parsed.tokens.length === 3 &&
-            parsed.tokens[1] === "diff" &&
-            parsed.tokens[2] === "--check"
-        ) {
-            return {
-                label: "git diff --check",
-                tool: "git",
-                args: ["diff", "--no-ext-diff", "--no-textconv", "--check"],
-            }
-        }
-        return incomplete(
+    }
+    const tool = parsed.tokens[0]
+    if (/^(npm|pnpm|yarn)$/.test(tool ?? "")) {
+        return translatePackage(cwd, requirement, parsed, packageManagers)
+    }
+    if (tool === "npx") {
+        return translateNpxRstest(
+            cwd,
             requirement,
-            "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, and git diff --check",
+            parsed,
+            packageManagers,
         )
-    })
+    }
+    if (tool === "cargo") return translateCargo(cwd, requirement, parsed)
+    if (tool === "node") return translateNode(cwd, requirement, parsed)
+    if (
+        tool === "git" &&
+        parsed.tokens.length === 3 &&
+        parsed.tokens[1] === "diff" &&
+        parsed.tokens[2] === "--check"
+    ) {
+        return {
+            label: "git diff --check",
+            tool: "git",
+            args: ["diff", "--no-ext-diff", "--no-textconv", "--check"],
+        }
+    }
+    if (tool === "composer") return translateComposer(cwd, requirement, parsed)
+    if (tool === "vendor/bin/phpunit") {
+        return translatePhpunit(cwd, requirement, parsed)
+    }
+    if (tool === "ddev") {
+        return translateDdev(
+            cwd,
+            requirement,
+            parsed,
+            packageManagers,
+            insideDdev,
+        )
+    }
+    return incomplete(
+        requirement,
+        "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, git diff --check, composer, vendor/bin/phpunit, and ddev exec",
+    )
 }
 
 // Only a whole token wrapped in a matching quote pair is unwrapped, and the
@@ -758,18 +799,236 @@ function translateNode(
     }
 }
 
+// composer.json is read only as an anchor: a declared script must exist in it,
+// but nothing about the script body is interpreted here.
+function readJsonObject(path: string): Record<string, unknown> | null {
+    try {
+        const parsed: unknown = JSON.parse(readFileSync(path, "utf8"))
+        return typeof parsed === "object" &&
+            parsed !== null &&
+            !Array.isArray(parsed)
+            ? (parsed as Record<string, unknown>)
+            : null
+    } catch {
+        return null
+    }
+}
+
+function translateComposer(
+    cwd: string,
+    requirement: DeclaredTestRequirement,
+    parsed: DeclaredTokens,
+): VerifyCommandSpec {
+    const [, operation, maybeScript, ...remaining] = parsed.tokens
+    const script = operation === "run" ? maybeScript : operation
+    const rest = operation === "run" ? remaining : parsed.tokens.slice(2)
+    if (!script) {
+        return incomplete(
+            requirement,
+            "composer tests must use 'composer <script>' or 'composer run <script>'",
+        )
+    }
+    if (rest.length > 0) {
+        return incomplete(
+            requirement,
+            "composer tests must not pass arguments after the script name",
+        )
+    }
+    if (!SAFE_SCRIPT_NAME.test(script)) {
+        return incomplete(requirement, `unsafe composer script name '${script}'`)
+    }
+    const manifest = readJsonObject(join(cwd, "composer.json"))
+    if (!manifest) {
+        return incomplete(
+            requirement,
+            "declared composer test requires a valid root composer.json",
+        )
+    }
+    const scripts = manifest.scripts
+    const body = typeof scripts === "object" && scripts !== null
+        ? (scripts as Record<string, unknown>)[script]
+        : undefined
+    // Composer spells a script body as either a string or a list of strings.
+    if (
+        typeof body !== "string" &&
+        !(
+            Array.isArray(body) &&
+            body.every((entry) => typeof entry === "string")
+        )
+    ) {
+        return incomplete(
+            requirement,
+            `composer.json does not declare script '${script}'`,
+        )
+    }
+    if (!TRUSTED_COMPOSER_SCRIPTS.has(script)) {
+        return incomplete(
+            requirement,
+            `custom composer script '${script}' is not trusted by the baseline verifier policy`,
+        )
+    }
+    return {
+        label: `composer run ${script}`,
+        tool: "composer",
+        args: ["run", script],
+    }
+}
+
+function translatePhpunit(
+    cwd: string,
+    requirement: DeclaredTestRequirement,
+    parsed: DeclaredTokens,
+): VerifyCommandSpec {
+    const binary = containedPath(cwd, "vendor/bin/phpunit", true)
+    if (!binary.path) {
+        return incomplete(
+            requirement,
+            "declared phpunit test requires a contained vendor/bin/phpunit executable" +
+                (binary.reason ? `: ${binary.reason}` : ""),
+        )
+    }
+    const rest = parsed.tokens.slice(1)
+    const args: string[] = []
+    // Every path this command can touch is emitted absolute — the binary
+    // because cross-spawn would otherwise resolve it through PATH, the
+    // arguments so the spec stays independent of the spawn cwd — and each one
+    // is recorded for pre-spawn revalidation.
+    const containedPaths: VerifyContainedPath[] = [
+        { path: join(cwd, binary.path), requireFile: true },
+    ]
+    for (let index = 0; index < rest.length; index += 1) {
+        const token = rest[index]!
+        if (token === "--testsuite") {
+            const value = rest[index + 1]
+            if (value === undefined || !SAFE_TOKEN.test(value)) {
+                return incomplete(
+                    requirement,
+                    "phpunit --testsuite requires a suite name",
+                )
+            }
+            args.push(token, value)
+            index += 1
+            continue
+        }
+        if (token === "-c" || token === "--configuration") {
+            const value = rest[index + 1]
+            if (value === undefined) {
+                return incomplete(
+                    requirement,
+                    "phpunit -c/--configuration requires a configuration file",
+                )
+            }
+            const contained = containedPath(cwd, value, true)
+            if (!contained.path) {
+                return incomplete(
+                    requirement,
+                    contained.reason ?? `unsafe phpunit path '${value}'`,
+                )
+            }
+            const configPath = join(cwd, contained.path)
+            args.push(token, configPath)
+            containedPaths.push({ path: configPath, requireFile: true })
+            index += 1
+            continue
+        }
+        if (!token.startsWith("-")) {
+            const contained = containedPath(cwd, token, false)
+            if (!contained.path) {
+                return incomplete(
+                    requirement,
+                    contained.reason ?? `unsafe phpunit path '${token}'`,
+                )
+            }
+            const testPath = join(cwd, contained.path)
+            args.push(testPath)
+            containedPaths.push({ path: testPath, requireFile: false })
+            continue
+        }
+        return incomplete(
+            requirement,
+            "phpunit arguments allow only --testsuite <name>, -c/--configuration <file>, and contained test paths",
+        )
+    }
+    // cross-spawn resolves a relative command through which.sync over PATH
+    // after only a best-effort process.chdir (skipped in worker threads), so a
+    // contained binary must be spawned absolute.
+    return {
+        label: ["vendor/bin/phpunit", ...rest].join(" "),
+        tool: join(cwd, binary.path),
+        args,
+        containedPaths,
+    }
+}
+
+function translateDdev(
+    cwd: string,
+    requirement: DeclaredTestRequirement,
+    parsed: DeclaredTokens,
+    packageManagers: readonly VerifyJavaScriptPackageManager[],
+    insideDdev: boolean,
+): VerifyCommandSpec {
+    if (insideDdev) {
+        return incomplete(
+            requirement,
+            "ddev exec must not wrap another ddev command",
+        )
+    }
+    if (parsed.tokens[1] !== "exec") {
+        return incomplete(requirement, "ddev tests must use 'ddev exec <command>'")
+    }
+    if (parsed.tokens.length < 3) {
+        return incomplete(requirement, "ddev exec requires a command to run")
+    }
+    if (!existsSync(join(cwd, ".ddev", "config.yaml"))) {
+        return incomplete(
+            requirement,
+            "declared ddev test requires .ddev/config.yaml in the repository root",
+        )
+    }
+    const innerTokens = parsed.tokens.slice(2)
+    const inner = dispatchDeclared(
+        cwd,
+        requirement,
+        { normalized: innerTokens.join(" "), tokens: innerTokens },
+        packageManagers,
+        true,
+    )
+    // The prefix grants no authority: whatever the dispatcher rejects
+    // directly stays rejected with that same reason.
+    if (inner.incompleteReason !== undefined) return inner
+    // The container sees the declared inner token, not the host-absolute tool
+    // the phpunit route resolves for direct spawning.
+    return {
+        label: parsed.normalized,
+        tool: "ddev",
+        args: ["exec", innerTokens[0]!, ...inner.args],
+        ...(inner.containedPaths
+            ? { containedPaths: inner.containedPaths }
+            : {}),
+    }
+}
+
+
 export function revalidateContainedPaths(
     cwd: string,
     paths: readonly VerifyContainedPath[],
 ): string | null {
     for (const requirement of paths) {
+        // Contained-binary routes spawn absolute (cross-spawn would otherwise
+        // resolve a relative command through PATH), so an entry may already be
+        // absolute. Re-express it relative to cwd and let the unchanged checks
+        // below judge it: anything outside cwd relativises to a traversal and
+        // is still rejected, so containment is re-proved, never assumed.
+        const candidate = isAbsolute(requirement.path)
+            ? relative(resolve(cwd), requirement.path) || "."
+            : requirement.path
         if (requirement.allowMissing) {
             if (
-                requirement.path === "" ||
-                isAbsolute(requirement.path) ||
-                /^[A-Za-z]:\//.test(requirement.path) ||
-                hasParentTraversal(requirement.path) ||
-                escapesRoot(cwd, requirement.path)
+                candidate === "" ||
+                isAbsolute(candidate) ||
+                /^[A-Za-z]:\//.test(candidate) ||
+                hasParentTraversal(candidate) ||
+                escapesRoot(cwd, candidate)
             ) {
                 return (
                     "focused package path failed immediate pre-spawn containment: " +
@@ -778,11 +1037,7 @@ export function revalidateContainedPaths(
             }
             continue
         }
-        const result = containedPath(
-            cwd,
-            requirement.path,
-            requirement.requireFile,
-        )
+        const result = containedPath(cwd, candidate, requirement.requireFile)
         if (!result.path) {
             return (
                 "declared node path failed immediate pre-spawn containment: " +
