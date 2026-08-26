@@ -556,6 +556,137 @@ describe("declared verification policy", () => {
         })
     })
 
+    it("accepts a workspace selector positioned between run and the script name", async () => {
+        await withTempDir("baro-verify-declared-workspace-preselect-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "root",
+                    private: true,
+                    workspaces: ["packages/*"],
+                }),
+            )
+            mkdirSync(join(dir, "packages", "pkg"), { recursive: true })
+            writeFileSync(
+                join(dir, "packages", "pkg", "package.json"),
+                JSON.stringify({
+                    name: "pkg",
+                    scripts: { typecheck: "tsc --noEmit", test: "vitest run" },
+                }),
+            )
+            const workspace = join(dir, "packages", "pkg")
+            const managers = [
+                { manager: "npm" as const },
+                { manager: "npm" as const, cwd: workspace },
+            ]
+            const [
+                shortFlag,
+                longFlag,
+                longFlagEquals,
+                focused,
+                trailingRegression,
+                testOperation,
+            ] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: "npm run -w pkg typecheck" },
+                    {
+                        storyId: "S1",
+                        command: "npm run --workspace pkg typecheck",
+                    },
+                    {
+                        storyId: "S1",
+                        command: "npm run --workspace=pkg typecheck",
+                    },
+                    {
+                        storyId: "S1",
+                        command: "npm run -w pkg typecheck -- test/x.test.ts",
+                    },
+                    { storyId: "S1", command: "npm run typecheck -w pkg" },
+                    { storyId: "S1", command: "npm test -w pkg" },
+                ],
+                managers,
+            )
+
+            // Pre-script, long-flag, and trailing-script selector positions
+            // must all emit byte-identical argv; the selector never reaches
+            // argv regardless of where it was declared.
+            for (
+                const spec of [shortFlag, longFlag, longFlagEquals, trailingRegression]
+            ) {
+                assert.equal(spec?.incompleteReason, undefined)
+                assert.equal(spec?.tool, "npm")
+                assert.deepEqual(spec?.args, ["run", "typecheck"])
+                assert.equal(spec?.cwd, workspace)
+            }
+
+            assert.equal(focused?.incompleteReason, undefined)
+            assert.equal(focused?.tool, "npm")
+            assert.deepEqual(focused?.args, [
+                "run",
+                "typecheck",
+                "--",
+                "test/x.test.ts",
+            ])
+            assert.equal(focused?.cwd, workspace)
+
+            // `npm test -w pkg` regression: the `test` operation's selector
+            // handling is untouched by the `run` reordering.
+            assert.equal(testOperation?.incompleteReason, undefined)
+            assert.equal(testOperation?.tool, "npm")
+            assert.deepEqual(testOperation?.args, ["run", "test"])
+            assert.equal(testOperation?.cwd, workspace)
+        })
+    })
+
+    it("rejects malformed workspace selectors positioned before the script name", async () => {
+        await withTempDir(
+            "baro-verify-declared-workspace-preselect-reject-",
+            async (dir) => {
+                const managers = [{ manager: "npm" as const }]
+                const [duplicate, requiresNameDash, requiresNameNoScript, postSeparator] =
+                    translateDeclaredTests(
+                        dir,
+                        [
+                            {
+                                storyId: "S1",
+                                command: "npm run -w pkg typecheck -w pkg2",
+                            },
+                            { storyId: "S1", command: "npm run -w -- typecheck" },
+                            { storyId: "S1", command: "npm run -w typecheck" },
+                            {
+                                storyId: "S1",
+                                command: "npm run typecheck -- -w pkg",
+                            },
+                        ],
+                        managers,
+                    )
+                assert.equal(
+                    duplicate?.incompleteReason,
+                    "package tests accept at most one workspace selector",
+                )
+                assert.equal(
+                    requiresNameDash?.incompleteReason,
+                    "workspace selector requires a name",
+                )
+                // extractWorkspaceSelector would otherwise greedily consume the
+                // sole remaining token as the workspace NAME here (it does not
+                // start with '-'), leaving no script token; `run` always needs
+                // both a name and a script, so translatePackage treats a
+                // selector that swallows the only remaining token the same as
+                // a selector with no name at all instead of guessing.
+                assert.equal(
+                    requiresNameNoScript?.incompleteReason,
+                    "workspace selector requires a name",
+                )
+                assert.equal(
+                    postSeparator?.incompleteReason,
+                    "workspace selector must appear before '--'",
+                )
+            },
+        )
+    })
+
     it("requires a root workspaces field before any selector resolves", async () => {
         await withTempDir("baro-verify-declared-workspace-", async (dir) => {
             writeFileSync(

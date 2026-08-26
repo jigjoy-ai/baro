@@ -1,0 +1,6 @@
+# ADR-0006: Scrub inherited BARO_RUN_ID once at the top of main, before any run id is issued
+
+**Status:** Accepted
+**Context:** BARO_RUN_ID is set process-globally (main.rs:1012-1019, 3983-3994) and inherited by every child; running baro from inside a baro-driven shell therefore leaks the parent run's id into billing/session lanes.
+**Decision:** In main.rs, as the first statement of the run entrypoint (before the raw-argv command dispatch at :380 and before cli::cli::parse() at :394), call `std::env::remove_var("BARO_RUN_ID")`. Nothing else changes: main.rs:1012-1019 and main.rs:3983-3994 keep their existing 'reuse if already set, otherwise generate' logic, which now always sees an unset variable at startup and still propagates the run's own id to every child it spawns. Do not add a flag or env opt-out. Cover the decision with a pure helper in main.rs used by the scrub site: `fn scrubbed_launch_env(env: &BTreeMap<String,String>) -> BTreeMap<String,String>` that removes only the BARO_RUN_ID key, with an inline test asserting BARO_RUN_ID is removed and neighbouring BARO_* keys survive.
+**Consequences:** Any workflow that intentionally pre-seeded BARO_RUN_ID for the top-level process loses that ability; child propagation is unaffected because it happens after the id is issued.

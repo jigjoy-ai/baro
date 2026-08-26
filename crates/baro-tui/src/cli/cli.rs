@@ -9,11 +9,23 @@ use crate::cli::session::SessionLock;
     name = "baro",
     version,
     about = "AI-powered project execution",
-    after_help = "Issues: https://github.com/jigjoy-ai/baro/issues\nTwitter: @lotus_sbc"
+    after_help = "Run commands (handled before flag parsing):\n  baro watch <run-id>            follow a live run and print milestone events\n  baro logs <run-id> [--follow]  print (or tail) a run's log file\n\n--resume never re-plans; --continue always re-plans.\n\nIssues: https://github.com/jigjoy-ai/baro/issues\nTwitter: @lotus_sbc"
 )]
 pub struct Cli {
     /// Project goal (if omitted, shows welcome screen)
     pub goal: Option<String>,
+
+    /// Read the goal text from a file (mutually exclusive with the positional goal)
+    #[arg(long = "goal-file", value_name = "PATH")]
+    pub goal_file: Option<String>,
+
+    /// Run in the background and print the run id immediately
+    #[arg(long)]
+    pub detach: bool,
+
+    /// Per-command shell budget in seconds for story bash tools (overrides BASH_DEFAULT_TIMEOUT_MS when both are set)
+    #[arg(long = "shell-budget", value_name = "SECONDS", value_parser = parse_shell_budget)]
+    pub shell_budget: Option<u64>,
 
     /// Planner to use
     #[arg(long, default_value="claude", value_parser = ["claude", "openai"])]
@@ -230,6 +242,38 @@ pub struct Cli {
     pub confirm_mode: bool,
 }
 
+fn parse_shell_budget(raw: &str) -> Result<u64, String> {
+    let value = raw
+        .parse::<u64>()
+        .map_err(|_| "must be a whole number of seconds".to_string())?;
+    if value == 0 {
+        return Err("--shell-budget must be greater than 0".to_string());
+    }
+    Ok(value)
+}
+
+/// Resolve the goal text from the positional argument or --goal-file.
+/// `read` is injected so the rules stay testable without touching the filesystem.
+pub fn resolve_goal(
+    positional: Option<&str>,
+    goal_file: Option<&str>,
+    read: impl FnOnce(&str) -> std::io::Result<String>,
+) -> Result<Option<String>, String> {
+    match (positional, goal_file) {
+        (Some(_), Some(_)) => Err(GOAL_SOURCE_CONFLICT.to_string()),
+        (_, Some(path)) => {
+            let text = read(path).map_err(|err| format!("--goal-file '{path}': {err}"))?;
+            if text.trim().is_empty() {
+                return Err(format!("--goal-file '{path}' is empty"));
+            }
+            Ok(Some(text.trim_end_matches(['\n', '\r']).to_string()))
+        }
+        (positional, None) => Ok(positional.map(str::to_string)),
+    }
+}
+
+const GOAL_SOURCE_CONFLICT: &str = "--goal-file and the positional goal argument are mutually exclusive; pass exactly one (--goal-file <path> or the positional goal)";
+
 fn parse_probability(raw: &str) -> Result<f64, String> {
     let value = raw
         .parse::<f64>()
@@ -254,7 +298,12 @@ fn parse_non_negative_f64(raw: &str) -> Result<f64, String> {
 
 pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {
     let mut cmd = Cli::command();
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    cli.goal = resolve_goal(cli.goal.as_deref(), cli.goal_file.as_deref(), |path| {
+        fs::read_to_string(path)
+    })
+    .map_err(|msg| cmd.error(ErrorKind::ValueValidation, msg))?;
 
     let cwd = fs::canonicalize(&cli.cwd)?;
 
@@ -272,4 +321,117 @@ pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {
     };
 
     Ok((cli, lock))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unreachable_read(_path: &str) -> std::io::Result<String> {
+        panic!("goal file must not be read");
+    }
+
+    #[test]
+    fn resolve_goal_rejects_both_sources_naming_both() {
+        let err = resolve_goal(Some("ship it"), Some("goal.md"), unreachable_read).unwrap_err();
+        assert_eq!(
+            err,
+            "--goal-file and the positional goal argument are mutually exclusive; pass exactly one (--goal-file <path> or the positional goal)"
+        );
+    }
+
+    #[test]
+    fn resolve_goal_reads_file_and_trims_trailing_newlines() {
+        let body = "line with 'quotes' and $vars\n".repeat(200);
+        assert!(body.len() > 4096);
+        let expected = body.trim_end_matches('\n').to_string();
+        let resolved = resolve_goal(None, Some("goal.md"), |path| {
+            assert_eq!(path, "goal.md");
+            Ok(format!("{body}\n\n"))
+        })
+        .unwrap();
+        assert_eq!(resolved, Some(expected));
+    }
+
+    #[test]
+    fn resolve_goal_rejects_empty_file() {
+        let err = resolve_goal(None, Some("goal.md"), |_| Ok("  \n\t\n".to_string())).unwrap_err();
+        assert_eq!(err, "--goal-file 'goal.md' is empty");
+    }
+
+    #[test]
+    fn resolve_goal_surfaces_read_error() {
+        let err = resolve_goal(None, Some("missing.md"), |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such file",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(err, "--goal-file 'missing.md': no such file");
+    }
+
+    #[test]
+    fn resolve_goal_passes_positional_through_and_defaults_to_none() {
+        assert_eq!(
+            resolve_goal(Some("ship it"), None, unreachable_read).unwrap(),
+            Some("ship it".to_string())
+        );
+        assert_eq!(resolve_goal(None, None, unreachable_read).unwrap(), None);
+    }
+
+    #[test]
+    fn shell_budget_parses_seconds_and_rejects_zero() {
+        let cli = Cli::try_parse_from(["baro", "--shell-budget", "120", "goal"]).unwrap();
+        assert_eq!(cli.shell_budget, Some(120));
+        assert_eq!(
+            Cli::try_parse_from(["baro", "goal"]).unwrap().shell_budget,
+            None
+        );
+
+        let err = match Cli::try_parse_from(["baro", "--shell-budget", "0", "goal"]) {
+            Ok(_) => panic!("--shell-budget 0 must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("--shell-budget must be greater than 0"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn detach_combines_with_resume_and_continue() {
+        let resumed = Cli::try_parse_from(["baro", "--detach", "--resume"]).unwrap();
+        assert!(resumed.detach && resumed.resume);
+
+        let continued = Cli::try_parse_from(["baro", "--detach", "--continue"]).unwrap();
+        assert!(continued.detach && continued.continue_run);
+
+        let with_goal_file =
+            Cli::try_parse_from(["baro", "--detach", "--goal-file", "goal.md"]).unwrap();
+        assert!(with_goal_file.detach);
+        assert_eq!(with_goal_file.goal_file.as_deref(), Some("goal.md"));
+    }
+
+    #[test]
+    fn long_help_documents_precedence_and_replanning_rules() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(
+            help.contains(
+                "Per-command shell budget in seconds for story bash tools (overrides BASH_DEFAULT_TIMEOUT_MS when both are set)"
+            ),
+            "missing --shell-budget precedence line:\n{help}"
+        );
+        assert!(
+            help.contains("--resume never re-plans; --continue always re-plans."),
+            "missing re-planning rule:\n{help}"
+        );
+        assert!(help.contains("baro watch <run-id>"), "missing watch command");
+        assert!(help.contains("baro logs <run-id> [--follow]"), "missing logs command");
+        assert!(
+            help.contains("Read the goal text from a file (mutually exclusive with the positional goal)"),
+            "missing --goal-file help"
+        );
+    }
 }

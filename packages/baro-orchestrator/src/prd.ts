@@ -45,6 +45,12 @@ export interface PrdStory {
     completedAt: string | null
     durationSecs: number | null
     model?: string
+    /** Host-owned integration outcome, written mid-run as each story settles
+     * so an interrupted run can be resumed from disk instead of re-executed. */
+    mergeStatus?: "merged" | "failed"
+    /** Run-branch HEAD after this story merged back; absent when the sha
+     * could not be read or the run has no git. */
+    mergeCommitSha?: string
 }
 
 /**
@@ -71,6 +77,8 @@ export const PRD_STORY_FIELDS = [
     "completedAt",
     "durationSecs",
     "model",
+    "mergeStatus",
+    "mergeCommitSha",
 ] as const satisfies readonly (keyof PrdStory)[]
 
 // Compile-time exhaustiveness: adding a PrdStory field without listing it
@@ -746,6 +754,14 @@ function normalizeStory(
     const durationSecs =
         typeof input.durationSecs === "number" ? input.durationSecs : null
     const model = typeof input.model === "string" ? input.model : undefined
+    const mergeStatus =
+        input.mergeStatus === "merged" || input.mergeStatus === "failed"
+            ? input.mergeStatus
+            : undefined
+    const mergeCommitSha =
+        typeof input.mergeCommitSha === "string"
+            ? input.mergeCommitSha
+            : undefined
     return {
         id,
         priority,
@@ -761,6 +777,8 @@ function normalizeStory(
         completedAt,
         durationSecs,
         model,
+        ...(mergeStatus ? { mergeStatus } : {}),
+        ...(mergeCommitSha ? { mergeCommitSha } : {}),
     }
 }
 

@@ -124,6 +124,9 @@ export interface StoryMergedData {
     mode: "worktree" | "shared-tree"
     runId?: string
     leaseId?: string
+    /** Run-branch HEAD after the merge landed; best-effort, so consumers must
+     * tolerate its absence (no git, or the sha could not be read). */
+    mergeCommitSha?: string
 }
 
 export const StoryMerged = defineSemanticEvent<StoryMergedData>("story_merged")
