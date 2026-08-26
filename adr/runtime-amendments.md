@@ -11,42 +11,57 @@
 ```json
 {
   "graphVersion": 2,
-  "proposalId": "run-progressive-2a69550a87d46bc5:planner:738c47057321ca55ec3c76f08352a44e89fcf20e311628fd6c45c27d473d18c4",
-  "sourceStoryId": "planner:planning-2a69550a87d46bc5-1",
-  "reason": "progressive planner admitted fragment verification-gaps-59-62-triple",
-  "exactMutationSha256": "156f50fa389ef919253c8a2b61df8b9ab9c83382052f0d226e1c63d2914ac8fc",
+  "proposalId": "run-progressive-00b6529e76b14e1a:planner:e9b90da3bcf11114a99200d7bfc75f949e5e0bafe3958b4ca3a26d4b2a8d9cbd",
+  "sourceStoryId": "planner:planning-00b6529e76b14e1a-1",
+  "reason": "progressive planner admitted fragment php-declared-routes-1",
+  "exactMutationSha256": "f64c44fb297dda5de7407addde06902c4ad3725e6bf493b5b7c0edac6a508a33",
   "mutationSummary": {
     "addedStories": [
       {
         "id": "S1",
-        "title": "Accept literal '--import tsx' loader prefix in translateNode",
+        "title": "Add composer, vendor/bin/phpunit and ddev exec declared-test routes",
         "dependsOn": [],
         "goalInvariantIds": [
           "G-A1",
-          "G-C1",
-          "G-C2",
-          "G-C4",
-          "G-C5",
-          "G-C6"
+          "G-A2",
+          "G-A3",
+          "G-A4",
+          "G-A5",
+          "G-A6",
+          "G-A7",
+          "G-A8",
+          {
+            "omittedItems": 15
+          }
         ]
-      },
+      }
+    ],
+    "removedStoryIds": [],
+    "modifiedDeps": {}
+  }
+}
+```
+
+## Graph version 3
+
+```json
+{
+  "graphVersion": 3,
+  "proposalId": "run-progressive-00b6529e76b14e1a:planner:d38f50b6eda7782433630b82a2374cc29c0f095e7a1c0cebd07231a295a3761f",
+  "sourceStoryId": "planner:planning-00b6529e76b14e1a-1",
+  "reason": "progressive planner admitted fragment final-d2c3d107d43abd0ccfe7ba6eaed37fd3426d11b85fae43bd03446a431969b518",
+  "exactMutationSha256": "45658c453499c68c468d38129b1577add3175e1c68c1a82fbdde45f304b98bd0",
+  "mutationSummary": {
+    "addedStories": [
       {
         "id": "S2",
-        "title": "Carry retry evidence to the TUI wire via one exported mapper",
+        "title": "Document the composer, phpunit and ddev exec routes in the allowlist paragraph",
         "dependsOn": [],
         "goalInvariantIds": [
-          "G-A2",
-          "G-C4"
-        ]
-      },
-      {
-        "id": "S3",
-        "title": "Make the shared-budget architect test deadline-dominant by construction",
-        "dependsOn": [],
-        "goalInvariantIds": [
-          "G-A3",
-          "G-C3",
-          "G-C4"
+          "G-A9",
+          "G-C12",
+          "G-C14",
+          "G-C15"
         ]
       }
     ],

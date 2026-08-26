@@ -1,0 +1,11 @@
+# ADR-0004: Add vendor/bin/phpunit as a contained-binary route with a closed argument grammar
+
+**Status:** Accepted
+**Context:** translateNode is the contained-binary precedent: every path argument goes through containedPath() and is re-checked pre-spawn via containedPaths. phpunit needs three argument forms and must reject everything else with an enumerating reason.
+**Decision:** `translatePhpunit(cwd, requirement, parsed)` fires only when parsed.tokens[0] === "vendor/bin/phpunit" exactly (no basename match, no ./ prefix variant, no vendor/bin/phpunit.phar). Resolve the binary with `containedPath(cwd, "vendor/bin/phpunit", true)`; if `.path` is absent → incomplete with reason "declared phpunit test requires a contained vendor/bin/phpunit executable" when contained.reason is undefined, otherwise pass contained.reason through unchanged. Then walk parsed.tokens.slice(1) left to right:
+- `--testsuite` → next token required, must match SAFE_TOKEN, emitted as two args; missing next token → "phpunit --testsuite requires a suite name"
+- `-c` or `--configuration` → next token required, resolved with containedPath(cwd, value, true); missing next token → "phpunit -c/--configuration requires a configuration file"; containment failure → contained.reason
+- a token that does not start with `-` → bare test path, resolved with containedPath(cwd, value, false); containment failure → contained.reason
+- anything else (any other flag, `--testsuite=x`, `-c=x`, `--`) → `phpunit arguments allow only --testsuite <name>, -c/--configuration <file>, and contained test paths`
+On success return `{ label: ["vendor/bin/phpunit", ...parsed.tokens.slice(1)].join(" "), tool: <resolved absolute binary path>, args: <the arguments exactly as declared, with path arguments replaced by their resolved absolute containedPath values>, containedPaths: [ {path: <binary abs>, requireFile: true}, ...{path: <config abs>, requireFile: true}, ...{path: <test path abs>, requireFile: false} ] }` in declaration order, binary first.
+**Consequences:** Every path the process can touch is revalidated pre-spawn by revalidateContainedPaths, and a vanished file downgrades the command to skipped rather than failing the run. Flag grammar is closed, so pest/codeception and phpunit flags such as --filter are rejected with the enumerating reason, matching the non-goals.
