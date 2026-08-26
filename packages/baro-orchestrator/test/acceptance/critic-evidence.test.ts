@@ -1837,6 +1837,49 @@ describe("Critic altitude advisory evidence", () => {
         })
     })
 
+    it("skips the measurement for every git config that can run a program", async () => {
+        // core.fsmonitor is the key with a proven execution path; hooksPath and
+        // diff.external are contained by the same gate, so each is pinned here
+        // rather than left to the one key a regression would happen to hit.
+        for (const key of ["core.hooksPath", "diff.external"]) {
+            await withTempDir(`baro-critic-altitude-${key}-`, async (repo) => {
+                const baseSha = commitBaseline(repo, {
+                    "src/big.ts": body("a", 1600),
+                })
+                writeFileSync(
+                    join(repo, "src/big.ts"),
+                    body("a", 1600) + body("b", 100),
+                )
+                git(repo, "config", key, join(repo, "program.sh"))
+
+                const events: ActivityEvent[] = []
+                const [prompt] = await prepare(repo, baseSha, events)
+                assert.ok(prompt, key)
+
+                assert.ok(!prompt.includes(ALTITUDE_HEADER), key)
+                assert.equal(events.length, 0, key)
+            })
+        }
+    })
+
+    it("still measures a repository that only disables the helper", async () => {
+        await withTempDir("baro-critic-altitude-false-", async (repo) => {
+            const baseSha = commitBaseline(repo, { "src/big.ts": body("a", 1600) })
+            writeFileSync(join(repo, "src/big.ts"), body("a", 1600) + body("b", 100))
+            // "false" is git's own way of turning the helper off, so it must not
+            // read as "a program is configured" and cost the story its section.
+            git(repo, "config", "core.fsmonitor", "false")
+
+            const events: ActivityEvent[] = []
+            const [prompt] = await prepare(repo, baseSha, events)
+            assert.ok(prompt)
+
+            assert.ok(prompt.includes(ALTITUDE_HEADER))
+            assert.match(prompt, FINDING_LINE)
+            assert.equal(events.length, 1)
+        })
+    })
+
     it("leaves the verdict schema and altitude-free prompts unchanged", async () => {
         const shapes = verdictSystemPrompt()
             .split("\n")
