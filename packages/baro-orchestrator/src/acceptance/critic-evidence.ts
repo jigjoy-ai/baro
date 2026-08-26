@@ -19,6 +19,13 @@ import {
     runRepositoryCommand,
 } from "../integration/repository-command.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
+import { emit } from "../tui-protocol.js"
+import { collectAltitudeFindings } from "./altitude-probe.js"
+import {
+    altitudeActivityText,
+    renderAltitudeEvidenceSection,
+    type AltitudeFinding,
+} from "./altitude.js"
 
 const DEFAULT_GIT_TIMEOUT_MS = 10_000
 const DEFAULT_MAX_DIFF_CHARS = 32_000
@@ -94,6 +101,13 @@ export interface CriticEvidenceSource {
     hostRunsWholeTreeVerification?: boolean
     gitTimeoutMs?: number
     maxDiffChars?: number
+    /** Injection point for the activity feed; production uses tui-protocol emit. */
+    readonly emitActivity?: (event: {
+        type: "activity"
+        id: string
+        kind: string
+        text: string
+    }) => void
 }
 
 export type CriticCommandFreshness = "fresh" | "stale" | "unverifiable"
@@ -863,6 +877,7 @@ export async function prepareCriticEvaluation(
     const repositoryEvidence = await repositoryEvidenceFor(agentId, source)
     const decisionDocument = await decisionDocumentFor(source)
     const publishedNotes = await publishedNotesFor(agentId, source)
+    const altitude = await altitudeEvidenceFor(agentId, source)
     const afterFingerprint = await repositoryFingerprintFor(agentId, source)
     const readinessIssues = source
         ? evidenceReadinessIssues(commandEvidence, repositoryEvidence)
@@ -893,10 +908,22 @@ export async function prepareCriticEvaluation(
             { ordinal: index + 1, total: segments.length, offset },
             publishedNotes,
             source?.hostRunsWholeTreeVerification === true,
+            altitude.section,
         )
         offset += segmentCriteria.length
         return prompt
     })
+    // Once per story, not once per segment: a segmented contract still
+    // describes a single set of grown files.
+    if (altitude.activity !== null) {
+        const emitActivity = source?.emitActivity ?? emit
+        emitActivity({
+            type: "activity",
+            id: agentId,
+            kind: "warn",
+            text: altitude.activity,
+        })
+    }
     return {
         prompts,
         status: issues.length > 0 ? "inconclusive" : "ready",
@@ -981,6 +1008,7 @@ export function buildEvalPrompt(
     segment?: AcceptanceContractSegment,
     publishedNotes: readonly string[] = [],
     hostRunsWholeTreeVerification = false,
+    altitudeSection: string | null = null,
 ): string {
     const criteriaList = renderCompleteAcceptanceContract(
         criteria,
@@ -1044,6 +1072,11 @@ export function buildEvalPrompt(
               )
             : "(repository evidence unavailable; do not infer changes from the agent output)",
         "",
+        // Baro-generated advisory text: neither redacted nor bounded, because
+        // truncating it would silently mangle a section the story never wrote.
+        ...(altitudeSection && altitudeSection.trim() !== ""
+            ? [altitudeSection, ""]
+            : []),
         "## Baro-captured run artifacts this story published",
         publishedNotes.length > 0
             ? boundText(
@@ -1451,6 +1484,80 @@ async function repositoryEvidenceFor(
     } catch (error) {
         return `Repository evidence collection failed closed: ${errorMessage(error)}`
     }
+}
+
+/**
+ * Advisory measurement: it fails closed to no findings so a probe failure can
+ * never turn into a critic verdict.
+ */
+async function altitudeEvidenceFor(
+    agentId: string,
+    source: CriticEvidenceSource | undefined,
+): Promise<{ section: string | null; activity: string | null }> {
+    if (!source) return { section: null, activity: null }
+    try {
+        const target = await source.resolveRepositoryTarget(agentId)
+        if (!target) return { section: null, activity: null }
+        const timeoutMs = source.gitTimeoutMs ?? DEFAULT_GIT_TIMEOUT_MS
+        const { directory, base } = await validatedRepositoryTarget(
+            target,
+            timeoutMs,
+        )
+        if (await repositoryConfiguresGitPrograms(directory, timeoutMs)) {
+            return { section: null, activity: null }
+        }
+        const findings: AltitudeFinding[] = await collectAltitudeFindings({
+            cwd: directory,
+            baseSha: base,
+            timeoutMs,
+        })
+        return {
+            section: renderAltitudeEvidenceSection(findings),
+            activity: altitudeActivityText(findings),
+        }
+    } catch {
+        return { section: null, activity: null }
+    }
+}
+
+/**
+ * The altitude probe owns its own git I/O and issues it without the hardening
+ * runGit applies below, so a repository-configured helper executes while it
+ * measures: a core.fsmonitor script left in a story worktree runs the moment
+ * collectAltitudeFindings does. An advisory line count is never worth running
+ * repository-controlled programs from the evaluator, so the measurement is
+ * skipped whenever the repository configures git to execute one.
+ *
+ * Containment here rather than hardening in the probe is deliberate: the probe
+ * module is read-only for this goal, and AltitudeProbeOptions exposes no env or
+ * argument hook, so the caller's only lever is declining to measure. The cost is
+ * that such a repository gets no advisory section even when findings exist —
+ * the right trade for a measurement that may never fail a criterion.
+ */
+const PROGRAM_EXECUTING_GIT_CONFIG = [
+    "core.fsmonitor",
+    "core.hooksPath",
+    "diff.external",
+] as const
+
+async function repositoryConfiguresGitPrograms(
+    directory: string,
+    timeoutMs: number,
+): Promise<boolean> {
+    for (const key of PROGRAM_EXECUTING_GIT_CONFIG) {
+        // --local, because runGit's own neutralizing -c values live in
+        // command-line scope and would otherwise mask the repository's value.
+        const configured = await runGit(
+            directory,
+            ["config", "--local", "--get", key],
+            timeoutMs,
+        )
+        const value = configured.stdout.trim()
+        if (configured.exitCode === 0 && value !== "" && value !== "false") {
+            return true
+        }
+    }
+    return false
 }
 
 async function collectRepositoryEvidence(
