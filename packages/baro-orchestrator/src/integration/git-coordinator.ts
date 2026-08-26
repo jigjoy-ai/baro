@@ -308,6 +308,19 @@ export class GitCoordinator extends SerializedObserver {
         }
     }
 
+    /** Best-effort run-branch HEAD for a landed merge. A sha we cannot read is
+     * not a merge failure, so the field is simply omitted. */
+    private async mergeCommitShaField(
+        cwd: string,
+    ): Promise<{ mergeCommitSha?: string }> {
+        try {
+            const sha = await getHeadSha(cwd)
+            return sha ? { mergeCommitSha: sha } : {}
+        } catch {
+            return {}
+        }
+    }
+
     private log(storyId: string, line: string): void {
         if (this.opts.emitTui ?? true) {
             emit({ type: "story_log", id: storyId, line })
@@ -437,7 +450,12 @@ export class GitCoordinator extends SerializedObserver {
                     log(`[git] merged worktree cleanup deferred: ${(error as Error)?.message ?? String(error)}`)
                 }
                 this.emitBus(
-                    StoryMerged.create({ storyId, mode: "worktree", ...correlation }),
+                    StoryMerged.create({
+                        storyId,
+                        mode: "worktree",
+                        ...correlation,
+                        ...(await this.mergeCommitShaField(cwd)),
+                    }),
                 )
                 if (emitTui) {
                     emit({ type: "push_status", id: storyId, success: true, error: null })
@@ -461,7 +479,12 @@ export class GitCoordinator extends SerializedObserver {
             await safePullRebase(cwd, log, gitGate)
         }
         this.emitBus(
-            StoryMerged.create({ storyId, mode: "shared-tree", ...correlation }),
+            StoryMerged.create({
+                storyId,
+                mode: "shared-tree",
+                ...correlation,
+                ...(await this.mergeCommitShaField(cwd)),
+            }),
         )
         if (!(this.opts.push ?? true)) return
         this.storyPushes.push(

@@ -62,6 +62,7 @@ interface CliArgs {
     model?: string
     noGit: boolean
     continueRun: boolean
+    resume: boolean
     noTuiEvents: boolean
     auditLog?: string
     withCritic: boolean
@@ -100,6 +101,7 @@ function parseArgs(argv: string[]): CliArgs {
         localOnly: false,
         noGit: false,
         continueRun: false,
+        resume: false,
         noTuiEvents: false,
         withCritic: false,
         noLibrarian: false,
@@ -191,6 +193,9 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--continue":
                 args.continueRun = true
+                break
+            case "--resume":
+                args.resume = true
                 break
             case "--no-tui-events":
                 args.noTuiEvents = true
@@ -798,6 +803,7 @@ async function main(): Promise<void> {
         emitTuiEvents: !args.noTuiEvents,
         withGit: args.noGit ? false : undefined,
         continueRun: args.continueRun || process.env.BARO_CONTINUE === "1",
+        resumeRun: args.resume || process.env.BARO_RESUME === "1",
         auditLogPath: args.auditLog,
         withCritic: args.withCritic,
         criticModel: args.criticModel,
