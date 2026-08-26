@@ -40,7 +40,9 @@ const SAFE_CARGO_VALUE = /^[A-Za-z0-9_+.-]+(?:,[A-Za-z0-9_+.-]+)*$/
 const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/
 
 interface PackageManifest {
+    name?: unknown
     scripts?: Record<string, unknown>
+    workspaces?: unknown
 }
 
 interface DeclaredTokens {
@@ -331,6 +333,121 @@ function trustedScriptAlias(
     return null
 }
 
+interface WorkspaceSelector {
+    readonly name?: string
+    /** The selector exactly as declared, so the label keeps its spelling. */
+    readonly declared?: readonly string[]
+    readonly rest: readonly string[]
+    readonly reason?: string
+}
+
+// Runs before the '--' split so the surviving tokens reach the unchanged
+// focused-argument policy in their original order.
+function extractWorkspaceSelector(
+    rest: readonly string[],
+): WorkspaceSelector {
+    const kept: string[] = []
+    let name: string | undefined
+    let declared: readonly string[] | undefined
+    let index = 0
+    for (; index < rest.length; index += 1) {
+        const token = rest[index]!
+        if (token === "--") break
+        const equalsValue = token.startsWith("--workspace=")
+            ? token.slice("--workspace=".length)
+            : null
+        if (token !== "-w" && token !== "--workspace" && equalsValue === null) {
+            kept.push(token)
+            continue
+        }
+        if (declared) {
+            return {
+                rest,
+                reason: "package tests accept at most one workspace selector",
+            }
+        }
+        if (equalsValue !== null) {
+            if (equalsValue === "" || equalsValue.startsWith("-")) {
+                return { rest, reason: "workspace selector requires a name" }
+            }
+            name = equalsValue
+            declared = [token]
+            continue
+        }
+        const value = rest[index + 1]
+        if (value === undefined || value.startsWith("-")) {
+            return { rest, reason: "workspace selector requires a name" }
+        }
+        name = value
+        declared = [token, value]
+        index += 1
+    }
+    for (; index < rest.length; index += 1) {
+        const token = rest[index]!
+        if (
+            token === "-w" ||
+            token === "--workspace" ||
+            token.startsWith("--workspace=")
+        ) {
+            return {
+                rest,
+                reason: "workspace selector must appear before '--'",
+            }
+        }
+        kept.push(token)
+    }
+    if (!declared) return { rest }
+    return { name, declared, rest: kept }
+}
+
+interface WorkspaceAuthority {
+    readonly authority?: VerifyJavaScriptPackageManager
+    readonly reason?: string
+}
+
+// The plan carries no workspace names, only cwds, so a declared name is
+// matched against the repo-relative directory first and the workspace
+// manifest's own `name` second. Globs are never expanded.
+function resolveWorkspaceAuthority(
+    cwd: string,
+    name: string,
+    managers: readonly VerifyJavaScriptPackageManager[],
+): WorkspaceAuthority {
+    const declaredWorkspaces = readManifest(
+        join(cwd, "package.json"),
+    )?.workspaces
+    const packages = (declaredWorkspaces as { packages?: unknown } | undefined)
+        ?.packages
+    if (!Array.isArray(declaredWorkspaces) && !Array.isArray(packages)) {
+        return {
+            reason:
+                "workspace selector requires a 'workspaces' field in the root package.json",
+        }
+    }
+    const candidates = managers.filter((manager) => manager.cwd !== undefined)
+    const repoRelative = (manager: VerifyJavaScriptPackageManager): string =>
+        relative(resolve(cwd), resolve(manager.cwd!)).replace(/\\/g, "/")
+    const wanted = name
+        .replace(/\\/g, "/")
+        .replace(/^\.\//, "")
+        .replace(/\/+$/, "")
+    const byPath = candidates.find(
+        (manager) => repoRelative(manager) === wanted,
+    )
+    if (byPath) return { authority: byPath }
+    const byName = candidates.find(
+        (manager) =>
+            readManifest(join(manager.cwd!, "package.json"))?.name === name,
+    )
+    if (byName) return { authority: byName }
+    const known = [...new Set(candidates.map(repoRelative))].sort()
+    return {
+        reason: known.length > 0
+            ? `unknown workspace '${name}': known workspaces are ${known.join(", ")}`
+            : `unknown workspace '${name}': no workspace packages were resolved`,
+    }
+}
+
 function translatePackage(
     cwd: string,
     requirement: DeclaredTestRequirement,
@@ -343,7 +460,9 @@ function translatePackage(
         : operation === "run" && maybeScript
           ? maybeScript
           : null
-    const rest = operation === "test" ? parsed.tokens.slice(2) : remaining
+    const declaredRest = operation === "test"
+        ? parsed.tokens.slice(2)
+        : remaining
     if (!script) {
         return incomplete(
             requirement,
@@ -353,6 +472,9 @@ function translatePackage(
     if (!SAFE_SCRIPT_NAME.test(script)) {
         return incomplete(requirement, `unsafe package script name '${script}'`)
     }
+    const selector = extractWorkspaceSelector(declaredRest)
+    if (selector.reason) return incomplete(requirement, selector.reason)
+    const rest = selector.rest
 
     let trailingArgs: readonly string[] = []
     let focusedArgs: readonly string[] = []
@@ -373,18 +495,37 @@ function translatePackage(
         if (focusedArgs.length > 0) trailingArgs = ["--", ...focusedArgs]
     }
 
-    const manifestPath = join(cwd, "package.json")
+    let workspace: VerifyJavaScriptPackageManager | undefined
+    if (selector.name !== undefined) {
+        const resolved = resolveWorkspaceAuthority(
+            cwd,
+            selector.name,
+            managers,
+        )
+        if (!resolved.authority) {
+            return incomplete(requirement, resolved.reason!)
+        }
+        workspace = resolved.authority
+    }
+
+    // A workspace selector moves every manifest question to that package:
+    // the script it declares is the one the command will run.
+    const manifestPath = join(workspace?.cwd ?? cwd, "package.json")
     const manifest = existsSync(manifestPath) ? readManifest(manifestPath) : null
     if (!manifest) {
         return incomplete(
             requirement,
-            "declared package test requires a valid root package.json",
+            workspace
+                ? `declared package test requires a valid package.json in workspace '${selector.name}'`
+                : "declared package test requires a valid root package.json",
         )
     }
     if (typeof manifest.scripts?.[script] !== "string") {
         return incomplete(
             requirement,
-            `package.json does not declare script '${script}'`,
+            workspace
+                ? `workspace '${selector.name}' package.json does not declare script '${script}'`
+                : `package.json does not declare script '${script}'`,
         )
     }
     if (!TRUSTED_PACKAGE_SCRIPTS.has(script)) {
@@ -393,7 +534,8 @@ function translatePackage(
             `custom package script '${script}' is not trusted by the baseline verifier policy`,
         )
     }
-    const authority = managers.find((manager) => manager.cwd === undefined)
+    const authority =
+        workspace ?? managers.find((manager) => manager.cwd === undefined)
     if (!authority) {
         return incomplete(
             requirement,
@@ -402,8 +544,15 @@ function translatePackage(
     }
     const containedPaths = focusedArgs.map(focusedPathRequirement)
     return {
-        label: [authority.manager, "run", script, ...trailingArgs].join(" "),
+        label: [
+            authority.manager,
+            "run",
+            script,
+            ...(selector.declared ?? []),
+            ...trailingArgs,
+        ].join(" "),
         ...packageCommand(authority, script, trailingArgs),
+        ...(workspace ? { cwd: workspace.cwd } : {}),
         ...(containedPaths.length > 0 ? { containedPaths } : {}),
         ...(script === "test" &&
         exactRstestScript(manifest.scripts?.test) &&
@@ -889,10 +1038,10 @@ function translatePhpunit(
     }
     const rest = parsed.tokens.slice(1)
     const args: string[] = []
-    // Every path this command can touch is emitted absolute — the binary
-    // because cross-spawn would otherwise resolve it through PATH, the
-    // arguments so the spec stays independent of the spawn cwd — and each one
-    // is recorded for pre-spawn revalidation.
+    // Only the binary is emitted absolute (cross-spawn would otherwise
+    // resolve it through PATH); path arguments stay repo-relative so a
+    // ddev-wrapped argv carries no host prefix into the container. Every
+    // path is still recorded absolute for pre-spawn revalidation.
     const containedPaths: VerifyContainedPath[] = [
         { path: join(cwd, binary.path), requireFile: true },
     ]
@@ -925,9 +1074,11 @@ function translatePhpunit(
                     contained.reason ?? `unsafe phpunit path '${value}'`,
                 )
             }
-            const configPath = join(cwd, contained.path)
-            args.push(token, configPath)
-            containedPaths.push({ path: configPath, requireFile: true })
+            args.push(token, contained.path)
+            containedPaths.push({
+                path: join(cwd, contained.path),
+                requireFile: true,
+            })
             index += 1
             continue
         }
@@ -939,9 +1090,11 @@ function translatePhpunit(
                     contained.reason ?? `unsafe phpunit path '${token}'`,
                 )
             }
-            const testPath = join(cwd, contained.path)
-            args.push(testPath)
-            containedPaths.push({ path: testPath, requireFile: false })
+            args.push(contained.path)
+            containedPaths.push({
+                path: join(cwd, contained.path),
+                requireFile: false,
+            })
             continue
         }
         return incomplete(
