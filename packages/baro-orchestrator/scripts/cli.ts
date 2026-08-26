@@ -24,7 +24,11 @@ import {
     parseProgressivePlannerMcpInvocation,
     runProgressivePlannerMcpServer,
 } from "../src/planning/adapters/planner-harness-progressive.js"
-import { subscribeCommands, type BaroCommand } from "../src/tui-protocol.js"
+import {
+    subscribeCommands,
+    flushTuiProtocolWithTimeout,
+    type BaroCommand,
+} from "../src/tui-protocol.js"
 import type { CoordinationMode } from "../src/semantic-events.js"
 import { loadPrd } from "../src/prd.js"
 import { loadConversationContextFile } from "../src/conversation/session/conversation-context.js"
@@ -861,16 +865,16 @@ async function main(): Promise<void> {
             if (result.summary.abortReason) {
                 process.stderr.write(`[cli] stopped: ${result.summary.abortReason}\n`)
             }
-            exitAfterTreeCleanup(1)
+            await exitAfterFlushAndTreeCleanup(1)
         }
         // Explicit exit — open handles (ONNX model, Mozaik timers) prevent
         // natural Node exit after orchestrate() resolves.
-        exitAfterTreeCleanup(0)
+        await exitAfterFlushAndTreeCleanup(0)
     } catch (e) {
         process.stderr.write(
             `[cli] fatal: ${(e as Error)?.stack ?? String(e)}\n`,
         )
-        exitAfterTreeCleanup(1)
+        await exitAfterFlushAndTreeCleanup(1)
     }
 }
 
@@ -948,4 +952,10 @@ main().catch((e: unknown) => {
 function exitAfterTreeCleanup(code: number): never {
     signalAllProcessTrees("SIGKILL")
     process.exit(code)
+}
+
+/** Post-run exits wait for queued TUI lines to reach the pipe; a stuck pipe must not stall shutdown. */
+async function exitAfterFlushAndTreeCleanup(code: number): Promise<never> {
+    await flushTuiProtocolWithTimeout()
+    return exitAfterTreeCleanup(code)
 }
