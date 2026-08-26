@@ -466,6 +466,13 @@ function translatePackage(
     // than only after it) is never mistaken for the script token itself.
     const selector = extractWorkspaceSelector(parsed.tokens.slice(2))
     if (selector.reason) return incomplete(requirement, selector.reason)
+    // `run` always needs a script token in addition to the selector's name,
+    // so a selector that swallows the only remaining token leaves no way to
+    // tell its value apart from a missing name — fail the same way a bare
+    // '-w' with nothing after it already does, rather than guess.
+    if (operation === "run" && selector.declared && selector.rest.length === 0) {
+        return incomplete(requirement, "workspace selector requires a name")
+    }
     const script = operation === "test" ? "test" : selector.rest[0] ?? null
     const rest = operation === "test" ? selector.rest : selector.rest.slice(1)
     if (!script) {

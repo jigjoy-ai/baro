@@ -644,7 +644,7 @@ describe("declared verification policy", () => {
             "baro-verify-declared-workspace-preselect-reject-",
             async (dir) => {
                 const managers = [{ manager: "npm" as const }]
-                const [duplicate, requiresName, missingScript, postSeparator] =
+                const [duplicate, requiresNameDash, requiresNameNoScript, postSeparator] =
                     translateDeclaredTests(
                         dir,
                         [
@@ -666,16 +666,18 @@ describe("declared verification policy", () => {
                     "package tests accept at most one workspace selector",
                 )
                 assert.equal(
-                    requiresName?.incompleteReason,
+                    requiresNameDash?.incompleteReason,
                     "workspace selector requires a name",
                 )
-                // extractWorkspaceSelector (unmodified) greedily consumes the
+                // extractWorkspaceSelector would otherwise greedily consume the
                 // sole remaining token as the workspace NAME here (it does not
-                // start with '-'), leaving no script token rather than
-                // tripping the selector's own "requires a name" check.
+                // start with '-'), leaving no script token; `run` always needs
+                // both a name and a script, so translatePackage treats a
+                // selector that swallows the only remaining token the same as
+                // a selector with no name at all instead of guessing.
                 assert.equal(
-                    missingScript?.incompleteReason,
-                    "package tests must use '<manager> test' or '<manager> run <script>'",
+                    requiresNameNoScript?.incompleteReason,
+                    "workspace selector requires a name",
                 )
                 assert.equal(
                     postSeparator?.incompleteReason,
