@@ -11,45 +11,27 @@
 ```json
 {
   "graphVersion": 2,
-  "proposalId": "run-progressive-aa22fe4d08cb3014:planner:1ac8b302ee43aafe5412bb547e49519fbba6d522397d6a83c8ddc83185659e47",
-  "sourceStoryId": "planner:planning-aa22fe4d08cb3014-1",
-  "reason": "progressive planner admitted fragment tui-flush-and-run-diff-cap-1",
-  "exactMutationSha256": "12d6ec5405cac548ffed7e73615cd1044cd18ba92d275cfeb870995e07f3f58a",
+  "proposalId": "run-progressive-cea37b5ae74ae63c:planner:12efb5157d15b166dab5132de2182f44753fe4a30a0ce8575bfc1c2e4deaa95d",
+  "sourceStoryId": "planner:planning-cea37b5ae74ae63c-1",
+  "reason": "progressive planner admitted fragment final-5a36a0674e3f831b2464296fc399e4193ae32dc1a28bd0d85db4ac5cf754327f",
+  "exactMutationSha256": "e68e9aca2972536930606fca8a1ae42cc0f0b72dd729c26096346822bab864c9",
   "mutationSummary": {
     "addedStories": [
       {
         "id": "S1",
-        "title": "stdout flush on exit",
+        "title": "Workspace-scoped package scripts + repo-relative phpunit args",
         "dependsOn": [],
         "goalInvariantIds": [
           "G-A1",
           "G-A2",
-          "G-A5",
-          "G-A6",
-          "G-C1",
-          "G-C2",
-          "G-C3",
-          "G-C4",
-          {
-            "omittedItems": 6
-          }
-        ]
-      },
-      {
-        "id": "S2",
-        "title": "run diff byte cap",
-        "dependsOn": [],
-        "goalInvariantIds": [
           "G-A3",
           "G-A4",
           "G-A5",
-          "G-C1",
-          "G-C6",
-          "G-C7",
-          "G-C9",
-          "G-C11",
+          "G-A6",
+          "G-A7",
+          "G-A8",
           {
-            "omittedItems": 2
+            "omittedItems": 13
           }
         ]
       }
