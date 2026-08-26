@@ -1526,9 +1526,13 @@ async function altitudeEvidenceFor(
  * measures: a core.fsmonitor script left in a story worktree runs the moment
  * collectAltitudeFindings does. An advisory line count is never worth running
  * repository-controlled programs from the evaluator, so the measurement is
- * skipped whenever the repository configures git to execute one. Narrow
- * containment at the trust boundary, not a substitute for hardening the probe
- * itself; drop it once altitude-probe.ts passes the same flags runGit does.
+ * skipped whenever the repository configures git to execute one.
+ *
+ * Containment here rather than hardening in the probe is deliberate: the probe
+ * module is read-only for this goal, and AltitudeProbeOptions exposes no env or
+ * argument hook, so the caller's only lever is declining to measure. The cost is
+ * that such a repository gets no advisory section even when findings exist —
+ * the right trade for a measurement that may never fail a criterion.
  */
 const PROGRAM_EXECUTING_GIT_CONFIG = [
     "core.fsmonitor",
