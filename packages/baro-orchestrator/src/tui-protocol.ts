@@ -14,6 +14,8 @@ import { createInterface } from "readline"
 import type { RunVerificationEvidence } from "./events/verification.js"
 import type { ModelInvocationMeasuredData } from "./telemetry/model-telemetry.js"
 
+let pendingDrain: Promise<void> | null = null
+
 export interface StoryInfo {
     id: string
     title: string
@@ -220,7 +222,58 @@ export type BaroEvent =
  */
 export function emit(event: BaroEvent): void {
     const line = JSON.stringify({ ts: new Date().toISOString(), ...event }) + "\n"
-    process.stdout.write(line)
+    const accepted = process.stdout.write(line)
+    if (!accepted && pendingDrain === null) {
+        pendingDrain = new Promise<void>((resolve) => {
+            process.stdout.once("drain", () => {
+                pendingDrain = null
+                resolve()
+            })
+        })
+    }
+}
+
+/**
+ * Resolves once every line emitted so far has been handed to the OS pipe.
+ * 'drain' covers the stream's whole buffer, so one promise covers every
+ * queued emit(), not just the last.
+ */
+export function flushTuiProtocol(): Promise<void> {
+    return pendingDrain ?? Promise.resolve()
+}
+
+export const TUI_FLUSH_TIMEOUT_MS = 3_000
+
+/** A stuck pipe must never stall shutdown, so the flush is bounded and never rejects. */
+export async function flushTuiProtocolWithTimeout(
+    timeoutMs: number = TUI_FLUSH_TIMEOUT_MS,
+    flush: () => Promise<void> = flushTuiProtocol,
+): Promise<"flushed" | "timeout"> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const flushed = (async () => {
+        try {
+            await flush()
+        } catch {
+            // A failed flush is still a reason to exit, not to hang.
+        }
+        return "flushed" as const
+    })()
+    try {
+        return await Promise.race([
+            flushed,
+            new Promise<"timeout">((resolve) => {
+                timer = setTimeout(() => resolve("timeout"), timeoutMs)
+                timer.unref?.()
+            }),
+        ])
+    } finally {
+        if (timer !== undefined) clearTimeout(timer)
+    }
+}
+
+/** Test-only: drop the pending-drain state so cases cannot bleed into each other. */
+export function resetTuiProtocolFlushState(): void {
+    pendingDrain = null
 }
 
 export type BaroCommand =
