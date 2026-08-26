@@ -93,6 +93,11 @@ import { MemoryLibrarian } from "./execution/memory-librarian.js"
 import { ModelTelemetryCollector } from "./telemetry/model-telemetry-collector.js"
 import { Operator } from "./execution/operator.js"
 import { PlanningFeed } from "./execution/planning-feed.js"
+import {
+    PrdStatusObserver,
+    createPrdStatusWriter,
+} from "./execution/prd-status-writer.js"
+import { selectResumeStories } from "./execution/resume-selection.js"
 import { PlannerAwarenessRunner } from "./execution/planner-awareness-runner.js"
 import {
     plannerBusAgentId,
@@ -267,6 +272,14 @@ export interface OrchestrateConfig {
      * context.
      */
     continueRun?: boolean
+    /**
+     * `--resume`: execute the plan already in prd.json. Resume never
+     * re-plans — the planner lanes are not started and stories the previous
+     * run recorded as passed/merged are skipped. Independent of
+     * `continueRun`; when both are set, resume still skips planning while
+     * continue keeps its branch-rewrite behavior.
+     */
+    resumeRun?: boolean
     /**
      * Wire the Librarian (cross-agent runtime memory): later-level story
      * prompts get augmented with earlier stories' findings. Default: true.
@@ -476,6 +489,26 @@ export async function orchestrate(
     if (conversationContext) {
         const prd = loadPrd(config.prdPath)
         assertConversationContextBinding(conversationContext, prd)
+    }
+    if (config.resumeRun) {
+        const selection = selectResumeStories(loadPrd(config.prdPath))
+        if (selection.warning) {
+            process.stderr.write(`[orchestrate] ${selection.warning}\n`)
+        } else {
+            process.stderr.write(
+                `[orchestrate] resume mode — skipping ${selection.skipped.length} finished story(ies), executing ${selection.remaining.length}\n`,
+            )
+        }
+        // Resume never re-plans: the planner lanes never open, so intake,
+        // architect and planning are all skipped and the persisted plan runs
+        // as-is. Conductor/Board already leave passed stories alone.
+        if (config.progressivePlanningId || config.busPlanner) {
+            config = {
+                ...config,
+                progressivePlanningId: undefined,
+                busPlanner: undefined,
+            }
+        }
     }
     // Set once at the chokepoint every run passes through; child agents
     // inherit process.env, so no shell command they issue can hang on a
@@ -805,6 +838,14 @@ export async function orchestrate(
     const repositoryAuthority = gitCoordinator ?? localRepositoryAgent
     if (repositoryAuthority) {
         dagForwarder?.setRepositoryAuthority(repositoryAuthority)
+    }
+    // prd.json learns each story's outcome as it settles, not at run end, so
+    // an interrupted run can be resumed from disk.
+    const prdStatusWriter = createPrdStatusWriter({ prdPath: config.prdPath })
+    if (repositoryAuthority) {
+        const prdStatusObserver = new PrdStatusObserver(prdStatusWriter)
+        prdStatusObserver.setRepositoryAuthority(repositoryAuthority)
+        prdStatusObserver.join(env)
     }
 
     const useLibrarian = config.withLibrarian ?? true
@@ -1240,12 +1281,15 @@ export async function orchestrate(
                           gitCoordinator.onStoryPassed(storyId),
                       )
                 : undefined,
-            onStoryFailed: worktrees && gitCoordinator
-                ? (storyId) =>
-                      withCriticEvidenceBarrier(critic, () =>
-                          gitCoordinator.onStoryFailed(storyId),
-                      )
-                : undefined,
+            onStoryFailed: (storyId) => {
+                // Terminal: the Conductor calls this only once a story has
+                // exhausted its retries.
+                prdStatusWriter.onStoryFailed(storyId)
+                if (!(worktrees && gitCoordinator)) return
+                return withCriticEvidenceBarrier(critic, () =>
+                    gitCoordinator.onStoryFailed(storyId),
+                )
+            },
         })
         conductor.setEnvironment(env)
         conductor.join(env)
