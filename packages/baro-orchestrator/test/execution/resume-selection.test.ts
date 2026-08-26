@@ -1,10 +1,14 @@
 import assert from "node:assert/strict"
-import { describe, it } from "node:test"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { after, describe, it } from "node:test"
 
 import {
     RESUME_WITHOUT_STATUS_WARNING,
     selectResumeStories,
 } from "../../src/execution/resume-selection.js"
+import { orchestrate } from "../../src/orchestrate.js"
 import { normalizePrd, type PrdStory } from "../../src/prd.js"
 
 function prdWith(...stories: Partial<PrdStory>[]) {
@@ -108,5 +112,84 @@ describe("what a resumed run still has to do", () => {
         selectResumeStories(prd)
 
         assert.equal(JSON.stringify(prd), before)
+    })
+})
+
+const temporaryRoots: string[] = []
+
+after(() => {
+    for (const root of temporaryRoots) rmSync(root, { recursive: true, force: true })
+})
+
+function prdFileWith(...stories: Partial<PrdStory>[]): string {
+    const root = mkdtempSync(join(tmpdir(), "resume-selection-"))
+    temporaryRoots.push(root)
+    const path = join(root, "prd.json")
+    writeFileSync(path, JSON.stringify(prdWith(...stories), null, 2))
+    return path
+}
+
+/**
+ * The orchestrate notices a run prints before it starts.
+ *
+ * orchestrate() rejects collective Operator control hooks before any
+ * participant joins the bus, so this reaches the resume decision — which runs
+ * first — without starting a run, touching git, or spawning an agent.
+ */
+async function orchestrateNotices(resumeRun: boolean, prdPath: string): Promise<string[]> {
+    const lines: string[] = []
+    const original = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+        if (typeof chunk === "string" && chunk.startsWith("[orchestrate] ")) {
+            lines.push(chunk.trimEnd())
+        }
+        return (original as (...a: never[]) => boolean)(
+            chunk as never,
+            ...(rest as never[]),
+        )
+    }) as typeof process.stderr.write
+    try {
+        await assert.rejects(
+            orchestrate({
+                prdPath,
+                cwd: "/not-read",
+                coordinationMode: "collective",
+                ...(resumeRun ? { resumeRun } : {}),
+                operatorHooks: { onAbort: () => undefined },
+            }),
+            /control must cross a source-bound Mozaik semantic lane/,
+        )
+    } finally {
+        process.stderr.write = original
+    }
+    return lines
+}
+
+describe("what a resumed run tells the operator", () => {
+    it("warns exactly once when the plan on disk carries no status", async () => {
+        const notices = await orchestrateNotices(true, prdFileWith({}, {}))
+
+        assert.deepEqual(notices, [
+            "[orchestrate] prd.json carries no per-story status; resuming with legacy behavior (all stories will be executed)",
+        ])
+    })
+
+    it("reports what it skips instead of warning when the plan has status", async () => {
+        const notices = await orchestrateNotices(
+            true,
+            prdFileWith(
+                { passes: true, mergeStatus: "merged" },
+                { mergeStatus: "failed" },
+                {},
+            ),
+        )
+
+        assert.equal(notices.length, 1)
+        assert.doesNotMatch(notices[0]!, /no per-story status/)
+        assert.match(notices[0]!, /skipping 1 finished story\(ies\), executing 2/)
+    })
+
+    it("says nothing about resuming when the run is not a resume", async () => {
+        assert.deepEqual(await orchestrateNotices(false, prdFileWith({}, {})), [])
     })
 })
