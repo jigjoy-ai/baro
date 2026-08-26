@@ -363,6 +363,306 @@ describe("declared verification policy", () => {
         })
     })
 
+    it("scopes a package script to the workspace a selector names", async () => {
+        await withTempDir("baro-verify-declared-workspace-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "root",
+                    private: true,
+                    workspaces: ["packages/*"],
+                }),
+            )
+            mkdirSync(join(dir, "packages", "app"), { recursive: true })
+            writeFileSync(
+                join(dir, "packages", "app", "package.json"),
+                JSON.stringify({
+                    name: "@baro/app",
+                    scripts: {
+                        typecheck: "tsc --noEmit",
+                        test: "rstest run",
+                        release: "do-it",
+                    },
+                }),
+            )
+            const workspace = join(dir, "packages", "app")
+            const [byName, byPath, byEquals, focused] = translateDeclaredTests(
+                dir,
+                [
+                    {
+                        storyId: "S1",
+                        command: "npm run typecheck -w @baro/app",
+                    },
+                    {
+                        storyId: "S1",
+                        command: "npm run typecheck --workspace packages/app",
+                    },
+                    {
+                        storyId: "S1",
+                        command: "npm run typecheck --workspace=@baro/app",
+                    },
+                    {
+                        storyId: "S1",
+                        command: "npm run test -w @baro/app -- tests/a.test.ts",
+                    },
+                ],
+                [{ manager: "npm" }, { manager: "npm", cwd: workspace }],
+            )
+
+            // The root manifest declares no scripts at all, so every one of
+            // these resolves only because the lookup moved to the workspace.
+            for (const spec of [byName, byPath, byEquals]) {
+                assert.equal(spec?.incompleteReason, undefined)
+                assert.equal(spec?.tool, "npm")
+                assert.deepEqual(spec?.args, ["run", "typecheck"])
+                assert.equal(spec?.cwd, workspace)
+            }
+            // The selector keeps its declared spelling in the label but never
+            // reaches argv, which would double-scope the manager.
+            assert.equal(byName?.label, "npm run typecheck -w @baro/app")
+            assert.equal(
+                byPath?.label,
+                "npm run typecheck --workspace packages/app",
+            )
+            assert.equal(
+                byEquals?.label,
+                "npm run typecheck --workspace=@baro/app",
+            )
+
+            assert.equal(focused?.incompleteReason, undefined)
+            assert.deepEqual(focused?.args, [
+                "run",
+                "test",
+                "--",
+                "tests/a.test.ts",
+            ])
+            assert.equal(focused?.cwd, workspace)
+            assert.equal(
+                focused?.label,
+                "npm run test -w @baro/app -- tests/a.test.ts",
+            )
+            assert.deepEqual(focused?.containedPaths, [
+                {
+                    path: "tests/a.test.ts",
+                    requireFile: false,
+                    allowMissing: true,
+                },
+            ])
+        })
+    })
+
+    it("rejects every workspace selector the plan or manifest cannot license", async () => {
+        await withTempDir("baro-verify-declared-workspace-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "root",
+                    private: true,
+                    workspaces: ["packages/*"],
+                }),
+            )
+            mkdirSync(join(dir, "packages", "app"), { recursive: true })
+            writeFileSync(
+                join(dir, "packages", "app", "package.json"),
+                JSON.stringify({
+                    name: "@baro/app",
+                    scripts: { typecheck: "tsc --noEmit", release: "do-it" },
+                }),
+            )
+            mkdirSync(join(dir, "packages", "broken"), { recursive: true })
+            const managers = [
+                { manager: "npm" as const },
+                { manager: "npm" as const, cwd: join(dir, "packages", "app") },
+                {
+                    manager: "npm" as const,
+                    cwd: join(dir, "packages", "broken"),
+                },
+            ]
+            const [
+                unknown,
+                twoSelectors,
+                afterSeparator,
+                noValue,
+                untrusted,
+                noScript,
+                brokenManifest,
+                glob,
+            ] = translateDeclaredTests(
+                dir,
+                [
+                    {
+                        storyId: "S1",
+                        command: "npm run typecheck -w @baro/missing",
+                    },
+                    {
+                        storyId: "S1",
+                        command:
+                            "npm run typecheck -w @baro/app --workspace=packages/app",
+                    },
+                    { storyId: "S1", command: "npm run test -- -w @baro/app" },
+                    { storyId: "S1", command: "npm run typecheck -w" },
+                    { storyId: "S1", command: "npm run release -w @baro/app" },
+                    { storyId: "S1", command: "npm run lint -w @baro/app" },
+                    {
+                        storyId: "S1",
+                        command:
+                            "npm run typecheck --workspace packages/broken",
+                    },
+                    { storyId: "S1", command: "npm run typecheck -w packages/*" },
+                ],
+                managers,
+            )
+
+            assert.equal(
+                unknown?.incompleteReason,
+                "unknown workspace '@baro/missing': known workspaces are packages/app, packages/broken",
+            )
+            assert.equal(
+                twoSelectors?.incompleteReason,
+                "package tests accept at most one workspace selector",
+            )
+            assert.equal(
+                afterSeparator?.incompleteReason,
+                "workspace selector must appear before '--'",
+            )
+            assert.equal(
+                noValue?.incompleteReason,
+                "workspace selector requires a name",
+            )
+            assert.equal(
+                untrusted?.incompleteReason,
+                "custom package script 'release' is not trusted by the baseline verifier policy",
+            )
+            assert.equal(
+                noScript?.incompleteReason,
+                "workspace '@baro/app' package.json does not declare script 'lint'",
+            )
+            assert.equal(
+                brokenManifest?.incompleteReason,
+                "declared package test requires a valid package.json in workspace 'packages/broken'",
+            )
+            // A '*' never reaches workspace resolution: the tokenizer refuses
+            // glob syntax outright, so no pattern is ever expanded.
+            assert.equal(
+                glob?.incompleteReason,
+                "declared test contains unsupported quoting, shell, or glob syntax",
+            )
+
+            // A rejection is evidence, never a runnable command.
+            for (const spec of [unknown, twoSelectors, afterSeparator]) {
+                assert.equal(spec?.tool, "node")
+                assert.deepEqual(spec?.args, [])
+            }
+        })
+    })
+
+    it("requires a root workspaces field before any selector resolves", async () => {
+        await withTempDir("baro-verify-declared-workspace-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "root",
+                    scripts: { typecheck: "tsc --noEmit" },
+                }),
+            )
+            mkdirSync(join(dir, "packages", "app"), { recursive: true })
+            writeFileSync(
+                join(dir, "packages", "app", "package.json"),
+                JSON.stringify({
+                    name: "@baro/app",
+                    scripts: { typecheck: "tsc --noEmit" },
+                }),
+            )
+            const [spec] = translateDeclaredTests(
+                dir,
+                [{ storyId: "S1", command: "npm run typecheck -w @baro/app" }],
+                [
+                    { manager: "npm" },
+                    { manager: "npm", cwd: join(dir, "packages", "app") },
+                ],
+            )
+            // The root script exists and the workspace is resolvable, yet the
+            // selector is still refused: the repo never declared workspaces.
+            assert.equal(
+                spec?.incompleteReason,
+                "workspace selector requires a 'workspaces' field in the root package.json",
+            )
+        })
+    })
+
+    it("names no candidates when the plan resolved no workspace packages", async () => {
+        await withTempDir("baro-verify-declared-workspace-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "root",
+                    private: true,
+                    workspaces: { packages: ["packages/*"] },
+                    scripts: { typecheck: "tsc --noEmit" },
+                }),
+            )
+            const [spec] = translateDeclaredTests(
+                dir,
+                [{ storyId: "S1", command: "npm run typecheck -w @baro/app" }],
+                [{ manager: "npm" }],
+            )
+            assert.equal(
+                spec?.incompleteReason,
+                "unknown workspace '@baro/app': no workspace packages were resolved",
+            )
+        })
+    })
+
+    it("leaves selector-free package declarations byte-identical", async () => {
+        await withTempDir("baro-verify-declared-workspace-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "root",
+                    private: true,
+                    workspaces: ["packages/*"],
+                    scripts: { test: "node -e \"process.exit(0)\"" },
+                }),
+            )
+            mkdirSync(join(dir, "packages", "app"), { recursive: true })
+            writeFileSync(
+                join(dir, "packages", "app", "package.json"),
+                JSON.stringify({ name: "@baro/app", scripts: { test: "x" } }),
+            )
+            const [plain, focused] = translateDeclaredTests(
+                dir,
+                [
+                    { storyId: "S1", command: "npm run test" },
+                    { storyId: "S1", command: "npm run test -- --filter x" },
+                ],
+                [
+                    { manager: "npm" },
+                    { manager: "npm", cwd: join(dir, "packages", "app") },
+                ],
+            )
+
+            // Merely having workspaces available changes nothing without a
+            // selector: the root authority still owns the command.
+            assert.equal(plain?.incompleteReason, undefined)
+            assert.equal(plain?.cwd, undefined)
+            assert.equal(plain?.label, "npm run test")
+            assert.equal(plain?.tool, "npm")
+            assert.deepEqual(plain?.args, ["run", "test"])
+            assert.equal(plain?.containedPaths, undefined)
+
+            assert.equal(focused?.incompleteReason, undefined)
+            assert.equal(focused?.cwd, undefined)
+            assert.equal(focused?.label, "npm run test -- --filter x")
+            assert.deepEqual(focused?.args, [
+                "run",
+                "test",
+                "--",
+                "--filter",
+                "x",
+            ])
+        })
+    })
+
     it("subsumes path-scoped runs under the full suite instead of failing the budget", async () => {
         // A 12-story plan went fully green and was stamped failed: its
         // stories' `npm run test -- <path>` requirements overflowed the
@@ -1195,9 +1495,9 @@ describe("declared verification policy", () => {
                     [{ manager: "npm" }],
                 )
 
-            // The label keeps the declared relative form while the spawn
-            // target is absolute (cross-spawn resolves a relative command
-            // through PATH, not the command cwd).
+            // The label and every path argument keep the declared relative
+            // form while the spawn target is absolute (cross-spawn resolves a
+            // relative command through PATH, not the command cwd).
             assert.equal(plain?.incompleteReason, undefined)
             assert.equal(plain?.label, "vendor/bin/phpunit")
             assert.equal(plain?.tool, binary)
@@ -1215,14 +1515,14 @@ describe("declared verification policy", () => {
             ])
 
             assert.equal(config?.incompleteReason, undefined)
-            assert.deepEqual(config?.args, ["-c", join(dir, "phpunit.xml")])
+            assert.deepEqual(config?.args, ["-c", "phpunit.xml"])
             assert.deepEqual(config?.containedPaths, [
                 { path: binary, requireFile: true },
                 { path: join(dir, "phpunit.xml"), requireFile: true },
             ])
 
             assert.equal(path?.incompleteReason, undefined)
-            assert.deepEqual(path?.args, [join(dir, "tests", "UnitTest.php")])
+            assert.deepEqual(path?.args, ["tests/UnitTest.php"])
             assert.deepEqual(path?.containedPaths, [
                 { path: binary, requireFile: true },
                 {
@@ -1233,11 +1533,7 @@ describe("declared verification policy", () => {
 
             // Binary first, then each path argument in declaration order.
             assert.equal(combined?.incompleteReason, undefined)
-            assert.deepEqual(combined?.args, [
-                "-c",
-                join(dir, "phpunit.xml"),
-                join(dir, "tests", "Unit"),
-            ])
+            assert.deepEqual(combined?.args, ["-c", "phpunit.xml", "tests/Unit"])
             assert.deepEqual(combined?.containedPaths, [
                 { path: binary, requireFile: true },
                 { path: join(dir, "phpunit.xml"), requireFile: true },
@@ -1245,6 +1541,56 @@ describe("declared verification policy", () => {
             ])
         })
     })
+
+    it(
+        "emits phpunit path arguments repo-relative and the tool host-absolute",
+        { skip: process.platform === "win32" },
+        async () => {
+            await withTempDir("baro-verify-declared-phpunit-", async (dir) => {
+                mkdirSync(join(dir, "vendor", "bin"), { recursive: true })
+                writeFileSync(join(dir, "vendor", "bin", "phpunit"), "")
+                writeFileSync(join(dir, "phpunit.xml"), "")
+                mkdirSync(join(dir, "tests", "Unit"), { recursive: true })
+                const [spec] = translateDeclaredTests(
+                    dir,
+                    [
+                        {
+                            storyId: "S1",
+                            command:
+                                "vendor/bin/phpunit -c phpunit.xml tests/Unit",
+                        },
+                    ],
+                    [{ manager: "npm" }],
+                )
+
+                assert.equal(spec?.incompleteReason, undefined)
+                assert.equal(
+                    spec?.label,
+                    "vendor/bin/phpunit -c phpunit.xml tests/Unit",
+                )
+                assert.equal(spec?.tool, join(dir, "vendor", "bin", "phpunit"))
+                assert.deepEqual(spec?.args, [
+                    "-c",
+                    "phpunit.xml",
+                    "tests/Unit",
+                ])
+                assert.ok(spec?.args.every((value) => !value.includes(dir)))
+                // Only the emitted args go relative; containedPaths stay
+                // host-absolute so pre-spawn revalidation is unaffected.
+                assert.deepEqual(spec?.containedPaths, [
+                    {
+                        path: join(dir, "vendor", "bin", "phpunit"),
+                        requireFile: true,
+                    },
+                    { path: join(dir, "phpunit.xml"), requireFile: true },
+                    { path: join(dir, "tests", "Unit"), requireFile: false },
+                ])
+                assert.ok(
+                    spec?.containedPaths?.every(({ path }) => isAbsolute(path)),
+                )
+            })
+        },
+    )
 
     it("keeps every phpunit path revalidatable immediately pre-spawn", async () => {
         await withTempDir("baro-verify-declared-phpunit-", async (dir) => {
@@ -1441,6 +1787,50 @@ describe("declared verification policy", () => {
             assert.equal(labelled?.label, "ddev exec composer run check")
         })
     })
+
+    it(
+        "leaves no host path in a ddev-wrapped phpunit argv",
+        { skip: process.platform === "win32" },
+        async () => {
+            await withTempDir("baro-verify-declared-ddev-", async (dir) => {
+                mkdirSync(join(dir, ".ddev"), { recursive: true })
+                writeFileSync(join(dir, ".ddev", "config.yaml"), "name: app\n")
+                mkdirSync(join(dir, "vendor", "bin"), { recursive: true })
+                writeFileSync(join(dir, "vendor", "bin", "phpunit"), "")
+                writeFileSync(join(dir, "phpunit.xml"), "")
+                mkdirSync(join(dir, "tests", "Unit"), { recursive: true })
+                const [spec] = translateDeclaredTests(
+                    dir,
+                    [
+                        {
+                            storyId: "S1",
+                            command:
+                                "ddev exec vendor/bin/phpunit -c phpunit.xml tests/Unit",
+                        },
+                    ],
+                    [{ manager: "npm" }],
+                )
+
+                // The container has no host filesystem: the wrapped argv must
+                // be container-relative end to end, and innerTokens[0] still
+                // supplies the declared token rather than the resolved tool.
+                assert.equal(spec?.incompleteReason, undefined)
+                assert.equal(spec?.tool, "ddev")
+                assert.deepEqual(spec?.args, [
+                    "exec",
+                    "vendor/bin/phpunit",
+                    "-c",
+                    "phpunit.xml",
+                    "tests/Unit",
+                ])
+                assert.ok(spec?.args.every((value) => !value.includes(dir)))
+                assert.equal(
+                    revalidateContainedPaths(dir, spec?.containedPaths ?? []),
+                    null,
+                )
+            })
+        },
+    )
 
     it("lets ddev exec launder nothing the dispatcher would reject", async () => {
         await withTempDir("baro-verify-declared-ddev-", async (dir) => {
