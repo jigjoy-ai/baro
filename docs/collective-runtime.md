@@ -196,7 +196,15 @@ it, while baseline package-manager authority and executable gates remain
 frozen. PRD command strings never enter a shell: the translator admits only
 conventional npm/pnpm/Yarn `build`, `typecheck`, `test`, or `lint` scripts;
 narrow Cargo build/check/test/clippy/fmt checks; contained `node --check` or
-`node --test` paths; and exact `git diff --check`. Custom package scripts,
+`node --test` paths; exact `npx rstest run` paths; exact `git diff --check`;
+conventional Composer `build`, `typecheck`, `test`, `lint`, or `check` scripts
+anchored to a root `composer.json`; a contained `vendor/bin/phpunit` limited to
+`--testsuite <name>`, `-c`/`--configuration <file>`, and contained test paths;
+and `ddev exec <command>` as a transparent prefix that requires `.ddev/config.yaml`
+and re-applies the same policy to the wrapped command. Composer trust is a
+separate baseline set from the npm one, and `ddev exec` grants no authority: a
+wrapped command the translator would reject directly stays rejected with the same
+reason. Custom package scripts,
 missing scripts/tools, unsupported flags, quoting, response files, and lexical
 or symlink path escapes become explicit incomplete evidence. Eight unique PRD
 commands and eight final-plan executable additions are the bounded defaults;
