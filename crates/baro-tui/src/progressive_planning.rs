@@ -297,6 +297,7 @@ pub(crate) fn build_progressive_bootstrap_prd(
         runtime_graph: Some(runtime_graph),
         conversation_session_id: input.conversation_session_id.map(str::to_string),
         goal_envelope: input.goal_envelope.cloned(),
+        ..Default::default()
     })
 }
 
@@ -523,6 +524,44 @@ mod tests {
                     "fragments": []
                 }
             })
+        );
+    }
+
+    /// The metadata tail is spelled `..Default::default()` so an additive
+    /// `PrdFile` field cannot break this file. G-A6 makes the TS orchestrator
+    /// the sole writer of per-story merge status, so the price of that spelling
+    /// is this guard: a bootstrap PRD must still emit nothing it was not given.
+    #[test]
+    fn the_bootstrap_prd_emits_no_metadata_it_was_not_given() {
+        let ids = ProgressivePlanningIds::new("run-status", "planning-status").unwrap();
+        let prd = build_progressive_bootstrap_prd(ProgressiveBootstrapInput {
+            cwd: Path::new("/work/baro"),
+            goal: "Persist story status mid-run",
+            ids: &ids,
+            decision_document: None,
+            execution_mode: None,
+            conversation_session_id: None,
+            goal_envelope: None,
+        })
+        .unwrap();
+
+        let serialized = serde_json::to_value(&prd).unwrap();
+        let mut keys: Vec<&str> = serialized
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "branchName",
+                "description",
+                "project",
+                "runtimeGraph",
+                "userStories"
+            ]
         );
     }
 

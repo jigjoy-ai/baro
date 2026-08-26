@@ -505,11 +505,7 @@ mod tests {
             branch_name: "baro/legacy".to_string(),
             description: "Finish the legacy checkpoint".to_string(),
             user_stories: Vec::new(),
-            decision_document: None,
-            execution_mode: None,
-            runtime_graph: None,
-            conversation_session_id: None,
-            goal_envelope: None,
+            ..Default::default()
         };
         let envelope = legacy_goal_envelope(&prd);
         let session = rebuild_conversation_from_prd("session-legacy", &envelope).unwrap();

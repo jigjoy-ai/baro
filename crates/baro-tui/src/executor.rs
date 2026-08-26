@@ -8,7 +8,10 @@ use std::path::Path;
 use crate::app::ReviewStory;
 use crate::conversation::{ConversationContextSnapshot, GoalEnvelope};
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+// `Default` exists so the constructors outside this module can spell the
+// metadata tail as `..Default::default()`; without it every additive field
+// here breaks files no PRD story owns.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct PrdFile {
     pub project: String,
     #[serde(rename = "branchName", default)]
