@@ -1,0 +1,6 @@
+# ADR-0001: Keep all translator changes inside declared-verification.ts and add no new modules or dependencies
+
+**Status:** Accepted
+**Context:** Three new routes could plausibly be split into php-specific modules, but every existing route (package, cargo, node, npx, git) lives in one file and shares incomplete(), tokenize(), SAFE_TOKEN and containedPath(). Splitting would export internals that are currently private and risk divergent containment logic.
+**Decision:** Modify exactly two source-tree files and one doc: packages/baro-orchestrator/src/verification/declared-verification.ts, packages/baro-orchestrator/test/verification/declared-verification.test.ts, docs/collective-runtime.md. Create NO new files under src/ or test/. Add NO npm dependency (no yaml parser, no php tooling); .ddev/config.yaml is checked with existsSync only and never parsed. Do not export any new symbol from declared-verification.ts except what already exists; new constants (TRUSTED_COMPOSER_SCRIPTS) and new functions (translateComposer, translatePhpunit, translateDdev, dispatchDeclared) are module-private. Do not touch verify.ts, prd-declared-tests.ts, verification-goal-gate.ts, or any Rust/TUI file.
+**Consequences:** All three routes reuse the file's existing helpers verbatim, so containment semantics cannot drift. Reviewers diff a single source file. No lockfile churn.

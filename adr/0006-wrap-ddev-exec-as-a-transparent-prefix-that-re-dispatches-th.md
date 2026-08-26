@@ -1,0 +1,11 @@
+# ADR-0006: Wrap ddev exec as a transparent prefix that re-dispatches the inner command
+
+**Status:** Accepted
+**Context:** ddev exec must add no authority: anything the dispatcher rejects directly must stay rejected with the same reason, and the inner command's containedPaths must survive to pre-spawn revalidation. The inner tool must be spelled the way the container will see it, which for phpunit is not the host-absolute path chosen in ADR-005.
+**Decision:** `translateDdev(cwd, requirement, parsed, insideDdev)` requires parsed.tokens[0] === "ddev". In order:
+1. insideDdev === true → incomplete "ddev exec must not wrap another ddev command"
+2. parsed.tokens[1] !== "exec" (including absent) → incomplete "ddev tests must use 'ddev exec <command>'"
+3. parsed.tokens.length < 3 → incomplete "ddev exec requires a command to run"
+4. !existsSync(join(cwd, ".ddev", "config.yaml")) → incomplete "declared ddev test requires .ddev/config.yaml in the repository root"
+Then build `const innerTokens = parsed.tokens.slice(2)` and `const inner = dispatchDeclared(cwd, requirement, { normalized: innerTokens.join(" "), tokens: innerTokens }, managers, true)`. If `inner.incompleteReason !== undefined`, return `inner` unchanged (same reason, same empty args, key derived from the outer requirement). Otherwise return `{ label: parsed.normalized, tool: "ddev", args: ["exec", innerTokens[0], ...inner.args], ...(inner.containedPaths ? { containedPaths: inner.containedPaths } : {}) }`. Note the prepended element is the DECLARED inner tool token (innerTokens[0]), not inner.tool: for composer they are identical ("composer"), and for phpunit the container must receive the repo-relative "vendor/bin/phpunit" while containedPaths still carry the host-absolute paths for revalidation. Do not copy inner.cwd or inner.canonicalDeclaredFocus onto the wrapper.
+**Consequences:** ddev cannot launder a rejected command, and the rejection reason is byte-identical to the direct form. containedPaths are passed through by reference-equal value, so the host revalidates the same files it would for the unwrapped command. Nested ddev and non-exec subcommands are closed, matching the non-goals. Tests must assert args exactly, e.g. ["exec","composer","run","test"] and ["exec","vendor/bin/phpunit","--testsuite","unit"].
