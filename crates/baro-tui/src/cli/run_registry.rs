@@ -151,7 +151,6 @@ fn detached_record(goal: &str, cwd: &str, child_pid: u32, log_path: &Path) -> Ru
 /// Registers a detached child as a live run. The returned handle deliberately
 /// does not unregister on drop; the caller is the parent, which exits at once.
 // Wired from main.rs's detach path (a sibling story); unreferenced until then.
-#[allow(dead_code)]
 pub fn register_detached(
     goal: &str,
     cwd: &str,
@@ -363,7 +362,6 @@ fn record_still_listed(id: String) -> impl Fn() -> bool {
 }
 
 // Dispatched from main.rs's raw-argv arm (a sibling story); unreferenced here.
-#[allow(dead_code)]
 pub fn run_logs(args: &[String]) -> i32 {
     let Some(id) = command_target(args) else {
         eprintln!("usage: baro logs <ID> [--follow]   (list them with: baro runs)");
@@ -408,7 +406,6 @@ fn stream_log(path: &Path, follow: &dyn Fn() -> bool, out: &mut dyn Write) -> io
 }
 
 // Dispatched from main.rs's raw-argv arm (a sibling story); unreferenced here.
-#[allow(dead_code)]
 pub fn run_watch(args: &[String]) -> i32 {
     let Some(id) = command_target(args) else {
         eprintln!("usage: baro watch <ID>   (list them with: baro runs)");
