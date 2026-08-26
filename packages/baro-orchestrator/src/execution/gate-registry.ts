@@ -133,10 +133,28 @@ export function surfaceRemedyLines(
     ]
 }
 
+const ALTITUDE: GateDisclosure = {
+    id: "altitude",
+    enforcedBy: "src/acceptance/altitude.ts",
+    summary:
+        "Files at 1500 lines or more that gain 80 lines or more in one story are reported to the reviewer as advisory altitude findings.",
+    announce: () =>
+        [
+            "ALTITUDE (advisory measurement, not a gate you can fail) [gate:altitude]:",
+            "- A file that is already 1500 lines or longer and gains 80 or more lines in your story is",
+            "  reported to the reviewer as an altitude finding. New files and test files are never counted.",
+            "- This never fails a criterion, never blocks completion, and is not a request to refactor.",
+            "- Default discipline still holds: do NOT split or reorganise files you were not asked to touch.",
+            "- Explicit extraction instructions in the goal or decision document outrank that default —",
+            "  when the goal says to split a file, split it.",
+        ].join("\n"),
+}
+
 /** Base-prompt gates: active for every story regardless of spawn context. */
 export const BASE_GATES: readonly GateDisclosure[] = [
     EVIDENCE_CAPTURE,
     BUILD_BEFORE_COMMIT,
+    ALTITUDE,
 ]
 
 const RUN_VERIFICATION: GateDisclosure = {
