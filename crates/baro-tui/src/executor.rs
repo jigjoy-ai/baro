@@ -59,6 +59,14 @@ pub struct PrdFile {
         skip_serializing_if = "Option::is_none"
     )]
     pub goal_envelope: Option<GoalEnvelope>,
+    /// Fingerprint of the goal text this plan was created for, used by
+    /// bare-launch resume detection. Written by Rust, never computed by TS.
+    #[serde(
+        rename = "goalFingerprint",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub goal_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -93,6 +101,17 @@ pub struct PrdStory {
     pub duration_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// TS-written mid-run merge outcome ("merged" | "failed"). Rust only
+    /// round-trips this; it must survive write_prd unchanged.
+    #[serde(rename = "mergeStatus", default, skip_serializing_if = "Option::is_none")]
+    pub merge_status: Option<String>,
+    /// TS-written head sha of the merge commit for this story, when known.
+    #[serde(
+        rename = "mergeCommitSha",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub merge_commit_sha: Option<String>,
 }
 
 fn default_retries() -> u32 {
@@ -165,6 +184,7 @@ pub fn prd_from_review(
         runtime_graph: None,
         conversation_session_id: None,
         goal_envelope: None,
+        goal_fingerprint: None,
     }
 }
 
@@ -237,6 +257,7 @@ pub fn prd_from_resume_review(
         runtime_graph: original.runtime_graph.clone(),
         conversation_session_id: original.conversation_session_id.clone(),
         goal_envelope: original.goal_envelope.clone(),
+        goal_fingerprint: original.goal_fingerprint.clone(),
     };
     validate_resume_prd(&prd)?;
     Ok(prd)
@@ -336,6 +357,8 @@ fn prd_story_from_review(story: &ReviewStory) -> PrdStory {
         completed_at: None,
         duration_secs: None,
         model: story.model.clone(),
+        merge_status: None,
+        merge_commit_sha: None,
     }
 }
 
@@ -607,5 +630,82 @@ mod tests {
             1,
             "temporary file must be removed after replacement"
         );
+    }
+
+    #[test]
+    fn ts_written_status_fields_survive_write_prd_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = serde_json::json!({
+            "project": "p",
+            "branchName": "baro/p",
+            "description": "",
+            "goalFingerprint": "fnv1a64:0123456789abcdef",
+            "userStories": [
+                {
+                    "id": "S1", "priority": 1, "title": "Merged story",
+                    "description": "merged", "dependsOn": [], "retries": 2,
+                    "acceptance": ["done"], "tests": ["test done"],
+                    "passes": true, "mergeStatus": "merged",
+                    "mergeCommitSha": "deadbeefcafef00d"
+                },
+                {
+                    "id": "S2", "priority": 2, "title": "Failed story",
+                    "description": "failed", "dependsOn": [], "retries": 2,
+                    "acceptance": ["fail"], "tests": ["test fail"],
+                    "passes": false, "mergeStatus": "failed"
+                }
+            ]
+        });
+        let prd: PrdFile = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            prd.goal_fingerprint.as_deref(),
+            Some("fnv1a64:0123456789abcdef")
+        );
+        assert_eq!(prd.user_stories[0].merge_status.as_deref(), Some("merged"));
+        assert_eq!(
+            prd.user_stories[0].merge_commit_sha.as_deref(),
+            Some("deadbeefcafef00d")
+        );
+        assert_eq!(prd.user_stories[1].merge_status.as_deref(), Some("failed"));
+        assert_eq!(prd.user_stories[1].merge_commit_sha, None);
+
+        write_prd(&prd, dir.path()).unwrap();
+        let persisted: PrdFile =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("prd.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            persisted.goal_fingerprint.as_deref(),
+            Some("fnv1a64:0123456789abcdef")
+        );
+        assert_eq!(
+            persisted.user_stories[0].merge_status.as_deref(),
+            Some("merged")
+        );
+        assert_eq!(
+            persisted.user_stories[0].merge_commit_sha.as_deref(),
+            Some("deadbeefcafef00d")
+        );
+        assert_eq!(
+            persisted.user_stories[1].merge_status.as_deref(),
+            Some("failed")
+        );
+        assert_eq!(persisted.user_stories[1].merge_commit_sha, None);
+    }
+
+    #[test]
+    fn absent_status_fields_deserialize_as_none_and_are_omitted_on_write() {
+        let raw = r#"{"project":"p","branchName":"b","userStories":[
+            {"id":"S1","priority":1,"title":"t","description":"d",
+             "dependsOn":[],"retries":2,"acceptance":[],"tests":[]}
+        ]}"#;
+        let prd: PrdFile = serde_json::from_str(raw).unwrap();
+        assert_eq!(prd.goal_fingerprint, None);
+        assert_eq!(prd.user_stories[0].merge_status, None);
+        assert_eq!(prd.user_stories[0].merge_commit_sha, None);
+
+        let out = serde_json::to_string(&prd).unwrap();
+        assert!(!out.contains("goalFingerprint"));
+        assert!(!out.contains("mergeStatus"));
+        assert!(!out.contains("mergeCommitSha"));
     }
 }
