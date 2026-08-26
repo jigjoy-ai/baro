@@ -38,6 +38,14 @@ import {
     AgentState,
     CollaborationNote,
 } from "../../src/semantic-events.js"
+import {
+    altitudeActivityText,
+    renderAltitudeEvidenceSection,
+} from "../../src/acceptance/altitude.js"
+import {
+    extractVerdictJson,
+    verdictSystemPrompt,
+} from "../../src/acceptance/critic-verdict.js"
 import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
 
 interface TestCritic {
@@ -1563,5 +1571,305 @@ describe("whitespace findings are evidence, not an incident", () => {
             assert.doesNotMatch(prompt, /evidence collection failed closed/iu)
             assert.match(prompt, /tracked\.go/u)
         })
+    })
+})
+
+describe("Critic altitude advisory evidence", () => {
+    interface ActivityEvent {
+        type: "activity"
+        id: string
+        kind: string
+        text: string
+    }
+
+    const ALTITUDE_HEADER = "## Altitude findings (advisory)"
+    const REPOSITORY_HEADER = "## Baro-captured repository evidence"
+    const PUBLISHED_HEADER = "## Baro-captured run artifacts this story published"
+    const FINDING_LINE = /^src\/big\.ts — (\d+) total lines, \+(\d+) this story$/mu
+
+    function body(prefix: string, count: number): string {
+        return (
+            Array.from({ length: count }, (_, index) => `const ${prefix}${index} = ${index}`)
+                .join("\n") + "\n"
+        )
+    }
+
+    function commitBaseline(repo: string, files: Record<string, string>): string {
+        git(repo, "init", "--quiet")
+        mkdirSync(join(repo, "src"), { recursive: true })
+        for (const [path, contents] of Object.entries(files)) {
+            writeFileSync(join(repo, path), contents)
+        }
+        git(repo, "add", "-A")
+        git(
+            repo, "-c", "user.name=Baro Test", "-c", "user.email=baro@example.invalid",
+            "commit", "--quiet", "-m", "baseline",
+        )
+        return git(repo, "rev-parse", "HEAD").trim()
+    }
+
+    async function prepare(
+        repo: string,
+        baseSha: string | null,
+        events: ActivityEvent[],
+        criteria: readonly string[] = ["the story is complete"],
+    ): Promise<readonly string[]> {
+        const prepared = await prepareCriticEvaluation(
+            criteria,
+            "agent output",
+            "story-1",
+            {
+                resolveRepositoryTarget: () => ({ cwd: repo, baseSha }),
+                emitActivity: (event) => {
+                    events.push(event as ActivityEvent)
+                },
+            },
+        )
+        return prepared.prompts
+    }
+
+    /** Imported renderer, never a duplicated literal: it owns the sentence. */
+    function advisorySentence(): string {
+        const section = renderAltitudeEvidenceSection([
+            { path: "src/probe.ts", totalLines: 1500, addedLines: 80 },
+        ])
+        assert.ok(section)
+        return section.split("\n").at(-1) as string
+    }
+
+    it("adds the advisory section for a large file that grew this story", async () => {
+        await withTempDir("baro-critic-altitude-present-", async (repo) => {
+            const baseSha = commitBaseline(repo, {
+                "src/big.ts": body("a", 1600),
+            })
+            writeFileSync(join(repo, "src/big.ts"), body("a", 1600) + body("b", 100))
+
+            const events: ActivityEvent[] = []
+            const [prompt] = await prepare(repo, baseSha, events)
+            assert.ok(prompt)
+
+            assert.equal(prompt.split(ALTITUDE_HEADER).length - 1, 1)
+            const finding = FINDING_LINE.exec(prompt)
+            assert.ok(finding, "expected a formatted altitude finding line")
+            assert.equal(Number(finding[1]), 1700)
+            assert.equal(Number(finding[2]), 100)
+            assert.ok(prompt.includes(advisorySentence()))
+
+            assert.ok(prompt.indexOf(REPOSITORY_HEADER) < prompt.indexOf(ALTITUDE_HEADER))
+            assert.ok(prompt.indexOf(ALTITUDE_HEADER) < prompt.indexOf(PUBLISHED_HEADER))
+        })
+    })
+
+    it("omits the advisory section when no touched file qualifies", async () => {
+        await withTempDir("baro-critic-altitude-absent-", async (repo) => {
+            const baseSha = commitBaseline(repo, { "src/small.ts": body("s", 10) })
+            writeFileSync(join(repo, "src/small.ts"), body("s", 10) + body("t", 5))
+
+            const events: ActivityEvent[] = []
+            const [prompt] = await prepare(repo, baseSha, events)
+            assert.ok(prompt)
+
+            assert.ok(!prompt.includes(ALTITUDE_HEADER))
+            assert.ok(!prompt.includes("total lines, +"))
+            assert.equal(events.length, 0)
+        })
+    })
+
+    it("emits exactly one warn activity for a single finding", async () => {
+        await withTempDir("baro-critic-altitude-activity-", async (repo) => {
+            const baseSha = commitBaseline(repo, { "src/big.ts": body("a", 1600) })
+            writeFileSync(join(repo, "src/big.ts"), body("a", 1600) + body("b", 90))
+
+            const events: ActivityEvent[] = []
+            const [prompt] = await prepare(repo, baseSha, events)
+            assert.ok(prompt)
+
+            const finding = FINDING_LINE.exec(prompt)
+            assert.ok(finding)
+            const expected = altitudeActivityText([
+                {
+                    path: "src/big.ts",
+                    totalLines: Number(finding[1]),
+                    addedLines: Number(finding[2]),
+                },
+            ])
+            assert.deepStrictEqual(events, [
+                { type: "activity", id: "story-1", kind: "warn", text: expected },
+            ])
+        })
+    })
+
+    it("joins multiple findings into one activity line", async () => {
+        await withTempDir("baro-critic-altitude-multi-", async (repo) => {
+            const baseSha = commitBaseline(repo, {
+                "src/big.ts": body("a", 1600),
+                "src/huge.ts": body("h", 2000),
+            })
+            writeFileSync(join(repo, "src/big.ts"), body("a", 1600) + body("b", 90))
+            writeFileSync(join(repo, "src/huge.ts"), body("h", 2000) + body("i", 120))
+
+            const events: ActivityEvent[] = []
+            const [prompt] = await prepare(repo, baseSha, events)
+            assert.ok(prompt)
+
+            const section = prompt.slice(prompt.indexOf(ALTITUDE_HEADER))
+            const lines = /^src\/big\.ts — (\d+) total lines, \+(\d+) this story\nsrc\/huge\.ts — (\d+) total lines, \+(\d+) this story$/mu
+                .exec(section)
+            assert.ok(lines, "expected both findings in path order")
+            const expected = altitudeActivityText([
+                {
+                    path: "src/big.ts",
+                    totalLines: Number(lines[1]),
+                    addedLines: Number(lines[2]),
+                },
+                {
+                    path: "src/huge.ts",
+                    totalLines: Number(lines[3]),
+                    addedLines: Number(lines[4]),
+                },
+            ])
+            assert.equal(events.length, 1)
+            assert.deepStrictEqual(events[0], {
+                type: "activity",
+                id: "story-1",
+                kind: "warn",
+                text: expected,
+            })
+            assert.equal(events[0]?.text.split("; ").length, 2)
+            assert.equal(events[0]?.text.split("\n").length, 1)
+        })
+    })
+
+    it("carries the section into every segment while emitting one event", async () => {
+        await withTempDir("baro-critic-altitude-segments-", async (repo) => {
+            const baseSha = commitBaseline(repo, { "src/big.ts": body("a", 1600) })
+            writeFileSync(join(repo, "src/big.ts"), body("a", 1600) + body("b", 100))
+
+            const criteria = Array.from(
+                { length: 8 },
+                (_, index) => `criterion ${index} ${"detail ".repeat(260)}`,
+            )
+            const events: ActivityEvent[] = []
+            const prompts = await prepare(repo, baseSha, events, criteria)
+
+            assert.ok(prompts.length > 1, "expected a segmented contract")
+            for (const prompt of prompts) {
+                assert.ok(prompt.includes(ALTITUDE_HEADER))
+                assert.match(prompt, FINDING_LINE)
+                assert.ok(prompt.indexOf(REPOSITORY_HEADER) < prompt.indexOf(ALTITUDE_HEADER))
+                assert.ok(prompt.indexOf(ALTITUDE_HEADER) < prompt.indexOf(PUBLISHED_HEADER))
+            }
+            assert.equal(events.length, 1)
+        })
+    })
+
+    it("fails closed to no section when the target cannot be measured", async () => {
+        await withTempDir("baro-critic-altitude-closed-", async (repo) => {
+            commitBaseline(repo, { "src/big.ts": body("a", 1600) })
+            writeFileSync(join(repo, "src/big.ts"), body("a", 1600) + body("b", 100))
+
+            const cases: { label: string; source: CriticEvidenceSource }[] = [
+                {
+                    label: "no target",
+                    source: { resolveRepositoryTarget: () => null },
+                },
+                {
+                    label: "no base sha",
+                    source: {
+                        resolveRepositoryTarget: () => ({ cwd: repo, baseSha: null }),
+                    },
+                },
+                {
+                    label: "resolver throws",
+                    source: {
+                        resolveRepositoryTarget: () => {
+                            throw new Error("resolver exploded")
+                        },
+                    },
+                },
+            ]
+
+            for (const item of cases) {
+                const events: ActivityEvent[] = []
+                const prepared = await prepareCriticEvaluation(
+                    ["the story is complete"],
+                    "agent output",
+                    "story-1",
+                    {
+                        ...item.source,
+                        emitActivity: (event) => {
+                            events.push(event as ActivityEvent)
+                        },
+                    },
+                )
+                const prompt = prepared.prompts.join("\n")
+                assert.ok(prompt.length > 0, item.label)
+                assert.ok(!prompt.includes(ALTITUDE_HEADER), item.label)
+                assert.equal(events.length, 0, item.label)
+            }
+        })
+    })
+
+    it("skips the measurement when the repository configures git to run a program", async () => {
+        await withTempDir("baro-critic-altitude-fsmonitor-", async (repo) => {
+            const baseSha = commitBaseline(repo, { "src/big.ts": body("a", 1600) })
+            writeFileSync(join(repo, "src/big.ts"), body("a", 1600) + body("b", 100))
+            const sentinel = join(repo, "fsmonitor-executed")
+            const fsmonitor = join(repo, "hostile-fsmonitor.sh")
+            writeFileSync(
+                fsmonitor,
+                `#!/bin/sh\nprintf executed > ${JSON.stringify(sentinel)}\n`,
+            )
+            chmodSync(fsmonitor, 0o755)
+            git(repo, "config", "core.fsmonitor", fsmonitor)
+
+            const events: ActivityEvent[] = []
+            const [prompt] = await prepare(repo, baseSha, events)
+            assert.ok(prompt)
+
+            assert.equal(
+                existsSync(sentinel),
+                false,
+                "the advisory measurement must not run repository-configured git helpers",
+            )
+            assert.ok(!prompt.includes(ALTITUDE_HEADER))
+            assert.equal(events.length, 0)
+        })
+    })
+
+    it("leaves the verdict schema and altitude-free prompts unchanged", async () => {
+        const shapes = verdictSystemPrompt()
+            .split("\n")
+            .filter((line) => line.startsWith('{"verdict":'))
+        assert.equal(shapes.length, 2)
+        for (const shape of shapes) {
+            assert.deepStrictEqual(Object.keys(JSON.parse(shape)), [
+                "verdict",
+                "reasoning",
+                "violated_criteria",
+            ])
+        }
+        assert.deepStrictEqual(
+            JSON.parse(
+                extractVerdictJson(
+                    '{"verdict":"fail","reasoning":"why","violated_criteria":["a"]}',
+                ),
+            ),
+            { verdict: "fail", reasoning: "why", violated_criteria: ["a"] },
+        )
+        assert.doesNotMatch(verdictSystemPrompt(), /altitude/iu)
+
+        const prompt = buildEvalPrompt(
+            ["the story is complete"],
+            "agent output",
+            null,
+            "diff evidence",
+            null,
+            undefined,
+            [],
+            false,
+        )
+        assert.ok(!/Altitude/u.test(prompt))
+        assert.ok(prompt.indexOf(REPOSITORY_HEADER) < prompt.indexOf(PUBLISHED_HEADER))
     })
 })
