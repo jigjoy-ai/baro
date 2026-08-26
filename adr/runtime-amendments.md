@@ -11,57 +11,46 @@
 ```json
 {
   "graphVersion": 2,
-  "proposalId": "run-progressive-00b6529e76b14e1a:planner:e9b90da3bcf11114a99200d7bfc75f949e5e0bafe3958b4ca3a26d4b2a8d9cbd",
-  "sourceStoryId": "planner:planning-00b6529e76b14e1a-1",
-  "reason": "progressive planner admitted fragment php-declared-routes-1",
-  "exactMutationSha256": "f64c44fb297dda5de7407addde06902c4ad3725e6bf493b5b7c0edac6a508a33",
+  "proposalId": "run-progressive-aa22fe4d08cb3014:planner:1ac8b302ee43aafe5412bb547e49519fbba6d522397d6a83c8ddc83185659e47",
+  "sourceStoryId": "planner:planning-aa22fe4d08cb3014-1",
+  "reason": "progressive planner admitted fragment tui-flush-and-run-diff-cap-1",
+  "exactMutationSha256": "12d6ec5405cac548ffed7e73615cd1044cd18ba92d275cfeb870995e07f3f58a",
   "mutationSummary": {
     "addedStories": [
       {
         "id": "S1",
-        "title": "Add composer, vendor/bin/phpunit and ddev exec declared-test routes",
+        "title": "stdout flush on exit",
         "dependsOn": [],
         "goalInvariantIds": [
           "G-A1",
           "G-A2",
+          "G-A5",
+          "G-A6",
+          "G-C1",
+          "G-C2",
+          "G-C3",
+          "G-C4",
+          {
+            "omittedItems": 6
+          }
+        ]
+      },
+      {
+        "id": "S2",
+        "title": "run diff byte cap",
+        "dependsOn": [],
+        "goalInvariantIds": [
           "G-A3",
           "G-A4",
           "G-A5",
-          "G-A6",
-          "G-A7",
-          "G-A8",
+          "G-C1",
+          "G-C6",
+          "G-C7",
+          "G-C9",
+          "G-C11",
           {
-            "omittedItems": 15
+            "omittedItems": 2
           }
-        ]
-      }
-    ],
-    "removedStoryIds": [],
-    "modifiedDeps": {}
-  }
-}
-```
-
-## Graph version 3
-
-```json
-{
-  "graphVersion": 3,
-  "proposalId": "run-progressive-00b6529e76b14e1a:planner:d38f50b6eda7782433630b82a2374cc29c0f095e7a1c0cebd07231a295a3761f",
-  "sourceStoryId": "planner:planning-00b6529e76b14e1a-1",
-  "reason": "progressive planner admitted fragment final-d2c3d107d43abd0ccfe7ba6eaed37fd3426d11b85fae43bd03446a431969b518",
-  "exactMutationSha256": "45658c453499c68c468d38129b1577add3175e1c68c1a82fbdde45f304b98bd0",
-  "mutationSummary": {
-    "addedStories": [
-      {
-        "id": "S2",
-        "title": "Document the composer, phpunit and ddev exec routes in the allowlist paragraph",
-        "dependsOn": [],
-        "goalInvariantIds": [
-          "G-A9",
-          "G-C12",
-          "G-C14",
-          "G-C15"
         ]
       }
     ],

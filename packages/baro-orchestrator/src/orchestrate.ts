@@ -32,6 +32,7 @@ import {
     ensureGreenfieldRepo,
     isInsideGitRepo,
 } from "./integration/git.js"
+import { capRunDiff } from "./integration/run-diff-cap.js"
 import { WorktreeManager } from "./integration/worktree.js"
 import { StoryOutcomeAuthority } from "./runtime/story-outcome-authority.js"
 import { deriveGoalContract } from "./goal/goal-contract.js"
@@ -1962,7 +1963,7 @@ export async function orchestrate(
                     type: "story_diff",
                     id: "(run)",
                     files: runDiff.files,
-                    diff: runDiff.diff || undefined,
+                    diff: capRunDiff(runDiff.diff || undefined),
                 })
             }
         }
