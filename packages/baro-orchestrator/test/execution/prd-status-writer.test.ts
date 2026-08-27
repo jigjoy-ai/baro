@@ -11,6 +11,7 @@ import {
     createPrdStatusWriter,
 } from "../../src/execution/prd-status-writer.js"
 import { loadPrd, type PrdFile } from "../../src/prd.js"
+import type { BaroEvent } from "../../src/tui-protocol.js"
 
 const temporaryRoots: string[] = []
 
@@ -56,6 +57,15 @@ function prdFileWith(...ids: string[]): string {
 
 function storyOnDisk(path: string, id: string) {
     return loadPrd(path).userStories.find((s) => s.id === id)!
+}
+
+function emptyPrd(): PrdFile {
+    return {
+        project: "p",
+        branchName: "b",
+        description: "d",
+        userStories: [story("S1")],
+    } as PrdFile
 }
 
 class FakeRepository extends BaseObserver {}
@@ -141,12 +151,12 @@ describe("what prd.json knows while the run is still going", () => {
         assert.equal(final.userStories[1]!.mergeCommitSha, "sha-2")
     })
 
-    it("says so once when the event names a story the PRD does not have", () => {
+    it("says so once, in the run stream, when the event names a story the PRD does not have", () => {
         const path = prdFileWith("S1")
-        const warnings: string[] = []
+        const activity: BaroEvent[] = []
         const writer = createPrdStatusWriter({
             prdPath: path,
-            warn: (line) => warnings.push(line),
+            emitActivity: (event) => activity.push(event),
         })
         const before = readFileSync(path, "utf8")
 
@@ -154,32 +164,85 @@ describe("what prd.json knows while the run is still going", () => {
         writer.onStoryFailed("ghost")
 
         assert.equal(readFileSync(path, "utf8"), before, "unknown id is a no-op")
-        assert.equal(warnings.length, 1)
-        assert.match(warnings[0]!, /ghost/)
+        assert.equal(activity.length, 1, "one report per story, not per event")
+        assert.deepEqual(activity[0], {
+            type: "activity",
+            id: "ghost",
+            kind: "warn",
+            text: `[prd-status] no story 'ghost' in ${path}; status not recorded`,
+            ok: false,
+        })
     })
 
-    it("never throws a write failure back into the event bus", () => {
-        const warnings: string[] = []
+    it("stays silent when the run has no prd.json on disk at all", () => {
+        const activity: BaroEvent[] = []
+        let loaded = 0
+        let saved = 0
         const writer = createPrdStatusWriter({
-            prdPath: "/nowhere/prd.json",
-            load: () =>
-                ({
-                    project: "p",
-                    branchName: "b",
-                    description: "d",
-                    userStories: [story("S1")],
-                }) as PrdFile,
+            prdPath: join(mkdtempSync(join(tmpdir(), "prd-status-")), "prd.json"),
+            load: () => {
+                loaded += 1
+                return emptyPrd()
+            },
+            save: () => {
+                saved += 1
+            },
+            emitActivity: (event) => activity.push(event),
+        })
+
+        writer.onStoryMerged("S1", "abc123")
+        writer.onStoryFailed("S1")
+
+        assert.deepEqual(activity, [], "a PRD-less run is not a failure")
+        assert.equal(loaded, 0)
+        assert.equal(saved, 0)
+    })
+
+    it("never throws a save failure back into the event bus", () => {
+        const path = prdFileWith("S1")
+        const activity: BaroEvent[] = []
+        const writer = createPrdStatusWriter({
+            prdPath: path,
             save: () => {
                 throw new Error("disk is full")
             },
-            warn: (line) => warnings.push(line),
+            emitActivity: (event) => activity.push(event),
         })
 
         assert.doesNotThrow(() => writer.onStoryMerged("S1", "abc123"))
         assert.doesNotThrow(() => writer.onStoryFailed("S1"))
 
-        assert.equal(warnings.length, 1, "one warning per story, not per event")
-        assert.match(warnings[0]!, /disk is full/)
+        assert.equal(activity.length, 1, "one report per story, not per event")
+        assert.deepEqual(activity[0], {
+            type: "activity",
+            id: "S1",
+            kind: "error",
+            text: `[prd-status] could not record 'S1' in ${path}: disk is full`,
+            ok: false,
+        })
+    })
+
+    it("never throws a load failure back into the event bus", () => {
+        const path = prdFileWith("S1")
+        const activity: BaroEvent[] = []
+        const writer = createPrdStatusWriter({
+            prdPath: path,
+            load: () => {
+                throw new Error("prd.json is not JSON")
+            },
+            emitActivity: (event) => activity.push(event),
+        })
+
+        assert.doesNotThrow(() => writer.onStoryMerged("S1", "abc123"))
+
+        assert.equal(activity.length, 1)
+        assert.deepEqual(activity[0], {
+            type: "activity",
+            id: "S1",
+            kind: "error",
+            text: `[prd-status] could not record 'S1' in ${path}: prd.json is not JSON`,
+            ok: false,
+        })
     })
 })
 
@@ -224,5 +287,88 @@ describe("which bus events may rewrite story status", () => {
 
         assert.equal(storyOnDisk(path, "S1").mergeStatus, undefined)
         assert.equal(storyOnDisk(path, "S1").passes, false)
+    })
+
+    it("accepts a merge from any source when the run has no repository authority", () => {
+        const path = prdFileWith("S1", "S2")
+        const observer = new PrdStatusObserver(
+            createPrdStatusWriter({ prdPath: path }),
+        )
+
+        // A legacy non-git run: nothing ever calls setRepositoryAuthority.
+        observer.onExternalEvent(
+            new FakeRepository(),
+            StoryMerged.create({
+                storyId: "S1",
+                mode: "shared-tree",
+                mergeCommitSha: "abc1234",
+            }),
+        )
+
+        assert.equal(storyOnDisk(path, "S1").mergeStatus, "merged")
+        assert.equal(storyOnDisk(path, "S1").mergeCommitSha, "abc1234")
+        assert.equal(storyOnDisk(path, "S2").mergeStatus, undefined)
+    })
+
+    it("writes a relayed outcome once, and still lets a later merge overwrite the failure", () => {
+        let writes = 0
+        const observer = new PrdStatusObserver({
+            onStoryMerged(storyId, mergeCommitSha) {
+                writes += 1
+                assert.equal(storyId, "S1")
+                assert.equal(mergeCommitSha, "abc1234")
+            },
+            onStoryFailed(storyId) {
+                writes += 1
+                assert.equal(storyId, "S1")
+            },
+        })
+        const failure = StoryMergeFailed.create({
+            storyId: "S1",
+            error: "conflict",
+        })
+
+        observer.onExternalEvent(new FakeRepository(), failure)
+        // A forwarder re-emits the very same outcome.
+        observer.onExternalEvent(new FakeRepository(), failure)
+        assert.equal(writes, 1, "a relayed copy is not a second outcome")
+
+        observer.onExternalEvent(
+            new FakeRepository(),
+            StoryMerged.create({
+                storyId: "S1",
+                mode: "shared-tree",
+                mergeCommitSha: "abc1234",
+            }),
+        )
+        assert.equal(writes, 2, "merged and failed are distinct outcomes")
+    })
+
+    it("persists a relayed failure to disk exactly once", () => {
+        const path = prdFileWith("S1")
+        const observer = new PrdStatusObserver(
+            createPrdStatusWriter({ prdPath: path }),
+        )
+        const failure = StoryMergeFailed.create({
+            storyId: "S1",
+            error: "conflict",
+        })
+
+        observer.onExternalEvent(new FakeRepository(), failure)
+        assert.equal(storyOnDisk(path, "S1").mergeStatus, "failed")
+
+        observer.onExternalEvent(new FakeRepository(), failure)
+        assert.equal(storyOnDisk(path, "S1").mergeStatus, "failed")
+
+        observer.onExternalEvent(
+            new FakeRepository(),
+            StoryMerged.create({
+                storyId: "S1",
+                mode: "shared-tree",
+                mergeCommitSha: "abc1234",
+            }),
+        )
+        assert.equal(storyOnDisk(path, "S1").mergeStatus, "merged")
+        assert.equal(storyOnDisk(path, "S1").mergeCommitSha, "abc1234")
     })
 })
