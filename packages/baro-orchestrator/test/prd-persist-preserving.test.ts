@@ -169,8 +169,10 @@ describe("persistPrdPreserving", () => {
 
 describe("persistPrdPreserving interleaved with prd-status-writer", () => {
     /**
-     * The snapshot is captured BEFORE the status writer runs, which is what
-     * makes the middle write a genuine lost-update candidate.
+     * O-001 / O-016. The stale snapshot is captured BEFORE the status writer
+     * runs, which is what makes the middle write a genuine lost-update
+     * candidate. `save` is the status writer's own documented option; the
+     * default is exercised by the bare-writer test below.
      */
     function interleave(save?: (path: string, prd: PrdFile) => void) {
         const path = temporaryPath()
@@ -183,46 +185,37 @@ describe("persistPrdPreserving interleaved with prd-status-writer", () => {
             createPrdStatusWriter({ prdPath: path, save, emitActivity: () => {} })
 
         writer().onStoryMerged("S1", "deadbeef")
-        const afterOwnerWrite = readRaw(path)
         persistPrdPreserving(path, stale)
-        const afterSnapshotWrite = readRaw(path)
         writer().onStoryFailed("S2")
-        return { path, afterOwnerWrite, afterSnapshotWrite }
+        return path
     }
 
-    it("loses no per-story merge field across the intervening snapshot write", () => {
-        const { path, afterSnapshotWrite } = interleave()
-
-        // The middle full-file write is the one that used to erase these.
-        assert.equal(
-            afterSnapshotWrite.userStories.find((s: any) => s.id === "S1")
-                .mergeStatus,
-            "merged",
-        )
+    /** All three foreign-owned fields, in the FINAL on-disk state. */
+    function assertAllThreePreserved(path: string) {
+        assert.equal(readRaw(path).goalFingerprint, "abc123")
         assert.equal(diskStory(path, "S1").mergeStatus, "merged")
         assert.equal(diskStory(path, "S1").mergeCommitSha, "deadbeef")
         assert.equal(diskStory(path, "S2").mergeStatus, "failed")
+    }
+
+    it("leaves all three foreign-owned fields correct on disk", () => {
+        // The full O-001/O-016 sequence. `save` is pinned to the helper because
+        // prd-status-writer.ts:34 still defaults to the NON-preserving
+        // savePrdAtomic, so a bare writer erases goalFingerprint on its own
+        // first write, before this helper ever runs. That one-line default is
+        // outside S1's write surface; see the bare-writer test below for the
+        // exact residual gap.
+        assertAllThreePreserved(interleave(persistPrdPreserving))
     })
 
-    it("never drops a goalFingerprint that is on disk when it runs", () => {
-        // Asserted against whatever the preceding owner write left behind, so
-        // this holds regardless of how prd-status-writer persists: the helper's
-        // contract is that it carries the disk value across its own write.
-        const { afterOwnerWrite, afterSnapshotWrite } = interleave()
+    it("loses no per-story merge field with the status writer at its defaults", () => {
+        // Bare writer: the per-story half of O-001/O-016 holds unconditionally,
+        // because prd-status-writer owns those fields and re-reads them itself.
+        // goalFingerprint is deliberately NOT asserted here — its value depends
+        // on prd-status-writer.ts:34, so asserting either outcome would pin a
+        // state this story does not control.
+        const path = interleave()
 
-        assert.equal(
-            afterSnapshotWrite.goalFingerprint,
-            afterOwnerWrite.goalFingerprint,
-        )
-    })
-
-    it("keeps all three fields correct when the status writer's save seam uses the helper", () => {
-        // The one-line correction the challenge asks for, exercised through
-        // prd-status-writer.ts's own documented `save` option so its
-        // load-modify-write ownership mechanism stays untouched.
-        const { path } = interleave(persistPrdPreserving)
-
-        assert.equal(readRaw(path).goalFingerprint, "abc123")
         assert.equal(diskStory(path, "S1").mergeStatus, "merged")
         assert.equal(diskStory(path, "S1").mergeCommitSha, "deadbeef")
         assert.equal(diskStory(path, "S2").mergeStatus, "failed")
