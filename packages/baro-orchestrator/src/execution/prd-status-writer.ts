@@ -8,16 +8,19 @@
  * re-executed work that had already landed.
  */
 
+import { existsSync } from "node:fs"
+
 import { BaseObserver, type Participant, type SemanticEvent } from "../runtime/mozaik.js"
 
 import { loadPrd, savePrdAtomic, type PrdFile } from "../prd.js"
 import { StoryMergeFailed, StoryMerged } from "../semantic-events.js"
+import { emit, type BaroEvent } from "../tui-protocol.js"
 
 export interface PrdStatusWriterOptions {
     prdPath: string
     load?: (path: string) => PrdFile
     save?: (path: string, prd: PrdFile) => void
-    warn?: (line: string) => void
+    emitActivity?: (event: BaroEvent) => void
 }
 
 export interface PrdStatusWriter {
@@ -29,9 +32,9 @@ export function createPrdStatusWriter({
     prdPath,
     load = loadPrd,
     save = savePrdAtomic,
-    warn = (line) => process.stderr.write(`${line}\n`),
+    emitActivity = emit,
 }: PrdStatusWriterOptions): PrdStatusWriter {
-    // One warning per story, not per event: a PRD we cannot write is a
+    // One report per story, not per event: a PRD we cannot write is a
     // condition, and repeating it once per story keeps the run readable.
     const warnedUnknown = new Set<string>()
     const warnedWriteFailure = new Set<string>()
@@ -40,14 +43,21 @@ export function createPrdStatusWriter({
         storyId: string,
         mutate: (story: PrdFile["userStories"][number]) => PrdFile["userStories"][number],
     ): void => {
+        // A run with no PRD on disk is legitimate (programmatic orchestration,
+        // tests); there is nothing to project onto and nothing to report.
+        if (!existsSync(prdPath)) return
         try {
             const prd = load(prdPath)
             if (!prd.userStories.some((story) => story.id === storyId)) {
                 if (!warnedUnknown.has(storyId)) {
                     warnedUnknown.add(storyId)
-                    warn(
-                        `[prd-status] no story '${storyId}' in ${prdPath}; status not recorded`,
-                    )
+                    emitActivity({
+                        type: "activity",
+                        id: storyId,
+                        kind: "warn",
+                        text: `[prd-status] no story '${storyId}' in ${prdPath}; status not recorded`,
+                        ok: false,
+                    })
                 }
                 return
             }
@@ -62,9 +72,14 @@ export function createPrdStatusWriter({
             // is still correct, only its on-disk projection is stale.
             if (warnedWriteFailure.has(storyId)) return
             warnedWriteFailure.add(storyId)
-            warn(
-                `[prd-status] could not record '${storyId}' in ${prdPath}: ${(error as Error)?.message ?? String(error)}`,
-            )
+            const message = error instanceof Error ? error.message : String(error)
+            emitActivity({
+                type: "activity",
+                id: storyId,
+                kind: "error",
+                text: `[prd-status] could not record '${storyId}' in ${prdPath}: ${message}`,
+                ok: false,
+            })
         }
     }
 
@@ -87,12 +102,16 @@ export function createPrdStatusWriter({
 }
 
 /**
- * Bus adapter: turns the repository authority's StoryMerged / StoryMergeFailed
- * into writer calls. Only the bound repository authority is trusted, so an
- * ambient participant cannot rewrite story status.
+ * Bus adapter: turns StoryMerged / StoryMergeFailed into writer calls. When a
+ * repository authority is bound (git runs, collective runs) only that
+ * participant is trusted. A legacy non-git run has no authority at all, and
+ * refusing its events is what left prd.json stale across an interrupt — so
+ * with no authority bound every source is accepted, deduped per event kind
+ * and story so a relayed copy cannot re-run the write.
  */
 export class PrdStatusObserver extends BaseObserver {
     private repositoryAuthority: Participant | null = null
+    private readonly settled = new Set<string>()
 
     constructor(private readonly writer: PrdStatusWriter) {
         super()
@@ -106,10 +125,11 @@ export class PrdStatusObserver extends BaseObserver {
         source: Participant,
         event: SemanticEvent<unknown>,
     ): void {
-        if (!this.repositoryAuthority || source !== this.repositoryAuthority) {
+        if (this.repositoryAuthority && source !== this.repositoryAuthority) {
             return
         }
         if (StoryMerged.is(event)) {
+            if (!this.claim(event.type, event.data.storyId)) return
             this.writer.onStoryMerged(
                 event.data.storyId,
                 event.data.mergeCommitSha,
@@ -117,7 +137,17 @@ export class PrdStatusObserver extends BaseObserver {
             return
         }
         if (StoryMergeFailed.is(event)) {
+            if (!this.claim(event.type, event.data.storyId)) return
             this.writer.onStoryFailed(event.data.storyId)
         }
+    }
+
+    /** Merged and failed keep distinct keys, so a late merge can still
+     *  overwrite an earlier failure for the same story. */
+    private claim(eventType: string, storyId: string): boolean {
+        const key = `${eventType}:${storyId}`
+        if (this.settled.has(key)) return false
+        this.settled.add(key)
+        return true
     }
 }

@@ -842,11 +842,14 @@ export async function orchestrate(
     // prd.json learns each story's outcome as it settles, not at run end, so
     // an interrupted run can be resumed from disk.
     const prdStatusWriter = createPrdStatusWriter({ prdPath: config.prdPath })
+    // Joined in every run shape: a legacy non-git run has no repository
+    // authority, and gating the observer on one is what kept merge status off
+    // disk there.
+    const prdStatusObserver = new PrdStatusObserver(prdStatusWriter)
     if (repositoryAuthority) {
-        const prdStatusObserver = new PrdStatusObserver(prdStatusWriter)
         prdStatusObserver.setRepositoryAuthority(repositoryAuthority)
-        prdStatusObserver.join(env)
     }
+    prdStatusObserver.join(env)
 
     const useLibrarian = config.withLibrarian ?? true
     const useSentry = config.withSentry ?? true
