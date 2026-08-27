@@ -52,7 +52,7 @@ import {
     buildDefaultStoryPrompt,
     loadPrd,
     markStoryPassed,
-    savePrdAtomic,
+    persistPrdPreserving,
 } from "../prd.js"
 import {
     ConductorState,
@@ -98,9 +98,11 @@ export interface ConductorOptions {
     ) => Promise<string | null | undefined> | string | null | undefined
     onRunComplete?: (summary: ConductorRunSummary) => Promise<void> | void
     /**
-     * Persistence seam for tests and embedders. Defaults to atomic path
-     * replacement; a thrown error terminates the run before in-memory state
-     * or authoritative events can advance beyond the durable PRD.
+     * Persistence seam for tests and embedders. Defaults to an atomic write
+     * that preserves foreign-owned fields (top-level `goalFingerprint`,
+     * per-story `mergeStatus`/`mergeCommitSha`) this snapshot does not carry;
+     * a thrown error terminates the run before in-memory state or
+     * authoritative events can advance beyond the durable PRD.
      */
     persistPrd?: (path: string, prd: PrdFile) => void
     /**
@@ -846,7 +848,7 @@ export class Conductor extends BaseObserver {
     }
 
     private persistPrd(prd: PrdFile): void {
-        const persist = this.opts.persistPrd ?? savePrdAtomic
+        const persist = this.opts.persistPrd ?? persistPrdPreserving
         persist(this.opts.prdPath, prd)
     }
 

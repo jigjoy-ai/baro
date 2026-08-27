@@ -122,7 +122,7 @@ import { SurgeonPi } from "./harness/pi/surgeon.js"
 import { Supervisor } from "./execution/supervisor.js"
 import { resolveEffectiveParallel } from "./planning/domain/mode-enforcement.js"
 import { ALL_GATES } from "./execution/gate-registry.js"
-import { PrdFile, loadPrd, savePrd } from "./prd.js"
+import { PrdFile, loadPrd, persistPrdPreserving } from "./prd.js"
 import { PremiseAmendmentAuthority } from "./planning/application/premise-amendments.js"
 import { readAuthoritativeDeclaredTests } from "./verification/prd-declared-tests.js"
 import {
@@ -711,7 +711,7 @@ export async function orchestrate(
             const prd = loadPrd(config.prdPath)
             if (prd.branchName !== cur) {
                 prd.branchName = cur
-                savePrd(config.prdPath, prd)
+                persistPrdPreserving(config.prdPath, prd)
             }
             process.stderr.write(`[orchestrate] continue mode — staying on branch '${cur}' (updates the existing PR)\n`)
         }
@@ -1084,7 +1084,7 @@ export async function orchestrate(
             persist: (document) => {
                 try {
                     const current = loadPrd(config.prdPath)
-                    savePrd(config.prdPath, { ...current, decisionDocument: document })
+                    persistPrdPreserving(config.prdPath, { ...current, decisionDocument: document })
                 } catch (error) {
                     process.stderr.write(
                         `[premise] could not persist the amendment: ${

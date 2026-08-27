@@ -9,7 +9,7 @@ import {
 import {
     loadPrd,
     markStoryPassed,
-    savePrdAtomic,
+    persistPrdPreserving,
     type PrdCollectiveProtocolState,
     type PrdFile,
     type PrdStory,
@@ -492,7 +492,7 @@ export class CollectiveBoard extends SerializedObserver {
                         : null,
                 }),
                 commitPrd: (prd) => {
-                    savePrdAtomic(this.opts.prdPath, prd)
+                    persistPrdPreserving(this.opts.prdPath, prd)
                     this.prd = prd
                 },
                 admitGraph: ({ proposal, planningState, maxAddedStories }) => {
@@ -1577,7 +1577,7 @@ export class CollectiveBoard extends SerializedObserver {
         }
         const duration = this.durations.get(storyId) ?? 0
         this.prd = markStoryPassed(this.prd, storyId, duration)
-        savePrdAtomic(this.opts.prdPath, this.prd)
+        persistPrdPreserving(this.opts.prdPath, this.prd)
         this.dependencySuspensionDurationSecs.delete(storyId)
         this.wave.pending.delete(storyId)
         addUnique(this.wave.passed, storyId)
@@ -3108,7 +3108,7 @@ export class CollectiveBoard extends SerializedObserver {
                   protocol: structuredClone(protocol),
               }
         const next: PrdFile = { ...this.prd, runtimeGraph }
-        savePrdAtomic(this.opts.prdPath, next)
+        persistPrdPreserving(this.opts.prdPath, next)
         this.prd = next
     }
 

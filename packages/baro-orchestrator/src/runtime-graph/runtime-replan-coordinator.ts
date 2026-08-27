@@ -1,5 +1,5 @@
 import {
-    savePrdAtomic,
+    persistPrdPreserving,
     type PrdFile,
     type PrdRuntimeGraphState,
     type PrdRuntimeReplanOrigin,
@@ -91,7 +91,7 @@ export class RuntimeReplanCoordinator {
     private readonly persist: (path: string, prd: PrdFile) => void
 
     constructor(private readonly opts: RuntimeReplanCoordinatorOptions) {
-        this.persist = opts.persist ?? savePrdAtomic
+        this.persist = opts.persist ?? persistPrdPreserving
     }
 
     get graphVersion(): number {
