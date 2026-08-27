@@ -195,6 +195,12 @@ export interface RecoveryStartedData {
 export const RecoveryStarted =
     defineSemanticEvent<RecoveryStartedData>("recovery_started")
 
+/** Set only when this attempt resumes a story the host suspended; the
+ *  preserved ref is null when no recovery material survived cleanup. */
+export interface StoryResumeDirective {
+    readonly preservedBranch: string | null
+}
+
 /**
  * Unlike the old toJSON() (which logged only `promptLen`), the wire format
  * carries the full prompt — StoryFactory needs it, and audit-log
@@ -220,6 +226,10 @@ export interface StorySpawnRequestData {
         reason: string
         branch?: string
     }
+    /** Present only on a re-offer of a host-suspended story: the spawn must
+     * go through the host-owned resume step so the recorded creation SHA
+     * moves with the re-base instead of staying on a stale one. */
+    resume?: StoryResumeDirective
     offerId?: string
     runId?: string
     leaseId?: string

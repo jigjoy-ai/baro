@@ -954,9 +954,34 @@ export class StoryFactory extends BaseObserver {
         )
 
         // Legacy may fall back to cwd; collective treats missing isolation as failure.
-        const createdWorktree = this.opts.worktrees
-            ? await this.opts.worktrees.create(req.storyId)
-            : null
+        const worktrees = this.opts.worktrees
+        let createdWorktree: string | null = null
+        if (worktrees) {
+            if (req.resume) {
+                // The host owns re-basing a suspended story: it moves the
+                // recorded creation SHA in the same critical section, so the
+                // lineage gate later compares against the base this attempt
+                // actually descends from. Never create() instead — that would
+                // silently drop the preserved attempt and its base.
+                try {
+                    await worktrees.resumeFromSuspension(
+                        req.storyId,
+                        req.resume.preservedBranch
+                            ? { restoreFrom: req.resume.preservedBranch }
+                            : {},
+                    )
+                    createdWorktree = worktrees.activePath(req.storyId)
+                } catch (error) {
+                    process.stderr.write(
+                        `[story-factory] ${req.storyId} resume failed: ` +
+                            `${(error as Error)?.message ?? String(error)}\n`,
+                    )
+                    createdWorktree = null
+                }
+            } else {
+                createdWorktree = await worktrees.create(req.storyId)
+            }
+        }
         // The run may have completed while git worktree creation was queued.
         // Leave any already-created path registered for cleanup, but never
         // launch a provider process across the shutdown boundary.
