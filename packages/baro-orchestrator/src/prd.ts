@@ -223,9 +223,13 @@ export function savePrd(path: string, prd: PrdFile): void {
  * truncate/write. The temporary file is removed on every failed path.
  */
 export function savePrdAtomic(path: string, prd: PrdFile): void {
+    writeJsonAtomic(path, prd)
+}
+
+function writeJsonAtomic(path: string, value: unknown): void {
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
     try {
-        writeFileSync(temporary, JSON.stringify(prd, null, 2) + "\n", {
+        writeFileSync(temporary, JSON.stringify(value, null, 2) + "\n", {
             flag: "wx",
         })
         renameSync(temporary, path)
@@ -235,6 +239,95 @@ export function savePrdAtomic(path: string, prd: PrdFile): void {
         } catch {}
         throw error
     }
+}
+
+/** Fields a full-file writer must never clobber, named by their real owner. */
+export type PrdPreservedField =
+    | "goalFingerprint"
+    | "mergeStatus"
+    | "mergeCommitSha"
+
+export interface PersistPrdPreservingOptions {
+    /** Preserved fields this caller legitimately authors, so its own value —
+     *  including an absent one — wins over what is already on disk. */
+    owns?: readonly PrdPreservedField[]
+}
+
+// Top-level `goalFingerprint` is written by Rust (crates/baro-tui/src/main.rs:3945)
+// and is not a member of `PrdFile` (above), so `normalizePrd`'s whitelist literal
+// strips it; per-story `mergeStatus`/`mergeCommitSha` are owned by
+// src/execution/prd-status-writer.ts. A blind full-file `savePrd`/`savePrdAtomic`
+// from a stale in-memory snapshot therefore silently erases another writer's
+// field: every full-file writer must go through this function instead.
+export function persistPrdPreserving(
+    path: string,
+    prd: PrdFile,
+    opts?: PersistPrdPreservingOptions,
+): void {
+    const owns = new Set<PrdPreservedField>(opts?.owns ?? [])
+    // Raw read, never `loadPrd`: normalization drops the very keys this merge
+    // exists to carry across. An unreadable or non-object file merges nothing.
+    let disk: Record<string, unknown> | null = null
+    try {
+        const parsed: unknown = JSON.parse(readFileSync(path, "utf8"))
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            disk = parsed as Record<string, unknown>
+        }
+    } catch {
+        disk = null
+    }
+
+    const out: Record<string, unknown> = {
+        ...(prd as unknown as Record<string, unknown>),
+    }
+    if (disk) {
+        // `goalFingerprint` only: a blanket foreign-key merge would resurrect
+        // top-level keys a caller intentionally removed (e.g. `runtimeGraph`).
+        if (
+            !owns.has("goalFingerprint") &&
+            out.goalFingerprint === undefined &&
+            typeof disk.goalFingerprint === "string"
+        ) {
+            out.goalFingerprint = disk.goalFingerprint
+        }
+
+        const diskStories = new Map<string, Record<string, unknown>>()
+        if (Array.isArray(disk.userStories)) {
+            for (const entry of disk.userStories) {
+                if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+                    continue
+                }
+                const record = entry as Record<string, unknown>
+                if (typeof record.id === "string") {
+                    diskStories.set(record.id, record)
+                }
+            }
+        }
+        // Stories on disk but absent from `prd` are NOT re-added: a planner
+        // deletion must stick.
+        out.userStories = prd.userStories.map((story) => {
+            const previous = diskStories.get(story.id)
+            if (!previous) return story
+            const { mergeStatus, mergeCommitSha } = previous
+            return {
+                ...story,
+                // Omit rather than emit an explicit `undefined`, matching
+                // `normalizeStory`.
+                ...(!owns.has("mergeStatus") &&
+                story.mergeStatus === undefined &&
+                (mergeStatus === "merged" || mergeStatus === "failed")
+                    ? { mergeStatus }
+                    : {}),
+                ...(!owns.has("mergeCommitSha") &&
+                story.mergeCommitSha === undefined &&
+                typeof mergeCommitSha === "string"
+                    ? { mergeCommitSha }
+                    : {}),
+            }
+        })
+    }
+
+    writeJsonAtomic(path, out)
 }
 
 export function normalizePrd(input: Partial<PrdFile>, source: string): PrdFile {
