@@ -32,6 +32,7 @@ import {
 import type { CoordinationMode } from "../src/semantic-events.js"
 import { loadPrd } from "../src/prd.js"
 import { loadConversationContextFile } from "../src/conversation/session/conversation-context.js"
+import { resumeRunRequested } from "../src/runtime/resume-mode.js"
 import {
     parseEndpoints,
     parseTierMap,
@@ -414,6 +415,7 @@ function printHelp(): void {
             "                        'light=openai:MiniMax-M3,standard=openai:MiniMax-M3,heavy=claude:opus'",
             "                        (also read from BARO_TIER_MAP). Lets one DAG mix claude/openai/codex.",
             "                        Legacy tier spellings haiku/sonnet/opus are accepted as aliases.",
+            "  --resume              Resume an in-progress run (also via BARO_RESUME=1)",
             "  --openai-endpoint <name=url>  Register a named OpenAI-compatible endpoint (repeatable).",
             "                        Reference it from a route as openai:<model>@<name>, e.g.",
             "                        --openai-endpoint minimax=https://api.minimax.io/v1",
@@ -434,7 +436,8 @@ async function main(): Promise<void> {
         await runProgressivePlannerMcpServer(mcpInvocation)
         return
     }
-    const args = parseArgs(process.argv.slice(2))
+    const cliArgv = process.argv.slice(2)
+    const args = parseArgs(cliArgv)
     if (args.help) {
         printHelp()
         return
@@ -803,7 +806,7 @@ async function main(): Promise<void> {
         emitTuiEvents: !args.noTuiEvents,
         withGit: args.noGit ? false : undefined,
         continueRun: args.continueRun || process.env.BARO_CONTINUE === "1",
-        resumeRun: args.resume || process.env.BARO_RESUME === "1",
+        resumeRun: resumeRunRequested(cliArgv, process.env),
         auditLogPath: args.auditLog,
         withCritic: args.withCritic,
         criticModel: args.criticModel,
