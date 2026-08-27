@@ -35,6 +35,9 @@ pub struct OrchestratorConfig {
     pub timeout_secs: u64,
     pub override_model: Option<String>,
     pub default_model: Option<String>,
+    /// Forwarded as the bare `--resume` flag, so the resume decision reaches
+    /// the child on its own argv instead of only through inherited env.
+    pub is_resume: bool,
     /// Skip the git lifecycle (branch/push).
     pub skip_git: bool,
     /// Path for the audit JSONL log.
@@ -447,6 +450,9 @@ fn build_command(
     };
     cmd.arg("--prd").arg(&cfg.prd_path);
     cmd.arg("--cwd").arg(&cfg.cwd);
+    if cfg.is_resume {
+        cmd.arg("--resume");
+    }
     if let Some(planning_id) = &cfg.progressive_planning_id {
         cmd.arg("--progressive-planning").arg(planning_id);
     }
@@ -575,6 +581,7 @@ mod tests {
             timeout_secs: 60,
             override_model: None,
             default_model: Some("sonnet".to_string()),
+            is_resume: false,
             skip_git: true,
             audit_log: None,
             with_critic: false,
@@ -661,6 +668,22 @@ mod tests {
         assert_eq!(count(&args, "--with-surgeon"), 0);
         assert_eq!(count(&args, "--surgeon-use-llm"), 1);
         assert_eq!(count(&args, "--no-surgeon-llm"), 0);
+    }
+
+    #[test]
+    fn a_resume_launch_puts_the_resume_flag_on_the_child_argv() {
+        let mut cfg = config(true, true);
+        cfg.is_resume = true;
+        let args = command_args(&cfg);
+        assert_eq!(count(&args, "--resume"), 1);
+    }
+
+    #[test]
+    fn a_fresh_launch_leaves_the_resume_flag_off() {
+        let mut cfg = config(true, true);
+        cfg.is_resume = false;
+        let args = command_args(&cfg);
+        assert_eq!(count(&args, "--resume"), 0);
     }
 
     fn context_snapshot() -> crate::conversation::ConversationContextSnapshot {

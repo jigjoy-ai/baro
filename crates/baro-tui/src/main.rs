@@ -2554,6 +2554,7 @@ async fn run_app(
                                     if !app.refining =>
                                 {
                                     if app.is_resume {
+                                        let exec_is_resume = app.is_resume;
                                         let resume_branch = app.branch_name.clone();
                                         let project = app.project.clone();
                                         let description = app.description.clone();
@@ -2628,7 +2629,13 @@ async fn run_app(
                                                 return;
                                             }
                                             spawn_executor(
-                                                prd, exec_cwd, branch_tx, cfg, false, None,
+                                                prd,
+                                                exec_cwd,
+                                                branch_tx,
+                                                cfg,
+                                                false,
+                                                None,
+                                                exec_is_resume,
                                             );
                                         });
                                     } else {
@@ -2695,6 +2702,7 @@ async fn run_app(
                                                 }
                                             };
                                             app.start_execution();
+                                            let exec_is_resume = app.is_resume;
                                             let exec_prd = prd;
                                             let exec_cwd = cwd.clone();
                                             let branch_tx = tx.clone();
@@ -2772,7 +2780,13 @@ async fn run_app(
                                                     ))
                                                     .await;
                                                 spawn_executor(
-                                                    exec_prd, exec_cwd, branch_tx, cfg, false, None,
+                                                    exec_prd,
+                                                    exec_cwd,
+                                                    branch_tx,
+                                                    cfg,
+                                                    false,
+                                                    None,
+                                                    exec_is_resume,
                                                 );
                                             });
                                         }
@@ -2867,6 +2881,7 @@ async fn run_app(
                                         }
                                     };
                                     app.start_execution();
+                                    let exec_is_resume = app.is_resume;
                                     tokio::spawn(async move {
                                         if let Err(e) =
                                             git::checkout_existing_branch(&branch_cwd, &full_branch)
@@ -2892,7 +2907,15 @@ async fn run_app(
                                                 return;
                                             }
                                         }
-                                        spawn_executor(prd, exec_cwd, branch_tx, cfg, false, None);
+                                        spawn_executor(
+                                            prd,
+                                            exec_cwd,
+                                            branch_tx,
+                                            cfg,
+                                            false,
+                                            None,
+                                            exec_is_resume,
+                                        );
                                     });
                                 }
                                 Err(e) => {
@@ -4019,6 +4042,7 @@ fn confirm_and_execute(
         }
     };
     app.start_execution();
+    let is_resume = app.is_resume;
     let exec_cwd = cwd.to_path_buf();
     let branch_cwd = cwd.to_path_buf();
     tokio::spawn(async move {
@@ -4075,7 +4099,7 @@ fn confirm_and_execute(
             return;
         }
         let _ = tx.send(AppEvent::BranchReady(actual_full_branch)).await;
-        spawn_executor(exec_prd, exec_cwd, tx, cfg, headless, None);
+        spawn_executor(exec_prd, exec_cwd, tx, cfg, headless, None, is_resume);
     });
 }
 
@@ -4155,6 +4179,7 @@ async fn begin_progressive_execution(
         executor_config,
         headless,
         Some(planning_id.clone()),
+        app.is_resume,
     );
     // The orchestrator hosts the planner on its own bus by default
     // (authoritative receipts, execution awareness): no subprocess planner, no
@@ -4196,6 +4221,7 @@ fn spawn_executor(
     config: executor::ExecutorConfig,
     echo_raw: bool,
     progressive_planning_id: Option<String>,
+    is_resume: bool,
 ) -> mpsc::Sender<String> {
     // Bridge the orchestrator's BaroEvents to AppEvent::Baro so
     // app/screens stay untouched.
@@ -4287,6 +4313,7 @@ fn spawn_executor(
         timeout_secs: config.timeout_secs,
         override_model: config.override_model,
         default_model,
+        is_resume,
         skip_git: false,
         audit_log: Some(audit_log_default),
         with_critic: config.with_critic,
