@@ -353,6 +353,9 @@ struct ModeContractView {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    // Before anything reads it: an inherited value belongs to whoever launched
+    // this process, and would make this run report under their identity.
+    cli::launch::scrub_inherited_run_id();
     match run_main().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -385,13 +388,65 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
         cli::run_registry::run_stop(&raw_args[2..])?;
         return Ok(());
     }
+    // `baro watch <id>` / `baro logs <id> [--follow]` — read a run from another
+    // terminal. Before clap so they neither take the session lock nor register
+    // themselves as a run; the slice is parsed inside run_registry.
+    if raw_args.get(1).map(|s| s.as_str()) == Some("watch") {
+        let code = cli::run_registry::run_watch(&raw_args[2..]);
+        std::process::exit(code);
+    }
+    if raw_args.get(1).map(|s| s.as_str()) == Some("logs") {
+        let code = cli::run_registry::run_logs(&raw_args[2..]);
+        std::process::exit(code);
+    }
 
     // Update notice: the network check runs in the JS layer (no HTTP dep
     // here); this reads its cache. Printed AFTER the TUI restores the
     // terminal (below) — the alternate screen purges it.
     let update_notice = notify_update();
 
-    let (cli, _lock) = cli::cli::parse()?;
+    let (mut cli, _lock) = cli::cli::parse()?;
+
+    // Detach re-execs this argv headless in a child and hands the run over to
+    // it, so the parent must leave before it registers or touches the terminal.
+    if cli.detach {
+        match cli::detach::run_detached(&cli, &raw_args) {
+            Ok(pid) => {
+                println!("run-{pid}");
+                std::process::exit(0);
+            }
+            Err(err) => {
+                eprintln!("baro: could not detach: {err}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // Whether a bare `baro` continues the run prd.json describes or starts a
+    // new one. Decided here because the notice must reach a plain terminal —
+    // below, the alternate screen would swallow it.
+    let inferred = {
+        let prd = std::fs::read_to_string(std::path::Path::new(&cli.cwd).join("prd.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<executor::PrdFile>(&raw).ok());
+        let has_incomplete = prd
+            .as_ref()
+            .is_some_and(|p| p.user_stories.iter().any(|s| !s.passes));
+        cli::launch::decide_launch(
+            cli.resume,
+            cli.continue_run,
+            cli.goal.as_deref(),
+            prd.as_ref().and_then(|p| p.goal_fingerprint.as_deref()),
+            has_incomplete,
+        )
+    };
+    if let Some(message) = inferred.message.as_deref() {
+        eprintln!("baro: {message}");
+    }
+    if inferred.mode == cli::launch::LaunchMode::Resume {
+        cli.resume = true;
+    }
+
     // Held for the process's life; its Drop unregisters the run.
     let _run_record = cli::run_registry::register(
         cli.goal.as_deref().unwrap_or(""),
@@ -424,6 +479,14 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(value) = &cli.dialogue_model {
         std::env::set_var("BARO_DIALOGUE_MODEL", value);
+    }
+    // The orchestrator child inherits this env, so the flag reaches it without
+    // build_command knowing about it. Absent flag = leave an operator's value.
+    if let Some(ms) = cli::launch::shell_budget_env(
+        cli.shell_budget,
+        std::env::var("BASH_DEFAULT_TIMEOUT_MS").ok().as_deref(),
+    ) {
+        std::env::set_var("BASH_DEFAULT_TIMEOUT_MS", ms);
     }
 
     // --doctor short-circuits before any TUI setup — it must work even
@@ -740,6 +803,10 @@ async fn run_app(
     cli: cli::cli::Cli,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let headless = cli.headless;
+    // Captured before `cli.goal` is moved into the conversation and before the
+    // planner handoff replaces `app.goal_input`: this is the only stable copy
+    // of the goal that launched the run.
+    let launch_goal = cli.goal.clone();
     let critic_backend_explicitly_set = cli.critic_llm.is_some();
     let mut app = App::new();
     let cwd = std::fs::canonicalize(&cli.cwd)?;
@@ -1168,6 +1235,11 @@ async fn run_app(
                     )
                     .map_err(|error| format!("cannot verify resume branch: {error}"))?;
                     app.is_resume = true;
+                    // The orchestrator learns to resume only from `--resume` on
+                    // its own argv or from this variable, which it inherits;
+                    // without it the persisted plan is re-run from the top
+                    // instead of skipping what already landed.
+                    std::env::set_var("BARO_RESUME", "1");
                     app.project = prd.project.clone();
                     app.branch_name = continuation_branch.clone();
                     app.continuation_branch = Some(continuation_branch);
@@ -1185,7 +1257,14 @@ async fn run_app(
                         // `--resume --headless` sat on a review screen it had
                         // no way to answer.
                         println!(r#"{{"type":"plan_ready","stories":{}}}"#, stories.len());
-                        confirm_and_execute(&mut app, stories, &cwd, tx.clone(), headless);
+                        confirm_and_execute(
+                            &mut app,
+                            stories,
+                            &cwd,
+                            tx.clone(),
+                            headless,
+                            launch_goal.as_deref(),
+                        );
                     } else {
                         app.show_review(stories);
                     }
@@ -1698,8 +1777,15 @@ async fn run_app(
                 }
             }
             Some(AppEvent::ProgressivePlanningPrepared(spec)) => {
-                if let Err(error) =
-                    begin_progressive_execution(&mut app, spec, &cwd, tx.clone(), headless).await
+                if let Err(error) = begin_progressive_execution(
+                    &mut app,
+                    spec,
+                    &cwd,
+                    tx.clone(),
+                    headless,
+                    launch_goal.as_deref(),
+                )
+                .await
                 {
                     if headless {
                         return Err(format!("progressive planning could not start: {error}").into());
@@ -1725,7 +1811,14 @@ async fn run_app(
                         // Emit a planning event for the runner/dashboard, then
                         // auto-confirm and execute (no review screen).
                         println!(r#"{{"type":"plan_ready","stories":{}}}"#, stories.len());
-                        confirm_and_execute(&mut app, stories, &cwd, tx.clone(), headless);
+                        confirm_and_execute(
+                            &mut app,
+                            stories,
+                            &cwd,
+                            tx.clone(),
+                            headless,
+                            launch_goal.as_deref(),
+                        );
                     } else if app.conversation.goal_envelope().is_some() {
                         // Conversation-owned: confirm inline in the session.
                         app.pending_plan = Some(stories);
@@ -2203,7 +2296,14 @@ async fn run_app(
                                 );
                                 spawn_planner_stage_b(&app, &cwd, tx.clone(), mode_json);
                             } else if let Some(stories) = app.pending_plan.take() {
-                                confirm_and_execute(&mut app, stories, &cwd, tx.clone(), headless);
+                                confirm_and_execute(
+                                    &mut app,
+                                    stories,
+                                    &cwd,
+                                    tx.clone(),
+                                    headless,
+                                    launch_goal.as_deref(),
+                                );
                             } else if app.conversation_input.trim().starts_with('/') {
                                 let command = app.input_take();
                                 if run_slash_command(&mut app, &cwd, tx.clone(), command.trim()) {
@@ -2461,6 +2561,7 @@ async fn run_app(
                                         let exec_cwd = cwd.clone();
                                         let branch_tx = tx.clone();
                                         let err_tx = tx.clone();
+                                        let exec_goal = launch_goal.clone();
                                         if let Err(error) =
                                             begin_conversation_execution(&mut app, &cwd)
                                         {
@@ -2499,7 +2600,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             };
-                                            let prd = match executor::prd_from_resume_review(
+                                            let mut prd = match executor::prd_from_resume_review(
                                                 &original_prd,
                                                 &project,
                                                 &description,
@@ -2516,6 +2617,7 @@ async fn run_app(
                                                     return;
                                                 }
                                             };
+                                            stamp_goal_fingerprint(&mut prd, exec_goal.as_deref());
                                             if let Err(error) = executor::write_prd(&prd, &exec_cwd)
                                             {
                                                 let _ = err_tx
@@ -2539,6 +2641,7 @@ async fn run_app(
                                             app.execution_mode.clone(),
                                         );
                                         attach_conversation_metadata(&mut prd, &app);
+                                        stamp_goal_fingerprint(&mut prd, launch_goal.as_deref());
                                         if let Err(e) = executor::write_prd(&prd, &cwd) {
                                             app.planning_error =
                                                 Some(format!("Failed to write prd.json: {}", e));
@@ -3836,6 +3939,15 @@ fn spawn_context_builder(cwd: &Path, tx: mpsc::Sender<AppEvent>) {
     });
 }
 
+/// Stamps the launching goal so a later bare `baro` recognises this prd.json as
+/// its own. `app.goal_input` cannot serve: the planner handoff overwrites it
+/// with the planning prompt. An already-stamped PRD keeps its fingerprint.
+fn stamp_goal_fingerprint(prd: &mut executor::PrdFile, launch_goal: Option<&str>) {
+    let Some(goal) = launch_goal else { return };
+    prd.goal_fingerprint
+        .get_or_insert_with(|| cli::launch::goal_fingerprint(goal));
+}
+
 /// Plan confirmation: write the PRD, create the run branch, and spawn the
 /// orchestrator. Shared by headless (which needs the raw event echo on stdout)
 /// and the conversation session, where echoing would paint over the TUI.
@@ -3845,6 +3957,7 @@ fn confirm_and_execute(
     cwd: &Path,
     tx: mpsc::Sender<AppEvent>,
     headless: bool,
+    launch_goal: Option<&str>,
 ) {
     app.review_stories = stories;
     let mut prd = executor::prd_from_review(
@@ -3856,6 +3969,7 @@ fn confirm_and_execute(
         app.execution_mode.clone(),
     );
     attach_conversation_metadata(&mut prd, app);
+    stamp_goal_fingerprint(&mut prd, launch_goal);
     if let Err(e) = executor::write_prd(&prd, cwd) {
         let _ = tx.try_send(AppEvent::BranchError(format!(
             "Failed to write prd.json: {}",
@@ -3971,6 +4085,7 @@ async fn begin_progressive_execution(
     cwd: &Path,
     tx: mpsc::Sender<AppEvent>,
     headless: bool,
+    launch_goal: Option<&str>,
 ) -> Result<(), String> {
     if app.is_followup || app.is_resume {
         return Err(
@@ -4012,6 +4127,7 @@ async fn begin_progressive_execution(
     )
     .map_err(|error| error.to_string())?;
     attach_conversation_metadata(&mut bootstrap, app);
+    stamp_goal_fingerprint(&mut bootstrap, launch_goal);
 
     let actual_branch = git::create_fresh_branch(cwd, &bootstrap.branch_name)
         .await

@@ -72,7 +72,7 @@ pub struct PrdFile {
     pub goal_fingerprint: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct PrdStory {
     pub id: String,
     pub priority: i32,
@@ -184,10 +184,7 @@ pub fn prd_from_review(
         user_stories: stories.iter().map(prd_story_from_review).collect(),
         decision_document,
         execution_mode,
-        runtime_graph: None,
-        conversation_session_id: None,
-        goal_envelope: None,
-        goal_fingerprint: None,
+        ..Default::default()
     }
 }
 
@@ -252,15 +249,10 @@ pub fn prd_from_resume_review(
 
     let prd = PrdFile {
         project: project.to_string(),
-        branch_name: original.branch_name.clone(),
         description: description.to_string(),
         user_stories: merged,
-        decision_document: original.decision_document.clone(),
         execution_mode: execution_mode.or_else(|| original.execution_mode.clone()),
-        runtime_graph: original.runtime_graph.clone(),
-        conversation_session_id: original.conversation_session_id.clone(),
-        goal_envelope: original.goal_envelope.clone(),
-        goal_fingerprint: original.goal_fingerprint.clone(),
+        ..original.clone()
     };
     validate_resume_prd(&prd)?;
     Ok(prd)
@@ -360,8 +352,7 @@ fn prd_story_from_review(story: &ReviewStory) -> PrdStory {
         completed_at: None,
         duration_secs: None,
         model: story.model.clone(),
-        merge_status: None,
-        merge_commit_sha: None,
+        ..Default::default()
     }
 }
 
@@ -383,7 +374,7 @@ pub fn write_prd(prd: &PrdFile, cwd: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{prd_from_resume_review, prd_from_review, write_prd, PrdFile};
+    use super::{prd_from_resume_review, prd_from_review, write_prd, PrdFile, PrdStory};
     use crate::app::ReviewStory;
     use std::fs;
 
@@ -710,5 +701,119 @@ mod tests {
         assert!(!out.contains("goalFingerprint"));
         assert!(!out.contains("mergeStatus"));
         assert!(!out.contains("mergeCommitSha"));
+    }
+
+    #[test]
+    fn a_goal_fingerprint_survives_a_full_prd_round_trip() {
+        let with_fingerprint = PrdFile {
+            project: "p".to_string(),
+            branch_name: "baro/p".to_string(),
+            goal_fingerprint: Some("fnv1a64:0123456789abcdef".to_string()),
+            ..Default::default()
+        };
+        let out = serde_json::to_string(&with_fingerprint).unwrap();
+        assert!(out.contains(r#""goalFingerprint":"fnv1a64:0123456789abcdef""#));
+        let parsed: PrdFile = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed.goal_fingerprint, with_fingerprint.goal_fingerprint);
+
+        let without_fingerprint = PrdFile {
+            project: "p".to_string(),
+            branch_name: "baro/p".to_string(),
+            ..Default::default()
+        };
+        let out = serde_json::to_string(&without_fingerprint).unwrap();
+        assert!(!out.contains("goalFingerprint"));
+    }
+
+    #[test]
+    fn merge_status_and_commit_sha_survive_a_completed_story_round_trip() {
+        let completed = PrdStory {
+            id: "S1".to_string(),
+            priority: 1,
+            title: "Done".to_string(),
+            description: "done".to_string(),
+            retries: 2,
+            passes: true,
+            merge_status: Some("merged".to_string()),
+            merge_commit_sha: Some("deadbeef".to_string()),
+            ..Default::default()
+        };
+        let prd = PrdFile {
+            project: "p".to_string(),
+            branch_name: "baro/p".to_string(),
+            user_stories: vec![completed.clone()],
+            ..Default::default()
+        };
+        let out = serde_json::to_string(&prd).unwrap();
+        assert!(out.contains(r#""mergeStatus":"merged""#));
+        assert!(out.contains(r#""mergeCommitSha":"deadbeef""#));
+        let parsed: PrdFile = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed.user_stories[0].merge_status, completed.merge_status);
+        assert_eq!(
+            parsed.user_stories[0].merge_commit_sha,
+            completed.merge_commit_sha
+        );
+
+        let pending = PrdStory {
+            id: "S2".to_string(),
+            priority: 2,
+            title: "Pending".to_string(),
+            description: "pending".to_string(),
+            retries: 2,
+            passes: false,
+            ..Default::default()
+        };
+        let prd_without = PrdFile {
+            project: "p".to_string(),
+            branch_name: "baro/p".to_string(),
+            user_stories: vec![pending],
+            ..Default::default()
+        };
+        let out = serde_json::to_string(&prd_without).unwrap();
+        assert!(!out.contains("mergeStatus"));
+        assert!(!out.contains("mergeCommitSha"));
+    }
+
+    #[test]
+    fn rewriting_the_branch_name_keeps_the_satellite_fields() {
+        let story = PrdStory {
+            id: "S1".to_string(),
+            priority: 1,
+            title: "Done".to_string(),
+            description: "done".to_string(),
+            retries: 2,
+            passes: true,
+            merge_status: Some("merged".to_string()),
+            merge_commit_sha: Some("deadbeef".to_string()),
+            ..Default::default()
+        };
+        let original = PrdFile {
+            project: "p".to_string(),
+            branch_name: "baro/original".to_string(),
+            goal_fingerprint: Some("fnv1a64:0123456789abcdef".to_string()),
+            user_stories: vec![story],
+            ..Default::default()
+        };
+
+        // Mirrors the main.rs branch-rewrite pattern: mutate branch_name on
+        // the moved value rather than rebuilding a full field literal.
+        let mut rewritten = original;
+        rewritten.branch_name = "baro/rewritten".to_string();
+
+        let out = serde_json::to_string(&rewritten).unwrap();
+        let parsed: PrdFile = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed.branch_name, "baro/rewritten");
+        assert_eq!(
+            parsed.goal_fingerprint.as_deref(),
+            Some("fnv1a64:0123456789abcdef")
+        );
+        assert_eq!(
+            parsed.user_stories[0].merge_status.as_deref(),
+            Some("merged")
+        );
+        assert_eq!(
+            parsed.user_stories[0].merge_commit_sha.as_deref(),
+            Some("deadbeef")
+        );
     }
 }
