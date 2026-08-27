@@ -1,0 +1,8 @@
+# ADR-0001: Split into two stories with disjoint declared writes
+
+**Status:** Accepted
+**Context:** Two parallel agents must not touch the same file. The event work is confined to integration/, the spawn work to events/execution.ts + market/ + execution/. S1's worktree.ts and its tests are frozen by the goal's constraints.
+**Decision:** Story A ("integration_refused event") writes EXACTLY: packages/baro-orchestrator/src/events/integration.ts, packages/baro-orchestrator/src/integration/git-coordinator.ts, packages/baro-orchestrator/test/integration/git-coordinator-integration-refused.test.ts (new).
+Story B ("host-owned resume on the post-suspension spawn path") writes EXACTLY: packages/baro-orchestrator/src/events/execution.ts, packages/baro-orchestrator/src/market/story-factory.ts, packages/baro-orchestrator/src/execution/collective-board.ts, packages/baro-orchestrator/test/market/story-factory-resume.test.ts (new), packages/baro-orchestrator/test/execution/collective-board-resume-directive.test.ts (new).
+Neither story writes packages/baro-orchestrator/src/integration/worktree.ts, test/integration/worktree.test.ts, test/integration/worktree-suspension-lineage.test.ts, src/semantic-events.ts (a `export *` barrel, so new exports need no edit), or any existing test file. docs/semantic-events.md is NOT edited by either story.
+**Consequences:** No write overlap; both stories may run in parallel. Story A must not add fields to StorySpawnRequestData and Story B must not touch integration/*. If an agent believes it needs an edit in worktree.ts, that is out of scope — it must adapt using the existing public accessors.

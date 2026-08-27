@@ -1,0 +1,9 @@
+# ADR-0004: Test the event shape in a new file beside the existing git-coordinator tests
+
+**Status:** Accepted
+**Context:** House style is node:test + node:assert/strict, doubles as object-literal casts, real Mozaik bus with `joinWithCapture`/`captureEnv` from test/execution/helpers.ts; test/integration/ runs in the slow lane (scripts/test-lanes.mjs:12).
+**Decision:** Add packages/baro-orchestrator/test/integration/git-coordinator-integration-refused.test.ts using `describe`/`it`, `assert` from node:assert/strict, `source`/`joinWithCapture` from ../execution/helpers.js, and a `{ ... } as unknown as WorktreeManager` double. Two required cases:
+(a) refusal WITH recovery: `mergeBack` throws an object shaped `Object.assign(new Error("…"), { invariant: "sealed_merge_lineage" })`, `prepareConflictRetry` resolves `"baro-recovery/run/S1/1"`, `activePath` returns a path → assert the single `IntegrationRefused.is` event has `invariant: "sealed_merge_lineage"`, `recoveryRef: "baro-recovery/run/S1/1"`, `recoverable: true`, `retryable: true`, and that a `StoryMergeFailed` is still emitted.
+(b) refusal WITHOUT recovery: `prepareConflictRetry` rejects (or the missing-worktree path, `mergeBack` resolves `false`), `recoveryRef()` returns null and `activePath()` returns null → assert `recoveryRef: null`, `worktreeRetained: false`, `recoverable: false`, and the site-appropriate `invariant`.
+Drive the subject with `env.deliverSemanticEvent(BOARD, StoryIntegrationRequested.create({...}))` and `await coordinator.idle()`, as test/integration/git-coordinator.test.ts:62-99 does. Do NOT edit test/integration/git-coordinator.test.ts.
+**Consequences:** Story A's targeted verification is `cd packages/baro-orchestrator && node --import tsx --test test/integration/git-coordinator-integration-refused.test.ts test/integration/git-coordinator.test.ts` plus `npx tsc --noEmit -p tsconfig.json` if that config exists in the package. No repository-wide suite command.

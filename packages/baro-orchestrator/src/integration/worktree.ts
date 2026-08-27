@@ -66,6 +66,48 @@ export interface WorktreeCandidateSeal {
     capture(target: { cwd: string; baseSha: string | null }): Promise<string>
 }
 
+/** Which integration invariant refused a reviewed candidate. Carried on the
+ * error so observers classify a refusal without parsing its message. */
+export type IntegrationRefusalInvariant =
+    | "sealed_merge_lineage"
+    | "sealed_merge_base_unavailable"
+    | "sealed_merge_seal_invalid"
+    | "sealed_merge_head_changed"
+    | "sealed_merge_fingerprint"
+    | "sealed_merge_dirty"
+    | "merge_conflict"
+
+export class WorktreeRefusalError extends Error {
+    constructor(
+        readonly invariant: IntegrationRefusalInvariant,
+        message: string,
+    ) {
+        super(message)
+        this.name = "WorktreeRefusalError"
+    }
+}
+
+/** What the host-owned suspension-boundary step did, and the creation SHA it
+ * recorded in the same critical section. */
+export interface ResumeBaseUpdate {
+    mode: "created" | "recreated" | "rebased"
+    baseSha: string
+    previousBaseSha: string | null
+    restoredFrom: string | null
+}
+
+/** Disposition of a story's preserved material, so a recovery refusal names
+ * its failure class instead of only its absence. */
+interface PreservedDisposition {
+    state: "preserved" | "cleaned"
+    reason: string
+    ref: string | null
+}
+
+/** Refusal to run a destructive step because recovery material could not be
+ * secured first. Never converted into a shared-tree fallback. */
+class RecoveryMaterialError extends Error {}
+
 /**
  * Per-story worktree lifecycle for one run (one instance per orchestrate()
  * call); the run id scopes branch + dir names so concurrent runs never
@@ -78,6 +120,10 @@ export class WorktreeManager {
     private readonly baseShas = new Map<string, string>()
     /** Stories whose merge-back failed: their branch is kept for recovery. */
     private readonly preserved = new Set<string>()
+    /** Immutable recovery ref minted for a story, indexed so recovery material
+     * outlives the worktree and branch it came from. */
+    private readonly recoveryRefs = new Map<string, string>()
+    private readonly preservedHistory = new Map<string, PreservedDisposition>()
     private recoverySequence = 0
     private readonly baseDir: string
     private readonly linkDepDirs: boolean
@@ -129,6 +175,99 @@ export class WorktreeManager {
         return this.baseShas.get(storyId) ?? null
     }
 
+    /** Immutable ref holding a story's last preserved attempt, if one was
+     * minted. Survives removal of the worktree and the logical branch. */
+    recoveryRef(storyId: string): string | null {
+        return this.recoveryRefs.get(storyId) ?? null
+    }
+
+    private markPreserved(storyId: string): void {
+        this.preserved.add(storyId)
+        this.preservedHistory.set(storyId, {
+            state: "preserved",
+            reason: "",
+            ref: this.recoveryRefs.get(storyId) ?? null,
+        })
+    }
+
+    private recordRecoveryRef(storyId: string, ref: string): void {
+        this.recoveryRefs.set(storyId, ref)
+        const entry = this.preservedHistory.get(storyId)
+        if (entry) entry.ref = ref
+    }
+
+    /**
+     * Precondition of every path that removes or forgets a preserved worktree:
+     * the committed attempt becomes an immutable ref FIRST, so no destructive
+     * step can be the reason work stopped being recoverable. A story that was
+     * never preserved has nothing to secure. Failure to secure refuses the
+     * destructive step rather than proceeding without recovery material.
+     */
+    private async secureRecoveryMaterial(
+        storyId: string,
+        reason: string,
+    ): Promise<void> {
+        if (!this.preserved.has(storyId)) return
+        try {
+            const branch = this.branchOf(storyId)
+            const head = await this.logicalBranchHead(branch)
+            // A recorded ref only covers the commit it was minted at: a later
+            // attempt that advanced the branch needs its own ref.
+            const recorded = this.recoveryRefs.get(storyId)
+            const covered = recorded
+                ? await this.logicalBranchHead(recorded)
+                : null
+            if (head && head !== covered) {
+                this.recordRecoveryRef(
+                    storyId,
+                    await this.createRecoveryBranch(storyId, branch),
+                )
+            }
+        } catch (error) {
+            throw new RecoveryMaterialError(
+                `refusing to discard preserved story ${storyId} (${reason}): ` +
+                    `recovery ref could not be created: ${errMsg(error)}`,
+                { cause: error },
+            )
+        }
+        this.preservedHistory.set(storyId, {
+            state: "cleaned",
+            reason,
+            ref: this.recoveryRefs.get(storyId) ?? null,
+        })
+    }
+
+    /** The recorded ref for a story, only if it still resolves. */
+    private async resolvedRecoveryRef(storyId: string): Promise<string | null> {
+        const ref = this.recoveryRefs.get(storyId)
+        if (!ref) return null
+        try {
+            await exec("git", ["rev-parse", "--verify", `refs/heads/${ref}`], {
+                cwd: this.repoRoot,
+            })
+        } catch (error) {
+            if (isRepositoryCommandTimeout(error)) throw error
+            return null
+        }
+        return ref
+    }
+
+    /** Names the failure class behind a missing preserved worktree. */
+    private recoveryDisposition(storyId: string): string {
+        const entry = this.preservedHistory.get(storyId)
+        if (!entry) return "never preserved"
+        const { reason, ref } =
+            entry.state === "cleaned"
+                ? entry
+                : // Marked preserved, yet no usable worktree remains: the
+                  // directory went away outside this manager.
+                  { ...entry, reason: "worktree_missing" }
+        return (
+            "preserved and later cleaned " +
+            `(reason=${reason}, recoveryRef=${ref ?? "none"})`
+        )
+    }
+
     private pathOf(storyId: string): string {
         return join(this.baseDir, sanitize(storyId))
     }
@@ -151,6 +290,7 @@ export class WorktreeManager {
         const path = this.pathOf(storyId)
         try {
             if (this.shutdownStarted) return null
+            await this.secureRecoveryMaterial(storyId, "create_reclaim")
             // Registration is transactional: observers must not be able to
             // resolve a story target until every setup step has completed.
             // Clear any prior logical state before removing stale git state.
@@ -181,6 +321,9 @@ export class WorktreeManager {
             this.log(`created ${branch} at ${path}`)
             return path
         } catch (e) {
+            // Nothing was removed yet, and a shared-tree fallback would drop
+            // the preserved attempt this refusal exists to protect.
+            if (e instanceof RecoveryMaterialError) throw e
             let rollbackError: unknown = null
             try {
                 await this.rollbackPartialCreate(storyId, path, branch)
@@ -225,6 +368,191 @@ export class WorktreeManager {
     }
 
     /**
+     * The host-owned step at the cooperative-suspension boundary: recreate the
+     * story worktree at the current run branch and, optionally, replay the
+     * commits preserved when the story suspended onto that new base.
+     *
+     * The history move and the creation-SHA write happen in ONE gate-held
+     * critical section, so a resumed candidate descends from the base recorded
+     * for it. This is the only legitimate way a story's base moves: no agent
+     * process runs between the two, and every other actor that rewrites
+     * candidate history is still refused by the sealed-merge lineage gate.
+     *
+     * Fail-closed throughout: an unreadable base, a failed worktree creation
+     * or a conflicting replay aborts, leaves recovery material intact, and
+     * rejects. The previous base is never re-recorded.
+     */
+    async resumeFromSuspension(
+        storyId: string,
+        opts: { restoreFrom?: string } = {},
+    ): Promise<ResumeBaseUpdate> {
+        const release = await this.gate.acquire()
+        const branch = this.branchOf(storyId)
+        const path = this.pathOf(storyId)
+        const previousBaseSha = this.baseShas.get(storyId) ?? null
+        const resumesKnownStory =
+            previousBaseSha !== null ||
+            this.paths.has(storyId) ||
+            this.preservedHistory.has(storyId)
+        try {
+            if (this.shutdownStarted) {
+                throw new Error(
+                    `story ${storyId} cannot resume: run shutdown has started`,
+                )
+            }
+            await this.secureRecoveryMaterial(storyId, "resume_from_suspension")
+
+            const restoreSha = opts.restoreFrom
+                ? await this.resolveRestorePoint(storyId, opts.restoreFrom)
+                : null
+
+            this.paths.delete(storyId)
+            this.baseShas.delete(storyId)
+            this.preserved.delete(storyId)
+            await this.removeWorktreeQuiet(path, "resume:clear-leftover")
+            await this.deleteBranchQuiet(branch)
+
+            // Read once, under the gate: the run branch cannot move between
+            // this read, the worktree creation and the base write below.
+            const { stdout: rawBase } = await exec("git", ["rev-parse", "HEAD"], {
+                cwd: this.repoRoot,
+            })
+            const baseSha = rawBase.trim()
+            if (!baseSha) {
+                throw new Error(
+                    `run branch base is unavailable for resuming story ${storyId}`,
+                )
+            }
+
+            await exec(
+                "git",
+                ["worktree", "add", "-b", branch, path, baseSha],
+                { cwd: this.repoRoot },
+            )
+            if (this.linkDepDirs) {
+                await this.ensureDepDirsExcluded()
+                this.symlinkDepDirs(path)
+            }
+            if (restoreSha) {
+                await this.replayPreservedWork(storyId, path, baseSha, restoreSha)
+            }
+
+            this.paths.set(storyId, path)
+            this.baseShas.set(storyId, baseSha)
+            this.createdWorktree = true
+            this.log(
+                `resumed ${branch} at ${path} on ${baseSha}` +
+                    (restoreSha ? `; replayed ${opts.restoreFrom}` : ""),
+            )
+            return {
+                mode: restoreSha
+                    ? "rebased"
+                    : resumesKnownStory
+                      ? "recreated"
+                      : "created",
+                baseSha,
+                previousBaseSha,
+                restoredFrom: restoreSha ? (opts.restoreFrom ?? null) : null,
+            }
+        } catch (e) {
+            if (e instanceof RecoveryMaterialError) throw e
+            let rollbackError: unknown = null
+            try {
+                await this.rollbackPartialCreate(storyId, path, branch)
+            } catch (cleanupError) {
+                rollbackError = cleanupError
+            }
+            this.log(
+                `could not resume worktree for ${storyId} (${errMsg(e)})` +
+                    (rollbackError
+                        ? `; partial setup cleanup failed (${errMsg(rollbackError)})`
+                        : ""),
+            )
+            if (rollbackError) {
+                throw new Error(
+                    `worktree resume failed for ${storyId}: ${errMsg(e)}; ` +
+                        `rollback failed: ${errMsg(rollbackError)}`,
+                    {
+                        cause: isRepositoryCommandTimeout(e) ? e : rollbackError,
+                    },
+                )
+            }
+            throw e
+        } finally {
+            release()
+        }
+    }
+
+    /** A restore point is pinned to a commit SHA before it is replayed, so the
+     * rebase can never move the immutable recovery ref it names. */
+    private async resolveRestorePoint(
+        storyId: string,
+        restoreFrom: string,
+    ): Promise<string> {
+        let resolved: string
+        try {
+            const { stdout } = await exec(
+                "git",
+                ["rev-parse", "--verify", `${restoreFrom}^{commit}`],
+                { cwd: this.repoRoot },
+            )
+            resolved = stdout.trim()
+        } catch (error) {
+            if (isRepositoryCommandTimeout(error)) throw error
+            throw new Error(
+                `preserved work ${restoreFrom} is unavailable for resuming story ` +
+                    `${storyId}: ${errMsg(error)}`,
+            )
+        }
+        if (!resolved) {
+            throw new Error(
+                `preserved work ${restoreFrom} is unavailable for resuming story ${storyId}`,
+            )
+        }
+        return resolved
+    }
+
+    private async replayPreservedWork(
+        storyId: string,
+        worktreePath: string,
+        baseSha: string,
+        restoreSha: string,
+    ): Promise<void> {
+        const { stdout: forkPoint } = await exec(
+            "git",
+            ["merge-base", baseSha, restoreSha],
+            { cwd: worktreePath },
+        )
+        const mergeBase = forkPoint.trim()
+        if (!mergeBase) {
+            throw new Error(
+                `preserved work for story ${storyId} shares no history with the run branch`,
+            )
+        }
+        try {
+            await exec(
+                "git",
+                ["rebase", "--onto", baseSha, mergeBase, restoreSha],
+                { cwd: worktreePath },
+            )
+        } catch (error) {
+            // Leave no rebase in progress behind: the caller's rollback needs a
+            // removable worktree, and the preserved ref must stay untouched.
+            await execQuiet("git", ["rebase", "--abort"], worktreePath)
+            if (isRepositoryCommandTimeout(error)) throw error
+            throw new Error(
+                `could not replay preserved work for story ${storyId} onto ${baseSha}: ` +
+                    errMsg(error),
+            )
+        }
+        // The replay above runs on a detached HEAD (restoreSha is a raw
+        // commit), so the story branch is moved onto its result explicitly.
+        await exec("git", ["checkout", "-B", this.branchOf(storyId)], {
+            cwd: worktreePath,
+        })
+    }
+
+    /**
      * Turn a merge-failed worktree into an immutable recovery ref, then free
      * the logical story id so a bounded retry can start from the latest run
      * branch. The original commit remains inspectable even if retry execution
@@ -236,7 +564,21 @@ export class WorktreeManager {
             const path = this.paths.get(storyId)
             const branch = this.branchOf(storyId)
             if (!path || !existsSync(path) || !this.preserved.has(storyId)) {
-                throw new Error(`story ${storyId} has no preserved worktree to recover`)
+                // No live worktree to release, but an earlier host step may
+                // already have moved this story's attempt onto an immutable
+                // ref — that ref IS the recovery material.
+                const recorded = await this.resolvedRecoveryRef(storyId)
+                if (recorded) {
+                    this.log(
+                        `story ${storyId} has no live preserved worktree; recovering ` +
+                            `from ${recorded}`,
+                    )
+                    return recorded
+                }
+                throw new Error(
+                    `story ${storyId} has no preserved worktree to recover: ` +
+                        this.recoveryDisposition(storyId),
+                )
             }
 
             const { stdout: status } = await exec("git", ["status", "--porcelain"], {
@@ -252,6 +594,7 @@ export class WorktreeManager {
             // mergeBack already ran the leftover safety-net before detecting
             // the conflict, so this ref is a complete immutable attempt.
             const backup = await this.createRecoveryBranch(storyId, branch)
+            this.recordRecoveryRef(storyId, backup)
 
             // The backup now owns durability. Release the reusable story ref;
             // create(storyId) can safely start a fresh worktree at current HEAD.
@@ -271,6 +614,11 @@ export class WorktreeManager {
                 throw new Error(`could not release preserved branch for story ${storyId}`)
             }
             this.preserved.delete(storyId)
+            this.preservedHistory.set(storyId, {
+                state: "cleaned",
+                reason: "prepare_conflict_retry",
+                ref: backup,
+            })
             this.log(
                 `preserved rejected attempt for story ${storyId} at ${backup}; ` +
                     "fresh recovery will start from the latest run branch",
@@ -309,7 +657,7 @@ export class WorktreeManager {
                     try {
                         branchHead = await this.logicalBranchHead(branch)
                     } catch (error) {
-                        this.preserved.add(storyId)
+                        this.markPreserved(storyId)
                         throw new Error(
                             `could not inspect missing worktree branch for story ${storyId}; ` +
                                 `retained ${branch}: ${errMsg(error)}`,
@@ -317,8 +665,9 @@ export class WorktreeManager {
                     }
                     const baseSha = this.baseShas.get(storyId)
                     if (branchHead && (!baseSha || branchHead !== baseSha)) {
-                        this.preserved.add(storyId)
+                        this.markPreserved(storyId)
                         const backup = await this.createRecoveryBranch(storyId, branch)
+                        this.recordRecoveryRef(storyId, backup)
                         await this.releaseLogicalStory(
                             storyId,
                             path ?? this.pathOf(storyId),
@@ -340,6 +689,7 @@ export class WorktreeManager {
             }
 
             if (!preserveForRecovery) {
+                await this.secureRecoveryMaterial(storyId, "cleanup_failed_discard")
                 await this.removeWorktreeQuiet(path, "cleanupFailed")
                 this.paths.delete(storyId)
                 this.baseShas.delete(storyId)
@@ -356,7 +706,7 @@ export class WorktreeManager {
                     { cwd: path },
                 ))
             } catch (error) {
-                this.preserved.add(storyId)
+                this.markPreserved(storyId)
                 throw new Error(
                     `could not inspect failed story ${storyId}; retained dirty worktree ` +
                         `at ${path}: ${errMsg(error)}`,
@@ -369,7 +719,7 @@ export class WorktreeManager {
                     cwd: path,
                 }))
             } catch (error) {
-                this.preserved.add(storyId)
+                this.markPreserved(storyId)
                 throw new Error(
                     `could not inspect failed story ${storyId} HEAD; retained worktree ` +
                         `at ${path}: ${errMsg(error)}`,
@@ -386,9 +736,10 @@ export class WorktreeManager {
 
             // Mark it before touching the index. cleanupAll() must retain the
             // worktree if staging, committing, or ref creation fails midway.
-            this.preserved.add(storyId)
+            this.markPreserved(storyId)
             if (meaningfulDirty) await this.commitFailedWork(storyId, path)
             const backup = await this.createRecoveryBranch(storyId, branch)
+            this.recordRecoveryRef(storyId, backup)
 
             // The immutable backup now owns durability. It is safe to release
             // the reusable logical id and let a recovery start from fresh HEAD.
@@ -436,23 +787,23 @@ export class WorktreeManager {
                 return true
             } catch (error) {
                 if (isRepositoryCommandTimeout(error)) {
-                    this.preserved.add(storyId)
+                    this.markPreserved(storyId)
                 }
                 let conflicts: string[]
                 try {
                     conflicts = await this.conflictedPaths()
                 } catch (inspectionError) {
-                    this.preserved.add(storyId)
+                    this.markPreserved(storyId)
                     await this.abortMerge(storyId)
                     throw inspectionError
                 }
                 await this.abortMerge(storyId)
                 if (isRepositoryCommandTimeout(error)) {
-                    this.preserved.add(storyId)
+                    this.markPreserved(storyId)
                     throw error
                 }
                 if (!this.resolveConflictsWithTheirs) {
-                    this.preserved.add(storyId)
+                    this.markPreserved(storyId)
                     throw new Error(
                         `story ${storyId} conflicts with already-merged work` +
                             (conflicts.length ? ` on [${conflicts.join(", ")}]` : ""),
@@ -479,7 +830,7 @@ export class WorktreeManager {
                     )
                     return true
                 } catch (e) {
-                    this.preserved.add(storyId)
+                    this.markPreserved(storyId)
                     await this.abortMerge(storyId)
                     // Keep the branch out of the cleanup sweep so the
                     // commits stay recoverable after the run.
@@ -494,7 +845,7 @@ export class WorktreeManager {
                 // A timed-out inspection/auto-commit/merge leaves repository
                 // state unsuitable for generic cleanup. Retain the exact
                 // story branch/worktree for terminal diagnosis.
-                this.preserved.add(storyId)
+                this.markPreserved(storyId)
             }
             throw error
         } finally {
@@ -508,13 +859,15 @@ export class WorktreeManager {
         seal: WorktreeCandidateSeal,
     ): Promise<string> {
         if (!/^[a-f0-9]{64}$/i.test(seal.expectedFingerprint)) {
-            throw new Error(
+            throw new WorktreeRefusalError(
+                "sealed_merge_seal_invalid",
                 `reviewed candidate seal is missing or invalid for story ${storyId}`,
             )
         }
         const baseSha = this.baseShas.get(storyId)
         if (!baseSha) {
-            throw new Error(
+            throw new WorktreeRefusalError(
+                "sealed_merge_base_unavailable",
                 `reviewed candidate creation SHA is unavailable for story ${storyId}`,
             )
         }
@@ -528,7 +881,8 @@ export class WorktreeManager {
             )
         } catch (error) {
             if (isRepositoryCommandTimeout(error)) throw error
-            throw new Error(
+            throw new WorktreeRefusalError(
+                "sealed_merge_lineage",
                 `reviewed candidate history no longer descends from its creation SHA for story ${storyId}`,
             )
         }
@@ -538,12 +892,14 @@ export class WorktreeManager {
         await this.assertCleanSealedCandidate(storyId, worktreePath)
 
         if (before !== after) {
-            throw new Error(
+            throw new WorktreeRefusalError(
+                "sealed_merge_head_changed",
                 `reviewed candidate HEAD changed during integration seal recheck for story ${storyId}`,
             )
         }
         if (actual !== seal.expectedFingerprint) {
-            throw new Error(
+            throw new WorktreeRefusalError(
+                "sealed_merge_fingerprint",
                 `reviewed candidate fingerprint mismatch for story ${storyId}: ` +
                     `expected ${seal.expectedFingerprint}, got ${actual}`,
             )
@@ -577,7 +933,8 @@ export class WorktreeManager {
             { cwd: worktreePath },
         )
         if (stdout.trim()) {
-            throw new Error(
+            throw new WorktreeRefusalError(
+                "sealed_merge_dirty",
                 `reviewed candidate remained dirty after commit for story ${storyId}`,
             )
         }
@@ -605,6 +962,7 @@ export class WorktreeManager {
         const branch = this.branchOf(storyId)
         const release = await this.gate.acquire()
         try {
+            await this.secureRecoveryMaterial(storyId, "cleanup")
             if (path) {
                 await this.removeWorktreeQuiet(path, "cleanup")
                 this.paths.delete(storyId)
@@ -661,6 +1019,7 @@ export class WorktreeManager {
                         continue
                     }
                 }
+                await this.secureRecoveryMaterial(storyId, "cleanup_all")
                 await this.removeWorktreeQuiet(path, "cleanupAll")
                 this.paths.delete(storyId)
                 this.baseShas.delete(storyId)
@@ -1024,6 +1383,7 @@ export class WorktreeManager {
         path: string,
         branch: string,
     ): Promise<void> {
+        await this.secureRecoveryMaterial(storyId, "release_logical_story")
         await this.removeWorktreeQuiet(path, "releaseLogicalStory")
         if (existsSync(path)) {
             throw new Error(`could not release worktree for story ${storyId}`)
@@ -1088,6 +1448,7 @@ export class WorktreeManager {
         path: string,
         branch: string,
     ): Promise<void> {
+        await this.secureRecoveryMaterial(storyId, "rollback_partial_create")
         this.paths.delete(storyId)
         this.baseShas.delete(storyId)
         this.preserved.delete(storyId)

@@ -2988,6 +2988,12 @@ export class CollectiveBoard extends SerializedObserver {
                     : {}),
                 ...(surface ? { surface } : {}),
                 ...(recovery ? { recovery } : {}),
+                // Only a host-suspended story is resumed: the spawn must
+                // re-base through the host-owned step rather than start from
+                // a fresh worktree that abandons the preserved attempt.
+                ...(recovery?.kind === "dependency"
+                    ? { resume: { preservedBranch: recovery.branch ?? null } }
+                    : {}),
             },
         })
         this.offers.recordOffer(offered.data)

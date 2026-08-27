@@ -23,6 +23,7 @@ import {
 } from "./git.js"
 import { loadPrd } from "../prd.js"
 import {
+    IntegrationRefused,
     RunPreparationFailed,
     RunPreparationRequested,
     RunPrepared,
@@ -39,9 +40,11 @@ import {
 } from "../semantic-events.js"
 import { emit } from "../tui-protocol.js"
 import type {
+    IntegrationRefusalInvariant,
     WorktreeCandidateSeal,
     WorktreeManager,
 } from "./worktree.js"
+import type { IntegrationRefusalCode } from "../events/integration.js"
 import { captureCriticRepositoryFingerprint } from "../acceptance/critic-evidence.js"
 import { isRepositoryCommandSignalDeath } from "./repository-command.js"
 import {
@@ -79,6 +82,18 @@ interface LeaseCorrelation {
 interface CandidateSealRequest {
     required: boolean
     fingerprint?: string
+}
+
+/** Carries which pre-merge seal check refused the candidate, so the outer
+ * catch classifies it instead of matching on the message. */
+class CandidateSealRefusalError extends Error {
+    constructor(
+        message: string,
+        readonly invariant: "seal_missing" | "fingerprint_missing",
+    ) {
+        super(message)
+        this.name = "CandidateSealRefusalError"
+    }
 }
 
 export class GitCoordinator extends SerializedObserver {
@@ -180,6 +195,20 @@ export class GitCoordinator extends SerializedObserver {
                         : {}),
                 })
             } catch (error) {
+                this.emitIntegrationRefused({
+                    storyId: event.data.storyId,
+                    runId: event.data.runId,
+                    leaseId: event.data.leaseId,
+                    invariant:
+                        error instanceof CandidateSealRefusalError
+                            ? error.invariant
+                            : (error as { invariant?: IntegrationRefusalInvariant } | null)
+                                  ?.invariant ?? "unknown",
+                    detail: (error as Error)?.message ?? String(error),
+                    branch: null,
+                    retryable: false,
+                    recoveryRef: null,
+                })
                 this.emitBus(
                     StoryMergeFailed.create({
                         storyId: event.data.storyId,
@@ -308,6 +337,45 @@ export class GitCoordinator extends SerializedObserver {
         }
     }
 
+    /** Names the invariant that refused a reviewed candidate, alongside the
+     * unchanged StoryMergeFailed. Purely advisory: a refusal must stay a
+     * refusal, so neither the worktree reads nor the emission may throw. */
+    private emitIntegrationRefused(args: {
+        storyId: string
+        runId: string | null
+        leaseId: string | null
+        invariant: IntegrationRefusalCode
+        detail: string
+        branch: string | null
+        retryable: boolean
+        recoveryRef: string | null
+    }): void {
+        const read = (pick: (w: WorktreeManager) => string | null): string | null => {
+            const worktrees = this.opts.worktrees
+            if (!worktrees) return null
+            try {
+                return pick(worktrees)
+            } catch {
+                return null
+            }
+        }
+        try {
+            const worktreeRetained = read((w) => w.activePath(args.storyId)) != null
+            const recoveryRef =
+                args.recoveryRef ?? read((w) => w.recoveryRef(args.storyId))
+            this.emitBus(
+                IntegrationRefused.create({
+                    ...args,
+                    recoveryRef,
+                    worktreeRetained,
+                    recoverable: recoveryRef !== null || worktreeRetained,
+                }),
+            )
+        } catch {
+            // Observability only.
+        }
+    }
+
     /** Best-effort run-branch HEAD for a landed merge. A sha we cannot read is
      * not a merge failure, so the field is simply omitted. */
     private async mergeCommitShaField(
@@ -404,6 +472,20 @@ export class GitCoordinator extends SerializedObserver {
                     // ran. Giving up here is what dropped an accepted story.
                     retryable = isRepositoryCommandSignalDeath(e)
                 }
+                this.emitIntegrationRefused({
+                    storyId,
+                    runId: correlation?.runId ?? null,
+                    leaseId: correlation?.leaseId ?? null,
+                    invariant:
+                        (e as { invariant?: IntegrationRefusalInvariant } | null)
+                            ?.invariant ?? "unknown",
+                    detail: error,
+                    branch,
+                    retryable,
+                    // Only a successful prepareConflictRetry mints an immutable
+                    // recovery ref; otherwise `branch` is still the logical one.
+                    recoveryRef: preparationError ? null : branch,
+                })
                 this.emitBus(
                     StoryMergeFailed.create({
                         storyId,
@@ -463,6 +545,16 @@ export class GitCoordinator extends SerializedObserver {
                 return
             }
             if (this.opts.eventDriven) {
+                this.emitIntegrationRefused({
+                    storyId,
+                    runId: correlation?.runId ?? null,
+                    leaseId: correlation?.leaseId ?? null,
+                    invariant: "worktree_missing",
+                    detail: `isolated worktree state missing for ${storyId}`,
+                    branch: null,
+                    retryable: false,
+                    recoveryRef: null,
+                })
                 this.emitBus(
                     StoryMergeFailed.create({
                         storyId,
@@ -552,16 +644,18 @@ export class GitCoordinator extends SerializedObserver {
             active.requiresQualityReview
 
         if (leaseRequiresSeal && requested?.required !== true) {
-            throw new Error(
+            throw new CandidateSealRefusalError(
                 `reviewed candidate seal marker is missing for story ${storyId}`,
+                "seal_missing",
             )
         }
         if (!leaseRequiresSeal && requested?.required !== true) return undefined
 
         const fingerprint = requested?.fingerprint
         if (!fingerprint || !/^[a-f0-9]{64}$/i.test(fingerprint)) {
-            throw new Error(
+            throw new CandidateSealRefusalError(
                 `reviewed candidate fingerprint is missing or invalid for story ${storyId}`,
+                "fingerprint_missing",
             )
         }
         return {
