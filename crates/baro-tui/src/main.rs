@@ -4407,6 +4407,107 @@ mod tests {
         JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL, JIGJOY_STRONG_MODEL,
     };
 
+    // Nested so every test's full path carries `goal_fingerprint`, letting
+    // `cargo test -p baro-tui goal_fingerprint` catch all four by itself.
+    mod goal_fingerprint {
+        use std::fs;
+
+        use crate::cli::launch::{decide_launch, goal_fingerprint};
+        use crate::executor::{self, PrdFile};
+        use crate::stamp_goal_fingerprint;
+
+        #[test]
+        fn a_headless_persist_stamps_the_launch_goal_fingerprint() {
+            let mut prd = executor::prd_from_review(
+                "atomic",
+                "baro/atomic",
+                "complete snapshot",
+                &[],
+                None,
+                None,
+            );
+            stamp_goal_fingerprint(&mut prd, Some("ship the launcher"));
+
+            let dir = tempfile::tempdir().unwrap();
+            executor::write_prd(&prd, dir.path()).unwrap();
+
+            let content = fs::read_to_string(dir.path().join("prd.json")).unwrap();
+            let reloaded: PrdFile = serde_json::from_str(&content).unwrap();
+            assert_eq!(
+                reloaded.goal_fingerprint,
+                Some(goal_fingerprint("ship the launcher"))
+            );
+        }
+
+        #[test]
+        fn a_stamped_prd_lets_decide_launch_match_the_same_goal() {
+            let mut prd = executor::prd_from_review(
+                "atomic",
+                "baro/atomic",
+                "complete snapshot",
+                &[],
+                None,
+                None,
+            );
+            stamp_goal_fingerprint(&mut prd, Some("ship the launcher"));
+
+            let dir = tempfile::tempdir().unwrap();
+            executor::write_prd(&prd, dir.path()).unwrap();
+            let content = fs::read_to_string(dir.path().join("prd.json")).unwrap();
+            let reloaded: PrdFile = serde_json::from_str(&content).unwrap();
+
+            let decision = decide_launch(
+                false,
+                false,
+                Some("ship the launcher"),
+                reloaded.goal_fingerprint.as_deref(),
+                true,
+            );
+
+            assert_eq!(decision.mode, crate::cli::launch::LaunchMode::Resume);
+            assert_eq!(
+                decision.message.as_deref(),
+                Some(crate::cli::launch::RESUMING_INTERRUPTED_RUN)
+            );
+        }
+
+        #[test]
+        fn an_absent_launch_goal_leaves_the_fingerprint_unset() {
+            let mut prd = executor::prd_from_review(
+                "atomic",
+                "baro/atomic",
+                "complete snapshot",
+                &[],
+                None,
+                None,
+            );
+
+            stamp_goal_fingerprint(&mut prd, None);
+
+            assert_eq!(prd.goal_fingerprint, None);
+        }
+
+        #[test]
+        fn an_already_stamped_fingerprint_is_preserved() {
+            let mut prd = executor::prd_from_review(
+                "atomic",
+                "baro/atomic",
+                "complete snapshot",
+                &[],
+                None,
+                None,
+            );
+            prd.goal_fingerprint = Some("fnv1a64:0000000000000000".to_string());
+
+            stamp_goal_fingerprint(&mut prd, Some("a completely different goal"));
+
+            assert_eq!(
+                prd.goal_fingerprint.as_deref(),
+                Some("fnv1a64:0000000000000000")
+            );
+        }
+    }
+
     fn deleted(input: &str) -> String {
         let mut s = input.to_string();
         delete_prev_word(&mut s);
