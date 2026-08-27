@@ -167,6 +167,13 @@ pub fn register_detached(
     Some(RunHandle { path, remove_on_drop: false })
 }
 
+/// Deletes a run's record once its process is confirmed dead. Takes an
+/// explicit dir rather than resolving `registry_dir()` itself, so it stays
+/// testable under a temp home.
+fn remove_record(dir: &PathBuf, id: &str) -> bool {
+    fs::remove_file(dir.join(format!("{id}.json"))).is_ok()
+}
+
 fn reap_dead(dir: &PathBuf) {
     for record in read_all(dir) {
         if !is_process_alive(record.1.pid) {
@@ -282,6 +289,10 @@ pub fn run_stop(args: &[String]) -> Result<(), io::Error> {
         ));
     };
     if stop(&record) {
+        if let Some(dir) = registry_dir() {
+            let _ = remove_record(&dir, &record.id);
+            reap_dead(&dir);
+        }
         println!("Stopped {} ({}).", record.id, record.cwd);
         Ok(())
     } else {
@@ -595,6 +606,47 @@ mod tests {
         let dir = live.clone();
         reap_dead(&dir);
         let remaining: Vec<String> = read_all(&dir)
+            .into_iter()
+            .map(|(_, record)| record.id)
+            .collect();
+
+        assert_eq!(remaining, vec!["run-alive".to_string()]);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn stop_removes_the_record_of_a_process_that_is_already_dead() {
+        let home = temp_home("remove-record");
+        // A pid this large cannot be running: it is above the platform maximum.
+        write_record(&home, "run-4294967290", 4_294_967_290);
+
+        let removed = remove_record(&home, "run-4294967290");
+
+        assert!(removed);
+        assert!(!home.join("run-4294967290.json").exists());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn removing_a_record_that_is_already_gone_is_not_an_error() {
+        let home = temp_home("remove-record-twice");
+        write_record(&home, "run-4294967290", 4_294_967_290);
+
+        assert!(remove_record(&home, "run-4294967290"));
+        assert!(!remove_record(&home, "run-4294967290"));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_dead_pid_is_not_listed() {
+        let home = temp_home("dead-pid-not-listed");
+        // A pid this large cannot be running: it is above the platform maximum.
+        write_record(&home, "run-dead", 4_294_967_290);
+        write_record(&home, "run-alive", std::process::id());
+
+        reap_dead(&home);
+        let remaining: Vec<String> = read_all(&home)
             .into_iter()
             .map(|(_, record)| record.id)
             .collect();
