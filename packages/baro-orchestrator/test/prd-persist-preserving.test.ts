@@ -202,9 +202,9 @@ describe("persistPrdPreserving interleaved with prd-status-writer", () => {
         // The full O-001/O-016 sequence. `save` is pinned to the helper because
         // prd-status-writer.ts:34 still defaults to the NON-preserving
         // savePrdAtomic, so a bare writer erases goalFingerprint on its own
-        // first write, before this helper ever runs. That one-line default is
-        // outside S1's write surface; see the bare-writer test below for the
-        // exact residual gap.
+        // first write, before this helper ever runs. Flipping that one-line
+        // default is story S3; until it lands, the bare-writer test below
+        // records the exact residual gap.
         assertAllThreePreserved(interleave(persistPrdPreserving))
     })
 
