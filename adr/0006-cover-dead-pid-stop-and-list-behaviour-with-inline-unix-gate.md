@@ -1,0 +1,10 @@
+# ADR-0006: Cover dead-pid stop and list behaviour with inline unix-gated registry tests using temp_home
+
+**Status:** Accepted
+**Context:** run_registry's tests live in `#[cfg(all(test, unix))] mod tests` (:555) and isolate state with the hand-rolled `temp_home(name)` helper (:561-567) plus manual `remove_dir_all` cleanup, because functions under test take an explicit dir and `registry_dir()` has no HOME override. Tests in one binary run in parallel, so a shared directory would cross-contaminate (:559-560). Adding a HOME env override to `registry_dir()` was considered and rejected: it would change production path resolution for a test-only need.
+**Decision:** Add to the existing `#[cfg(all(test, unix))] mod tests` in crates/baro-tui/src/cli/run_registry.rs, each using `temp_home("<unique-name>")` and ending with `let _ = fs::remove_dir_all(&home);`, sentence-style names per the launch.rs precedent:
+- `stop_removes_the_record_of_a_process_that_is_already_dead`: write `<home>/run-4294967290.json` for a dead pid (reuse the existing unreachable-pid constant style at :587), call `remove_record(&home, "run-4294967290")`, assert it returns `true` and the file no longer exists.
+- `removing_a_record_that_is_already_gone_is_not_an_error`: call `remove_record` on the same id twice; assert the second call returns `false` and does not panic.
+- `a_dead_pid_is_not_listed`: write one dead-pid record and one record for `std::process::id()`, call `read_all(&home)` after `reap_dead(&home)`, and assert only the live id remains — this is the `baro runs` culling verification.
+Do not spawn processes, do not send real signals, and do not call `registry_dir()`, `live_runs`, `print_runs`, or `run_stop` from the tests.
+**Consequences:** Story verification is `cargo test -p baro-tui run_registry::tests::` plus `cargo build -p baro-tui`. The tests are unix-gated like their neighbours, so Windows CI skips them. Because they exercise `remove_record`/`reap_dead`/`read_all` directly, they stay independent of the developer's real `~/.baro` directory.
