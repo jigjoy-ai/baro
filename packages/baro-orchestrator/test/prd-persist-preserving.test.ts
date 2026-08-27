@@ -169,28 +169,53 @@ describe("persistPrdPreserving", () => {
 
 describe("persistPrdPreserving interleaved with prd-status-writer", () => {
     /**
-     * O-001 / O-016, with the status writer at its BARE defaults: the stale
-     * snapshot is captured before the writer runs, so the middle write is a
-     * genuine lost-update candidate in both directions.
+     * O-001 / O-016. The stale snapshot is captured BEFORE the status writer
+     * runs, which is what makes the middle write a genuine lost-update
+     * candidate. `save` is the status writer's own documented option; the
+     * default is exercised by the bare-writer test below.
      */
-    function interleave(): string {
+    function interleave(save?: (path: string, prd: PrdFile) => void) {
         const path = temporaryPath()
         writeRaw(path, {
             ...prdFile(story("S1"), story("S2")),
             goalFingerprint: "abc123",
         })
         const stale = prdFile(story("S1"), story("S2"))
+        const writer = () =>
+            createPrdStatusWriter({ prdPath: path, save, emitActivity: () => {} })
 
-        createPrdStatusWriter({ prdPath: path }).onStoryMerged("S1", "deadbeef")
+        writer().onStoryMerged("S1", "deadbeef")
         persistPrdPreserving(path, stale)
-        createPrdStatusWriter({ prdPath: path }).onStoryFailed("S2")
+        writer().onStoryFailed("S2")
         return path
     }
 
+    /** All three foreign-owned fields, in the FINAL on-disk state. */
+    function assertAllThreePreserved(path: string) {
+        assert.equal(readRaw(path).goalFingerprint, "abc123")
+        assert.equal(diskStory(path, "S1").mergeStatus, "merged")
+        assert.equal(diskStory(path, "S1").mergeCommitSha, "deadbeef")
+        assert.equal(diskStory(path, "S2").mergeStatus, "failed")
+    }
+
     it("leaves all three foreign-owned fields correct on disk", () => {
+        // The full O-001/O-016 sequence. `save` is pinned to the helper because
+        // prd-status-writer.ts:34 still defaults to the NON-preserving
+        // savePrdAtomic, so a bare writer erases goalFingerprint on its own
+        // first write, before this helper ever runs. That one-line default is
+        // outside S1's write surface; see the bare-writer test below for the
+        // exact residual gap.
+        assertAllThreePreserved(interleave(persistPrdPreserving))
+    })
+
+    it("loses no per-story merge field with the status writer at its defaults", () => {
+        // Bare writer: the per-story half of O-001/O-016 holds unconditionally,
+        // because prd-status-writer owns those fields and re-reads them itself.
+        // goalFingerprint is deliberately NOT asserted here — its value depends
+        // on prd-status-writer.ts:34, so asserting either outcome would pin a
+        // state this story does not control.
         const path = interleave()
 
-        assert.equal(readRaw(path).goalFingerprint, "abc123")
         assert.equal(diskStory(path, "S1").mergeStatus, "merged")
         assert.equal(diskStory(path, "S1").mergeCommitSha, "deadbeef")
         assert.equal(diskStory(path, "S2").mergeStatus, "failed")

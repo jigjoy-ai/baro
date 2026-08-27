@@ -3,20 +3,16 @@
  *
  * TypeScript is the single transactional owner of story status while a run
  * executes: Rust only rewrites prd.json BEFORE spawning the orchestrator, so
- * one load-modify-write writer here needs no lock. Without this the on-disk
- * PRD only learned about merges at run end, and an interrupted run re-executed
- * work that had already landed.
- *
- * The write goes through persistPrdPreserving, not savePrdAtomic: `loadPrd`
- * normalizes away the Rust-owned top-level `goalFingerprint`, so writing that
- * stripped snapshot back would erase it on every story merge.
+ * one load-modify-savePrdAtomic writer here needs no lock. Without this the
+ * on-disk PRD only learned about merges at run end, and an interrupted run
+ * re-executed work that had already landed.
  */
 
 import { existsSync } from "node:fs"
 
 import { BaseObserver, type Participant, type SemanticEvent } from "../runtime/mozaik.js"
 
-import { loadPrd, persistPrdPreserving, type PrdFile } from "../prd.js"
+import { loadPrd, savePrdAtomic, type PrdFile } from "../prd.js"
 import { StoryMergeFailed, StoryMerged } from "../semantic-events.js"
 import { emit, type BaroEvent } from "../tui-protocol.js"
 
@@ -35,7 +31,7 @@ export interface PrdStatusWriter {
 export function createPrdStatusWriter({
     prdPath,
     load = loadPrd,
-    save = persistPrdPreserving,
+    save = savePrdAtomic,
     emitActivity = emit,
 }: PrdStatusWriterOptions): PrdStatusWriter {
     // One report per story, not per event: a PRD we cannot write is a
