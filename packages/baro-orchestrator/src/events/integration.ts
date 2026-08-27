@@ -1,6 +1,7 @@
 /** Repository integration: prepare, merge, cleanup, push, PR. Wire `type` strings are frozen (see ../semantic-events.ts). */
 
 import { defineSemanticEvent } from "./define.js"
+import type { IntegrationRefusalInvariant } from "../integration/worktree.js"
 
 export interface RunPreparationRequestedData {
     runId: string
@@ -147,3 +148,35 @@ export interface StoryMergeFailedData {
 
 export const StoryMergeFailed =
     defineSemanticEvent<StoryMergeFailedData>("story_merge_failed")
+
+/** Coordinator-level refusals that happen before any worktree invariant runs. */
+export type IntegrationRefusalCode =
+    | IntegrationRefusalInvariant
+    | "seal_missing"
+    | "fingerprint_missing"
+    | "worktree_missing"
+    | "unknown"
+
+/** Integration refused a Critic-accepted candidate. Names the invariant that
+ * refused it and whether any recovery material survived, so an advisory
+ * consumer distinguishes "lost forever" from "retryable" without parsing prose. */
+export interface IntegrationRefusedData {
+    runId: string | null
+    storyId: string
+    leaseId: string | null
+    invariant: IntegrationRefusalCode
+    /** Message from the refusing error; advisory only, never parsed. */
+    detail: string
+    /** Immutable recovery ref (`baro-recovery/...`) or null. */
+    recoveryRef: string | null
+    /** The isolated worktree still exists on disk for this story. */
+    worktreeRetained: boolean
+    /** false ⇒ the candidate's work is lost forever. */
+    recoverable: boolean
+    /** The run may re-offer this story; mirrors StoryMergeFailed.retryable. */
+    retryable: boolean
+    branch: string | null
+}
+
+export const IntegrationRefused =
+    defineSemanticEvent<IntegrationRefusedData>("integration_refused")
