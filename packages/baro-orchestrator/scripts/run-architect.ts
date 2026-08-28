@@ -49,6 +49,7 @@ import { emitPlanLine } from "../src/planning/application/plan-events.js"
 import { extractModelJsonObject } from "../src/model-json.js"
 import {
     appendRepairNote,
+    ARCHITECT_OUTCOME_SCHEMA_SUMMARY,
     ArchitectOutcomeContractError,
     outcomeByteOverrun,
     parseArchitectOutcome,
@@ -56,6 +57,7 @@ import {
     wrapArchitectOutcome,
     type ArchitectOutcomeCorrelationV1,
 } from "../src/planning/domain/architect-outcome.js"
+import type { ContractNote } from "../src/contract/contract-normalization.js"
 import {
     parseRequiredModeContract,
     type ModeContract,
@@ -251,6 +253,11 @@ function fatal(msg: string): never {
     process.exit(2)
 }
 
+/** The only place contract drift notes are printed; domain modules never write to stderr. */
+function logContractNote(note: ContractNote): void {
+    process.stderr.write(`[architect] ${note.detail}\n`)
+}
+
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2))
     const outcomeMode = args.outcomeFile !== undefined
@@ -401,7 +408,7 @@ async function main(): Promise<void> {
             try {
                 decisionOutcome = parseArchitectOutcome(result, {
                     decisionOnly: true,
-                })
+                }, logContractNote)
             } catch (error) {
                 // A named violation is worth one more turn: since the
                 // contract gates started saying WHAT is wrong (draft, field,
@@ -442,7 +449,7 @@ async function main(): Promise<void> {
                 }
                 decisionOutcome = parseArchitectOutcome(result, {
                     decisionOnly: true,
-                })
+                }, logContractNote)
             }
             // Both machine-readable appendices are attached here, once, where
             // the outcome is accepted. Attaching inside the validator made a
@@ -476,7 +483,7 @@ async function main(): Promise<void> {
                 parseArchitectOutcome(result, {
                     requireObligations: true,
                     trustedGoalEnvelope,
-                }),
+                }, logContractNote),
                 correlation!,
             )
         }
@@ -699,8 +706,9 @@ async function runArchitectOnBus(input: {
                   validateOutcome: (raw: string) => {
                       parseArchitectOutcome(raw, {
                           decisionOnly: outcomeContractMode === "decision",
-                      })
+                      }, logContractNote)
                   },
+                  outcomeSchemaSummary: ARCHITECT_OUTCOME_SCHEMA_SUMMARY,
               }
             : {}),
         onProgress: (line) => process.stderr.write(`${line}\n`),
@@ -759,6 +767,7 @@ async function compileObligations(input: {
             decisionDocument: input.decisionDocument,
             goalEnvelope: input.goalEnvelope,
             signal: controller.signal,
+            onNote: logContractNote,
             onProgress: (event) => {
                 const detail =
                     `batch=${event.batchId} invariants=${event.invariantIds.join(",")}` +
