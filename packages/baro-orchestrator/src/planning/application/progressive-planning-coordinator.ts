@@ -12,6 +12,7 @@ import {
 } from "../../prd.js"
 import {
     ConductorState,
+    FinalTailDiscarded,
     PlanFragmentAdmitted,
     PlanFragmentProposed,
     PlanFragmentRejected,
@@ -34,6 +35,8 @@ import {
     validateProgressivePlanFragment,
 } from "../domain/progressive-plan.js"
 import { validateGoalContractCoverage } from "../domain/goal-contract-coverage.js"
+import { evaluateFinalTailTolerance } from "../domain/final-tail-tolerance.js"
+import { emitPlanActivity } from "./plan-events.js"
 import {
     architectureObligationsFromDecision,
     canonicalObligationAcceptance,
@@ -87,6 +90,16 @@ export interface ProgressivePlanningCoordinatorOptions {
     planningId?: string
     host: ProgressivePlanningCoordinatorHost
 }
+
+/**
+ * What the board actually did with a proposed fragment. Returned rather than
+ * inferred from a later snapshot so the rejecting code and reason survive to
+ * the caller instead of dying inside the emitted PlanFragmentRejected.
+ */
+export type PlanFragmentAdmissionOutcome =
+    | { status: "admitted" }
+    | { status: "replayed" }
+    | { status: "rejected"; code: PlanFragmentRejectionCode; reason: string }
 
 export type ProgressivePlanningScheduleLatch =
     | { status: "open"; nextOrdinal: number }
@@ -235,35 +248,34 @@ export class ProgressivePlanningCoordinator {
         )
     }
 
-    private onPlanFragmentProposed(fragment: PlanFragmentProposedData): void {
+    private onPlanFragmentProposed(
+        fragment: PlanFragmentProposedData,
+    ): PlanFragmentAdmissionOutcome {
         const state = this.opts.host.snapshot()
         if (
             !state.prd ||
             (state.phase !== "preparing" && state.phase !== "running")
         ) {
-            this.rejectPlanFragment(
+            return this.rejectPlanFragment(
                 fragment,
                 "planning_not_open",
                 "the collective run is not accepting planner fragments",
             )
-            return
         }
         const planning = state.prd.runtimeGraph?.planning
         if (!planning) {
-            this.rejectPlanFragment(
+            return this.rejectPlanFragment(
                 fragment,
                 "planning_not_open",
                 "the run has no progressive-planning latch",
             )
-            return
         }
         if (fragment.planningId !== planning.planningId) {
-            this.rejectPlanFragment(
+            return this.rejectPlanFragment(
                 fragment,
                 "planning_id_mismatch",
                 `fragment session ${fragment.planningId || "(missing)"} does not match ${planning.planningId}`,
             )
-            return
         }
 
         let validated
@@ -350,8 +362,11 @@ export class ProgressivePlanningCoordinator {
             )
             fingerprint = progressivePlanFragmentFingerprint(envelope)
         } catch (error) {
-            this.rejectPlanFragment(fragment, "invalid_fragment", messageOf(error))
-            return
+            return this.rejectPlanFragment(
+                fragment,
+                "invalid_fragment",
+                messageOf(error),
+            )
         }
 
         const remembered = planning.fragments.find(
@@ -362,12 +377,11 @@ export class ProgressivePlanningCoordinator {
                 remembered.fingerprint !== fingerprint ||
                 remembered.ordinal !== validated.ordinal
             ) {
-                this.rejectPlanFragment(
+                return this.rejectPlanFragment(
                     fragment,
                     "fragment_id_conflict",
                     `fragment id ${validated.fragmentId} was already admitted with different content`,
                 )
-                return
             }
             this.opts.host.emit(
                 PlanFragmentAdmitted.create({
@@ -380,23 +394,21 @@ export class ProgressivePlanningCoordinator {
                     replay: true,
                 }),
             )
-            return
+            return { status: "replayed" }
         }
         if (planning.status !== "open") {
-            this.rejectPlanFragment(
+            return this.rejectPlanFragment(
                 fragment,
                 "planning_not_open",
                 `planning session is already ${planning.status}`,
             )
-            return
         }
         if (validated.ordinal !== planning.nextOrdinal) {
-            this.rejectPlanFragment(
+            return this.rejectPlanFragment(
                 fragment,
                 "ordinal_gap",
                 `fragment ordinal ${validated.ordinal} does not match expected ${planning.nextOrdinal}`,
             )
-            return
         }
 
         const predictedGraphVersion = state.graphVersion + 1
@@ -483,14 +495,13 @@ export class ProgressivePlanningCoordinator {
         })
         if (!outcome.applied || !RuntimeReplanApplied.is(outcome.event)) {
             this.opts.host.emit(outcome.event)
-            this.rejectPlanFragment(
+            return this.rejectPlanFragment(
                 fragment,
                 "graph_rejected",
                 RuntimeReplanRejected.is(outcome.event)
                     ? outcome.event.data.reason
                     : "planner fragment was not admitted",
             )
-            return
         }
 
         this.opts.host.emit(outcome.event)
@@ -518,6 +529,7 @@ export class ProgressivePlanningCoordinator {
             }),
         )
         this.opts.host.afterAdmission()
+        return { status: "admitted" }
     }
 
     private onPlanningStreamCompleted(
@@ -616,27 +628,107 @@ export class ProgressivePlanningCoordinator {
         const tail = finalStories.slice(planning.admittedStoryIds.length)
         if (tail.length > 0) {
             const ordinal = planning.nextOrdinal
-            this.onPlanFragmentProposed({
+            const fragmentId = `final-${progressiveFinalFingerprint(finalStories)}`
+            // Admission is synchronous: admitGraph -> RuntimeReplanCoordinator.decide
+            // persists and swaps board.prd before returning (collective-board.ts:498-517),
+            // so this outcome is authoritative and no accept/reject event is awaited.
+            const admission = this.onPlanFragmentProposed({
                 runId: this.opts.runId,
                 planningId: planning.planningId,
-                fragmentId: `final-${progressiveFinalFingerprint(finalStories)}`,
+                fragmentId,
                 ordinal,
                 stories: tail,
             })
-            const afterAdmission =
-                this.opts.host.snapshot().prd?.runtimeGraph?.planning
-            if (!afterAdmission || afterAdmission.nextOrdinal !== ordinal + 1) {
-                this.failPlanning(
-                    afterAdmission ?? planning,
-                    "final_tail_rejected",
-                    "the final planner tail could not be durably admitted",
-                )
-                return
+            if (admission.status === "admitted") {
+                const afterAdmission =
+                    this.opts.host.snapshot().prd?.runtimeGraph?.planning
+                if (!afterAdmission || afterAdmission.nextOrdinal !== ordinal + 1) {
+                    this.failPlanning(
+                        afterAdmission ?? planning,
+                        "final_tail_rejected",
+                        "admission reported success but the planning ordinal did not advance",
+                    )
+                    return
+                }
+            } else if (admission.status === "rejected") {
+                if (
+                    !this.discardRedundantFinalTail(
+                        planning,
+                        tail,
+                        fragmentId,
+                        ordinal,
+                        admission,
+                    )
+                ) {
+                    return
+                }
             }
         }
         const current = this.opts.host.snapshot().prd?.runtimeGraph?.planning
         if (!current || current.status !== "open") return
         this.closePlanning(current, "completed")
+    }
+
+    /**
+     * A rejected final tail only fails the run when it still carried work the
+     * goal needs. When every admitted story has settled and the admitted set
+     * alone owns every obligation and invariant, the tail is redundant: it is
+     * discarded with a visible warning and planning still closes completed.
+     *
+     * Returns true when the caller may go on to close planning.
+     */
+    private discardRedundantFinalTail(
+        planning: PrdProgressivePlanningState,
+        tail: readonly PrdStory[],
+        fragmentId: string,
+        ordinal: number,
+        rejection: { code: PlanFragmentRejectionCode; reason: string },
+    ): boolean {
+        const state = this.opts.host.snapshot()
+        const current = state.prd?.runtimeGraph?.planning ?? planning
+        const tolerance = state.prd
+            ? evaluateFinalTailTolerance({
+                  prd: state.prd,
+                  admittedStoryIds: current.admittedStoryIds,
+                  goalContract: deriveGoalContract(state.prd.goalEnvelope),
+              })
+            : ({
+                  tolerated: false,
+                  blocker: "unsettled_stories",
+                  detail: "the run no longer holds a PRD",
+              } as const)
+        const storyIds = tail.map((story) => story.id)
+        if (!tolerance.tolerated) {
+            emitPlanActivity(
+                "error",
+                `final planner tail rejected (${rejection.code}): ${rejection.reason}; ` +
+                    `blocker: ${tolerance.blocker}: ${tolerance.detail}`,
+            )
+            this.failPlanning(
+                current,
+                "final_tail_rejected",
+                `${rejection.code}: ${rejection.reason} ` +
+                    `(tail not redundant: ${tolerance.blocker}: ${tolerance.detail})`,
+            )
+            return false
+        }
+        emitPlanActivity(
+            "warn",
+            `final planner tail discarded (${rejection.code}): ${rejection.reason}; ` +
+                `dropped stories: ${storyIds.join(", ")}`,
+        )
+        this.opts.host.emit(
+            FinalTailDiscarded.create({
+                runId: this.opts.runId,
+                planningId: planning.planningId,
+                fragmentId,
+                ordinal,
+                storyIds,
+                code: rejection.code,
+                reason: rejection.reason,
+            }),
+        )
+        return true
     }
 
     private onPlanningStreamFailed(failure: PlanningStreamFailedData): void {
@@ -733,7 +825,7 @@ export class ProgressivePlanningCoordinator {
         },
         code: PlanFragmentRejectionCode,
         reason: string,
-    ): void {
+    ): PlanFragmentAdmissionOutcome {
         this.opts.host.emit(
             PlanFragmentRejected.create({
                 runId: correlation.runId,
@@ -748,6 +840,7 @@ export class ProgressivePlanningCoordinator {
                 reason,
             }),
         )
+        return { status: "rejected", code, reason }
     }
 }
 

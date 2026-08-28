@@ -1,0 +1,6 @@
+# ADR-0009: Split the work into two sequential stories with disjoint writes
+
+**Status:** Accepted
+**Context:** Constraints require every story to declare exact repository-relative `writes` with no overlap between parallel stories; the tests must observe the new event and helper, so they cannot be authored in parallel with the implementation.
+**Decision:** Story 1 (implementation) writes exactly: `packages/baro-orchestrator/src/planning/application/progressive-planning-coordinator.ts`, `packages/baro-orchestrator/src/planning/domain/final-tail-tolerance.ts`, `packages/baro-orchestrator/src/events/planning.ts`, `packages/baro-orchestrator/src/planning/application/plan-events.ts`. Story 2 (tests) depends on Story 1 and writes exactly: `packages/baro-orchestrator/test/planning/progressive-planning-final-tail.test.ts`. No story writes `packages/baro-orchestrator/src/execution/collective-board.ts`, `src/runtime-graph/runtime-replan-coordinator.ts`, `src/runtime/runtime-replan.ts`, `src/planning/domain/architecture-obligation-contract.ts`, `src/goal/*`, `src/tui-protocol.ts`, or anything under `crates/`.
+**Consequences:** Sequential execution; no write-set overlap. Any need to touch a file outside these sets is a signal the change has left the goal's scope and must be raised rather than executed.
