@@ -25,6 +25,7 @@ mod orchestrator_client;
 mod planner_host;
 mod planner_runner;
 mod planner_stream_bridge;
+mod prd_write_guard;
 mod preaccept_context;
 mod progressive_planning;
 mod provider_ownership;
@@ -2649,6 +2650,12 @@ async fn run_app(
                                         );
                                         attach_conversation_metadata(&mut prd, &app);
                                         stamp_goal_fingerprint(&mut prd, launch_goal.as_deref());
+                                        if let Err(message) =
+                                            prd_write_guard::guard_fresh_plan_write(app.is_resume)
+                                        {
+                                            app.planning_error = Some(message);
+                                            continue;
+                                        }
                                         if let Err(e) = executor::write_prd(&prd, &cwd) {
                                             app.planning_error =
                                                 Some(format!("Failed to write prd.json: {}", e));
@@ -3993,6 +4000,10 @@ fn confirm_and_execute(
     );
     attach_conversation_metadata(&mut prd, app);
     stamp_goal_fingerprint(&mut prd, launch_goal);
+    if let Err(message) = prd_write_guard::guard_fresh_plan_write(app.is_resume) {
+        let _ = tx.try_send(AppEvent::BranchError(message));
+        return;
+    }
     if let Err(e) = executor::write_prd(&prd, cwd) {
         let _ = tx.try_send(AppEvent::BranchError(format!(
             "Failed to write prd.json: {}",
@@ -4158,6 +4169,7 @@ async fn begin_progressive_execution(
         .map_err(|error| format!("progressive branch creation failed: {error}"))?;
     branch_authority::verify_execution_branch(cwd, &actual_branch).await?;
     bootstrap.branch_name = actual_branch.clone();
+    prd_write_guard::guard_fresh_plan_write(app.is_resume)?;
     executor::write_prd(&bootstrap, cwd)
         .map_err(|error| format!("could not persist progressive bootstrap PRD: {error}"))?;
 
