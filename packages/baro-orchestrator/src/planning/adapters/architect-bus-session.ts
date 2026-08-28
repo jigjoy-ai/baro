@@ -38,6 +38,12 @@ import {
 import { runArchitectResearchSession } from "./architect-research-session.js"
 import { emitPlanLine } from "../application/plan-events.js"
 import { ScoutDispatched, ScoutFindingPublished } from "../../semantic-events.js"
+import {
+    contractDefects,
+    defectFlavor,
+    formatDefectList,
+    joinDefectMessages,
+} from "../../contract/contract-normalization.js"
 
 const DEFAULT_RESEARCH_ROUNDS = 2
 const DEFAULT_OUTCOME_REPAIRS = 2
@@ -87,6 +93,12 @@ export interface ArchitectBusSessionOptions {
     idleTimeoutMs?: number
     /** Host validation; throws with a reason the Architect can act on. */
     validateOutcome?: (raw: string) => void
+    /**
+     * Restated inline in every repair prompt, so a correction round does not
+     * depend on the model still remembering the shape from its system prompt.
+     * Omitted entirely when the caller supplies nothing.
+     */
+    outcomeSchemaSummary?: string
     onFinding?: (finding: ScoutFinding) => void
     onProgress?: (line: string) => void
     /** Test seam, and the seam a run-wide environment plugs into. */
@@ -389,6 +401,9 @@ async function settleOutcome(
     const { opts, architect, replies, findings, researchRounds, maxRepairs } = input
     let reply: string | null = firstReply
     let attempt = input.startingAttempt
+    // Flavors the Architect was told about on an earlier attempt. Whatever is
+    // no longer in the final attempt's defects is what the repairs resolved.
+    const seenFlavors = new Set<string>()
     for (;;) {
         if (reply === null) {
             throw new Error("architect bus session: the Architect exited mid-repair")
@@ -405,18 +420,34 @@ async function settleOutcome(
                 outcomeAttempts: attempt,
             }
         } catch (error) {
-            const reason = error instanceof Error ? error.message : String(error)
+            const defects = contractDefects(error)
+            const reason = joinDefectMessages(defects)
             if (attempt > maxRepairs) {
+                const finalFlavors = new Set(defects.map(defectFlavor))
+                const repaired = [...seenFlavors]
+                    .filter((flavor) => !finalFlavors.has(flavor))
+                    .sort()
                 throw new Error(
-                    `architect bus session: outcome rejected after ${attempt} attempt(s): ${reason}`,
+                    `architect bus session: outcome rejected after ${attempt} attempt(s): ${reason}\n` +
+                        `final defects (${defects.length}):\n` +
+                        `${formatDefectList(defects)}\n` +
+                        `repaired defect flavors: ${repaired.length ? repaired.join(", ") : "none"}`,
                 )
             }
             opts.onProgress?.(
                 `[architect-bus] outcome attempt ${attempt} rejected: ${reason}`,
             )
+            for (const flavor of defects.map(defectFlavor)) seenFlavors.add(flavor)
             attempt += 1
+            // One round per mistake set, not per mistake: telling the model
+            // about one defect at a time spends the whole budget walking a
+            // list it could have fixed in a single reply.
             architect.sendUserMessage(
-                `Your outcome was rejected: ${reason}\n\n` +
+                "Your outcome was rejected. Fix every defect listed below in one reply.\n\n" +
+                    `Defects (${defects.length}):\n${formatDefectList(defects)}\n\n` +
+                    (opts.outcomeSchemaSummary
+                        ? `Expected schema:\n${opts.outcomeSchemaSummary}\n\n`
+                        : "") +
                     "Reply with ONLY the corrected outcome. Change nothing that " +
                     "was already valid, and do not restate this message.",
             )
