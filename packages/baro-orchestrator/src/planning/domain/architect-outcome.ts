@@ -7,6 +7,14 @@
  */
 
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
+import {
+    ContractNormalizationError,
+    type ContractDefect,
+    type NoteSink,
+    contractDefects,
+    joinDefectMessages,
+    normalizeRecordKeys,
+} from "../../contract/contract-normalization.js"
 import { deriveGoalContract } from "../../goal/goal-contract.js"
 import {
     MAX_CONSTRAINT_PREDICATES,
@@ -45,6 +53,30 @@ const MAX_EVIDENCE_PATH_LENGTH = 512
 const MAX_EVIDENCE_FACT_LENGTH = 2_000
 const MAX_CORRELATION_ID_LENGTH = 128
 const MAX_LINE_NUMBER = 10_000_000
+
+/**
+ * The one source of the expected key sets: normalization and the exact-shape
+ * checks must never disagree about what the outcome is allowed to name.
+ */
+const OUTCOME_REQUIRED_KEYS = [
+    "schemaVersion",
+    "kind",
+    "message",
+    "questions",
+    "evidence",
+    "decisionDocument",
+] as const
+const OUTCOME_KEYS = [...OUTCOME_REQUIRED_KEYS, "constraintPredicates"] as const
+const QUESTION_KEYS = ["id", "text", "reason"] as const
+const EVIDENCE_KEYS = ["path", "line", "fact"] as const
+
+/** Inline schema text for the repair prompt; no prompt module is involved. */
+export const ARCHITECT_OUTCOME_SCHEMA_SUMMARY = [
+    '{"schemaVersion":1,"kind":"ready|needsInput","message":"…","questions":[],"evidence":[],"decisionDocument":null,"constraintPredicates":[]}',
+    'questions[i]: {"id":"…","text":"…","reason":"…"} — reason is optional, 1-3 entries, ids unique',
+    'evidence[i]: {"path":"project/relative/path","line":1|null,"fact":"…"} — 1-16 unique entries',
+    'constraintPredicates[i]: {"invariantId":"G-A1","kind":"absent|unchanged","pathPrefix":"…","pathSuffix":"…","text":"…"}',
+].join("\n")
 
 export interface ArchitectClarificationQuestionV1 {
     readonly id: string
@@ -101,10 +133,21 @@ export interface ArchitectOutcomeCorrelationV1 {
     architectRequestId: string
 }
 
+export interface ArchitectOutcomeContractErrorOptions extends ErrorOptions {
+    readonly defects?: readonly ContractDefect[]
+}
+
 export class ArchitectOutcomeContractError extends Error {
-    constructor(message: string) {
-        super(message)
+    /**
+     * Every entry rejected in one pass. A lone defect reproduces the message
+     * verbatim, so the single-failure text is unchanged.
+     */
+    readonly defects: readonly ContractDefect[]
+
+    constructor(message: string, options?: ArchitectOutcomeContractErrorOptions) {
+        super(message, options)
         this.name = "ArchitectOutcomeContractError"
+        this.defects = options?.defects ?? [{ path: "", message }]
     }
 }
 
@@ -259,6 +302,7 @@ export const ARCHITECT_OUTCOME_JSON_SCHEMA = architectOutcomeJsonSchema(false)
 export function parseArchitectOutcome(
     raw: string,
     options: ArchitectOutcomeValidationOptions = {},
+    onNote?: NoteSink,
 ): ArchitectOutcomeV1 {
     if (typeof raw !== "string") {
         throw new ArchitectOutcomeContractError("architect outcome must be text")
@@ -279,37 +323,44 @@ export function parseArchitectOutcome(
     } catch {
         throw new ArchitectOutcomeContractError("architect outcome is not valid JSON")
     }
-    return validateArchitectOutcome(value, options)
+    return validateArchitectOutcome(value, options, onNote)
 }
 
 export function validateArchitectOutcome(
     value: unknown,
     options: ArchitectOutcomeValidationOptions = {},
+    onNote?: NoteSink,
 ): ArchitectOutcomeV1 {
     assertCompatibleValidationOptions(options)
-    if (!exactRecord(value, [
-        "schemaVersion",
-        "kind",
-        "message",
-        "questions",
-        "evidence",
-        "decisionDocument",
-    ], ["constraintPredicates"])) {
+    const record = normalizeOutcomeRecord(value, onNote)
+    if (!exactRecord(record, OUTCOME_REQUIRED_KEYS, ["constraintPredicates"])) {
         throw new ArchitectOutcomeContractError(
             "architect outcome must use the exact v1 schema",
         )
     }
-    if (value.schemaVersion !== ARCHITECT_OUTCOME_SCHEMA_VERSION) {
+    if (record.schemaVersion !== ARCHITECT_OUTCOME_SCHEMA_VERSION) {
         throw new ArchitectOutcomeContractError("unsupported architect outcome schemaVersion")
     }
-    const message = boundedText(value.message, MAX_MESSAGE_LENGTH, "architect message")
-    const questions = parseQuestions(value.questions)
-    const evidence = parseEvidence(value.evidence)
-    const constraintPredicates = validateGoalConstraintPredicates(
-        value.constraintPredicates ?? [],
-    )
+    const message = boundedText(record.message, MAX_MESSAGE_LENGTH, "architect message")
+    // One pass over the three entry-bearing fields, so a repair round sees
+    // every bad entry instead of the first one.
+    const defects: ContractDefect[] = []
+    const questions = parseQuestions(record.questions, defects, onNote)
+    const evidence = parseEvidence(record.evidence, defects, onNote)
+    let constraintPredicates: readonly GoalConstraintPredicateWireV1[] = []
+    try {
+        constraintPredicates = validateGoalConstraintPredicates(
+            record.constraintPredicates ?? [],
+            onNote,
+        )
+    } catch (error) {
+        defects.push(...contractDefects(error))
+    }
+    if (defects.length > 0) {
+        throw new ArchitectOutcomeContractError(joinDefectMessages(defects), { defects })
+    }
 
-    if (value.kind === "ready") {
+    if (record.kind === "ready") {
         if (questions.length !== 0 || evidence.length !== 0) {
             throw new ArchitectOutcomeContractError(
                 "ready architect outcome requires empty questions and evidence",
@@ -320,9 +371,9 @@ export function validateArchitectOutcome(
             // ADR markdown, so the model is never asked to reproduce ids,
             // numbering or field markers it cannot be held responsible for.
             // Backends still emitting the document verbatim keep working.
-            options.decisionOnly === true && isStatedDecisions(value.decisionDocument)
-                ? renderStatedDecisions(value.decisionDocument)
-                : value.decisionDocument,
+            options.decisionOnly === true && isStatedDecisions(record.decisionDocument)
+                ? renderStatedDecisions(record.decisionDocument)
+                : record.decisionDocument,
             options.decisionOnly === true
                 ? MAX_ARCHITECT_DECISION_OUTCOME_BYTES
                 : MAX_DECISION_DOCUMENT_LENGTH,
@@ -355,8 +406,8 @@ export function validateArchitectOutcome(
         })
     }
 
-    if (value.kind === "needsInput") {
-        if (value.decisionDocument !== null) {
+    if (record.kind === "needsInput") {
+        if (record.decisionDocument !== null) {
             throw new ArchitectOutcomeContractError(
                 "needsInput architect outcome requires decisionDocument null",
             )
@@ -459,7 +510,11 @@ export function validateArchitectOutcomeCorrelation(
     })
 }
 
-function parseQuestions(value: unknown): ArchitectClarificationQuestionV1[] {
+function parseQuestions(
+    value: unknown,
+    defects: ContractDefect[],
+    onNote?: NoteSink,
+): ArchitectClarificationQuestionV1[] {
     if (!Array.isArray(value) || value.length > MAX_QUESTIONS) {
         throw new ArchitectOutcomeContractError(
             `architect questions must contain at most ${MAX_QUESTIONS} entries`,
@@ -467,40 +522,50 @@ function parseQuestions(value: unknown): ArchitectClarificationQuestionV1[] {
     }
     const result: ArchitectClarificationQuestionV1[] = []
     const ids = new Set<string>()
-    for (const candidate of value) {
-        if (
-            !exactRecord(candidate, ["id", "text"]) &&
-            !exactRecord(candidate, ["id", "text", "reason"])
-        ) {
-            throw new ArchitectOutcomeContractError("architect question shape is not exact")
+    for (const [index, entry] of value.entries()) {
+        const at = `questions[${index}]`
+        try {
+            const candidate = normalizeEntry(entry, QUESTION_KEYS, at, onNote)
+            if (
+                !exactRecord(candidate, ["id", "text"]) &&
+                !exactRecord(candidate, ["id", "text", "reason"])
+            ) {
+                throw new ArchitectOutcomeContractError("architect question shape is not exact")
+            }
+            const id = safeCorrelationId(candidate.id, "architect question id")
+            if (ids.has(id)) {
+                throw new ArchitectOutcomeContractError("architect question ids must be unique")
+            }
+            ids.add(id)
+            result.push({
+                id,
+                text: boundedText(
+                    candidate.text,
+                    MAX_QUESTION_TEXT_LENGTH,
+                    "architect question text",
+                ),
+                ...("reason" in candidate
+                    ? {
+                          reason: boundedText(
+                              candidate.reason,
+                              MAX_QUESTION_REASON_LENGTH,
+                              "architect question reason",
+                          ),
+                      }
+                    : {}),
+            })
+        } catch (error) {
+            defects.push({ path: at, message: defectMessage(error) })
         }
-        const id = safeCorrelationId(candidate.id, "architect question id")
-        if (ids.has(id)) {
-            throw new ArchitectOutcomeContractError("architect question ids must be unique")
-        }
-        ids.add(id)
-        result.push({
-            id,
-            text: boundedText(
-                candidate.text,
-                MAX_QUESTION_TEXT_LENGTH,
-                "architect question text",
-            ),
-            ...("reason" in candidate
-                ? {
-                      reason: boundedText(
-                          candidate.reason,
-                          MAX_QUESTION_REASON_LENGTH,
-                          "architect question reason",
-                      ),
-                  }
-                : {}),
-        })
     }
     return result
 }
 
-function parseEvidence(value: unknown): ArchitectRepositoryEvidenceV1[] {
+function parseEvidence(
+    value: unknown,
+    defects: ContractDefect[],
+    onNote?: NoteSink,
+): ArchitectRepositoryEvidenceV1[] {
     if (!Array.isArray(value) || value.length > MAX_EVIDENCE) {
         throw new ArchitectOutcomeContractError(
             `architect evidence must contain at most ${MAX_EVIDENCE} entries`,
@@ -508,36 +573,79 @@ function parseEvidence(value: unknown): ArchitectRepositoryEvidenceV1[] {
     }
     const result: ArchitectRepositoryEvidenceV1[] = []
     const seen = new Set<string>()
-    for (const candidate of value) {
-        if (!exactRecord(candidate, ["path", "line", "fact"])) {
-            throw new ArchitectOutcomeContractError("architect evidence shape is not exact")
-        }
-        const path = safeRelativePath(candidate.path)
-        const line = candidate.line
-        if (
-            line !== null &&
-            (typeof line !== "number" ||
-                !Number.isSafeInteger(line) ||
-                line < 1 ||
-                line > MAX_LINE_NUMBER)
-        ) {
-            throw new ArchitectOutcomeContractError(
-                "architect evidence line must be null or a positive bounded integer",
+    for (const [index, entry] of value.entries()) {
+        const at = `evidence[${index}]`
+        try {
+            const candidate = normalizeEntry(entry, EVIDENCE_KEYS, at, onNote)
+            if (!exactRecord(candidate, ["path", "line", "fact"])) {
+                throw new ArchitectOutcomeContractError("architect evidence shape is not exact")
+            }
+            const path = safeRelativePath(candidate.path)
+            const line = candidate.line
+            if (
+                line !== null &&
+                (typeof line !== "number" ||
+                    !Number.isSafeInteger(line) ||
+                    line < 1 ||
+                    line > MAX_LINE_NUMBER)
+            ) {
+                throw new ArchitectOutcomeContractError(
+                    "architect evidence line must be null or a positive bounded integer",
+                )
+            }
+            const fact = boundedText(
+                candidate.fact,
+                MAX_EVIDENCE_FACT_LENGTH,
+                "architect evidence fact",
             )
+            const key = `${path}\u0000${line ?? ""}\u0000${fact}`
+            if (seen.has(key)) {
+                throw new ArchitectOutcomeContractError("architect evidence entries must be unique")
+            }
+            seen.add(key)
+            result.push({ path, line: line as number | null, fact })
+        } catch (error) {
+            defects.push({ path: at, message: defectMessage(error) })
         }
-        const fact = boundedText(
-            candidate.fact,
-            MAX_EVIDENCE_FACT_LENGTH,
-            "architect evidence fact",
-        )
-        const key = `${path}\u0000${line ?? ""}\u0000${fact}`
-        if (seen.has(key)) {
-            throw new ArchitectOutcomeContractError("architect evidence entries must be unique")
-        }
-        seen.add(key)
-        result.push({ path, line: line as number | null, fact })
     }
     return result
+}
+
+/**
+ * A null or non-record element reaches the shape check untouched: inside
+ * evidence and questions an absent entry is missing required content, never a
+ * skippable hole.
+ */
+function normalizeEntry(
+    entry: unknown,
+    expectedKeys: readonly string[],
+    path: string,
+    onNote?: NoteSink,
+): unknown {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return entry
+    return normalizeRecordKeys(entry as Record<string, unknown>, expectedKeys, path, onNote)
+}
+
+function defectMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Top-level ambiguity is not one of the per-entry accumulation boundaries, so
+ * it is restated as the contract error this module promises its callers —
+ * run-architect branches on that class.
+ */
+function normalizeOutcomeRecord(value: unknown, onNote?: NoteSink): unknown {
+    try {
+        return normalizeEntry(value, OUTCOME_KEYS, "", onNote)
+    } catch (error) {
+        if (error instanceof ContractNormalizationError) {
+            throw new ArchitectOutcomeContractError(error.message, {
+                defects: [{ path: error.path, message: error.message }],
+            })
+        }
+        throw error
+    }
 }
 
 function safeRelativePath(value: unknown): string {
