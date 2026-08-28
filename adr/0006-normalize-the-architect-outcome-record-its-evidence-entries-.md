@@ -1,0 +1,12 @@
+# ADR-0006: Normalize the architect outcome record, its evidence entries and its question entries
+
+**Status:** Accepted
+**Context:** parseArchitectOutcome is the validator the bus session repair loop actually runs (scripts/run-architect.ts:699-703), so drift tolerance must exist there or the repair loop never sees a normalized draft. Its nested records (ArchitectRepositoryEvidenceV1 {path,line,fact} at architect-outcome.ts:55-60, ArchitectClarificationQuestionV1 {id,text,reason?} at :49-53) are the most drift-prone shapes.
+**Decision:** In src/planning/domain/architect-outcome.ts:
+- Apply `normalizeRecordKeys` at exactly three levels: the top-level outcome object (expected keys = the existing top-level key list already enforced there, path `""`), each `evidence[i]` record (expected `["path", "line", "fact"]`, path `evidence[${i}]`), and each `questions[i]` record (expected `["id", "text", "reason"]`, path `questions[${i}]`). Each call receives the forwarded `onNote`.
+- Predicate records are normalized by goal-constraint-appendix, not here; architect-outcome only forwards the sink at :308-310.
+- Do NOT skip absent entries in `evidence` or `questions` — a null element there is missing required content and rejects. Skip-absent applies only to constraintPredicates.
+- All existing bounds stay exactly as they are: the 1..16 evidence-entry count rule, the 1..3 question rule, MAX_CONSTRAINT_PREDICATES, byte-size limits, the ready/needsInput branch rules (empty questions+evidence for ready; null decisionDocument for needsInput), and `outcomeByteOverrun`/`appendRepairNote` (:714-731) are untouched.
+- Export `const ARCHITECT_OUTCOME_SCHEMA_SUMMARY: string` from this file: the exact JSON key line `{"schemaVersion":1,"kind":"ready|needsInput","message":"…","questions":[],"evidence":[],"decisionDocument":null,"constraintPredicates":[]}` plus one line each for the question object shape, the evidence object shape, and the predicate wire shape. This constant is the ONLY inline schema text the bus session repair prompt uses for outcomes.
+- No new key is added to the outcome envelope, preserving crates/baro-tui/src/architect_runner/outcome.rs:180-185.
+**Consequences:** Drifted spellings inside evidence and question records now normalize instead of failing a whole draft; extra fields are stripped with a warn note. Because normalization runs before every existing check, out-of-bounds evidence counts and branch-rule violations reject identically. The new constant gives the repair loop its schema text without editing any prompt module.
