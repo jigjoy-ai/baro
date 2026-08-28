@@ -98,3 +98,17 @@ export interface PlanningStreamClosedData {
 
 export const PlanningStreamClosed =
     defineSemanticEvent<PlanningStreamClosedData>("planning_stream_closed")
+
+export interface FinalTailDiscardedData {
+    runId: string
+    planningId: string
+    fragmentId: string
+    ordinal: number
+    /** Stories the rejected tail carried and the run will never execute. */
+    storyIds: readonly string[]
+    code: PlanFragmentRejectionCode
+    reason: string
+}
+
+export const FinalTailDiscarded =
+    defineSemanticEvent<FinalTailDiscardedData>("final_tail_discarded")

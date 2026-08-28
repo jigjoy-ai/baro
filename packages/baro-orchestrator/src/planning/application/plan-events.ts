@@ -20,6 +20,18 @@ export function emitPlanLine(line: string): void {
     emit({ type: "story_log", id: "plan", line: trimmed })
 }
 
+/**
+ * A planning-lane activity line the operator always sees. Deliberately outside
+ * the BARO_PLAN_EVENTS gate: this is the only channel that makes a planning
+ * decision visible in the feed, so gating it would hide the very warning it
+ * exists to raise. Whitespace is collapsed because `emit` forbids newlines.
+ */
+export function emitPlanActivity(kind: "warn" | "error", text: string): void {
+    const trimmed = text.replace(/\s+/g, " ").trim()
+    if (!trimmed) return
+    emit({ type: "activity", id: "plan", kind, text: trimmed })
+}
+
 /** Describe one tool call the planner/architect made while exploring. */
 export function emitToolCall(name: string, argsJson: string | undefined): void {
     if (!enabled()) return
