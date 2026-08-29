@@ -73,6 +73,12 @@ export interface PlannerHarnessMcpConnection {
     providerEnvironment: Record<string, string>
 }
 
+// The publisher computes the gap from its own admitted-story record; a
+// publisher built before that capability reports no gap rather than a wrong one.
+interface ProgressiveGapSource {
+    unownedObligationIds?(): readonly string[]
+}
+
 export interface PlannerHarnessProgressiveSupport {
     readonly systemInstruction: string | null
     /**
@@ -97,6 +103,8 @@ export interface PlannerHarnessProgressiveSupport {
     publish(args: unknown): Promise<string>
     /** Returns the composed final PRD (admitted prefix + tail). */
     reconcileFinalCandidate(candidate: string): Record<string, unknown>
+    /** Obligation ids no admitted story owns yet; [] without a contract. */
+    unownedObligationIds(): readonly string[]
     assertInitialized(): void
     hasEarlyPlan(): boolean
     close(): Promise<void>
@@ -114,6 +122,7 @@ const NO_HARNESS_PROGRESSIVE_SUPPORT: PlannerHarnessProgressiveSupport =
         },
         reconcileFinalCandidate: (candidate: string) =>
             JSON.parse(candidate) as Record<string, unknown>,
+        unownedObligationIds: () => [],
         assertInitialized: () => undefined,
         hasEarlyPlan: () => false,
         close: async () => undefined,
@@ -160,6 +169,8 @@ export async function createPlannerHarnessProgressiveSupport(
         },
         reconcileFinalCandidate: (candidate) =>
             publisher.reconcileFinalCandidate(candidate),
+        unownedObligationIds: () =>
+            (publisher as ProgressiveGapSource).unownedObligationIds?.() ?? [],
         // A relay nobody opened has nothing to have initialized.
         assertInitialized: () => {
             if (connection) relay.assertInitialized()
