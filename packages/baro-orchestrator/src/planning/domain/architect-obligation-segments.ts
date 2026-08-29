@@ -1,6 +1,8 @@
 import { extractModelJsonObject } from "../../model-json.js"
 import {
+    ContractAuthorityFieldError,
     ContractNormalizationError,
+    assertNoHostAssignedCorrelation,
     contractDefects,
     formatDefectList,
     joinDefectMessages,
@@ -537,6 +539,17 @@ function parseSegmentResponse(
             decisionRank,
             index + 1,
         ))
+        // Evidence entries are copied without normalization, so this is the
+        // only place a forged correlation field one level down is seen.
+        if (Array.isArray(candidate.evidence)) {
+            candidate.evidence.forEach((item, evidenceIndex) => {
+                if (item === null || typeof item !== "object" || Array.isArray(item)) return
+                assertNoHostAssignedCorrelation(
+                    item as Record<string, unknown>,
+                    `obligations[${index}].evidence[${evidenceIndex}]`,
+                )
+            })
+        }
         return {
             id: `O-${String(index + 1).padStart(3, "0")}`,
             invariantIds: candidate.invariantIds,
@@ -556,6 +569,12 @@ function parseSegmentResponse(
             // A truncated response is a control-flow signal routed to
             // bisection, never a content defect to enumerate back at the model.
             if (error instanceof ArchitectObligationOutputLimitError) throw error
+            // A nested evidence record carries its own path; collapsing it to
+            // the draft would hide which entry forged the field.
+            if (error instanceof ContractAuthorityFieldError) {
+                defects.push({ path: error.path, message: error.message })
+                return
+            }
             defects.push({
                 path: `obligations[${index}]`,
                 message: error instanceof Error ? error.message : String(error),

@@ -591,6 +591,79 @@ describe("segmented Architect obligation compiler", () => {
         )
     })
 
+    // Evidence entries are copied without normalization, so a forged field one
+    // level down would otherwise never meet the shared guard.
+    it("refuses a nested evidence record that carries host-assigned correlation", async () => {
+        const requests: ArchitectObligationSegmentRequest[] = []
+        const notes: ContractNote[] = []
+        const forged =
+            'obligations[0].evidence[0]: field "sessionId" is host-assigned correlation; ' +
+            "model output may not carry host-assigned correlation"
+        await assert.rejects(
+            compileArchitectObligationSegments({
+                decisionDocument: DECISION_DOCUMENT,
+                goalEnvelope: goalEnvelope(1, 0),
+                respond: async (request) => {
+                    requests.push(request)
+                    return JSON.stringify({
+                        schemaVersion: 1,
+                        obligations: [{
+                            adrIds: ["ADR-001"],
+                            invariantIds: ["G-A1"],
+                            subject: "subject",
+                            scenario: "scenario",
+                            expectedOutcome: "outcome",
+                            evidence: [{ sessionId: "model-owned" }],
+                        }],
+                    })
+                },
+                onNote: (note) => notes.push(note),
+            }),
+            (error: unknown) => {
+                assert.ok(error instanceof ArchitectObligationSegmentError)
+                assert.ok(
+                    error.message.endsWith(`remained invalid after two repairs: ${forged}`),
+                    error.message,
+                )
+                // No outcome-only schema phrase leaks onto the obligation path.
+                assert.doesNotMatch(error.message, /exact v1 schema/u)
+                return true
+            },
+        )
+        // The defect keeps the offending evidence path, not the draft's.
+        const repair = repairOf(requests[1]!)
+        assert.ok(repair.includes(`- obligations[0].evidence[0]: ${forged}`), repair)
+        assert.deepEqual(notes, [])
+    })
+
+    // The guard denies authority only; a surplus key one level down still
+    // fails exactly where it failed before, on the evidence shape.
+    it("leaves a benign nested evidence record to the pre-existing shape check", async () => {
+        await assert.rejects(
+            compileArchitectObligationSegments({
+                decisionDocument: DECISION_DOCUMENT,
+                goalEnvelope: goalEnvelope(1, 0),
+                respond: async () =>
+                    JSON.stringify({
+                        schemaVersion: 1,
+                        obligations: [{
+                            adrIds: ["ADR-001"],
+                            invariantIds: ["G-A1"],
+                            subject: "subject",
+                            scenario: "scenario",
+                            expectedOutcome: "outcome",
+                            evidence: [{ note: "proof" }],
+                        }],
+                    }),
+            }),
+            (error: unknown) => {
+                assert.ok(error instanceof ArchitectObligationSegmentError)
+                assert.doesNotMatch(error.message, /host-assigned correlation/u)
+                return true
+            },
+        )
+    })
+
     it("enumerates every defect of one attempt in the repair prompt", async () => {
         // Drift pinned: one-defect-at-a-time feedback made a two-defect draft
         // cost two repair rounds; the whole set now goes back in one reply.

@@ -38,6 +38,71 @@ export class ContractNormalizationError extends Error {
     }
 }
 
+/**
+ * Correlation the host stamps onto the transport itself. A model that emits
+ * one is claiming authority it cannot hold, so the record is refused rather
+ * than quietly stripped: a stripped field looks like an accepted outcome.
+ */
+export const HOST_ASSIGNED_CORRELATION_FIELDS: readonly string[] = [
+    "sessionId", // outcome transport envelope, architect-outcome.ts:122-128 / :480-489
+    "conversationSessionId", // same envelope, from --conversation-session-id (run-architect.ts:177-185)
+    "goalRequestId", // same envelope, same stamping site
+    "architectRequestId", // same envelope, same stamping site
+    "runId", // billing envelope, run-architect.ts:325 / :786-799
+    "billingRunId", // billing envelope, same lines
+    "messageId", // per-call billing envelope, run-architect.ts:786-799
+    "billingPhase", // per-call billing envelope, same lines
+    "billingAttempt", // per-call billing envelope, same lines
+    "invocationId", // model_usage measurement context, run-architect.ts:908-935
+    "invocationBaseId", // model_usage measurement context, same lines
+    "measurementId", // model_usage measurement context, same lines
+    "storyId", // host-assigned execution identity, same measurement context
+    "workerId", // host-assigned execution identity, same measurement context
+    "batchId", // obligation compilation identity, architect-obligation-segments.ts:210-211 / :346-357
+    "batchOrdinal", // obligation compilation identity, same sites
+    "snapshotId", // host-owned RepositoryBrief snapshot identity
+    "traceId", // reserved generic host correlation spelling
+    "requestId", // reserved generic host correlation spelling
+]
+
+// Deliberately absent: "id" (obligation drafts legitimately carry a model id
+// the host discards) and "schemaVersion" (a real contract field), plus the
+// bare words attempt/phase/backend/requestedModel, which are host-side
+// telemetry only and plausible prose field names.
+const HOST_ASSIGNED_CANONICAL = new Set(
+    HOST_ASSIGNED_CORRELATION_FIELDS.map(canonicalFieldKey),
+)
+
+export class ContractAuthorityFieldError extends ContractNormalizationError {
+    readonly field: string
+
+    constructor(field: string, path: string) {
+        super(
+            `${path}: field "${field}" is host-assigned correlation; ` +
+                "model output may not carry host-assigned correlation",
+            path,
+        )
+        this.name = "ContractAuthorityFieldError"
+        this.field = field
+    }
+}
+
+/** Canonical matching, so session_id and SessionID cannot slip past. */
+export function isHostAssignedCorrelationField(key: string): boolean {
+    return HOST_ASSIGNED_CANONICAL.has(canonicalFieldKey(key))
+}
+
+export function assertNoHostAssignedCorrelation(
+    candidate: Record<string, unknown>,
+    path: string,
+): void {
+    for (const key of Object.keys(candidate)) {
+        if (isHostAssignedCorrelationField(key)) {
+            throw new ContractAuthorityFieldError(key, path)
+        }
+    }
+}
+
 const MAX_DEFECT_MESSAGE_LENGTH = 400
 const MAX_DEFECT_LIST_LENGTH = 4000
 
@@ -62,6 +127,9 @@ export function normalizeRecordKeys(
     path: string,
     onNote?: NoteSink,
 ): Record<string, unknown> {
+    // Before collision detection and before any note: forged authority is a
+    // refusal, never a drift the caller gets to hear about and continue past.
+    assertNoHostAssignedCorrelation(candidate, path)
     const presentKeys = Object.keys(candidate)
     const grouped = new Map<string, string[]>()
     for (const key of presentKeys) {
