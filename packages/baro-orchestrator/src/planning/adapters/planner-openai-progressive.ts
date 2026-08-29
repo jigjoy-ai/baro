@@ -11,6 +11,11 @@ import {
 } from "../domain/architecture-obligation-contract.js"
 import { validateGoalContractCoverage } from "../domain/goal-contract-coverage.js"
 import {
+    formatObligationIdList,
+    obligationGapSummary,
+    unownedObligationIds,
+} from "../domain/obligation-coverage-report.js"
+import {
     openProgressivePlanSession,
     reconcileProgressivePlanStories,
     validateProgressivePlanFragment,
@@ -49,6 +54,8 @@ export interface PlannerOpenAIProgressiveSupport {
     readonly systemInstruction: string | null
     /** Returns the composed final PRD (admitted prefix + tail). */
     reconcileFinalCandidate(candidate: string): Record<string, unknown>
+    /** Obligation ids no admitted story owns yet; [] without a contract. */
+    unownedObligationIds(): readonly string[]
     hasEarlyPlan(): boolean
 }
 
@@ -56,6 +63,8 @@ export interface PlannerProgressivePublisher {
     publish(args: unknown): Promise<Record<string, unknown>>
     /** Returns the composed final PRD (admitted prefix + tail). */
     reconcileFinalCandidate(candidate: string): Record<string, unknown>
+    /** Obligation ids no admitted story owns yet; [] without a contract. */
+    unownedObligationIds(): readonly string[]
     hasEarlyPlan(): boolean
 }
 
@@ -200,6 +209,7 @@ const NO_PROGRESSIVE_SUPPORT: PlannerOpenAIProgressiveSupport = Object.freeze({
     systemInstruction: null,
     reconcileFinalCandidate: (candidate: string) =>
         JSON.parse(candidate) as Record<string, unknown>,
+    unownedObligationIds: () => [],
     hasEarlyPlan: () => false,
 })
 
@@ -215,6 +225,7 @@ export function createPlannerOpenAIProgressiveSupport(
         ),
         reconcileFinalCandidate: (candidate) =>
             publisher.reconcileFinalCandidate(candidate),
+        unownedObligationIds: () => publisher.unownedObligationIds(),
         hasEarlyPlan: () => publisher.hasEarlyPlan(),
     }
 }
@@ -282,18 +293,25 @@ export function createPlannerProgressivePublisher(
             // Published stories are immutable, so an obligation that is not
             // attached here can never be attached — say so on the receipt,
             // in the round where it is still fixable, instead of at close.
-            const fragmentOwnsObligations = fragment.stories.some((story) =>
-                story.acceptance.some((criterion) => /\[O-\d+\]/u.test(criterion)),
+            const unowned = unownedObligationIds(
+                obligationContract,
+                session.snapshot().stories,
             )
+            const totalObligations = obligationContract?.obligations.length ?? 0
             const obligationNote =
-                (obligationContract?.obligations.length ?? 0) > 0 &&
-                !fragmentOwnsObligations
-                    ? "WARNING: no story in this fragment owns an architecture " +
-                      "obligation ([O-###] acceptance criterion). Published " +
-                      "stories are immutable — an obligation not attached at " +
-                      "publish time can never be attached, and planning closes " +
-                      "incomplete."
-                    : undefined
+                totalObligations === 0 || unowned.length === 0
+                    ? undefined
+                    : `WARNING: ${unowned.length} of ${totalObligations} architecture ` +
+                      "obligation(s) are still unowned after this fragment: " +
+                      `${formatObligationIdList(unowned)}. Published stories are ` +
+                      "immutable — an obligation not attached at publish time can " +
+                      "never be attached, and planning closes incomplete."
+            if (totalObligations > 0) {
+                process.stderr.write(
+                    `[planner-obligations] fragment ${admission.fragmentId} admitted; ` +
+                        `unowned ${obligationGapSummary(unowned, totalObligations)}\n`,
+                )
+            }
             return {
                 ok: true,
                 disposition: admission.disposition,
@@ -303,6 +321,7 @@ export function createPlannerProgressivePublisher(
                 storyIds: admission.admittedStoryIds,
                 nextOrdinal: admission.nextOrdinal,
                 ...(obligationNote ? { obligationNote } : {}),
+                ...(unowned.length > 0 ? { unownedObligationIds: [...unowned] } : {}),
                 ...(hostFeedback ?? {}),
             }
         },
@@ -337,6 +356,12 @@ export function createPlannerProgressivePublisher(
             )
             session.reconcile({ userStories: composed.finalStories })
             return { ...parsed, userStories: composed.finalStories }
+        },
+        unownedObligationIds() {
+            return unownedObligationIds(
+                obligationContract,
+                session.snapshot().stories,
+            )
         },
         hasEarlyPlan() {
             return session.snapshot().stories.length > 0
