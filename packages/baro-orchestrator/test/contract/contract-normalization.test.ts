@@ -2,8 +2,10 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
+    ContractAuthorityFieldError,
     ContractNormalizationError,
     type ContractNote,
+    HOST_ASSIGNED_CORRELATION_FIELDS,
     canonicalFieldKey,
     contractDefects,
     defectFlavor,
@@ -185,6 +187,150 @@ describe("what normalization refuses to guess", () => {
             ["stripped_unexpected_field"],
         )
         assert.throws(() => requireKeys(normalized, PREDICATE_KEYS), /missing text/u)
+    })
+})
+
+describe("host-assigned correlation fields", () => {
+    const OUTCOME_KEYS = ["schemaVersion", "kind"] as const
+    const OBLIGATION_KEYS = ["invariantId", "text"] as const
+
+    it("refuses an outcome record that carries forged session authority", () => {
+        const { notes, sink } = recorder()
+        assert.throws(
+            () =>
+                normalizeRecordKeys(
+                    { schemaVersion: 1, kind: "ready", sessionId: "x" },
+                    OUTCOME_KEYS,
+                    "",
+                    sink,
+                ),
+            (error: unknown) => {
+                assert.ok(error instanceof ContractAuthorityFieldError)
+                assert.equal(error.name, "ContractAuthorityFieldError")
+                assert.equal(error.field, "sessionId")
+                assert.equal(error.path, "")
+                assert.ok(error.message.includes('"sessionId"'), error.message)
+                assert.match(error.message, /model output may not carry host-assigned correlation/u)
+                return true
+            },
+        )
+        assert.deepEqual(notes, [], "a refused record is not partially normalized")
+    })
+
+    // The same guard, reached through the obligation path, so the defect the
+    // repair prompt groups by is the obligation flavor and not "outcome".
+    it("refuses an obligation record that carries a forged run id", () => {
+        const { notes, sink } = recorder()
+        assert.throws(
+            () =>
+                normalizeRecordKeys(
+                    { invariantId: "G-A1", text: "t", runId: "run-7" },
+                    OBLIGATION_KEYS,
+                    "obligations[0]",
+                    sink,
+                ),
+            (error: unknown) => {
+                assert.ok(error instanceof ContractAuthorityFieldError)
+                assert.equal(error.field, "runId")
+                assert.equal(error.path, "obligations[0]")
+                assert.ok(error.message.includes('"runId"'), error.message)
+                assert.equal(
+                    defectFlavor({ path: error.path, message: error.message }),
+                    "obligations",
+                )
+                return true
+            },
+        )
+        assert.deepEqual(notes, [])
+    })
+
+    // Denial is canonical, so respelling the field is not a way past it.
+    it("rejects every spelling that canonicalizes to a denied field", () => {
+        for (const spelling of ["session_id", "SessionID", "goal-request-id"]) {
+            assert.throws(
+                () => normalizeRecordKeys({ [spelling]: "x" }, OUTCOME_KEYS, ""),
+                (error: unknown) => {
+                    assert.ok(error instanceof ContractAuthorityFieldError)
+                    // The model's own spelling, so the repair names what it sent.
+                    assert.equal(error.field, spelling)
+                    assert.ok(error.message.includes(`"${spelling}"`), error.message)
+                    return true
+                },
+            )
+        }
+    })
+
+    // The denylist is layered on top of drift tolerance, not in place of it.
+    it("still strips an unexpected field that is not host-assigned", () => {
+        const { notes, sink } = recorder()
+        const normalized = normalizeRecordKeys(
+            { schemaVersion: 1, kind: "ready", vibes: "good" },
+            OUTCOME_KEYS,
+            "",
+            sink,
+        )
+        assert.deepEqual(normalized, { schemaVersion: 1, kind: "ready" })
+        assert.deepEqual(notes, [{
+            severity: "warn",
+            kind: "stripped_unexpected_field",
+            path: "",
+            detail: ': dropped unexpected field "vibes"',
+        }])
+    })
+
+    it("refuses even when every other key is an exact expected spelling", () => {
+        const { notes, sink } = recorder()
+        assert.throws(
+            () =>
+                normalizeRecordKeys(
+                    { invariantId: "G-A1", text: "t", architectRequestId: "req-1" },
+                    OBLIGATION_KEYS,
+                    "obligations[2]",
+                    sink,
+                ),
+            (error: unknown) => {
+                assert.ok(error instanceof ContractAuthorityFieldError)
+                assert.equal(error.field, "architectRequestId")
+                assert.equal(error.path, "obligations[2]")
+                return true
+            },
+        )
+        assert.deepEqual(notes, [])
+    })
+
+    // Two failures in one record must resolve deterministically to the
+    // authority one: it is the more serious claim.
+    it("reports forged authority before an ambiguous field pair", () => {
+        const { notes, sink } = recorder()
+        assert.throws(
+            () =>
+                normalizeRecordKeys(
+                    { invariant_id: "G-A1", "invariant-id": "G-A2", sessionId: "x" },
+                    OBLIGATION_KEYS,
+                    "obligations[0]",
+                    sink,
+                ),
+            (error: unknown) => {
+                assert.ok(error instanceof ContractAuthorityFieldError)
+                assert.equal(error.field, "sessionId")
+                return true
+            },
+        )
+        assert.deepEqual(notes, [])
+    })
+
+    it("denies the audited authority fields and no legitimate contract field", () => {
+        for (const field of ["sessionId", "goalRequestId", "architectRequestId", "runId"]) {
+            assert.ok(
+                HOST_ASSIGNED_CORRELATION_FIELDS.includes(field),
+                `${field} must be denied`,
+            )
+        }
+        // An obligation draft carries a model id the host discards, and
+        // schemaVersion is a real contract field: denying either breaks parsing.
+        assert.equal(HOST_ASSIGNED_CORRELATION_FIELDS.includes("id"), false)
+        assert.equal(HOST_ASSIGNED_CORRELATION_FIELDS.includes("schemaVersion"), false)
+        assert.equal(HOST_ASSIGNED_CORRELATION_FIELDS.length, 19)
     })
 })
 
