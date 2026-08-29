@@ -1,0 +1,12 @@
+# ADR-0004: Normalize and skip-absent inside the constraintPredicates appendix
+
+**Status:** Accepted
+**Context:** parsePredicate demands an exact 5-key set (goal-constraint-appendix.ts:80-84), so a drifted spelling such as invariantIDs or an extra explanatory field fails a semantically complete predicate. Separately, a model that emits a hole in the array (a null element) currently kills the whole appendix even when the other predicates are independently valid.
+**Decision:** In src/goal/goal-constraint-appendix.ts:
+- Introduce `const PREDICATE_KEYS = ["invariantId", "kind", "pathPrefix", "pathSuffix", "text"] as const;` as the single source of the expected key set; the existing exact-key check at :80-84 reads from it and stays in place unchanged after normalization.
+- In the per-entry loop, before `parsePredicate`: if the element is `null` or `undefined`, SKIP it, emit `{severity:"warn", kind:"skipped_absent_entry", path: `constraintPredicates[${index}]`, detail: `constraintPredicates[${index}]: skipped absent entry`}`, and continue. Anything else that is not a non-null non-array object still becomes a defect via the existing check at :76-78 — an empty object `{}` is missing required content and still REJECTS.
+- For each surviving element, call `normalizeRecordKeys(entry as Record<string, unknown>, PREDICATE_KEYS, `constraintPredicates[${index}]`, onNote)` and pass the normalized record into `parsePredicate`.
+- If at least one element was skipped and NO element survived (and the input array was non-empty), throw a `GoalConstraintContractError` with defect `{path: "constraintPredicates", message: "constraintPredicates must declare at least one predicate"}`.
+- `MAX_CONSTRAINT_PREDICATES` (24) is measured against the ORIGINAL array length at :63-67, before skipping. The `text()` helper (:127-141), the invariantId regex, the kind enum, the absent/unchanged field requirements and the bare-extension suffix rejection are all unchanged.
+- `attachGoalConstraintContract` and `goalPredicatesFromWire` are NOT changed.
+**Consequences:** Predicates arriving with harmless extra prose fields or casing drift now validate; holes in the array degrade to a warn note. Genuinely missing required content, out-of-range invariantIds, and kind/pathSuffix mismatches reject exactly as today. Because skipping happens after the 24-item bound, an oversized array still fails first, as it does now.

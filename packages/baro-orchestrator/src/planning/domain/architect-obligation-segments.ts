@@ -1,4 +1,15 @@
 import { extractModelJsonObject } from "../../model-json.js"
+import {
+    ContractAuthorityFieldError,
+    ContractNormalizationError,
+    assertNoHostAssignedCorrelation,
+    contractDefects,
+    formatDefectList,
+    joinDefectMessages,
+    normalizeRecordKeys,
+    type ContractDefect,
+    type NoteSink,
+} from "../../contract/contract-normalization.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
     deriveGoalContract,
@@ -29,6 +40,15 @@ export const MAX_ARCHITECT_OBLIGATIONS_PER_SEGMENT = 8
 /** Kept modest: these are frontier-model calls on a subscription that rate
  *  limits, and the win is already most of the way there at four. */
 export const ARCHITECT_OBLIGATION_BATCH_CONCURRENCY = 4
+
+/** Restated inline in the repair prompt so a rejected attempt sees the shape
+ *  again without the prompt modules having to grow a second copy of it. */
+export const ARCHITECT_OBLIGATION_DRAFT_SCHEMA_SUMMARY =
+    '{"schemaVersion":1,"obligations":[{"adrIds":[],"invariantIds":[],' +
+    '"subject":"","scenario":"","expectedOutcome":"","evidence":[]}]}\n' +
+    "All six draft fields are required: adrIds and invariantIds are non-empty " +
+    "arrays of ids that already exist, subject, scenario and expectedOutcome " +
+    "are non-empty text, and evidence holds 1-8 distinct non-empty entries."
 
 
 /**
@@ -106,6 +126,8 @@ export interface CompileArchitectObligationSegmentsOptions {
     readonly isOutputLimitError?: (error: unknown) => boolean
     /** Bounded lifecycle diagnostics only; prompts and model responses are never exposed. */
     readonly onProgress?: (event: ArchitectObligationSegmentProgress) => void
+    /** Warn notes for key drift that normalization absorbed before validation. */
+    readonly onNote?: NoteSink
 }
 
 export type ArchitectObligationSegmentProgress = Readonly<{
@@ -124,9 +146,15 @@ export interface CompiledArchitectObligationSegments {
 }
 
 export class ArchitectObligationSegmentError extends Error {
-    constructor(message: string, options?: ErrorOptions) {
+    readonly defects: readonly ContractDefect[]
+
+    constructor(
+        message: string,
+        options?: ErrorOptions & { defects?: readonly ContractDefect[] },
+    ) {
         super(message, options)
         this.name = "ArchitectObligationSegmentError"
+        this.defects = options?.defects ?? [{ path: "", message }]
     }
 }
 
@@ -256,6 +284,7 @@ async function compileBatch(input: CompileBatchInput): Promise<ArchitectureOblig
                 input.targets,
                 input.decisionIds,
                 input.maxObligations,
+                input.options.onNote,
             )
             emitProgress(input, {
                 type: "batch_completed",
@@ -281,7 +310,7 @@ async function compileBatch(input: CompileBatchInput): Promise<ArchitectureOblig
                     { cause: error },
                 )
             }
-            repairReason = safeReason(error)
+            repairReason = buildRepairInstruction(error)
             emitProgress(input, { type: "batch_repair" })
         }
     }
@@ -367,11 +396,7 @@ function buildRequest(
         architectureDecisionIds: input.decisionIds,
         maxObligations: requestedMaxObligations ?? input.maxObligations,
         decisionDocument: input.options.decisionDocument,
-        ...(repairReason
-            ? {
-                  repair: `Regenerate the complete batch. Previous output was rejected: ${repairReason}`,
-              }
-            : {}),
+        ...(repairReason ? { repair: repairReason } : {}),
     }
     const userPrompt = JSON.stringify(payload)
     const requestBytes =
@@ -397,6 +422,7 @@ function parseSegmentResponse(
     targets: readonly GoalInvariant[],
     decisionIds: readonly string[],
     maxObligations: number,
+    onNote?: NoteSink,
 ): ArchitectureObligationDraftV1[] {
     if (typeof raw !== "string") {
         throw new ArchitectObligationSegmentError(
@@ -429,6 +455,14 @@ function parseSegmentResponse(
             `architect obligation segment is not valid JSON (response ends: "…${tail}")`,
         )
     }
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+        value = normalizeDraftRecord(
+            value as Record<string, unknown>,
+            ["schemaVersion", "obligations"],
+            "",
+            onNote,
+        )
+    }
     if (!exactRecord(value, ["schemaVersion", "obligations"])) {
         throw new ArchitectObligationSegmentError(
             "architect obligation segment must use the exact v1 shape",
@@ -458,7 +492,16 @@ function parseSegmentResponse(
         "expectedOutcome",
         "evidence",
     ] as const
-    const numbered = value.obligations.map((candidate, index) => {
+    function numberDraft(entry: unknown, index: number): Record<string, unknown> {
+        const candidate =
+            entry !== null && typeof entry === "object" && !Array.isArray(entry)
+                ? normalizeDraftRecord(
+                      entry as Record<string, unknown>,
+                      [...DRAFT_KEYS, "id"],
+                      `obligations[${index}]`,
+                      onNote,
+                  )
+                : entry
         // Models routinely echo an id despite the no-id instruction. It is
         // redundant, never authoritative — the host renumbers positionally —
         // so a draft that differs ONLY by an extra id is accepted and the
@@ -496,6 +539,17 @@ function parseSegmentResponse(
             decisionRank,
             index + 1,
         ))
+        // Evidence entries are copied without normalization, so this is the
+        // only place a forged correlation field one level down is seen.
+        if (Array.isArray(candidate.evidence)) {
+            candidate.evidence.forEach((item, evidenceIndex) => {
+                if (item === null || typeof item !== "object" || Array.isArray(item)) return
+                assertNoHostAssignedCorrelation(
+                    item as Record<string, unknown>,
+                    `obligations[${index}].evidence[${evidenceIndex}]`,
+                )
+            })
+        }
         return {
             id: `O-${String(index + 1).padStart(3, "0")}`,
             invariantIds: candidate.invariantIds,
@@ -504,7 +558,34 @@ function parseSegmentResponse(
             expectedOutcome: candidate.expectedOutcome,
             evidence: candidate.evidence,
         }
+    }
+
+    const numbered: Record<string, unknown>[] = []
+    const defects: ContractDefect[] = []
+    value.obligations.forEach((entry, index) => {
+        try {
+            numbered.push(numberDraft(entry, index))
+        } catch (error) {
+            // A truncated response is a control-flow signal routed to
+            // bisection, never a content defect to enumerate back at the model.
+            if (error instanceof ArchitectObligationOutputLimitError) throw error
+            // A nested evidence record carries its own path; collapsing it to
+            // the draft would hide which entry forged the field.
+            if (error instanceof ContractAuthorityFieldError) {
+                defects.push({ path: error.path, message: error.message })
+                return
+            }
+            defects.push({
+                path: `obligations[${index}]`,
+                message: error instanceof Error ? error.message : String(error),
+            })
+        }
     })
+    if (defects.length > 0) {
+        throw new ArchitectObligationSegmentError(joinDefectMessages(defects), {
+            defects,
+        })
+    }
 
     let validated: ArchitectureObligationContractV1
     try {
@@ -729,6 +810,44 @@ function jsonAppearsTruncated(candidate: string): boolean {
         }
     }
     return true
+}
+
+/**
+ * Key drift is absorbed before the exact-shape checks run, but ambiguity is
+ * not: two spellings of one field mean the model's intent is unrecoverable, so
+ * it surfaces as this module's own error rather than leaking the shared class.
+ */
+function normalizeDraftRecord(
+    candidate: Record<string, unknown>,
+    expectedKeys: readonly string[],
+    path: string,
+    onNote?: NoteSink,
+): Record<string, unknown> {
+    try {
+        return normalizeRecordKeys(candidate, expectedKeys, path, onNote)
+    } catch (error) {
+        if (error instanceof ContractNormalizationError) {
+            throw new ArchitectObligationSegmentError(error.message, {
+                cause: error,
+                defects: [{ path: error.path, message: error.message }],
+            })
+        }
+        throw error
+    }
+}
+
+/** One repair round per mistake SET: every defect of the rejected attempt plus
+ *  the shape it should have had, instead of one defect at a time. */
+function buildRepairInstruction(error: unknown): string {
+    const defects = contractDefects(error).map(({ path, message }) => ({
+        path,
+        message: safeReason(message),
+    }))
+    return (
+        "Your draft was rejected. Fix every defect listed below in one reply.\n\n" +
+        `Defects (${defects.length}):\n${formatDefectList(defects)}\n\n` +
+        `Expected schema:\n${ARCHITECT_OBLIGATION_DRAFT_SCHEMA_SUMMARY}`
+    )
 }
 
 function safeReason(error: unknown): string {

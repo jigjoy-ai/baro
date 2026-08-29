@@ -17,6 +17,12 @@
  */
 
 import {
+    type ContractDefect,
+    type NoteSink,
+    joinDefectMessages,
+    normalizeRecordKeys,
+} from "../contract/contract-normalization.js"
+import {
     type AbsentPredicate,
     type GoalPredicate,
     type UnchangedPredicate,
@@ -29,10 +35,33 @@ export const MAX_CONSTRAINT_PREDICATES = 24
 const MAX_FIELD_LENGTH = 200
 const INVARIANT_ID = /^G-[AC][1-9][0-9]*$/u
 
+/**
+ * The one source of the expected key set: normalization and the exact-key
+ * check must never disagree about what a predicate is allowed to name.
+ */
+const PREDICATE_KEYS = [
+    "invariantId",
+    "kind",
+    "pathPrefix",
+    "pathSuffix",
+    "text",
+] as const
+
+export interface GoalConstraintContractErrorOptions extends ErrorOptions {
+    readonly defects?: readonly ContractDefect[]
+}
+
 export class GoalConstraintContractError extends Error {
-    constructor(message: string) {
-        super(message)
+    /**
+     * Every entry rejected in one pass. A lone defect reproduces the message
+     * verbatim, so the single-failure text is unchanged.
+     */
+    readonly defects: readonly ContractDefect[]
+
+    constructor(message: string, options?: GoalConstraintContractErrorOptions) {
+        super(message, options)
         this.name = "GoalConstraintContractError"
+        this.defects = options?.defects ?? [{ path: "", message }]
     }
 }
 
@@ -56,16 +85,68 @@ export interface GoalConstraintContractV1 {
 
 export function validateGoalConstraintPredicates(
     value: unknown,
+    onNote?: NoteSink,
 ): GoalConstraintPredicateWireV1[] {
     if (!Array.isArray(value)) {
         throw new GoalConstraintContractError("constraintPredicates must be an array")
     }
+    // Measured against the array as it arrived: skipping holes first would let
+    // an oversized reply slip under the bound.
     if (value.length > MAX_CONSTRAINT_PREDICATES) {
         throw new GoalConstraintContractError(
             `constraintPredicates exceeds ${MAX_CONSTRAINT_PREDICATES} entries`,
         )
     }
-    return value.map((entry, index) => parsePredicate(entry, index))
+
+    const predicates: GoalConstraintPredicateWireV1[] = []
+    const defects: ContractDefect[] = []
+    let skipped = 0
+    for (const [index, entry] of value.entries()) {
+        const at = `constraintPredicates[${index}]`
+        if (entry == null) {
+            skipped += 1
+            onNote?.({
+                severity: "warn",
+                kind: "skipped_absent_entry",
+                path: at,
+                detail: `${at}: skipped absent entry`,
+            })
+            continue
+        }
+        try {
+            // Anything that is not a record reaches parsePredicate untouched,
+            // so it still fails as "must be an object" rather than as a shape
+            // normalization invented for it.
+            const candidate =
+                typeof entry === "object" && !Array.isArray(entry)
+                    ? normalizeRecordKeys(
+                          entry as Record<string, unknown>,
+                          PREDICATE_KEYS,
+                          at,
+                          onNote,
+                      )
+                    : entry
+            predicates.push(parsePredicate(candidate, index))
+        } catch (error) {
+            defects.push({
+                path: at,
+                message: error instanceof Error ? error.message : String(error),
+            })
+        }
+    }
+    if (defects.length > 0) {
+        throw new GoalConstraintContractError(joinDefectMessages(defects), { defects })
+    }
+    // A hole degrades to a note, but an appendix where every entry was a hole
+    // states nothing the host was asked to evaluate.
+    if (skipped > 0 && predicates.length === 0) {
+        const defect: ContractDefect = {
+            path: "constraintPredicates",
+            message: "constraintPredicates must declare at least one predicate",
+        }
+        throw new GoalConstraintContractError(defect.message, { defects: [defect] })
+    }
+    return predicates
 }
 
 function parsePredicate(
@@ -78,7 +159,7 @@ function parsePredicate(
     }
     const record = value as Record<string, unknown>
     const keys = Object.keys(record).sort()
-    const expected = ["invariantId", "kind", "pathPrefix", "pathSuffix", "text"]
+    const expected = [...PREDICATE_KEYS].sort()
     if (keys.length !== expected.length || keys.some((key, i) => key !== expected[i])) {
         throw new GoalConstraintContractError(`${at} must use the exact predicate shape`)
     }
@@ -203,6 +284,7 @@ export function attachGoalConstraintContract(
  */
 export function parseGoalConstraintContract(
     decisionDocument: string | null | undefined,
+    onNote?: NoteSink,
 ): GoalConstraintPredicateWireV1[] {
     if (decisionDocument == null || !hasGoalConstraintFence(decisionDocument)) {
         return []
@@ -239,5 +321,6 @@ export function parseGoalConstraintContract(
     }
     return validateGoalConstraintPredicates(
         (value as { predicates?: unknown }).predicates,
+        onNote,
     )
 }

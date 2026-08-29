@@ -1,9 +1,11 @@
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
+import type { ContractNote } from "../src/contract/contract-normalization.js"
 import {
     ARCHITECT_DECISION_OUTCOME_JSON_SCHEMA,
     ARCHITECT_OUTCOME_JSON_SCHEMA,
+    ARCHITECT_OUTCOME_SCHEMA_SUMMARY,
     MAX_ARCHITECT_DECISION_OUTCOME_BYTES,
     MAX_ARCHITECT_OUTCOME_BYTES,
     ArchitectOutcomeContractError,
@@ -395,8 +397,12 @@ ${TRIVIAL_DECISION_DOCUMENT}
             () => parseArchitectOutcome(`\`\`\`json\n${JSON.stringify(ready())}\n\`\`\``),
             /not valid JSON/,
         )
+        // A surplus key is now stripped (see the drift suite), so the exact-shape
+        // check is pinned here by a MISSING required key instead.
+        const withoutMessage: Record<string, unknown> = { ...ready() }
+        delete withoutMessage.message
         assert.throws(
-            () => parseArchitectOutcome(JSON.stringify({ ...ready(), sessionId: "model-owned" })),
+            () => parseArchitectOutcome(JSON.stringify(withoutMessage)),
             /exact v1 schema/,
         )
         assert.throws(
@@ -577,6 +583,39 @@ describe("Architect states decisions, the host writes the document", () => {
         assert.doesNotMatch(outcome.decisionDocument, /annotation the schema/)
     })
 
+    // Surplus keys are tolerated here, so without an explicit guard this is
+    // where forged correlation would ride in one level below the root.
+    it("refuses stated decisions that carry host-assigned correlation", () => {
+        for (const [path, document] of [
+            [
+                "decisionDocument",
+                { existingContext, runId: "run-7", decisions: [drafts[0]!] },
+            ],
+            [
+                "decisionDocument.decisions[0]",
+                { existingContext, decisions: [{ ...drafts[0]!, sessionId: "model-owned" }] },
+            ],
+        ] as const) {
+            const forged = structured()
+            forged.decisionDocument = document as never
+            let thrown: unknown
+            try {
+                parseArchitectOutcome(JSON.stringify(forged), { decisionOnly: true })
+            } catch (error) {
+                thrown = error
+            }
+            assert.ok(thrown instanceof ArchitectOutcomeContractError, path)
+            assert.match(
+                thrown.message,
+                /model output may not carry host-assigned correlation/u,
+            )
+            assert.deepEqual(
+                thrown.defects.map((defect) => defect.path),
+                [path],
+            )
+        }
+    })
+
     it("keeps the verbatim document form working for backends that send one", () => {
         const outcome = parseArchitectOutcome(JSON.stringify(ready()), {
             decisionOnly: true,
@@ -611,6 +650,258 @@ describe("Architect states decisions, the host writes the document", () => {
         assert.throws(
             () => parseArchitectOutcome(JSON.stringify(structured())),
             ArchitectOutcomeContractError,
+        )
+    })
+})
+
+describe("architect outcome drift normalization", () => {
+    function notes() {
+        const recorded: ContractNote[] = []
+        return { recorded, sink: (note: ContractNote) => recorded.push(note) }
+    }
+
+    /** assert.throws discards the error; the defect list is what is asserted. */
+    function rejection(run: () => unknown, label?: string): ArchitectOutcomeContractError {
+        try {
+            run()
+        } catch (error) {
+            assert.ok(error instanceof ArchitectOutcomeContractError, label)
+            return error
+        }
+        assert.fail(label ?? "expected an ArchitectOutcomeContractError")
+    }
+
+    it("refuses an otherwise valid outcome that forges session authority", () => {
+        // Stripping the key accepted the outcome, which reads to every caller
+        // as a provider that never claimed authority at all.
+        const { recorded, sink } = notes()
+        const error = rejection(() =>
+            parseArchitectOutcome(
+                JSON.stringify({ ...ready(), sessionId: "model-owned" }),
+                {},
+                sink,
+            ),
+        )
+        assert.match(error.message, /exact v1 schema/u)
+        assert.match(error.message, /model output may not carry host-assigned correlation/u)
+        assert.ok(error.message.includes('"sessionId"'), error.message)
+        assert.deepEqual(error.defects, [{
+            path: "",
+            message:
+                ': field "sessionId" is host-assigned correlation; ' +
+                "model output may not carry host-assigned correlation",
+        }])
+        assert.deepEqual(recorded, [], "a refused outcome reports no drift note")
+    })
+
+    it("still strips a surplus top-level key that is not host-assigned", () => {
+        const { recorded, sink } = notes()
+        const outcome = parseArchitectOutcome(
+            JSON.stringify({ ...ready(), vibes: "good" }),
+            {},
+            sink,
+        )
+        assert.equal(outcome.kind, "ready")
+        assert.equal("vibes" in outcome, false)
+        assert.deepEqual(recorded, [{
+            severity: "warn",
+            kind: "stripped_unexpected_field",
+            path: "",
+            detail: ': dropped unexpected field "vibes"',
+        }])
+    })
+
+    it("accepts drifted evidence and question records and reports what it changed", () => {
+        // Drift pinned: one surplus field per record plus a casing variant of
+        // an expected name, on a semantically complete needsInput outcome.
+        const drifted = needsInput() as unknown as Record<string, unknown>
+        drifted.questions = [{
+            id: "wire-compat",
+            text: "Must existing clients keep the current wire representation?",
+            Reason: "The repository contains both legacy and v2 serializers.",
+            priority: "high",
+        }]
+        drifted.evidence = [{
+            path: "src/protocol/serializer.ts",
+            Line: 42,
+            fact: "The public serializer still emits the legacy field names.",
+            confidence: 0.9,
+        }]
+        const raw = JSON.stringify(drifted)
+
+        const { recorded, sink } = notes()
+        const outcome = parseArchitectOutcome(raw, {}, sink)
+        assert.equal(outcome.questions[0]!.reason, "The repository contains both legacy and v2 serializers.")
+        assert.equal(outcome.evidence[0]!.line, 42)
+        assert.deepEqual(
+            recorded.map(({ kind, path, detail }) => ({ kind, path, detail })),
+            [
+                {
+                    kind: "canonicalized_field",
+                    path: "questions[0]",
+                    detail: 'questions[0]: renamed field "Reason" to "reason"',
+                },
+                {
+                    kind: "stripped_unexpected_field",
+                    path: "questions[0]",
+                    detail: 'questions[0]: dropped unexpected field "priority"',
+                },
+                {
+                    kind: "canonicalized_field",
+                    path: "evidence[0]",
+                    detail: 'evidence[0]: renamed field "Line" to "line"',
+                },
+                {
+                    kind: "stripped_unexpected_field",
+                    path: "evidence[0]",
+                    detail: 'evidence[0]: dropped unexpected field "confidence"',
+                },
+            ],
+        )
+        assert.ok(recorded.every((note) => note.severity === "warn"))
+
+        // Notes are observation only: omitting the sink parses identically.
+        assert.deepEqual(parseArchitectOutcome(raw), outcome)
+    })
+
+    it("reports every bad entry of one attempt, not just the first", () => {
+        // Drift pinned: one repair round per mistake set. Two evidence entries
+        // and one question entry are each invalid in the same reply.
+        const broken = needsInput() as unknown as Record<string, unknown>
+        broken.questions = [{ id: "not a safe id", text: "Which serializer stays?" }]
+        broken.evidence = [
+            { path: "../secret", line: 1, fact: "escaped the checkout" },
+            { path: "src/protocol/serializer.ts", line: 0, fact: "line is out of range" },
+        ]
+        const error = rejection(() => parseArchitectOutcome(JSON.stringify(broken)))
+
+        assert.deepEqual(error.defects, [
+            {
+                path: "questions[0]",
+                message: "architect question id is not a safe correlation id",
+            },
+            {
+                path: "evidence[0]",
+                message: "architect evidence path must be a portable project-relative path",
+            },
+            {
+                path: "evidence[1]",
+                message: "architect evidence line must be null or a positive bounded integer",
+            },
+        ])
+        assert.equal(error.message, error.defects.map((defect) => defect.message).join("; "))
+    })
+
+    it("keeps a single-defect rejection character-identical", () => {
+        const broken = needsInput() as unknown as Record<string, unknown>
+        broken.evidence = [{ path: "../secret", line: 1, fact: "escaped the checkout" }]
+        const error = rejection(() => parseArchitectOutcome(JSON.stringify(broken)))
+        assert.equal(
+            error.message,
+            "architect evidence path must be a portable project-relative path",
+        )
+    })
+
+    it("treats an absent evidence or question element as missing content, never a hole", () => {
+        // Drift pinned: skip-absent belongs to constraintPredicates alone. A
+        // null here is content the outcome owed and did not supply.
+        for (const [field, path] of [["evidence", "evidence[1]"], ["questions", "questions[1]"]] as const) {
+            const holed = needsInput() as unknown as Record<string, unknown>
+            holed[field] = [(holed[field] as unknown[])[0], null]
+            const { recorded, sink } = notes()
+            const error = rejection(
+                () => parseArchitectOutcome(JSON.stringify(holed), {}, sink),
+                field,
+            )
+            assert.deepEqual(error.defects.map((defect) => defect.path), [path])
+            assert.equal(
+                recorded.some((note) => note.kind === "skipped_absent_entry"),
+                false,
+                field,
+            )
+        }
+    })
+
+    it("rejects two fields that name the same thing rather than picking one", () => {
+        const colliding = needsInput() as unknown as Record<string, unknown>
+        colliding.evidence = [{
+            path: "src/protocol/serializer.ts",
+            line: 42,
+            fact: "the legacy field names survive",
+            Fact: "the legacy field names survive",
+        }]
+        const error = rejection(() => parseArchitectOutcome(JSON.stringify(colliding)))
+        assert.deepEqual(error.defects, [{
+            path: "evidence[0]",
+            message: 'evidence[0]: fields "Fact" and "fact" both name "fact"',
+        }])
+
+        // A top-level collision is not an accumulation boundary, but it still
+        // has to arrive as the class run-architect branches on.
+        const topLevel = rejection(() => parseArchitectOutcome(JSON.stringify({
+            ...ready(),
+            decision_document: DECISION_DOCUMENT,
+        })))
+        assert.deepEqual(topLevel.defects, [{
+            path: "",
+            message: ': fields "decisionDocument" and "decision_document" both name "decisionDocument"',
+        }])
+    })
+
+    it("keeps every bound exactly as strict after normalization", () => {
+        // Normalization removes spelling and shape failures only: content that
+        // was genuinely missing or out of bounds still rejects.
+        const missingFact = needsInput() as unknown as Record<string, unknown>
+        missingFact.evidence = [{ path: "src/protocol/serializer.ts", line: 42, note: "no fact" }]
+        assert.throws(
+            () => parseArchitectOutcome(JSON.stringify(missingFact)),
+            /architect evidence shape is not exact/u,
+        )
+
+        const tooManyQuestions = needsInput() as unknown as Record<string, unknown>
+        tooManyQuestions.questions = [0, 1, 2, 3].map((index) => ({
+            id: `q-${index}`,
+            text: "Which serializer stays?",
+            commentary: "stripped, but the count bound is measured first",
+        }))
+        assert.throws(
+            () => parseArchitectOutcome(JSON.stringify(tooManyQuestions)),
+            /architect questions must contain at most 3 entries/u,
+        )
+
+        const tooMuchEvidence = needsInput() as unknown as Record<string, unknown>
+        tooMuchEvidence.evidence = Array.from({ length: 17 }, (_, index) => ({
+            path: `src/protocol/serializer-${index}.ts`,
+            Line: index + 1,
+            fact: `entry ${index}`,
+        }))
+        assert.throws(
+            () => parseArchitectOutcome(JSON.stringify(tooMuchEvidence)),
+            /architect evidence must contain at most 16 entries/u,
+        )
+    })
+
+    it("restates the outcome schema inline for the repair prompt", () => {
+        assert.ok(ARCHITECT_OUTCOME_SCHEMA_SUMMARY.length > 0)
+        assert.match(
+            ARCHITECT_OUTCOME_SCHEMA_SUMMARY,
+            /\{"schemaVersion":1,"kind":"ready\|needsInput","message":"…","questions":\[\],"evidence":\[\],"decisionDocument":null,"constraintPredicates":\[\]\}/u,
+        )
+        assert.match(ARCHITECT_OUTCOME_SCHEMA_SUMMARY, /^questions\[i\]: /mu)
+        assert.match(ARCHITECT_OUTCOME_SCHEMA_SUMMARY, /^evidence\[i\]: /mu)
+        assert.match(ARCHITECT_OUTCOME_SCHEMA_SUMMARY, /^constraintPredicates\[i\]: /mu)
+        // No new key reaches the envelope, so the Rust outcome check stays valid.
+        assert.deepEqual(
+            Object.keys(parseArchitectOutcome(JSON.stringify(ready()))).sort(),
+            [
+                "constraintPredicates",
+                "decisionDocument",
+                "evidence",
+                "kind",
+                "message",
+                "questions",
+                "schemaVersion",
+            ],
         )
     })
 })

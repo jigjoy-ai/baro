@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
+    ARCHITECT_OBLIGATION_DRAFT_SCHEMA_SUMMARY,
     ArchitectObligationOutputLimitError,
     ArchitectObligationSegmentError,
     MAX_ARCHITECT_OBLIGATION_REQUEST_BYTES,
@@ -11,6 +12,7 @@ import {
     type ArchitectObligationSegmentProgress,
     type ArchitectObligationSegmentRequest,
 } from "../../../src/planning/domain/architect-obligation-segments.js"
+import type { ContractNote } from "../../../src/contract/contract-normalization.js"
 import {
     ARCHITECTURE_OBLIGATION_FENCE,
     MAX_ARCHITECTURE_DECISION_DOCUMENT_BYTES,
@@ -63,6 +65,10 @@ function responseFor(
             }
         }),
     })
+}
+
+function repairOf(request: ArchitectObligationSegmentRequest): string {
+    return (JSON.parse(request.userPrompt) as { repair?: string }).repair ?? ""
 }
 
 describe("segmented Architect obligation compiler", () => {
@@ -377,8 +383,6 @@ describe("segmented Architect obligation compiler", () => {
                             subject: "forged",
                             scenario: "forged",
                             expectedOutcome: "forged",
-                            evidence: ["forged"],
-                            priority: "high",
                         }],
                     })
                 }
@@ -388,7 +392,7 @@ describe("segmented Architect obligation compiler", () => {
         })
 
         assert.deepEqual(requests.map(({ attempt }) => attempt), [1, 2])
-        assert.match(requests[1]!.userPrompt, /must use exactly the fields .*unexpected: priority/u)
+        assert.match(requests[1]!.userPrompt, /must use exactly the fields .*missing: evidence/u)
         assert.equal(result.contract.obligations[0]!.id, "O-001")
         assert.deepEqual(
             progress.map(({ type }) => type),
@@ -408,6 +412,323 @@ describe("segmented Architect obligation compiler", () => {
             /remained invalid after two repairs/u,
         )
         assert.equal(calls, 3)
+    })
+
+    it("strips an unexpected draft field and reports it as a warn note", async () => {
+        // Drift pinned: a semantically complete draft that carries one extra
+        // explanatory field used to fail the exact-shape check outright.
+        const notes: ContractNote[] = []
+        const requests: ArchitectObligationSegmentRequest[] = []
+        const result = await compileArchitectObligationSegments({
+            decisionDocument: DECISION_DOCUMENT,
+            goalEnvelope: goalEnvelope(1, 0),
+            respond: async (request) => {
+                requests.push(request)
+                return JSON.stringify({
+                    schemaVersion: 1,
+                    obligations: [{
+                        adrIds: ["ADR-001"],
+                        invariantIds: ["G-A1"],
+                        subject: "subject",
+                        scenario: "scenario",
+                        expectedOutcome: "outcome",
+                        evidence: ["proof"],
+                        priority: "high",
+                    }],
+                    commentary: "unsolicited",
+                })
+            },
+            onNote: (note) => notes.push(note),
+        })
+
+        assert.deepEqual(requests.map(({ attempt }) => attempt), [1])
+        assert.equal(result.contract.obligations[0]!.id, "O-001")
+        assert.deepEqual(notes, [
+            {
+                severity: "warn",
+                kind: "stripped_unexpected_field",
+                path: "",
+                detail: ': dropped unexpected field "commentary"',
+            },
+            {
+                severity: "warn",
+                kind: "stripped_unexpected_field",
+                path: "obligations[0]",
+                detail: 'obligations[0]: dropped unexpected field "priority"',
+            },
+        ])
+        // The frozen result literal keeps exactly its two documented fields.
+        assert.deepEqual(Object.keys(result).sort(), ["contract", "decisionDocument"])
+        assert.ok(Object.isFrozen(result))
+    })
+
+    it("canonicalizes an unambiguous casing variant of a draft field", async () => {
+        // Drift pinned: invariantIDs is the same field as invariantIds, and
+        // only its spelling differs, so it is renamed rather than rejected.
+        const notes: ContractNote[] = []
+        const requests: ArchitectObligationSegmentRequest[] = []
+        const result = await compileArchitectObligationSegments({
+            decisionDocument: DECISION_DOCUMENT,
+            goalEnvelope: goalEnvelope(1, 0),
+            respond: async (request) => {
+                requests.push(request)
+                return JSON.stringify({
+                    schemaVersion: 1,
+                    obligations: [{
+                        adrIds: ["ADR-001"],
+                        invariantIDs: ["G-A1"],
+                        subject: "subject",
+                        scenario: "scenario",
+                        expectedOutcome: "outcome",
+                        evidence: ["proof"],
+                    }],
+                })
+            },
+            onNote: (note) => notes.push(note),
+        })
+
+        assert.deepEqual(requests.map(({ attempt }) => attempt), [1])
+        assert.deepEqual(result.contract.obligations[0]!.invariantIds, ["G-A1"])
+        assert.deepEqual(notes, [{
+            severity: "warn",
+            kind: "canonicalized_field",
+            path: "obligations[0]",
+            detail: 'obligations[0]: renamed field "invariantIDs" to "invariantIds"',
+        }])
+    })
+
+    it("rejects a draft whose two fields canonicalize to the same name", async () => {
+        // Drift pinned: two spellings of one field make the model's intent
+        // unrecoverable, so neither is picked and the draft becomes a defect.
+        const requests: ArchitectObligationSegmentRequest[] = []
+        const notes: ContractNote[] = []
+        const draft = (invariantIds: string, extra: Record<string, unknown>) => ({
+            adrIds: ["ADR-001"],
+            invariantIds: [invariantIds],
+            subject: "subject",
+            scenario: "scenario",
+            expectedOutcome: "outcome",
+            evidence: ["proof"],
+            ...extra,
+        })
+        const ambiguous = JSON.stringify({
+            schemaVersion: 1,
+            obligations: [
+                draft("G-A1", { invariantIDs: ["G-A1"] }),
+                { ...draft("G-A2", {}), adrIds: ["ADR-404"] },
+            ],
+        })
+        const ambiguity =
+            'obligations[0]: fields "invariantIDs" and "invariantIds" ' +
+            'both name "invariantIds"'
+        const unknownAdr =
+            "architect obligation draft 2 references unknown ADR(s): ADR-404"
+
+        await assert.rejects(
+            compileArchitectObligationSegments({
+                decisionDocument: DECISION_DOCUMENT,
+                goalEnvelope: goalEnvelope(2, 0),
+                respond: async (request) => {
+                    requests.push(request)
+                    return ambiguous
+                },
+                onNote: (note) => notes.push(note),
+            }),
+            (error: unknown) => {
+                assert.ok(error instanceof ArchitectObligationSegmentError)
+                // The thrown message is joinDefectMessages(defects): every
+                // defect of the attempt, in source order, joined by "; ".
+                assert.ok(
+                    error.message.endsWith(
+                        `remained invalid after two repairs: ${ambiguity}; ${unknownAdr}`,
+                    ),
+                    error.message,
+                )
+                return true
+            },
+        )
+
+        // Each defect is carried at its own draft path, the ambiguity verbatim.
+        const repair = repairOf(requests[1]!)
+        assert.match(repair, /^Defects \(2\):$/mu)
+        assert.ok(repair.includes(`- obligations[0]: ${ambiguity}`))
+        assert.ok(repair.includes(`- obligations[1]: ${unknownAdr}`))
+        // Nothing was normalized for the ambiguous draft, so no note fired.
+        assert.deepEqual(notes, [])
+    })
+
+    it("still rejects an evidence-bound violation after canonicalizing keys", async () => {
+        // Drift pinned: normalization fixes spelling only. The 1-8 evidence
+        // bound is unchanged, and its single-defect message is untouched.
+        const requests: ArchitectObligationSegmentRequest[] = []
+        await assert.rejects(
+            compileArchitectObligationSegments({
+                decisionDocument: DECISION_DOCUMENT,
+                goalEnvelope: goalEnvelope(1, 0),
+                respond: async (request) => {
+                    requests.push(request)
+                    return JSON.stringify({
+                        schemaVersion: 1,
+                        obligations: [{
+                            adrIds: ["ADR-001"],
+                            invariantIds: ["G-A1"],
+                            subject: "subject",
+                            scenario: "scenario",
+                            "expected-outcome": "outcome",
+                            evidence: [],
+                        }],
+                    })
+                },
+            }),
+            /remained invalid after two repairs: architecture obligation O-001 requires 1-8 evidence entries$/u,
+        )
+        assert.equal(
+            repairOf(requests[1]!),
+            "Your draft was rejected. Fix every defect listed below in one reply.\n\n" +
+                "Defects (1):\n" +
+                "- architecture obligation O-001 requires 1-8 evidence entries\n\n" +
+                `Expected schema:\n${ARCHITECT_OBLIGATION_DRAFT_SCHEMA_SUMMARY}`,
+        )
+    })
+
+    // Evidence entries are copied without normalization, so a forged field one
+    // level down would otherwise never meet the shared guard.
+    it("refuses a nested evidence record that carries host-assigned correlation", async () => {
+        const requests: ArchitectObligationSegmentRequest[] = []
+        const notes: ContractNote[] = []
+        const forged =
+            'obligations[0].evidence[0]: field "sessionId" is host-assigned correlation; ' +
+            "model output may not carry host-assigned correlation"
+        await assert.rejects(
+            compileArchitectObligationSegments({
+                decisionDocument: DECISION_DOCUMENT,
+                goalEnvelope: goalEnvelope(1, 0),
+                respond: async (request) => {
+                    requests.push(request)
+                    return JSON.stringify({
+                        schemaVersion: 1,
+                        obligations: [{
+                            adrIds: ["ADR-001"],
+                            invariantIds: ["G-A1"],
+                            subject: "subject",
+                            scenario: "scenario",
+                            expectedOutcome: "outcome",
+                            evidence: [{ sessionId: "model-owned" }],
+                        }],
+                    })
+                },
+                onNote: (note) => notes.push(note),
+            }),
+            (error: unknown) => {
+                assert.ok(error instanceof ArchitectObligationSegmentError)
+                assert.ok(
+                    error.message.endsWith(`remained invalid after two repairs: ${forged}`),
+                    error.message,
+                )
+                // No outcome-only schema phrase leaks onto the obligation path.
+                assert.doesNotMatch(error.message, /exact v1 schema/u)
+                return true
+            },
+        )
+        // The defect keeps the offending evidence path, not the draft's.
+        const repair = repairOf(requests[1]!)
+        assert.ok(repair.includes(`- obligations[0].evidence[0]: ${forged}`), repair)
+        assert.deepEqual(notes, [])
+    })
+
+    // The guard denies authority only; a surplus key one level down still
+    // fails exactly where it failed before, on the evidence shape.
+    it("leaves a benign nested evidence record to the pre-existing shape check", async () => {
+        await assert.rejects(
+            compileArchitectObligationSegments({
+                decisionDocument: DECISION_DOCUMENT,
+                goalEnvelope: goalEnvelope(1, 0),
+                respond: async () =>
+                    JSON.stringify({
+                        schemaVersion: 1,
+                        obligations: [{
+                            adrIds: ["ADR-001"],
+                            invariantIds: ["G-A1"],
+                            subject: "subject",
+                            scenario: "scenario",
+                            expectedOutcome: "outcome",
+                            evidence: [{ note: "proof" }],
+                        }],
+                    }),
+            }),
+            (error: unknown) => {
+                assert.ok(error instanceof ArchitectObligationSegmentError)
+                assert.doesNotMatch(error.message, /host-assigned correlation/u)
+                return true
+            },
+        )
+    })
+
+    it("enumerates every defect of one attempt in the repair prompt", async () => {
+        // Drift pinned: one-defect-at-a-time feedback made a two-defect draft
+        // cost two repair rounds; the whole set now goes back in one reply.
+        const requests: ArchitectObligationSegmentRequest[] = []
+        const result = await compileArchitectObligationSegments({
+            decisionDocument: DECISION_DOCUMENT,
+            goalEnvelope: goalEnvelope(2, 0),
+            respond: async (request) => {
+                requests.push(request)
+                if (request.attempt === 1) {
+                    return JSON.stringify({
+                        schemaVersion: 1,
+                        obligations: [
+                            {
+                                adrIds: ["ADR-404"],
+                                invariantIds: ["G-A1"],
+                                subject: "subject",
+                                scenario: "scenario",
+                                expectedOutcome: "outcome",
+                                evidence: ["proof one"],
+                            },
+                            {
+                                adrIds: ["ADR-001"],
+                                invariantIds: ["G-A2"],
+                                subject: "subject",
+                                scenario: "scenario",
+                            },
+                        ],
+                    })
+                }
+                return responseFor(request.invariantIds)
+            },
+        })
+
+        assert.deepEqual(requests.map(({ attempt }) => attempt), [1, 2])
+        assert.equal(
+            repairOf(requests[1]!),
+            "Your draft was rejected. Fix every defect listed below in one reply.\n\n" +
+                "Defects (2):\n" +
+                "- obligations[0]: architect obligation draft 1 references unknown ADR(s): ADR-404\n" +
+                "- obligations[1]: architect obligation draft 2 must use exactly the fields " +
+                "adrIds, invariantIds, subject, scenario, expectedOutcome, evidence " +
+                "(missing: expectedOutcome, evidence)\n\n" +
+                `Expected schema:\n${ARCHITECT_OBLIGATION_DRAFT_SCHEMA_SUMMARY}`,
+        )
+        assert.equal(result.contract.obligations.length, 2)
+    })
+
+    it("restates the draft schema inline without touching the prompt modules", () => {
+        for (const key of [
+            "schemaVersion",
+            "obligations",
+            "adrIds",
+            "invariantIds",
+            "subject",
+            "scenario",
+            "expectedOutcome",
+            "evidence",
+        ]) {
+            assert.ok(
+                ARCHITECT_OBLIGATION_DRAFT_SCHEMA_SUMMARY.includes(key),
+                `schema summary must name ${key}`,
+            )
+        }
+        assert.match(ARCHITECT_OBLIGATION_DRAFT_SCHEMA_SUMMARY, /1-8 distinct/u)
     })
 
     it("rejects foreign invariant ids and requires complete target coverage", async () => {
