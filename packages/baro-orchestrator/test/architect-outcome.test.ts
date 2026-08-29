@@ -583,6 +583,39 @@ describe("Architect states decisions, the host writes the document", () => {
         assert.doesNotMatch(outcome.decisionDocument, /annotation the schema/)
     })
 
+    // Surplus keys are tolerated here, so without an explicit guard this is
+    // where forged correlation would ride in one level below the root.
+    it("refuses stated decisions that carry host-assigned correlation", () => {
+        for (const [path, document] of [
+            [
+                "decisionDocument",
+                { existingContext, runId: "run-7", decisions: [drafts[0]!] },
+            ],
+            [
+                "decisionDocument.decisions[0]",
+                { existingContext, decisions: [{ ...drafts[0]!, sessionId: "model-owned" }] },
+            ],
+        ] as const) {
+            const forged = structured()
+            forged.decisionDocument = document as never
+            let thrown: unknown
+            try {
+                parseArchitectOutcome(JSON.stringify(forged), { decisionOnly: true })
+            } catch (error) {
+                thrown = error
+            }
+            assert.ok(thrown instanceof ArchitectOutcomeContractError, path)
+            assert.match(
+                thrown.message,
+                /model output may not carry host-assigned correlation/u,
+            )
+            assert.deepEqual(
+                thrown.defects.map((defect) => defect.path),
+                [path],
+            )
+        }
+    })
+
     it("keeps the verbatim document form working for backends that send one", () => {
         const outcome = parseArchitectOutcome(JSON.stringify(ready()), {
             decisionOnly: true,
@@ -638,22 +671,43 @@ describe("architect outcome drift normalization", () => {
         assert.fail(label ?? "expected an ArchitectOutcomeContractError")
     }
 
-    it("strips a model-supplied top-level key instead of refusing the outcome", () => {
-        // Drift pinned: a surplus top-level field. Session authority still
-        // cannot ride in on it — the key is dropped, never carried through.
+    it("refuses an otherwise valid outcome that forges session authority", () => {
+        // Stripping the key accepted the outcome, which reads to every caller
+        // as a provider that never claimed authority at all.
+        const { recorded, sink } = notes()
+        const error = rejection(() =>
+            parseArchitectOutcome(
+                JSON.stringify({ ...ready(), sessionId: "model-owned" }),
+                {},
+                sink,
+            ),
+        )
+        assert.match(error.message, /exact v1 schema/u)
+        assert.match(error.message, /model output may not carry host-assigned correlation/u)
+        assert.ok(error.message.includes('"sessionId"'), error.message)
+        assert.deepEqual(error.defects, [{
+            path: "",
+            message:
+                ': field "sessionId" is host-assigned correlation; ' +
+                "model output may not carry host-assigned correlation",
+        }])
+        assert.deepEqual(recorded, [], "a refused outcome reports no drift note")
+    })
+
+    it("still strips a surplus top-level key that is not host-assigned", () => {
         const { recorded, sink } = notes()
         const outcome = parseArchitectOutcome(
-            JSON.stringify({ ...ready(), sessionId: "model-owned" }),
+            JSON.stringify({ ...ready(), vibes: "good" }),
             {},
             sink,
         )
         assert.equal(outcome.kind, "ready")
-        assert.equal("sessionId" in outcome, false)
+        assert.equal("vibes" in outcome, false)
         assert.deepEqual(recorded, [{
             severity: "warn",
             kind: "stripped_unexpected_field",
             path: "",
-            detail: ': dropped unexpected field "sessionId"',
+            detail: ': dropped unexpected field "vibes"',
         }])
     })
 

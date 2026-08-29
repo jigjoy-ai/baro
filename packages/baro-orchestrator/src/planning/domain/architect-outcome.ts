@@ -8,9 +8,11 @@
 
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
+    ContractAuthorityFieldError,
     ContractNormalizationError,
     type ContractDefect,
     type NoteSink,
+    assertNoHostAssignedCorrelation,
     contractDefects,
     joinDefectMessages,
     normalizeRecordKeys,
@@ -639,7 +641,30 @@ function normalizeOutcomeRecord(value: unknown, onNote?: NoteSink): unknown {
     try {
         return normalizeEntry(value, OUTCOME_KEYS, "", onNote)
     } catch (error) {
+        // Forged authority is a schema violation, not a drift the model can
+        // repair by rewording: it keeps the schema phrase run-architect and
+        // its callers branch on, and adds the field that caused it.
+        if (error instanceof ContractAuthorityFieldError) {
+            throw new ArchitectOutcomeContractError(
+                `architect outcome must use the exact v1 schema: ${error.message}`,
+                { defects: [{ path: error.path, message: error.message }] },
+            )
+        }
         if (error instanceof ContractNormalizationError) {
+            throw new ArchitectOutcomeContractError(error.message, {
+                defects: [{ path: error.path, message: error.message }],
+            })
+        }
+        throw error
+    }
+}
+
+/** Keeps the offending record's path on the defect instead of collapsing to "". */
+function assertNoStatedAuthority(record: Record<string, unknown>, path: string): void {
+    try {
+        assertNoHostAssignedCorrelation(record, path)
+    } catch (error) {
+        if (error instanceof ContractAuthorityFieldError) {
             throw new ArchitectOutcomeContractError(error.message, {
                 defects: [{ path: error.path, message: error.message }],
             })
@@ -691,6 +716,9 @@ function isStatedDecisions(value: unknown): value is Record<string, unknown> {
  * annotation field this parser had no name for.
  */
 function renderStatedDecisions(value: Record<string, unknown>): string {
+    // Surplus keys are tolerated here, so this record never reaches
+    // normalizeRecordKeys — the guard has to be stated explicitly.
+    assertNoStatedAuthority(value, "decisionDocument")
     if (!requiredKeys(value, ["existingContext", "decisions"])) {
         throw new ArchitectOutcomeContractError(
             "stated architect decisions must carry existingContext and a decisions array",
@@ -717,6 +745,12 @@ function parseDecisionDrafts(value: readonly unknown[]): ArchitectureDecisionDra
         )
     }
     return value.map((entry, index) => {
+        if (entry !== null && typeof entry === "object" && !Array.isArray(entry)) {
+            assertNoStatedAuthority(
+                entry as Record<string, unknown>,
+                `decisionDocument.decisions[${index}]`,
+            )
+        }
         if (
             !requiredKeys(entry, ["title", "context", "decision", "consequences"])
         ) {
