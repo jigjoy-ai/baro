@@ -1,7 +1,12 @@
 import {
+    contractDefects,
+    formatDefectList,
+} from "../../contract/contract-normalization.js"
+import {
     parseArchitectureObligationContract,
     renderArchitectureObligationCriterion,
 } from "./architecture-obligation-contract.js"
+import { formatObligationIdList } from "./obligation-coverage-report.js"
 
 /**
  * Planner system prompt, shared by all planner backends so providers
@@ -524,4 +529,51 @@ export function buildPlannerUserMessage(args: {
     sections.push("User goal:")
     sections.push(args.goal.trim())
     return sections.join("\n")
+}
+
+/** Inline schema text for the finalization repair prompt. */
+export const PLANNER_FINAL_PRD_SCHEMA_SUMMARY = [
+    '{"project": string, "branchName": string, "description": string, "userStories": [...]}',
+    'userStories[i]: {"id": string, "title": string, "description": string, "acceptance": string[]}',
+    'acceptance[i] claiming an obligation starts with the bracketed id, e.g. "[O-001] <criterion text>"',
+].join("\n")
+
+/**
+ * The v0.100.0 architect repair recipe applied to the final PRD: the whole
+ * defect list, every obligation still unowned, the terminal shape, and what
+ * happens to anything else.
+ */
+export function buildFinalPrdRepairMessage(input: {
+    reason: string
+    error?: unknown
+    unownedObligationIds: readonly string[]
+}): string {
+    // contractDefects synthesizes a defect from whatever it is handed, so an
+    // absent error must not become the literal defect "undefined".
+    const carried = input.error === undefined ? [] : contractDefects(input.error)
+    const defects =
+        carried.length > 0 ? carried : [{ path: "", message: input.reason }]
+    const sections = [
+        "Your final PRD was rejected. Fix every defect listed below in one reply.",
+        `Defects (${defects.length}):\n${formatDefectList(defects)}`,
+    ]
+    if (input.unownedObligationIds.length > 0) {
+        sections.push(
+            `Unowned architecture obligations (${input.unownedObligationIds.length}):\n` +
+                `${formatObligationIdList(input.unownedObligationIds)}\n` +
+                "Every id above must be claimed by an acceptance criterion of a " +
+                "story in THIS reply — already-published stories are immutable " +
+                "and cannot take them later.",
+        )
+    }
+    sections.push(`Expected schema:\n${PLANNER_FINAL_PRD_SCHEMA_SUMMARY}`)
+    sections.push(
+        "Reply with ONLY the corrected final PRD JSON object. Anything that is " +
+            "not that JSON object is discarded. The host already holds every " +
+            "published story verbatim — userStories must contain only the " +
+            "stories that come after the published prefix (an empty array if " +
+            "nothing remains), plus the usual project, branchName and " +
+            "description metadata.",
+    )
+    return sections.join("\n\n")
 }
