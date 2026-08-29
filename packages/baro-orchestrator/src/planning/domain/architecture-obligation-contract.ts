@@ -52,10 +52,20 @@ export interface ArchitectureObligationCoverageResult {
 }
 
 export class ArchitectureObligationContractError extends Error {
-    constructor(message: string) {
+    /** Populated only by the incomplete-coverage throw; empty elsewhere. */
+    readonly missingObligationIds: readonly string[]
+
+    constructor(message: string, missingObligationIds: readonly string[] = []) {
         super(message)
         this.name = "ArchitectureObligationContractError"
+        this.missingObligationIds = missingObligationIds
     }
+}
+
+export function missingObligationIdsFromError(error: unknown): readonly string[] {
+    return error instanceof ArchitectureObligationContractError
+        ? error.missingObligationIds
+        : []
 }
 
 /**
@@ -327,6 +337,7 @@ export function validateArchitectureObligationCoverage(
     if (mode === "complete" && missingObligationIds.length > 0) {
         throw new ArchitectureObligationContractError(
             `architecture obligation coverage is incomplete; no story owns: ${missingObligationIds.join(", ")}`,
+            missingObligationIds,
         )
     }
     return { coveredObligationIds, missingObligationIds }

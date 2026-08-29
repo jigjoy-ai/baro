@@ -41,10 +41,13 @@ import type { PlanningFeed } from "../../execution/planning-feed.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
     PLANNER_SYSTEM_PROMPT,
+    buildFinalPrdRepairMessage,
     buildPlannerUserMessage,
     heuristicModeContract,
     type ModeContract,
 } from "../domain/planner-prompts.js"
+import { missingObligationIdsFromError } from "../domain/architecture-obligation-contract.js"
+import { formatObligationIdList } from "../domain/obligation-coverage-report.js"
 import {
     createPlannerHarnessProgressiveSupport,
     currentPlannerMcpServerCommand,
@@ -100,6 +103,18 @@ export interface PlannerBusSessionOptions {
      *  with planning_id_mismatch. When set, the session adopts it and skips
      *  its own planning_open. */
     existingPlanningId?: string
+}
+
+/** Nothing to say when no id resolved: an empty list must not read as a finding. */
+export function unownedObligationsClause(ids: readonly string[]): string {
+    if (ids.length === 0) return ""
+    return (
+        `; unowned architecture obligations (${ids.length}): ` +
+        `${formatObligationIdList(ids)}; composition would have succeeded only ` +
+        "if a story published before the tail had claimed each of these ids in " +
+        "its acceptance text — published stories are immutable, so this cannot " +
+        "be repaired after the fact"
+    )
 }
 
 /** The planner's stable bus identity; awareness runners address this. */
@@ -503,6 +518,11 @@ export async function runPlannerBusSession(
         // rejected finalization is something it can be TOLD, so it gets the
         // error back as a message and another turn to restate.
         const maxFinalizationAttempts = 3
+        let repairMessagesSent = 0
+        const resolveUnowned = (error: unknown): readonly string[] => {
+            const carried = missingObligationIdsFromError(error)
+            return carried.length > 0 ? carried : progressive.unownedObligationIds()
+        }
         for (let attempt = 1; attempt <= maxFinalizationAttempts; attempt++) {
             const resultText = await results.next()
             if (resultText === null) {
@@ -514,6 +534,7 @@ export async function runPlannerBusSession(
             }
             let composedFinalPrd: Record<string, unknown>
             let candidate: string | null = null
+            let rejectionError: unknown = null
             try {
                 candidate = extractJsonObject(resultText.trim())
             } catch {
@@ -528,6 +549,7 @@ export async function runPlannerBusSession(
                 progressive.assertInitialized()
                 composedFinalPrd = progressive.reconcileFinalCandidate(candidate)
             } catch (error) {
+                rejectionError = error
                 let reason =
                     error instanceof Error ? error.message : String(error)
                 // The MCP child is spawned by the lane's CLI, not by us: the
@@ -543,14 +565,15 @@ export async function runPlannerBusSession(
                     `[planner-bus] finalization attempt ${attempt}/${maxFinalizationAttempts} rejected: ${reason}\n`,
                 )
                 if (attempt < maxFinalizationAttempts) {
+                    const unowned = resolveUnowned(rejectionError)
                     planner.sendUserMessage(
-                        `Your final PRD was rejected: ${reason}\n\n` +
-                            `The host already holds every published story verbatim — do not ` +
-                            `repeat them. Reply with ONLY the corrected final PRD JSON whose ` +
-                            `userStories contains just the stories that come after the ` +
-                            `published prefix (an empty array if nothing remains), plus the ` +
-                            `usual project, branchName and description metadata.`,
+                        buildFinalPrdRepairMessage({
+                            reason,
+                            error: rejectionError,
+                            unownedObligationIds: unowned,
+                        }),
                     )
+                    repairMessagesSent += 1
                     continue
                 }
                 planner.closeStdin()
@@ -566,6 +589,8 @@ export async function runPlannerBusSession(
                 if (candidate !== null || !progressive.hasEarlyPlan()) {
                     return fail("planner_failed", reason)
                 }
+                // Compose only after the model was actually told how to fix it.
+                if (repairMessagesSent === 0) return fail("planner_failed", reason)
                 try {
                     composedFinalPrd = progressive.reconcileFinalCandidate(
                         JSON.stringify({
@@ -582,7 +607,7 @@ export async function runPlannerBusSession(
                             composeError instanceof Error
                                 ? composeError.message
                                 : String(composeError)
-                        }`,
+                        }${unownedObligationsClause(resolveUnowned(composeError))}`,
                     )
                 }
                 process.stderr.write(
