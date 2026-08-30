@@ -36,7 +36,7 @@ import {
 } from "../domain/progressive-plan.js"
 import { validateGoalContractCoverage } from "../domain/goal-contract-coverage.js"
 import { evaluateFinalTailTolerance } from "../domain/final-tail-tolerance.js"
-import { emitPlanActivity } from "./plan-events.js"
+import { emitObligationNote, emitPlanActivity } from "./plan-events.js"
 import {
     architectureObligationsFromDecision,
     canonicalObligationAcceptance,
@@ -359,6 +359,7 @@ export class ProgressivePlanningCoordinator {
                     ...validated.stories,
                 ]),
                 "partial",
+                emitObligationNote,
             )
             fingerprint = progressivePlanFragmentFingerprint(envelope)
         } catch (error) {
@@ -590,6 +591,7 @@ export class ProgressivePlanningCoordinator {
                 ),
                 obligationMappingsForStories(finalStories),
                 "complete",
+                emitObligationNote,
             )
             if (
                 planning.status === "completed" &&
