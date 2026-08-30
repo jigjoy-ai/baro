@@ -16,6 +16,7 @@ import {
     validateArchitectureObligationCoverage,
 } from "./architecture-obligation-contract.js"
 import { validateGoalContractCoverage } from "./goal-contract-coverage.js"
+import { emitObligationNote } from "../application/plan-events.js"
 
 export interface FinalTailToleranceInput {
     prd: PrdFile
@@ -67,6 +68,7 @@ export function evaluateFinalTailTolerance(
             ),
             obligationMappingsForStories(admittedStories),
             "complete",
+            emitObligationNote,
         )
         if (missingObligationIds.length > 0) {
             return {

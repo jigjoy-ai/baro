@@ -20,6 +20,7 @@ import {
     obligationMappingsForStories,
     validateArchitectureObligationCoverage,
 } from "../planning/domain/architecture-obligation-contract.js"
+import { emitObligationNote } from "../planning/application/plan-events.js"
 
 export interface RuntimeReplanValidationOptions {
     /** Running, leased, or otherwise already-started stories are immutable. */
@@ -391,11 +392,13 @@ function validateCandidateGraph(
             obligationContract,
             obligationMappingsForStories(current.userStories),
             "partial",
+            emitObligationNote,
         )
         const candidateObligations = validateArchitectureObligationCoverage(
             obligationContract,
             obligationMappingsForStories(candidate.userStories),
             "partial",
+            emitObligationNote,
         )
         const currentlyMissingObligations = new Set(
             currentObligations.missingObligationIds,

@@ -36,6 +36,7 @@ import {
     type ProgressivePlanSession,
 } from "../domain/progressive-plan.js"
 import { validateGoalContractCoverage } from "../domain/goal-contract-coverage.js"
+import { emitObligationNote } from "./plan-events.js"
 
 export type PlanningOpenWireEvent = Extract<
     BaroCommand,
@@ -234,6 +235,7 @@ export class ProgressivePlannerLifecycle {
                 ...candidate.stories,
             ]),
             "partial",
+            emitObligationNote,
         )
         // This provider-independent copy of the contract remains open through
         // post-processing. Native planners validate too, but mode enforcement
@@ -261,6 +263,7 @@ export class ProgressivePlannerLifecycle {
             this.obligationContract,
             obligationMappingsForStories(normalized.userStories),
             "complete",
+            emitObligationNote,
         )
         this.planSession.reconcile(normalized)
     }

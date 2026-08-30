@@ -628,7 +628,7 @@ describe("validateRuntimeReplanMutation", () => {
         )
         expectCode(tamperedClaim, "invalid_proposal")
         if (!tamperedClaim.ok) {
-            assert.match(tamperedClaim.reason, /altered canonical.*O-001/i)
+            assert.match(tamperedClaim.reason, /O-001.*multiple evidence owners/i)
         }
     })
 

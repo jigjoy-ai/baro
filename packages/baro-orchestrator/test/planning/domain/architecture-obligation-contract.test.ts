@@ -227,29 +227,31 @@ describe("Architecture obligation contract", () => {
             ], "partial"),
             /multiple evidence owners/u,
         )
-        assert.throws(
-            () => validateArchitectureObligationCoverage(contract, [{
+        // Host-owned data the planner was told not to author is completed,
+        // and a paraphrase of a known claim is restored, never rejected.
+        assert.deepEqual(
+            validateArchitectureObligationCoverage(contract, [{
                 storyId: "S1",
                 acceptance: [first],
                 invariantIds: [],
             }], "partial"),
-            /omits parent.*G-A1/u,
+            { coveredObligationIds: ["O-001"], missingObligationIds: ["O-002"] },
         )
-        assert.throws(
-            () => validateArchitectureObligationCoverage(contract, [{
+        assert.deepEqual(
+            validateArchitectureObligationCoverage(contract, [{
                 storyId: "S1",
                 acceptance: [`${first} narrowed`],
                 invariantIds: ["G-A1"],
             }], "partial"),
-            /altered canonical.*O-001/u,
+            { coveredObligationIds: ["O-001"], missingObligationIds: ["O-002"] },
         )
-        assert.throws(
-            () => validateArchitectureObligationCoverage(contract, [{
+        assert.deepEqual(
+            validateArchitectureObligationCoverage(contract, [{
                 storyId: "S1",
                 acceptance: [`Parents G-A1: ${first}`],
                 invariantIds: ["G-A1"],
             }], "partial"),
-            /altered canonical.*O-001/u,
+            { coveredObligationIds: ["O-001"], missingObligationIds: ["O-002"] },
         )
         assert.throws(
             () => validateArchitectureObligationCoverage(contract, [{
@@ -267,13 +269,13 @@ describe("Architecture obligation contract", () => {
             }], "partial"),
             /unknown architecture obligation O-099/u,
         )
-        assert.throws(
-            () => validateArchitectureObligationCoverage(contract, [{
+        assert.deepEqual(
+            validateArchitectureObligationCoverage(contract, [{
                 storyId: "S1",
                 acceptance: ["[O-001]: weakened"],
                 invariantIds: ["G-A1"],
             }], "partial"),
-            /altered canonical.*O-001/u,
+            { coveredObligationIds: ["O-001"], missingObligationIds: ["O-002"] },
         )
         assert.throws(
             () => validateArchitectureObligationCoverage(contract, [{

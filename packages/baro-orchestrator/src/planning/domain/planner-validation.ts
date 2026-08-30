@@ -12,6 +12,7 @@ import {
     type StoryObligationMapping,
 } from "./architecture-obligation-contract.js"
 import { validateGoalContractCoverage } from "./goal-contract-coverage.js"
+import { emitObligationNote } from "../application/plan-events.js"
 
 const STORY_TIERS = new Set(["light", "standard", "heavy"])
 
@@ -193,6 +194,7 @@ export function assertRunnablePlannerPrdJson(
         obligationContract,
         obligationMappings,
         "complete",
+        emitObligationNote,
     )
     return prdRepaired ? JSON.stringify(prd) : json
 }
