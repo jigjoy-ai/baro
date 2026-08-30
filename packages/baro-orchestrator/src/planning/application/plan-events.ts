@@ -8,6 +8,7 @@
  */
 
 import { emit } from "../../tui-protocol.js"
+import type { ObligationNote } from "../domain/architecture-obligation-contract.js"
 
 function enabled(): boolean {
     return process.env.BARO_PLAN_EVENTS === "1"
@@ -30,6 +31,11 @@ export function emitPlanActivity(kind: "warn" | "error", text: string): void {
     const trimmed = text.replace(/\s+/g, " ").trim()
     if (!trimmed) return
     emit({ type: "activity", id: "plan", kind, text: trimmed })
+}
+
+/** The only bridge from a domain obligation note to the run stream. */
+export function emitObligationNote(note: ObligationNote): void {
+    emitPlanActivity("warn", note.detail)
 }
 
 /** Describe one tool call the planner/architect made while exploring. */
