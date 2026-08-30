@@ -14,7 +14,10 @@ import type {
     InteractiveParticipantRequest,
 } from "../src/harness/interactive-participant.js"
 import { runArchitectBusSession } from "../src/planning/adapters/architect-bus-session.js"
-import { ARCHITECT_OUTCOME_SCHEMA_SUMMARY } from "../src/planning/domain/architect-outcome.js"
+import {
+    ARCHITECT_OUTCOME_SCHEMA_SUMMARY,
+    parseArchitectOutcome,
+} from "../src/planning/domain/architect-outcome.js"
 import type { ContractDefect } from "../src/contract/contract-normalization.js"
 
 /** A validator failure that carries per-entry defects, as the real ones do. */
@@ -171,7 +174,92 @@ const THREE_DEFECTS: readonly ContractDefect[] = [
     { path: "questions[1]", message: "questions[1].id must be unique" },
 ]
 
+const DECISION_DOCUMENT = `## Existing context
+The repository uses a strict provider-neutral planning contract.
+
+## ADR-001: Keep authority outside model output
+**Status:** Accepted
+**Context:** Provider text is untrusted.
+**Decision:** Attach session and request correlation only after strict parsing.
+**Consequences:** Malformed or foreign model output cannot advance planning.`
+
+const CANONICAL_PREDICATES = [
+    {
+        invariantId: "G-C1",
+        kind: "absent",
+        pathPrefix: "internal/",
+        pathSuffix: "",
+        text: "github.com/jackc/pgx/v5",
+    },
+    {
+        invariantId: "G-C2",
+        kind: "unchanged",
+        pathPrefix: "",
+        pathSuffix: "_test.go",
+        text: "",
+    },
+    {
+        invariantId: "G-C3",
+        kind: "absent",
+        pathPrefix: "cmd/",
+        pathSuffix: "",
+        text: "os.Getenv",
+    },
+]
+
+/** Kind changed, kind changed on a second entry, pathPrefix and text dropped. */
+const MANGLED_PREDICATES = [
+    { ...CANONICAL_PREDICATES[0]!, kind: "unchanged" },
+    { ...CANONICAL_PREDICATES[1]!, kind: "absent" },
+    { ...CANONICAL_PREDICATES[2]!, pathPrefix: "", text: "" },
+]
+
+const PREDICATE_DEFECT_MESSAGES = [
+    "constraintPredicates[0] is unchanged and needs the pathSuffix it protects",
+    "constraintPredicates[1] is absent and needs both a pathPrefix and the text it forbids",
+    "constraintPredicates[2] is absent and needs both a pathPrefix and the text it forbids",
+]
+
+function outcomeJson(predicates: readonly unknown[]): string {
+    return JSON.stringify({
+        schemaVersion: 1,
+        kind: "ready",
+        message: "Repository validation passed; planning may proceed.",
+        questions: [],
+        evidence: [],
+        decisionDocument: DECISION_DOCUMENT,
+        constraintPredicates: predicates,
+    })
+}
+
 describe("architect bus session repair feedback", () => {
+    // Pins O-002/O-024: the real outcome gate, not a scripted defect list.
+    // Three drifted predicates arrive as one rejection, so the adapter that
+    // was never changed still spends exactly one round on all three.
+    it("spends one repair round on every drifted predicate of a mangled outcome", async () => {
+        const { prompts, result, error } = await runOutcomeSession({
+            script: [outcomeJson(MANGLED_PREDICATES), outcomeJson(CANONICAL_PREDICATES)],
+            validateOutcome: (raw: string) => {
+                parseArchitectOutcome(raw)
+            },
+        })
+
+        assert.equal(error, undefined)
+        assert.equal((result as { outcomeAttempts: number }).outcomeAttempts, 2)
+        assert.equal(prompts.length, 2, "one instruction, then one repair round")
+        assert.ok(
+            prompts[1]!.startsWith(
+                "Your outcome was rejected. Fix every defect listed below in one reply.\n" +
+                    "\n" +
+                    "Defects (3):\n",
+            ),
+            prompts[1],
+        )
+        for (const message of PREDICATE_DEFECT_MESSAGES) {
+            assert.ok(prompts[1]!.includes(message), message)
+        }
+    })
+
     // Pins O-015/O-034: one rejection carrying three defects produces ONE
     // repair round listing all three plus the schema, not three rounds.
     it("lists every defect of the attempt and restates the schema inline", async () => {

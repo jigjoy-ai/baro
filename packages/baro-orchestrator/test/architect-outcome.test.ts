@@ -50,6 +50,37 @@ const TRIVIAL_DECISION_DOCUMENT = `## ADR-001: No cross-cutting decisions needed
 user's goal as stated and the conventions already in the repo.
 **Consequences:** None of note.`
 
+const CANONICAL_PREDICATES = [
+    {
+        invariantId: "G-C1",
+        kind: "absent" as const,
+        pathPrefix: "internal/",
+        pathSuffix: "",
+        text: "github.com/jackc/pgx/v5",
+    },
+    {
+        invariantId: "G-C2",
+        kind: "unchanged" as const,
+        pathPrefix: "",
+        pathSuffix: "_test.go",
+        text: "",
+    },
+    {
+        invariantId: "G-C3",
+        kind: "absent" as const,
+        pathPrefix: "cmd/",
+        pathSuffix: "",
+        text: "os.Getenv",
+    },
+]
+
+/** Kind changed, kind changed on a second entry, pathPrefix and text dropped. */
+const MANGLED_PREDICATES = [
+    { ...CANONICAL_PREDICATES[0]!, kind: "unchanged" },
+    { ...CANONICAL_PREDICATES[1]!, kind: "absent" },
+    { ...CANONICAL_PREDICATES[2]!, pathPrefix: "", text: "" },
+]
+
 function ready() {
     return {
         schemaVersion: 1,
@@ -878,6 +909,56 @@ describe("architect outcome drift normalization", () => {
         assert.throws(
             () => parseArchitectOutcome(JSON.stringify(tooMuchEvidence)),
             /architect evidence must contain at most 16 entries/u,
+        )
+    })
+
+    it("reports every drifted constraint predicate of one attempt", () => {
+        // Pins O-001: three predicates drifted in one reply cost one rejection
+        // carrying all three, not a first-defect throw and three repair rounds.
+        const drifted = { ...ready(), constraintPredicates: MANGLED_PREDICATES }
+        const error = rejection(() => parseArchitectOutcome(JSON.stringify(drifted)))
+
+        assert.deepEqual(error.defects, [
+            {
+                path: "constraintPredicates[0]",
+                message:
+                    "constraintPredicates[0] is unchanged and needs the pathSuffix it protects",
+            },
+            {
+                path: "constraintPredicates[1]",
+                message:
+                    "constraintPredicates[1] is absent and needs both a pathPrefix " +
+                    "and the text it forbids",
+            },
+            {
+                path: "constraintPredicates[2]",
+                message:
+                    "constraintPredicates[2] is absent and needs both a pathPrefix " +
+                    "and the text it forbids",
+            },
+        ])
+        assert.equal(error.message, error.defects.map((defect) => defect.message).join("; "))
+    })
+
+    it("restores the same drifted predicates when the canon is supplied", () => {
+        // Pins O-004: the host owns the canon, so identity that is unambiguous
+        // is repaired here instead of costing the model a round.
+        const drifted = { ...ready(), constraintPredicates: MANGLED_PREDICATES }
+        const { recorded, sink } = notes()
+        const outcome = parseArchitectOutcome(
+            JSON.stringify(drifted),
+            { canonicalConstraintPredicates: CANONICAL_PREDICATES },
+            sink,
+        )
+
+        assert.deepEqual(outcome.constraintPredicates, CANONICAL_PREDICATES)
+        assert.deepEqual(
+            recorded.map((note) => [note.severity, note.kind, note.path]),
+            [
+                ["warn", "canonicalized_field", "constraintPredicates[0]"],
+                ["warn", "canonicalized_field", "constraintPredicates[1]"],
+                ["warn", "canonicalized_field", "constraintPredicates[2]"],
+            ],
         )
     })
 

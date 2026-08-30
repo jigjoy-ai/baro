@@ -40,7 +40,11 @@ import {
 import { runArchitectCodex } from "../src/planning/adapters/architect-codex.js"
 import type { ArchitectInvocationObserver } from "../src/planning/adapters/architect-invocation.js"
 import { compileArchitectObligationSegments } from "../src/planning/domain/architect-obligation-segments.js"
-import { attachGoalConstraintContract } from "../src/goal/goal-constraint-appendix.js"
+import {
+    attachGoalConstraintContract,
+    hasGoalConstraintFence,
+    parseGoalConstraintContract,
+} from "../src/goal/goal-constraint-appendix.js"
 import { runArchitectOpenAI } from "../src/planning/adapters/architect-openai.js"
 import { runArchitectOpenCode } from "../src/planning/adapters/architect-opencode.js"
 import { runArchitectPi } from "../src/planning/adapters/architect-pi.js"
@@ -684,6 +688,12 @@ async function runArchitectOnBus(input: {
         billing,
     } = input
     const outcomeMode = args.outcomeFile !== undefined
+    // Read once, before the session opens: the canon is whatever the trusted
+    // prior document already fenced, never something an attempt authored.
+    const canonicalConstraintPredicates =
+        projectContext !== undefined && hasGoalConstraintFence(projectContext)
+            ? parseGoalConstraintContract(projectContext)
+            : undefined
     const session = await runArchitectBusSession({
         systemPrompt: architectSystemPrompt(outcomeMode, outcomeContractMode),
         userMessage: buildArchitectUserMessage(
@@ -706,6 +716,7 @@ async function runArchitectOnBus(input: {
                   validateOutcome: (raw: string) => {
                       parseArchitectOutcome(raw, {
                           decisionOnly: outcomeContractMode === "decision",
+                          canonicalConstraintPredicates,
                       }, logContractNote)
                   },
                   outcomeSchemaSummary: ARCHITECT_OUTCOME_SCHEMA_SUMMARY,
