@@ -11,60 +11,38 @@
 ```json
 {
   "graphVersion": 2,
-  "proposalId": "run-progressive-b7503c5d75c0c48c:planner:35d4e9ff90dd90c6d37f918eabe62d4ed9d0f6ea68b5b56cb746f023bbc66d47",
-  "sourceStoryId": "planner:planning-b7503c5d75c0c48c-1",
-  "reason": "progressive planner admitted fragment planner-finalization-obligation-visibility-1",
-  "exactMutationSha256": "49922a9949a8c8124fca99626bf805606bb2ce336dcd1e9886f1e5dcfbe89a5e",
+  "proposalId": "run-progressive-c86970d1f3deee37:planner:670418a97cb125f73dfe8edba3aa9c0dcbc18ed2f126b3029e558aa942d4912a",
+  "sourceStoryId": "planner:planning-c86970d1f3deee37-1",
+  "reason": "progressive planner admitted fragment obligation-canonicalization-core",
+  "exactMutationSha256": "7a6687c53139e6746c706e2b1cb864624990231fd5814edeccbc36861318bc46",
   "mutationSummary": {
     "addedStories": [
       {
         "id": "S1",
-        "title": "Structured unowned-obligation ids, planner repair prompt, and fail-closed finalization retry loop",
+        "title": "Canonicalize obligation mappings inside the validator and collect all violations",
         "dependsOn": [],
         "goalInvariantIds": [
           "G-A1",
+          "G-A2",
           "G-A3",
           "G-A4",
-          "G-A6",
+          "G-A5",
           "G-C1",
           "G-C2",
           "G-C3",
-          "G-C4",
           {
-            "omittedItems": 1
+            "omittedItems": 4
           }
         ]
-      }
-    ],
-    "removedStoryIds": [],
-    "modifiedDeps": {}
-  }
-}
-```
-
-## Graph version 3
-
-```json
-{
-  "graphVersion": 3,
-  "proposalId": "run-progressive-b7503c5d75c0c48c:planner:3edea1b0cf0a83abf888d9a7cd6f249454ffe82b5d7e3d58ce1e07bc64ed4bb3",
-  "sourceStoryId": "planner:planning-b7503c5d75c0c48c-1",
-  "reason": "progressive planner admitted fragment final-49a54e1c3c57a1f895a5d61175e03ef9ae50f7e02501920954a6508e69cc2b4d",
-  "exactMutationSha256": "be765f7fabf2ebe90c5569c6bc580e36a32d0f5f298bcf826059b794cc7d69a4",
-  "mutationSummary": {
-    "addedStories": [
+      },
       {
         "id": "S2",
-        "title": "Concrete unowned-obligation ids on the fragment publish receipt and a per-admission stderr announcement",
+        "title": "Wire emitObligationNote as onNote at the stream-capable validator call sites",
         "dependsOn": [
           "S1"
         ],
         "goalInvariantIds": [
-          "G-A2",
-          "G-A5",
-          "G-C1",
-          "G-C3",
-          "G-C4"
+          "G-C3"
         ]
       }
     ],
