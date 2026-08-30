@@ -354,6 +354,7 @@ export function validateArchitectOutcome(
         constraintPredicates = validateGoalConstraintPredicates(
             record.constraintPredicates ?? [],
             onNote,
+            options.canonicalConstraintPredicates,
         )
     } catch (error) {
         defects.push(...contractDefects(error))
@@ -463,6 +464,11 @@ export interface ArchitectOutcomeValidationOptions {
     decisionOnly?: boolean
     /** Host-owned goal used to reject unknown or missing parent ids. */
     trustedGoalEnvelope?: GoalEnvelope | null
+    /**
+     * Host-owned canonical appendix. Supplied only on a re-plan of a document
+     * that already carries one; absent or empty leaves the gate as it was.
+     */
+    canonicalConstraintPredicates?: readonly GoalConstraintPredicateWireV1[]
 }
 
 function assertCompatibleValidationOptions(
