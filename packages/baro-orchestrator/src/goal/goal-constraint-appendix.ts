@@ -86,6 +86,7 @@ export interface GoalConstraintContractV1 {
 export function validateGoalConstraintPredicates(
     value: unknown,
     onNote?: NoteSink,
+    canonical?: readonly GoalConstraintPredicateWireV1[],
 ): GoalConstraintPredicateWireV1[] {
     if (!Array.isArray(value)) {
         throw new GoalConstraintContractError("constraintPredicates must be an array")
@@ -96,6 +97,9 @@ export function validateGoalConstraintPredicates(
         throw new GoalConstraintContractError(
             `constraintPredicates exceeds ${MAX_CONSTRAINT_PREDICATES} entries`,
         )
+    }
+    if (canonical && canonical.length > 0) {
+        return canonicalizePredicates(value, canonical, onNote)
     }
 
     const predicates: GoalConstraintPredicateWireV1[] = []
@@ -113,11 +117,12 @@ export function validateGoalConstraintPredicates(
             })
             continue
         }
+        let candidate: unknown
         try {
             // Anything that is not a record reaches parsePredicate untouched,
             // so it still fails as "must be an object" rather than as a shape
             // normalization invented for it.
-            const candidate =
+            candidate =
                 typeof entry === "object" && !Array.isArray(entry)
                     ? normalizeRecordKeys(
                           entry as Record<string, unknown>,
@@ -126,13 +131,15 @@ export function validateGoalConstraintPredicates(
                           onNote,
                       )
                     : entry
-            predicates.push(parsePredicate(candidate, index))
         } catch (error) {
             defects.push({
                 path: at,
                 message: error instanceof Error ? error.message : String(error),
             })
+            continue
         }
+        const parsed = parsePredicate(candidate, index, defects)
+        if (parsed) predicates.push(parsed)
     }
     if (defects.length > 0) {
         throw new GoalConstraintContractError(joinDefectMessages(defects), { defects })
@@ -149,74 +156,268 @@ export function validateGoalConstraintPredicates(
     return predicates
 }
 
+interface CanonicalMatch {
+    /** raw index -> canonical index */
+    readonly matched: Map<number, number>
+    readonly unmatchedRaw: number[]
+    readonly unclaimedCanon: number[]
+}
+
+/**
+ * Identity is read off the raw array before holes are skipped and before any
+ * key is canonicalized: an entry whose `invariantId` key itself drifted has no
+ * identity the host can trust, and stays unmatched.
+ */
+function identityOf(entry: unknown): string | null {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null
+    const invariantId = (entry as { invariantId?: unknown }).invariantId
+    return typeof invariantId === "string" ? invariantId.trim() : null
+}
+
+function matchCanonicalPredicates(
+    raw: readonly unknown[],
+    canonical: readonly GoalConstraintPredicateWireV1[],
+): CanonicalMatch {
+    const matched = new Map<number, number>()
+    const claimed = new Set<number>()
+
+    const paired = Math.min(raw.length, canonical.length)
+    for (let index = 0; index < paired; index += 1) {
+        if (identityOf(raw[index]) === canonical[index]!.invariantId) {
+            matched.set(index, index)
+            claimed.add(index)
+        }
+    }
+    // A shared id is only a key when exactly one canonical entry still carries
+    // it; two candidates leave the entry unmatched rather than guessing.
+    for (let index = 0; index < raw.length; index += 1) {
+        if (matched.has(index)) continue
+        const identity = identityOf(raw[index])
+        if (identity === null) continue
+        const candidates: number[] = []
+        for (let canon = 0; canon < canonical.length; canon += 1) {
+            if (!claimed.has(canon) && canonical[canon]!.invariantId === identity) {
+                candidates.push(canon)
+            }
+        }
+        if (candidates.length === 1) {
+            matched.set(index, candidates[0]!)
+            claimed.add(candidates[0]!)
+        }
+    }
+
+    const unmatchedRaw: number[] = []
+    for (let index = 0; index < raw.length; index += 1) {
+        // A hole claims nothing and states nothing; whatever it failed to
+        // cover is reported as an unclaimed canonical entry instead.
+        if (matched.has(index) || raw[index] == null) continue
+        unmatchedRaw.push(index)
+    }
+    const unclaimedCanon: number[] = []
+    for (let canon = 0; canon < canonical.length; canon += 1) {
+        if (!claimed.has(canon)) unclaimedCanon.push(canon)
+    }
+    return { matched, unmatchedRaw, unclaimedCanon }
+}
+
+function cloneCanonical(
+    predicate: GoalConstraintPredicateWireV1,
+): GoalConstraintPredicateWireV1 {
+    return {
+        invariantId: predicate.invariantId.trim(),
+        kind: predicate.kind,
+        pathPrefix: predicate.pathPrefix.trim(),
+        pathSuffix: predicate.pathSuffix.trim(),
+        text: predicate.text.trim(),
+    }
+}
+
+function driftedFields(
+    entry: unknown,
+    canon: GoalConstraintPredicateWireV1,
+): string[] {
+    const record = entry as Record<string, unknown>
+    const drifted = PREDICATE_KEYS.filter((key) => record[key] !== canon[key])
+    const unexpected = Object.keys(record)
+        .filter((key) => !(PREDICATE_KEYS as readonly string[]).includes(key))
+        .sort()
+    return [...drifted, ...unexpected]
+}
+
+/**
+ * With a canonical appendix in hand the host restores rather than argues:
+ * drifted fields never reach parsePredicate, so what validation returns — and
+ * what every downstream consumer sees — is the canon itself. Only meaning
+ * drift is left to reject: an entry that matches nothing, and a canonical
+ * predicate nobody claimed.
+ */
+function canonicalizePredicates(
+    raw: readonly unknown[],
+    canonical: readonly GoalConstraintPredicateWireV1[],
+    onNote?: NoteSink,
+): GoalConstraintPredicateWireV1[] {
+    const { matched, unmatchedRaw, unclaimedCanon } = matchCanonicalPredicates(
+        raw,
+        canonical,
+    )
+    const defects: ContractDefect[] = []
+    for (const index of unmatchedRaw) {
+        const at = `constraintPredicates[${index}]`
+        const entry = raw[index]
+        // Its own shape defects travel in the same throw as the membership
+        // one, so a repair round hears everything wrong with it at once.
+        try {
+            const candidate =
+                typeof entry === "object" && !Array.isArray(entry)
+                    ? normalizeRecordKeys(
+                          entry as Record<string, unknown>,
+                          PREDICATE_KEYS,
+                          at,
+                          onNote,
+                      )
+                    : entry
+            parsePredicate(candidate, index, defects)
+        } catch (error) {
+            defects.push({
+                path: at,
+                message: error instanceof Error ? error.message : String(error),
+            })
+        }
+        defects.push({
+            path: at,
+            message: `${at} does not match any canonical constraint predicate`,
+        })
+    }
+    for (const canon of unclaimedCanon) {
+        defects.push({
+            path: `constraintPredicates[${canon}]`,
+            message: `constraintPredicates is missing the canonical predicate ${canonical[canon]!.invariantId}`,
+        })
+    }
+    if (defects.length > 0) {
+        throw new GoalConstraintContractError(joinDefectMessages(defects), { defects })
+    }
+
+    for (const index of [...matched.keys()].sort((a, b) => a - b)) {
+        const canon = cloneCanonical(canonical[matched.get(index)!]!)
+        const drifted = driftedFields(raw[index], canon)
+        if (drifted.length === 0) continue
+        const at = `constraintPredicates[${index}]`
+        onNote?.({
+            severity: "warn",
+            kind: "canonicalized_field",
+            path: at,
+            detail: `${at}: restored canonical predicate ${canon.invariantId} (${drifted.join(", ")})`,
+        })
+    }
+    return canonical.map(cloneCanonical)
+}
+
+/**
+ * Every field is judged, not just the first bad one: a predicate that drifted
+ * in two places would otherwise cost a second repair round to hear about the
+ * second place. The defect path stays the entry, as it was when a single throw
+ * carried the field name in its message alone.
+ */
 function parsePredicate(
     value: unknown,
     index: number,
-): GoalConstraintPredicateWireV1 {
+    defects: ContractDefect[],
+): GoalConstraintPredicateWireV1 | null {
     const at = `constraintPredicates[${index}]`
+    const before = defects.length
     if (!value || typeof value !== "object" || Array.isArray(value)) {
-        throw new GoalConstraintContractError(`${at} must be an object`)
+        defects.push({ path: at, message: `${at} must be an object` })
+        return null
     }
     const record = value as Record<string, unknown>
     const keys = Object.keys(record).sort()
     const expected = [...PREDICATE_KEYS].sort()
     if (keys.length !== expected.length || keys.some((key, i) => key !== expected[i])) {
-        throw new GoalConstraintContractError(`${at} must use the exact predicate shape`)
+        defects.push({ path: at, message: `${at} must use the exact predicate shape` })
+        return null
     }
-    const invariantId = text(record.invariantId, `${at}.invariantId`)
-    if (!INVARIANT_ID.test(invariantId)) {
-        throw new GoalConstraintContractError(
-            `${at}.invariantId must be a GoalContract id such as G-C1`,
-        )
+    const invariantId = text(record.invariantId, `${at}.invariantId`, at, defects)
+    if (invariantId !== null && !INVARIANT_ID.test(invariantId)) {
+        defects.push({
+            path: at,
+            message: `${at}.invariantId must be a GoalContract id such as G-C1`,
+        })
     }
-    const kind = text(record.kind, `${at}.kind`)
-    if (kind !== "absent" && kind !== "unchanged") {
-        throw new GoalConstraintContractError(`${at}.kind must be absent or unchanged`)
+    const declaredKind = text(record.kind, `${at}.kind`, at, defects)
+    let kind: "absent" | "unchanged" | null = null
+    if (declaredKind !== null) {
+        if (declaredKind === "absent" || declaredKind === "unchanged") {
+            kind = declaredKind
+        } else {
+            defects.push({ path: at, message: `${at}.kind must be absent or unchanged` })
+        }
     }
-    const pathPrefix = text(record.pathPrefix, `${at}.pathPrefix`, true)
-    const pathSuffix = text(record.pathSuffix, `${at}.pathSuffix`, true)
-    const body = text(record.text, `${at}.text`, true)
+    const pathPrefix = text(record.pathPrefix, `${at}.pathPrefix`, at, defects, true)
+    const pathSuffix = text(record.pathSuffix, `${at}.pathSuffix`, at, defects, true)
+    const body = text(record.text, `${at}.text`, at, defects, true)
 
     if (kind === "absent" && (!pathPrefix || !body)) {
-        throw new GoalConstraintContractError(
-            `${at} is absent and needs both a pathPrefix and the text it forbids`,
-        )
+        defects.push({
+            path: at,
+            message: `${at} is absent and needs both a pathPrefix and the text it forbids`,
+        })
     }
     if (kind === "unchanged" && !pathSuffix) {
-        throw new GoalConstraintContractError(
-            `${at} is unchanged and needs the pathSuffix it protects`,
-        )
+        defects.push({
+            path: at,
+            message: `${at} is unchanged and needs the pathSuffix it protects`,
+        })
     }
     // A prefix that escapes the tree, or a suffix so broad it names every
     // file, would turn a report into noise the moment it fires.
-    if (pathPrefix.startsWith("/") || pathPrefix.includes("..")) {
-        throw new GoalConstraintContractError(
-            `${at}.pathPrefix must be a repository-relative path`,
-        )
+    if (pathPrefix !== null && (pathPrefix.startsWith("/") || pathPrefix.includes(".."))) {
+        defects.push({
+            path: at,
+            message: `${at}.pathPrefix must be a repository-relative path`,
+        })
     }
     // A bare extension is every source file in the language. The suffix has to
     // carry a second marker — `_test.go`, `.spec.ts` — or the report it feeds
     // would name the whole repository and mean nothing.
-    if (kind === "unchanged" && /^\.[a-z0-9]+$/iu.test(pathSuffix)) {
-        throw new GoalConstraintContractError(
-            `${at}.pathSuffix "${pathSuffix}" is a bare extension and would name every file of that kind`,
-        )
+    if (kind === "unchanged" && pathSuffix !== null && /^\.[a-z0-9]+$/iu.test(pathSuffix)) {
+        defects.push({
+            path: at,
+            message: `${at}.pathSuffix "${pathSuffix}" is a bare extension and would name every file of that kind`,
+        })
     }
-    return { invariantId, kind, pathPrefix, pathSuffix, text: body }
+    if (defects.length > before) return null
+    return {
+        invariantId: invariantId!,
+        kind: kind!,
+        pathPrefix: pathPrefix!,
+        pathSuffix: pathSuffix!,
+        text: body!,
+    }
 }
 
-function text(value: unknown, label: string, allowEmpty = false): string {
+function text(
+    value: unknown,
+    label: string,
+    at: string,
+    defects: ContractDefect[],
+    allowEmpty = false,
+): string | null {
     if (typeof value !== "string") {
-        throw new GoalConstraintContractError(`${label} must be a string`)
+        defects.push({ path: at, message: `${label} must be a string` })
+        return null
     }
     const trimmed = value.trim()
     if (!allowEmpty && !trimmed) {
-        throw new GoalConstraintContractError(`${label} must not be empty`)
+        defects.push({ path: at, message: `${label} must not be empty` })
+        return null
     }
     if (trimmed.length > MAX_FIELD_LENGTH) {
-        throw new GoalConstraintContractError(
-            `${label} exceeds ${MAX_FIELD_LENGTH} characters`,
-        )
+        defects.push({
+            path: at,
+            message: `${label} exceeds ${MAX_FIELD_LENGTH} characters`,
+        })
+        return null
     }
     return trimmed
 }
@@ -285,6 +486,7 @@ export function attachGoalConstraintContract(
 export function parseGoalConstraintContract(
     decisionDocument: string | null | undefined,
     onNote?: NoteSink,
+    canonical?: readonly GoalConstraintPredicateWireV1[],
 ): GoalConstraintPredicateWireV1[] {
     if (decisionDocument == null || !hasGoalConstraintFence(decisionDocument)) {
         return []
@@ -322,5 +524,6 @@ export function parseGoalConstraintContract(
     return validateGoalConstraintPredicates(
         (value as { predicates?: unknown }).predicates,
         onNote,
+        canonical,
     )
 }
