@@ -1,0 +1,6 @@
+# ADR-0007: Record the matching rule in a new ADR file under adr/
+
+**Status:** Accepted
+**Context:** The goal requires the predicate-matching rule to be decided explicitly and recorded, following the shape of the existing records in `adr/`, whose slugs are lowercase-hyphenated and truncated around 56 characters and whose leading numbers repeat across runs.
+**Decision:** Create exactly one new file: `adr/0001-match-goal-constraint-predicates-by-index-then-unique-inva.md`. Mirror the heading and section structure of `adr/0001-canonicalize-mappings-inside-validatearchitectureobligationc.md` verbatim (same section names, same order, same status line style). Content: the index-then-unique-invariantId rule from ADR-002 stated precisely, the rejected alternatives (field-subset matching — the drifted fields are the unreliable ones; `invariantId` alone — not unique and not enforced unique by `parsePredicate`; index alone — holes compact and shift positions), the fail-closed membership rule from ADR-004, and the rejected shared-helper option from ADR-006. Add no other ADR file and edit no existing one.
+**Consequences:** Reviewers can trace the rule without reading the implementation. Keep the file comment-lean and free of changelog narration, per repo convention.

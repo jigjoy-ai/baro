@@ -1,0 +1,9 @@
+# ADR-0004: With canon supplied, require a 1:1 cover of the canonical appendix and reject anything else as ContractDefect
+
+**Status:** Accepted
+**Context:** Restoration alone would let an extra, well-formed predicate pass validation, violating the fail-closed acceptance criterion. Meaning drift — an entry absent from canon, an entry beyond canon, or an entry that cannot be matched unambiguously — must remain a rejection through the existing mechanism.
+**Decision:** When `canonical` is non-empty, after matching and before returning, append these defects to the same `ContractDefect[]` accumulator the entry loop already fills, then throw the existing `GoalConstraintContractError(joinDefectMessages(defects), { defects })` if the accumulator is non-empty:
+- for each raw index `i` in `unmatchedRaw`, ascending: `{ path: "constraintPredicates[" + i + "]", message: "constraintPredicates[" + i + "] does not match any canonical constraint predicate" }`
+- for each canon index `c` in `unclaimedCanon`, ascending: `{ path: "constraintPredicates[" + c + "]", message: "constraintPredicates is missing the canonical predicate " + canonical[c].invariantId }`
+The over-cap check at :95-99 and the non-array check at :90-92 stay eager throws and run before matching. When there are no unmatched raw entries and no unclaimed canonical entries, skip per-entry shape validation entirely for matched entries — canon is trusted and already valid — so drifted fields never reach `parsePredicate`. When defects exist, still run per-entry validation on the unmatched raw entries so their own shape defects are reported in the same throw.
+**Consequences:** Canonicalization runs strictly before validation judges predicate text, satisfying the ordering constraint. An extra predicate is rejected even when it is individually well-formed. One rejection still produces one repair round through `architect-bus-session.ts:422-453` with no adapter change.
