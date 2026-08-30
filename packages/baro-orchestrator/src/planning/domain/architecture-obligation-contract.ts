@@ -23,6 +23,7 @@ const GOAL_INVARIANT_ID = /^G-[AC][1-9]\d*$/u
 // claimed obligation that is not byte-for-byte canonical must fail closed,
 // including provider-added prose before or after the canonical criterion.
 const OBLIGATION_CRITERION_CLAIM = /\[(O-[^\]]+)\]/u
+const MAX_REPORTED_VIOLATION_DETAILS = 12
 
 export interface ArchitectureObligationV1 {
     id: string
@@ -51,20 +52,64 @@ export interface ArchitectureObligationCoverageResult {
     missingObligationIds: readonly string[]
 }
 
+export type ObligationNoteKind =
+    | "canonicalized_obligation_criterion"
+    | "completed_obligation_parent_invariants"
+
+export interface ObligationNote {
+    readonly severity: "warn"
+    readonly kind: ObligationNoteKind
+    readonly storyId: string
+    readonly obligationId: string
+    readonly detail: string
+}
+
+export type ObligationNoteSink = (note: ObligationNote) => void
+
+export type ArchitectureObligationViolationKind =
+    | "unknown_obligation"
+    | "compound_claim"
+    | "altered_canonical"
+    | "duplicate_owner"
+    | "missing_parent_invariants"
+    | "unowned_obligation"
+
+export interface ArchitectureObligationViolation {
+    readonly kind: ArchitectureObligationViolationKind
+    /** "" for unowned_obligation: no story reached the criterion. */
+    readonly storyId: string
+    readonly obligationId: string
+    readonly detail: string
+}
+
 export class ArchitectureObligationContractError extends Error {
     /** Populated only by the incomplete-coverage throw; empty elsewhere. */
     readonly missingObligationIds: readonly string[]
+    readonly violations: readonly ArchitectureObligationViolation[]
 
-    constructor(message: string, missingObligationIds: readonly string[] = []) {
+    constructor(
+        message: string,
+        missingObligationIds: readonly string[] = [],
+        violations: readonly ArchitectureObligationViolation[] = [],
+    ) {
         super(message)
         this.name = "ArchitectureObligationContractError"
         this.missingObligationIds = missingObligationIds
+        this.violations = violations
     }
 }
 
 export function missingObligationIdsFromError(error: unknown): readonly string[] {
     return error instanceof ArchitectureObligationContractError
         ? error.missingObligationIds
+        : []
+}
+
+export function violationsFromError(
+    error: unknown,
+): readonly ArchitectureObligationViolation[] {
+    return error instanceof ArchitectureObligationContractError
+        ? error.violations
         : []
 }
 
@@ -269,6 +314,77 @@ export function completeImpliedInvariantIds(
     return result
 }
 
+/** Idempotent host-side repair of known claims, announced through `onNote`. */
+export function canonicalizeObligationMappings(
+    contract: ArchitectureObligationContractV1,
+    mappings: readonly StoryObligationMapping[],
+    onNote?: ObligationNoteSink,
+): readonly StoryObligationMapping[] {
+    const byId = new Map(
+        contract.obligations.map((obligation) => [obligation.id, obligation] as const),
+    )
+    const announced = new Set<string>()
+    const note = (
+        kind: ObligationNoteKind,
+        storyId: string,
+        obligationId: string,
+        detail: string,
+    ): void => {
+        if (!onNote) return
+        const key = `${storyId} ${obligationId} ${kind}`
+        if (announced.has(key)) return
+        announced.add(key)
+        onNote({ severity: "warn", kind, storyId, obligationId, detail })
+    }
+    return mappings.map((mapping) => {
+        const declared = new Set(mapping.invariantIds)
+        const implied: string[] = []
+        const acceptance: string[] = []
+        let rewritten = false
+        for (const criterion of mapping.acceptance) {
+            const claim = OBLIGATION_CRITERION_CLAIM.exec(criterion)
+            const claimedIds = claim ? splitClaimedObligationIds(claim[1] ?? "") : []
+            const obligation =
+                claimedIds.length === 1 ? byId.get(claimedIds[0]!) : undefined
+            // Unknown and multi-id claims stay verbatim for the validator.
+            if (!obligation) {
+                acceptance.push(criterion)
+                continue
+            }
+            const canonical =
+                canonicalObligationAcceptance(contract, [criterion]).acceptance[0] ??
+                criterion
+            if (canonical !== criterion) {
+                rewritten = true
+                note(
+                    "canonicalized_obligation_criterion",
+                    mapping.storyId,
+                    obligation.id,
+                    `story ${mapping.storyId}: canonicalized paraphrased architecture obligation ${obligation.id} criterion text`,
+                )
+            }
+            acceptance.push(canonical)
+            // Parent ids come from the contract obligation, never the text.
+            const added = obligation.invariantIds.filter((id) => !declared.has(id))
+            if (added.length > 0) {
+                for (const id of added) declared.add(id)
+                note(
+                    "completed_obligation_parent_invariants",
+                    mapping.storyId,
+                    obligation.id,
+                    `story ${mapping.storyId}: completed parent GoalContract invariant(s) for ${obligation.id}: ${added.join(", ")}`,
+                )
+            }
+            implied.push(...obligation.invariantIds)
+        }
+        const invariantIds = completeImpliedInvariantIds(mapping.invariantIds, implied)
+        if (!rewritten && invariantIds.length === mapping.invariantIds.length) {
+            return mapping
+        }
+        return { storyId: mapping.storyId, acceptance, invariantIds }
+    })
+}
+
 /**
  * Require exact, single-owner propagation into stories. Partial mode permits
  * obligations to arrive in later progressive fragments but still rejects
@@ -278,6 +394,7 @@ export function validateArchitectureObligationCoverage(
     contract: ArchitectureObligationContractV1 | null | undefined,
     mappings: readonly StoryObligationMapping[],
     mode: ArchitectureObligationCoverageMode,
+    onNote?: ObligationNoteSink,
 ): ArchitectureObligationCoverageResult {
     if (!contract) {
         return { coveredObligationIds: [], missingObligationIds: [] }
@@ -289,9 +406,11 @@ export function validateArchitectureObligationCoverage(
         ] as const),
     )
     const byId = new Map(contract.obligations.map((obligation) => [obligation.id, obligation]))
+    const effective = canonicalizeObligationMappings(contract, mappings, onNote)
     const owners = new Map<string, string>()
+    const violations: ArchitectureObligationViolation[] = []
 
-    for (const mapping of mappings) {
+    for (const mapping of effective) {
         const storyInvariantIds = new Set(mapping.invariantIds)
         for (const criterion of mapping.acceptance) {
             const exact = byCriterion.get(criterion)
@@ -300,29 +419,53 @@ export function validateArchitectureObligationCoverage(
                 if (claim) {
                     const id = claim[1] ?? "unknown"
                     const compound = splitClaimedObligationIds(id)
-                    throw new ArchitectureObligationContractError(
+                    violations.push(
                         compound.length > 1
-                            ? `story ${mapping.storyId} writes ${compound.length} obligation ids in one claim [${id}]; each obligation needs its own acceptance criterion`
+                            ? {
+                                  kind: "compound_claim",
+                                  storyId: mapping.storyId,
+                                  obligationId: id,
+                                  detail: `story ${mapping.storyId} writes ${compound.length} obligation ids in one claim [${id}]; each obligation needs its own acceptance criterion`,
+                              }
                             : byId.has(id)
-                              ? `story ${mapping.storyId} altered canonical architecture obligation ${id}`
-                              : `story ${mapping.storyId} claims unknown architecture obligation ${id}`,
+                              ? {
+                                    kind: "altered_canonical",
+                                    storyId: mapping.storyId,
+                                    obligationId: id,
+                                    detail: `story ${mapping.storyId} altered canonical architecture obligation ${id}`,
+                                }
+                              : {
+                                    kind: "unknown_obligation",
+                                    storyId: mapping.storyId,
+                                    obligationId: id,
+                                    detail: `story ${mapping.storyId} claims unknown architecture obligation ${id}`,
+                                },
                     )
                 }
                 continue
             }
             const previousOwner = owners.get(exact.id)
             if (previousOwner) {
-                throw new ArchitectureObligationContractError(
-                    `architecture obligation ${exact.id} has multiple evidence owners: ${previousOwner}, ${mapping.storyId}`,
-                )
+                violations.push({
+                    kind: "duplicate_owner",
+                    storyId: mapping.storyId,
+                    obligationId: exact.id,
+                    detail: `architecture obligation ${exact.id} has multiple evidence owners: ${previousOwner}, ${mapping.storyId}`,
+                })
+                continue
             }
             const missingParents = exact.invariantIds.filter(
                 (id) => !storyInvariantIds.has(id),
             )
+            // Backstop: canonicalization completes these before the loops run.
             if (missingParents.length > 0) {
-                throw new ArchitectureObligationContractError(
-                    `story ${mapping.storyId} owns ${exact.id} but omits parent GoalContract invariant(s): ${missingParents.join(", ")}`,
-                )
+                violations.push({
+                    kind: "missing_parent_invariants",
+                    storyId: mapping.storyId,
+                    obligationId: exact.id,
+                    detail: `story ${mapping.storyId} owns ${exact.id} but omits parent GoalContract invariant(s): ${missingParents.join(", ")}`,
+                })
+                continue
             }
             owners.set(exact.id, mapping.storyId)
         }
@@ -334,13 +477,39 @@ export function validateArchitectureObligationCoverage(
     const missingObligationIds = contract.obligations
         .map(({ id }) => id)
         .filter((id) => !owners.has(id))
-    if (mode === "complete" && missingObligationIds.length > 0) {
+    const unowned = mode === "complete" ? missingObligationIds : []
+    for (const id of unowned) {
+        violations.push({
+            kind: "unowned_obligation",
+            storyId: "",
+            obligationId: id,
+            detail: `architecture obligation ${id} has no evidence owner`,
+        })
+    }
+    if (violations.length > 0) {
         throw new ArchitectureObligationContractError(
-            `architecture obligation coverage is incomplete; no story owns: ${missingObligationIds.join(", ")}`,
-            missingObligationIds,
+            violationMessage(violations, unowned),
+            unowned.length > 0 ? missingObligationIds : [],
+            violations,
         )
     }
     return { coveredObligationIds, missingObligationIds }
+}
+
+function violationMessage(
+    violations: readonly ArchitectureObligationViolation[],
+    unowned: readonly string[],
+): string {
+    // Incomplete coverage alone keeps its legacy wording at any id count.
+    if (unowned.length > 0 && unowned.length === violations.length) {
+        return `architecture obligation coverage is incomplete; no story owns: ${unowned.join(", ")}`
+    }
+    if (violations.length === 1) return violations[0]!.detail
+    const details = violations.map(({ detail }) => detail)
+    const shown = details.slice(0, MAX_REPORTED_VIOLATION_DETAILS)
+    const hidden = details.length - shown.length
+    if (hidden > 0) shown.push(`… (+${hidden} more)`)
+    return `${violations.length} architecture obligation violations: ${shown.join("; ")}`
 }
 
 export function obligationMappingsForStories(
@@ -363,6 +532,7 @@ export function validatePrdArchitectureObligationCoverage(
     prd: Pick<PrdFile, "decisionDocument" | "userStories">,
     goal: GoalContract | null | undefined,
     mode: ArchitectureObligationCoverageMode,
+    onNote?: ObligationNoteSink,
 ): ArchitectureObligationCoverageResult {
     const parsed = parseArchitectureObligationContract(prd.decisionDocument)
     if (!parsed) {
@@ -377,6 +547,7 @@ export function validatePrdArchitectureObligationCoverage(
         bindArchitectureObligationContract(parsed, goal),
         obligationMappingsForStories(prd.userStories),
         mode,
+        onNote,
     )
 }
 
