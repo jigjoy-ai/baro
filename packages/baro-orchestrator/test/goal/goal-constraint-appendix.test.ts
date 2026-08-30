@@ -450,3 +450,292 @@ describe("holes in the array", () => {
         assert.deepEqual(notes.map((note) => note.kind), ["canonicalized_field"])
     })
 })
+
+// The canonical appendix the host already accepted once, and the same three
+// predicates as a model re-states them on a repair round: one kind changed,
+// one prefix dropped with its forbidden text emptied, one more kind changed.
+const THIRD = {
+    invariantId: "G-C3",
+    kind: "absent" as const,
+    pathPrefix: "cmd/",
+    pathSuffix: "",
+    text: "database/sql",
+}
+const CANON = [ABSENT, THIRD, UNCHANGED]
+
+function mangled(): unknown[] {
+    return [
+        { ...ABSENT, kind: "forbidden" },
+        { ...THIRD, pathPrefix: null, text: "" },
+        { ...UNCHANGED, kind: "frozen" },
+    ]
+}
+
+describe("every defect in one reply", () => {
+    it("reports all three mangled predicates, and both defects of the one that lost two fields", () => {
+        const defects = defectsOf(() => validateGoalConstraintPredicates(mangled()))
+        assert.deepEqual(defects, [
+            {
+                path: "constraintPredicates[0]",
+                message: "constraintPredicates[0].kind must be absent or unchanged",
+            },
+            {
+                path: "constraintPredicates[1]",
+                message: "constraintPredicates[1].pathPrefix must be a string",
+            },
+            {
+                path: "constraintPredicates[1]",
+                message:
+                    "constraintPredicates[1] is absent and needs both a pathPrefix and the text it forbids",
+            },
+            {
+                path: "constraintPredicates[2]",
+                message: "constraintPredicates[2].kind must be absent or unchanged",
+            },
+        ])
+    })
+
+    // A predicate that drifted in two places used to cost a second repair
+    // round to hear about the second place.
+    it("reports two field defects of one predicate in a single throw", () => {
+        try {
+            validateGoalConstraintPredicates([
+                { ...ABSENT, invariantId: "whatever", kind: "gone" },
+            ])
+            assert.fail("expected the appendix to reject")
+        } catch (error) {
+            assert.ok(error instanceof GoalConstraintContractError)
+            assert.deepEqual(
+                error.defects.map((defect) => defect.message),
+                [
+                    "constraintPredicates[0].invariantId must be a GoalContract id such as G-C1",
+                    "constraintPredicates[0].kind must be absent or unchanged",
+                ],
+            )
+            assert.equal(
+                error.message,
+                error.defects.map((defect) => defect.message).join("; "),
+            )
+        }
+    })
+})
+
+describe("restoring predicates the host already accepted", () => {
+    // Drift the host can prove is drift is not worth a repair round: the
+    // identity is unambiguous, so the canonical predicate is substituted and
+    // the restoration is reported instead.
+    it("restores three drifted predicates with one warn each and no rejection", () => {
+        const { notes, sink } = recorder()
+        const predicates = validateGoalConstraintPredicates(mangled(), sink, CANON)
+        assert.deepEqual(predicates, CANON)
+        assert.deepEqual(
+            notes.map((note) => [note.severity, note.kind, note.path, note.detail]),
+            [
+                [
+                    "warn",
+                    "canonicalized_field",
+                    "constraintPredicates[0]",
+                    "constraintPredicates[0]: restored canonical predicate G-C1 (kind)",
+                ],
+                [
+                    "warn",
+                    "canonicalized_field",
+                    "constraintPredicates[1]",
+                    "constraintPredicates[1]: restored canonical predicate G-C3 (pathPrefix, text)",
+                ],
+                [
+                    "warn",
+                    "canonicalized_field",
+                    "constraintPredicates[2]",
+                    "constraintPredicates[2]: restored canonical predicate G-C2 (kind)",
+                ],
+            ],
+        )
+    })
+
+    // Substitution happens before anything judges the text, so rules that the
+    // drifted fields would fail are never consulted.
+    it("never lets a matched entry's drifted text reach the shape rules", () => {
+        const { notes, sink } = recorder()
+        const predicates = validateGoalConstraintPredicates(
+            [{ ...ABSENT, kind: "gone", pathPrefix: "../escape/" }],
+            sink,
+            [ABSENT],
+        )
+        assert.deepEqual(predicates, [ABSENT])
+        assert.deepEqual(goalPredicatesFromWire(predicates), [
+            {
+                kind: "absent",
+                invariantId: "G-C1",
+                pathPrefix: "internal/",
+                text: "github.com/jackc/pgx/v5",
+            },
+        ])
+        assert.deepEqual(notes.map((note) => note.detail), [
+            "constraintPredicates[0]: restored canonical predicate G-C1 (kind, pathPrefix)",
+        ])
+    })
+
+    // Re-validating what the host itself wrote must be silent, or every
+    // downstream pass would report a restoration that never happened.
+    it("says nothing when the input is already the canonical appendix", () => {
+        const { notes, sink } = recorder()
+        assert.deepEqual(
+            validateGoalConstraintPredicates([...CANON], sink, CANON),
+            CANON,
+        )
+        assert.deepEqual(notes, [])
+    })
+
+    it("hands the canonical appendix back through the decision document", () => {
+        const drifted = attachGoalConstraintContract("## ctx", mangled() as never)
+        const predicates = parseGoalConstraintContract(drifted, undefined, CANON)
+        assert.deepEqual(predicates, CANON)
+        assert.equal(
+            attachGoalConstraintContract("## ctx", predicates),
+            attachGoalConstraintContract("## ctx", CANON),
+        )
+    })
+})
+
+describe("what canonicalization still refuses", () => {
+    // Individually well formed and still meaning drift: nothing in the canon
+    // says it, so restoring it would be inventing a constraint.
+    it("rejects an extra predicate the canonical appendix never stated", () => {
+        const defects = defectsOf(() =>
+            validateGoalConstraintPredicates(
+                [...CANON, { ...ABSENT, invariantId: "G-C9" }],
+                undefined,
+                CANON,
+            ),
+        )
+        assert.deepEqual(defects, [
+            {
+                path: "constraintPredicates[3]",
+                message:
+                    "constraintPredicates[3] does not match any canonical constraint predicate",
+            },
+        ])
+    })
+
+    it("rejects an appendix that dropped a canonical predicate", () => {
+        const defects = defectsOf(() =>
+            validateGoalConstraintPredicates([ABSENT, THIRD], undefined, CANON),
+        )
+        assert.deepEqual(defects, [
+            {
+                path: "constraintPredicates[2]",
+                message: "constraintPredicates is missing the canonical predicate G-C2",
+            },
+        ])
+    })
+
+    // Two canonical predicates carry the same id and neither is claimed by
+    // index: guessing between them would restore a constraint nobody stated.
+    it("leaves an entry unmatched when two canonical predicates share its id", () => {
+        const ambiguous = [UNCHANGED, ABSENT, { ...ABSENT, pathPrefix: "cmd/" }]
+        const defects = defectsOf(() =>
+            validateGoalConstraintPredicates(
+                [{ ...ABSENT, kind: "frozen" }],
+                undefined,
+                ambiguous,
+            ),
+        )
+        assert.deepEqual(
+            defects.map((defect) => defect.message),
+            [
+                "constraintPredicates[0].kind must be absent or unchanged",
+                "constraintPredicates[0] does not match any canonical constraint predicate",
+                "constraintPredicates is missing the canonical predicate G-C2",
+                "constraintPredicates is missing the canonical predicate G-C1",
+                "constraintPredicates is missing the canonical predicate G-C1",
+            ],
+        )
+    })
+
+    // The id key itself drifted, so the entry has no identity to match on and
+    // its position no longer agrees with the canon. Key-case repair does not
+    // run first: it would hand matching a value the model never wrote there.
+    it("leaves an entry unmatched when its invariantId key drifted out of position", () => {
+        const defects = defectsOf(() =>
+            validateGoalConstraintPredicates(
+                [
+                    UNCHANGED,
+                    {
+                        invariantID: "G-C1",
+                        kind: "absent",
+                        pathPrefix: "internal/",
+                        pathSuffix: "",
+                        text: "github.com/jackc/pgx/v5",
+                    },
+                ],
+                undefined,
+                [ABSENT, UNCHANGED],
+            ),
+        )
+        assert.deepEqual(defects, [
+            {
+                path: "constraintPredicates[1]",
+                message:
+                    "constraintPredicates[1] does not match any canonical constraint predicate",
+            },
+            {
+                path: "constraintPredicates[0]",
+                message: "constraintPredicates is missing the canonical predicate G-C1",
+            },
+        ])
+    })
+})
+
+describe("callers that never supply a canonical appendix", () => {
+    // The gate is used everywhere with two arguments. An omitted or empty
+    // canon has to mean exactly what it meant before canonicalization existed.
+    it("behaves as it always did for an omitted and for an empty canon", () => {
+        for (const canonical of [undefined, []]) {
+            const { notes, sink } = recorder()
+            assert.deepEqual(
+                validateGoalConstraintPredicates([ABSENT, null, UNCHANGED], sink, canonical),
+                [ABSENT, UNCHANGED],
+            )
+            assert.deepEqual(notes, [
+                {
+                    severity: "warn",
+                    kind: "skipped_absent_entry",
+                    path: "constraintPredicates[1]",
+                    detail: "constraintPredicates[1]: skipped absent entry",
+                },
+            ])
+            assert.deepEqual(
+                defectsOf(() =>
+                    validateGoalConstraintPredicates(
+                        [{ ...ABSENT, invariantId: "whatever" }],
+                        undefined,
+                        canonical,
+                    ),
+                ),
+                [
+                    {
+                        path: "constraintPredicates[0]",
+                        message:
+                            "constraintPredicates[0].invariantId must be a GoalContract id such as G-C1",
+                    },
+                ],
+            )
+        }
+    })
+
+    it("keeps the eager array and bound checks ahead of any matching", () => {
+        assert.throws(
+            () => validateGoalConstraintPredicates("nope", undefined, CANON),
+            /constraintPredicates must be an array/u,
+        )
+        const oversized = Array.from(
+            { length: MAX_CONSTRAINT_PREDICATES + 1 },
+            () => ABSENT,
+        )
+        assert.throws(
+            () => validateGoalConstraintPredicates(oversized, undefined, CANON),
+            new RegExp(`exceeds ${MAX_CONSTRAINT_PREDICATES} entries`, "u"),
+        )
+    })
+})
