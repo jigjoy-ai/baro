@@ -9,7 +9,7 @@ use crate::cli::session::SessionLock;
     name = "baro",
     version,
     about = "AI-powered project execution",
-    after_help = "Run commands (handled before flag parsing):\n  baro watch <run-id>            follow a live run and print milestone events\n  baro logs <run-id> [--follow]  print (or tail) a run's log file\n\n--resume never re-plans; --continue always re-plans.\n\nIssues: https://github.com/jigjoy-ai/baro/issues\nTwitter: @lotus_sbc"
+    after_help = crate::cli::usage::AFTER_HELP
 )]
 pub struct Cli {
     /// Project goal (if omitted, shows welcome screen)
@@ -433,5 +433,22 @@ mod tests {
             help.contains("Read the goal text from a file (mutually exclusive with the positional goal)"),
             "missing --goal-file help"
         );
+    }
+
+    #[test]
+    fn long_help_contains_summaries() {
+        use crate::cli::usage;
+
+        let help = Cli::command().render_long_help().to_string();
+        for summary in [
+            usage::CONNECT_SUMMARY,
+            usage::LOGIN_SUMMARY,
+            usage::RUNS_SUMMARY,
+            usage::STOP_SUMMARY,
+            usage::WATCH_SUMMARY,
+            usage::LOGS_SUMMARY,
+        ] {
+            assert!(help.contains(summary), "epilogue drifted from {summary}:\n{help}");
+        }
     }
 }

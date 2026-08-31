@@ -1,0 +1,6 @@
+# ADR-0003: Emit `baro <CARGO_PKG_VERSION>` as the pre-clap version line to match clap byte-for-byte
+
+**Status:** Accepted
+**Context:** `baro --version` is produced by clap's bare `version` attribute (cli/cli.rs:10), which prints `{command name} {version}` — i.e. `baro 0.104.0` — followed by a newline. The acceptance criterion requires the pre-clap path to print the same string. There is no existing reusable version const; the crate uses inline `env!("CARGO_PKG_VERSION")` (main.rs:577,580; screens/welcome.rs:288).
+**Decision:** In `src/cli/usage.rs`: `pub const VERSION_LINE: &str = concat!("baro ", env!("CARGO_PKG_VERSION"));` printed with `println!` (single trailing newline). Do NOT change the clap `version` attribute in cli/cli.rs, do NOT add a `long_version`, and do NOT introduce a second version const elsewhere or rewrite the existing `env!` call sites at main.rs:577/580 or welcome.rs:288. The literal command name `baro` matches `name = "baro"` at cli/cli.rs:9.
+**Consequences:** A unit test must assert `VERSION_LINE == format!("baro {}", env!("CARGO_PKG_VERSION"))` and that it equals the first line of `crate::cli::cli::Cli::command().render_version().to_string()`, which pins the two sources together if clap's name or version attribute ever changes.

@@ -370,6 +370,21 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     // `baro connect [--token …] [--workspace …]` — run as a baro-cloud runner.
     // Handled before clap / the session lock so it bypasses the TUI entirely.
     let raw_args: Vec<String> = std::env::args().collect();
+    // Must stay the first statement after raw_args: every branch below has a side
+    // effect (browser launch, network call, registry write, process signal).
+    if let Some(cmd) = raw_args.get(1).map(|s| s.as_str()) {
+        match cli::usage::pre_clap_response(cmd, &raw_args[2..]) {
+            Some(cli::usage::PreClapResponse::Help(text)) => {
+                print!("{text}");
+                return Ok(());
+            }
+            Some(cli::usage::PreClapResponse::Version) => {
+                println!("{}", cli::usage::VERSION_LINE);
+                return Ok(());
+            }
+            None => {}
+        }
+    }
     if raw_args.get(1).map(|s| s.as_str()) == Some("connect") {
         return run_connect(&raw_args[2..]).await;
     }
@@ -702,18 +717,6 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             "--no-service" => {
                 no_service_prompt = true;
                 i += 1;
-            }
-            "-h" | "--help" => {
-                println!("Usage: baro connect [--token <rt_…>] [--workspace <git repo>]");
-                println!("Pairs this machine with baro-cloud and runs dispatched goals over your subscription.");
-                println!("Run `baro login` first and the token is optional — connect signs in automatically.");
-                println!();
-                println!("  --install-service    install a background service (launchd/systemd/Task Scheduler)");
-                println!("                       so the runner survives terminal close, logout, and reboot");
-                println!("  --uninstall-service  remove that service");
-                println!("  --no-service         don't offer to install the background service after pairing");
-                println!("  --once               run exactly one dispatched goal, then exit (cloud workers)");
-                return Ok(());
             }
             _ => i += 1,
         }
@@ -4445,6 +4448,25 @@ mod tests {
         reconcile_jigjoy_phase_overrides, resolve_parallel_limit, App, JIGJOY_CHEAP_STORY_MODEL,
         JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL, JIGJOY_STRONG_MODEL,
     };
+
+    #[test]
+    fn after_help_epilogue_matches_pre_clap_usage() {
+        use clap::CommandFactory;
+
+        use crate::cli::usage;
+
+        let help = crate::cli::cli::Cli::command().render_long_help().to_string();
+        for summary in [
+            usage::CONNECT_SUMMARY,
+            usage::LOGIN_SUMMARY,
+            usage::RUNS_SUMMARY,
+            usage::STOP_SUMMARY,
+            usage::WATCH_SUMMARY,
+            usage::LOGS_SUMMARY,
+        ] {
+            assert!(help.contains(summary), "epilogue drifted from {summary}:\n{help}");
+        }
+    }
 
     // Nested so every test's full path carries `goal_fingerprint`, letting
     // `cargo test -p baro-tui goal_fingerprint` catch all four by itself.
