@@ -14,6 +14,7 @@ import type {
     RuntimeReplanMutation,
     RuntimeReplanRejectionCode,
 } from "../semantic-events.js"
+import type { WriteSurfaceOverlapFacts } from "../events/runtime-graph.js"
 import { deriveGoalContract } from "../goal/goal-contract.js"
 import {
     architectureObligationsFromDecision,
@@ -42,6 +43,8 @@ export interface RuntimeReplanValidationFailure {
     ok: false
     code: RuntimeReplanRejectionCode
     reason: string
+    /** Populated only for `overlapping_write_surface`. */
+    overlap?: WriteSurfaceOverlapFacts
 }
 
 export type RuntimeReplanValidationResult =
@@ -353,12 +356,18 @@ function validateCandidateGraph(
 
     const overlap = findWriteSurfaceOverlap(candidate, addedStoryIds)
     if (overlap) {
-        return reject(
+        const failure = reject(
             "overlapping_write_surface",
             `overlapping write surface: story '${overlap.addedStoryId}' ` +
                 `writes ${overlap.paths.join(", ")} ` +
                 `already owned by story '${overlap.ownerStoryId}'`,
         )
+        const facts = collectWriteSurfaceOverlapFacts(
+            candidate,
+            addedStoryIds,
+            overlap.addedStoryId,
+        )
+        return facts ? { ...failure, overlap: facts } : failure
     }
 
     try {
@@ -455,6 +464,47 @@ function findWriteSurfaceOverlap(
         }
     }
     return undefined
+}
+
+/**
+ * Read-only companion to `findWriteSurfaceOverlap`: same owner filter, but
+ * every colliding owner instead of the first, so the planner is told which
+ * paths are still free rather than only that one is taken.
+ */
+function collectWriteSurfaceOverlapFacts(
+    candidate: PrdFile,
+    addedStoryIds: readonly string[],
+    candidateStoryId: string,
+): WriteSurfaceOverlapFacts | undefined {
+    const added = new Set(addedStoryIds)
+    const subject = candidate.userStories.find(
+        (story) => story.id === candidateStoryId,
+    )
+    if (!subject) return undefined
+    const subjectWrites = writeSurfaceOf(subject)
+    if (subjectWrites.length === 0) return undefined
+    const subjectSet = new Set(subjectWrites)
+
+    const owners: WriteSurfaceOverlapFacts["owners"] = []
+    const collided = new Set<string>()
+    for (const owner of candidate.userStories) {
+        if (owner.id === candidateStoryId) continue
+        if (added.has(owner.id) || owner.passes === true) continue
+        const ownedFiles = writeSurfaceOf(owner).sort()
+        const collidingPaths = ownedFiles.filter((path) => subjectSet.has(path))
+        if (collidingPaths.length === 0) continue
+        for (const path of collidingPaths) collided.add(path)
+        owners.push({ storyId: owner.id, ownedFiles, collidingPaths })
+    }
+    if (owners.length === 0) return undefined
+
+    return {
+        candidateStoryId,
+        owners,
+        remainingPaths: subjectWrites
+            .filter((path) => !collided.has(path))
+            .sort(),
+    }
 }
 
 function goalContractMappings(stories: readonly PrdStory[]) {

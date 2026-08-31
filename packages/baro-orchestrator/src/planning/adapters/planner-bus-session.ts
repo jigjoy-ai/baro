@@ -42,11 +42,13 @@ import type { GoalEnvelope } from "../../conversation/session/conversation-contr
 import {
     PLANNER_SYSTEM_PROMPT,
     buildFinalPrdRepairMessage,
+    buildWriteSurfaceOverlapRemedySection,
     buildPlannerUserMessage,
     heuristicModeContract,
     type ModeContract,
 } from "../domain/planner-prompts.js"
 import { missingObligationIdsFromError } from "../domain/architecture-obligation-contract.js"
+import type { WriteSurfaceOverlapFacts } from "../../events/runtime-graph.js"
 import { formatObligationIdList } from "../domain/obligation-coverage-report.js"
 import {
     createPlannerHarnessProgressiveSupport,
@@ -130,6 +132,7 @@ interface FragmentReceipt {
     replay?: boolean
     rejectionCode?: string
     rejectionReason?: string
+    overlap?: WriteSurfaceOverlapFacts
 }
 
 /** Resolves fragment receipts by correlating admission events on the bus. */
@@ -171,6 +174,7 @@ class ReceiptObserver extends BaseObserver {
                 admitted: false,
                 rejectionCode: event.data.code,
                 rejectionReason: event.data.reason,
+                ...(event.data.overlap ? { overlap: event.data.overlap } : {}),
             })
         }
     }
@@ -338,6 +342,9 @@ export async function runPlannerBusSession(
     const receipts = new ReceiptObserver(planningId)
     receipts.join(opts.env)
 
+    // The overlap facts arrive on the fragment receipt, but the planner is
+    // told about them again on the finalization retry, which sees no receipt.
+    let lastWriteSurfaceOverlap: WriteSurfaceOverlapFacts | undefined
     let progressive: Awaited<
         ReturnType<typeof createPlannerHarnessProgressiveSupport>
     >
@@ -356,9 +363,14 @@ export async function runPlannerBusSession(
                 opts.feed.fragment(event)
                 const outcome = await receipt
                 if (!outcome.admitted) {
-                    throw new Error(
-                        `fragment rejected (${outcome.rejectionCode}): ${outcome.rejectionReason}`,
-                    )
+                    const base = `fragment rejected (${outcome.rejectionCode}): ${outcome.rejectionReason}`
+                    if (outcome.overlap) {
+                        lastWriteSurfaceOverlap = outcome.overlap
+                        throw new Error(
+                            `${base}\n\n${buildWriteSurfaceOverlapRemedySection(outcome.overlap)}`,
+                        )
+                    }
+                    throw new Error(base)
                 }
                 return {
                     graphVersion: outcome.graphVersion,
@@ -571,6 +583,9 @@ export async function runPlannerBusSession(
                             reason,
                             error: rejectionError,
                             unownedObligationIds: unowned,
+                            ...(lastWriteSurfaceOverlap
+                                ? { writeSurfaceOverlap: lastWriteSurfaceOverlap }
+                                : {}),
                         }),
                     )
                     repairMessagesSent += 1

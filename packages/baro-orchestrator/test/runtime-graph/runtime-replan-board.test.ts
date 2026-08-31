@@ -947,6 +947,66 @@ describe("runtime replan write-surface disjointness", () => {
         assert.deepEqual(result.addedStoryIds, ["S4"])
     })
 
+    it("carries overlap facts for every colliding owner", () => {
+        const result = validateRuntimeReplanMutation(
+            surfacePrd(),
+            addOnly("S4", ["./src/two.ts", "src/three.ts", "src/four.ts"]),
+            surfaceOptions(),
+        )
+        assert.ok(!result.ok)
+        assert.equal(result.code, "overlapping_write_surface")
+        assert.deepEqual(result.overlap, {
+            candidateStoryId: "S4",
+            owners: [
+                {
+                    storyId: "S2",
+                    ownedFiles: ["src/alpha.ts", "src/two.ts"],
+                    collidingPaths: ["src/two.ts"],
+                },
+                {
+                    storyId: "S3",
+                    ownedFiles: ["src/three.ts"],
+                    collidingPaths: ["src/three.ts"],
+                },
+            ],
+            remainingPaths: ["src/four.ts"],
+        })
+    })
+
+    it("reports an empty remainder when every candidate path collides", () => {
+        const result = validateRuntimeReplanMutation(
+            surfacePrd(),
+            addOnly("S4", ["src/two.ts", "src/three.ts"]),
+            surfaceOptions(),
+        )
+        assert.ok(!result.ok)
+        assert.deepEqual(result.overlap?.remainingPaths, [])
+        assert.deepEqual(
+            result.overlap?.owners.map((owner) => owner.storyId),
+            ["S2", "S3"],
+        )
+    })
+
+    it("admits the resubmitted tail re-scoped onto the reported remainder", () => {
+        const rejected = validateRuntimeReplanMutation(
+            surfacePrd(),
+            addOnly("S4", ["src/two.ts", "src/four.ts"]),
+            surfaceOptions(),
+        )
+        assert.ok(!rejected.ok)
+        const remaining = rejected.overlap?.remainingPaths ?? []
+        assert.deepEqual(remaining, ["src/four.ts"])
+
+        const result = validateRuntimeReplanMutation(
+            surfacePrd(),
+            addOnly("S4", [...remaining]),
+            surfaceOptions(),
+        )
+        assert.ok(result.ok)
+        assert.deepEqual(result.addedStoryIds, ["S4"])
+        assert.ok(!("overlap" in result))
+    })
+
     it("admits an overlap with a story that already passes", () => {
         const prd = surfacePrd()
         prd.userStories[2] = { ...prd.userStories[2]!, passes: true }

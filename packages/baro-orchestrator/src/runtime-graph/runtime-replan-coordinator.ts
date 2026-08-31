@@ -226,6 +226,7 @@ export class RuntimeReplanCoordinator {
                 fingerprint,
                 validation.code,
                 validation.reason,
+                validation.overlap,
             )
         }
 
@@ -389,8 +390,9 @@ export class RuntimeReplanCoordinator {
         fingerprint: string,
         code: RuntimeReplanRejectedData["code"],
         reason: string,
+        overlap?: RuntimeReplanRejectedData["overlap"],
     ): RuntimeReplanDecisionOutcome {
-        const event = this.rejection(proposal, code, reason)
+        const event = this.rejection(proposal, code, reason, overlap)
         if (proposal.proposalId && !retryableRejection(code)) {
             this.decisions.set(proposal.proposalId, { fingerprint, event })
         }
@@ -401,6 +403,7 @@ export class RuntimeReplanCoordinator {
         proposal: RuntimeReplanProposedData,
         code: RuntimeReplanRejectedData["code"],
         reason: string,
+        overlap?: RuntimeReplanRejectedData["overlap"],
     ): ReturnType<typeof RuntimeReplanRejected.create> {
         return RuntimeReplanRejected.create({
             runId: proposal.runId,
@@ -412,6 +415,7 @@ export class RuntimeReplanCoordinator {
             currentGraphVersion: this.graphVersionValue,
             code,
             reason,
+            ...(overlap ? { overlap } : {}),
         })
     }
 }
