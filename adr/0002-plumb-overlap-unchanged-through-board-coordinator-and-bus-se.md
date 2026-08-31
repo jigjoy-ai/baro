@@ -1,0 +1,10 @@
+# ADR-0002: Plumb `overlap` unchanged through board, coordinator and bus session
+
+**Status:** Accepted
+**Context:** The facts are produced in runtime-replan but consumed by the planner-facing message. Four hops already forward `reason` verbatim. Re-deriving ownership at any hop would duplicate authority; the board holds `prd` by reference but exposes no ownership accessor.
+**Decision:** Forward the optional field, never re-derive it:
+1. src/execution/collective-board.ts:1273-1279 — read `rejected.data.overlap` and pass it as a new trailing optional parameter to `rejectWorkBlock(request, code, reason, overlap?: WriteSurfaceOverlapFacts)` (collective-board.ts:1374-1392); store it on the rejection record it already builds.
+2. src/planning/application/progressive-planning-coordinator.ts — add `overlap?: WriteSurfaceOverlapFacts` to the rejected fragment-outcome type (declared near :95-98, produced by `rejectPlanFragment` at :845) and set it on the `graph_rejected` branch at :497-506.
+3. src/planning/adapters/planner-bus-session.ts — at :358-362 the thrown tool error becomes `fragment rejected (${code}): ${reason}` unchanged when `outcome.overlap` is absent, and `fragment rejected (${code}): ${reason}\n\n${buildWriteSurfaceOverlapRemedySection(outcome.overlap)}` when present. In the finalization retry loop (:520-633) keep a `let lastWriteSurfaceOverlap: WriteSurfaceOverlapFacts | undefined`, assigned from the rejection caught at :551-563, and pass it to `buildFinalPrdRepairMessage` at :567-577.
+No other module reads or writes `overlap`. Do NOT add a board accessor, do NOT change `ownerOfPath` (collective-board.ts:2932) or `storyWriteSurface` (src/planning/domain/write-surface.ts:18-33).
+**Consequences:** Four files change by additive optional fields only. Both retry surfaces (mid-stream fragment rejection and finalization repair) get the same enrichment from one source of truth. When the facts are absent the messages are byte-identical to today, so unrelated rejection-path tests are unaffected.

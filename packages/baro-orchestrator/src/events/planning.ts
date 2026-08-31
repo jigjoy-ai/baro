@@ -1,6 +1,7 @@
 /** Progressive planning stream: planner fragments and stream lifecycle. Wire `type` strings are frozen (see ../semantic-events.ts). */
 
 import { defineSemanticEvent } from "./define.js"
+import type { WriteSurfaceOverlapFacts } from "./runtime-graph.js"
 
 // Progressive planning is an opt-in collective control-plane lane. Planner
 // fragments are proposals until the Board validates and durably admits them;
@@ -62,6 +63,7 @@ export interface PlanFragmentRejectedData {
     ordinal?: number
     code: PlanFragmentRejectionCode
     reason: string
+    overlap?: WriteSurfaceOverlapFacts
 }
 
 export const PlanFragmentRejected =

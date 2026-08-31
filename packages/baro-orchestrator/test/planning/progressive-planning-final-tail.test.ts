@@ -103,13 +103,70 @@ describe("final planner tail admission", () => {
         assert.equal(harness.rejections()[0]?.code, "planning_not_open")
         assert.equal(harness.discards().length, 0)
 
-        assert.equal(harness.toleranceCalls().length, 1)
+        assert.equal(
+            harness.toleranceCalls().length,
+            2,
+            "the failure is composed from a second, decision-time evaluation",
+        )
 
         const activity = harness.activity()
         assert.equal(activity.length, 1)
         assert.equal(activity[0]?.kind, "error")
         assert.match(activity[0]?.text ?? "", /planning_not_open/)
         assert.match(activity[0]?.text ?? "", /blocker: obligation_unowned/)
+    })
+
+    it("closes completed when the tail is redundant on the fresh board", () => {
+        const harness = buildHarness({
+            phase: "pushing",
+            settleAfterFirstEvaluation: true,
+        })
+
+        harness.complete()
+
+        assert.equal(
+            harness.toleranceCalls().length,
+            2,
+            "a blocked first evaluation is re-taken against the live board",
+        )
+        assert.equal(harness.planning().status, "completed")
+        assert.equal(harness.planning().terminalReason, undefined)
+        assert.equal(harness.closed()?.status, "completed")
+
+        const discarded = harness.discards()
+        assert.equal(discarded.length, 1)
+        assert.deepEqual(discarded[0]?.storyIds, ["S2"])
+
+        const activity = harness.activity()
+        assert.equal(activity.length, 1)
+        assert.equal(activity[0]?.kind, "warn")
+        assert.match(activity[0]?.text ?? "", /dropped stories: S2/)
+    })
+
+    it("never names a fresh-settled story in the terminal failure", () => {
+        const harness = buildHarness({
+            phase: "pushing",
+            obligations: true,
+            settleAfterFirstEvaluation: true,
+        })
+
+        harness.complete()
+
+        assert.equal(harness.toleranceCalls().length, 2)
+        const planning = harness.planning()
+        assert.equal(planning.status, "failed")
+        const reason = planning.terminalReason ?? ""
+        assert.match(reason, /^final_tail_rejected: /)
+        assert.match(reason, /tail not redundant: obligation_unowned: /)
+        assert.match(reason, /no story owns: O-002/)
+        assert.doesNotMatch(reason, /S1/)
+        assert.equal(harness.discards().length, 0)
+
+        const activity = harness.activity()
+        assert.equal(activity.length, 1)
+        assert.equal(activity[0]?.kind, "error")
+        assert.match(activity[0]?.text ?? "", /blocker: obligation_unowned/)
+        assert.doesNotMatch(activity[0]?.text ?? "", /unsettled_stories/)
     })
 
     // The replay branch admits nothing new and leaves nextOrdinal untouched, so
@@ -172,8 +229,8 @@ describe("final planner tail admission", () => {
         assert.deepEqual(harness.activity(), [])
     })
     // What makes the method spy above a spy on the tolerance function: there is
-    // one call site, it lives in discardRedundantFinalTail, and that method is
-    // reached only from the rejected branch of the tail block.
+    // one call site, it lives inside discardRedundantFinalTail's own section of
+    // the file, and that method is reached only from the rejected branch.
     it("keeps evaluateFinalTailTolerance to one call site, in the rejected branch", () => {
         const source = readFileSync(
             new URL(
@@ -430,6 +487,8 @@ interface HarnessOptions {
     replayTail?: boolean
     /** Let admitGraph apply, so the tail is genuinely admitted. */
     admitTail?: boolean
+    /** Leave S1 unsettled, then settle it once the first evaluation has run. */
+    settleAfterFirstEvaluation?: boolean
 }
 
 interface Harness {
@@ -475,7 +534,10 @@ function buildHarness(options: HarnessOptions): Harness {
 
     // The admitted prefix is settled only where the scenario needs tolerance to
     // pass; the replay/admit scenarios deliberately leave it unsettled.
-    const settled = !options.replayTail && !options.admitTail
+    const settled =
+        !options.replayTail &&
+        !options.admitTail &&
+        !options.settleAfterFirstEvaluation
     const runtimeS1: PrdStory = {
         ...structuredClone(authoredS1),
         ...(settled ? { passes: true, mergeStatus: "merged" as const } : {}),
@@ -611,7 +673,7 @@ function buildHarness(options: HarnessOptions): Harness {
     })
 
     // evaluateFinalTailTolerance is an ESM binding the coordinator imports
-    // directly, so it cannot be replaced from a test. discardRedundantFinalTail
+    // directly, so it cannot be replaced from a test. evaluateTailToleranceNow
     // is its sole call site — asserted below — so shadowing that method on the
     // instance spies on the tolerance invocation itself.
     const toleranceCalls: unknown[][] = []
@@ -619,10 +681,21 @@ function buildHarness(options: HarnessOptions): Harness {
         string,
         (...args: unknown[]) => unknown
     >
-    const realDiscard = spied.discardRedundantFinalTail!.bind(coordinator)
-    spied.discardRedundantFinalTail = (...args: unknown[]) => {
+    const realEvaluate = spied.evaluateTailToleranceNow!.bind(coordinator)
+    spied.evaluateTailToleranceNow = (...args: unknown[]) => {
         toleranceCalls.push(args)
-        return realDiscard(...args)
+        const result = realEvaluate(...args)
+        if (options.settleAfterFirstEvaluation && toleranceCalls.length === 1) {
+            prd = {
+                ...prd,
+                userStories: prd.userStories.map((entry) =>
+                    entry.id === "S1"
+                        ? { ...entry, passes: true, mergeStatus: "merged" as const }
+                        : entry,
+                ),
+            }
+        }
+        return result
     }
 
     return {

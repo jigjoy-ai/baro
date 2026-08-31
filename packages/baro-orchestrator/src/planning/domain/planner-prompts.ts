@@ -7,6 +7,7 @@ import {
     renderArchitectureObligationCriterion,
 } from "./architecture-obligation-contract.js"
 import { formatObligationIdList } from "./obligation-coverage-report.js"
+import type { WriteSurfaceOverlapFacts } from "../../events/runtime-graph.js"
 
 /**
  * Planner system prompt, shared by all planner backends so providers
@@ -539,6 +540,32 @@ export const PLANNER_FINAL_PRD_SCHEMA_SUMMARY = [
 ].join("\n")
 
 /**
+ * The one place write-surface overlap remedies are worded. Both retry
+ * surfaces — the mid-stream fragment error and the finalization repair
+ * message — render this, so the planner never sees two dialects.
+ */
+export function buildWriteSurfaceOverlapRemedySection(
+    facts: WriteSurfaceOverlapFacts,
+): string {
+    const remaining =
+        facts.remainingPaths.length > 0
+            ? facts.remainingPaths.join(", ")
+            : "no files remain available to this story"
+    return [
+        `Write-surface overlap (${facts.owners.length}):`,
+        ...facts.owners.map(
+            (owner) =>
+                `- story '${owner.storyId}' owns: ${owner.ownedFiles.join(", ")}; ` +
+                `collides on: ${owner.collidingPaths.join(", ")}`,
+        ),
+        "Remedies (pick one):",
+        `1. Drop the overlapping file(s) from this story and keep only the files still available to it: ${remaining}`,
+        "2. Drop this story entirely if its purpose is already covered by a settled story's merged output.",
+        "3. Re-scope this story onto files no settled story owns.",
+    ].join("\n")
+}
+
+/**
  * The v0.100.0 architect repair recipe applied to the final PRD: the whole
  * defect list, every obligation still unowned, the terminal shape, and what
  * happens to anything else.
@@ -547,6 +574,7 @@ export function buildFinalPrdRepairMessage(input: {
     reason: string
     error?: unknown
     unownedObligationIds: readonly string[]
+    writeSurfaceOverlap?: WriteSurfaceOverlapFacts
 }): string {
     // contractDefects synthesizes a defect from whatever it is handed, so an
     // absent error must not become the literal defect "undefined".
@@ -557,6 +585,11 @@ export function buildFinalPrdRepairMessage(input: {
         "Your final PRD was rejected. Fix every defect listed below in one reply.",
         `Defects (${defects.length}):\n${formatDefectList(defects)}`,
     ]
+    if (input.writeSurfaceOverlap) {
+        sections.push(
+            buildWriteSurfaceOverlapRemedySection(input.writeSurfaceOverlap),
+        )
+    }
     if (input.unownedObligationIds.length > 0) {
         sections.push(
             `Unowned architecture obligations (${input.unownedObligationIds.length}):\n` +

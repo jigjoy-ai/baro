@@ -115,11 +115,28 @@ export type RuntimeReplanRejectionCode =
     | "prompt_projection_overflow"
     | "run_not_active"
 
+/** One admitted story the candidate collides with, and what it already owns. */
+export interface WriteSurfaceOverlapOwner {
+    storyId: string
+    ownedFiles: string[]
+    collidingPaths: string[]
+}
+
+/** Structured companion to the `overlapping_write_surface` reason string,
+ *  carried so the planner-facing message can name remedies without
+ *  re-deriving ownership downstream. */
+export interface WriteSurfaceOverlapFacts {
+    candidateStoryId: string
+    owners: WriteSurfaceOverlapOwner[]
+    remainingPaths: string[]
+}
+
 export interface RuntimeReplanRejectedData
     extends RuntimeReplanCorrelationData {
     currentGraphVersion: number
     code: RuntimeReplanRejectionCode
     reason: string
+    overlap?: WriteSurfaceOverlapFacts
 }
 
 export const RuntimeReplanRejected =

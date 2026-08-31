@@ -11,66 +11,33 @@
 ```json
 {
   "graphVersion": 2,
-  "proposalId": "run-progressive-5454d438780869ea:planner:27a8bd5a778dac6bf9e156380fff0784c6c6812f4c21099d4772ffadf7762a87",
-  "sourceStoryId": "planner:planning-5454d438780869ea-1",
-  "reason": "progressive planner admitted fragment goal-constraint-canonicalization-prefix-2",
-  "exactMutationSha256": "059193cff90c7e10219dcd25707398574d55d3526543d1ec2c0ee2830fca4351",
+  "proposalId": "run-progressive-d497b3daccc7bb61:planner:53901aa5bff5e5adb4879fbb0458c63b27b001fc9cf535c72c27cbd4a4db4a28",
+  "sourceStoryId": "planner:planning-d497b3daccc7bb61-1",
+  "reason": "progressive planner admitted fragment fix-104-fragment-1",
+  "exactMutationSha256": "47a5070cd617c4f5e4b46be2f1b21690e7cb18494ee7ec7415ee414ea95feb44",
   "mutationSummary": {
     "addedStories": [
       {
         "id": "S1",
-        "title": "Canonicalize and fully aggregate constraint-predicate defects in goal-constraint-appendix.ts",
+        "title": "Carry write-surface overlap facts to the planner and render the three remedies",
         "dependsOn": [],
         "goalInvariantIds": [
           "G-A1",
           "G-A2",
-          "G-A3",
-          "G-A4",
           "G-A5",
           "G-C1",
-          "G-C2",
-          "G-C3",
-          {
-            "omittedItems": 4
-          }
+          "G-C3"
         ]
       },
       {
-        "id": "S3",
-        "title": "Record the predicate-matching rule in a new ADR",
-        "dependsOn": [],
-        "goalInvariantIds": [
-          "G-C6",
-          "G-C7"
-        ]
-      }
-    ],
-    "removedStoryIds": [],
-    "modifiedDeps": {}
-  }
-}
-```
-
-## Graph version 3
-
-```json
-{
-  "graphVersion": 3,
-  "proposalId": "run-progressive-5454d438780869ea:planner:cde06fc20317d2c72a65c9a5012a92d6d480455e127c7d2e44a5dc4455dfcc94",
-  "sourceStoryId": "planner:planning-5454d438780869ea-1",
-  "reason": "progressive planner admitted fragment final-53d7ed239d777b3e5672c6a1cce5b37637b99a9f933a407b126f005f7c5efcba",
-  "exactMutationSha256": "67c3ced7886880917686a730b28688cd83f02b9247cbba8a3ab39e4da94381ff",
-  "mutationSummary": {
-    "addedStories": [
-      {
         "id": "S2",
-        "title": "Thread canonicalConstraintPredicates through the outcome gate and wire it in run-architect",
+        "title": "Decide the final tail on a fresh board snapshot and compose the failure from it",
         "dependsOn": [
           "S1"
         ],
         "goalInvariantIds": [
-          "G-A1",
-          "G-A2",
+          "G-A3",
+          "G-A4",
           "G-A5",
           "G-C2",
           "G-C4",
