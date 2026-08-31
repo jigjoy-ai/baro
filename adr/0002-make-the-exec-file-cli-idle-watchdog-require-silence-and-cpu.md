@@ -1,0 +1,10 @@
+# ADR-0002: Make the exec-file-cli idle watchdog require silence AND CPU idleness
+
+**Status:** Accepted
+**Context:** `execFileCli` is the only spawn site for verification commands, so the fix belongs there rather than in verify.ts. Today the `idleTimer` expiry terminates immediately on silence alone (exec-file-cli.ts:190-202), killing long silent-but-working commands and producing gate flake.
+**Decision:** Modify `packages/baro-orchestrator/src/harness/exec-file-cli.ts` only:
+- Add to `ExecFileCliOptions`: `cpuActivityProbe?: (rootPid: number, previous: CpuActivitySample | null) => Promise<{ active: boolean; sample: CpuActivitySample }>`. Default implementation calls `sampleProcessTreeCpu(rootPid)` and returns `{ active: previous === null ? true : cpuAdvanced(previous, sample), sample }` — i.e. the first expiry after spawn always grants one extension, subsequent ones require measured advance.
+- Replace the idle expiry body: instead of calling `terminate(err)` directly, run the probe (guarded by an internal `Promise.race` against `CPU_PROBE_TIMEOUT_MS`; a probe rejection or timeout counts as `active: true`). If `active` is true, store the returned sample, call `petIdle()` to restart the same `idleTimeoutMs` window, and continue. If `active` is false, terminate with the existing message `"<command> produced no output for <idleMs>ms — presumed hung"` and `killed = true` (unchanged shape).
+- Do not probe when `child.pid` is undefined or the child has already exited; in that case keep the current terminate behaviour.
+- Keep `petIdle()` resetting on stdout/stderr data exactly as today; the CPU check runs only at expiry.
+**Consequences:** Silent-but-busy commands are no longer killed; the only remaining bound on them is the absolute ceiling from ADR-003, which runCmd must always pass. Tests for this behaviour inject `cpuActivityProbe` and a short `idleTimeoutMs`, so no real 5-minute waits. `wasKilled` handling in continuous-gate-runner.ts:66-70,186 is unchanged because the error shape is unchanged.
