@@ -66,7 +66,7 @@ async function waitForProcessExit(pid: number, timeoutMs = 2_000): Promise<void>
 }
 
 describe("verifyBuild", () => {
-    it("retries a failed test command once and lets the retry decide", async () => {
+    it("retries a failed run-level command once and lets the retry decide", async () => {
         await withTempDir("baro-verify-flake-retry-", async (dir) => {
             const flakeScript =
                 "const fs = require('fs');" +
@@ -85,25 +85,27 @@ describe("verifyBuild", () => {
                         cwd: dir,
                     },
                     {
-                        label: "npm run build (fixture)",
+                        label: "npm run test (declared fixture)",
                         tool: process.execPath,
                         args: ["-e", "process.exit(1)"],
                         cwd: dir,
+                        origin: "declared" as const,
                     },
                 ],
             } as ReturnType<typeof createVerifyPlan>
 
-            const result = await verifyBuild(dir, { plan })
+            const result = await verifyBuild(dir, { plan, emitActivity: () => {} })
 
             const test = result.commands[0]!
             assert.equal(test.status, "passed")
             assert.equal(test.retriedAfterFailure, true)
             assert.match(test.firstFailureTail ?? "", /first attempt fails/)
 
-            // A failed build is deterministic: no retry, single attempt.
-            const build = result.commands[1]!
-            assert.equal(build.status, "failed")
-            assert.equal(build.retriedAfterFailure, undefined)
+            // A story's declared test already retries in its perimeter loop;
+            // the gate gives it exactly one attempt.
+            const declared = result.commands[1]!
+            assert.equal(declared.status, "failed")
+            assert.equal(declared.retriedAfterFailure, undefined)
             assert.equal(result.ok, false)
         })
     })
@@ -773,7 +775,11 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
             )
             const plan = createVerifyPlan(dir)
 
-            assert.equal(recommendedVerifyTimeoutMs(plan), 11 * 60_000 + 16_000)
+            // Two run-level commands, each budgeted for both of its attempts.
+            assert.equal(
+                recommendedVerifyTimeoutMs(plan),
+                2 * 2 * (10 * 60_000 + 5_000 + 3_000) + 60_000,
+            )
         })
     })
 })
