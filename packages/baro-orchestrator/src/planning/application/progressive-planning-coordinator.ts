@@ -35,7 +35,10 @@ import {
     validateProgressivePlanFragment,
 } from "../domain/progressive-plan.js"
 import { validateGoalContractCoverage } from "../domain/goal-contract-coverage.js"
-import { evaluateFinalTailTolerance } from "../domain/final-tail-tolerance.js"
+import {
+    evaluateFinalTailTolerance,
+    type FinalTailTolerance,
+} from "../domain/final-tail-tolerance.js"
 import { emitObligationNote, emitPlanActivity } from "./plan-events.js"
 import {
     architectureObligationsFromDecision,
@@ -695,31 +698,25 @@ export class ProgressivePlanningCoordinator {
         ordinal: number,
         rejection: { code: PlanFragmentRejectionCode; reason: string },
     ): boolean {
-        const state = this.opts.host.snapshot()
-        const current = state.prd?.runtimeGraph?.planning ?? planning
-        const tolerance = state.prd
-            ? evaluateFinalTailTolerance({
-                  prd: state.prd,
-                  admittedStoryIds: current.admittedStoryIds,
-                  goalContract: deriveGoalContract(state.prd.goalEnvelope),
-              })
-            : ({
-                  tolerated: false,
-                  blocker: "unsettled_stories",
-                  detail: "the run no longer holds a PRD",
-              } as const)
+        // A story can settle between the board's rejection and this decision, so
+        // a blocked first reading is re-taken against the live board before it
+        // is allowed to end the run, and the failure is composed from that one.
+        const first = this.evaluateTailToleranceNow(planning)
+        const fresh = first.tolerance.tolerated
+            ? first
+            : this.evaluateTailToleranceNow(planning)
         const storyIds = tail.map((story) => story.id)
-        if (!tolerance.tolerated) {
+        if (!fresh.tolerance.tolerated) {
             emitPlanActivity(
                 "error",
                 `final planner tail rejected (${rejection.code}): ${rejection.reason}; ` +
-                    `blocker: ${tolerance.blocker}: ${tolerance.detail}`,
+                    `blocker: ${fresh.tolerance.blocker}: ${fresh.tolerance.detail}`,
             )
             this.failPlanning(
-                current,
+                fresh.planning,
                 "final_tail_rejected",
                 `${rejection.code}: ${rejection.reason} ` +
-                    `(tail not redundant: ${tolerance.blocker}: ${tolerance.detail})`,
+                    `(tail not redundant: ${fresh.tolerance.blocker}: ${fresh.tolerance.detail})`,
             )
             return false
         }
@@ -740,6 +737,33 @@ export class ProgressivePlanningCoordinator {
             }),
         )
         return true
+    }
+
+    /** Reads the board itself; a caller-held snapshot may already be stale. */
+    private evaluateTailToleranceNow(fallback: PrdProgressivePlanningState): {
+        tolerance: FinalTailTolerance
+        planning: PrdProgressivePlanningState
+    } {
+        const state = this.opts.host.snapshot()
+        const planning = state.prd?.runtimeGraph?.planning ?? fallback
+        if (!state.prd) {
+            return {
+                tolerance: {
+                    tolerated: false,
+                    blocker: "unsettled_stories",
+                    detail: "the run no longer holds a PRD",
+                },
+                planning,
+            }
+        }
+        return {
+            tolerance: evaluateFinalTailTolerance({
+                prd: state.prd,
+                admittedStoryIds: planning.admittedStoryIds,
+                goalContract: deriveGoalContract(state.prd.goalEnvelope),
+            }),
+            planning,
+        }
     }
 
     private onPlanningStreamFailed(failure: PlanningStreamFailedData): void {
