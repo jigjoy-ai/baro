@@ -21,6 +21,7 @@ import {
 } from "../../src/semantic-events.js"
 import { WorktreeManager } from "../../src/integration/worktree.js"
 import { joinWithCapture, source, withTempDir } from "../execution/helpers.js"
+import { removeWorktreeRun, uniqueRunId } from "./worktree-fixture.js"
 
 function writeCli(dir: string, name: string, source: string): string {
     const path = join(dir, name)
@@ -246,7 +247,8 @@ if (args[0] === "rev-parse" && args[1] === "HEAD") {
             process.env.BARO_REPOSITORY_COMMAND_TIMEOUT_SECS = "0.5"
 
             const gate = new GitGate()
-            const manager = new WorktreeManager(repo, gate, "run-timeout", {
+            const worktreeRunId = uniqueRunId("run-timeout")
+            const manager = new WorktreeManager(repo, gate, worktreeRunId, {
                 allowSharedFallback: false,
                 linkDepDirs: false,
             })
@@ -321,6 +323,8 @@ if (args[0] === "rev-parse" && args[1] === "HEAD") {
                     process.env.BARO_REPOSITORY_COMMAND_TIMEOUT_SECS =
                         previousTimeout
                 }
+                // After PATH is restored, so cleanup uses real git.
+                await removeWorktreeRun(repo, worktreeRunId)
             }
         })
     })

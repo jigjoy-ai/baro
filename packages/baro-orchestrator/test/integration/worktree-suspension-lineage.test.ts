@@ -11,6 +11,7 @@ import {
     WorktreeManager,
     WorktreeRefusalError,
 } from "../../src/integration/worktree.js"
+import { removeWorktreeRun, uniqueRunId } from "./worktree-fixture.js"
 
 // ── helpers ──────────────────────────────────────────────────────────
 
@@ -64,13 +65,12 @@ let gate: GitGate
 let logs: string[]
 let mgr: WorktreeManager
 let runId: string
-let seq = 0
 
 beforeEach(() => {
     repo = initRepo()
     gate = new GitGate()
     logs = []
-    runId = `run-resume-test-${seq++}`
+    runId = uniqueRunId("run-resume-test")
     mgr = new WorktreeManager(repo, gate, runId, {
         onLog: (l) => logs.push(l),
         resolveConflictsWithTheirs: false,
@@ -79,6 +79,7 @@ beforeEach(() => {
 
 afterEach(async () => {
     try { await mgr.cleanupAll() } catch { /* */ }
+    await removeWorktreeRun(repo, runId)
     try { rmSync(repo, { recursive: true, force: true }) } catch { /* */ }
 })
 
