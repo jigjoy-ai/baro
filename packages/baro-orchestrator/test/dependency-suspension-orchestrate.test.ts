@@ -1,13 +1,6 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import {
-    existsSync,
-    mkdirSync,
-    readFileSync,
-    rmSync,
-    writeFileSync,
-} from "node:fs"
-import { tmpdir } from "node:os"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
@@ -26,6 +19,11 @@ import {
     type StorySpawnRequestData,
 } from "../src/semantic-events.js"
 import { withTempDir } from "./execution/helpers.js"
+import {
+    removeWorktreeRun,
+    uniqueRunId,
+    worktreeRunRoot,
+} from "./integration/worktree-fixture.js"
 
 class NeverQuiescingExecutor implements StoryExecutor {
     readonly started: string[] = []
@@ -128,9 +126,8 @@ describe("dependency suspension orchestration", () => {
             git(dir, ["add", "README.md"])
             git(dir, ["commit", "-m", "base"])
 
-            const runId = `dependency-timeout-${process.pid}-${Date.now()}`
-            const worktreePath = join(tmpdir(), "baro-worktrees", runId, "S1")
-            const branch = `baro-wt/${runId}/S1`
+            const runId = uniqueRunId("dependency-timeout")
+            const worktreePath = join(worktreeRunRoot(runId), "S1")
             const prdPath = join(dir, "prd.json")
             const auditPath = join(dir, "audit.jsonl")
             writeFileSync(prdPath, JSON.stringify(testPrd(), null, 2) + "\n")
@@ -186,23 +183,7 @@ describe("dependency suspension orchestration", () => {
                     "an uncertified worker must not release its lease as suspended",
                 )
             } finally {
-                if (existsSync(worktreePath)) {
-                    try {
-                        git(dir, ["worktree", "remove", "--force", worktreePath])
-                    } catch {
-                        rmSync(worktreePath, { recursive: true, force: true })
-                        try {
-                            git(dir, ["worktree", "prune"])
-                        } catch { /* best-effort fixture cleanup */ }
-                    }
-                }
-                try {
-                    git(dir, ["branch", "-D", branch])
-                } catch { /* best-effort fixture cleanup */ }
-                rmSync(join(tmpdir(), "baro-worktrees", runId), {
-                    recursive: true,
-                    force: true,
-                })
+                await removeWorktreeRun(dir, runId)
             }
         })
     })
@@ -216,9 +197,8 @@ describe("dependency suspension orchestration", () => {
             git(dir, ["add", "README.md"])
             git(dir, ["commit", "-m", "base"])
 
-            const runId = `terminal-uncertified-${process.pid}-${Date.now()}`
-            const worktreePath = join(tmpdir(), "baro-worktrees", runId, "S1")
-            const branch = `baro-wt/${runId}/S1`
+            const runId = uniqueRunId("terminal-uncertified")
+            const worktreePath = join(worktreeRunRoot(runId), "S1")
             const prdPath = join(dir, "prd.json")
             const auditPath = join(dir, "audit.jsonl")
             const prd = testPrd()
@@ -269,23 +249,7 @@ describe("dependency suspension orchestration", () => {
                 assert.match(audit, /process_quiescence_uncertified/)
                 assert.doesNotMatch(audit, /"type":"workspace_cleanup_requested"/)
             } finally {
-                if (existsSync(worktreePath)) {
-                    try {
-                        git(dir, ["worktree", "remove", "--force", worktreePath])
-                    } catch {
-                        rmSync(worktreePath, { recursive: true, force: true })
-                        try {
-                            git(dir, ["worktree", "prune"])
-                        } catch { /* best-effort fixture cleanup */ }
-                    }
-                }
-                try {
-                    git(dir, ["branch", "-D", branch])
-                } catch { /* best-effort fixture cleanup */ }
-                rmSync(join(tmpdir(), "baro-worktrees", runId), {
-                    recursive: true,
-                    force: true,
-                })
+                await removeWorktreeRun(dir, runId)
             }
         })
     })
