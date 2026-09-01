@@ -7,6 +7,8 @@ import {
     renderArchitectureObligationCriterion,
 } from "./architecture-obligation-contract.js"
 import { formatObligationIdList } from "./obligation-coverage-report.js"
+import { renderUnownedInvariantLines } from "./invariant-coverage-report.js"
+import type { GoalInvariant } from "../../goal/goal-contract.js"
 import type { WriteSurfaceOverlapFacts } from "../../events/runtime-graph.js"
 
 /**
@@ -574,6 +576,7 @@ export function buildFinalPrdRepairMessage(input: {
     reason: string
     error?: unknown
     unownedObligationIds: readonly string[]
+    unownedInvariants?: readonly GoalInvariant[]
     writeSurfaceOverlap?: WriteSurfaceOverlapFacts
 }): string {
     // contractDefects synthesizes a defect from whatever it is handed, so an
@@ -595,6 +598,16 @@ export function buildFinalPrdRepairMessage(input: {
             `Unowned architecture obligations (${input.unownedObligationIds.length}):\n` +
                 `${formatObligationIdList(input.unownedObligationIds)}\n` +
                 "Every id above must be claimed by an acceptance criterion of a " +
+                "story in THIS reply — already-published stories are immutable " +
+                "and cannot take them later.",
+        )
+    }
+    const unownedInvariants = input.unownedInvariants ?? []
+    if (unownedInvariants.length > 0) {
+        sections.push(
+            `Unowned goal invariants (${unownedInvariants.length}):\n` +
+                `${renderUnownedInvariantLines(unownedInvariants)}\n` +
+                "Every id above must be claimed via goalInvariantIds of a " +
                 "story in THIS reply — already-published stories are immutable " +
                 "and cannot take them later.",
         )
