@@ -9,7 +9,16 @@ import {
     obligationMappingsForStories,
     validateArchitectureObligationCoverage,
 } from "../domain/architecture-obligation-contract.js"
+import {
+    emitInvariantCoverageGap,
+    type InvariantCoverageGapSink,
+} from "../application/plan-events.js"
 import { validateGoalContractCoverage } from "../domain/goal-contract-coverage.js"
+import {
+    formatInvariantIdList,
+    invariantGapSummary,
+    unownedInvariantIds,
+} from "../domain/invariant-coverage-report.js"
 import {
     formatObligationIdList,
     obligationGapSummary,
@@ -38,6 +47,8 @@ export interface PlannerOpenAIProgressiveConfig {
     /** Finalization carries only the appended tail; the host composes the
      * full plan from its admitted record (see ProgressiveReconcileOptions). */
     finalizationTailOnly?: boolean
+    /** Defaults to the run-stream warn; injectable so a caller can capture it. */
+    readonly onInvariantCoverageGap?: InvariantCoverageGapSink
     /** May return host feedback (authoritative admission: graph version,
      *  dropped edges) that is merged into the tool result the planner sees. */
     publish(
@@ -56,6 +67,8 @@ export interface PlannerOpenAIProgressiveSupport {
     reconcileFinalCandidate(candidate: string): Record<string, unknown>
     /** Obligation ids no admitted story owns yet; [] without a contract. */
     unownedObligationIds(): readonly string[]
+    /** Goal invariant ids no admitted story claims yet; [] without a contract. */
+    unownedInvariantIds(): readonly string[]
     hasEarlyPlan(): boolean
 }
 
@@ -65,6 +78,8 @@ export interface PlannerProgressivePublisher {
     reconcileFinalCandidate(candidate: string): Record<string, unknown>
     /** Obligation ids no admitted story owns yet; [] without a contract. */
     unownedObligationIds(): readonly string[]
+    /** Goal invariant ids no admitted story claims yet; [] without a contract. */
+    unownedInvariantIds(): readonly string[]
     hasEarlyPlan(): boolean
 }
 
@@ -210,6 +225,7 @@ const NO_PROGRESSIVE_SUPPORT: PlannerOpenAIProgressiveSupport = Object.freeze({
     reconcileFinalCandidate: (candidate: string) =>
         JSON.parse(candidate) as Record<string, unknown>,
     unownedObligationIds: () => [],
+    unownedInvariantIds: () => [],
     hasEarlyPlan: () => false,
 })
 
@@ -226,6 +242,7 @@ export function createPlannerOpenAIProgressiveSupport(
         reconcileFinalCandidate: (candidate) =>
             publisher.reconcileFinalCandidate(candidate),
         unownedObligationIds: () => publisher.unownedObligationIds(),
+        unownedInvariantIds: () => publisher.unownedInvariantIds(),
         hasEarlyPlan: () => publisher.hasEarlyPlan(),
     }
 }
@@ -312,6 +329,34 @@ export function createPlannerProgressivePublisher(
                         `unowned ${obligationGapSummary(unowned, totalObligations)}\n`,
                 )
             }
+            const unownedInvariants = unownedInvariantIds(
+                goalContract,
+                session.snapshot().stories,
+            )
+            const totalInvariants = goalContract?.invariants.length ?? 0
+            const invariantNote =
+                totalInvariants === 0 || unownedInvariants.length === 0
+                    ? undefined
+                    : `WARNING: ${unownedInvariants.length} of ${totalInvariants} goal ` +
+                      "invariant(s) are still unowned after this fragment: " +
+                      `${formatInvariantIdList(unownedInvariants)}. Published stories are ` +
+                      "immutable — an invariant not claimed at publish time can " +
+                      "never be claimed, and planning closes incomplete."
+            if (totalInvariants > 0) {
+                process.stderr.write(
+                    `[planner-invariants] fragment ${admission.fragmentId} admitted; ` +
+                        `unowned ${invariantGapSummary(unownedInvariants, totalInvariants)}\n`,
+                )
+            }
+            if (totalInvariants > 0 && unownedInvariants.length > 0) {
+                const announce =
+                    config.onInvariantCoverageGap ?? emitInvariantCoverageGap
+                announce({
+                    fragmentId: admission.fragmentId,
+                    unownedInvariantIds: unownedInvariants,
+                    totalInvariants,
+                })
+            }
             return {
                 ok: true,
                 disposition: admission.disposition,
@@ -322,6 +367,10 @@ export function createPlannerProgressivePublisher(
                 nextOrdinal: admission.nextOrdinal,
                 ...(obligationNote ? { obligationNote } : {}),
                 ...(unowned.length > 0 ? { unownedObligationIds: [...unowned] } : {}),
+                ...(invariantNote ? { invariantNote } : {}),
+                ...(unownedInvariants.length > 0
+                    ? { unownedInvariantIds: [...unownedInvariants] }
+                    : {}),
                 ...(hostFeedback ?? {}),
             }
         },
@@ -362,6 +411,9 @@ export function createPlannerProgressivePublisher(
                 obligationContract,
                 session.snapshot().stories,
             )
+        },
+        unownedInvariantIds() {
+            return unownedInvariantIds(goalContract, session.snapshot().stories)
         },
         hasEarlyPlan() {
             return session.snapshot().stories.length > 0
