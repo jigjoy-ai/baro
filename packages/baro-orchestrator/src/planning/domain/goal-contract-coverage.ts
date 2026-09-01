@@ -19,10 +19,17 @@ export class GoalContractCoverageError extends Error {
     constructor(
         readonly code: GoalContractCoverageErrorCode,
         message: string,
+        readonly missingInvariantIds: readonly string[] = [],
     ) {
         super(message)
         this.name = "GoalContractCoverageError"
     }
+}
+
+export function missingInvariantIdsFromError(error: unknown): readonly string[] {
+    return error instanceof GoalContractCoverageError
+        ? error.missingInvariantIds
+        : []
 }
 
 /**
@@ -48,6 +55,7 @@ export function validateGoalContractCoverage(
     const knownIds = new Set(contract.invariants.map(({ id }) => id))
     const coveredIds = new Set<string>()
     const unknownMappings: string[] = []
+    const offendingIds = new Set<string>()
 
     for (const mapping of mappings) {
         const unknownIds = mapping.invariantIds.filter(
@@ -57,6 +65,7 @@ export function validateGoalContractCoverage(
             unknownMappings.push(
                 `${mapping.storyId}: ${[...new Set(unknownIds)].join(", ")}`,
             )
+            for (const invariantId of unknownIds) offendingIds.add(invariantId)
         }
         for (const invariantId of mapping.invariantIds) {
             if (knownIds.has(invariantId)) coveredIds.add(invariantId)
@@ -67,6 +76,7 @@ export function validateGoalContractCoverage(
         throw new GoalContractCoverageError(
             "unknown_invariant",
             `GoalContract mappings reference unknown invariant id(s): ${unknownMappings.join("; ")}`,
+            [...offendingIds],
         )
     }
 
@@ -81,6 +91,7 @@ export function validateGoalContractCoverage(
         throw new GoalContractCoverageError(
             "incomplete_coverage",
             `GoalContract coverage is incomplete; no story owns invariant(s): ${missingInvariantIds.join(", ")}`,
+            missingInvariantIds,
         )
     }
 
