@@ -13,6 +13,12 @@ import type { SpawnOptions } from "child_process"
 import spawn from "cross-spawn"
 
 import {
+    CPU_PROBE_TIMEOUT_MS,
+    createDefaultCpuActivityProbe,
+    type CpuActivityProbe,
+    type CpuActivitySample,
+} from "./process-cpu-activity.js"
+import {
     ManagedProcessTree,
     POSIX_PROCESS_GROUPS_SUPPORTED,
 } from "./process-tree.js"
@@ -35,15 +41,21 @@ const REAL_TIMERS: ExecFileCliTimers = {
     clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 }
 
+export type { CpuActivityProbe }
+
 export interface ExecFileCliOptions {
     cwd?: string
     env?: NodeJS.ProcessEnv
     /** SIGTERM the child after this many ms; the promise rejects (killed=true). */
     timeout?: number
-    /** SIGTERM the child after this many ms WITHOUT any stdout/stderr output.
-     *  Unlike `timeout`, every output chunk resets the clock: a process that
-     *  is visibly working is never killed, only one that has gone silent. */
+    /** SIGTERM the child after this many ms WITHOUT any stdout/stderr output
+     *  AND without measured CPU progress across the tree. Every output chunk
+     *  resets the clock; at expiry {@link cpuActivityProbe} gets the last word,
+     *  so a silent-but-computing command is extended rather than killed. */
     idleTimeoutMs?: number
+    /** Consulted only at idle expiry. Rejection, a hang, or an unobservable
+     *  tree all count as active — the absolute `timeout` is the sole backstop. */
+    cpuActivityProbe?: CpuActivityProbe
     /** Grace after SIGTERM before the complete CLI tree is SIGKILLed. */
     terminationGraceMs?: number
     /** Optional caller cancellation; abort follows the same tree cleanup path. */
@@ -125,6 +137,8 @@ function execFileCliRaw(
             stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
             detached: POSIX_PROCESS_GROUPS_SUPPORTED,
         } as SpawnOptions)
+        const cpuActivityProbe =
+            options.cpuActivityProbe ?? createDefaultCpuActivityProbe(child.pid)
         const processTree = new ManagedProcessTree(child, {
             terminationGraceMs,
             pollIntervalMs: 25,
@@ -141,6 +155,7 @@ function execFileCliRaw(
         const timers = options.timers ?? REAL_TIMERS
         let timer: unknown
         let idleTimer: unknown
+        const probeTimers = new Set<unknown>()
         let terminationError: Error | undefined
         let treeRefreshed = false
 
@@ -149,6 +164,8 @@ function execFileCliRaw(
             settled = true
             if (timer) timers.clearTimeout(timer)
             if (idleTimer) timers.clearTimeout(idleTimer)
+            for (const handle of probeTimers) timers.clearTimeout(handle)
+            probeTimers.clear()
             options.signal?.removeEventListener("abort", onAbort)
             fn()
         }
@@ -181,23 +198,71 @@ function execFileCliRaw(
         if (options.timeout && options.timeout > 0) {
             timer = timers.setTimeout(() => {
                 const err = new Error(
-                    `${command} timed out after ${options.timeout}ms`,
+                    `${command} timed out after ${options.timeout}ms — exceeded the absolute command ceiling`,
                 ) as Error & { killed: boolean }
                 err.killed = true
                 terminate(err)
             }, options.timeout)
         }
         const idleMs = options.idleTimeoutMs
+        let cpuSample: CpuActivitySample | null = null
+        // Bumped by every pet, so a probe that was still in flight when output
+        // finally arrived cannot kill the process it was asking about.
+        let idleGeneration = 0
+
+        const presumedHung = (): void => {
+            const err = new Error(
+                `${command} produced no output for ${idleMs}ms — presumed hung`,
+            ) as Error & { killed: boolean }
+            err.killed = true
+            terminate(err)
+        }
+
+        const onIdleExpiry = (generation: number): void => {
+            if (settled || terminationError) return
+            const rootPid = child.pid
+            if (
+                rootPid === undefined ||
+                child.exitCode !== null ||
+                child.signalCode !== null
+            ) {
+                presumedHung()
+                return
+            }
+            type ProbeVerdict = { active: boolean; sample: CpuActivitySample | null }
+            let raceTimer: unknown
+            const bounded = new Promise<ProbeVerdict>((settle) => {
+                raceTimer = timers.setTimeout(
+                    () => settle({ active: true, sample: null }),
+                    CPU_PROBE_TIMEOUT_MS,
+                )
+                probeTimers.add(raceTimer)
+            })
+            void Promise.race([
+                cpuActivityProbe(rootPid, cpuSample).then(
+                    (verdict): ProbeVerdict => verdict,
+                    (): ProbeVerdict => ({ active: true, sample: null }),
+                ),
+                bounded,
+            ]).then(({ active, sample }) => {
+                if (probeTimers.delete(raceTimer)) timers.clearTimeout(raceTimer)
+                if (settled || terminationError) return
+                if (generation !== idleGeneration) return
+                if (!active) {
+                    presumedHung()
+                    return
+                }
+                if (sample) cpuSample = sample
+                petIdle()
+            })
+        }
+
         const petIdle = (): void => {
             if (!idleMs || idleMs <= 0 || settled || terminationError) return
             if (idleTimer) timers.clearTimeout(idleTimer)
-            idleTimer = timers.setTimeout(() => {
-                const err = new Error(
-                    `${command} produced no output for ${idleMs}ms — presumed hung`,
-                ) as Error & { killed: boolean }
-                err.killed = true
-                terminate(err)
-            }, idleMs)
+            idleGeneration += 1
+            const generation = idleGeneration
+            idleTimer = timers.setTimeout(() => onIdleExpiry(generation), idleMs)
         }
         petIdle()
         options.signal?.addEventListener("abort", onAbort, { once: true })

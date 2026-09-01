@@ -1149,10 +1149,12 @@ describe("declared verification policy", () => {
                 merged.commands.at(-1)?.incompleteReason ?? "",
                 /final command\(s\) were not executed/,
             )
+            // An empty baseline, so the whole budget is the retryable final
+            // delta at two attempts each.
             assert.equal(
                 recommendedMergedVerifyTimeoutMs(baseline),
-                (MAX_FINAL_ADDED_VERIFY_COMMANDS * 5 + 1) * 60_000 +
-                    MAX_FINAL_ADDED_VERIFY_COMMANDS * 8_000,
+                MAX_FINAL_ADDED_VERIFY_COMMANDS * 2 * (10 * 60_000 + 5_000 + 3_000) +
+                    60_000,
             )
         })
     })

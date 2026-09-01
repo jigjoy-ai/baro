@@ -20,6 +20,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path"
 
 import type { VerificationCommandOutput } from "../events/verification.js"
 import { execFileCli } from "../harness/exec-file-cli.js"
+import { emit, type BaroEvent } from "../tui-protocol.js"
 import {
     MAX_DECLARED_VERIFY_COMMANDS,
     revalidateContainedPaths,
@@ -31,6 +32,9 @@ export { MAX_DECLARED_VERIFY_COMMANDS } from "./declared-verification.js"
 // Max silence, not max duration: a test runner streaming progress may run
 // far longer; only a command with no output for the whole window is killed.
 const IDLE_TIMEOUT_MS = 5 * 60_000
+// Silence alone no longer kills a command, so every command also carries a
+// hard wall-clock ceiling; without it a silent-but-busy process is unbounded.
+const ABSOLUTE_COMMAND_TIMEOUT_MS = 10 * 60_000
 const COMMAND_SETTLEMENT_GRACE_MS = 5_000
 const COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS = 3_000
 const TAIL_BYTES = 1500
@@ -60,7 +64,7 @@ export interface VerifyCommandResult {
     durationMs: number
     tail?: string
     output?: VerificationCommandOutput
-    /** A failed test command was re-run once; this status is the retry's. */
+    /** A failed run-level command was re-run once; this status is the retry's. */
     retriedAfterFailure?: true
     /** Evidence of the first attempt when a retry decided the status. */
     firstFailureTail?: string
@@ -83,6 +87,14 @@ export interface VerifyCommandSpec {
     canonicalDeclaredFocus?: "rstest"
     /** Paths that must still resolve beneath command cwd immediately pre-spawn. */
     containedPaths?: readonly VerifyContainedPath[]
+    /** Absent means "detected", i.e. run-level. Story-declared tests already
+     *  get a retry from their own perimeter loop and must not get a second. */
+    readonly origin?: "detected" | "declared"
+}
+
+/** The only provenance predicate; nothing may re-derive this from a label. */
+export function isRunLevelCommand(command: VerifyCommandSpec): boolean {
+    return command.origin !== "declared"
 }
 
 export interface VerifyContainedPath {
@@ -124,6 +136,8 @@ export interface VerifyBuildOptions {
     signal?: AbortSignal
     /** Snapshotted before agents mutate the target repo. */
     plan?: VerifyPlan
+    /** Defaults to the process-wide TUI stream; injected only by tests. */
+    readonly emitActivity?: (event: BaroEvent) => void
 }
 
 interface PackageManifest {
@@ -628,7 +642,7 @@ function boundedDeclaredCommands(
             continue
         }
         admitted += 1
-        commands.push(command)
+        commands.push({ ...command, origin: "declared" })
     }
     if (omitted > 0) {
         commands.push({
@@ -638,6 +652,7 @@ function boundedDeclaredCommands(
             incompleteReason:
                 `${omitted} unique PRD test requirement(s) were not admitted; ` +
                 `the safe limit is ${MAX_DECLARED_VERIFY_COMMANDS}`,
+            origin: "declared",
         })
     }
     return commands
@@ -926,16 +941,28 @@ function freezeVerifyPlan(
     })
 }
 
+/** One attempt's worst case: the hard ceiling plus its teardown tail. */
+const COMMAND_ATTEMPT_BUDGET_MS =
+    ABSOLUTE_COMMAND_TIMEOUT_MS +
+    COMMAND_SETTLEMENT_GRACE_MS +
+    COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS
+
+function executableCommands(plan: VerifyPlan): readonly VerifyCommandSpec[] {
+    return plan.commands.filter(
+        (command) => !command.preflightFailure && !command.incompleteReason,
+    )
+}
+
 /** Worst-case command budget plus one minute for mailbox/process teardown. */
 export function recommendedVerifyTimeoutMs(plan: VerifyPlan): number {
-    const executableCommands = plan.commands.filter(
-        (command) => !command.preflightFailure && !command.incompleteReason,
-    ).length
-    return Math.max(
-        60_000,
-        executableCommands * (IDLE_TIMEOUT_MS + COMMAND_SETTLEMENT_GRACE_MS) +
-            executableCommands * COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS +
-            60_000,
+    const executable = executableCommands(plan)
+    // Run-level commands are budgeted for two attempts; declared ones for one.
+    const retryable = executable.filter(isRunLevelCommand).length
+    const declared = executable.length - retryable
+    return (
+        declared * COMMAND_ATTEMPT_BUDGET_MS +
+        retryable * 2 * COMMAND_ATTEMPT_BUDGET_MS +
+        60_000
     )
 }
 
@@ -945,14 +972,14 @@ export function recommendedVerifyTimeoutMs(plan: VerifyPlan): number {
  * bounded plan whose own per-command budgets systematically exceed the Board.
  */
 export function recommendedMergedVerifyTimeoutMs(baseline: VerifyPlan): number {
-    const baselineCommands = baseline.commands.filter(
-        (command) => !command.preflightFailure && !command.incompleteReason,
-    ).length
+    const executable = executableCommands(baseline)
+    const baselineRetryable = executable.filter(isRunLevelCommand).length
+    const declared = executable.length - baselineRetryable
+    // Final-plan additions are detected, so they are retryable too.
+    const retryable = baselineRetryable + MAX_FINAL_ADDED_VERIFY_COMMANDS
     return (
-        (baselineCommands + MAX_FINAL_ADDED_VERIFY_COMMANDS) *
-            (IDLE_TIMEOUT_MS +
-                COMMAND_SETTLEMENT_GRACE_MS +
-                COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS) +
+        declared * COMMAND_ATTEMPT_BUDGET_MS +
+        retryable * 2 * COMMAND_ATTEMPT_BUDGET_MS +
         60_000
     )
 }
@@ -1024,6 +1051,7 @@ async function runCmd(
         const result = await execFileCli(c.tool, c.args, {
             cwd: commandCwd,
             idleTimeoutMs: IDLE_TIMEOUT_MS,
+            timeout: ABSOLUTE_COMMAND_TIMEOUT_MS,
             terminationGraceMs: COMMAND_SETTLEMENT_GRACE_MS,
             maxBuffer: 8 * 1024 * 1024,
             signal,
@@ -1054,11 +1082,6 @@ async function runCmd(
     }
 }
 
-/** Only test commands earn a flake retry; a failed build is deterministic. */
-function isTestCommandLabel(label: string): boolean {
-    return /\btest\b/iu.test(label)
-}
-
 function throwIfAborted(signal?: AbortSignal): void {
     if (!signal?.aborted) return
     throw signal.reason instanceof Error
@@ -1079,19 +1102,34 @@ export async function verifyBuild(
     const commands: VerifyCommandResult[] = []
     let ran = false
     const plan = options.plan ?? createVerifyPlan(cwd)
+    const emitActivity = options.emitActivity ?? emit
     for (const c of plan.commands) {
         throwIfAborted(options.signal)
         let outcome = await runCmd(cwd, c, options.signal)
         let firstFailureTail: string | undefined
-        if (outcome.status === "failed" && isTestCommandLabel(c.label)) {
+        // A preflight failure never spawned anything and cannot flake, so it
+        // is excluded here exactly as it is from the two-attempt budget above.
+        if (
+            outcome.status === "failed" &&
+            !c.preflightFailure &&
+            isRunLevelCommand(c)
+        ) {
             // The stories' rule, applied to the gate itself: a load failure
             // is retried once and the retry decides. The first live gate
             // pass failed a finished, green run on one timing test its
             // stories never touched — a gate that cannot tell a flake from
             // a regression mislabels finished work. Both attempts stay in
-            // the evidence.
+            // the evidence, and the retry is announced rather than silent.
             throwIfAborted(options.signal)
             firstFailureTail = outcome.tail
+            emitActivity({
+                type: "activity",
+                id: "_verify",
+                kind: "warn",
+                text:
+                    `verification command retried once: ${c.label} — ` +
+                    `first attempt failed: ${firstFailureTail.replace(/[\r\n]+/gu, " ")}`,
+            })
             outcome = await runCmd(cwd, c, options.signal)
         }
         commands.push({

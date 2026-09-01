@@ -11,15 +11,15 @@
 ```json
 {
   "graphVersion": 2,
-  "proposalId": "run-progressive-b35468966d6aee67:planner:c765acec8e05fe54e08a6057fd032032f75c22ae8336443133810210d2a66ccd",
-  "sourceStoryId": "planner:planning-b35468966d6aee67-1",
-  "reason": "progressive planner admitted fragment final-d98e396e5e8a25f2ee897541a732e1e44c49978bf5c42cdb65cc31aca6911efd",
-  "exactMutationSha256": "d8d0f313bf79e055a29dcbc08e203f013423f95bff30db83501e16664c44449b",
+  "proposalId": "run-progressive-e6386e1797963a83:planner:1368e12a099aba7579a93673fc8e923094fe036f5b7a997b97b6debbbc2b46cc",
+  "sourceStoryId": "planner:planning-e6386e1797963a83-1",
+  "reason": "progressive planner admitted fragment final-45a732777a4e7869dc57830bb44c924cdc198bd918523de809cf580f1ef87658",
+  "exactMutationSha256": "c87d55bd41d1f61f9fff29f590e8cd29ea36ab804c5686c8dfa6ae397a707a57",
   "mutationSummary": {
     "addedStories": [
       {
         "id": "S1",
-        "title": "Pre-clap help/version interception via shared cli/usage.rs",
+        "title": "Restore ceiling wording, route host timeout to the absolute ceiling, and make the first idle expiry CPU-measured",
         "dependsOn": [],
         "goalInvariantIds": [
           "G-A1",
@@ -28,10 +28,10 @@
           "G-A4",
           "G-A5",
           "G-A6",
-          "G-C1",
-          "G-C2",
+          "G-A7",
+          "G-A8",
           {
-            "omittedItems": 3
+            "omittedItems": 11
           }
         ]
       }

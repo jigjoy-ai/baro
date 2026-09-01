@@ -8,6 +8,11 @@ import { join } from "node:path"
 import { GitGate } from "../../src/integration/git.js"
 import { captureCriticRepositoryFingerprint } from "../../src/acceptance/critic-evidence.js"
 import { WorktreeManager } from "../../src/integration/worktree.js"
+import {
+    removeWorktreeRun,
+    uniqueRunId,
+    worktreeRunRoot,
+} from "./worktree-fixture.js"
 
 // ── helpers ──────────────────────────────────────────────────────────
 
@@ -40,16 +45,12 @@ let gate: GitGate
 let logs: string[]
 let mgr: WorktreeManager
 let runId: string
-let seq = 0
 
 beforeEach(() => {
     repo = initRepo()
     gate = new GitGate()
     logs = []
-    // Unique per test: the worktree base dir lives in the OS tmpdir keyed by
-    // runId, so a shared id would collide across tests (in production the id
-    // is `run-<time>-<pid>`, unique per process).
-    runId = `run-test-${seq++}`
+    runId = uniqueRunId("run-test")
     mgr = new WorktreeManager(repo, gate, runId, {
         onLog: (l) => logs.push(l),
     })
@@ -57,6 +58,7 @@ beforeEach(() => {
 
 afterEach(async () => {
     try { await mgr.cleanupAll() } catch { /* */ }
+    await removeWorktreeRun(repo, runId)
     try { rmSync(repo, { recursive: true, force: true }) } catch { /* */ }
 })
 
@@ -541,7 +543,7 @@ describe("WorktreeManager — fallback", () => {
         mkdirSync(excludePath)
 
         const path = await mgr.create("S1")
-        const partialPath = join(tmpdir(), "baro-worktrees", runId, "S1")
+        const partialPath = join(worktreeRunRoot(runId), "S1")
 
         assert.equal(path, null)
         assert.equal(mgr.activePath("S1"), null)
@@ -763,12 +765,80 @@ describe("WorktreeManager — dependency dir symlink", () => {
 
     it("skips the symlink when disabled", async () => {
         mkdirSync(join(repo, "node_modules"), { recursive: true })
-        const noLink = new WorktreeManager(repo, new GitGate(), "run-nolink", {
+        const noLinkRunId = uniqueRunId("run-nolink")
+        const noLink = new WorktreeManager(repo, new GitGate(), noLinkRunId, {
             linkDepDirs: false,
             onLog: () => {},
         })
-        const p = (await noLink.create("S1"))!
-        assert.ok(!existsSync(join(p, "node_modules")), "no symlink when disabled")
-        await noLink.cleanupAll()
+        try {
+            const p = (await noLink.create("S1"))!
+            assert.ok(!existsSync(join(p, "node_modules")), "no symlink when disabled")
+        } finally {
+            await noLink.cleanupAll()
+            await removeWorktreeRun(repo, noLinkRunId)
+        }
+    })
+})
+
+describe("WorktreeManager — fixture isolation", () => {
+    it("leaves no run root or run-scoped branch behind when a test body throws", async () => {
+        const failingRunId = uniqueRunId("run-residue")
+        const failing = new WorktreeManager(repo, new GitGate(), failingRunId, {
+            linkDepDirs: false,
+            onLog: () => {},
+        })
+
+        await assert.rejects(async () => {
+            try {
+                await failing.create("S1")
+                assert.fail("simulated mid-test assertion failure")
+            } finally {
+                try { await failing.cleanupAll() } catch { /* */ }
+                await removeWorktreeRun(repo, failingRunId)
+            }
+        })
+
+        assert.equal(
+            existsSync(worktreeRunRoot(failingRunId)),
+            false,
+            "no run root survives a failed test",
+        )
+        assert.equal(
+            git(repo, "branch", "--list", `baro-wt/${failingRunId}/*`),
+            "",
+            "no run-scoped branch survives a failed test",
+        )
+        assert.equal(
+            git(repo, "worktree", "list").includes(worktreeRunRoot(failingRunId)),
+            false,
+            "no worktree registration survives a failed test",
+        )
+    })
+
+    it("removeWorktreeRun is idempotent on an already-removed run root", async () => {
+        const partialRunId = uniqueRunId("run-partial")
+        const partial = new WorktreeManager(repo, new GitGate(), partialRunId, {
+            linkDepDirs: false,
+            onLog: () => {},
+        })
+        await partial.create("S1")
+
+        await removeWorktreeRun(repo, partialRunId)
+        await removeWorktreeRun(repo, partialRunId)
+        await removeWorktreeRun(null, partialRunId)
+
+        assert.equal(existsSync(worktreeRunRoot(partialRunId)), false)
+        assert.equal(git(repo, "branch", "--list", `baro-wt/${partialRunId}/*`), "")
+    })
+
+    it("derives a distinct run root per invocation", () => {
+        const first = uniqueRunId("run-test")
+        const second = uniqueRunId("run-test")
+
+        assert.notEqual(first, second)
+        assert.notEqual(worktreeRunRoot(first), worktreeRunRoot(second))
+        for (const id of [first, second]) {
+            assert.match(id, new RegExp(`^run-test-${process.pid}-[0-9a-f]{8}$`, "u"))
+        }
     })
 })
