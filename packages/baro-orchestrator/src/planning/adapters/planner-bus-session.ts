@@ -50,6 +50,8 @@ import {
 import { missingObligationIdsFromError } from "../domain/architecture-obligation-contract.js"
 import type { WriteSurfaceOverlapFacts } from "../../events/runtime-graph.js"
 import { formatObligationIdList } from "../domain/obligation-coverage-report.js"
+import { unownedInvariantsWithText } from "../domain/invariant-coverage-report.js"
+import { deriveGoalContract } from "../../goal/goal-contract.js"
 import {
     createPlannerHarnessProgressiveSupport,
     currentPlannerMcpServerCommand,
@@ -395,6 +397,10 @@ export async function runPlannerBusSession(
         )
     }
 
+    // Derived after the publisher, which already validated this same
+    // envelope, so a malformed goal still fails there and not here.
+    const goalContract = deriveGoalContract(opts.goalEnvelope)
+
     const systemPrompt = progressive.systemInstruction
         ? `${PLANNER_SYSTEM_PROMPT}\n\n${progressive.systemInstruction}`
         : PLANNER_SYSTEM_PROMPT
@@ -583,6 +589,10 @@ export async function runPlannerBusSession(
                             reason,
                             error: rejectionError,
                             unownedObligationIds: unowned,
+                            unownedInvariants: unownedInvariantsWithText(
+                                goalContract,
+                                progressive.unownedInvariantIds(),
+                            ),
                             ...(lastWriteSurfaceOverlap
                                 ? { writeSurfaceOverlap: lastWriteSurfaceOverlap }
                                 : {}),
