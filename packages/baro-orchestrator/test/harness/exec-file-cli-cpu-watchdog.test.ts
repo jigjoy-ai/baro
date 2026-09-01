@@ -193,17 +193,27 @@ describe("execFileCli CPU-aware idle watchdog", () => {
         )
     })
 
-    it("grants the first expiry an extension under the real default probe", async () => {
+    it("kills at the first expiry when the real default probe measures no CPU advance", async () => {
         await withFixture(
             "baro-exec-cpu-default-",
             undefined,
             {},
-            async ({ run, clock, stop }) => {
+            async ({ run, clock }) => {
                 await clock.fire(IDLE_MS)
-                await clock.waitForArm(IDLE_MS)
-
-                stop()
-                await run
+                await assert.rejects(
+                    run,
+                    (error: Error & { killed?: boolean }) => {
+                        assert.equal(error.killed, true)
+                        assert.match(
+                            error.message,
+                            new RegExp(
+                                ` produced no output for ${IDLE_MS}ms — presumed hung$`,
+                                "u",
+                            ),
+                        )
+                        return true
+                    },
+                )
             },
         )
     })
@@ -288,7 +298,7 @@ describe("execFileCli CPU-aware idle watchdog", () => {
                         assert.equal(error.killed, true)
                         assert.match(
                             error.message,
-                            /exceeded the absolute limit of 600000ms — terminated$/u,
+                            /timed out after 600000ms — exceeded the absolute command ceiling$/u,
                         )
                         return true
                     },

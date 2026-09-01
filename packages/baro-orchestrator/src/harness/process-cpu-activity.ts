@@ -30,9 +30,16 @@ export interface ProcessCpuRow {
 
 export type ProcessCpuTableReader = () => Promise<readonly ProcessCpuRow[] | null>
 
+export type CpuActivityProbe = (
+    rootPid: number,
+    previous: CpuActivitySample | null,
+) => Promise<{ active: boolean; sample: CpuActivitySample }>
+
 export const CPU_PROBE_TIMEOUT_MS = 5_000
 /** `ps` reports CPU time at 1-second resolution, so nothing finer is signal. */
 export const CPU_ADVANCE_MIN_DELTA_MS = 1_000
+/** Share of one core a tree must sustain across the window to count as busy. */
+export const CPU_ACTIVE_MIN_FRACTION = 0.05
 
 const CPU_PROBE_MAX_BUFFER = 4 * 1024 * 1024
 
@@ -119,5 +126,28 @@ export function cpuAdvanced(
     minDeltaMs: number = CPU_ADVANCE_MIN_DELTA_MS,
 ): boolean {
     if (!previous.observed || !current.observed) return true
-    return current.totalCpuMs! - previous.totalCpuMs! >= minDeltaMs
+    // Window-relative: a fixed floor alone reads a briefly-booting process as
+    // busy across a five-minute window, and a busy one as idle across a short one.
+    const elapsedMs = Math.max(0, current.at - previous.at)
+    const required = Math.max(minDeltaMs, elapsedMs * CPU_ACTIVE_MIN_FRACTION)
+    return current.totalCpuMs! - previous.totalCpuMs! >= required
+}
+
+/**
+ * Default probe for the idle watchdog. The spawn-time sample is what lets the
+ * FIRST expiry be measured instead of assumed, so a silent, idle command dies
+ * at the end of its first no-output window rather than the second.
+ */
+export function createDefaultCpuActivityProbe(
+    rootPid: number | undefined,
+): CpuActivityProbe {
+    const baseline: Promise<CpuActivitySample> =
+        rootPid === undefined
+            ? Promise.resolve({ at: Date.now(), totalCpuMs: null, observed: false })
+            : sampleProcessTreeCpu(rootPid)
+    return async (pid, previous) => {
+        const reference = previous ?? (await baseline)
+        const current = await sampleProcessTreeCpu(pid)
+        return { active: cpuAdvanced(reference, current), sample: current }
+    }
 }

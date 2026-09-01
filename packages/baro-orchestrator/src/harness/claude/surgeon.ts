@@ -324,6 +324,7 @@ export class Surgeon extends BaseObserver {
                 ],
                 {
                     env: harnessChildEnvironment(),
+                    timeout: this.opts.timeoutMs,
                     idleTimeoutMs: this.opts.timeoutMs,
                     maxBuffer: 4 * 1024 * 1024,
                     onStdoutData: (chunk) => collector.feed(chunk),
