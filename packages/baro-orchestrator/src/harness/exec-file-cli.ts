@@ -14,8 +14,8 @@ import spawn from "cross-spawn"
 
 import {
     CPU_PROBE_TIMEOUT_MS,
-    cpuAdvanced,
-    sampleProcessTreeCpu,
+    createDefaultCpuActivityProbe,
+    type CpuActivityProbe,
     type CpuActivitySample,
 } from "./process-cpu-activity.js"
 import {
@@ -41,19 +41,7 @@ const REAL_TIMERS: ExecFileCliTimers = {
     clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 }
 
-export type CpuActivityProbe = (
-    rootPid: number,
-    previous: CpuActivitySample | null,
-) => Promise<{ active: boolean; sample: CpuActivitySample }>
-
-/** The first expiry has no baseline to compare against, so it always extends. */
-const defaultCpuActivityProbe: CpuActivityProbe = async (rootPid, previous) => {
-    const sample = await sampleProcessTreeCpu(rootPid)
-    return {
-        active: previous === null ? true : cpuAdvanced(previous, sample),
-        sample,
-    }
-}
+export type { CpuActivityProbe }
 
 export interface ExecFileCliOptions {
     cwd?: string
@@ -149,6 +137,8 @@ function execFileCliRaw(
             stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
             detached: POSIX_PROCESS_GROUPS_SUPPORTED,
         } as SpawnOptions)
+        const cpuActivityProbe =
+            options.cpuActivityProbe ?? createDefaultCpuActivityProbe(child.pid)
         const processTree = new ManagedProcessTree(child, {
             terminationGraceMs,
             pollIntervalMs: 25,
@@ -208,14 +198,13 @@ function execFileCliRaw(
         if (options.timeout && options.timeout > 0) {
             timer = timers.setTimeout(() => {
                 const err = new Error(
-                    `${command} exceeded the absolute limit of ${options.timeout}ms — terminated`,
+                    `${command} timed out after ${options.timeout}ms — exceeded the absolute command ceiling`,
                 ) as Error & { killed: boolean }
                 err.killed = true
                 terminate(err)
             }, options.timeout)
         }
         const idleMs = options.idleTimeoutMs
-        const cpuActivityProbe = options.cpuActivityProbe ?? defaultCpuActivityProbe
         let cpuSample: CpuActivitySample | null = null
         // Bumped by every pet, so a probe that was still in flight when output
         // finally arrived cannot kill the process it was asking about.

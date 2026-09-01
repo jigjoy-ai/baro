@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 
 import {
+    CPU_ACTIVE_MIN_FRACTION,
     CPU_ADVANCE_MIN_DELTA_MS,
     CPU_PROBE_TIMEOUT_MS,
     cpuAdvanced,
@@ -77,6 +78,29 @@ describe("process CPU activity sampling", () => {
         )
         assert.equal(
             cpuAdvanced(previous, { at: 1, totalCpuMs: 10_500, observed: true }, 500),
+            true,
+        )
+    })
+
+    it("scales the bar with the window, so a near-idle long window reads idle", () => {
+        const previous = { at: 0, totalCpuMs: 10_000, observed: true }
+        const longWindow = 300_000
+
+        assert.equal(
+            cpuAdvanced(previous, {
+                at: longWindow,
+                totalCpuMs: 10_000 + 5_000,
+                observed: true,
+            }),
+            false,
+            "5s of CPU across 5 minutes is a near-idle tree",
+        )
+        assert.equal(
+            cpuAdvanced(previous, {
+                at: longWindow,
+                totalCpuMs: 10_000 + longWindow * CPU_ACTIVE_MIN_FRACTION,
+                observed: true,
+            }),
             true,
         )
     })
