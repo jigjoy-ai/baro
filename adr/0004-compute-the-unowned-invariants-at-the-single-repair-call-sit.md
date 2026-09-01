@@ -1,0 +1,9 @@
+# ADR-0004: Compute the unowned invariants at the single repair call site in planner-bus-session.ts
+
+**Status:** Accepted
+**Context:** planner-bus-session.ts:582-589 is the only src caller of buildFinalPrdRepairMessage. It already resolves unowned obligation ids via a local `resolveUnowned` helper (:534-537) backed by `progressive.unownedObligationIds()`, and the progressive handle exposes the parallel `unownedInvariantIds()` (planner-openai-progressive.ts:69-82, 244-245, 409-416). The bus session has no GoalContract in scope, so the ids must be paired with contract text somewhere; deriving the contract at the call site is cheaper than threading a contract through the publisher's public surface.
+**Decision:** In packages/baro-orchestrator/src/planning/adapters/planner-bus-session.ts, at the repair call site (:582-589):
+- Import `unownedInvariantsWithText` from "../domain/invariant-coverage-report.js" and `deriveGoalContract` from the exact same specifier planner-openai-progressive.ts:255 uses.
+- Compute `const goalContract = deriveGoalContract(opts.goalEnvelope)` (derive once per session, memoized in a module-local const/closure if a session-level binding already exists; do not derive inside a loop) and pass `unownedInvariants: unownedInvariantsWithText(goalContract, progressive.unownedInvariantIds())` as an additional property of the existing input object literal.
+- Do NOT change `resolveUnowned`, the obligation argument, `writeSurfaceOverlap` spreading, or the surrounding control flow. Missing-data behavior: `unownedInvariantsWithText` already returns `[]` for a null contract or unknown ids, so no null guards or throws are added.
+**Consequences:** The repair prompt degrades silently to today's output when no contract is derivable — no new failure mode. No new method is added to the progressive handle, so planner-harness-progressive.ts's optional-method cast (:78-81) stays valid.
