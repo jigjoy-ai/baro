@@ -11,28 +11,35 @@
 ```json
 {
   "graphVersion": 2,
-  "proposalId": "run-progressive-e6386e1797963a83:planner:1368e12a099aba7579a93673fc8e923094fe036f5b7a997b97b6debbbc2b46cc",
-  "sourceStoryId": "planner:planning-e6386e1797963a83-1",
-  "reason": "progressive planner admitted fragment final-45a732777a4e7869dc57830bb44c924cdc198bd918523de809cf580f1ef87658",
-  "exactMutationSha256": "c87d55bd41d1f61f9fff29f590e8cd29ea36ab804c5686c8dfa6ae397a707a57",
+  "proposalId": "run-progressive-c5a052b55ef50891:planner:79855f645cbebd716a10f7cc38e5d0c36579e00fe152d77ce1acfec3e102cc5b",
+  "sourceStoryId": "planner:planning-c5a052b55ef50891-1",
+  "reason": "progressive planner admitted fragment invariant-coverage-prefix-1",
+  "exactMutationSha256": "942bda258d89140efb8f5709f534d9ba6fba955781bee2aa5b3805e2a5da4177",
   "mutationSummary": {
     "addedStories": [
       {
         "id": "S1",
-        "title": "Restore ceiling wording, route host timeout to the absolute ceiling, and make the first idle expiry CPU-measured",
+        "title": "Invariant coverage report + canonicalization domain modules",
         "dependsOn": [],
         "goalInvariantIds": [
           "G-A1",
-          "G-A2",
           "G-A3",
           "G-A4",
+          "G-C2",
+          "G-C5",
+          "G-C7"
+        ]
+      },
+      {
+        "id": "S2",
+        "title": "Publisher receipt, stderr line and warn sink for the invariant gap",
+        "dependsOn": [
+          "S1"
+        ],
+        "goalInvariantIds": [
+          "G-A1",
           "G-A5",
-          "G-A6",
-          "G-A7",
-          "G-A8",
-          {
-            "omittedItems": 11
-          }
+          "G-C2"
         ]
       }
     ],

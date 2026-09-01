@@ -9,6 +9,8 @@
 
 import { emit } from "../../tui-protocol.js"
 import type { ObligationNote } from "../domain/architecture-obligation-contract.js"
+import type { GoalInvariantNote } from "../domain/goal-invariant-canonicalization.js"
+import { formatInvariantIdList } from "../domain/invariant-coverage-report.js"
 
 function enabled(): boolean {
     return process.env.BARO_PLAN_EVENTS === "1"
@@ -35,6 +37,27 @@ export function emitPlanActivity(kind: "warn" | "error", text: string): void {
 
 /** The only bridge from a domain obligation note to the run stream. */
 export function emitObligationNote(note: ObligationNote): void {
+    emitPlanActivity("warn", note.detail)
+}
+
+export interface InvariantCoverageGap {
+    readonly fragmentId: string
+    readonly unownedInvariantIds: readonly string[]
+    readonly totalInvariants: number
+}
+
+export type InvariantCoverageGapSink = (gap: InvariantCoverageGap) => void
+
+/** The only bridge from an admission-time invariant gap to the run stream. */
+export function emitInvariantCoverageGap(gap: InvariantCoverageGap): void {
+    emitPlanActivity(
+        "warn",
+        `[planner-invariants] fragment ${gap.fragmentId}: ${gap.unownedInvariantIds.length}/${gap.totalInvariants} goal invariant(s) unowned: ${formatInvariantIdList(gap.unownedInvariantIds)}`,
+    )
+}
+
+/** The only bridge from a domain goal-invariant note to the run stream. */
+export function emitGoalInvariantNote(note: GoalInvariantNote): void {
     emitPlanActivity("warn", note.detail)
 }
 
