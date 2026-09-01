@@ -1,0 +1,6 @@
+# ADR-0006: Carry missing invariant ids on GoalContractCoverageError
+
+**Status:** Accepted
+**Context:** planner-bus-session resolves the obligation retry list from `missingObligationIdsFromError(error)` first and only falls back to the publisher accessor. GoalContractCoverageError today carries only `code` and a message string, so the invariant retry list would have to be re-derived or scraped from prose.
+**Decision:** In packages/baro-orchestrator/src/planning/domain/goal-contract-coverage.ts extend the constructor to `(readonly code: GoalContractCoverageErrorCode, message: string, readonly missingInvariantIds: readonly string[] = [])` and populate it at both throw sites (:66-71 unknown_invariant → the offending ids; :80-85 incomplete_coverage → the missing ids). Add `export function missingInvariantIdsFromError(error: unknown): readonly string[]` returning `error instanceof GoalContractCoverageError ? error.missingInvariantIds : []`. Do NOT convert this error to ContractDefect carriage — the synthetic single-defect fallback in contract-normalization.ts:191-204 already routes its message into the repair prompt, and changing it would alter existing defect text.
+**Consequences:** Defaulted third parameter keeps every existing `new GoalContractCoverageError(code, message)` call compiling. Existing repair-prompt defect text is byte-identical.
