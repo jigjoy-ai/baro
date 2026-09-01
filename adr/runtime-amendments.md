@@ -11,39 +11,27 @@
 ```json
 {
   "graphVersion": 2,
-  "proposalId": "run-progressive-fa9710c864f6214e:planner:115475d28ac6d3673186acf90e5f7d9c0d0e6c579f341e68b3a3e333cbcd27a5",
-  "sourceStoryId": "planner:planning-fa9710c864f6214e-1",
-  "reason": "progressive planner admitted fragment issue-107-gate-reliability-1",
-  "exactMutationSha256": "b50c30c0f7e7b40f5bf4ee8c24dc62f07cda57a8874235bfd180defaae6a3f17",
+  "proposalId": "run-progressive-e6386e1797963a83:planner:1368e12a099aba7579a93673fc8e923094fe036f5b7a997b97b6debbbc2b46cc",
+  "sourceStoryId": "planner:planning-e6386e1797963a83-1",
+  "reason": "progressive planner admitted fragment final-45a732777a4e7869dc57830bb44c924cdc198bd918523de809cf580f1ef87658",
+  "exactMutationSha256": "c87d55bd41d1f61f9fff29f590e8cd29ea36ab804c5686c8dfa6ae397a707a57",
   "mutationSummary": {
     "addedStories": [
       {
         "id": "S1",
-        "title": "Unique per-invocation worktree run roots via shared test fixture",
+        "title": "Restore ceiling wording, route host timeout to the absolute ceiling, and make the first idle expiry CPU-measured",
         "dependsOn": [],
         "goalInvariantIds": [
           "G-A1",
           "G-A2",
-          "G-A7",
-          "G-C4",
-          "G-C6"
-        ]
-      },
-      {
-        "id": "S2",
-        "title": "CPU-aware idle watchdog, absolute command ceiling, and announced run-level retry",
-        "dependsOn": [],
-        "goalInvariantIds": [
           "G-A3",
           "G-A4",
           "G-A5",
           "G-A6",
-          "G-C1",
-          "G-C2",
-          "G-C3",
-          "G-C5",
+          "G-A7",
+          "G-A8",
           {
-            "omittedItems": 1
+            "omittedItems": 11
           }
         ]
       }
