@@ -1,0 +1,6 @@
+# ADR-0002: Freeze the published receipt key names and forbid host feedback from shadowing them
+
+**Status:** Accepted
+**Context:** planner-openai-progressive.ts:374 spreads `...(hostFeedback ?? {})` LAST, so any key the bus session returns from its publish callback (planner-bus-session.ts:375-387) would overwrite the invariant keys. Today there is no collision, but the acceptance criterion 'receipt carries concrete unownedInvariantIds of identical shape' depends on it staying that way.
+**Decision:** The published receipt keys are exactly `invariantNote` (string) and `unownedInvariantIds` (string[], a copy, omitted when empty) — unchanged. planner-bus-session.ts's publish callback (:361-388) MUST NOT return any object containing the keys `invariantNote`, `unownedInvariantIds`, `obligationNote`, or `unownedObligationIds`; its returned keys stay `graphVersion`, `admittedStoryIds`, `replayed`, `droppedEdges`, `droppedEdgeNote`. Do not reorder the spread at :360-375. The harness lane keeps JSON-stringifying the merged receipt (planner-harness-progressive.ts:170-173) with no key renaming.
+**Consequences:** Assertions in the new tests may key on `receipt.unownedInvariantIds` directly. Any future host feedback field must be checked against this reserved-key list.
