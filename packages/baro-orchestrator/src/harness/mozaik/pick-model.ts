@@ -20,6 +20,14 @@ export function pickInferenceModel(
     name: string,
     connection?: OpenAIConnection,
 ): GenerativeModel {
+    if (!name) {
+        // Reaching here nameless means a phase landed on the native lane by
+        // fallback — a backend with no interactive lane adapter (#121). Fail
+        // with the cause, not an OpenAI credentials error three calls later.
+        throw new Error(
+            "pick-model: no model name for the native lane — this backend has no interactive lane adapter",
+        )
+    }
     if (connection?.baseURL) return new GenericOpenAIModel(name, connection)
     switch (name) {
         case "gpt-5.5":
