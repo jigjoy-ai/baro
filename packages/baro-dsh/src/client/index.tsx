@@ -21,7 +21,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
 const RUNS_SETTINGS_NS = 'baro-dsh'
 
-export const inject = ['slots', 'locale', 'remote']
+// `remote.settings` is a scoped service of its own in cordis, not a property of `remote`.
+export const inject = ['slots', 'locale', 'remote', 'remote.settings']
 
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'baro-dsh: dictionaries')
