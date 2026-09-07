@@ -1,0 +1,9 @@
+# Layer applied when a dsh profile lists this bundle. One row: the provider
+# and its job publisher live in one plugin so a run is never half-registered.
+- insert:
+    - id: baro
+      name: baro-dsh
+      config:
+        providerName: baro
+        command: baro
+        localOnly: true
