@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { DelegateRun, type RunProcess, type RunProcessPort, type RunRequest, type RunView } from '../src/application/delegate-run.ts'
+import {
+  DelegateRun,
+  composeObservers,
+  type RunProcess,
+  type RunProcessPort,
+  type RunRequest,
+  type RunView,
+} from '../src/application/delegate-run.ts'
 import type { Terminal } from '../src/domain/run.ts'
 
 /* The use case against fake ports: a scripted stdout and a recording
@@ -46,24 +53,32 @@ describe('DelegateRun', () => {
       [
         '{"type":"init","protocol":3,"project":"demo","stories":[{"id":"S1"}]}',
         'garbage line',
+        '{"type":"activity","text":"not a milestone"}',
         '{"type":"story_complete","id":"S1"}',
         '{"type":"done","success":true,"stats":{"stories_completed":1,"stories_skipped":0}}',
       ],
       0,
     )
-    const seen: { view?: RunView; terminal?: Terminal } = {}
+    const seen: { view?: RunView; terminal?: Terminal; changes: number } = { changes: 0 }
     const delegate = new DelegateRun(child.port, {
       opened(view) {
         seen.view = view
-        return terminal => {
-          seen.terminal = terminal
+        return {
+          changed: () => {
+            seen.changes += 1
+          },
+          closed: terminal => {
+            seen.terminal = terminal
+          },
         }
       },
     })
     const outcome = await delegate.start(request()).outcome
     assert.equal(outcome.terminal, 'completed')
     assert.equal(seen.terminal, 'completed')
+    assert.equal(seen.view?.id, 'run-1')
     assert.equal(seen.view?.label, 'slugify')
+    assert.equal(seen.changes, 3, 'one change per milestone, none for the activity line')
     assert.match(seen.view?.progress() ?? '', /project: demo/)
     assert.match(outcome.text, /baro run succeeded/)
     assert.equal(child.started()?.runId, 'run-1')
@@ -100,6 +115,24 @@ describe('DelegateRun', () => {
     assert.equal(outcome.terminal, 'completed')
     assert.equal(failures.length, 1)
     assert.notEqual(child.started(), undefined)
+  })
+
+  it('composed observers are isolated from each other', async () => {
+    const closedBy: string[] = []
+    const failures: unknown[] = []
+    const observer = composeObservers(
+      [
+        { opened: () => { throw new Error('panel down') } },
+        { opened: () => ({ closed: () => closedBy.push('jobs') }) },
+        { opened: () => ({ changed: () => { throw new Error('flaky') }, closed: () => closedBy.push('flaky') }) },
+      ],
+      error => failures.push(error),
+    )
+    const child = scripted(['{"type":"progress","completed":1,"total":1}', '{"type":"done","success":true}'], 0)
+    const outcome = await new DelegateRun(child.port, observer).start(request()).outcome
+    assert.equal(outcome.terminal, 'completed')
+    assert.deepEqual(closedBy, ['jobs', 'flaky'])
+    assert.equal(failures.length, 1 + 2, 'one open failure, one changed failure per milestone')
   })
 
   it('refuses an empty goal before touching the process', () => {

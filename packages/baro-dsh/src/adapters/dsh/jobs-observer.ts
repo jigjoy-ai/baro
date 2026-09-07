@@ -1,5 +1,5 @@
 import type { JobHooks, JobOutcome, JobRegistry } from '@deepseek-ai/dsh-jobs'
-import type { RunObserverPort, RunView } from '../../application/delegate-run.js'
+import type { RunObserverPort, RunSubscription, RunView } from '../../application/delegate-run.js'
 import type { Terminal } from '../../domain/run.js'
 
 /* Every run is one unowned `baro-N` job: unowned so the whole frame sees it
@@ -14,7 +14,7 @@ declare module '@deepseek-ai/dsh-jobs' {
 export class JobsObserver implements RunObserverPort {
   constructor(private readonly jobs: JobRegistry) {}
 
-  opened(view: RunView): (terminal: Terminal) => void {
+  opened(view: RunView): RunSubscription {
     let settle: ((outcome: JobOutcome) => void) | undefined
     const done = new Promise<JobOutcome>(resolve => {
       settle = resolve
@@ -26,10 +26,12 @@ export class JobsObserver implements RunObserverPort {
     }
     this.jobs.start({ kind: 'baro', label: view.label, run: () => hooks })
     let settled = false
-    return terminal => {
-      if (settled) return
-      settled = true
-      settle?.(toJobOutcome(terminal))
+    return {
+      closed: terminal => {
+        if (settled) return
+        settled = true
+        settle?.(toJobOutcome(terminal))
+      },
     }
   }
 }

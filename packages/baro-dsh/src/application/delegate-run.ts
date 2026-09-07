@@ -26,14 +26,23 @@ export interface RunProcessPort {
 }
 
 export interface RunView {
+  readonly id: string
   readonly label: string
+  readonly startedAt: string
+  summary(): RunSummary
   progress(): string
   cancel(reason?: string): void
 }
 
-/** Where a human watches a run (a jobs panel). Optional: a run without an observer still completes. */
+export interface RunSubscription {
+  /** A milestone landed; the view's summary moved. */
+  changed?(): void
+  closed(terminal: Terminal): void
+}
+
+/** Where a human watches a run. Optional, and never load-bearing: a run without an observer still completes. */
 export interface RunObserverPort {
-  opened(view: RunView): (terminal: Terminal) => void
+  opened(view: RunView): RunSubscription
 }
 
 export interface DelegationOutcome {
@@ -46,6 +55,41 @@ export interface Delegation {
   readonly outcome: Promise<DelegationOutcome>
   cancel(reason?: string): void
   dispose(): Promise<void>
+}
+
+/* Several observers, each isolated: a panel that throws must not take the
+   jobs entry down with it, nor the run. */
+export function composeObservers(
+  observers: readonly RunObserverPort[],
+  onFailure?: (error: unknown) => void,
+): RunObserverPort {
+  return {
+    opened(view) {
+      const subscriptions: RunSubscription[] = []
+      for (const observer of observers) {
+        try {
+          subscriptions.push(observer.opened(view))
+        } catch (error) {
+          onFailure?.(error)
+        }
+      }
+      const guarded = (fn: () => void) => {
+        try {
+          fn()
+        } catch (error) {
+          onFailure?.(error)
+        }
+      }
+      return {
+        changed: () => {
+          for (const s of subscriptions) if (s.changed) guarded(() => s.changed?.())
+        },
+        closed: terminal => {
+          for (const s of subscriptions) guarded(() => s.closed(terminal))
+        },
+      }
+    },
+  }
 }
 
 export class DelegateRun {
@@ -69,23 +113,36 @@ export class DelegateRun {
     // The observer opens before the process starts, and its failure is not the
     // run's failure: a panel that cannot be shown must never orphan a child or
     // turn a deliverable delegation into an error.
-    let closed: ((terminal: Terminal) => void) | undefined
+    let subscription: RunSubscription | undefined
     try {
-      closed = this.observer?.opened({
+      subscription = this.observer?.opened({
+        id: request.runId,
         label: request.label,
+        startedAt: new Date().toISOString(),
+        summary: () => tracker.summary(),
         progress: () => renderProgress(tracker.summary()),
         cancel,
       })
     } catch (error) {
       this.onObserverFailure?.(error)
     }
-    child = this.process.start(request)
+    const notify = (fn: (() => void) | undefined) => {
+      try {
+        fn?.()
+      } catch (error) {
+        this.onObserverFailure?.(error)
+      }
+    }
 
+    child = this.process.start(request)
     const started = child
     const followed = (async () => {
       for await (const line of started.lines) {
         const event = parseLine(line)
-        if (event) tracker.accept(event)
+        if (!event) continue
+        const before = tracker.summary().milestones.length
+        tracker.accept(event)
+        if (tracker.summary().milestones.length !== before) notify(subscription?.changed?.bind(subscription))
       }
     })()
 
@@ -94,7 +151,7 @@ export class DelegateRun {
       await followed.catch(() => undefined)
       const summary = tracker.summary()
       const terminal = resolveTerminal(aborted || request.signal.aborted, exitCode, summary.done)
-      closed?.(terminal)
+      notify(subscription ? () => subscription?.closed(terminal) : undefined)
       return { terminal, text: renderOutcome(summary, terminal), summary }
     })()
 
