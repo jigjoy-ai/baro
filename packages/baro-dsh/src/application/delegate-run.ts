@@ -52,34 +52,45 @@ export class DelegateRun {
   constructor(
     private readonly process: RunProcessPort,
     private readonly observer: RunObserverPort | undefined,
+    private readonly onObserverFailure?: (error: unknown) => void,
   ) {}
 
   start(request: RunRequest): Delegation {
     if (!request.goal.trim()) throw new Error('baro needs a goal — the delegation prompt is empty')
     const tracker = new RunTracker()
-    const child = this.process.start(request)
 
+    let child: RunProcess | undefined
     let aborted = false
     const cancel = (reason?: string) => {
       aborted = true
-      child.terminate()
+      child?.terminate()
       void reason
     }
-    const closed = this.observer?.opened({
-      label: request.label,
-      progress: () => renderProgress(tracker.summary()),
-      cancel,
-    })
+    // The observer opens before the process starts, and its failure is not the
+    // run's failure: a panel that cannot be shown must never orphan a child or
+    // turn a deliverable delegation into an error.
+    let closed: ((terminal: Terminal) => void) | undefined
+    try {
+      closed = this.observer?.opened({
+        label: request.label,
+        progress: () => renderProgress(tracker.summary()),
+        cancel,
+      })
+    } catch (error) {
+      this.onObserverFailure?.(error)
+    }
+    child = this.process.start(request)
 
+    const started = child
     const followed = (async () => {
-      for await (const line of child.lines) {
+      for await (const line of started.lines) {
         const event = parseLine(line)
         if (event) tracker.accept(event)
       }
     })()
 
     const outcome = (async (): Promise<DelegationOutcome> => {
-      const { exitCode } = await child.exited
+      const { exitCode } = await started.exited
       await followed.catch(() => undefined)
       const summary = tracker.summary()
       const terminal = resolveTerminal(aborted || request.signal.aborted, exitCode, summary.done)
@@ -92,7 +103,7 @@ export class DelegateRun {
       cancel,
       dispose: async () => {
         cancel('disposed')
-        await child.waitForExit()
+        await started.waitForExit()
       },
     }
   }

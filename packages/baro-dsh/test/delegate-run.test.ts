@@ -84,6 +84,24 @@ describe('DelegateRun', () => {
     assert.equal((await delegation.outcome).terminal, 'aborted')
   })
 
+  it('a failing observer neither orphans the child nor fails the delegation', async () => {
+    const child = scripted(['{"type":"done","success":true}'], 0)
+    const failures: unknown[] = []
+    const delegate = new DelegateRun(
+      child.port,
+      {
+        opened() {
+          throw new Error('no job controller serves this agent')
+        },
+      },
+      error => failures.push(error),
+    )
+    const outcome = await delegate.start(request()).outcome
+    assert.equal(outcome.terminal, 'completed')
+    assert.equal(failures.length, 1)
+    assert.notEqual(child.started(), undefined)
+  })
+
   it('refuses an empty goal before touching the process', () => {
     const child = scripted([], 0)
     assert.throws(() => new DelegateRun(child.port, undefined).start(request('   ')), /needs a goal/)

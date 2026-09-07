@@ -46,9 +46,15 @@ export function apply(ctx: Context, config: Config): void {
     env: resolved.env ?? {},
     disposeGraceMs: resolved.disposeGraceMs ?? 5_000,
   })
+  // The registry refuses a job no controller serves. Our runs are unowned, so
+  // this plugin attaches its own controller for the scope it lives in instead
+  // of depending on which agent preset happened to load dsh-tool-jobs.
+  ctx.effect(() => ctx.jobs.attachController('baro-dsh'))
   const provider = new BaroSubagentProvider(
     resolved.providerName ?? 'baro',
-    new DelegateRun(runner, new JobsObserver(ctx.jobs)),
+    new DelegateRun(runner, new JobsObserver(ctx.jobs), error => {
+      console.error(`[baro-dsh] run continues without a job entry: ${error instanceof Error ? error.message : String(error)}`)
+    }),
     resolved.cwd,
   )
   ctx.effect(() => ctx.subagents.registerProvider(provider))
