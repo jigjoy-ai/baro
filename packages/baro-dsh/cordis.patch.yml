@@ -16,4 +16,8 @@
         provider: baro
         toolName: baro
         backgroundMode: one-shot
+        # A run is already a `baro-N` job through the registry; the tool's own
+        # background switch needs dsh-tool-jobs' controller, which the web
+        # profile does not give every agent, and the model reaches for it.
+        enableRunInBackground: false
         maxDepth: provider-managed
