@@ -1435,7 +1435,7 @@ export async function orchestrate(
                 responder = createDialogueResponder({
                     backend: criticLlm,
                     cwd: goalReviewRuntimeCwd,
-                    model: config.criticModel,
+                    model: config.criticModel ?? goalReviewDefaultModel(criticLlm),
                     // The adapter owns TERM/KILL settlement. Its watchdog must
                     // win before the outer reviewer watchdog so the latter is
                     // only a hard safety backstop, never the normal timeout.
@@ -2095,14 +2095,23 @@ export function resolveDialogueBackend(
     return runBackend
 }
 
+/* The run-level review reads every criterion against the whole merged run
+   and must cite them back exactly; long, non-English criteria broke haiku
+   (run 4cada710: fifteen invariants left open by a parse failure). It gets
+   the stronger tier by default; `--critic-model` still overrides. */
+function goalReviewDefaultModel(
+    backend: NonNullable<OrchestrateConfig["criticLlm"]>,
+): string | undefined {
+    if (backend === "openai") return "gpt-5.4-mini"
+    if (backend === "claude") return "sonnet"
+    return undefined
+}
+
 function goalReviewModelName(
     backend: NonNullable<OrchestrateConfig["criticLlm"]>,
     configured: string | undefined,
 ): string {
-    if (configured) return configured
-    if (backend === "openai") return "gpt-5.4-mini"
-    if (backend === "claude") return "haiku"
-    return `${backend}-default`
+    return configured ?? goalReviewDefaultModel(backend) ?? `${backend}-default`
 }
 
 export function aggregateReviewBudgetMs(

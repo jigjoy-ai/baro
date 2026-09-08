@@ -285,8 +285,51 @@ describe("GoalInvariantLedger", () => {
         )
     })
 
-    it("fails closed on negative and inconclusive aggregate reviews", () => {
-        for (const status of ["failed", "inconclusive"] as const) {
+    it("an inconclusive aggregate review does not undo integrated, independently reviewed evidence", () => {
+        const contract = deriveGoalContract({
+            objective: "Compose providers.",
+            constraints: [],
+            acceptanceCriteria: ["Every provider shares one cancellation signal."],
+            nonGoals: [],
+            assumptions: [],
+        })!
+        const invariantId = contract.invariants[0]!.id
+        const ledger = new GoalInvariantLedger(contract, [{
+            storyId: "S5",
+            invariantIds: [invariantId],
+        }])
+        ledger.recordIntegration({ storyId: "S5", leaseId: "lease-S5" })
+        ledger.recordQuality({
+            storyId: "S5",
+            leaseId: "lease-S5",
+            evaluationId: "quality-S5",
+            status: "passed",
+            independentlyPassed: true,
+        })
+        const basis = ledger.aggregateReviewBasis(["S5"], "verification-1")
+        ledger.recordAggregateReview({
+            reviewId: `goal-review:${basis.fingerprint}`,
+            basisFingerprint: basis.fingerprint,
+            verificationId: basis.verificationId,
+            repositoryFingerprint: "a".repeat(64),
+            status: "inconclusive",
+            attempts: 2,
+            modelUsed: "fake-reviewer",
+            invariants: [{
+                invariantId,
+                status: "inconclusive",
+                reason: "aggregate evaluator violated the exact criterion contract",
+            }],
+        })
+        const assessment = ledger.assess(["S5"], true, basis)
+        assert.equal(assessment.status, "satisfied")
+        assert.deepEqual(assessment.satisfiedInvariantIds, [invariantId])
+        assert.match(assessment.invariants[0]!.reason, /independently reviewed; run-level semantic review was inconclusive: aggregate evaluator/)
+        assert.match(assessment.reason, /inconclusive for 1 of them, completion rests on per-story evidence/)
+    })
+
+    it("fails closed on negative aggregate reviews", () => {
+        for (const status of ["failed"] as const) {
             const contract = deriveGoalContract({
                 objective: "Compose providers.",
                 constraints: [],

@@ -393,7 +393,7 @@ describe("aggregate goal governance", () => {
         )
     })
 
-    it("keeps infrastructure-inconclusive aggregate review fail-closed without coding remediation", () => {
+    it("an inconclusive aggregate review completes on per-story evidence without coding remediation", () => {
         const fixture = aggregateFixture("run-aggregate-inconclusive")
         fixture.env.deliverSemanticEvent(
             fixture.board,
@@ -411,8 +411,10 @@ describe("aggregate goal governance", () => {
             false,
         )
         const attestation = fixture.env.events.find(GoalCompletionAttested.is)
-        assert.equal(attestation?.data.status, "incomplete")
-        assert.deepEqual(attestation?.data.openInvariantIds, ["G-A1"])
+        assert.equal(attestation?.data.status, "satisfied")
+        assert.deepEqual(attestation?.data.openInvariantIds, [])
+        assert.deepEqual(attestation?.data.satisfiedInvariantIds, ["G-A1"])
+        assert.match(attestation?.data.reason ?? "", /inconclusive for 1 of them/)
     })
 
     it("bounds repeated semantic remediation and eventually returns the rejected attestation", () => {
