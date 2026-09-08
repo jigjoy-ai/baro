@@ -40,6 +40,7 @@ import type {
     GoalAggregateReviewStatus,
 } from "../runtime/goal-aggregate-review.js"
 import { createGoalAggregateReviewBasis } from "../runtime/goal-aggregate-review.js"
+import { resolveCitedCriteria } from "./goal-criterion-citation.js"
 
 const DEFAULT_TIMEOUT_MS = 120_000
 const DEFAULT_MAX_ATTEMPTS = 2
@@ -93,7 +94,8 @@ export const GOAL_AGGREGATE_REVIEW_SYSTEM_PROMPT = `${verdictSystemPrompt({
 This is a run-level composition review, not a review of one worker. Evaluate every exact
 [G-*] criterion against the complete merged-run repository and verification evidence. A local
 story pass is evidence about that shard only; independently check the interaction of all mapped
-contributions. violated_criteria must contain only exact criterion strings from the prompt.
+contributions. Cite a violated criterion by its exact [G-*] tag alone (preferred, e.g. "[G-A3]")
+or by its exact string from the prompt; never paraphrase, translate, or shorten the text.
 
 Verification commands include their captured stdout/stderr (\`output\`). Weigh what the commands
 actually printed — test counts, suites run, warnings — over their pass/fail labels; a "passed"
@@ -1161,10 +1163,17 @@ function parseInvariantReviews(
     ) {
         throw new Error("aggregate evaluator returned an invalid verdict object")
     }
-    const violatedCriteria = violated as string[]
+    // Citations resolve onto the exact prompt strings (tag, exact text, or a
+    // typographically normalized text); anything unresolvable or duplicated is
+    // still the contract violation it always was.
+    const violatedCriteria = resolveCitedCriteria(
+        violated as string[],
+        criteria,
+        invariantIds,
+    )
     if (
+        violatedCriteria === null ||
         new Set(violatedCriteria).size !== violatedCriteria.length ||
-        violatedCriteria.some((criterion) => !criteria.includes(criterion)) ||
         (verdict === "pass" && violatedCriteria.length > 0) ||
         (verdict === "fail" && violatedCriteria.length === 0) ||
         (verdict === "inconclusive" && violatedCriteria.length > 0)
@@ -1178,6 +1187,8 @@ function parseInvariantReviews(
             violatedCriteria,
             groupNamespace,
             new Map(),
+            criteria,
+            invariantIds,
         )
         return criteria.map((_criterion, index) => ({
             invariantId: invariantIds[index]!,
@@ -1195,6 +1206,8 @@ function parseInvariantReviews(
         violatedCriteria,
         groupNamespace,
         invariantByCriterion,
+        criteria,
+        invariantIds,
     )
     return criteria.map((criterion, index) => ({
         invariantId: invariantIds[index]!,
@@ -1222,6 +1235,8 @@ function parseRemediationGroups(
     violatedCriteria: readonly string[],
     groupNamespace: string,
     invariantByCriterion: ReadonlyMap<string, string>,
+    criteria: readonly string[],
+    invariantIds: readonly string[],
 ): ReadonlyMap<string, ParsedRemediationGroup> {
     if (verdict !== "fail") {
         if (
@@ -1265,8 +1280,13 @@ function parseRemediationGroups(
                 "aggregate evaluator returned a malformed remediation group",
             )
         }
-        const groupCriteria = item.violated_criteria as string[]
+        const groupCriteria = resolveCitedCriteria(
+            item.violated_criteria as string[],
+            criteria,
+            invariantIds,
+        )
         if (
+            groupCriteria === null ||
             new Set(groupCriteria).size !== groupCriteria.length ||
             groupCriteria.some(
                 (criterion) =>
