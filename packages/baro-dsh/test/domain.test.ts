@@ -26,6 +26,27 @@ describe('run', () => {
     assert.equal(classifyDone({ type: 'done', success: false }), 'error')
   })
 
+  it('a run whose stories all merged with verification passed is delivered, not failed', () => {
+    const done = {
+      type: 'done',
+      success: false,
+      abort_reason: 'global goal is not satisfied (G-A1, G-C2): 2 open invariant(s)',
+      verification_status: 'passed',
+      stats: { stories_completed: 3, stories_skipped: 0, total_commits: 6, files_created: 4, files_modified: 1 },
+    }
+    assert.equal(classifyDone(done), 'completed')
+    const tracker = new RunTracker()
+    tracker.accept(done)
+    const text = renderOutcome(tracker.summary(), 'completed')
+    assert.match(text, /^baro run delivered: every story merged and verification passed/)
+    assert.match(text, /open contract: global goal is not satisfied/)
+    assert.match(text, /commits: 6/)
+    assert.match(text, /files created: 4, modified: 1/)
+    // One skipped story or a failed verification keeps the honest error.
+    assert.equal(classifyDone({ ...done, stats: { ...done.stats, stories_skipped: 1 } }), 'error')
+    assert.equal(classifyDone({ ...done, verification_status: 'failed' }), 'error')
+  })
+
   it('resolves a terminal without a done line from the exit code', () => {
     assert.equal(resolveTerminal(true, 0, undefined), 'aborted')
     assert.equal(resolveTerminal(false, 0, undefined), 'completed')

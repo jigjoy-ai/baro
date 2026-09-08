@@ -8,10 +8,24 @@ import { type BaroEvent, describe, isMilestone, numberField, stringField } from 
 export type Terminal = 'completed' | 'error' | 'max-tokens' | 'aborted'
 
 /* `done.abort_code` is a classification only when every failed story agreed
-   on one code; a prose-only abort is `error`, never guessed further. */
+   on one code; a prose-only abort is `error`, never guessed further — with one
+   exception. baro marks a run unsuccessful when its goal contract keeps open
+   invariants even though every story merged and verification passed. For the
+   delegating agent that run delivered; calling it an error made the parent
+   conclude nothing was produced. It is `completed`, and the text carries the
+   open contract. */
 export function classifyDone(done: BaroEvent): Terminal {
   if (done.success === true) return 'completed'
-  return done.abort_code === 'token_ceiling' ? 'max-tokens' : 'error'
+  if (done.abort_code === 'token_ceiling') return 'max-tokens'
+  return deliveredDespiteContract(done) ? 'completed' : 'error'
+}
+
+export function deliveredDespiteContract(done: BaroEvent): boolean {
+  if (done.success === true || done.abort_code !== undefined) return false
+  const stats = done.stats as Record<string, unknown> | undefined
+  const completed = typeof stats?.stories_completed === 'number' ? stats.stories_completed : 0
+  const skipped = typeof stats?.stories_skipped === 'number' ? stats.stories_skipped : 0
+  return completed > 0 && skipped === 0 && done.verification_status === 'passed'
 }
 
 export function resolveTerminal(aborted: boolean, exitCode: number | null, done: BaroEvent | undefined): Terminal {
@@ -188,15 +202,30 @@ export function renderOutcome(summary: RunSummary, terminal: Terminal): string {
   const lines: string[] = []
   if (done) {
     const code = stringField(done, 'abort_code')
-    lines.push(done.success === true ? 'baro run succeeded.' : `baro run failed${code ? ` (${code})` : ''}.`)
     const reason = stringField(done, 'abort_reason')
-    if (reason) lines.push(reason)
     const stats = done.stats as Record<string, unknown> | undefined
+    if (done.success === true) {
+      lines.push('baro run succeeded.')
+    } else if (deliveredDespiteContract(done)) {
+      lines.push('baro run delivered: every story merged and verification passed, but baro left its goal contract open.')
+      if (reason) lines.push(`open contract: ${reason}`)
+    } else {
+      lines.push(`baro run failed${code ? ` (${code})` : ''}.`)
+      if (reason) lines.push(reason)
+    }
     if (stats) {
-      lines.push(`stories completed: ${String(stats.stories_completed ?? '?')}, skipped: ${String(stats.stories_skipped ?? '?')}`)
+      const facts = [
+        `stories completed: ${String(stats.stories_completed ?? '?')}, skipped: ${String(stats.stories_skipped ?? '?')}`,
+        typeof stats.total_commits === 'number' ? `commits: ${stats.total_commits}` : undefined,
+        typeof stats.files_created === 'number' || typeof stats.files_modified === 'number'
+          ? `files created: ${String(stats.files_created ?? 0)}, modified: ${String(stats.files_modified ?? 0)}`
+          : undefined,
+      ].filter((f): f is string => f !== undefined)
+      lines.push(...facts)
     }
     const verification = stringField(done, 'verification_status')
     if (verification) lines.push(`verification: ${verification}`)
+    if (done.success !== true) lines.push('Changes are committed in the working directory; inspect them with git log.')
   } else {
     lines.push(`baro run ended without a result (${terminal}).`)
   }
