@@ -1,5 +1,5 @@
 import type { RunObserverPort, RunSubscription, RunView } from '../../application/delegate-run.js'
-import type { Terminal } from '../../domain/run.js'
+import type { Phase, Terminal } from '../../domain/run.js'
 
 /* The host→browser channel an out-of-tree plugin has: a settings namespace.
    dsh forwards `settings/document-updated` to every client, and the settings
@@ -15,6 +15,8 @@ export interface RunRecord {
   readonly startedAt: string
   readonly finishedAt: string | null
   readonly project: string | null
+  readonly phase: Phase
+  readonly activity: string | null
   readonly completed: number
   readonly total: number
   readonly prUrl: string | null
@@ -75,6 +77,8 @@ export class SettingsObserver implements RunObserverPort {
         startedAt: view.startedAt,
         finishedAt: finished ? new Date(this.now()).toISOString() : null,
         project: s.project ?? null,
+        phase: s.phase,
+        activity: s.activity ?? null,
         completed: s.completed,
         total: s.total || s.storiesTotal,
         prUrl: s.prUrl ?? null,

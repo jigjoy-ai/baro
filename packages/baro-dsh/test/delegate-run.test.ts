@@ -78,7 +78,7 @@ describe('DelegateRun', () => {
     assert.equal(seen.terminal, 'completed')
     assert.equal(seen.view?.id, 'run-1')
     assert.equal(seen.view?.label, 'slugify')
-    assert.equal(seen.changes, 3, 'one change per milestone, none for the activity line')
+    assert.equal(seen.changes, 4, 'three milestones plus the activity line; the garbage line moves nothing')
     assert.match(seen.view?.progress() ?? '', /project: demo/)
     assert.match(outcome.text, /baro run succeeded/)
     assert.equal(child.started()?.runId, 'run-1')

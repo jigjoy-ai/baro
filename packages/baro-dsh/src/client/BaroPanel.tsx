@@ -28,6 +28,9 @@ const CSS = `
 .baro-status{opacity:.7;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
 .baro-bar{height:4px;margin:8px 0 4px;border-radius:2px;background:rgba(127,127,127,.2);overflow:hidden}
 .baro-bar i{display:block;height:100%;background:#f59e0b}
+.baro-phase{display:flex;flex-direction:column;gap:2px;margin:2px 0 6px}
+.baro-phase-name{font-weight:600;color:#f59e0b;font-size:11px;letter-spacing:.02em}
+.baro-activity{opacity:.8;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .baro-meta{display:flex;gap:10px;opacity:.75;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
 .baro-meta a{color:inherit}
 .baro-log{margin:6px 0 0;padding:0;list-style:none;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;opacity:.85}
@@ -98,6 +101,12 @@ function RunCard({ run, t }: { run: RunRecord; t: (key: BaroKey) => string }): J
         <span className="baro-status">{t(`status.${run.status}` as BaroKey)} · {elapsed(run)}</span>
       </div>
       <div className="baro-bar"><i style={{ width: `${pct}%` }} /></div>
+      {run.status === 'running' && (
+        <div className="baro-phase">
+          <span className="baro-phase-name">{t(`phase.${run.phase}` as BaroKey)}</span>
+          {run.activity && <span className="baro-activity" title={run.activity}>{run.activity}</span>}
+        </div>
+      )}
       <div className="baro-meta">
         {run.total > 0 && <span>{t('run.progress')} {run.completed}/{run.total}</span>}
         {run.project && <span>{run.project}</span>}

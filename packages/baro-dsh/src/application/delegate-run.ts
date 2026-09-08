@@ -140,9 +140,9 @@ export class DelegateRun {
       for await (const line of started.lines) {
         const event = parseLine(line)
         if (!event) continue
-        const before = tracker.summary().milestones.length
+        const before = tracker.summary().revision
         tracker.accept(event)
-        if (tracker.summary().milestones.length !== before) notify(subscription?.changed?.bind(subscription))
+        if (tracker.summary().revision !== before) notify(subscription?.changed?.bind(subscription))
       }
     })()
 

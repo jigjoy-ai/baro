@@ -13,6 +13,12 @@ export const en = {
   'run.progress': 'stories',
   'run.pr': 'pull request',
   'run.milestones': 'milestones',
+  'phase.intake': 'intake · reading the repository and the goal',
+  'phase.architect': 'architect · pinning the design',
+  'phase.planning': 'planning · composing stories',
+  'phase.executing': 'executing',
+  'phase.finalizing': 'finalizing · verification and integration',
+  'phase.done': 'done',
   'trigger.aria': 'baro runs',
 } as const
 
@@ -29,6 +35,12 @@ export const zh = {
   'run.progress': '故事',
   'run.pr': '拉取请求',
   'run.milestones': '里程碑',
+  'phase.intake': '接收 · 阅读仓库与目标',
+  'phase.architect': '架构 · 确定设计',
+  'phase.planning': '规划 · 编排故事',
+  'phase.executing': '执行中',
+  'phase.finalizing': '收尾 · 验证与集成',
+  'phase.done': '完成',
   'trigger.aria': 'baro 运行',
 } as const
 
