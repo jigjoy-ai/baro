@@ -44,8 +44,14 @@ export function apply(ctx: ClientContext): void {
         void store.refresh()
       }),
     ]
+    // Belt and braces for the event: while a run is live, poll slowly too. The
+    // document is small and the host writes at most once a second anyway.
+    const poll = setInterval(() => {
+      if (store.getSnapshot().running > 0) void store.refresh()
+    }, 4_000)
     void store.refresh()
     return () => {
+      clearInterval(poll)
       for (const dispose of disposers) dispose()
     }
   }, 'baro-dsh: run state')

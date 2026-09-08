@@ -90,7 +90,8 @@ export class RunTracker {
       case 'init':
         this.protocol = numberField(event, 'protocol')
         this.project = stringField(event, 'project')
-        this.storiesTotal = Array.isArray(event.stories) ? event.stories.length : this.storiesTotal
+        // Progressive planning inits with an empty graph and fills it by fragments; keep what we counted.
+        this.storiesTotal = (Array.isArray(event.stories) ? event.stories.length : 0) || this.storiesTotal
         this.setPhase('executing')
         break
       case 'activity': {
