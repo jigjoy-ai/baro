@@ -23,6 +23,7 @@ import {
     PlanningStreamCompleted,
     PlanFragmentRejected,
     RuntimeReplanApplied,
+    RuntimeReplanRejected,
 } from "../../src/semantic-events.js"
 import type { ProgressivePlanningBoardPhase } from "../../src/planning/application/progressive-planning-coordinator.js"
 
@@ -167,6 +168,57 @@ describe("final planner tail admission", () => {
         assert.equal(activity[0]?.kind, "error")
         assert.match(activity[0]?.text ?? "", /blocker: obligation_unowned/)
         assert.doesNotMatch(activity[0]?.text ?? "", /unsettled_stories/)
+    })
+
+    // Run 6cc165ae: the tail was rejected while S1/S2 were still running and the
+    // run failed four minutes before both merged. Unsettled work is not a
+    // verdict, it is a question the board answers later.
+    it("parks the decision while admitted stories are unsettled, then discards once they settle", () => {
+        const harness = buildHarness({ phase: "running", leaveUnsettled: true, rejectTail: true })
+
+        harness.complete()
+
+        assert.equal(harness.planning().status, "open")
+        assert.equal(harness.closed(), undefined)
+        assert.equal(harness.pending(), true)
+        assert.equal(harness.discards().length, 0)
+        let activity = harness.activity()
+        assert.equal(activity.length, 1)
+        assert.equal(activity[0]?.kind, "warn")
+        assert.match(activity[0]?.text ?? "", /decision deferred until admitted stories settle: S1/)
+
+        harness.resolve(false)
+        assert.equal(harness.planning().status, "open", "still unsettled: keep waiting")
+        assert.equal(harness.pending(), true)
+
+        harness.settle("S1")
+        harness.resolve(false)
+
+        assert.equal(harness.pending(), false)
+        assert.equal(harness.planning().status, "completed")
+        assert.equal(harness.closed()?.status, "completed")
+        assert.deepEqual(harness.discards().map((d) => d.storyIds), [["S2"]])
+        activity = harness.activity()
+        assert.equal(activity.length, 2)
+        assert.equal(activity[1]?.kind, "warn")
+        assert.match(activity[1]?.text ?? "", /dropped stories: S2/)
+    })
+
+    it("fails the parked decision only when nothing more can settle", () => {
+        const harness = buildHarness({ phase: "running", leaveUnsettled: true, rejectTail: true })
+
+        harness.complete()
+        harness.resolve(true)
+
+        assert.equal(harness.pending(), false)
+        const planning = harness.planning()
+        assert.equal(planning.status, "failed")
+        assert.match(planning.terminalReason ?? "", /^final_tail_rejected: /)
+        assert.match(planning.terminalReason ?? "", /tail not redundant: unsettled_stories: S1/)
+        assert.equal(harness.closed()?.status, "failed")
+        assert.equal(harness.discards().length, 0)
+        const activity = harness.activity()
+        assert.equal(activity.at(-1)?.kind, "error")
     })
 
     // The replay branch admits nothing new and leaves nextOrdinal untouched, so
@@ -339,7 +391,10 @@ describe("evaluateFinalTailTolerance", () => {
         assert.match(result.detail, /no story owns: O-002/)
     })
 
-    it("blocks when the admitted set leaves a goal invariant uncovered", () => {
+    // Uncovered invariants are GoalGuardian's to remediate once planning
+    // closes — the same rule the completion boundary applies. A tail that only
+    // added coverage over files the settled stories own is redundant.
+    it("tolerates an admitted set that leaves a goal invariant uncovered", () => {
         const prd: PrdFile = {
             ...bootstrapPrd(),
             goalEnvelope: TWO_CRITERIA_ENVELOPE,
@@ -355,9 +410,28 @@ describe("evaluateFinalTailTolerance", () => {
             admittedStoryIds: ["S1"],
             goalContract: deriveGoalContract(TWO_CRITERIA_ENVELOPE),
         })
+        assert.equal(result.tolerated, true)
+    })
+
+    it("still blocks when an admitted story claims an invariant the contract does not have", () => {
+        const prd: PrdFile = {
+            ...bootstrapPrd(),
+            goalEnvelope: TWO_CRITERIA_ENVELOPE,
+            userStories: [
+                {
+                    ...story("S1", [], { goalInvariantIds: ["G-A1", "G-Z9"] }),
+                    passes: true,
+                },
+            ],
+        }
+        const result = evaluateFinalTailTolerance({
+            prd,
+            admittedStoryIds: ["S1"],
+            goalContract: deriveGoalContract(TWO_CRITERIA_ENVELOPE),
+        })
         assert.equal(result.tolerated, false)
         assert.equal(result.blocker, "goal_contract_incomplete")
-        assert.match(result.detail, /no story owns invariant\(s\): G-A2/)
+        assert.match(result.detail, /G-Z9/)
     })
 
     // First blocker wins: an unsettled story is reported even though the
@@ -489,11 +563,20 @@ interface HarnessOptions {
     admitTail?: boolean
     /** Leave S1 unsettled, then settle it once the first evaluation has run. */
     settleAfterFirstEvaluation?: boolean
+    /** Leave S1 unsettled for the whole scenario; the test settles it by hand. */
+    leaveUnsettled?: boolean
+    /** The board refuses the tail over a write-surface overlap while running. */
+    rejectTail?: boolean
 }
 
 interface Harness {
     complete(): void
     prd(): PrdFile
+    /** Mark a story merged, the way the board's integration path does. */
+    settle(id: string): void
+    /** The board's re-ask for a parked final-tail decision. */
+    resolve(final: boolean): void
+    pending(): boolean
     planning(): PrdProgressivePlanningState
     closed(): { status: string; reason?: string } | undefined
     rejections(): { code: string; reason: string }[]
@@ -537,7 +620,8 @@ function buildHarness(options: HarnessOptions): Harness {
     const settled =
         !options.replayTail &&
         !options.admitTail &&
-        !options.settleAfterFirstEvaluation
+        !options.settleAfterFirstEvaluation &&
+        !options.leaveUnsettled
     const runtimeS1: PrdStory = {
         ...structuredClone(authoredS1),
         ...(settled ? { passes: true, mergeStatus: "merged" as const } : {}),
@@ -619,6 +703,23 @@ function buildHarness(options: HarnessOptions): Harness {
                 prd = value
             },
             admitGraph: ({ proposal, planningState }) => {
+                if (options.rejectTail) {
+                    return {
+                        applied: null,
+                        event: RuntimeReplanRejected.create({
+                            runId: RUN_ID,
+                            proposalId: proposal.proposalId,
+                            sourceStoryId: proposal.sourceStoryId,
+                            leaseId: proposal.leaseId,
+                            generation: proposal.generation,
+                            baseGraphVersion: proposal.baseGraphVersion,
+                            currentGraphVersion: proposal.baseGraphVersion,
+                            code: "overlapping_write_surface",
+                            reason:
+                                "overlapping write surface: story 'S2' writes src/a.js already owned by story 'S1'",
+                        }),
+                    }
+                }
                 const next: PrdFile = {
                     ...prd,
                     userStories: [
@@ -713,6 +814,23 @@ function buildHarness(options: HarnessOptions): Harness {
             assert.ok(written, "stdout capture was restored")
         },
         prd: () => prd,
+        settle: (id: string) => {
+            prd = {
+                ...prd,
+                userStories: prd.userStories.map((entry) =>
+                    entry.id === id
+                        ? { ...entry, passes: true, mergeStatus: "merged" as const }
+                        : entry,
+                ),
+            }
+        },
+        resolve: (final: boolean) => {
+            const written = captureActivity(activity, () => {
+                coordinator.resolvePendingFinalTail(final)
+            })
+            assert.ok(written, "stdout capture was restored")
+        },
+        pending: () => coordinator.hasPendingFinalTail(),
         planning: () => prd.runtimeGraph!.planning!,
         closed: () =>
             emitted

@@ -117,6 +117,15 @@ export type ProgressivePlanningScheduleLatch =
 
 /** Planner-stream protocol state machine composed into CollectiveBoard. */
 export class ProgressivePlanningCoordinator {
+    /** A board-rejected final tail whose redundancy cannot be judged until admitted work settles. */
+    private pendingFinalTail: {
+        planning: PrdProgressivePlanningState
+        tail: readonly PrdStory[]
+        fragmentId: string
+        ordinal: number
+        rejection: { code: PlanFragmentRejectionCode; reason: string }
+    } | null = null
+
     constructor(private readonly opts: ProgressivePlanningCoordinatorOptions) {}
 
     initialize(prd: PrdFile): PrdFile {
@@ -686,8 +695,14 @@ export class ProgressivePlanningCoordinator {
     /**
      * A rejected final tail only fails the run when it still carried work the
      * goal needs. When every admitted story has settled and the admitted set
-     * alone owns every obligation and invariant, the tail is redundant: it is
-     * discarded with a visible warning and planning still closes completed.
+     * alone owns every obligation, the tail is redundant: it is discarded with
+     * a visible warning and planning still closes completed.
+     *
+     * While admitted stories are still running the question has no answer yet
+     * — run 6cc165ae died here with two stories four minutes from merging — so
+     * the decision is parked and the board asks again as work settles
+     * ({@link resolvePendingFinalTail}). Only a blocker that no settlement can
+     * lift ends the run at once.
      *
      * Returns true when the caller may go on to close planning.
      */
@@ -705,21 +720,67 @@ export class ProgressivePlanningCoordinator {
         const fresh = first.tolerance.tolerated
             ? first
             : this.evaluateTailToleranceNow(planning)
-        const storyIds = tail.map((story) => story.id)
-        if (!fresh.tolerance.tolerated) {
+        if (fresh.tolerance.tolerated) {
+            this.discardFinalTail(planning, tail, fragmentId, ordinal, rejection)
+            return true
+        }
+        if (fresh.tolerance.blocker === "unsettled_stories") {
+            this.pendingFinalTail = { planning, tail, fragmentId, ordinal, rejection }
             emitPlanActivity(
-                "error",
+                "warn",
                 `final planner tail rejected (${rejection.code}): ${rejection.reason}; ` +
-                    `blocker: ${fresh.tolerance.blocker}: ${fresh.tolerance.detail}`,
-            )
-            this.failPlanning(
-                fresh.planning,
-                "final_tail_rejected",
-                `${rejection.code}: ${rejection.reason} ` +
-                    `(tail not redundant: ${fresh.tolerance.blocker}: ${fresh.tolerance.detail})`,
+                    `decision deferred until admitted stories settle: ${fresh.tolerance.detail}`,
             )
             return false
         }
+        this.failFinalTail(fresh, rejection)
+        return false
+    }
+
+    hasPendingFinalTail(): boolean {
+        return this.pendingFinalTail !== null
+    }
+
+    /**
+     * The board's re-ask for a parked tail decision: after a wave settles
+     * (`final` false) and when no admitted work can settle any further
+     * (`final` true — anything still unsettled then failed for good).
+     */
+    resolvePendingFinalTail(final: boolean): void {
+        const pending = this.pendingFinalTail
+        if (!pending) return
+        const state = this.opts.host.snapshot()
+        const current = state.prd?.runtimeGraph?.planning
+        if (!current || current.status !== "open" || current.planningId !== pending.planning.planningId) {
+            this.pendingFinalTail = null
+            return
+        }
+        const fresh = this.evaluateTailToleranceNow(current)
+        if (fresh.tolerance.tolerated) {
+            this.pendingFinalTail = null
+            this.discardFinalTail(
+                current,
+                pending.tail,
+                pending.fragmentId,
+                pending.ordinal,
+                pending.rejection,
+            )
+            this.closePlanning(current, "completed")
+            return
+        }
+        if (fresh.tolerance.blocker === "unsettled_stories" && !final) return
+        this.pendingFinalTail = null
+        this.failFinalTail(fresh, pending.rejection)
+    }
+
+    private discardFinalTail(
+        planning: PrdProgressivePlanningState,
+        tail: readonly PrdStory[],
+        fragmentId: string,
+        ordinal: number,
+        rejection: { code: PlanFragmentRejectionCode; reason: string },
+    ): void {
+        const storyIds = tail.map((story) => story.id)
         emitPlanActivity(
             "warn",
             `final planner tail discarded (${rejection.code}): ${rejection.reason}; ` +
@@ -736,7 +797,24 @@ export class ProgressivePlanningCoordinator {
                 reason: rejection.reason,
             }),
         )
-        return true
+    }
+
+    private failFinalTail(
+        fresh: { tolerance: FinalTailTolerance; planning: PrdProgressivePlanningState },
+        rejection: { code: PlanFragmentRejectionCode; reason: string },
+    ): void {
+        if (fresh.tolerance.tolerated) return
+        emitPlanActivity(
+            "error",
+            `final planner tail rejected (${rejection.code}): ${rejection.reason}; ` +
+                `blocker: ${fresh.tolerance.blocker}: ${fresh.tolerance.detail}`,
+        )
+        this.failPlanning(
+            fresh.planning,
+            "final_tail_rejected",
+            `${rejection.code}: ${rejection.reason} ` +
+                `(tail not redundant: ${fresh.tolerance.blocker}: ${fresh.tolerance.detail})`,
+        )
     }
 
     /** Reads the board itself; a caller-held snapshot may already be stale. */

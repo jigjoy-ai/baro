@@ -2651,6 +2651,17 @@ export class CollectiveBoard extends SerializedObserver {
     private scheduleNextWave(): void {
         if (this.phase !== "running" || !this.prd || this.wave) return
 
+        // A parked final-tail decision is re-asked whenever settled work brings
+        // us here. Closing the latch re-enters through afterClose, so once it
+        // is no longer open this pass has nothing left to schedule.
+        if (
+            this.progressivePlanning.hasPendingFinalTail() &&
+            this.progressivePlanning.scheduleLatch()?.status === "open"
+        ) {
+            this.progressivePlanning.resolvePendingFinalTail(false)
+            if (this.progressivePlanning.scheduleLatch()?.status !== "open") return
+        }
+
         const planningLatch = this.progressivePlanning.scheduleLatch()
         if (planningLatch?.status === "failed") {
             this.requestPush(
@@ -2797,6 +2808,13 @@ export class CollectiveBoard extends SerializedObserver {
         }
 
         if (planningLatch?.status === "open") {
+            // Nothing admitted can settle any further: a parked tail decision
+            // is final now. Whatever it closes the latch to, afterClose
+            // re-enters and this pass is done.
+            if (this.progressivePlanning.hasPendingFinalTail()) {
+                this.progressivePlanning.resolvePendingFinalTail(true)
+                if (this.progressivePlanning.scheduleLatch()?.status !== "open") return
+            }
             this.emit(
                 ConductorState.create({
                     phase: "running_level",

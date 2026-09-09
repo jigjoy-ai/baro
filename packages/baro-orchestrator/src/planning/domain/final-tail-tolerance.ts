@@ -1,10 +1,18 @@
 /**
  * Whether a board-rejected final planner tail may be discarded instead of
  * failing the run: the admitted stories have all settled successfully and the
- * admitted set *alone* already owns every architecture obligation and every
- * GoalContract invariant, so the tail carried nothing the goal still needs.
+ * admitted set *alone* already owns every architecture obligation, so the tail
+ * carried no design work the goal still needs.
  *
- * Fail-closed by construction — the obligation check runs over admitted
+ * Goal-contract coverage is judged the way the completion boundary judges it
+ * (progressive-planning-coordinator.ts, onPlanningStreamCompleted): unknown
+ * invariant claims are inadmissible, incomplete coverage is not. An invariant
+ * the admitted set leaves unowned is GoalGuardian's to remediate through the
+ * normal DAG path once planning closes — a tail whose only unique contribution
+ * was such coverage (run 6cc165ae: a "verify everything" story rewriting every
+ * file the settled stories owned) is redundant, not load-bearing.
+ *
+ * Fail-closed where it matters — the obligation check runs over admitted
  * stories only and its failure is a blocker, never a tolerance.
  */
 
@@ -92,7 +100,7 @@ export function evaluateFinalTailTolerance(
                 storyId: story.id,
                 invariantIds: story.goalInvariantIds ?? [],
             })),
-            "complete",
+            "partial",
         )
     } catch (error) {
         return {

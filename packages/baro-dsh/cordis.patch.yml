@@ -1,0 +1,23 @@
+# Layer applied when a dsh profile lists this bundle. Two rows: the provider
+# (this package) and the model-facing tool bound to it. A provider alone is
+# invisible to the model — dsh's delegation tool is bound to exactly one
+# provider per row, so the `baro` tool is what the agent actually calls.
+- insert:
+    - id: baro
+      name: baro-dsh
+      config:
+        providerName: baro
+        command: baro
+        localOnly: true
+
+    - id: tool-baro
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: baro
+        toolName: baro
+        backgroundMode: one-shot
+        # A run is already a `baro-N` job through the registry; the tool's own
+        # background switch needs dsh-tool-jobs' controller, which the web
+        # profile does not give every agent, and the model reaches for it.
+        enableRunInBackground: false
+        maxDepth: provider-managed

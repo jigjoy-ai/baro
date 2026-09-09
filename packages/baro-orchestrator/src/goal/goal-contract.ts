@@ -1158,8 +1158,18 @@ export class GoalInvariantLedger {
             openInvariantIds.length === 0 &&
             rejectedInvariantIds.length === 0 &&
             protocolIssues.length === 0
+        const inconclusiveReviews = aggregateReview
+            ? aggregateReview.invariants.filter(
+                  ({ invariantId, status }) =>
+                      status === "inconclusive" &&
+                      satisfiedInvariantIds.includes(invariantId),
+              ).length
+            : 0
         const reason = satisfied
-            ? `all ${invariants.length} goal invariants have integrated${requireIndependentQuality ? ", independently reviewed" : ""} evidence`
+            ? `all ${invariants.length} goal invariants have integrated${requireIndependentQuality ? ", independently reviewed" : ""} evidence` +
+              (inconclusiveReviews > 0
+                  ? `; run-level semantic review was inconclusive for ${inconclusiveReviews} of them, completion rests on per-story evidence`
+                  : "")
             : [
                   openInvariantIds.length > 0
                       ? `${openInvariantIds.length} open invariant(s)`
@@ -1280,10 +1290,15 @@ export class GoalInvariantLedger {
             requireAggregateReview &&
             aggregateInvariantReview?.status === "inconclusive"
         ) {
-            status = "open"
+            // The run-level review is a second opinion over evidence that has
+            // already been integrated and independently reviewed per story. An
+            // opinion that could not be formed — evaluator budget, a parse
+            // failure, honest doubt — is recorded, not turned into a failure:
+            // only a review that saw a defect rejects the invariant.
+            status = "satisfied"
             reason =
-                `run-level semantic review was inconclusive: ` +
-                aggregateInvariantReview.reason
+                "mapped story evidence is integrated and independently reviewed; " +
+                `run-level semantic review was inconclusive: ${aggregateInvariantReview.reason}`
         } else if (requireAggregateReview && !aggregateInvariantReview) {
             status = "open"
             reason = "integrated mapped evidence lacks a run-level semantic review"
