@@ -60,6 +60,13 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
 
     const registry = new RunRegistry({
         ...(options.baroArgs ? { baroArgs: options.baroArgs } : {}),
+        onStarted: (run) => {
+            note(`  ${run.id} · started (was queued)`)
+            busy = true
+            participant.sendUserMessage(
+                `[baro] ${run.id} left the queue and is now running. Tell the user in one sentence.`,
+            )
+        },
         onMilestone: (run, line) => note(`  ${run.id} · ${line}`),
         onFinished: (run, outcome) => {
             note(`  ${run.id} · finished (${run.terminal})`)
@@ -110,7 +117,14 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
             invoke: async (args) => {
                 const { goal, cwd } = args as { goal?: unknown; cwd?: unknown }
                 if (typeof goal !== "string" || !goal.trim()) throw new Error("delegate requires a goal")
-                const run = registry.delegate(goal.trim(), typeof cwd === "string" && cwd ? cwd : options.cwd)
+                const { run, behind } = registry.delegate(
+                    goal.trim(),
+                    typeof cwd === "string" && cwd ? cwd : options.cwd,
+                )
+                if (behind) {
+                    note(`  ${run.id} · queued behind ${behind.id}: ${run.goal.slice(0, 80)}`)
+                    return `${run.id} queued behind ${behind.id}: baro allows one run per repository at a time, so it starts automatically the moment ${behind.id} exits. Tell the user it is queued, not running. stop ${behind.id} only if the user asks for that.`
+                }
                 note(`  ${run.id} · delegated: ${run.goal.slice(0, 90)}`)
                 return `${run.id} started in the background (cwd ${run.cwd}). Intake and planning take a few minutes before stories start; ask run_status for progress.`
             },
