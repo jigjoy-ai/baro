@@ -92,6 +92,33 @@ describe("progressive plan v1", () => {
         ])
     })
 
+    // Issue #104: local admission precedes the host's verdict, so a refused
+    // fragment must be forgettable or its corrected retry can never land.
+    it("retracts only the newest fragment of an open session", () => {
+        const session = openProgressivePlanSession({
+            schemaVersion: 1,
+            planningSessionId: "planning-1",
+        })
+        session.admit(fragment("fragment-1", 1, [story("S1")]))
+        session.admit(fragment("fragment-2", 2, [story("S2", ["S1"])]))
+
+        assert.equal(session.retract("fragment-1"), false, "not the newest")
+        assert.equal(session.retract("fragment-2"), true)
+        assert.equal(session.nextOrdinal, 2)
+        assert.deepEqual(session.snapshot().stories.map((s) => s.id), ["S1"])
+        assert.equal(session.retract("fragment-2"), false, "already gone")
+
+        // The same id and ordinal are free again, with different content.
+        const again = session.admit(
+            fragment("fragment-2", 2, [story("S2", ["S1"], { title: "corrected" })]),
+        )
+        assert.equal(again.disposition, "admitted")
+        assert.equal(session.snapshot().stories[1]?.title, "corrected")
+
+        session.reconcile(finalPrd([story("S1"), story("S2", ["S1"], { title: "corrected" })]))
+        assert.equal(session.retract("fragment-2"), false, "reconciled sessions are sealed")
+    })
+
     it("allows dependencies within one fragment but rejects a same-fragment cycle", () => {
         const session = openProgressivePlanSession({
             schemaVersion: 1,

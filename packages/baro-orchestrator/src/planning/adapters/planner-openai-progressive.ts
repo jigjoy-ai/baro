@@ -74,6 +74,13 @@ export interface PlannerOpenAIProgressiveSupport {
 
 export interface PlannerProgressivePublisher {
     publish(args: unknown): Promise<Record<string, unknown>>
+    /**
+     * Send the candidate's appended tail through the same admission path as
+     * a mid-stream fragment, so a host rejection (write-surface overlap) comes
+     * back with its remedy while the planner can still answer. Resolves without
+     * publishing when nothing is appended or the session is already reconciled.
+     */
+    publishFinalTail(candidate: string): Promise<void>
     /** Returns the composed final PRD (admitted prefix + tail). */
     reconcileFinalCandidate(candidate: string): Record<string, unknown>
     /** Obligation ids no admitted story owns yet; [] without a contract. */
@@ -257,7 +264,20 @@ export function createPlannerProgressivePublisher(
         config.trustedDecisionDocument,
         goalContract,
     )
-    return {
+    const publisher: PlannerProgressivePublisher = {
+        async publishFinalTail(candidate: string) {
+            if (session.phase !== "open") return
+            const { tail } = reconcileProgressivePlanStories(
+                session.snapshot().stories,
+                progressiveFinalPrd(candidate),
+                { tailOnly: config.finalizationTailOnly === true },
+            )
+            if (tail.length === 0) return
+            await publisher.publish({
+                fragmentId: `final-tail-${session.nextOrdinal}`,
+                stories: tail.map(snapshotPlannerStory),
+            })
+        },
         async publish(args: unknown) {
             if (!isExactToolArgs(args)) {
                 throw new Error(
@@ -306,7 +326,17 @@ export function createPlannerProgressivePublisher(
                 ordinal: admission.ordinal,
                 stories: fragment.stories.map(snapshotPlannerStory),
             }
-            const hostFeedback = await config.publish(event)
+            let hostFeedback: Awaited<ReturnType<typeof config.publish>>
+            try {
+                hostFeedback = await config.publish(event)
+            } catch (error) {
+                // The host is the authority; a fragment it refused must not
+                // stay admitted here or the corrected retry can never land.
+                if (admission.disposition === "admitted") {
+                    session.retract(admission.fragmentId)
+                }
+                throw error
+            }
             // Published stories are immutable, so an obligation that is not
             // attached here can never be attached — say so on the receipt,
             // in the round where it is still fixable, instead of at close.
@@ -419,6 +449,7 @@ export function createPlannerProgressivePublisher(
             return session.snapshot().stories.length > 0
         },
     }
+    return publisher
 }
 
 function goalContractMappings(stories: readonly PrdStory[]) {

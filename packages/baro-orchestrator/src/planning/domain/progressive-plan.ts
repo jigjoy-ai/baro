@@ -575,6 +575,29 @@ export class ProgressivePlanSession {
         return this.admissionResult(rememberedFragment, "admitted")
     }
 
+    /**
+     * Forget the most recent admission after the host refused it. Local
+     * admission precedes the host's verdict; without this the planner's
+     * corrected fragment met `duplicate_story` here and `ordinal_gap` there
+     * (issue #104). Only the newest fragment of an open session can go.
+     */
+    retract(fragmentId: string): boolean {
+        if (this.phaseValue !== "open") return false
+        const last = this.fragments.at(-1)
+        if (!last || last.fragment.fragmentId !== fragmentId) return false
+        this.fragments.pop()
+        this.fragmentsById.delete(fragmentId)
+        const retracted = new Set(last.fragment.stories.map((story) => story.id))
+        for (let index = this.admittedStories.length - 1; index >= 0; index -= 1) {
+            if (retracted.has(this.admittedStories[index]!.id)) {
+                this.admittedStories.splice(index, 1)
+            }
+        }
+        for (const id of retracted) this.admittedStoryIds.delete(id)
+        this.nextOrdinalValue -= 1
+        return true
+    }
+
     reconcile(
         finalPrd: PrdFile | unknown,
         options: ProgressiveReconcileOptions = {},

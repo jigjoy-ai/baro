@@ -6,7 +6,11 @@ import type {
     AgenticEnvironment as Env,
     Participant,
 } from "../src/runtime/mozaik.js"
-import { AgentResult, PlanFragmentAdmitted } from "../src/semantic-events.js"
+import {
+    AgentResult,
+    PlanFragmentAdmitted,
+    PlanFragmentRejected,
+} from "../src/semantic-events.js"
 import { registerLane } from "../src/harness/lane-registry.js"
 import type {
     HostFunction,
@@ -143,6 +147,8 @@ class StubFeed extends BaseObserver {
     readonly fragments: PlanFragmentCommand[] = []
     readonly completions: PlanCompleteCommand[] = []
     readonly failures: PlanFailedCommand[] = []
+    /** How many final-tail fragments the board refuses for overlapping writes. */
+    refuseTailTimes = 0
 
     open(command: PlanningOpenCommand): void {
         this.opened.push(command)
@@ -150,6 +156,27 @@ class StubFeed extends BaseObserver {
 
     fragment(command: PlanFragmentCommand): void {
         this.fragments.push(command)
+        if (command.fragment_id.startsWith("final-tail") && this.refuseTailTimes > 0) {
+            this.refuseTailTimes -= 1
+            const candidateStoryId = command.stories[0]!.id
+            const rejected = PlanFragmentRejected.create({
+                runId: command.run_id,
+                planningId: command.planning_id,
+                fragmentId: command.fragment_id,
+                ordinal: command.ordinal,
+                code: "graph_rejected",
+                reason: `overlapping write surface: story '${candidateStoryId}' writes src/a.js already owned by story 'S1'`,
+                overlap: {
+                    candidateStoryId,
+                    owners: [{ storyId: "S1", ownedFiles: ["src/a.js"], collidingPaths: ["src/a.js"] }],
+                    remainingPaths: [],
+                },
+            })
+            for (const environment of this.getEnvironments()) {
+                environment.deliverSemanticEvent(this, rejected)
+            }
+            return
+        }
         const admitted = PlanFragmentAdmitted.create({
             runId: command.run_id,
             planningId: command.planning_id,
@@ -322,6 +349,7 @@ async function runSession(input: {
     publishFragment?: boolean
     decisionDocument?: string
     backend?: string
+    refuseTailTimes?: number
 }): Promise<SessionRun> {
     const prompts: string[] = []
     const plan: ArmedPlan = {
@@ -332,6 +360,7 @@ async function runSession(input: {
     armed = plan
     const env = new AgenticEnvironment("planner-finalization-repair")
     const feed = new StubFeed()
+    feed.refuseTailTimes = input.refuseTailTimes ?? 0
     feed.join(env)
     try {
         const result = await runPlannerBusSession({
@@ -505,6 +534,61 @@ describe("planner finalization repair prompt", () => {
         assert.equal(
             run.result.reason,
             `planner_failed: ${run.failureReason}`,
+        )
+    })
+
+    // Issue #104 (run-55089): the final tail now meets the board through the
+    // fragment path while the planner is still listening, so a write-surface
+    // refusal arrives as a repair round carrying the overlap remedy.
+    it("retries a host-refused final tail with the overlap remedy on the same ordinal", async () => {
+        const run = await runSession({
+            script: [OWNED_TAIL_PRD, OWNED_TAIL_PRD],
+            decisionDocument: DECISION_DOCUMENT,
+            refuseTailTimes: 1,
+        })
+
+        assert.deepEqual(run.feed.failures, [])
+        assert.equal(run.result.status, "completed")
+        assert.equal(run.repairPrompts.length, 1)
+        const repair = run.repairPrompts[0]!
+        assert.ok(repair.includes("fragment rejected (graph_rejected): overlapping write surface"))
+        assert.ok(repair.includes("Write-surface overlap (1):"))
+        assert.ok(repair.includes("story 'S1' owns: src/a.js"))
+        assert.deepEqual(
+            run.feed.fragments.map((f) => [f.fragment_id, f.ordinal]),
+            [
+                ["foundation", 1],
+                ["final-tail-2", 2],
+                ["final-tail-2", 2],
+            ],
+            "the refused tail is retracted locally, so the retry reuses its ordinal",
+        )
+        assert.equal(run.feed.completions.length, 1)
+        assert.deepEqual(
+            (run.feed.completions[0]!.final_prd as { userStories: Array<{ id: string }> })
+                .userStories.map((story) => story.id),
+            ["S1", "S2"],
+        )
+    })
+
+    it("hands a tail refused in every round to the board's tolerance instead of failing", async () => {
+        const run = await runSession({
+            script: [OWNED_TAIL_PRD, OWNED_TAIL_PRD, OWNED_TAIL_PRD],
+            decisionDocument: DECISION_DOCUMENT,
+            refuseTailTimes: 3,
+        })
+
+        assert.deepEqual(run.feed.failures, [])
+        assert.equal(run.result.status, "completed")
+        assert.equal(run.repairPrompts.length, 2)
+        assert.equal(run.feed.fragments.length, 4, "foundation + three refused tails")
+        // The completed plan still carries the tail: the coordinator decides
+        // whether it is redundant (discard) or load-bearing (fail with reason).
+        assert.equal(run.feed.completions.length, 1)
+        assert.deepEqual(
+            (run.feed.completions[0]!.final_prd as { userStories: Array<{ id: string }> })
+                .userStories.map((story) => story.id),
+            ["S1", "S2"],
         )
     })
 

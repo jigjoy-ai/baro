@@ -553,6 +553,7 @@ export async function runPlannerBusSession(
             let composedFinalPrd: Record<string, unknown>
             let candidate: string | null = null
             let rejectionError: unknown = null
+            let tailRefusedByHost = false
             try {
                 candidate = extractJsonObject(resultText.trim())
             } catch {
@@ -565,6 +566,15 @@ export async function runPlannerBusSession(
                     )
                 }
                 progressive.assertInitialized()
+                // The appended tail meets the board here, while the planner is
+                // still listening — run-55089 learned of its overlapping tail
+                // only from the run's obituary (issue #104).
+                try {
+                    await progressive.publishFinalTail(candidate)
+                } catch (error) {
+                    tailRefusedByHost = true
+                    throw error
+                }
                 composedFinalPrd = progressive.reconcileFinalCandidate(candidate)
             } catch (error) {
                 rejectionError = error
@@ -602,43 +612,57 @@ export async function runPlannerBusSession(
                     continue
                 }
                 planner.closeStdin()
-                // The host already holds every admitted story — the run is
-                // not missing a plan, only the planner's restatement of
-                // "nothing remains" in the terminal shape. Compose that shape
-                // here; reconciliation and obligation coverage still judge
-                // it, so a prefix that does not cover the goal contract
-                // fails exactly as before. Composition covers ONLY the
-                // shapeless-prose case: a candidate that PARSED and was
-                // rejected carries planner intent this host must not
-                // silently overrule.
-                if (candidate !== null || !progressive.hasEarlyPlan()) {
-                    return fail("planner_failed", reason)
-                }
-                // Compose only after the model was actually told how to fix it.
-                if (repairMessagesSent === 0) return fail("planner_failed", reason)
-                try {
-                    composedFinalPrd = progressive.reconcileFinalCandidate(
-                        JSON.stringify({
-                            project: opts.prdMetadata.project,
-                            branchName: opts.prdMetadata.branchName,
-                            description: opts.prdMetadata.description,
-                            userStories: [],
-                        }),
+                if (tailRefusedByHost && candidate !== null) {
+                    // A tail the board kept refusing goes to the board anyway,
+                    // as the completed plan: the coordinator's tolerance
+                    // decides whether it was redundant (discard, run
+                    // completes) or load-bearing (fail with the board's own
+                    // reason). Closing on the planner's last word here would
+                    // fail runs whose admitted stories already deliver.
+                    process.stderr.write(
+                        "[planner-bus] final tail refused after every repair round — " +
+                            "handing the plan to the board's tail tolerance\n",
                     )
-                } catch (composeError) {
-                    return fail(
-                        "planner_failed",
-                        `${reason}; host empty-tail composition also failed: ${
-                            composeError instanceof Error
-                                ? composeError.message
-                                : String(composeError)
-                        }${unownedObligationsClause(resolveUnowned(composeError))}`,
+                    composedFinalPrd = progressive.reconcileFinalCandidate(candidate)
+                } else {
+                    // The host already holds every admitted story — the run is
+                    // not missing a plan, only the planner's restatement of
+                    // "nothing remains" in the terminal shape. Compose that shape
+                    // here; reconciliation and obligation coverage still judge
+                    // it, so a prefix that does not cover the goal contract
+                    // fails exactly as before. Composition covers ONLY the
+                    // shapeless-prose case: a candidate that PARSED and was
+                    // rejected carries planner intent this host must not
+                    // silently overrule.
+                    if (candidate !== null || !progressive.hasEarlyPlan()) {
+                        return fail("planner_failed", reason)
+                    }
+                    // Compose only after the model was actually told how to fix it.
+                    if (repairMessagesSent === 0) return fail("planner_failed", reason)
+                    try {
+                        composedFinalPrd = progressive.reconcileFinalCandidate(
+                            JSON.stringify({
+                                project: opts.prdMetadata.project,
+                                branchName: opts.prdMetadata.branchName,
+                                description: opts.prdMetadata.description,
+                                userStories: [],
+                            }),
+                        )
+                    } catch (composeError) {
+                        return fail(
+                            "planner_failed",
+                            `${reason}; host empty-tail composition also failed: ${
+                                composeError instanceof Error
+                                    ? composeError.message
+                                    : String(composeError)
+                            }${unownedObligationsClause(resolveUnowned(composeError))}`,
+                        )
+                    }
+                    process.stderr.write(
+                        "[planner-bus] terminal restatement never arrived — " +
+                            "host composed the published prefix with an empty tail\n",
                     )
                 }
-                process.stderr.write(
-                    "[planner-bus] terminal restatement never arrived — " +
-                        "host composed the published prefix with an empty tail\n",
-                )
             }
             planner.closeStdin()
             await planner.done
