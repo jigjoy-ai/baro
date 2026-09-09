@@ -1,7 +1,27 @@
 {
   "name": "baro-dsh",
   "version": "0.1.0",
-  "description": "baro as a subagent provider for DeepSeek Harness: delegate a goal, watch it as a background job, get a certified verdict back",
+  "description": "baro as a DeepSeek Harness subagent provider: delegate a multi-story goal, get parallel execution, independent review and a verified outcome back \u2014 with a live run panel in the sidebar",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "baro",
+    "subagent",
+    "agents",
+    "orchestration",
+    "verification"
+  ],
+  "homepage": "https://github.com/jigjoy-ai/baro/tree/main/packages/baro-dsh#readme",
+  "bugs": {
+    "url": "https://github.com/jigjoy-ai/baro/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jigjoy-ai/baro",
+    "directory": "packages/baro-dsh"
+  },
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -19,6 +39,9 @@
     "dist/",
     "cordis.patch.yml"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -39,7 +62,8 @@
     "build:host": "tsc -p tsconfig.json",
     "build:client": "tsup",
     "test": "node --test --import tsx test/*.test.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
@@ -75,17 +99,5 @@
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^5.3.3"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/jigjoy-ai/baro",
-    "directory": "packages/baro-dsh"
-  },
-  "keywords": [
-    "dsh-plugin",
-    "deepseek-harness",
-    "baro",
-    "subagent"
-  ],
-  "license": "MIT"
+  }
 }
