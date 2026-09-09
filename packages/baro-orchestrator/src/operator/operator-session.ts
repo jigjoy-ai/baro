@@ -43,7 +43,13 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
     const reprompt = (): void => {
         if (!busy && !asking) rl.prompt(true)
     }
+    // Nothing prints over an open question: notes wait until it is answered.
+    const heldNotes: string[] = []
     const note = (text: string): void => {
+        if (asking) {
+            heldNotes.push(text)
+            return
+        }
         clearPrompt()
         if (lineOpen) {
             out.write("\n")
@@ -51,6 +57,10 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
         }
         out.write(`${DIM}${text}${RESET}\n`)
         reprompt()
+    }
+    const releaseNotes = (): void => {
+        const held = heldNotes.splice(0)
+        for (const text of held) note(text)
     }
     const stream = (text: string): void => {
         if (!lineOpen) clearPrompt()
@@ -84,18 +94,28 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
     // stops being one component; past that the edit is refused with the remedy.
     const editedThisTurn = new Set<string>()
     const DIRECT_FILE_LIMIT = 5
-    const ask = (question: string): Promise<string> =>
-        new Promise((resolve) => {
-            asking = true
-            if (lineOpen) {
-                out.write("\n")
-                lineOpen = false
-            }
-            rl.question(question, (answer) => {
-                asking = false
-                resolve(answer.trim())
-            })
-        })
+    // Parallel tool calls arrive as parallel permission checks; they are asked
+    // one at a time, in order, and an "always" answer settles the rest.
+    let askChain: Promise<unknown> = Promise.resolve()
+    const ask = (question: string): Promise<string> => {
+        const turn = askChain.then(
+            () =>
+                new Promise<string>((resolve) => {
+                    asking = true
+                    if (lineOpen) {
+                        out.write("\n")
+                        lineOpen = false
+                    }
+                    rl.question(question, (answer) => {
+                        asking = false
+                        resolve(answer.trim())
+                        releaseNotes()
+                    })
+                }),
+        )
+        askChain = turn.catch(() => undefined)
+        return turn
+    }
 
     const functions: HostFunction[] = [
         {
