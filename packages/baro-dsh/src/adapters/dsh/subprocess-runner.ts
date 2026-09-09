@@ -29,10 +29,12 @@ export class SubprocessRunner implements RunProcessPort {
       ...(this.baro.localOnly ? ['--local-only'] : []),
       ...this.baro.args,
     ]
+    // stdin must be closed, not merely silent: headless baro answers its own
+    // intake questions only once stdin hits EOF, and blocks on an open pipe.
     const child = this.spawn({
       argv,
       cwd: request.cwd,
-      stdio: { stdin: 'pipe', stdout: 'pipe', stderr: 'inherit' },
+      stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'inherit' },
       graceMs: this.baro.disposeGraceMs,
       signal: request.signal,
       env: { ...this.baro.env, BARO_RUN_ID: request.runId },
