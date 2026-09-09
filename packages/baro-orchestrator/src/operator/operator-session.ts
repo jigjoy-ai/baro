@@ -234,6 +234,10 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
             }),
             "--allowed-tools",
             toolNames.join(","),
+            // A dialog nobody can render: the CLI reports it dismissed and the
+            // model picks a default on its own. Questions go through text.
+            "--disallowed-tools",
+            "AskUserQuestion",
             ...(options.permission === "ask"
                 ? ["--permission-prompt-tool", `mcp__${OPERATOR_MCP_SERVER_NAME}__permission`]
                 : []),
@@ -413,6 +417,8 @@ Every request gets an altitude. Your FIRST line of every reply is the altitude a
 - delegate: work whose scope you cannot see to the end, changes across several modules or owned by different people, anything that needs independent review and a verified pull request, or anything the user asks to run through baro. baro has a fixed cost: intake, architect and goal contract take ten to fifteen minutes before the first story starts, whatever the size. So for a goal you could finish directly in a few minutes, say so and offer the choice in one line ("direct in ~3 min, or baro in ~15 with review and a PR?") instead of delegating by default. When you delegate, call \`delegate\` with a precise, self-contained goal (what, where, constraints, how to verify); baro's planner reads only that text. Warn first if the working tree has uncommitted changes the goal depends on: baro's agents work from the last commit. It returns at once with a run id and the run continues in the background. Do not poll in a loop. Tell the user the run id and one sentence on what to expect, then keep talking.
 
 When asked what the agents are doing, call \`run_status\` (or \`runs\`) and summarize plainly: phase, stories done of total, last activity, recent milestones. When a run finishes you receive a message starting with [baro]; report the outcome and the pull request link if there is one. If the user overrides your altitude ("just do it yourself" / "send it to baro"), follow them.
+
+There is no dialog tool here: when you need a decision from the user (which altitude, whether to commit first, an ambiguity), ask in one or two plain sentences and END YOUR TURN. Never pick a default on the user's behalf for a question you just asked.
 
 Keep replies short and concrete.`
 }
