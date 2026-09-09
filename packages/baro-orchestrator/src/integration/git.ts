@@ -270,24 +270,34 @@ export async function gitPushWithRetry(
                 options.onLog?.("[git] push ok")
                 return
             } catch (e) {
+                if (isRepositoryCommandTimeout(e)) throw e
                 lastError = extractStderr(e)
             }
 
             if (attempt === max) break
 
+            // Only a remote that moved can be reconciled. Issue #106: three
+            // runs died on "Rebase conflict detected" with the base unmoved —
+            // a failed push of any kind fell into a pull, and a pull failing
+            // for any reason (dirty tree left by a timed-out step, no remote
+            // branch yet, network) was reported as a conflict and ended it.
+            const summary = lastError.split("\n")[0]?.trim() || lastError
+            if (!(await hasRemoteBranch(options.cwd, branch))) {
+                options.onLog?.(
+                    `[git] push failed (attempt ${attempt}/${max}) with no remote branch to reconcile: ${summary}; retrying`,
+                )
+                continue
+            }
             options.onLog?.(
-                `[git] push rejected (attempt ${attempt}/${max}), pulling and retrying...`,
+                `[git] push rejected (attempt ${attempt}/${max}): ${summary}; reconciling with origin/${branch}`,
             )
-            try {
-                // --rebase=merges: preserve per-story `--no-ff` merge
-                // commits when reconciling a rejected push.
-                await exec("git", ["pull", "--rebase=merges", "origin", branch], {
-                    cwd: options.cwd,
-                })
-            } catch {
-                await execSafe("git", ["rebase", "--abort"], { cwd: options.cwd })
-                options.onLog?.("[git] conflict detected, skipping")
-                throw new Error("Rebase conflict detected, push skipped")
+            const outcome = await rebaseOntoRemote(options.cwd, branch, options.onLog)
+            if (outcome.status === "conflict") {
+                throw new Error(
+                    `Rebase conflict against origin/${branch}@${outcome.targetSha.slice(0, 8)}` +
+                        ` (local HEAD ${outcome.headSha.slice(0, 8)}): ` +
+                        `${outcome.paths.length > 0 ? outcome.paths.join(", ") : outcome.detail}; push skipped`,
+                )
             }
         }
 
@@ -298,6 +308,86 @@ export async function gitPushWithRetry(
         throw new Error(`Push failed after ${max} attempts: ${lastError}`)
     } finally {
         release()
+    }
+}
+
+type RebaseOutcome =
+    | { status: "rebased" }
+    | { status: "failed"; detail: string }
+    | {
+          status: "conflict"
+          targetSha: string
+          headSha: string
+          paths: string[]
+          detail: string
+      }
+
+/**
+ * Rebase the local branch onto the freshly fetched remote head. The target sha
+ * and any conflicting paths are logged, so the next occurrence is diagnosable
+ * from the run log alone. --autostash carries tracked edits a timed-out step
+ * may have left behind; --rebase-merges keeps per-story --no-ff merges.
+ */
+async function rebaseOntoRemote(
+    cwd: string,
+    branch: string,
+    onLog?: (line: string) => void,
+): Promise<RebaseOutcome> {
+    let targetSha = "unknown"
+    let headSha = "unknown"
+    try {
+        await exec("git", ["fetch", "origin", branch], { cwd })
+        targetSha = (await exec("git", ["rev-parse", "FETCH_HEAD"], { cwd })).stdout.trim()
+        headSha = (await exec("git", ["rev-parse", "HEAD"], { cwd })).stdout.trim()
+    } catch (error) {
+        if (isRepositoryCommandTimeout(error)) throw error
+        const detail = extractStderr(error).split("\n")[0]?.trim() ?? ""
+        onLog?.(`[git] fetch origin/${branch} failed: ${detail}`)
+        return { status: "failed", detail }
+    }
+    onLog?.(
+        `[git] rebasing ${headSha.slice(0, 8)} onto origin/${branch}@${targetSha.slice(0, 8)}`,
+    )
+    try {
+        await exec(
+            "git",
+            ["rebase", "--rebase-merges", "--autostash", "FETCH_HEAD"],
+            { cwd },
+        )
+        onLog?.(`[git] rebased onto origin/${branch}@${targetSha.slice(0, 8)}`)
+        return { status: "rebased" }
+    } catch (error) {
+        if (isRepositoryCommandTimeout(error)) throw error
+        const stderr = extractStderr(error)
+        const detail = stderr.split("\n")[0]?.trim() ?? ""
+        const paths = await unmergedPaths(cwd)
+        await execSafe("git", ["rebase", "--abort"], { cwd })
+        if (paths.length > 0 || /CONFLICT/i.test(stderr)) {
+            onLog?.(
+                `[git] rebase conflict against origin/${branch}@${targetSha.slice(0, 8)}: ` +
+                    `${paths.length > 0 ? paths.join(", ") : detail}`,
+            )
+            return { status: "conflict", targetSha, headSha, paths, detail }
+        }
+        onLog?.(`[git] rebase failed without a conflict: ${detail}; retrying push as is`)
+        return { status: "failed", detail }
+    }
+}
+
+async function unmergedPaths(cwd: string): Promise<string[]> {
+    try {
+        const { stdout } = await exec(
+            "git",
+            ["diff", "--name-only", "--diff-filter=U"],
+            { cwd },
+        )
+        return stdout
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0)
+    } catch (error) {
+        if (isRepositoryCommandTimeout(error)) throw error
+        return []
     }
 }
 
