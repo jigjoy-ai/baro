@@ -17,8 +17,15 @@ export type { RunRecord, RunsDocument } from './adapters/dsh/settings-observer.j
    registers the provider. Everything else in this package is dsh-free. */
 
 export const name = 'baro-dsh'
-// cordis has no optional injection; all four are in dsh-base.
-export const inject = ['subagents', 'subprocess', 'jobs', 'settings']
+// cordis has no optional injection; all five are in dsh-base.
+export const inject = ['subagents', 'subprocess', 'jobs', 'settings', 'systemPrompt']
+
+/* dsh's delegation tool carries a fixed description, so the one place to tell
+   the model what baro is for is a prompt section. It is a run, not a helper:
+   minutes of planning and verification that only pay off past one small edit. */
+export const DELEGATION_GUIDANCE = `\
+The "baro" tool delegates a goal to baro, an autonomous run that plans the goal into stories, executes them in parallel with coding agents, reviews each story independently, and verifies the merged result. A run takes 10–30 minutes and returns a certified outcome, not a chat reply.
+Use "baro" for goals that span several files or need more than one coherent change, where a plan, parallel execution and independent verification are worth the wait. For a single small edit, a question, or an investigation, do the work yourself or use the ordinary subagent. Give baro the full goal in one prompt; it does not see this conversation.`
 
 /** Namespace the browser panel reads; must match `src/client`. */
 export const RUNS_SETTINGS_NS = 'baro-dsh'
@@ -85,4 +92,11 @@ export function apply(ctx: Context, config: Config): void {
     resolved.cwd,
   )
   ctx.effect(() => ctx.subagents.registerProvider(provider))
+  ctx.effect(() =>
+    ctx.systemPrompt.section({
+      name: 'baro:delegation',
+      order: 400,
+      text: DELEGATION_GUIDANCE.replaceAll('"baro"', `"${resolved.providerName ?? 'baro'}"`),
+    }),
+  )
 }
