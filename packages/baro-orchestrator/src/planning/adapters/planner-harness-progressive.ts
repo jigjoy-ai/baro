@@ -102,6 +102,9 @@ export interface PlannerHarnessProgressiveSupport {
      * A lane that runs inside this process calls it.
      */
     publish(args: unknown): Promise<string>
+    /** Admit the candidate's appended tail through the fragment path first, so
+     *  a host rejection reaches the planner as a repairable error. */
+    publishFinalTail(candidate: string): Promise<void>
     /** Returns the composed final PRD (admitted prefix + tail). */
     reconcileFinalCandidate(candidate: string): Record<string, unknown>
     /** Obligation ids no admitted story owns yet; [] without a contract. */
@@ -123,6 +126,7 @@ const NO_HARNESS_PROGRESSIVE_SUPPORT: PlannerHarnessProgressiveSupport =
         publish: async () => {
             throw new Error("progressive planning is not enabled for this run")
         },
+        publishFinalTail: async () => undefined,
         reconcileFinalCandidate: (candidate: string) =>
             JSON.parse(candidate) as Record<string, unknown>,
         unownedObligationIds: () => [],
@@ -171,6 +175,7 @@ export async function createPlannerHarnessProgressiveSupport(
             const receipt = await publisher.publish(args)
             return typeof receipt === "string" ? receipt : JSON.stringify(receipt)
         },
+        publishFinalTail: (candidate) => publisher.publishFinalTail(candidate),
         reconcileFinalCandidate: (candidate) =>
             publisher.reconcileFinalCandidate(candidate),
         unownedObligationIds: () =>
