@@ -1,0 +1,31 @@
+name: Publish baro-dsh
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: npm dist-tag
+        default: latest
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - run: npm install --workspaces --include-workspace-root
+
+      # prepublishOnly runs typecheck, tests and both bundles.
+      - name: Publish to npm
+        working-directory: packages/baro-dsh
+        run: npm publish --access public --tag "${{ inputs.tag }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
