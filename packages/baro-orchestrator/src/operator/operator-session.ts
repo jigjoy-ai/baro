@@ -71,6 +71,11 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
     })
 
     const alwaysAllowed = new Set<string>()
+    // Files edited in the current turn. A strong model prefers to do the work
+    // itself; the third distinct file in one turn is where "direct" has become
+    // a multi-file job and the edit is refused with the remedy instead.
+    const editedThisTurn = new Set<string>()
+    const DIRECT_FILE_LIMIT = 2
     const ask = (question: string): Promise<string> =>
         new Promise((resolve) => {
             asking = true
@@ -154,6 +159,19 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
             invoke: async (args) => {
                 const { tool_name: tool, input } = args as { tool_name?: string; input?: unknown }
                 const name = tool ?? "tool"
+                if (name === "Edit" || name === "Write" || name === "MultiEdit" || name === "NotebookEdit") {
+                    const path = summarizeToolInput(name, input)
+                    if (path && !editedThisTurn.has(path) && editedThisTurn.size >= DIRECT_FILE_LIMIT) {
+                        note(`  ✋ ${name} ${path} refused: direct work is capped at ${DIRECT_FILE_LIMIT} files per turn`)
+                        return JSON.stringify({
+                            behavior: "deny",
+                            message:
+                                `This change now spans more than ${DIRECT_FILE_LIMIT} files (${[...editedThisTurn, path].join(", ")}). ` +
+                                "That is delegate altitude: stop editing, revert nothing, and call the delegate tool with a self-contained goal that includes the files you already touched.",
+                        })
+                    }
+                    if (path) editedThisTurn.add(path)
+                }
                 if (alwaysAllowed.has(name)) {
                     return JSON.stringify({ behavior: "allow", updatedInput: input })
                 }
@@ -220,6 +238,7 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
             result.totalCostUsd !== null ? `$${result.totalCostUsd.toFixed(2)}` : undefined,
         ].filter(Boolean)
         if (facts.length) out.write(`${DIM}· ${facts.join(" · ")}${RESET}\n`)
+        editedThisTurn.clear()
         busy = false
         reprompt()
     })
@@ -373,12 +392,12 @@ function summarizeToolInput(name: string, input: unknown): string {
 function systemPrompt(cwd: string): string {
     return `You are baro's operator: a coding agent working inside the repository at ${cwd}, with baro as your back office. baro runs multi-story goals as a verified pipeline (architect, planner, parallel coding agents, independent per-story review, verification, pull request) in the background through the \`delegate\` tool.
 
-Choose an altitude for every request and state it in one short line before acting:
-- answer: questions, explanations, lookups. Reply directly; read files if needed.
-- direct: small, well-bounded changes (one or two files, clear intent, tests exist or are trivial). Do it yourself like a normal coding agent: edit, run the relevant tests, say what changed. Do not commit unless asked. Never push and never open a pull request yourself.
-- delegate: multi-file or multi-module work, features with several parts, unclear scope, or anything the user asks to run through baro. Call \`delegate\` with a precise, self-contained goal (what, where, constraints, how to verify); baro's planner reads only that text. It returns at once with a run id and the run continues in the background. Do not poll in a loop. Tell the user the run id and one sentence on what to expect, then keep talking.
+Every request gets an altitude. Your FIRST line of every reply is the altitude and a short reason, e.g. "direct — one file plus its test." Decide before you touch anything; reading a file or two to decide is fine.
+- answer: questions, explanations, lookups. Reply directly.
+- direct: at most two files (a file and its test), clear intent, no new component. Do it yourself like a normal coding agent: edit, run the relevant tests, say what changed. Do not commit unless asked. Never push and never open a pull request yourself. The host refuses a third file in one turn; when that happens, delegate.
+- delegate: anything else. Three or more files, a new component (a CLI, a module, a package entry) plus its tests or docs, work in several parts, unclear scope, or anything the user asks to run through baro. Being able to do it yourself is not a reason to; baro gives it a plan, parallel agents, independent review and a verified pull request. Call \`delegate\` with a precise, self-contained goal (what, where, constraints, how to verify); baro's planner reads only that text. It returns at once with a run id and the run continues in the background. Do not poll in a loop. Tell the user the run id and one sentence on what to expect, then keep talking.
 
-When asked what the agents are doing, call \`run_status\` (or \`runs\`) and summarize plainly: phase, stories done of total, last activity, recent milestones. When a run finishes you receive a message starting with [baro]; report the outcome and the pull request link if there is one. Escalate from direct to delegate the moment a "small" change turns out to touch many files. If the user overrides your altitude, follow them.
+When asked what the agents are doing, call \`run_status\` (or \`runs\`) and summarize plainly: phase, stories done of total, last activity, recent milestones. When a run finishes you receive a message starting with [baro]; report the outcome and the pull request link if there is one. If the user overrides your altitude ("just do it yourself" / "send it to baro"), follow them.
 
 Keep replies short and concrete.`
 }
