@@ -5,7 +5,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { createOrCheckoutBranch, getCommitCount } from "../../src/integration/git.js"
+import {
+    GitGate,
+    createOrCheckoutBranch,
+    getCommitCount,
+    gitPushWithRetry,
+} from "../../src/integration/git.js"
 
 function git(cwd: string, ...args: string[]): string {
     return execFileSync("git", args, { cwd, encoding: "utf8" }).trim()
@@ -37,6 +42,98 @@ afterEach(() => {
     if (remote) {
         try { rmSync(remote, { recursive: true, force: true }) } catch { /* */ }
     }
+})
+
+// Issue #106: three runs ended on "Rebase conflict detected" while their work
+// was complete; one of them with the remote unmoved. A push failure of any
+// kind fell into a pull, and a pull failing for any reason was called a
+// conflict and ended the run.
+describe("gitPushWithRetry", () => {
+    let peer: string
+
+    /** A bare origin holding `main`, plus a second clone that can race us. */
+    function armRemote(): void {
+        remote = mkdtempSync(join(tmpdir(), "baro-git-remote-"))
+        git(remote!, "init", "--bare")
+        git(repo, "remote", "add", "origin", remote!)
+        git(repo, "push", "-u", "origin", "main")
+        peer = mkdtempSync(join(tmpdir(), "baro-git-peer-"))
+        git(peer, "clone", "-q", remote!, ".")
+        git(peer, "config", "user.email", "p@p.p")
+        git(peer, "config", "user.name", "peer")
+    }
+
+    function peerPushes(file: string, content: string): void {
+        writeFileSync(join(peer, file), content)
+        git(peer, "add", "-A")
+        git(peer, "commit", "-m", `peer ${file}`)
+        git(peer, "push", "origin", "main")
+    }
+
+    function localCommits(file: string, content: string): void {
+        writeFileSync(join(repo, file), content)
+        git(repo, "add", "-A")
+        git(repo, "commit", "-m", `local ${file}`)
+    }
+
+    afterEach(() => {
+        try { rmSync(peer, { recursive: true, force: true }) } catch { /* */ }
+    })
+
+    it("rebases onto a moved remote and pushes, naming the target sha", async () => {
+        armRemote()
+        peerPushes("peer.txt", "peer\n")
+        localCommits("local.txt", "local\n")
+
+        await gitPushWithRetry(new GitGate(), { cwd: repo, onLog: (l) => logs.push(l) })
+
+        const remoteHead = git(remote!, "rev-parse", "main")
+        assert.equal(git(repo, "rev-parse", "HEAD"), remoteHead)
+        assert.equal(git(repo, "log", "--format=%s", "-3"), "local local.txt\npeer peer.txt\ninit")
+        const peerSha = git(peer, "rev-parse", "HEAD").slice(0, 8)
+        assert.ok(
+            logs.some((l) => l.includes(`onto origin/main@${peerSha}`)),
+            `rebase target missing from log: ${logs.join(" | ")}`,
+        )
+        assert.ok(logs.includes("[git] push ok"))
+    })
+
+    it("reports a real conflict with the target sha and the conflicting paths, leaving the tree clean", async () => {
+        armRemote()
+        peerPushes("a.txt", "peer version\n")
+        localCommits("a.txt", "local version\n")
+        const localHead = git(repo, "rev-parse", "HEAD")
+        const peerSha = git(peer, "rev-parse", "HEAD").slice(0, 8)
+
+        await assert.rejects(
+            gitPushWithRetry(new GitGate(), { cwd: repo, onLog: (l) => logs.push(l) }),
+            (error: unknown) => {
+                assert.equal(
+                    (error as Error).message,
+                    `Rebase conflict against origin/main@${peerSha} (local HEAD ${localHead.slice(0, 8)}): a.txt; push skipped`,
+                )
+                return true
+            },
+        )
+        assert.equal(git(repo, "rev-parse", "HEAD"), localHead, "aborted rebase restores HEAD")
+        assert.equal(git(repo, "status", "--porcelain"), "", "no rebase leftovers")
+        assert.ok(logs.some((l) => l.includes("rebase conflict against origin/main@") && l.includes("a.txt")))
+    })
+
+    it("does not mistake a dirty working tree for a rebase conflict", async () => {
+        armRemote()
+        peerPushes("peer.txt", "peer\n")
+        localCommits("local.txt", "local\n")
+        // Tracked, uncommitted edit — what a timed-out verification step leaves behind.
+        writeFileSync(join(repo, "a.txt"), "edited but not committed\n")
+
+        await gitPushWithRetry(new GitGate(), { cwd: repo, onLog: (l) => logs.push(l) })
+
+        assert.equal(git(repo, "rev-parse", "HEAD"), git(remote!, "rev-parse", "main"))
+        // The helper trims the porcelain line's leading space.
+        assert.equal(git(repo, "status", "--porcelain"), "M a.txt", "the edit survives the rebase")
+        assert.ok(!logs.some((l) => /conflict/i.test(l)), logs.join(" | "))
+    })
 })
 
 describe("createOrCheckoutBranch - branch name handling", () => {
