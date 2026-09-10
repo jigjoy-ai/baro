@@ -357,18 +357,27 @@ class Renderer extends BaseObserver {
 function summarizeToolOutput(output: unknown): string {
     // Claude's tool_result content is an InputText array; a plain string
     // arrives from providers that never block their output.
+    let value: unknown = output
+    if (typeof value === "string" && /^\s*\[/.test(value)) {
+        // The stream mapper serializes the content array to a string.
+        try {
+            value = JSON.parse(value)
+        } catch {
+            /* plain text that happens to start with a bracket */
+        }
+    }
     const text =
-        typeof output === "string"
-            ? output
-            : Array.isArray(output)
-              ? output
+        typeof value === "string"
+            ? value
+            : Array.isArray(value)
+              ? value
                     .map((block) =>
                         typeof block === "object" && block !== null && typeof (block as { text?: unknown }).text === "string"
                             ? (block as { text: string }).text
                             : "",
                     )
                     .join("\n")
-              : JSON.stringify(output)
+              : JSON.stringify(value)
     const lines = text
         .replace(/\u001b\[[0-9;]*m/g, "")
         .split("\n")
