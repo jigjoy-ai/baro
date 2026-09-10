@@ -44,6 +44,8 @@ export interface RunRegistryOptions {
     readonly baroBin?: string
     onStarted?(run: RunRecord, behind: RunRecord | null): void
     onMilestone?(run: RunRecord, line: string): void
+    /** The live feed moved (activity, story log); frequent, throttle it. */
+    onActivity?(run: RunRecord): void
     onFinished?(run: RunRecord, outcome: string): void
 }
 
@@ -142,6 +144,13 @@ export class RunRegistry {
                 startedMs: run.startedAt ?? undefined,
                 finishedMs: run.finishedAt ?? undefined,
                 prUrl: s.prUrl,
+                activity: s.activity,
+                stories: s.stories,
+                milestones: s.milestones.slice(-20),
+                error:
+                    run.terminal && run.terminal !== "completed"
+                        ? (s.abortReason ?? run.stderrTail.at(-1))
+                        : undefined,
             }
         })
     }
@@ -202,8 +211,10 @@ export class RunRegistry {
         createInterface({ input: child.stdout!, crlfDelay: Number.POSITIVE_INFINITY }).on("line", (line) => {
             const event = parseLine(line)
             if (!event) return
+            const before = record.tracker.summary().activity
             const milestone = record.tracker.accept(event)
             if (milestone) this.options.onMilestone?.(record, milestone)
+            else if (record.tracker.summary().activity !== before) this.options.onActivity?.(record)
         })
         createInterface({ input: child.stderr!, crlfDelay: Number.POSITIVE_INFINITY }).on("line", (line) => {
             record.stderrTail.push(line)

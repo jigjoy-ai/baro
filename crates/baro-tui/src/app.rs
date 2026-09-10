@@ -614,6 +614,8 @@ pub struct OperatorState {
     /// The reply being streamed; becomes an assistant turn on turn_done.
     pub reply: String,
     pub gone: Option<String>,
+    /// Run shown in the drill-in pane (ctrl+o cycles, esc returns).
+    pub focus: Option<String>,
 }
 
 impl App {
@@ -781,6 +783,18 @@ impl App {
 
     pub fn operator_pending_ask(&self) -> Option<&OperatorAsk> {
         self.operator.as_ref().and_then(|state| state.pending_ask.as_ref())
+    }
+
+    pub fn operator_focused_run(&self) -> Option<&crate::operator_client::OperatorRun> {
+        let state = self.operator.as_ref()?;
+        let id = state.focus.as_deref()?;
+        state.runs.iter().find(|run| run.id == id)
+    }
+
+    /// A drill-in pane (an agent's activity or an operator run) owns the
+    /// transcript area, so scrolling keys go to it.
+    pub fn drill_in_active(&self) -> bool {
+        self.focused_story.is_some() || self.operator_focused_run().is_some()
     }
 
     // Screen transitions

@@ -1564,7 +1564,7 @@ async fn run_app(
             }
             Some(AppEvent::MouseScroll(delta)) => {
                 if app.screen == Screen::Conversation && !app.workbench_overlay {
-                    if app.focused_story.is_some() {
+                    if app.drill_in_active() {
                         if delta > 0 {
                             app.focus_scroll_back = app.focus_scroll_back.saturating_add(1);
                         } else {
@@ -2204,6 +2204,30 @@ async fn run_app(
                         KeyCode::Esc => {
                             app.quit_armed_tick = None;
                             app.focused_story = None;
+                            if let Some(state) = app.operator.as_mut() {
+                                state.focus = None;
+                            }
+                        }
+                        KeyCode::Char('o')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && app.operator.is_some() =>
+                        {
+                            // Same gesture as the agent drill-in: cycle the
+                            // runs, and past the last one return to the chat.
+                            if let Some(state) = app.operator.as_mut() {
+                                let ids: Vec<String> =
+                                    state.runs.iter().map(|run| run.id.clone()).collect();
+                                let next = match &state.focus {
+                                    Some(current) => ids
+                                        .iter()
+                                        .position(|id| id == current)
+                                        .map(|ix| ix + 1)
+                                        .unwrap_or(0),
+                                    None => 0,
+                                };
+                                state.focus = ids.get(next).cloned();
+                            }
+                            app.focus_scroll_back = 0;
                         }
                         KeyCode::Char('o')
                             if key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -2266,10 +2290,10 @@ async fn run_app(
                             app.mode_picker_index =
                                 (app.mode_picker_index + 1) % app::MODE_OPTIONS.len();
                         }
-                        KeyCode::PageUp if app.focused_story.is_some() => {
+                        KeyCode::PageUp if app.drill_in_active() => {
                             app.focus_scroll_back = app.focus_scroll_back.saturating_add(10);
                         }
-                        KeyCode::PageDown if app.focused_story.is_some() => {
+                        KeyCode::PageDown if app.drill_in_active() => {
                             app.focus_scroll_back = app.focus_scroll_back.saturating_sub(10);
                         }
                         KeyCode::PageUp => app.session_feed.scroll_up_by(10),

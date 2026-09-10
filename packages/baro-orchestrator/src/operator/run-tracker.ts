@@ -34,10 +34,20 @@ export function resolveTerminal(
 
 export type Phase = "intake" | "architect" | "planning" | "executing" | "finalizing" | "done"
 
+export type StoryStatus = "pending" | "running" | "suspended" | "done" | "merged" | "failed"
+
+export interface RunStory {
+    readonly id: string
+    readonly title: string
+    readonly status: StoryStatus
+}
+
 export interface RunSummary {
     readonly project: string | undefined
     readonly phase: Phase
     readonly activity: string | undefined
+    readonly stories: readonly RunStory[]
+    readonly abortReason: string | undefined
     readonly storiesTotal: number
     readonly completed: number
     readonly total: number
@@ -59,9 +69,29 @@ export class RunTracker {
     private prUrl: string | undefined
     private done: BaroEvent | undefined
     private readonly milestones: string[] = []
+    private readonly stories = new Map<string, RunStory>()
     private revision = 0
 
     constructor(private readonly limit = 200) {}
+
+    private story(event: BaroEvent, status: StoryStatus): void {
+        const id = stringField(event, "id", "storyId", "story_id")
+        if (!id) return
+        const known = this.stories.get(id)
+        const title = stringField(event, "title") ?? known?.title ?? ""
+        this.stories.set(id, { id, title, status })
+        this.revision += 1
+    }
+
+    private rememberStories(list: unknown): void {
+        if (!Array.isArray(list)) return
+        for (const entry of list) {
+            if (typeof entry !== "object" || entry === null) continue
+            const id = stringField(entry as BaroEvent, "id")
+            if (!id || this.stories.has(id)) continue
+            this.stories.set(id, { id, title: stringField(entry as BaroEvent, "title") ?? "", status: "pending" })
+        }
+    }
 
     /** Returns the milestone line when the event was one. */
     accept(event: BaroEvent): string | null {
@@ -78,6 +108,7 @@ export class RunTracker {
                 break
             case "plan_fragment": {
                 this.setPhase("planning")
+                this.rememberStories(event.stories)
                 const stories = Array.isArray(event.stories) ? event.stories : []
                 this.storiesTotal += stories.length
                 const titles = stories
@@ -97,6 +128,7 @@ export class RunTracker {
                 break
             case "init":
                 this.project = stringField(event, "project")
+                this.rememberStories(event.stories)
                 this.storiesTotal =
                     (Array.isArray(event.stories) ? event.stories.length : 0) || this.storiesTotal
                 this.setPhase("executing")
@@ -120,6 +152,22 @@ export class RunTracker {
                 if (total !== undefined) this.total = total
                 break
             }
+            case "story_start":
+                this.story(event, "running")
+                break
+            case "story_suspended":
+                this.story(event, "suspended")
+                break
+            case "story_complete":
+                this.story(event, "done")
+                break
+            case "story_merged":
+                this.story(event, "merged")
+                break
+            case "merge_failed":
+            case "story_error":
+                this.story(event, "failed")
+                break
             case "finalize_start":
                 this.setPhase("finalizing")
                 break
@@ -147,6 +195,8 @@ export class RunTracker {
             project: this.project,
             phase: this.phase,
             activity: this.activity,
+            stories: [...this.stories.values()],
+            abortReason: this.done ? stringField(this.done, "abort_reason") : undefined,
             storiesTotal: this.storiesTotal,
             completed: this.completed,
             total: this.total,

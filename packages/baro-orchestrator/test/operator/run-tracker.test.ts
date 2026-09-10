@@ -91,4 +91,20 @@ describe("operator run tracker", () => {
         tracker.accept({ type: "finalize_start" })
         assert.equal(tracker.summary().phase, "finalizing")
     })
+
+    it("keeps each story's latest state for the drill-in", () => {
+        const tracker = new RunTracker()
+        tracker.accept({ type: "plan_fragment", stories: [{ id: "S1", title: "Core" }, { id: "S2", title: "CLI" }] })
+        tracker.accept({ type: "story_start", id: "S1", title: "Core" })
+        tracker.accept({ type: "story_start", id: "S2" })
+        tracker.accept({ type: "story_complete", id: "S1" })
+        tracker.accept({ type: "story_merged", id: "S1" })
+        tracker.accept({ type: "story_error", id: "S2", error: "boom" })
+        assert.deepEqual(
+            tracker.summary().stories.map((s) => [s.id, s.title, s.status]),
+            [["S1", "Core", "merged"], ["S2", "CLI", "failed"]],
+        )
+        tracker.accept({ type: "done", success: false, abort_reason: "verification failed: npm test" })
+        assert.equal(tracker.summary().abortReason, "verification failed: npm test")
+    })
 })
