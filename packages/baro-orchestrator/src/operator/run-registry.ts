@@ -147,6 +147,7 @@ export class RunRegistry {
                 activity: s.activity,
                 stories: s.stories,
                 milestones: s.milestones.slice(-20),
+                activityTail: s.activityTail,
                 error:
                     run.terminal && run.terminal !== "completed"
                         ? (s.abortReason ?? run.stderrTail.at(-1))

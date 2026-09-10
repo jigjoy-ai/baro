@@ -38,6 +38,8 @@ pub struct OperatorRun {
     #[serde(default)]
     pub milestones: Vec<String>,
     #[serde(default)]
+    pub activity_tail: Vec<String>,
+    #[serde(default)]
     pub error: Option<String>,
 }
 

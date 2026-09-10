@@ -81,6 +81,7 @@ export class JsonUi implements OperatorUi {
                 ...(row.activity ? { activity: row.activity } : {}),
                 stories: row.stories,
                 milestones: row.milestones,
+                activity_tail: row.activityTail,
                 ...(row.error ? { error: row.error } : {}),
             })),
         })

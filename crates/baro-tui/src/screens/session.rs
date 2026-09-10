@@ -209,12 +209,19 @@ fn render_run_focus(
             Span::styled(pr.clone(), Style::default().fg(theme::ACCENT)),
         ]));
     }
-    if !run.milestones.is_empty() {
+    // The live feed: what the run said, oldest first, so the pane reads like
+    // the agent drill-in even before the first story exists.
+    if !run.activity_tail.is_empty() {
         lines.push(Line::from(""));
-        for milestone in &run.milestones {
+        for entry in &run.activity_tail {
+            let (clock, text) = entry.split_once(' ').unwrap_or(("", entry.as_str()));
+            let is_milestone = run.milestones.iter().any(|m| text == m);
             lines.push(Line::from(vec![
-                Span::styled("  · ", Style::default().fg(theme::MUTED)),
-                Span::styled(milestone.clone(), Style::default().fg(theme::TEXT_DIM)),
+                Span::styled(format!("  {clock} "), Style::default().fg(theme::MUTED)),
+                Span::styled(
+                    text.to_string(),
+                    Style::default().fg(if is_milestone { theme::TEXT } else { theme::TEXT_DIM }),
+                ),
             ]));
         }
     }

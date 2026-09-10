@@ -48,6 +48,8 @@ export interface RunSummary {
     readonly activity: string | undefined
     readonly stories: readonly RunStory[]
     readonly abortReason: string | undefined
+    /** Recent live-feed lines with a clock, oldest first; phase changes included. */
+    readonly activityTail: readonly string[]
     readonly storiesTotal: number
     readonly completed: number
     readonly total: number
@@ -70,7 +72,14 @@ export class RunTracker {
     private done: BaroEvent | undefined
     private readonly milestones: string[] = []
     private readonly stories = new Map<string, RunStory>()
+    private readonly activityTail: string[] = []
     private revision = 0
+
+    private feed(text: string, ts?: unknown): void {
+        const clock = typeof ts === "string" ? ts.slice(11, 19) : new Date().toISOString().slice(11, 19)
+        this.activityTail.push(`${clock} ${text}`)
+        if (this.activityTail.length > 40) this.activityTail.shift()
+    }
 
     constructor(private readonly limit = 200) {}
 
@@ -95,6 +104,7 @@ export class RunTracker {
 
     /** Returns the milestone line when the event was one. */
     accept(event: BaroEvent): string | null {
+        const phaseBefore = this.phase
         switch (event.type) {
             case "architect_start":
                 this.setPhase("architect")
@@ -136,13 +146,13 @@ export class RunTracker {
             case "activity": {
                 const text = stringField(event, "text")
                 const id = stringField(event, "id")
-                if (text) this.setActivity(id && id !== "plan" ? `${id}: ${text}` : text)
+                if (text) this.setActivity(id && id !== "plan" ? `${id}: ${text}` : text, event.ts)
                 break
             }
             case "story_log": {
                 const line = stringField(event, "line")
                 const id = stringField(event, "id")
-                if (line) this.setActivity(id && id !== "plan" ? `${id}: ${line}` : line)
+                if (line) this.setActivity(id && id !== "plan" ? `${id}: ${line}` : line, event.ts)
                 break
             }
             case "progress": {
@@ -182,8 +192,10 @@ export class RunTracker {
                 this.setPhase("done")
                 break
         }
+        if (this.phase !== phaseBefore) this.feed(`phase: ${this.phase}`, event.ts)
         if (!isMilestone(event)) return null
         const line = describe(event)
+        this.feed(line, event.ts)
         this.milestones.push(line)
         if (this.milestones.length > this.limit) this.milestones.shift()
         this.revision += 1
@@ -197,6 +209,7 @@ export class RunTracker {
             activity: this.activity,
             stories: [...this.stories.values()],
             abortReason: this.done ? stringField(this.done, "abort_reason") : undefined,
+            activityTail: [...this.activityTail],
             storiesTotal: this.storiesTotal,
             completed: this.completed,
             total: this.total,
@@ -213,10 +226,11 @@ export class RunTracker {
         this.revision += 1
     }
 
-    private setActivity(text: string): void {
+    private setActivity(text: string, ts?: unknown): void {
         const next = text.length > ACTIVITY_LIMIT ? `${text.slice(0, ACTIVITY_LIMIT - 1)}…` : text
         if (this.activity === next) return
         this.activity = next
+        this.feed(next, ts)
         this.revision += 1
     }
 }
