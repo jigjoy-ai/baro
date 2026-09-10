@@ -4,6 +4,7 @@ import { dirname, join } from "node:path"
 import { createInterface } from "node:readline"
 
 import { parseLine } from "./protocol.js"
+import type { RunRow } from "./ui.js"
 import {
     RunTracker,
     renderOutcome,
@@ -124,6 +125,23 @@ export class RunRegistry {
     stateOf(run: RunRecord): RunState {
         if (run.finishedAt !== null) return "finished"
         return run.startedAt === null ? "queued" : "running"
+    }
+
+    /** Structured rows for a surface that draws its own strip. */
+    rows(): RunRow[] {
+        return this.list().map((run) => {
+            const s = run.tracker.summary()
+            return {
+                id: run.id,
+                state: run.terminal ?? (run.startedAt === null ? "queued" : "running"),
+                phase: run.startedAt === null ? "queued" : s.phase,
+                completed: s.completed,
+                total: s.total > 0 ? s.total : s.storiesTotal,
+                goal: run.goal,
+                elapsed: elapsed(run),
+                prUrl: s.prUrl,
+            }
+        })
     }
 
     /** One line per run, for the terminal strip and the `runs` tool. */

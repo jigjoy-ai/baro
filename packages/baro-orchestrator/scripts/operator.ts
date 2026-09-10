@@ -5,6 +5,8 @@ import {
     runOperatorMcpServer,
 } from "../src/operator/host-tools-relay.js"
 import { runOperator } from "../src/operator/operator-session.js"
+import { JsonUi } from "../src/operator/json-ui.js"
+import { TerminalUi } from "../src/operator/terminal-ui.js"
 
 /* `baro operator`: a conversation with Claude Code in front and baro behind.
    The same bundle also serves as the MCP stdio child Claude spawns to reach
@@ -23,6 +25,7 @@ async function main(): Promise<void> {
     let effort: string | undefined
     let claudeBin: string | undefined
     let permission: "ask" | "auto" = "ask"
+    let protocol: "terminal" | "json" = "terminal"
     const baroArgs: string[] = []
     for (let index = 0; index < argv.length; index += 1) {
         const flag = argv[index]
@@ -51,6 +54,13 @@ async function main(): Promise<void> {
                 permission = value
                 index += 1
                 break
+            case "--protocol":
+                if (value !== "terminal" && value !== "json") {
+                    throw new Error("--protocol must be terminal or json")
+                }
+                protocol = value
+                index += 1
+                break
             case "--local-only":
                 baroArgs.push("--local-only")
                 break
@@ -61,21 +71,24 @@ async function main(): Promise<void> {
             case "--help":
             case "-h":
                 process.stdout.write(
-                    "usage: operator [--cwd <repo>] [--model opus] [--effort high] [--permission ask|auto] [--local-only] [--llm <backend>]\n",
+                    "usage: operator [--cwd <repo>] [--model opus] [--effort high] [--permission ask|auto] [--protocol terminal|json] [--local-only] [--llm <backend>]\n",
                 )
                 return
             default:
                 throw new Error(`unknown flag: ${flag}`)
         }
     }
-    await runOperator({
-        cwd,
-        ...(model ? { model } : {}),
-        ...(effort ? { effort } : {}),
-        ...(claudeBin ? { claudeBin } : {}),
-        permission,
-        baroArgs,
-    })
+    await runOperator(
+        {
+            cwd,
+            ...(model ? { model } : {}),
+            ...(effort ? { effort } : {}),
+            ...(claudeBin ? { claudeBin } : {}),
+            permission,
+            baroArgs,
+        },
+        protocol === "json" ? new JsonUi() : new TerminalUi(),
+    )
 }
 
 main().catch((error) => {

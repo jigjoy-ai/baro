@@ -1,5 +1,3 @@
-import { createInterface, clearLine, cursorTo, type Interface } from "node:readline"
-
 import { AgenticEnvironment, BaseObserver } from "../runtime/mozaik.js"
 import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
 import { AgentResult, ClaudeStreamChunk } from "../events/harness-stream.js"
@@ -7,80 +5,48 @@ import { ClaudeCliParticipant } from "../harness/claude/cli-participant.js"
 import type { HostFunction } from "../harness/lane-adapter.js"
 import { HostToolsRelay, OPERATOR_MCP_SERVER_NAME } from "./host-tools-relay.js"
 import { RunRegistry } from "./run-registry.js"
+import type { OperatorUi, TurnResult } from "./ui.js"
 
 /* One conversation that outlives its runs. Claude Code is the operator: it
    answers, edits directly, or delegates to baro, and says which. Everything
    baro does arrives here as protocol events, so "what are they doing" is a
-   question the operator can answer from the registry, not from a log. */
+   question the operator can answer from the registry, not from a log. The
+   surface is a port: the same session drives a terminal or the Rust TUI. */
 
 export interface OperatorOptions {
     readonly cwd: string
     readonly model?: string
     readonly effort?: string
     readonly claudeBin?: string
-    /** `ask` routes Claude's permission prompts to this terminal; `auto` bypasses them. */
+    /** `ask` routes Claude's permission prompts to the surface; `auto` bypasses them. */
     readonly permission: "ask" | "auto"
     readonly baroArgs?: readonly string[]
 }
 
 const AGENT_ID = "operator"
-const DIM = "[2m"
-const RESET = "[0m"
-const AMBER = "[33m"
+// Measured 9.9.2026: the operator built a four-file CLI with tests in under a
+// minute, while baro spent seven on intake and architect for three helpers.
+// Direct work is capped where it stops being one component; past that the
+// edit is refused with the remedy.
+const DIRECT_FILE_LIMIT = 10
 
-export async function runOperator(options: OperatorOptions): Promise<void> {
-    const out = process.stdout
-    const rl = createInterface({ input: process.stdin, output: out, prompt: "you › " })
-    let busy = false
-    let asking = false
-    let lineOpen = false
-
-    const clearPrompt = (): void => {
-        if (asking) return
-        clearLine(out, 0)
-        cursorTo(out, 0)
-    }
-    const reprompt = (): void => {
-        if (!busy && !asking) rl.prompt(true)
-    }
-    // Nothing prints over an open question: notes wait until it is answered.
-    const heldNotes: string[] = []
-    const note = (text: string): void => {
-        if (asking) {
-            heldNotes.push(text)
-            return
-        }
-        clearPrompt()
-        if (lineOpen) {
-            out.write("\n")
-            lineOpen = false
-        }
-        out.write(`${DIM}${text}${RESET}\n`)
-        reprompt()
-    }
-    const releaseNotes = (): void => {
-        const held = heldNotes.splice(0)
-        for (const text of held) note(text)
-    }
-    const stream = (text: string): void => {
-        if (!lineOpen) clearPrompt()
-        out.write(text)
-        lineOpen = !text.endsWith("\n")
-    }
-
+export async function runOperator(options: OperatorOptions, ui: OperatorUi): Promise<void> {
     const registry = new RunRegistry({
         ...(options.baroArgs ? { baroArgs: options.baroArgs } : {}),
         onStarted: (run) => {
-            note(`  ${run.id} · started (was queued)`)
-            busy = true
+            ui.note(`${run.id} · started (was queued)`)
+            ui.runsChanged(registry.rows())
             participant.sendUserMessage(
                 `[baro] ${run.id} left the queue and is now running. Tell the user in one sentence.`,
             )
         },
-        onMilestone: (run, line) => note(`  ${run.id} · ${line}`),
+        onMilestone: (run, line) => {
+            ui.note(`${run.id} · ${line}`)
+            ui.runsChanged(registry.rows())
+        },
         onFinished: (run, outcome) => {
-            note(`  ${run.id} · finished (${run.terminal})`)
-            busy = true
+            ui.note(`${run.id} · finished (${run.terminal})`)
+            ui.runsChanged(registry.rows())
             participant.sendUserMessage(
                 `[baro] ${run.id} finished.\n${outcome}\n\nTell the user in two or three sentences what happened and what they can do next.`,
             )
@@ -88,31 +54,11 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
     })
 
     const alwaysAllowed = new Set<string>()
-    // Files edited in the current turn. Measured 9.9.2026: the operator built a
-    // four-file CLI with tests in under a minute, while baro spent seven on
-    // intake and architect for three helpers. Direct work is capped where it
-    // stops being one component; past that the edit is refused with the remedy.
     const editedThisTurn = new Set<string>()
-    const DIRECT_FILE_LIMIT = 10
-    // Parallel tool calls arrive as parallel permission checks; they are asked
-    // one at a time, in order, and an "always" answer settles the rest.
+    // The surface answers one question at a time, in order.
     let askChain: Promise<unknown> = Promise.resolve()
-    const ask = (question: string): Promise<string> => {
-        const turn = askChain.then(
-            () =>
-                new Promise<string>((resolve) => {
-                    asking = true
-                    if (lineOpen) {
-                        out.write("\n")
-                        lineOpen = false
-                    }
-                    rl.question(question, (answer) => {
-                        asking = false
-                        resolve(answer.trim())
-                        releaseNotes()
-                    })
-                }),
-        )
+    const ask = (prompt: string, meta: Parameters<OperatorUi["ask"]>[1]): Promise<string> => {
+        const turn = askChain.then(() => ui.ask(prompt, meta))
         askChain = turn.catch(() => undefined)
         return turn
     }
@@ -142,11 +88,12 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
                     goal.trim(),
                     typeof cwd === "string" && cwd ? cwd : options.cwd,
                 )
+                ui.runsChanged(registry.rows())
                 if (behind) {
-                    note(`  ${run.id} · queued behind ${behind.id}: ${run.goal.slice(0, 80)}`)
+                    ui.note(`${run.id} · queued behind ${behind.id}: ${run.goal.slice(0, 80)}`)
                     return `${run.id} queued behind ${behind.id}: baro allows one run per repository at a time, so it starts automatically the moment ${behind.id} exits. Tell the user it is queued, not running. stop ${behind.id} only if the user asks for that.`
                 }
-                note(`  ${run.id} · delegated: ${run.goal.slice(0, 90)}`)
+                ui.note(`${run.id} · delegated: ${run.goal.slice(0, 90)}`)
                 return `${run.id} started in the background (cwd ${run.cwd}). Intake and planning take a few minutes before stories start; ask run_status for progress.`
             },
         },
@@ -178,14 +125,16 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
             },
             invoke: async (args) => {
                 const id = String((args as { run_id?: unknown }).run_id ?? "")
-                return registry.stop(id) ? `${id} stopping` : `${id} is not running`
+                const stopped = registry.stop(id)
+                ui.runsChanged(registry.rows())
+                return stopped ? `${id} stopping` : `${id} is not running`
             },
         },
     ]
     if (options.permission === "ask") {
         functions.push({
             name: "permission",
-            description: "Internal: asks the person at the terminal before a tool runs.",
+            description: "Internal: asks the person at the surface before a tool runs.",
             parameters: {
                 type: "object",
                 properties: { tool_name: { type: "string" }, input: { type: "object" } },
@@ -194,30 +143,33 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
             invoke: async (args) => {
                 const { tool_name: tool, input } = args as { tool_name?: string; input?: unknown }
                 const name = tool ?? "tool"
+                const summary = summarizeToolInput(name, input)
                 if (name === "Edit" || name === "Write" || name === "MultiEdit" || name === "NotebookEdit") {
-                    const path = summarizeToolInput(name, input)
-                    if (path && !editedThisTurn.has(path) && editedThisTurn.size >= DIRECT_FILE_LIMIT) {
-                        note(`  ✋ ${name} ${path} refused: direct work is capped at ${DIRECT_FILE_LIMIT} files per turn`)
+                    if (summary && !editedThisTurn.has(summary) && editedThisTurn.size >= DIRECT_FILE_LIMIT) {
+                        ui.note(`✋ ${name} ${summary} refused: direct work is capped at ${DIRECT_FILE_LIMIT} files per turn`)
                         return JSON.stringify({
                             behavior: "deny",
                             message:
-                                `This change now spans more than ${DIRECT_FILE_LIMIT} files (${[...editedThisTurn, path].join(", ")}). ` +
+                                `This change now spans more than ${DIRECT_FILE_LIMIT} files (${[...editedThisTurn, summary].join(", ")}). ` +
                                 "That is delegate altitude: stop editing, revert nothing, and call the delegate tool with a self-contained goal that includes the files you already touched.",
                         })
                     }
-                    if (path) editedThisTurn.add(path)
+                    if (summary) editedThisTurn.add(summary)
                 }
                 if (alwaysAllowed.has(name)) {
                     return JSON.stringify({ behavior: "allow", updatedInput: input })
                 }
-                const answer = await ask(
-                    `${AMBER}⚠ ${name}${RESET} ${summarizeToolInput(name, input)}\n  allow? [y/N/a=always for ${name}] `,
-                )
+                const answer = await ask("allow?", {
+                    kind: "permission",
+                    tool: name,
+                    summary,
+                    options: ["y", "N", `a=always for ${name}`],
+                })
                 if (answer === "a" || answer === "always") alwaysAllowed.add(name)
                 if (answer === "y" || answer === "yes" || answer === "a" || answer === "always") {
                     return JSON.stringify({ behavior: "allow", updatedInput: input })
                 }
-                return JSON.stringify({ behavior: "deny", message: "the user declined at the terminal" })
+                return JSON.stringify({ behavior: "deny", message: "the user declined" })
             },
         })
     }
@@ -267,93 +219,80 @@ export async function runOperator(options: OperatorOptions): Promise<void> {
     })
 
     const env = new AgenticEnvironment("baro-operator")
-    const renderer = new Renderer(stream, note, (result) => {
-        if (lineOpen) {
-            out.write("\n")
-            lineOpen = false
-        }
-        const facts = [
-            result.durationMs !== null ? `${(result.durationMs / 1000).toFixed(0)}s` : undefined,
-            result.totalCostUsd !== null ? `$${result.totalCostUsd.toFixed(2)}` : undefined,
-        ].filter(Boolean)
-        if (facts.length) out.write(`${DIM}· ${facts.join(" · ")}${RESET}\n`)
+    const renderer = new Renderer(ui, (result) => {
         editedThisTurn.clear()
-        busy = false
-        reprompt()
+        ui.turnDone(result)
     })
     renderer.join(env)
     participant.join(env)
     participant.start(env)
 
-    out.write(
-        `${DIM}baro operator · ${options.model ?? "default model"} · ${options.cwd}\n` +
-            `/runs  /status <id>  /stop <id>  /quit${RESET}\n`,
-    )
+    ui.banner(`baro operator · ${options.model ?? "default model"} · ${options.cwd}`)
 
     let closing = false
-    const shutdown = async (): Promise<void> => {
+    const shutdown = async (stopRuns: boolean | undefined): Promise<void> => {
         if (closing) return
         closing = true
         const running = registry.running()
         if (running.length > 0) {
-            const answer = await ask(
-                `${running.length} run(s) still running (${running.map((r) => r.id).join(", ")}). stop them? [y/N] `,
-            )
-            if (answer === "y" || answer === "yes") for (const run of running) registry.stop(run.id)
-            else out.write(`${DIM}leaving them running; stop later with: baro stop <id>${RESET}\n`)
+            let stop = stopRuns
+            if (stop === undefined) {
+                const answer = await ask(
+                    `${running.length} run(s) still running (${running.map((r) => r.id).join(", ")}). stop them?`,
+                    { kind: "quit", options: ["y", "N"] },
+                )
+                stop = answer === "y" || answer === "yes"
+            }
+            if (stop) for (const run of running) registry.stop(run.id)
+            else ui.note("leaving them running; stop later with: baro stop <id>")
         }
         participant.closeStdin()
         await Promise.race([participant.done, new Promise((r) => setTimeout(r, 4_000))])
         await participant.abortAndWait()
         await relay.close()
-        rl.close()
+        ui.close()
         process.exit(0)
     }
 
-    rl.on("line", (line) => {
-        const text = line.trim()
-        if (!text) {
-            reprompt()
-            return
+    ui.onCommand((command) => {
+        switch (command.type) {
+            case "quit":
+                void shutdown(command.stopRuns)
+                return
+            case "runs":
+                ui.note(registry.table())
+                return
+            case "status":
+                ui.note(registry.status(command.id))
+                return
+            case "stop": {
+                const stopped = registry.stop(command.id)
+                ui.runsChanged(registry.rows())
+                ui.note(stopped ? `${command.id} stopping` : `${command.id} is not running`)
+                return
+            }
+            case "user":
+                participant.sendUserMessage(command.text)
+                return
         }
-        if (text === "/quit" || text === "/exit") {
-            void shutdown()
-            return
-        }
-        if (text === "/runs") {
-            note(registry.table())
-            return
-        }
-        if (text.startsWith("/status")) {
-            note(registry.status(text.split(/\s+/)[1] ?? ""))
-            return
-        }
-        if (text.startsWith("/stop")) {
-            const id = text.split(/\s+/)[1] ?? ""
-            note(registry.stop(id) ? `${id} stopping` : `${id} is not running`)
-            return
-        }
-        busy = true
-        participant.sendUserMessage(text)
     })
-    rl.on("close", () => void shutdown())
-    rl.on("SIGINT", () => void shutdown())
-    rl.prompt()
 
     await participant.done
     if (!closing) {
-        out.write(`${DIM}operator session ended: ${participant.sessionEndDetail()}${RESET}\n`)
+        ui.note(`operator session ended: ${participant.sessionEndDetail()}`)
         await relay.close()
-        rl.close()
+        ui.close()
         process.exit(1)
     }
 }
 
 class Renderer extends BaseObserver {
+    /** Tool calls in flight, by content block index; input arrives as JSON deltas. */
+    private readonly toolBlocks = new Map<number, { name: string; json: string }>()
+
     constructor(
-        private readonly stream: (text: string) => void,
-        private readonly note: (text: string) => void,
-        private readonly onResult: (result: { durationMs: number | null; totalCostUsd: number | null }) => void,
+        private readonly ui: OperatorUi,
+        private readonly onResult: (result: TurnResult) => void,
     ) {
         super()
     }
@@ -364,12 +303,9 @@ class Renderer extends BaseObserver {
             return
         }
         if (AgentResult.is(event) && event.data.agentId === AGENT_ID) {
-            this.onResult(event.data)
+            this.onResult({ durationMs: event.data.durationMs, totalCostUsd: event.data.totalCostUsd })
         }
     }
-
-    /** Tool calls in flight, by content block index; input arrives as JSON deltas. */
-    private readonly toolBlocks = new Map<number, { name: string; json: string }>()
 
     private render(raw: Readonly<Record<string, unknown>>): void {
         if (raw.type !== "stream_event") return
@@ -387,7 +323,7 @@ class Renderer extends BaseObserver {
             }
             case "content_block_delta": {
                 if (delta?.type === "text_delta") {
-                    this.stream(String(delta.text ?? ""))
+                    this.ui.stream(String(delta.text ?? ""))
                 } else if (delta?.type === "input_json_delta") {
                     const pending = this.toolBlocks.get(index)
                     if (pending) pending.json += String(delta.partial_json ?? "")
@@ -405,7 +341,7 @@ class Renderer extends BaseObserver {
                     input = {}
                 }
                 const name = pending.name.replace(`mcp__${OPERATOR_MCP_SERVER_NAME}__`, "baro ")
-                this.note(`  ⚙ ${name} ${summarizeToolInput(name, input)}`)
+                this.ui.toolCall(name, summarizeToolInput(name, input))
                 return
             }
             default:
