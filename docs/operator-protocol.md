@@ -17,7 +17,7 @@ Every event carries `ts` (ISO 8601).
 | `tool_result` | `summary` | first meaningful line of what the last tool returned, with `(+N lines)` when there was more |
 | `ask` | `id`, `kind` (`permission` \| `quit`), `prompt`, `tool?`, `summary?`, `options` | a question only the person can answer; answer with `answer` |
 | `turn_done` | `duration_ms`, `cost_usd` (nullable) | the reply is complete |
-| `runs` | `runs[]`: `id`, `state`, `phase`, `completed`, `total`, `goal`, `elapsed`, `pr_url?` | snapshot after anything about a run changed |
+| `runs` | `runs[]`: `id`, `state`, `phase`, `completed`, `total`, `goal`, `elapsed`, `started_ms?`, `finished_ms?`, `pr_url?` | snapshot after anything about a run changed; a surface with a clock derives elapsed from `started_ms` between snapshots |
 | `exit` | | the operator is shutting down |
 
 `state` is `queued`, `running`, `completed`, `error`, `max-tokens` or `aborted`.

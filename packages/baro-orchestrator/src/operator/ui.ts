@@ -10,6 +10,9 @@ export interface RunRow {
     readonly total: number
     readonly goal: string
     readonly elapsed: string
+    /** Epoch millis when the child started; absent while queued. */
+    readonly startedMs: number | undefined
+    readonly finishedMs: number | undefined
     readonly prUrl: string | undefined
 }
 

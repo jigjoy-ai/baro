@@ -165,7 +165,7 @@ fn header_line(app: &App) -> Paragraph<'static> {
             };
             let (label, color) = match run.state.as_str() {
                 "queued" => ("queued".to_string(), theme::MUTED),
-                "running" => (format!("{}{} · {}", run.phase, progress, run.elapsed), theme::TEXT_DIM),
+                "running" => (format!("{}{} · {}", run.phase, progress, run.elapsed_now()), theme::TEXT_DIM),
                 "completed" => ("done".to_string(), theme::ACCENT),
                 other => (other.to_string(), theme::ERROR),
             };

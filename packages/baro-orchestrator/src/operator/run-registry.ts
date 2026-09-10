@@ -139,6 +139,8 @@ export class RunRegistry {
                 total: s.total > 0 ? s.total : s.storiesTotal,
                 goal: run.goal,
                 elapsed: elapsed(run),
+                startedMs: run.startedAt ?? undefined,
+                finishedMs: run.finishedAt ?? undefined,
                 prUrl: s.prUrl,
             }
         })

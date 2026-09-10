@@ -288,6 +288,8 @@ export async function runOperator(options: OperatorOptions, ui: OperatorUi): Pro
 class Renderer extends BaseObserver {
     /** Tool calls in flight, by content block index; input arrives as JSON deltas. */
     private readonly toolBlocks = new Map<number, { name: string; json: string }>()
+    /** Claude Code's internal schema loader; neither its call nor its result is news. */
+    private hiddenResults = 0
 
     constructor(
         private readonly ui: OperatorUi,
@@ -297,6 +299,10 @@ class Renderer extends BaseObserver {
     }
 
     override onExternalFunctionCallOutput(_source: Participant, item: FunctionCallOutputItem): void {
+        if (this.hiddenResults > 0) {
+            this.hiddenResults -= 1
+            return
+        }
         this.ui.toolResult(summarizeToolOutput(item.output))
     }
 
@@ -342,6 +348,10 @@ class Renderer extends BaseObserver {
                     input = pending.json ? JSON.parse(pending.json) : {}
                 } catch {
                     input = {}
+                }
+                if (pending.name === "ToolSearch") {
+                    this.hiddenResults += 1
+                    return
                 }
                 const name = pending.name.replace(`mcp__${OPERATOR_MCP_SERVER_NAME}__`, "baro ")
                 this.ui.toolCall(name, summarizeToolInput(name, input))
@@ -413,8 +423,8 @@ function summarizeToolInput(name: string, input: unknown): string {
 function systemPrompt(cwd: string): string {
     return `You are baro's operator: a coding agent working inside the repository at ${cwd}, with baro as your back office. baro runs multi-story goals as a verified pipeline (architect, planner, parallel coding agents, independent per-story review, verification, pull request) in the background through the \`delegate\` tool.
 
-Every request gets an altitude. Your FIRST line of every reply is the altitude and a short reason, e.g. "direct — one component, eight files, tests exist." Decide before you touch anything; reading a file or two to decide is fine.
-- answer: questions, explanations, lookups. Reply directly.
+Every request gets an altitude. Decide before you touch anything; reading a file or two to decide is fine. When the altitude is direct or delegate, say it in your FIRST line with a short reason, e.g. "direct — one component, eight files, tests exist." For an answer, never announce the altitude; just answer.
+- answer: questions, explanations, lookups. Reply directly, no preamble.
 - direct: one component you can finish in roughly ten minutes, clear intent, typically up to eight files. Do it yourself like a normal coding agent: edit, run the relevant tests, say what changed. Finish the whole thing in one turn; do not split a job to stay under a limit. Do not commit unless asked. Never push and never open a pull request yourself. The host refuses the eleventh file in one turn as a runaway-scope guard; if you hit it, delegate the rest.
 - delegate: work whose scope you cannot see to the end, changes across several modules or owned by different people, anything that needs independent review and a verified pull request, or anything the user asks to run through baro. baro has a fixed cost: intake, architect and goal contract take ten to fifteen minutes before the first story starts, whatever the size. So for a goal you could finish directly in a few minutes, say so and offer the choice in one line ("direct in ~3 min, or baro in ~15 with review and a PR?") instead of delegating by default. When you delegate, call \`delegate\` with a precise, self-contained goal (what, where, constraints, how to verify); baro's planner reads only that text. Warn first if the working tree has uncommitted changes the goal depends on: baro's agents work from the last commit. It returns at once with a run id and the run continues in the background. Do not poll in a loop. Tell the user the run id and one sentence on what to expect, then keep talking.
 

@@ -27,9 +27,35 @@ pub struct OperatorRun {
     pub goal: String,
     #[serde(default)]
     pub elapsed: String,
+    #[serde(default)]
+    pub started_ms: Option<u64>,
+    #[serde(default)]
+    pub finished_ms: Option<u64>,
     #[allow(dead_code)]
     #[serde(default)]
     pub pr_url: Option<String>,
+}
+
+impl OperatorRun {
+    /// Elapsed as of now: snapshots only arrive on events and intake is
+    /// silent for minutes, so the strip must not freeze at the last one.
+    pub fn elapsed_now(&self) -> String {
+        let Some(started) = self.started_ms else {
+            return self.elapsed.clone();
+        };
+        let end = self.finished_ms.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(started)
+        });
+        let secs = end.saturating_sub(started) / 1000;
+        if secs < 60 {
+            format!("{secs}s")
+        } else {
+            format!("{}m {:02}s", secs / 60, secs % 60)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -75,6 +75,8 @@ export class JsonUi implements OperatorUi {
                 total: row.total,
                 goal: row.goal,
                 elapsed: row.elapsed,
+                ...(row.startedMs !== undefined ? { started_ms: row.startedMs } : {}),
+                ...(row.finishedMs !== undefined ? { finished_ms: row.finishedMs } : {}),
                 ...(row.prUrl ? { pr_url: row.prUrl } : {}),
             })),
         })
