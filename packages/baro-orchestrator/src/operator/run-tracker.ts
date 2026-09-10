@@ -34,10 +34,22 @@ export function resolveTerminal(
 
 export type Phase = "intake" | "architect" | "planning" | "executing" | "finalizing" | "done"
 
+export type StoryStatus = "pending" | "running" | "suspended" | "done" | "merged" | "failed"
+
+export interface RunStory {
+    readonly id: string
+    readonly title: string
+    readonly status: StoryStatus
+}
+
 export interface RunSummary {
     readonly project: string | undefined
     readonly phase: Phase
     readonly activity: string | undefined
+    readonly stories: readonly RunStory[]
+    readonly abortReason: string | undefined
+    /** Recent live-feed lines with a clock, oldest first; phase changes included. */
+    readonly activityTail: readonly string[]
     readonly storiesTotal: number
     readonly completed: number
     readonly total: number
@@ -59,12 +71,43 @@ export class RunTracker {
     private prUrl: string | undefined
     private done: BaroEvent | undefined
     private readonly milestones: string[] = []
+    private readonly stories = new Map<string, RunStory>()
+    private readonly activityTail: string[] = []
     private revision = 0
+
+    private feed(text: string, ts?: unknown): void {
+        const clock = typeof ts === "string" ? ts.slice(11, 19) : new Date().toISOString().slice(11, 19)
+        this.activityTail.push(`${clock} ${text}`)
+        if (this.activityTail.length > 40) this.activityTail.shift()
+    }
 
     constructor(private readonly limit = 200) {}
 
+    private story(event: BaroEvent, status: StoryStatus): void {
+        const id = stringField(event, "id", "storyId", "story_id")
+        if (!id) return
+        const known = this.stories.get(id)
+        // story_start carries the id as its title (the lifecycle forwarder has
+        // no story text); the plan fragment already told us the real one.
+        const fromEvent = stringField(event, "title")
+        const title = fromEvent && fromEvent !== id ? fromEvent : (known?.title ?? "")
+        this.stories.set(id, { id, title, status })
+        this.revision += 1
+    }
+
+    private rememberStories(list: unknown): void {
+        if (!Array.isArray(list)) return
+        for (const entry of list) {
+            if (typeof entry !== "object" || entry === null) continue
+            const id = stringField(entry as BaroEvent, "id")
+            if (!id || this.stories.has(id)) continue
+            this.stories.set(id, { id, title: stringField(entry as BaroEvent, "title") ?? "", status: "pending" })
+        }
+    }
+
     /** Returns the milestone line when the event was one. */
     accept(event: BaroEvent): string | null {
+        const phaseBefore = this.phase
         switch (event.type) {
             case "architect_start":
                 this.setPhase("architect")
@@ -78,6 +121,7 @@ export class RunTracker {
                 break
             case "plan_fragment": {
                 this.setPhase("planning")
+                this.rememberStories(event.stories)
                 const stories = Array.isArray(event.stories) ? event.stories : []
                 this.storiesTotal += stories.length
                 const titles = stories
@@ -97,6 +141,7 @@ export class RunTracker {
                 break
             case "init":
                 this.project = stringField(event, "project")
+                this.rememberStories(event.stories)
                 this.storiesTotal =
                     (Array.isArray(event.stories) ? event.stories.length : 0) || this.storiesTotal
                 this.setPhase("executing")
@@ -104,13 +149,14 @@ export class RunTracker {
             case "activity": {
                 const text = stringField(event, "text")
                 const id = stringField(event, "id")
-                if (text) this.setActivity(id && id !== "plan" ? `${id}: ${text}` : text)
+                if (text) this.setActivity(id && id !== "plan" ? `${id}: ${text}` : text, event.ts)
                 break
             }
             case "story_log": {
+                // Raw lines: git output, relayed stdout fragments. Only the
+                // planner's own notes are prose worth a status line.
                 const line = stringField(event, "line")
-                const id = stringField(event, "id")
-                if (line) this.setActivity(id && id !== "plan" ? `${id}: ${line}` : line)
+                if (line && stringField(event, "id") === "plan") this.setActivity(line, event.ts)
                 break
             }
             case "progress": {
@@ -120,6 +166,22 @@ export class RunTracker {
                 if (total !== undefined) this.total = total
                 break
             }
+            case "story_start":
+                this.story(event, "running")
+                break
+            case "story_suspended":
+                this.story(event, "suspended")
+                break
+            case "story_complete":
+                this.story(event, "done")
+                break
+            case "story_merged":
+                this.story(event, "merged")
+                break
+            case "merge_failed":
+            case "story_error":
+                this.story(event, "failed")
+                break
             case "finalize_start":
                 this.setPhase("finalizing")
                 break
@@ -134,8 +196,10 @@ export class RunTracker {
                 this.setPhase("done")
                 break
         }
+        if (this.phase !== phaseBefore) this.feed(`phase: ${this.phase}`, event.ts)
         if (!isMilestone(event)) return null
         const line = describe(event)
+        this.feed(line, event.ts)
         this.milestones.push(line)
         if (this.milestones.length > this.limit) this.milestones.shift()
         this.revision += 1
@@ -147,6 +211,9 @@ export class RunTracker {
             project: this.project,
             phase: this.phase,
             activity: this.activity,
+            stories: [...this.stories.values()],
+            abortReason: this.done ? stringField(this.done, "abort_reason") : undefined,
+            activityTail: [...this.activityTail],
             storiesTotal: this.storiesTotal,
             completed: this.completed,
             total: this.total,
@@ -163,10 +230,11 @@ export class RunTracker {
         this.revision += 1
     }
 
-    private setActivity(text: string): void {
+    private setActivity(text: string, ts?: unknown): void {
         const next = text.length > ACTIVITY_LIMIT ? `${text.slice(0, ACTIVITY_LIMIT - 1)}…` : text
         if (this.activity === next) return
         this.activity = next
+        this.feed(next, ts)
         this.revision += 1
     }
 }

@@ -31,6 +31,7 @@ const AGENT_ID = "operator"
 const DIRECT_FILE_LIMIT = 10
 
 export async function runOperator(options: OperatorOptions, ui: OperatorUi): Promise<void> {
+    let activitySnapshot: ReturnType<typeof setTimeout> | null = null
     const registry = new RunRegistry({
         ...(options.baroArgs ? { baroArgs: options.baroArgs } : {}),
         onStarted: (run) => {
@@ -43,6 +44,15 @@ export async function runOperator(options: OperatorOptions, ui: OperatorUi): Pro
         onMilestone: (run, line) => {
             ui.note(`${run.id} · ${line}`)
             ui.runsChanged(registry.rows())
+        },
+        // Activity lines arrive many times a second; one snapshot a second is
+        // enough for a strip and a drill-in.
+        onActivity: () => {
+            if (activitySnapshot) return
+            activitySnapshot = setTimeout(() => {
+                activitySnapshot = null
+                ui.runsChanged(registry.rows())
+            }, 1_000)
         },
         onFinished: (run, outcome) => {
             ui.note(`${run.id} · finished (${run.terminal})`)

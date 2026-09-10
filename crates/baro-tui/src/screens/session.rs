@@ -63,7 +63,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     let visible = chunks[1].height as usize;
     let max_back = total.saturating_sub(visible);
     let back = app.session_feed.scroll_back.min(max_back);
-    if let Some(id) = &app.focused_story {
+    if let Some(run) = app.operator_focused_run() {
+        render_run_focus(frame, app, run, chunks[1]);
+    } else if let Some(id) = &app.focused_story {
         render_focus(frame, app, id, chunks[1]);
     } else {
         let transcript = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -142,6 +144,96 @@ fn render_focus(frame: &mut Frame, app: &App, id: &str, area: ratatui::layout::R
     frame.render_widget(paragraph.scroll((offset as u16, 0)), body_area);
 }
 
+/// Operator drill-in: one delegated run over the transcript area — goal,
+/// stories with their state, the live activity line, recent milestones.
+fn render_run_focus(
+    frame: &mut Frame,
+    app: &App,
+    run: &crate::operator_client::OperatorRun,
+    area: ratatui::layout::Rect,
+) {
+    let mut lines: Vec<Line> = Vec::new();
+    let state = match run.state.as_str() {
+        "running" => format!("{} · {}", run.phase, run.elapsed_now()),
+        other => format!("{other} · {}", run.elapsed_now()),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("  ◉ {} ", run.id),
+            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(state, Style::default().fg(theme::TEXT)),
+        Span::styled(
+            "   esc back · ctrl+o next run",
+            Style::default().fg(theme::MUTED),
+        ),
+    ]));
+    lines.push(Line::from(Span::styled(
+        format!("  {}", clip(&run.goal, area.width.saturating_sub(4) as usize)),
+        Style::default().fg(theme::TEXT_DIM),
+    )));
+    lines.push(Line::from(""));
+    if !run.stories.is_empty() {
+        for story in &run.stories {
+            let (glyph, color) = match story.status.as_str() {
+                "merged" => ("✔", theme::SUCCESS),
+                "done" => ("●", theme::SUCCESS),
+                "running" => ("◐", theme::ACCENT),
+                "suspended" => ("◌", theme::WARNING),
+                "failed" => ("✖", theme::ERROR),
+                _ => ("○", theme::MUTED),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {glyph} "), Style::default().fg(color)),
+                Span::styled(format!("{} ", story.id), Style::default().fg(theme::TEXT)),
+                Span::styled(story.title.clone(), Style::default().fg(theme::TEXT_DIM)),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+    if let Some(activity) = &run.activity {
+        lines.push(Line::from(vec![
+            Span::styled("  now  ", Style::default().fg(theme::MUTED)),
+            Span::styled(activity.clone(), Style::default().fg(theme::TEXT)),
+        ]));
+    }
+    if let Some(error) = &run.error {
+        lines.push(Line::from(vec![
+            Span::styled("  error  ", Style::default().fg(theme::ERROR)),
+            Span::styled(error.clone(), Style::default().fg(theme::TEXT_DIM)),
+        ]));
+    }
+    if let Some(pr) = &run.pr_url {
+        lines.push(Line::from(vec![
+            Span::styled("  pr  ", Style::default().fg(theme::MUTED)),
+            Span::styled(pr.clone(), Style::default().fg(theme::ACCENT)),
+        ]));
+    }
+    // The live feed: what the run said, oldest first, so the pane reads like
+    // the agent drill-in even before the first story exists.
+    if !run.activity_tail.is_empty() {
+        lines.push(Line::from(""));
+        for entry in &run.activity_tail {
+            let (clock, text) = entry.split_once(' ').unwrap_or(("", entry.as_str()));
+            let is_milestone = run.milestones.iter().any(|m| text == m);
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {clock} "), Style::default().fg(theme::MUTED)),
+                Span::styled(
+                    text.to_string(),
+                    Style::default().fg(if is_milestone { theme::TEXT } else { theme::TEXT_DIM }),
+                ),
+            ]));
+        }
+    }
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let total = paragraph.line_count(area.width);
+    let visible = area.height as usize;
+    let max_back = total.saturating_sub(visible);
+    let back = app.focus_scroll_back.min(max_back);
+    let offset = max_back.saturating_sub(back);
+    frame.render_widget(paragraph.scroll((offset as u16, 0)), area);
+}
+
 fn header_line(app: &App) -> Paragraph<'static> {
     if let Some(operator) = &app.operator {
         let mut spans = vec![
@@ -165,7 +257,19 @@ fn header_line(app: &App) -> Paragraph<'static> {
             };
             let (label, color) = match run.state.as_str() {
                 "queued" => ("queued".to_string(), theme::MUTED),
-                "running" => (format!("{}{} · {}", run.phase, progress, run.elapsed_now()), theme::TEXT_DIM),
+                "running" => (
+                    match &run.activity {
+                        Some(activity) => format!(
+                            "{}{} · {} · {}",
+                            run.phase,
+                            progress,
+                            run.elapsed_now(),
+                            clip(activity, 40)
+                        ),
+                        None => format!("{}{} · {}", run.phase, progress, run.elapsed_now()),
+                    },
+                    theme::TEXT_DIM,
+                ),
                 "completed" => ("done".to_string(), theme::ACCENT),
                 other => (other.to_string(), theme::ERROR),
             };
@@ -296,7 +400,7 @@ fn turn_lines(
             // call line — bullet, bold name, dim arguments.
             if let Some(result) = turn.text.strip_prefix("⎿ ") {
                 lines.push(Line::from(vec![
-                    Span::styled("  ⎿  ".to_string(), Style::default().fg(theme::MUTED)),
+                    Span::styled("  └ ".to_string(), Style::default().fg(theme::MUTED)),
                     Span::styled(result.to_string(), Style::default().fg(theme::TEXT_DIM)),
                 ]));
                 return;
@@ -306,8 +410,11 @@ fn turn_lines(
                     Some(at) => (&call[..at], &call[at..]),
                     None => (call, ""),
                 };
+                // Narrow, unambiguous-width glyphs only: a bullet the terminal
+                // draws two cells wide shifts the line and leaves its tail
+                // behind on the next repaint.
                 lines.push(Line::from(vec![
-                    Span::styled("● ".to_string(), Style::default().fg(theme::SUCCESS)),
+                    Span::styled("• ".to_string(), Style::default().fg(theme::SUCCESS)),
                     Span::styled(
                         name.to_string(),
                         Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
@@ -1007,6 +1114,27 @@ fn footer_line(app: &App, scrolled_back: bool) -> Paragraph<'static> {
             Span::styled(" error: ", Style::default().fg(theme::ERROR)),
             Span::styled(clip(error, 120), Style::default().fg(theme::TEXT_DIM)),
         ]));
+    }
+    if let Some(operator) = &app.operator {
+        if !operator.runs.is_empty() && app.conversation_input.is_empty() {
+            let hint = |key: &str, what: &str| {
+                vec![
+                    Span::styled(format!(" {key}"), Style::default().fg(theme::ACCENT)),
+                    Span::styled(format!(" {what} "), Style::default().fg(theme::TEXT_DIM)),
+                ]
+            };
+            let mut spans = hint("enter", "send");
+            spans.extend(hint(
+                "ctrl+o",
+                if operator.focus.is_some() { "next run" } else { "run details" },
+            ));
+            if operator.focus.is_some() {
+                spans.extend(hint("esc", "back"));
+            }
+            spans.extend(hint("⇞⇟", "scroll"));
+            spans.extend(hint("ctrl+c ×2", "quit"));
+            return Paragraph::new(Line::from(spans));
+        }
     }
     if app.quit_armed_tick.is_some_and(|armed| app.tick_count.saturating_sub(armed) <= 20) {
         return Paragraph::new(Line::from(vec![

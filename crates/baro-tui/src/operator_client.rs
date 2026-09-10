@@ -21,8 +21,6 @@ pub struct OperatorRun {
     pub completed: u32,
     #[serde(default)]
     pub total: u32,
-    // Carried for the run drill-in that follows; the strip shows the rest.
-    #[allow(dead_code)]
     #[serde(default)]
     pub goal: String,
     #[serde(default)]
@@ -31,9 +29,27 @@ pub struct OperatorRun {
     pub started_ms: Option<u64>,
     #[serde(default)]
     pub finished_ms: Option<u64>,
-    #[allow(dead_code)]
     #[serde(default)]
     pub pr_url: Option<String>,
+    #[serde(default)]
+    pub activity: Option<String>,
+    #[serde(default)]
+    pub stories: Vec<OperatorStory>,
+    #[serde(default)]
+    pub milestones: Vec<String>,
+    #[serde(default)]
+    pub activity_tail: Vec<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OperatorStory {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub status: String,
 }
 
 impl OperatorRun {

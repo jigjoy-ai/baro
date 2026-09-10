@@ -78,6 +78,11 @@ export class JsonUi implements OperatorUi {
                 ...(row.startedMs !== undefined ? { started_ms: row.startedMs } : {}),
                 ...(row.finishedMs !== undefined ? { finished_ms: row.finishedMs } : {}),
                 ...(row.prUrl ? { pr_url: row.prUrl } : {}),
+                ...(row.activity ? { activity: row.activity } : {}),
+                stories: row.stories,
+                milestones: row.milestones,
+                activity_tail: row.activityTail,
+                ...(row.error ? { error: row.error } : {}),
             })),
         })
     }

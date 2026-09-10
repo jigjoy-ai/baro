@@ -14,6 +14,13 @@ export interface RunRow {
     readonly startedMs: number | undefined
     readonly finishedMs: number | undefined
     readonly prUrl: string | undefined
+    readonly activity: string | undefined
+    readonly stories: readonly { id: string; title: string; status: string }[]
+    /** Last milestones, oldest first. */
+    readonly milestones: readonly string[]
+    /** Recent live-feed lines with a clock, oldest first. */
+    readonly activityTail: readonly string[]
+    readonly error: string | undefined
 }
 
 export interface AskMeta {
