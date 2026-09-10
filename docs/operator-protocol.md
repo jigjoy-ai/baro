@@ -14,6 +14,7 @@ Every event carries `ts` (ISO 8601).
 | `note` | `text` | one dim line: banner, milestone, queue note, refusal |
 | `assistant_delta` | `text` | a slice of the reply, in order; the turn ends with `turn_done` |
 | `tool_call` | `name`, `summary` | the operator invoked a tool; `name` is `baro delegate` etc. for its own tools |
+| `tool_result` | `summary` | first meaningful line of what the last tool returned, with `(+N lines)` when there was more |
 | `ask` | `id`, `kind` (`permission` \| `quit`), `prompt`, `tool?`, `summary?`, `options` | a question only the person can answer; answer with `answer` |
 | `turn_done` | `duration_ms`, `cost_usd` (nullable) | the reply is complete |
 | `runs` | `runs[]`: `id`, `state`, `phase`, `completed`, `total`, `goal`, `elapsed`, `pr_url?` | snapshot after anything about a run changed |

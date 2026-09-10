@@ -38,6 +38,8 @@ export interface OperatorUi {
     /** One dim line: a milestone, a queue note, a refusal. */
     note(text: string): void
     toolCall(name: string, summary: string): void
+    /** What the last tool returned, reduced to one line. */
+    toolResult(summary: string): void
     /** Resolves with the person's answer; the operator asks one thing at a time. */
     ask(prompt: string, meta: AskMeta): Promise<string>
     turnDone(result: TurnResult): void

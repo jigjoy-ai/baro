@@ -54,6 +54,10 @@ export class TerminalUi implements OperatorUi {
         this.note(`  ⚙ ${name} ${summary}`)
     }
 
+    toolResult(summary: string): void {
+        this.note(`    ⎿ ${summary}`)
+    }
+
     ask(prompt: string, meta: AskMeta): Promise<string> {
         const question =
             meta.kind === "permission"

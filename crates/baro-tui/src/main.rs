@@ -3438,6 +3438,9 @@ fn apply_operator_event(app: &mut App, event: operator_client::OperatorEvent) {
         Event::ToolCall { name, summary } => {
             let _ = app.conversation.record_system_turn(format!("⚙ {name}({summary})"));
         }
+        Event::ToolResult { summary } => {
+            let _ = app.conversation.record_system_turn(format!("⎿ {summary}"));
+        }
         Event::AssistantDelta { text } => {
             let state = app.operator.as_mut().expect("checked above");
             state.reply.push_str(&text);

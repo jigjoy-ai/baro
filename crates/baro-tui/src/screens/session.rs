@@ -294,6 +294,13 @@ fn turn_lines(
         TranscriptRole::System => {
             // Operator tool calls: "⚙ Name(args)" drawn like a coding agent's
             // call line — bullet, bold name, dim arguments.
+            if let Some(result) = turn.text.strip_prefix("⎿ ") {
+                lines.push(Line::from(vec![
+                    Span::styled("  ⎿  ".to_string(), Style::default().fg(theme::MUTED)),
+                    Span::styled(result.to_string(), Style::default().fg(theme::TEXT_DIM)),
+                ]));
+                return;
+            }
             if let Some(call) = turn.text.strip_prefix("⚙ ") {
                 let (name, args) = match call.find('(') {
                     Some(at) => (&call[..at], &call[at..]),

@@ -43,6 +43,8 @@ pub enum OperatorEvent {
     AssistantDelta { text: String },
     #[serde(rename = "tool_call")]
     ToolCall { name: String, summary: String },
+    #[serde(rename = "tool_result")]
+    ToolResult { summary: String },
     #[serde(rename = "ask")]
     Ask {
         id: String,

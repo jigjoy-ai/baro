@@ -39,6 +39,10 @@ export class JsonUi implements OperatorUi {
         this.emit({ type: "tool_call", name, summary })
     }
 
+    toolResult(summary: string): void {
+        this.emit({ type: "tool_result", summary })
+    }
+
     ask(prompt: string, meta: AskMeta): Promise<string> {
         this.askSequence += 1
         const id = `ask-${this.askSequence}`

@@ -1,5 +1,5 @@
 import { AgenticEnvironment, BaseObserver } from "../runtime/mozaik.js"
-import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
+import type { FunctionCallOutputItem, Participant, SemanticEvent } from "../runtime/mozaik.js"
 import { AgentResult, ClaudeStreamChunk } from "../events/harness-stream.js"
 import { ClaudeCliParticipant } from "../harness/claude/cli-participant.js"
 import type { HostFunction } from "../harness/lane-adapter.js"
@@ -296,6 +296,10 @@ class Renderer extends BaseObserver {
         super()
     }
 
+    override onExternalFunctionCallOutput(_source: Participant, item: FunctionCallOutputItem): void {
+        this.ui.toolResult(summarizeToolOutput(item.output))
+    }
+
     override onExternalEvent(_source: Participant, event: SemanticEvent<unknown>): void {
         if (ClaudeStreamChunk.is(event)) {
             this.render(event.data.raw)
@@ -347,6 +351,20 @@ class Renderer extends BaseObserver {
                 return
         }
     }
+}
+
+/** First meaningful line of a tool's output, and how much more there was. */
+function summarizeToolOutput(output: unknown): string {
+    const text = typeof output === "string" ? output : JSON.stringify(output)
+    const lines = text
+        .replace(/\u001b\[[0-9;]*m/g, "")
+        .split("\n")
+        .map((line) => line.trimEnd())
+        .filter((line) => line.trim().length > 0)
+    if (lines.length === 0) return "(no output)"
+    const first = lines[0]!.trim()
+    const head = first.length > 120 ? `${first.slice(0, 119)}…` : first
+    return lines.length > 1 ? `${head}  (+${lines.length - 1} lines)` : head
 }
 
 function summarizeToolInput(name: string, input: unknown): string {
