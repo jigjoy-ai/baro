@@ -355,15 +355,22 @@ class Renderer extends BaseObserver {
 
 /** First meaningful line of a tool's output, and how much more there was. */
 function summarizeToolOutput(output: unknown): string {
-    // Claude's tool_result content is an InputText array; a plain string
-    // arrives from providers that never block their output.
+    // Claude's tool_result content reaches us as mozaik InputText: an
+    // array-like object of {type, text} blocks that only looks like an array
+    // once serialized. A plain string comes from providers that never block.
     let value: unknown = output
     if (typeof value === "string" && /^\s*\[/.test(value)) {
-        // The stream mapper serializes the content array to a string.
         try {
             value = JSON.parse(value)
         } catch {
             /* plain text that happens to start with a bracket */
+        }
+    }
+    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        try {
+            value = JSON.parse(JSON.stringify(value))
+        } catch {
+            value = String(value)
         }
     }
     const text =
