@@ -15,7 +15,7 @@
  *   - ok=false   only when a build/test that ACTUALLY RAN returned non-zero.
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 
 import type { VerificationCommandOutput } from "../events/verification.js"
@@ -134,6 +134,12 @@ export interface VerifyPlan {
 export interface VerifyBuildOptions {
     /** Cancels the current child and prevents later commands from starting. */
     signal?: AbortSignal
+    /**
+     * Re-run the package manager's install before the gates when the
+     * installed tree no longer matches the manifests. Default on; BARO_DEPS_REFRESH=0
+     * turns it off process-wide.
+     */
+    refreshDependencies?: boolean
     /** Snapshotted before agents mutate the target repo. */
     plan?: VerifyPlan
     /** Defaults to the process-wide TUI stream; injected only by tests. */
@@ -141,9 +147,12 @@ export interface VerifyBuildOptions {
 }
 
 interface PackageManifest {
+    name?: unknown
     packageManager?: unknown
     scripts?: Record<string, unknown>
     workspaces?: unknown
+    dependencies?: unknown
+    devDependencies?: unknown
 }
 
 export type JavaScriptPackageManager = "npm" | "pnpm" | "yarn"
@@ -471,6 +480,90 @@ function detectCommands(cwd: string): DetectedVerifyPlan {
     }
 
     return { commands: cmds, javascriptPackageManagers }
+}
+
+/**
+ * Why the installed JavaScript dependency tree no longer matches the
+ * manifests, or nothing when it does. Issue #129: a run converted a package
+ * into npm workspaces, every story merged green, and the run-level gate
+ * failed because nobody had run `npm install` after the manifest changed —
+ * the CLI workspace could not resolve the core one by name. The rules are
+ * deliberately git-free so a fresh clone and a mid-run manifest edit read
+ * the same way.
+ */
+export function staleDependencyReasons(cwd: string): string[] {
+    const pkgPath = join(cwd, "package.json")
+    if (!existsSync(pkgPath)) return []
+    const manifest = readPackageManifest(pkgPath)
+    if (!manifest) return []
+    const reasons: string[] = []
+    const nodeModules = join(cwd, "node_modules")
+    const declaresDependencies =
+        hasEntries(manifest.dependencies) || hasEntries(manifest.devDependencies)
+    const workspaceDirs = workspacePackageDirs(cwd, [
+        ...workspacePatterns(manifest.workspaces),
+        ...pnpmWorkspacePatterns(cwd),
+    ])
+    if (!existsSync(nodeModules)) {
+        if (declaresDependencies || workspaceDirs.length > 0) {
+            reasons.push("node_modules is missing")
+        }
+        return reasons
+    }
+    for (const dir of workspaceDirs) {
+        const name = readPackageManifest(join(dir, "package.json"))?.name
+        if (typeof name !== "string" || !name) continue
+        if (!existsSync(join(nodeModules, name))) {
+            reasons.push(`workspace ${name} is not linked in node_modules`)
+        }
+    }
+    // The manager leaves a marker when it finishes; manifests or lockfiles
+    // written after it mean the tree predates them.
+    const marker = [
+        "node_modules/.package-lock.json",
+        "node_modules/.modules.yaml",
+        "node_modules/.yarn-integrity",
+    ]
+        .map((relativePath) => join(cwd, relativePath))
+        .find((path) => existsSync(path))
+    if (marker) {
+        const installedAt = statSync(marker).mtimeMs
+        for (const file of ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"]) {
+            const path = join(cwd, file)
+            if (existsSync(path) && statSync(path).mtimeMs > installedAt + 1_000) {
+                reasons.push(`${file} changed after the last install`)
+            }
+        }
+    }
+    return reasons
+}
+
+function hasEntries(value: unknown): boolean {
+    return typeof value === "object" && value !== null && Object.keys(value).length > 0
+}
+
+function dependencyRefreshCommand(cwd: string, reasons: readonly string[]): VerifyCommandSpec {
+    const manifest = readPackageManifest(join(cwd, "package.json"))
+    const declared = declaredPackageManager(manifest?.packageManager)
+    const pm = detectPackageManager(cwd, manifest, existsSync(join(cwd, "pnpm-workspace.yaml")))
+    const yarnMajor = declared?.manager === "yarn"
+        ? Number.parseInt(declared.version.match(/^\d+/)?.[0] ?? "", 10)
+        : Number.NaN
+    const command =
+        pm === "yarn" && yarnMajor >= 2
+            ? { tool: "corepack", args: ["yarn", "install"] }
+            : pm === "npm"
+              ? { tool: "npm", args: ["install", "--no-audit", "--no-fund"] }
+              : { tool: pm, args: ["install"] }
+    return {
+        label: `${pm} install (dependencies stale: ${reasons.join("; ")})`,
+        ...command,
+    }
+}
+
+function dependencyRefreshEnabled(options: VerifyBuildOptions): boolean {
+    if (options.refreshDependencies === false) return false
+    return process.env.BARO_DEPS_REFRESH !== "0"
 }
 
 function dedupeVerifyCommands(
@@ -1103,6 +1196,33 @@ export async function verifyBuild(
     let ran = false
     const plan = options.plan ?? createVerifyPlan(cwd)
     const emitActivity = options.emitActivity ?? emit
+    // A gate run against a tree that predates the manifests judges the
+    // install, not the work. Refresh first and keep it in the evidence.
+    const stale = dependencyRefreshEnabled(options) && plan.commands.length > 0
+        ? staleDependencyReasons(cwd)
+        : []
+    if (stale.length > 0) {
+        throwIfAborted(options.signal)
+        const install = dependencyRefreshCommand(cwd, stale)
+        emitActivity({
+            type: "activity",
+            id: "_verify",
+            kind: "warn",
+            text: `refreshing dependencies before verification: ${stale.join("; ")}`,
+        })
+        const outcome = await runCmd(cwd, install, options.signal)
+        commands.push({
+            command: install.label,
+            status: outcome.status,
+            durationMs: outcome.durationMs,
+            ...("tail" in outcome && outcome.tail ? { tail: outcome.tail } : {}),
+            ...("output" in outcome && outcome.output ? { output: outcome.output } : {}),
+        })
+        if (outcome.status === "failed") {
+            ran = true
+            failures.push({ cmd: install.label, tail: outcome.tail })
+        }
+    }
     for (const c of plan.commands) {
         throwIfAborted(options.signal)
         let outcome = await runCmd(cwd, c, options.signal)
