@@ -1446,6 +1446,10 @@ async fn run_app(
         .checked_sub(Duration::from_millis(100))
         .unwrap_or_else(Instant::now);
     let mut dirty = true;
+    // A drill-in swaps the whole transcript area. Glyph-width disagreements
+    // between the terminal and the buffer diff leave stray cells behind on
+    // such swaps, so the switch itself repaints from scratch.
+    let mut last_drill_in: (Option<String>, Option<String>) = (None, None);
     // Scroll frames render from the session cache, so they can run at
     // ~120fps; content frames keep the 30fps flood throttle.
     let mut scroll_frame = false;
@@ -1458,6 +1462,14 @@ async fn run_app(
         };
         if let Some(t) = terminal.as_deref_mut() {
             if dirty && last_draw.elapsed() >= min_gap {
+                let drill_in = (
+                    app.focused_story.clone(),
+                    app.operator.as_ref().and_then(|state| state.focus.clone()),
+                );
+                if drill_in != last_drill_in {
+                    t.clear()?;
+                    last_drill_in = drill_in;
+                }
                 t.draw(|f| ui::render(f, &mut app))?;
                 last_draw = Instant::now();
                 dirty = false;

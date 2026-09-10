@@ -393,7 +393,7 @@ fn turn_lines(
             // call line — bullet, bold name, dim arguments.
             if let Some(result) = turn.text.strip_prefix("⎿ ") {
                 lines.push(Line::from(vec![
-                    Span::styled("  ⎿  ".to_string(), Style::default().fg(theme::MUTED)),
+                    Span::styled("  └ ".to_string(), Style::default().fg(theme::MUTED)),
                     Span::styled(result.to_string(), Style::default().fg(theme::TEXT_DIM)),
                 ]));
                 return;
@@ -403,8 +403,11 @@ fn turn_lines(
                     Some(at) => (&call[..at], &call[at..]),
                     None => (call, ""),
                 };
+                // Narrow, unambiguous-width glyphs only: a bullet the terminal
+                // draws two cells wide shifts the line and leaves its tail
+                // behind on the next repaint.
                 lines.push(Line::from(vec![
-                    Span::styled("● ".to_string(), Style::default().fg(theme::SUCCESS)),
+                    Span::styled("• ".to_string(), Style::default().fg(theme::SUCCESS)),
                     Span::styled(
                         name.to_string(),
                         Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
