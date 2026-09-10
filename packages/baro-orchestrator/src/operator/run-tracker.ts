@@ -87,7 +87,10 @@ export class RunTracker {
         const id = stringField(event, "id", "storyId", "story_id")
         if (!id) return
         const known = this.stories.get(id)
-        const title = stringField(event, "title") ?? known?.title ?? ""
+        // story_start carries the id as its title (the lifecycle forwarder has
+        // no story text); the plan fragment already told us the real one.
+        const fromEvent = stringField(event, "title")
+        const title = fromEvent && fromEvent !== id ? fromEvent : (known?.title ?? "")
         this.stories.set(id, { id, title, status })
         this.revision += 1
     }
@@ -150,9 +153,10 @@ export class RunTracker {
                 break
             }
             case "story_log": {
+                // Raw lines: git output, relayed stdout fragments. Only the
+                // planner's own notes are prose worth a status line.
                 const line = stringField(event, "line")
-                const id = stringField(event, "id")
-                if (line) this.setActivity(id && id !== "plan" ? `${id}: ${line}` : line, event.ts)
+                if (line && stringField(event, "id") === "plan") this.setActivity(line, event.ts)
                 break
             }
             case "progress": {

@@ -95,8 +95,11 @@ describe("operator run tracker", () => {
     it("keeps each story's latest state for the drill-in", () => {
         const tracker = new RunTracker()
         tracker.accept({ type: "plan_fragment", stories: [{ id: "S1", title: "Core" }, { id: "S2", title: "CLI" }] })
-        tracker.accept({ type: "story_start", id: "S1", title: "Core" })
+        // The lifecycle forwarder sends the id as the title; the fragment's title wins.
+        tracker.accept({ type: "story_start", id: "S1", title: "S1" })
         tracker.accept({ type: "story_start", id: "S2" })
+        tracker.accept({ type: "story_log", id: "S2", line: "1I{" })
+        assert.notEqual(tracker.summary().activity, "S2: 1I{", "raw story_log lines are not status")
         tracker.accept({ type: "story_complete", id: "S1" })
         tracker.accept({ type: "story_merged", id: "S1" })
         tracker.accept({ type: "story_error", id: "S2", error: "boom" })
