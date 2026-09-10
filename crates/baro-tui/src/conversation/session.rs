@@ -442,6 +442,31 @@ impl ConversationSession {
         Ok(())
     }
 
+    /// Operator sessions: the person's message, outside the request/response
+    /// state machine (the operator process owns that exchange).
+    pub fn record_user_turn(&mut self, text: impl Into<String>) -> Result<(), ConversationError> {
+        let text = normalized_text("user message", text.into(), MAX_MESSAGE_CHARS)?;
+        self.push_turn(TranscriptTurn {
+            role: TranscriptRole::User,
+            text,
+            request_id: None,
+            kind: None,
+        });
+        Ok(())
+    }
+
+    /// Operator sessions: one complete reply, after its deltas finished.
+    pub fn record_assistant_turn(&mut self, text: impl Into<String>) -> Result<(), ConversationError> {
+        let text = normalized_text("assistant message", text.into(), MAX_MESSAGE_CHARS)?;
+        self.push_turn(TranscriptTurn {
+            role: TranscriptRole::Assistant,
+            text,
+            request_id: None,
+            kind: None,
+        });
+        Ok(())
+    }
+
     /// Add a deterministic lifecycle/status line without a model call.
     pub fn record_system_turn(&mut self, text: impl Into<String>) -> Result<(), ConversationError> {
         let text = normalized_text("system message", text.into(), MAX_MESSAGE_CHARS)?;

@@ -21,6 +21,7 @@ mod headless_transport;
 mod highlight;
 mod intake_runner;
 mod notification;
+mod operator_client;
 mod orchestrator_client;
 mod planner_host;
 mod planner_runner;
@@ -310,6 +311,8 @@ enum AppEvent {
     OrchestratorShutdown(tokio::sync::oneshot::Sender<()>),
     /// OS Ctrl-C observed by the headless host.
     Interrupt,
+    /// `baro operator`: one line from operator.mjs (docs/operator-protocol.md).
+    Operator(operator_client::OperatorEvent),
     Tick,
 }
 
@@ -414,6 +417,25 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     if raw_args.get(1).map(|s| s.as_str()) == Some("logs") {
         let code = cli::run_registry::run_logs(&raw_args[2..]);
         std::process::exit(code);
+    }
+    // `baro operator [--cwd …] [--model …] [--permission ask|auto] [--local-only]`:
+    // the session screen with operator.mjs behind it. No session lock and no
+    // run record here — the runs the operator delegates take those themselves.
+    if raw_args.get(1).map(|s| s.as_str()) == Some("operator") {
+        let mut argv = vec!["baro".to_string(), "--operator".to_string()];
+        let mut rest = raw_args[2..].iter();
+        while let Some(arg) = rest.next() {
+            if arg == "--permission" {
+                argv.push("--operator-permission".to_string());
+                if let Some(value) = rest.next() {
+                    argv.push(value.clone());
+                }
+            } else {
+                argv.push(arg.clone());
+            }
+        }
+        let cli = <cli::cli::Cli as clap::Parser>::try_parse_from(&argv)?;
+        return run_with_terminal(cli, None).await;
     }
 
     // Update notice: the network check runs in the JS layer (no HTTP dep
@@ -520,6 +542,18 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
         return run_app(None, cli).await;
     }
 
+    let result = run_with_terminal(cli, update_notice).await;
+
+    // _lock is dropped here, removing baro.lock
+
+    result
+}
+
+/// The alternate screen around `run_app`, restored whatever the run did.
+async fn run_with_terminal(
+    cli: cli::cli::Cli,
+    update_notice: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = open_terminal_writer()?;
     enable_raw_mode()?;
     execute!(writer, EnterAlternateScreen)?;
@@ -545,8 +579,6 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(n) = &update_notice {
         eprint!("{n}");
     }
-
-    // _lock is dropped here, removing baro.lock
 
     result
 }
@@ -1314,7 +1346,7 @@ async fn run_app(
         conversation_host::purge_conversation_snapshots(&cwd);
     }
 
-    if !entered_resume && cli.goal.is_none() && !greenfield_initialized {
+    if !entered_resume && cli.goal.is_none() && !greenfield_initialized && !cli.operator {
         restore_pre_prd_conversation(&mut app, &cwd);
     }
 
@@ -1336,6 +1368,9 @@ async fn run_app(
                 submit_conversation_message(&mut app, &cwd, tx.clone(), message)
                     .map_err(|error| format!("cannot start conversation: {error}"))?;
             }
+        } else if cli.operator {
+            app.start_conversation();
+            start_operator(&mut app, &cwd, tx.clone(), &cli)?;
         } else {
             if headless {
                 return Err("--headless requires a goal argument".into());
@@ -1447,6 +1482,9 @@ async fn run_app(
             app.session_version = app.session_version.wrapping_add(1);
         }
         match received {
+            Some(AppEvent::Operator(event)) => {
+                apply_operator_event(&mut app, event);
+            }
             Some(AppEvent::Baro(ev)) => {
                 if matches!(ev, BaroEvent::NotificationReady) {
                     notification::notify_completion();
@@ -2148,10 +2186,20 @@ async fn run_app(
                         {
                             match app.quit_armed_tick {
                                 Some(armed) if app.tick_count.saturating_sub(armed) <= 20 => {
+                                    operator_quit(&app);
                                     return Ok(())
                                 }
                                 _ => app.quit_armed_tick = Some(app.tick_count),
                             }
+                        }
+                        KeyCode::Char(answer @ ('y' | 'n' | 'a'))
+                            if app.operator_pending_ask().is_some()
+                                && app.conversation_input.is_empty() =>
+                        {
+                            operator_answer(&mut app, answer);
+                        }
+                        KeyCode::Esc if app.operator_pending_ask().is_some() => {
+                            operator_answer(&mut app, 'n');
                         }
                         KeyCode::Esc => {
                             app.quit_armed_tick = None;
@@ -2279,7 +2327,10 @@ async fn run_app(
                             spawn_pending_conversation(&mut app, &cwd, tx.clone(), intent);
                         }
                         KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n') => {
-                            if app.inline_mode_pick {
+                            if app.operator.is_some() {
+                                let message = app.input_take();
+                                operator_submit(&mut app, message);
+                            } else if app.inline_mode_pick {
                                 app.inline_mode_pick = false;
                                 let chosen = app::MODE_OPTIONS[app.mode_picker_index];
                                 let mode_json = match app.mode_proposal.take() {
@@ -3340,6 +3391,178 @@ fn conversation_model(app: &App) -> Option<String> {
             .then(|| app.architect_model.clone())
             .flatten()
     })
+}
+
+/// `baro operator`: spawn operator.mjs behind the session screen and route
+/// its lines into the app loop.
+fn start_operator(
+    app: &mut App,
+    cwd: &Path,
+    tx: mpsc::Sender<AppEvent>,
+    cli: &cli::cli::Cli,
+) -> Result<(), String> {
+    let (events_tx, mut events_rx) = mpsc::channel::<operator_client::OperatorEvent>(256);
+    let stdin = operator_client::spawn_operator(
+        operator_client::OperatorLaunch {
+            cwd: cwd.to_path_buf(),
+            model: Some(cli.model.clone().unwrap_or_else(|| "opus".to_string())),
+            permission_auto: cli.operator_permission == "auto",
+            local_only: cli.local_only,
+        },
+        events_tx,
+    )?;
+    tokio::spawn(async move {
+        while let Some(event) = events_rx.recv().await {
+            if tx.send(AppEvent::Operator(event)).await.is_err() {
+                break;
+            }
+        }
+    });
+    app.operator = Some(app::OperatorState {
+        stdin: Some(stdin),
+        ..Default::default()
+    });
+    Ok(())
+}
+
+fn apply_operator_event(app: &mut App, event: operator_client::OperatorEvent) {
+    use operator_client::OperatorEvent as Event;
+    if app.operator.is_none() {
+        return;
+    }
+    match event {
+        Event::Ready => {}
+        Event::Note { text } => {
+            let _ = app.conversation.record_system_turn(text);
+        }
+        Event::ToolCall { name, summary } => {
+            let _ = app.conversation.record_system_turn(format!("⚙ {name} {summary}"));
+        }
+        Event::AssistantDelta { text } => {
+            let state = app.operator.as_mut().expect("checked above");
+            state.reply.push_str(&text);
+            app.conversation_stream = Some(("operator".to_string(), state.reply.clone()));
+        }
+        Event::TurnDone { duration_ms, cost_usd } => {
+            let reply = {
+                let state = app.operator.as_mut().expect("checked above");
+                std::mem::take(&mut state.reply)
+            };
+            if !reply.trim().is_empty() {
+                let _ = app.conversation.record_assistant_turn(reply);
+            }
+            let facts: Vec<String> = [
+                duration_ms.map(|ms| format!("{}s", (ms / 1000.0).round() as u64)),
+                cost_usd.map(|usd| format!("${usd:.2}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !facts.is_empty() {
+                let _ = app.conversation.record_system_turn(facts.join(" · "));
+            }
+            app.conversation_stream = None;
+            app.conversation_busy = false;
+        }
+        Event::Ask {
+            id,
+            kind,
+            prompt,
+            tool,
+            summary,
+        } => {
+            let state = app.operator.as_mut().expect("checked above");
+            state.pending_ask = Some(app::OperatorAsk {
+                id,
+                kind,
+                prompt,
+                tool,
+                summary,
+            });
+        }
+        Event::Runs { runs } => {
+            let state = app.operator.as_mut().expect("checked above");
+            state.runs = runs;
+        }
+        Event::Exit => {}
+        Event::Gone { reason } => {
+            let text = reason.unwrap_or_else(|| "operator exited".to_string());
+            let state = app.operator.as_mut().expect("checked above");
+            state.gone = Some(text.clone());
+            state.stdin = None;
+            state.pending_ask = None;
+            app.conversation_stream = None;
+            app.conversation_busy = false;
+            let _ = app.conversation.record_system_turn(text);
+        }
+    }
+}
+
+/// Enter in operator mode: an answer to the pending question, a local slash
+/// command, or a message for the operator.
+fn operator_submit(app: &mut App, message: String) {
+    let text = message.trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+    if app.operator_pending_ask().is_some() {
+        let first = text.chars().next().unwrap_or('n').to_ascii_lowercase();
+        operator_answer(app, if matches!(first, 'y' | 'a') { first } else { 'n' });
+        return;
+    }
+    if app.operator.as_ref().is_some_and(|state| state.stdin.is_none()) {
+        app.conversation_error = Some("the operator is gone; quit and start again".to_string());
+        return;
+    }
+    let command = match text.as_str() {
+        "/quit" | "/exit" => Some(operator_client::quit_command(false)),
+        "/runs" => Some(serde_json::json!({ "type": "runs" }).to_string()),
+        other if other.starts_with("/status") || other.starts_with("/stop") => {
+            let mut parts = other.splitn(2, char::is_whitespace);
+            let verb = parts.next().unwrap_or("").trim_start_matches('/');
+            let id = parts.next().unwrap_or("").trim();
+            Some(serde_json::json!({ "type": verb, "id": id }).to_string())
+        }
+        _ => None,
+    };
+    if let Some(command) = command {
+        app.operator_send(command);
+        return;
+    }
+    let _ = app.conversation.record_user_turn(text.clone());
+    app.input_history.push(text.clone());
+    app.conversation_busy = true;
+    app.conversation_error = None;
+    app.operator_send(operator_client::user_command(&text));
+}
+
+fn operator_answer(app: &mut App, answer: char) {
+    let Some(ask) = app
+        .operator
+        .as_mut()
+        .and_then(|state| state.pending_ask.take())
+    else {
+        return;
+    };
+    let reply = answer.to_string();
+    app.operator_send(operator_client::answer_command(&ask.id, &reply));
+    let label = match answer {
+        'y' => "allowed",
+        'a' => "always allowed",
+        _ => "declined",
+    };
+    let _ = app.conversation.record_system_turn(format!(
+        "{} {} — {label}",
+        ask.tool.unwrap_or_else(|| ask.kind.clone()),
+        ask.summary.unwrap_or_default()
+    ));
+}
+
+/// The TUI is leaving: the operator shuts down, its delegated runs stay.
+fn operator_quit(app: &App) {
+    if app.operator.is_some() {
+        app.operator_send(operator_client::quit_command(false));
+    }
 }
 
 fn spawn_pending_conversation(
