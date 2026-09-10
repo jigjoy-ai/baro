@@ -240,6 +240,15 @@ pub struct Cli {
     /// and wait (≤120s) for a confirm_mode command before planning continues.
     #[arg(long, env = "BARO_CONFIRM_MODE")]
     pub confirm_mode: bool,
+
+    /// Internal: `baro operator` sets this before clap; the session screen
+    /// then talks to operator.mjs instead of the intake conversation.
+    #[arg(long, hide = true)]
+    pub operator: bool,
+
+    /// Internal: how the operator handles Claude's permission prompts.
+    #[arg(long, hide = true, value_parser = ["ask", "auto"], default_value = "auto")]
+    pub operator_permission: String,
 }
 
 fn parse_shell_budget(raw: &str) -> Result<u64, String> {

@@ -590,6 +590,30 @@ pub struct App {
     pub dialogue_enabled: bool,
     /// Live orchestrator stdin (JSON command lines); refreshed per spawn.
     pub orchestrator_stdin: Option<tokio::sync::mpsc::Sender<String>>,
+    /// `baro operator`: the session screen talks to operator.mjs instead of
+    /// the intake conversation. None outside that mode.
+    pub operator: Option<OperatorState>,
+}
+
+/// A question only the person can answer, relayed from the operator
+/// (a permission for a tool, or whether to stop runs on quit).
+#[derive(Debug, Clone)]
+pub struct OperatorAsk {
+    pub id: String,
+    pub kind: String,
+    pub prompt: String,
+    pub tool: Option<String>,
+    pub summary: Option<String>,
+}
+
+#[derive(Default)]
+pub struct OperatorState {
+    pub stdin: Option<tokio::sync::mpsc::Sender<String>>,
+    pub runs: Vec<crate::operator_client::OperatorRun>,
+    pub pending_ask: Option<OperatorAsk>,
+    /// The reply being streamed; becomes an assistant turn on turn_done.
+    pub reply: String,
+    pub gone: Option<String>,
 }
 
 impl App {
@@ -743,7 +767,20 @@ impl App {
             dialogue_enabled: std::env::var("BARO_WITH_DIALOGUE").is_ok_and(|value| value == "1")
                 || std::env::var("BARO_COORDINATION").is_ok_and(|value| value == "collective"),
             orchestrator_stdin: None,
+            operator: None,
         }
+    }
+
+    /// Operator mode: send a line to operator.mjs; false when it is gone.
+    pub fn operator_send(&self, line: String) -> bool {
+        match self.operator.as_ref().and_then(|state| state.stdin.as_ref()) {
+            Some(stdin) => stdin.try_send(line).is_ok(),
+            None => false,
+        }
+    }
+
+    pub fn operator_pending_ask(&self) -> Option<&OperatorAsk> {
+        self.operator.as_ref().and_then(|state| state.pending_ask.as_ref())
     }
 
     // Screen transitions

@@ -143,6 +143,41 @@ fn render_focus(frame: &mut Frame, app: &App, id: &str, area: ratatui::layout::R
 }
 
 fn header_line(app: &App) -> Paragraph<'static> {
+    if let Some(operator) = &app.operator {
+        let mut spans = vec![
+            Span::styled(
+                " baro ",
+                Style::default()
+                    .fg(theme::ACCENT_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("· ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                if operator.gone.is_some() { "operator gone" } else { "operator" }.to_string(),
+                Style::default().fg(theme::ACCENT),
+            ),
+        ];
+        for run in &operator.runs {
+            let progress = if run.total > 0 {
+                format!(" {}/{}", run.completed, run.total)
+            } else {
+                String::new()
+            };
+            let (label, color) = match run.state.as_str() {
+                "queued" => ("queued".to_string(), theme::MUTED),
+                "running" => (format!("{}{} · {}", run.phase, progress, run.elapsed_now()), theme::TEXT_DIM),
+                "completed" => ("done".to_string(), theme::ACCENT),
+                other => (other.to_string(), theme::ERROR),
+            };
+            spans.push(Span::styled("  ", Style::default()));
+            spans.push(Span::styled(
+                format!("{} ", run.id),
+                Style::default().fg(theme::TEXT),
+            ));
+            spans.push(Span::styled(label, Style::default().fg(color)));
+        }
+        return Paragraph::new(Line::from(spans));
+    }
     let phase = match app.conversation.phase() {
         ConversationPhase::Clarifying => "listening",
         ConversationPhase::NeedsInput => "needs input",
@@ -257,12 +292,36 @@ fn turn_lines(
             }
         }
         TranscriptRole::System => {
+            // Operator tool calls: "⚙ Name(args)" drawn like a coding agent's
+            // call line — bullet, bold name, dim arguments.
+            if let Some(result) = turn.text.strip_prefix("⎿ ") {
+                lines.push(Line::from(vec![
+                    Span::styled("  ⎿  ".to_string(), Style::default().fg(theme::MUTED)),
+                    Span::styled(result.to_string(), Style::default().fg(theme::TEXT_DIM)),
+                ]));
+                return;
+            }
+            if let Some(call) = turn.text.strip_prefix("⚙ ") {
+                let (name, args) = match call.find('(') {
+                    Some(at) => (&call[..at], &call[at..]),
+                    None => (call, ""),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("● ".to_string(), Style::default().fg(theme::SUCCESS)),
+                    Span::styled(
+                        name.to_string(),
+                        Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(args.to_string(), Style::default().fg(theme::TEXT_DIM)),
+                ]));
+                return;
+            }
             for text in turn.text.lines() {
                 lines.push(Line::from(vec![
                     Span::styled("· ".to_string(), Style::default().fg(theme::MUTED)),
                     Span::styled(
                         text.to_string(),
-                        Style::default().fg(theme::MUTED),
+                        Style::default().fg(theme::TEXT_DIM),
                     ),
                 ]));
             }
@@ -783,7 +842,29 @@ fn planning_lines(app: &App, width: usize, lines: &mut Vec<Line<'static>>) {
 }
 
 fn input_box(app: &App) -> Paragraph<'static> {
-    let text = if app.conversation_busy && app.conversation_input.is_empty() {
+    if let Some(ask) = app.operator_pending_ask() {
+        let question = match ask.kind.as_str() {
+            "permission" => format!(
+                " ⚠ {} {} — allow?  y · n · a (always for {})",
+                ask.tool.clone().unwrap_or_else(|| "tool".to_string()),
+                ask.summary.clone().unwrap_or_default(),
+                ask.tool.clone().unwrap_or_else(|| "this tool".to_string()),
+            ),
+            _ => format!(" {}  y · n", ask.prompt),
+        };
+        return Paragraph::new(question).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::ACCENT_BRIGHT)),
+        );
+    }
+    let text = if app.operator.is_some() && app.conversation_input.is_empty() {
+        if app.conversation_busy {
+            " Operator is working — keep typing, it queues…".to_string()
+        } else {
+            " Ask, change something, or hand baro a goal…".to_string()
+        }
+    } else if app.conversation_busy && app.conversation_input.is_empty() {
         " Baro is working — you can keep typing…".to_string()
     } else if app.conversation_input.is_empty() {
         if app.inline_mode_pick {

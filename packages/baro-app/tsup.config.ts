@@ -89,4 +89,10 @@ export default defineConfig([
         entry: { runner: "../baro-orchestrator/scripts/runner.ts" },
         ...sharedBundleConfig,
     },
+    {
+        // `baro operator` — Claude Code in front, baro runs behind; doubles as
+        // the MCP stdio child Claude spawns to reach the operator's tools.
+        entry: { operator: "../baro-orchestrator/scripts/operator.ts" },
+        ...sharedBundleConfig,
+    },
 ])
