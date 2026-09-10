@@ -18,7 +18,7 @@ export interface OperatorOptions {
     readonly model?: string
     readonly effort?: string
     readonly claudeBin?: string
-    /** `ask` routes Claude's permission prompts to the surface; `auto` bypasses them. */
+    /** `auto` allows every tool (Claude Code auto mode); `ask` routes each prompt to the surface. */
     readonly permission: "ask" | "auto"
     readonly baroArgs?: readonly string[]
 }
@@ -131,10 +131,11 @@ export async function runOperator(options: OperatorOptions, ui: OperatorUi): Pro
             },
         },
     ]
-    if (options.permission === "ask") {
-        functions.push({
+    // Always wired, even in auto mode: it is where the runaway-scope guard
+    // lives and how every tool call becomes visible before it runs.
+    functions.push({
             name: "permission",
-            description: "Internal: asks the person at the surface before a tool runs.",
+            description: "Internal: decides before a tool runs; asks the person only in ask mode.",
             parameters: {
                 type: "object",
                 properties: { tool_name: { type: "string" }, input: { type: "object" } },
@@ -156,7 +157,7 @@ export async function runOperator(options: OperatorOptions, ui: OperatorUi): Pro
                     }
                     if (summary) editedThisTurn.add(summary)
                 }
-                if (alwaysAllowed.has(name)) {
+                if (options.permission === "auto" || alwaysAllowed.has(name)) {
                     return JSON.stringify({ behavior: "allow", updatedInput: input })
                 }
                 const answer = await ask("allow?", {
@@ -171,8 +172,7 @@ export async function runOperator(options: OperatorOptions, ui: OperatorUi): Pro
                 }
                 return JSON.stringify({ behavior: "deny", message: "the user declined" })
             },
-        })
-    }
+    })
 
     const relay = new HostToolsRelay(functions, "baro operator tools")
     const connection = await relay.open()
@@ -188,7 +188,7 @@ export async function runOperator(options: OperatorOptions, ui: OperatorUi): Pro
         ...(options.claudeBin ? { claudeBin: options.claudeBin } : {}),
         includePartialMessages: true,
         replayUserMessages: false,
-        permissionMode: options.permission === "ask" ? "default" : "bypassPermissions",
+        permissionMode: "default",
         extraArgs: [
             "--strict-mcp-config",
             "--mcp-config",
@@ -210,9 +210,8 @@ export async function runOperator(options: OperatorOptions, ui: OperatorUi): Pro
             // model picks a default on its own. Questions go through text.
             "--disallowed-tools",
             "AskUserQuestion",
-            ...(options.permission === "ask"
-                ? ["--permission-prompt-tool", `mcp__${OPERATOR_MCP_SERVER_NAME}__permission`]
-                : []),
+            "--permission-prompt-tool",
+            `mcp__${OPERATOR_MCP_SERVER_NAME}__permission`,
             "--system-prompt",
             systemPrompt(options.cwd),
         ],

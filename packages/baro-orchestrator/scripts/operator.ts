@@ -24,7 +24,7 @@ async function main(): Promise<void> {
     let model: string | undefined = "opus"
     let effort: string | undefined
     let claudeBin: string | undefined
-    let permission: "ask" | "auto" = "ask"
+    let permission: "ask" | "auto" = "auto"
     let protocol: "terminal" | "json" = "terminal"
     const baroArgs: string[] = []
     for (let index = 0; index < argv.length; index += 1) {
@@ -71,7 +71,7 @@ async function main(): Promise<void> {
             case "--help":
             case "-h":
                 process.stdout.write(
-                    "usage: operator [--cwd <repo>] [--model opus] [--effort high] [--permission ask|auto] [--protocol terminal|json] [--local-only] [--llm <backend>]\n",
+                    "usage: operator [--cwd <repo>] [--model opus] [--effort high] [--permission auto|ask] [--protocol terminal|json] [--local-only] [--llm <backend>]\n",
                 )
                 return
             default:

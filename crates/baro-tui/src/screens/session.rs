@@ -292,12 +292,29 @@ fn turn_lines(
             }
         }
         TranscriptRole::System => {
+            // Operator tool calls: "⚙ Name(args)" drawn like a coding agent's
+            // call line — bullet, bold name, dim arguments.
+            if let Some(call) = turn.text.strip_prefix("⚙ ") {
+                let (name, args) = match call.find('(') {
+                    Some(at) => (&call[..at], &call[at..]),
+                    None => (call, ""),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("● ".to_string(), Style::default().fg(theme::SUCCESS)),
+                    Span::styled(
+                        name.to_string(),
+                        Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(args.to_string(), Style::default().fg(theme::TEXT_DIM)),
+                ]));
+                return;
+            }
             for text in turn.text.lines() {
                 lines.push(Line::from(vec![
                     Span::styled("· ".to_string(), Style::default().fg(theme::MUTED)),
                     Span::styled(
                         text.to_string(),
-                        Style::default().fg(theme::MUTED),
+                        Style::default().fg(theme::TEXT_DIM),
                     ),
                 ]));
             }

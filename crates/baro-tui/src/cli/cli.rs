@@ -247,7 +247,7 @@ pub struct Cli {
     pub operator: bool,
 
     /// Internal: how the operator handles Claude's permission prompts.
-    #[arg(long, hide = true, value_parser = ["ask", "auto"], default_value = "ask")]
+    #[arg(long, hide = true, value_parser = ["ask", "auto"], default_value = "auto")]
     pub operator_permission: String,
 }
 
