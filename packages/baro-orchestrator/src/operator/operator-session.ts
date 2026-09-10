@@ -355,7 +355,20 @@ class Renderer extends BaseObserver {
 
 /** First meaningful line of a tool's output, and how much more there was. */
 function summarizeToolOutput(output: unknown): string {
-    const text = typeof output === "string" ? output : JSON.stringify(output)
+    // Claude's tool_result content is an InputText array; a plain string
+    // arrives from providers that never block their output.
+    const text =
+        typeof output === "string"
+            ? output
+            : Array.isArray(output)
+              ? output
+                    .map((block) =>
+                        typeof block === "object" && block !== null && typeof (block as { text?: unknown }).text === "string"
+                            ? (block as { text: string }).text
+                            : "",
+                    )
+                    .join("\n")
+              : JSON.stringify(output)
     const lines = text
         .replace(/\u001b\[[0-9;]*m/g, "")
         .split("\n")
