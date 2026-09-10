@@ -13,6 +13,7 @@ import {
     createVerifyPlan,
     mergeVerifyPlans,
     recommendedVerifyTimeoutMs,
+    staleDependencyReasons,
     verifyBuild,
 } from "../../src/verification/verify.js"
 import { withTempDir } from "../execution/helpers.js"
@@ -337,6 +338,9 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
             assert.deepEqual(
                 r.commands.map(({ command, status }) => ({ command, status })),
                 [
+                    // A workspace fixture with no node_modules is stale by
+                    // definition; the refresh runs first and stays in evidence.
+                    { command: "npm install (dependencies stale: node_modules is missing)", status: "passed" },
                     { command: "npm run build (packages/app)", status: "passed" },
                     { command: "npm run test (packages/library)", status: "passed" },
                 ],
@@ -783,3 +787,67 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
         })
     })
 })
+
+// Issue #129: a run turned a package into npm workspaces, every story merged
+// green, and the gate failed on `npm test` because nobody had installed the
+// workspace links after the manifest changed.
+describe("dependency refresh before the gate", () => {
+    it("names why the installed tree is stale", async () => {
+        await withTempDir("baro-verify-deps-", async (dir) => {
+            writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "root", private: true }))
+            assert.deepEqual(staleDependencyReasons(dir), [], "no dependencies, nothing to install")
+
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({ name: "root", private: true, workspaces: ["packages/*"] }),
+            )
+            mkdirSync(join(dir, "packages", "core"), { recursive: true })
+            writeFileSync(join(dir, "packages", "core", "package.json"), JSON.stringify({ name: "@t/core" }))
+            assert.deepEqual(staleDependencyReasons(dir), ["node_modules is missing"])
+
+            mkdirSync(join(dir, "node_modules"), { recursive: true })
+            assert.deepEqual(staleDependencyReasons(dir), ["workspace @t/core is not linked in node_modules"])
+        })
+    })
+
+    it("installs first, records it, and the gate then sees the workspace link", async () => {
+        await withTempDir("baro-verify-deps-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "root",
+                    private: true,
+                    workspaces: ["packages/*"],
+                    scripts: { test: "node -e \"require('fs').accessSync('node_modules/@t/core')\"" },
+                }),
+            )
+            mkdirSync(join(dir, "packages", "core"), { recursive: true })
+            writeFileSync(join(dir, "packages", "core", "package.json"), JSON.stringify({ name: "@t/core", version: "0.0.0" }))
+
+            const r = await verifyBuild(dir, { emitActivity: () => {} })
+            assert.deepEqual(
+                r.commands.map(({ command, status }) => ({ command, status })),
+                [
+                    { command: "npm install (dependencies stale: node_modules is missing)", status: "passed" },
+                    { command: "npm run test", status: "passed" },
+                ],
+            )
+            assert.equal(r.ok, true)
+            assert.ok(existsSync(join(dir, "node_modules", "@t", "core")))
+        })
+    })
+
+    it("stays out of the way when refresh is off", async () => {
+        await withTempDir("baro-verify-deps-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({ name: "root", private: true, workspaces: ["packages/*"], scripts: { test: "true" } }),
+            )
+            mkdirSync(join(dir, "packages", "core"), { recursive: true })
+            writeFileSync(join(dir, "packages", "core", "package.json"), JSON.stringify({ name: "@t/core" }))
+            const r = await verifyBuild(dir, { emitActivity: () => {}, refreshDependencies: false })
+            assert.deepEqual(r.commands.map(({ command }) => command), ["npm run test"])
+        })
+    })
+})
+
