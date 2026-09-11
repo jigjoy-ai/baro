@@ -454,37 +454,45 @@ export class GitCoordinator extends SerializedObserver {
                 )
             } catch (e) {
                 const error = (e as Error)?.message ?? String(e)
+                const invariant =
+                    (e as { invariant?: IntegrationRefusalInvariant } | null)
+                        ?.invariant ?? "unknown"
                 let branch = worktrees.branchName(storyId)
                 let retryable = false
                 let preparationError: string | null = null
-                try {
-                    // Preserve the rejected attempt under a unique immutable
-                    // ref, then release the logical story ref. The Board may
-                    // now re-offer the story from the latest integrated HEAD.
-                    branch = await worktrees.prepareConflictRetry(storyId)
-                    retryable = true
-                } catch (prepareError) {
-                    preparationError =
-                        (prepareError as Error)?.message ?? String(prepareError)
-                    // A killed git process leaves the story's commit on its own
-                    // branch and the run branch untouched, so there is nothing
-                    // to preserve and nothing lost — the merge simply never
-                    // ran. Giving up here is what dropped an accepted story.
-                    retryable = isRepositoryCommandSignalDeath(e)
+                // A host checkout with uncommitted edits is the person's to
+                // clear; re-running the story would only meet the same wall,
+                // so the intact branch is kept and nothing is retried.
+                const blockedByHost = invariant === "host_checkout_dirty"
+                if (!blockedByHost) {
+                    try {
+                        // Preserve the rejected attempt under a unique immutable
+                        // ref, then release the logical story ref. The Board may
+                        // now re-offer the story from the latest integrated HEAD.
+                        branch = await worktrees.prepareConflictRetry(storyId)
+                        retryable = true
+                    } catch (prepareError) {
+                        preparationError =
+                            (prepareError as Error)?.message ?? String(prepareError)
+                        // A killed git process leaves the story's commit on its
+                        // own branch and the run branch untouched, so there is
+                        // nothing to preserve and nothing lost — the merge simply
+                        // never ran. Giving up here is what dropped an accepted
+                        // story.
+                        retryable = isRepositoryCommandSignalDeath(e)
+                    }
                 }
                 this.emitIntegrationRefused({
                     storyId,
                     runId: correlation?.runId ?? null,
                     leaseId: correlation?.leaseId ?? null,
-                    invariant:
-                        (e as { invariant?: IntegrationRefusalInvariant } | null)
-                            ?.invariant ?? "unknown",
+                    invariant,
                     detail: error,
                     branch,
                     retryable,
                     // Only a successful prepareConflictRetry mints an immutable
                     // recovery ref; otherwise `branch` is still the logical one.
-                    recoveryRef: preparationError ? null : branch,
+                    recoveryRef: preparationError || blockedByHost ? null : branch,
                 })
                 this.emitBus(
                     StoryMergeFailed.create({
@@ -500,7 +508,9 @@ export class GitCoordinator extends SerializedObserver {
                 log(
                     retryable
                         ? `[git] merge-back failed; attempt preserved at ${branch} and queued for recovery: ${error}`
-                        : `[git] merge-back failed; worktree preserved for manual recovery: ${error}`,
+                        : blockedByHost
+                          ? `[git] merge-back blocked by the host checkout; story kept on ${branch}: ${error}`
+                          : `[git] merge-back failed; worktree preserved for manual recovery: ${error}`,
                 )
                 if (emitTui) {
                     emit({ type: "push_status", id: storyId, success: false, error })
