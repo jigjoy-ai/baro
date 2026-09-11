@@ -34,7 +34,8 @@ import { AgenticEnvironment } from "../runtime/mozaik.js"
 import { buildDag } from "../runtime-graph/dag.js"
 import { getHeadSha } from "./git.js"
 import { BARO_COAUTHOR_TRAILER, loadPrd, type PrdFile, type PrdStory } from "../prd.js"
-import { readAuthoritativeDeclaredTests } from "../verification/prd-declared-tests.js"
+import { readAuthoritativeVerifyPlanOptions } from "../verification/prd-declared-tests.js"
+import { formatDeclaredBudgetEvidence } from "../verification/declared-test-budget.js"
 import { renderRuntimeAmendments } from "../planning/domain/runtime-amendments.js"
 import { runRepositoryCommand as execFileAsync } from "./repository-command.js"
 import type { StoryOutcomeAuthority } from "../runtime/story-outcome-authority.js"
@@ -483,9 +484,9 @@ export class Finalizer extends BaseObserver {
                   : null
         let verify = correlatedVerification
         if (!verify) {
-            const declaredTests = readAuthoritativeDeclaredTests(this.opts.prdPath)
+            const options = readAuthoritativeVerifyPlanOptions(this.opts.prdPath)
             if (!prd) {
-                declaredTests.push({
+                options.declaredTests.push({
                     storyId: "final PRD",
                     command: "full schema validation",
                     declarationError:
@@ -493,8 +494,14 @@ export class Finalizer extends BaseObserver {
                 })
             }
             const finalVerifyPlan: VerifyPlan = createVerifyPlan(this.opts.cwd, {
-                declaredTests,
+                declaredTests: options.declaredTests,
+                testBudgets: options.testBudgets,
             })
+            if (finalVerifyPlan.declaredBudget) {
+                for (const line of formatDeclaredBudgetEvidence(finalVerifyPlan.declaredBudget)) {
+                    this.log(`[finalizer] ${line}`)
+                }
+            }
             verify = await verifyBuild(this.opts.cwd, {
                 plan: mergeVerifyPlans(this.baselineVerifyPlan, finalVerifyPlan),
             })

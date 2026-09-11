@@ -22,6 +22,7 @@ import {
     translateDeclaredTests,
 } from "../../src/verification/declared-verification.js"
 import { readAuthoritativeDeclaredTests } from "../../src/verification/prd-declared-tests.js"
+import { readAuthoritativeVerifyPlanOptions } from "../../src/verification/prd-declared-tests.js"
 import { MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS } from "../../src/verification/verify.js"
 import {
     formatDeclaredBudgetEvidence,
@@ -2488,5 +2489,181 @@ describe("declared test budget negotiation", () => {
         const [decision] = evidence.decisions
         assert.equal(decision?.detail.length, 200)
         assert.ok(decision?.detail.startsWith("a b?c?dx"))
+    })
+})
+
+describe("negotiated declared test admission", () => {
+    const S1_BUDGET = { storyId: "S1", testBudget: { commands: 12, reason: "x" } }
+
+    // Bare path arguments past the budget are covered by the detected full
+    // `npm run test` and never overflow; flag-shaped focus arguments do.
+    function focusedRequirements(count: number) {
+        return Array.from({ length: count }, (_unused, index) => ({
+            storyId: "S1",
+            command: `npm test -- --focus${index}`,
+        }))
+    }
+
+    function writeTestScript(dir: string): void {
+        writeFileSync(
+            join(dir, "package.json"),
+            JSON.stringify({ name: "v", scripts: { test: "exit 0" } }),
+        )
+    }
+
+    function declaredExecutables(plan: ReturnType<typeof createVerifyPlan>) {
+        return plan.commands.filter(
+            (command) =>
+                command.origin === "declared" &&
+                !command.preflightFailure &&
+                !command.incompleteReason,
+        )
+    }
+
+    function incompleteReasons(plan: ReturnType<typeof createVerifyPlan>) {
+        return plan.commands.flatMap((command) =>
+            command.incompleteReason === undefined ? [] : [command.incompleteReason],
+        )
+    }
+
+    it("admits the default 8 and names the default in the overflow reason", async () => {
+        await withTempDir("baro-budget-default-", (dir) => {
+            writeTestScript(dir)
+            const plan = createVerifyPlan(dir, { declaredTests: focusedRequirements(9) })
+
+            assert.equal(declaredExecutables(plan).length, 8)
+            assert.equal(incompleteReasons(plan).length, 1)
+            assert.match(
+                incompleteReasons(plan)[0] ?? "",
+                /safe limit is 8 \(default; no story negotiated testBudget\)/,
+            )
+            assert.equal(Object.hasOwn(plan, "declaredBudget"), false)
+        })
+    })
+
+    it("admits 12 commands negotiated by S1", async () => {
+        await withTempDir("baro-budget-negotiated-", (dir) => {
+            writeTestScript(dir)
+            const plan = createVerifyPlan(dir, {
+                declaredTests: focusedRequirements(12),
+                testBudgets: [S1_BUDGET],
+            })
+
+            assert.equal(declaredExecutables(plan).length, 12)
+            assert.deepEqual(incompleteReasons(plan), [])
+            assert.equal(plan.declaredBudget?.effectiveLimit, 12)
+            assert.equal(plan.declaredBudget?.negotiatedBy, "S1")
+        })
+    })
+
+    it("names the negotiating story when the negotiated limit overflows", async () => {
+        await withTempDir("baro-budget-negotiated-overflow-", (dir) => {
+            writeTestScript(dir)
+            const plan = createVerifyPlan(dir, {
+                declaredTests: focusedRequirements(13),
+                testBudgets: [S1_BUDGET],
+            })
+
+            assert.equal(declaredExecutables(plan).length, 12)
+            assert.deepEqual(incompleteReasons(plan), [
+                "1 unique PRD test requirement(s) were not admitted; the safe limit is 12 (negotiated by story S1 testBudget)",
+            ])
+        })
+    })
+
+    it("falls back to 8 with a rejected decision for invalid budgets", async () => {
+        await withTempDir("baro-budget-rejected-", (dir) => {
+            writeTestScript(dir)
+            const cases: Array<[unknown, string]> = [
+                [{ commands: 12, reason: "" }, "testBudget.reason must be a non-empty string"],
+                [{ commands: 12.5, reason: "x" }, "testBudget.commands must be an integer"],
+                [{ commands: 25, reason: "x" }, "testBudget.commands must be at most 24"],
+            ]
+            for (const [testBudget, detail] of cases) {
+                const plan = createVerifyPlan(dir, {
+                    declaredTests: focusedRequirements(9),
+                    testBudgets: [{ storyId: "S1", testBudget }],
+                })
+
+                assert.equal(declaredExecutables(plan).length, 8)
+                assert.equal(plan.declaredBudget?.effectiveLimit, 8)
+                assert.equal(plan.declaredBudget?.negotiatedBy, null)
+                assert.deepEqual(
+                    plan.declaredBudget?.decisions.map(({ storyId, status, detail }) => ({
+                        storyId,
+                        status,
+                        detail,
+                    })),
+                    [{ storyId: "S1", status: "rejected", detail }],
+                )
+            }
+        })
+    })
+
+    it("reads raw budget requests even when requirements overflow", async () => {
+        await withTempDir("baro-budget-reader-", (dir) => {
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(
+                prdPath,
+                JSON.stringify({
+                    userStories: [
+                        {
+                            id: "S1",
+                            testBudget: { commands: 12, reason: "x" },
+                            tests: Array.from(
+                                { length: 70 },
+                                (_unused, index) => `npm test -- focus${index}`,
+                            ),
+                        },
+                        { id: "S2", testBudget: null, tests: ["npm test"] },
+                    ],
+                }),
+            )
+
+            const options = readAuthoritativeVerifyPlanOptions(prdPath)
+            assert.deepEqual(options.testBudgets, [
+                { storyId: "S1", testBudget: { commands: 12, reason: "x" } },
+                { storyId: "S2", testBudget: null },
+            ])
+            assert.equal(options.declaredTests.at(-1)?.command, "inspection overflow")
+            assert.deepEqual(readAuthoritativeDeclaredTests(prdPath), options.declaredTests)
+
+            const missing = join(dir, "missing.json")
+            assert.deepEqual(readAuthoritativeVerifyPlanOptions(missing).testBudgets, [])
+            assert.ok(Array.isArray(readAuthoritativeDeclaredTests(missing)))
+        })
+    })
+
+    it("keeps 12 negotiated declared commands through mergeVerifyPlans", async () => {
+        await withTempDir("baro-budget-merge-", (dir) => {
+            writeTestScript(dir)
+            const baseline = createVerifyPlan(dir)
+            const final = createVerifyPlan(dir, {
+                declaredTests: focusedRequirements(12),
+                testBudgets: [S1_BUDGET],
+            })
+            const merged = mergeVerifyPlans(baseline, final)
+
+            assert.equal(declaredExecutables(merged).length, 12)
+            assert.equal(
+                merged.commands.some(
+                    (command) =>
+                        command.label === "final verification additions beyond bounded budget",
+                ),
+                false,
+            )
+            assert.equal(merged.declaredBudget?.negotiatedBy, "S1")
+        })
+    })
+
+    it("clamps the merged watchdog at the negotiated ceiling", async () => {
+        await withTempDir("baro-budget-watchdog-", (dir) => {
+            const baseline = createVerifyPlan(dir)
+
+            assert.equal(
+                recommendedMergedVerifyTimeoutMs(baseline, 100),
+                recommendedMergedVerifyTimeoutMs(baseline, 24),
+            )
+        })
     })
 })

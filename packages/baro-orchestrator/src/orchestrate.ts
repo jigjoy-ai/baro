@@ -124,7 +124,8 @@ import { resolveEffectiveParallel } from "./planning/domain/mode-enforcement.js"
 import { ALL_GATES } from "./execution/gate-registry.js"
 import { PrdFile, loadPrd, persistPrdPreserving } from "./prd.js"
 import { PremiseAmendmentAuthority } from "./planning/application/premise-amendments.js"
-import { readAuthoritativeDeclaredTests } from "./verification/prd-declared-tests.js"
+import { readAuthoritativeVerifyPlanOptions } from "./verification/prd-declared-tests.js"
+import { formatDeclaredBudgetEvidence } from "./verification/declared-test-budget.js"
 import {
     ModelInvocationMeasured,
     RunStartRequest,
@@ -140,6 +141,7 @@ import { AttemptRecallRunner } from "./execution/attempt-recall-runner.js"
 import { emit, toVerificationEvidenceInfo } from "./tui-protocol.js"
 import {
     createVerifyPlan,
+    MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
     recommendedMergedVerifyTimeoutMs,
 } from "./verification/verify.js"
 import {
@@ -1325,9 +1327,16 @@ export async function orchestrate(
                 // raw inspection prevents its legacy normalization from
                 // erasing malformed `tests` fields at the objective gate.
                 loadPrd(config.prdPath)
-                return createVerifyPlan(cwd, {
-                    declaredTests: readAuthoritativeDeclaredTests(config.prdPath),
-                })
+                const plan = createVerifyPlan(
+                    cwd,
+                    readAuthoritativeVerifyPlanOptions(config.prdPath),
+                )
+                if (plan.declaredBudget) {
+                    for (const line of formatDeclaredBudgetEvidence(plan.declaredBudget)) {
+                        process.stderr.write(`[orchestrate] ${line}\n`)
+                    }
+                }
+                return plan
             },
         })
         finalizer?.setVerifierAuthority(runVerifier)
@@ -1517,8 +1526,7 @@ export async function orchestrate(
             outcomeAuthority,
             verifyBeforePush: true,
             verificationTimeoutMs:
-                config.collectiveVerificationTimeoutMs ??
-                recommendedMergedVerifyTimeoutMs(verifyPlan),
+                config.collectiveVerificationTimeoutMs ?? recommendedMergedVerifyTimeoutMs(verifyPlan, MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS),
             goalCompletionTimeoutMs:
                 goalInvariantReviewer &&
                 goalReviewOverallTimeoutMs !== undefined

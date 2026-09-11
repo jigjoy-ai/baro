@@ -12,6 +12,7 @@ import { describe, it } from "node:test"
 import {
     createVerifyPlan,
     mergeVerifyPlans,
+    recommendedMergedVerifyTimeoutMs,
     recommendedVerifyTimeoutMs,
     staleDependencyReasons,
     verifyBuild,
@@ -847,6 +848,43 @@ describe("dependency refresh before the gate", () => {
             writeFileSync(join(dir, "packages", "core", "package.json"), JSON.stringify({ name: "@t/core" }))
             const r = await verifyBuild(dir, { emitActivity: () => {}, refreshDependencies: false })
             assert.deepEqual(r.commands.map(({ command }) => command), ["npm run test"])
+        })
+    })
+})
+
+describe("negotiated declared budget timeouts", () => {
+    it("budgets one attempt for each negotiated declared command", async () => {
+        await withTempDir("baro-verify-negotiated-", (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({ name: "v", scripts: { test: "exit 0" } }),
+            )
+            const declaredTests = Array.from({ length: 12 }, (_unused, index) => ({
+                storyId: "S1",
+                command: `npm test -- focus${index}`,
+            }))
+            const negotiated = createVerifyPlan(dir, {
+                declaredTests,
+                testBudgets: [{ storyId: "S1", testBudget: { commands: 12, reason: "x" } }],
+            })
+            const defaulted = createVerifyPlan(dir, { declaredTests })
+
+            assert.equal(
+                recommendedVerifyTimeoutMs(negotiated) - recommendedVerifyTimeoutMs(defaulted),
+                4 * 608_000,
+            )
+        })
+    })
+
+    it("sizes the merged watchdog for negotiated final additions", async () => {
+        await withTempDir("baro-verify-negotiated-merged-", (dir) => {
+            const baseline = createVerifyPlan(dir)
+
+            assert.equal(
+                recommendedMergedVerifyTimeoutMs(baseline, 12) -
+                    recommendedMergedVerifyTimeoutMs(baseline),
+                4 * 2 * 608_000,
+            )
         })
     })
 })
