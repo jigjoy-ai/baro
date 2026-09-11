@@ -292,3 +292,30 @@ Two boundaries implement the behavior.
         )
     })
 })
+
+describe("final PRD story testBudget", () => {
+    it("rejects an invalid budget with the leaf's exact rejection", () => {
+        for (const [testBudget, rejection] of [
+            [{ commands: 12, reason: "  " }, "testBudget.reason must be a non-empty string"],
+            [{ commands: 12.5, reason: "x" }, "testBudget.commands must be an integer"],
+            [{ commands: 25, reason: "x" }, "testBudget.commands must be at most 24"],
+        ] as const) {
+            const prd = validPrd()
+            ;(prd.userStories as Record<string, unknown>[])[0]!.testBudget = testBudget
+            assert.throws(
+                () => assertRunnablePlannerPrdJson(JSON.stringify(prd)),
+                { message: `final PRD story S1 ${rejection}` },
+            )
+        }
+    })
+
+    it("accepts a negotiated budget", () => {
+        const prd = validPrd()
+        ;(prd.userStories as Record<string, unknown>[])[0]!.testBudget = {
+            commands: 12,
+            reason: "x",
+        }
+        const json = JSON.stringify(prd)
+        assert.equal(assertRunnablePlannerPrdJson(json), json)
+    })
+})

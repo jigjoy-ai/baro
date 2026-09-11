@@ -517,6 +517,13 @@ function progressiveFinalPrd(candidate: string): { userStories: PrdStory[] } {
             ...(story.writes !== undefined
                 ? { writes: [...(story.writes as string[])] }
                 : {}),
+            ...(story.testBudget !== undefined
+                ? {
+                      testBudget: {
+                          ...(story.testBudget as NonNullable<PrdStory["testBudget"]>),
+                      },
+                  }
+                : {}),
         })),
     }
 }
@@ -536,7 +543,7 @@ const FINAL_PRD_STORY_KEYS = [
 
 /** Required of the model by the tool schema, tolerated by the host: a planner
  *  that omits it should lose edge checking, not lose its fragment. */
-const OPTIONAL_PRD_STORY_KEYS = ["writes"] as const
+const OPTIONAL_PRD_STORY_KEYS = ["writes", "testBudget"] as const
 
 /**
  * The durable progressive contract deliberately remains execution-neutral,
@@ -590,6 +597,7 @@ function snapshotPlannerStory(story: PrdStory): PrdStory {
         durationSecs: null,
         ...(story.model !== undefined ? { model: story.model } : {}),
         ...(story.writes !== undefined ? { writes: [...story.writes] } : {}),
+        ...(story.testBudget !== undefined ? { testBudget: { ...story.testBudget } } : {}),
     }
 }
 
