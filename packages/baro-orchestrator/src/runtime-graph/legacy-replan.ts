@@ -8,6 +8,7 @@ import {
     type PrdFile,
 } from "../prd.js"
 import type { ReplanData, ReplanStoryAdd } from "../semantic-events.js"
+import { judgeTestBudget } from "../verification/declared-test-budget.js"
 
 export type LegacyReplanRejectionCode =
     | "invalid_proposal"
@@ -205,6 +206,7 @@ function parseAddedStory(
             "model",
             "goalInvariantIds",
             "writes",
+            "testBudget",
         ]) ||
         !validId(value.id) ||
         !Number.isInteger(value.priority) ||
@@ -225,7 +227,8 @@ function parseAddedStory(
                 value.goalInvariantIds.some(
                     (invariantId) => !/^G-[AC][1-9]\d*$/.test(invariantId),
                 ))) ||
-        (value.writes !== undefined && !nonBlankStringArray(value.writes))
+        (value.writes !== undefined && !nonBlankStringArray(value.writes)) ||
+        (value.testBudget !== undefined && !judgeTestBudget(value.testBudget).accepted)
     ) {
         return { ok: false, reason: "legacy replan contains a malformed added story" }
     }
@@ -247,6 +250,14 @@ function parseAddedStory(
                 ? { goalInvariantIds: [...value.goalInvariantIds] }
                 : {}),
             ...(value.writes !== undefined ? { writes: [...value.writes] } : {}),
+            ...(value.testBudget !== undefined
+                ? {
+                      testBudget: {
+                          commands: (value.testBudget as { commands: number }).commands,
+                          reason: (value.testBudget as { reason: string }).reason,
+                      },
+                  }
+                : {}),
             ...(value.model !== undefined ? { model: value.model } : {}),
         },
     }

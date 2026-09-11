@@ -6,7 +6,9 @@ import {
     MIN_STORY_PRIORITY,
     type PrdFile,
     type PrdStory,
+    type PrdTestBudget,
 } from "../../prd.js"
+import { judgeTestBudget } from "../../verification/declared-test-budget.js"
 
 export const PROGRESSIVE_PLAN_SCHEMA_VERSION = 1 as const
 
@@ -210,7 +212,7 @@ export function validateProgressivePlannerStory(
                 "completedAt",
                 "durationSecs",
             ],
-            ["model", "goalInvariantIds", "writes"],
+            ["model", "goalInvariantIds", "writes", "testBudget"],
         )
     ) {
         throw contractError(
@@ -309,6 +311,12 @@ export function validateProgressivePlannerStory(
     ) {
         throw contractError("invalid_fragment", `${label} '${id}' has invalid writes`)
     }
+    if (value.testBudget !== undefined) {
+        const judgement = judgeTestBudget(value.testBudget)
+        if (!judgement.accepted) {
+            throw contractError("invalid_fragment", `${label} '${id}' ${judgement.rejection}`)
+        }
+    }
 
     return {
         id,
@@ -326,6 +334,14 @@ export function validateProgressivePlannerStory(
         ...(value.model !== undefined ? { model: value.model } : {}),
         ...(value.writes !== undefined
             ? { writes: (value.writes as string[]).map((entry) => entry) }
+            : {}),
+        ...(value.testBudget !== undefined
+            ? {
+                  testBudget: {
+                      commands: (value.testBudget as PrdTestBudget).commands,
+                      reason: (value.testBudget as PrdTestBudget).reason,
+                  },
+              }
             : {}),
     }
 }

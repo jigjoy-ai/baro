@@ -3,6 +3,7 @@ import {
     MAX_STORY_RETRIES,
     MIN_STORY_PRIORITY,
 } from "../../prd.js"
+import { judgeTestBudget } from "../../verification/declared-test-budget.js"
 import { deriveGoalContract } from "../../goal/goal-contract.js"
 import type { GoalEnvelope } from "../../conversation/session/conversation-contract.js"
 import {
@@ -102,6 +103,12 @@ export function assertRunnablePlannerPrdJson(
             throw new Error(
                 `final PRD story ${id} model must be 'light', 'standard', or 'heavy'`,
             )
+        }
+        if (story.testBudget !== undefined) {
+            const judgement = judgeTestBudget(story.testBudget)
+            if (!judgement.accepted) {
+                throw new Error(`final PRD story ${id} ${judgement.rejection}`)
+            }
         }
 
         const dependsOn = requireStringArray(story, id, "dependsOn", true)

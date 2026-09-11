@@ -5,10 +5,13 @@ import { join } from "node:path"
 
 import {
     BARO_COAUTHOR_TRAILER,
+    applyReplan,
     applyReplanWithEffectiveDelta,
     buildDefaultStoryPrompt,
+    loadPrd,
     markStoryPassed,
     normalizePrd,
+    savePrd,
     savePrdAtomic,
     type PrdFile,
     type PrdStory,
@@ -597,5 +600,86 @@ describe("buildDefaultStoryPrompt", () => {
         assert.match(prompt, /operation-first, control-first, original errors/)
         assert.match(prompt, /cleanup side effects/)
         assert.ok(prompt.includes(BARO_COAUTHOR_TRAILER))
+    })
+})
+
+describe("story testBudget contract", () => {
+    it("round-trips object budgets verbatim and omits non-object budgets", async () => {
+        await withTempDir("prd-test-budget-", async (dir) => {
+            const path = join(dir, "prd.json")
+            writeFileSync(
+                path,
+                JSON.stringify({
+                    project: "budget",
+                    branchName: "baro/budget",
+                    description: "testBudget persistence",
+                    userStories: [
+                        { ...story({ id: "S1" }), testBudget: { commands: 12, reason: "x" } },
+                        { ...story({ id: "S2" }), testBudget: { commands: 12.5, reason: "" } },
+                        { ...story({ id: "S3" }), testBudget: "twelve" },
+                    ],
+                }),
+            )
+
+            const loaded = loadPrd(path)
+            assert.deepEqual(loaded.userStories[0]!.testBudget, { commands: 12, reason: "x" })
+            assert.deepEqual(loaded.userStories[1]!.testBudget, { commands: 12.5, reason: "" })
+            assert.equal("testBudget" in loaded.userStories[2]!, false)
+
+            savePrd(path, loaded)
+            const saved = JSON.parse(readFileSync(path, "utf8")) as {
+                userStories: Array<Record<string, unknown>>
+            }
+            assert.deepEqual(
+                saved.userStories.map((entry) => entry.testBudget),
+                [{ commands: 12, reason: "x" }, { commands: 12.5, reason: "" }, undefined],
+            )
+            assert.deepEqual(loadPrd(path), loaded)
+        })
+    })
+
+    it("deep-copies an added story's testBudget through both replan entry points", () => {
+        const prd: PrdFile = {
+            project: "baro",
+            branchName: "baro/budget-replan",
+            description: "Test testBudget replan copies.",
+            userStories: [story({ id: "S1" })],
+        }
+        const testBudget = { commands: 12, reason: "wide declared suite" }
+        const replan = {
+            source: "surgeon",
+            reason: "needs more declared tests",
+            removedStoryIds: [],
+            addedStories: [
+                {
+                    id: "S2",
+                    priority: 2,
+                    title: "Wide tests",
+                    description: "Needs a negotiated budget.",
+                    dependsOn: ["S1"],
+                    testBudget,
+                },
+            ],
+            modifiedDeps: {},
+        }
+
+        const result = applyReplanWithEffectiveDelta(prd, replan)
+        const plain = applyReplan(prd, replan)
+        const copies = [
+            result.prd.userStories[1]!.testBudget,
+            result.applied.addedStories[0]!.testBudget,
+            plain.userStories[1]!.testBudget,
+        ]
+        for (const copy of copies) {
+            assert.deepEqual(copy, testBudget)
+            assert.notStrictEqual(copy, testBudget)
+        }
+        assert.notStrictEqual(copies[0], copies[1])
+
+        testBudget.commands = 20
+        testBudget.reason = "mutated"
+        for (const copy of copies) {
+            assert.deepEqual(copy, { commands: 12, reason: "wide declared suite" })
+        }
     })
 })
