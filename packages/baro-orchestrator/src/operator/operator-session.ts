@@ -1,3 +1,6 @@
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+
 import { AgenticEnvironment, BaseObserver } from "../runtime/mozaik.js"
 import type { FunctionCallOutputItem, Participant, SemanticEvent } from "../runtime/mozaik.js"
 import { AgentResult, ClaudeStreamChunk } from "../events/harness-stream.js"
@@ -24,11 +27,39 @@ export interface OperatorOptions {
 }
 
 const AGENT_ID = "operator"
+const execFileAsync = promisify(execFile)
 // Measured 9.9.2026: the operator built a four-file CLI with tests in under a
 // minute, while baro spent seven on intake and architect for three helpers.
 // Direct work is capped where it stops being one component; past that the
 // edit is refused with the remedy.
 const DIRECT_FILE_LIMIT = 10
+
+/** Tracked files with uncommitted changes; empty when `cwd` is not a git
+ * checkout, so a non-repository target is baro's to refuse, not ours. */
+async function uncommittedPaths(cwd: string): Promise<string[]> {
+    try {
+        const { stdout } = await execFileAsync(
+            "git",
+            ["status", "--porcelain", "--untracked-files=no"],
+            { cwd, encoding: "utf8" },
+        )
+        return stdout
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => {
+                const entry = line.slice(3)
+                const renamed = entry.indexOf(" -> ")
+                return (renamed === -1 ? entry : entry.slice(renamed + 4)).trim()
+            })
+    } catch {
+        return []
+    }
+}
+
+function describePaths(paths: readonly string[]): string {
+    const shown = paths.slice(0, 5).join(", ")
+    return paths.length > 5 ? `${shown} and ${paths.length - 5} more` : shown
+}
 
 export async function runOperator(options: OperatorOptions, ui: OperatorUi): Promise<void> {
     let activitySnapshot: ReturnType<typeof setTimeout> | null = null
@@ -94,10 +125,19 @@ export async function runOperator(options: OperatorOptions, ui: OperatorUi): Pro
             invoke: async (args) => {
                 const { goal, cwd } = args as { goal?: unknown; cwd?: unknown }
                 if (typeof goal !== "string" || !goal.trim()) throw new Error("delegate requires a goal")
-                const { run, behind } = registry.delegate(
-                    goal.trim(),
-                    typeof cwd === "string" && cwd ? cwd : options.cwd,
-                )
+                const target = typeof cwd === "string" && cwd ? cwd : options.cwd
+                const dirty = await uncommittedPaths(target)
+                if (dirty.length) {
+                    ui.note(`delegate refused: ${dirty.length} uncommitted file(s) in ${target}`)
+                    return (
+                        `refused: ${target} has uncommitted changes to ${describePaths(dirty)}. ` +
+                        "baro merges each finished story into this checkout and cannot land one over uncommitted edits to the same files; " +
+                        "the first self-hosting run lost a story exactly this way. " +
+                        "Commit the changes (on a branch if they must not ride along with the run) or stash them, then delegate again. " +
+                        "Tell the user in one line what blocks and what you propose; do not commit or stash without their word."
+                    )
+                }
+                const { run, behind } = registry.delegate(goal.trim(), target)
                 ui.runsChanged(registry.rows())
                 if (behind) {
                     ui.note(`${run.id} · queued behind ${behind.id}: ${run.goal.slice(0, 80)}`)
@@ -436,7 +476,7 @@ function systemPrompt(cwd: string): string {
 Every request gets an altitude. Decide before you touch anything; reading a file or two to decide is fine. When the altitude is direct or delegate, say it in your FIRST line with a short reason, e.g. "direct — one component, eight files, tests exist." For an answer, never announce the altitude; just answer.
 - answer: questions, explanations, lookups. Reply directly, no preamble.
 - direct: one component you can finish in roughly ten minutes, clear intent, typically up to eight files. Do it yourself like a normal coding agent: edit, run the relevant tests, say what changed. Finish the whole thing in one turn; do not split a job to stay under a limit. Do not commit unless asked. Never push and never open a pull request yourself. The host refuses the eleventh file in one turn as a runaway-scope guard; if you hit it, delegate the rest.
-- delegate: work whose scope you cannot see to the end, changes across several modules or owned by different people, anything that needs independent review and a verified pull request, or anything the user asks to run through baro. baro has a fixed cost: intake, architect and goal contract take ten to fifteen minutes before the first story starts, whatever the size. So for a goal you could finish directly in a few minutes, say so and offer the choice in one line ("direct in ~3 min, or baro in ~15 with review and a PR?") instead of delegating by default. When you delegate, call \`delegate\` with a precise, self-contained goal (what, where, constraints, how to verify); baro's planner reads only that text. Warn first if the working tree has uncommitted changes the goal depends on: baro's agents work from the last commit. It returns at once with a run id and the run continues in the background. Do not poll in a loop. Tell the user the run id and one sentence on what to expect, then keep talking.
+- delegate: work whose scope you cannot see to the end, changes across several modules or owned by different people, anything that needs independent review and a verified pull request, or anything the user asks to run through baro. baro has a fixed cost: intake, architect and goal contract take ten to fifteen minutes before the first story starts, whatever the size. So for a goal you could finish directly in a few minutes, say so and offer the choice in one line ("direct in ~3 min, or baro in ~15 with review and a PR?") instead of delegating by default. When you delegate, call \`delegate\` with a precise, self-contained goal (what, where, constraints, how to verify); baro's planner reads only that text. \`delegate\` refuses while the working tree has uncommitted changes: baro's agents work from the last commit and baro merges finished stories into this very checkout, so uncommitted edits block a story from landing. Before delegating, get the tree clean with the user's word (commit, on a branch if the work must not ride along; or stash). While a run is active in this repository, do not edit files in the checkout; answer, plan, or delegate instead. It returns at once with a run id and the run continues in the background. Do not poll in a loop. Tell the user the run id and one sentence on what to expect, then keep talking.
 
 When asked what the agents are doing, call \`run_status\` (or \`runs\`) and summarize plainly: phase, stories done of total, last activity, recent milestones. When a run finishes you receive a message starting with [baro]; report the outcome and the pull request link if there is one. If the user overrides your altitude ("just do it yourself" / "send it to baro"), follow them.
 

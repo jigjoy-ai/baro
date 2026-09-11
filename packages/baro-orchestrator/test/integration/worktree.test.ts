@@ -7,7 +7,7 @@ import { join } from "node:path"
 
 import { GitGate } from "../../src/integration/git.js"
 import { captureCriticRepositoryFingerprint } from "../../src/acceptance/critic-evidence.js"
-import { WorktreeManager } from "../../src/integration/worktree.js"
+import { WorktreeManager, WorktreeRefusalError } from "../../src/integration/worktree.js"
 import {
     removeWorktreeRun,
     uniqueRunId,
@@ -840,5 +840,38 @@ describe("WorktreeManager — fixture isolation", () => {
         for (const id of [first, second]) {
             assert.match(id, new RegExp(`^run-test-${process.pid}-[0-9a-f]{8}$`, "u"))
         }
+    })
+})
+
+describe("WorktreeManager — host checkout", () => {
+    it("refuses to land a story over uncommitted host edits to the same file, and names them", async () => {
+        const p1 = (await mgr.create("S1"))!
+        commitInWorktree(p1, "a.txt", "story\nline2\nline3\n")
+        // The person (or an operator in direct mode) edits the same file in
+        // the checkout without committing.
+        writeFileSync(join(repo, "a.txt"), "host\nline2\nline3\n")
+
+        await assert.rejects(
+            () => mgr.mergeBack("S1"),
+            (e: unknown) =>
+                e instanceof WorktreeRefusalError &&
+                e.invariant === "host_checkout_dirty" &&
+                /uncommitted changes on \[a\.txt\]/.test(e.message) &&
+                e.message.includes(`baro-wt/${runId}/S1`),
+        )
+
+        assert.equal(readFileSync(join(repo, "a.txt"), "utf8"), "host\nline2\nline3\n", "host edit untouched")
+        assert.equal(git(repo, "status", "--porcelain"), "M a.txt", "no merge left in progress")
+        assert.notEqual(git(repo, "branch", "--list", `baro-wt/${runId}/S1`), "", "story branch intact")
+    })
+
+    it("lands a story when the host's uncommitted edits are to other files", async () => {
+        const p1 = (await mgr.create("S1"))!
+        commitInWorktree(p1, "b.txt", "story\n")
+        writeFileSync(join(repo, "a.txt"), "host\nline2\nline3\n")
+
+        assert.equal(await mgr.mergeBack("S1"), true)
+        assert.equal(readFileSync(join(repo, "b.txt"), "utf8"), "story\n")
+        assert.equal(readFileSync(join(repo, "a.txt"), "utf8"), "host\nline2\nline3\n")
     })
 })

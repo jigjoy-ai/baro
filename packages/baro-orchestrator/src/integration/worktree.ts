@@ -22,6 +22,7 @@ import { join, resolve } from "path"
 
 import { GitGate } from "./git.js"
 import {
+    RepositoryCommandError,
     isRepositoryCommandTimeout,
     runRepositoryCommand as exec,
 } from "./repository-command.js"
@@ -76,6 +77,7 @@ export type IntegrationRefusalInvariant =
     | "sealed_merge_fingerprint"
     | "sealed_merge_dirty"
     | "merge_conflict"
+    | "host_checkout_dirty"
 
 export class WorktreeRefusalError extends Error {
     constructor(
@@ -779,6 +781,16 @@ export class WorktreeManager {
             const mergeTarget = candidateSeal
                 ? await this.sealedMergeTarget(storyId, path, candidateSeal)
                 : branch
+            const blocked = await this.hostCheckoutBlocks(mergeTarget)
+            if (blocked.length) {
+                this.markPreserved(storyId)
+                throw new WorktreeRefusalError(
+                    "host_checkout_dirty",
+                    `story ${storyId} cannot land: the host checkout has uncommitted changes on ` +
+                        `[${blocked.join(", ")}]; the story is intact on ${branch} — ` +
+                        `commit or stash those files, then merge it`,
+                )
+            }
             const msg = `baro: merge story ${storyId}`
             try {
                 await exec("git", ["merge", "--no-ff", "-m", msg, mergeTarget], {
@@ -804,9 +816,13 @@ export class WorktreeManager {
                 }
                 if (!this.resolveConflictsWithTheirs) {
                     this.markPreserved(storyId)
-                    throw new Error(
-                        `story ${storyId} conflicts with already-merged work` +
-                            (conflicts.length ? ` on [${conflicts.join(", ")}]` : ""),
+                    // No conflicted path means git refused for another reason;
+                    // calling that a conflict hides the reason git printed.
+                    throw new WorktreeRefusalError(
+                        "merge_conflict",
+                        conflicts.length
+                            ? `story ${storyId} conflicts with already-merged work on [${conflicts.join(", ")}]`
+                            : `story ${storyId} merge-back failed without a conflict: ${gitFailureDetail(error)}`,
                     )
                 }
                 this.log(
@@ -1402,6 +1418,27 @@ export class WorktreeManager {
         this.preserved.delete(storyId)
     }
 
+    /** Tracked paths dirty in the host checkout that the merge would also
+     * write. git refuses such a merge outright; reported as a conflict it
+     * sent two recoveries after the same wall on the first self-hosting run. */
+    private async hostCheckoutBlocks(mergeTarget: string): Promise<string[]> {
+        const [{ stdout: status }, { stdout: touched }] = await Promise.all([
+            exec("git", ["status", "--porcelain", "--untracked-files=no"], {
+                cwd: this.repoRoot,
+            }),
+            exec("git", ["diff", "--name-only", "HEAD", mergeTarget], {
+                cwd: this.repoRoot,
+            }),
+        ])
+        const dirty = new Set(
+            status.split("\n").filter(Boolean).map(porcelainPath),
+        )
+        return touched
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((path) => path && dirty.has(path))
+    }
+
     private async conflictedPaths(): Promise<string[]> {
         try {
             const { stdout } = await exec(
@@ -1520,4 +1557,20 @@ function rmSyncQuiet(path: string): void {
 
 function errMsg(e: unknown): string {
     return (e as Error)?.message ?? String(e)
+}
+
+/** The first line git printed, when the failure came from git at all. */
+function gitFailureDetail(e: unknown): string {
+    if (e instanceof RepositoryCommandError) {
+        const line = e.stderr.split("\n").find((l) => l.trim())
+        if (line) return line.trim()
+    }
+    return errMsg(e)
+}
+
+/** `XY path` or `XY old -> new` from `git status --porcelain`. */
+function porcelainPath(line: string): string {
+    const entry = line.slice(3)
+    const renamed = entry.indexOf(" -> ")
+    return (renamed === -1 ? entry : entry.slice(renamed + 4)).trim()
 }
