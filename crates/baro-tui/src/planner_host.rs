@@ -386,6 +386,8 @@ pub(crate) struct PrdStoryOutput {
     writes: Option<Vec<String>>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default, rename = "testBudget")]
+    test_budget: Option<Value>,
 }
 
 fn default_story_retries() -> u32 {
@@ -407,6 +409,7 @@ impl From<PrdStoryOutput> for ReviewStory {
             writes: story.writes,
             completed: false,
             model: story.model,
+            test_budget: story.test_budget,
         }
     }
 }
