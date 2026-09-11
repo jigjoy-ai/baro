@@ -58,6 +58,10 @@ export function translateDeclaredTests(
         if (requirement.declarationError) {
             return incomplete(requirement, requirement.declarationError)
         }
+        const scoped = splitCdPrefix(requirement.command)
+        if (scoped) {
+            return translateCdScoped(cwd, requirement, scoped, packageManagers)
+        }
         const parsed = tokenize(requirement.command)
         if (typeof parsed === "string") return incomplete(requirement, parsed)
         return dispatchDeclared(
@@ -139,6 +143,95 @@ function dispatchDeclared(
         requirement,
         "unsupported declared test; allowed tools are npm/pnpm/yarn, exact npx rstest run paths, cargo, node, git diff --check, composer, vendor/bin/phpunit, and ddev exec",
     )
+}
+
+// The one compound form admitted, because agents naturally scope a command to
+// a package this way. The inner command still faces tokenize, so any further
+// shell syntax (a second '&&', ';', pipes) stays rejected.
+const CD_PREFIX = /^cd\s+([^\s&]+)\s*&&\s*([^]*)$/
+
+interface CdScoped {
+    readonly dir: string
+    readonly inner: string
+}
+
+function splitCdPrefix(command: unknown): CdScoped | null {
+    if (typeof command !== "string" || command.length > MAX_COMMAND_LENGTH) {
+        return null
+    }
+    const match = CD_PREFIX.exec(command.trim())
+    return match ? { dir: match[1]!, inner: match[2]! } : null
+}
+
+function translateCdScoped(
+    root: string,
+    requirement: DeclaredTestRequirement,
+    scoped: CdScoped,
+    packageManagers: readonly VerifyJavaScriptPackageManager[],
+): VerifyCommandSpec {
+    const dirTokens = tokenize(scoped.dir)
+    if (typeof dirTokens === "string") return incomplete(requirement, dirTokens)
+    const parsed = tokenize(scoped.inner)
+    if (typeof parsed === "string") return incomplete(requirement, parsed)
+    const dir = dirTokens.tokens[0]!
+    const contained = containedPath(root, dir, false)
+    let isDirectory = false
+    if (contained.path) {
+        try {
+            isDirectory = statSync(
+                realpathSync(resolve(root, contained.path)),
+            ).isDirectory()
+        } catch {
+            isDirectory = false
+        }
+    }
+    if (!contained.path || !isDirectory) {
+        return incomplete(
+            requirement,
+            `cd target '${dir}' must be an existing directory inside the repository`,
+        )
+    }
+    if (contained.path === ".") {
+        return dispatchDeclared(root, requirement, parsed, packageManagers, false)
+    }
+    const rel = contained.path
+    const scopeCwd = resolve(root, rel)
+    const scopedIncomplete = (reason: string): VerifyCommandSpec =>
+        incomplete(requirement, `cd ${rel}: ${reason}`)
+    const tool = parsed.tokens[0]
+    if (tool === "ddev" || tool === "npx") {
+        return scopedIncomplete(
+            `'${tool}' declarations cannot be scoped with cd; declare them from the repository root`,
+        )
+    }
+
+    // Package scripts go through the workspace selector so manager authority
+    // and script trust come from the package the command runs in, not root.
+    const alias = trustedScriptAlias(scopeCwd, parsed.tokens)
+    if (alias || /^(npm|pnpm|yarn)$/.test(tool ?? "")) {
+        const base = alias ? ["npm", "run", alias] : parsed.tokens
+        const [manager, operation, ...rest] = base
+        const tokens = operation === undefined
+            ? base
+            : [manager!, operation, `--workspace=${rel}`, ...rest]
+        const spec = translatePackage(
+            root,
+            requirement,
+            { normalized: tokens.join(" "), tokens },
+            packageManagers,
+        )
+        return spec.incompleteReason === undefined
+            ? spec
+            : scopedIncomplete(spec.incompleteReason)
+    }
+
+    const spec = tool === "node"
+        ? translateNode(scopeCwd, requirement, parsed, root)
+        : dispatchDeclared(scopeCwd, requirement, parsed, packageManagers, false)
+    if (spec.incompleteReason !== undefined) {
+        return scopedIncomplete(spec.incompleteReason)
+    }
+    return { ...spec, label: `cd ${rel} && ${spec.label}`, cwd: scopeCwd }
 }
 
 // Only a whole token wrapped in a matching quote pair is unwrapped, and the
@@ -888,6 +981,9 @@ function translateNode(
     cwd: string,
     requirement: DeclaredTestRequirement,
     parsed: DeclaredTokens,
+    // A cd-scoped node declaration must not dodge the root manifest check
+    // below by naming a subdirectory that happens to lack package.json.
+    manifestRoot: string = cwd,
 ): VerifyCommandSpec {
     // Only the literal two-token pair `--import tsx` is skipped over; any
     // other loader value, path or spelling falls through to the mode gate
@@ -907,7 +1003,8 @@ function translateNode(
         rest.length === 1 &&
         typeof mode === "string" &&
         !mode.startsWith("-") &&
-        !existsSync(join(cwd, "package.json"))
+        !existsSync(join(cwd, "package.json")) &&
+        !existsSync(join(manifestRoot, "package.json"))
     ) {
         const contained = containedPath(cwd, mode, true)
         if (!contained.path) {

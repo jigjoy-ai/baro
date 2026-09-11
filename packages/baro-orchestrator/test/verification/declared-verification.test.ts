@@ -2139,6 +2139,152 @@ describe("declared verification policy", () => {
         })
     })
 
+    it("runs 'cd <dir> && <cmd>' as the allowlisted command with cwd=<dir>", async () => {
+        await withTempDir("baro-verify-declared-cd-", async (dir) => {
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "root",
+                    private: true,
+                    workspaces: ["packages/*"],
+                }),
+            )
+            const workspace = join(dir, "packages", "app")
+            mkdirSync(join(workspace, "test"), { recursive: true })
+            writeFileSync(
+                join(workspace, "package.json"),
+                JSON.stringify({
+                    name: "@baro/app",
+                    scripts: { typecheck: "tsc --noEmit", test: "rstest run" },
+                }),
+            )
+            writeFileSync(join(workspace, "test", "a.test.ts"), "export {}\n")
+            const [node, script, focused, alias, dotRoot] = translateDeclaredTests(
+                dir,
+                [
+                    "cd packages/app && node --import tsx --test test/a.test.ts",
+                    "cd packages/app && npm run typecheck",
+                    "cd ./packages/app/ && npm test -- test/a.test.ts",
+                    "cd packages/app && tsc --noEmit",
+                    "cd . && git diff --check",
+                ].map((command) => ({ storyId: "S1", command })),
+                [{ manager: "npm" }, { manager: "npm", cwd: workspace }],
+            )
+
+            assert.equal(node?.incompleteReason, undefined)
+            assert.equal(node?.tool, "node")
+            assert.deepEqual(node?.args, [
+                "--import",
+                "tsx",
+                "--test",
+                "test/a.test.ts",
+            ])
+            assert.equal(node?.cwd, workspace)
+            assert.equal(
+                node?.label,
+                "cd packages/app && node --import tsx --test test/a.test.ts",
+            )
+            assert.deepEqual(node?.containedPaths, [
+                { path: "test/a.test.ts", requireFile: false },
+            ])
+
+            // A script alias resolves against the package's manifest and
+            // must run there, never at the root.
+            for (const spec of [script, alias]) {
+                assert.equal(spec?.incompleteReason, undefined)
+                assert.equal(spec?.tool, "npm")
+                assert.deepEqual(spec?.args, ["run", "typecheck"])
+                assert.equal(spec?.cwd, workspace)
+            }
+            assert.equal(focused?.incompleteReason, undefined)
+            assert.deepEqual(focused?.args, [
+                "run",
+                "test",
+                "--",
+                "test/a.test.ts",
+            ])
+            assert.equal(focused?.cwd, workspace)
+
+            assert.equal(dotRoot?.incompleteReason, undefined)
+            assert.equal(dotRoot?.label, "git diff --check")
+            assert.equal(dotRoot?.cwd, undefined)
+
+            const plan = createVerifyPlan(dir, {
+                declaredTests: [
+                    {
+                        storyId: "S1",
+                        command:
+                            "cd packages/app && node --import tsx --test test/a.test.ts",
+                    },
+                ],
+            })
+            const declared = plan.commands.filter(
+                (command) => command.origin === "declared",
+            )
+            assert.equal(declared.length, 1)
+            assert.equal(declared[0]?.incompleteReason, undefined)
+            assert.equal(declared[0]?.cwd, workspace)
+        })
+    })
+
+    it("keeps every other compound or escaping cd form fail-closed", async () => {
+        await withTempDir("baro-verify-declared-cd-reject-", async (base) => {
+            const dir = join(base, "repo")
+            const outside = join(base, "outside")
+            const workspace = join(dir, "packages", "app")
+            mkdirSync(workspace, { recursive: true })
+            mkdirSync(join(dir, "tools"), { recursive: true })
+            mkdirSync(outside, { recursive: true })
+            writeFileSync(
+                join(dir, "package.json"),
+                JSON.stringify({
+                    name: "root",
+                    private: true,
+                    workspaces: ["packages/*"],
+                }),
+            )
+            writeFileSync(
+                join(workspace, "package.json"),
+                JSON.stringify({
+                    name: "@baro/app",
+                    scripts: { test: "rstest run", release: "do-it" },
+                }),
+            )
+            writeFileSync(join(dir, "tools", "run.js"), "console.log('x')\n")
+            writeFileSync(join(outside, "run.js"), "console.log('x')\n")
+            symlinkSync(outside, join(dir, "packages", "link"))
+            const commands = [
+                "cd ../outside && npm test",
+                `cd ${outside} && node --check run.js`,
+                "cd packages/link && node --check run.js",
+                "cd missing && npm test",
+                "cd packages/app/package.json && npm test",
+                "cd -- && npm test",
+                "cd packages/app && cd . && npm test",
+                "cd packages/app; npm test",
+                "cd packages/app && npm test; touch x",
+                "cd packages/app a && npm test",
+                "cd packages/app &&",
+                "cd packages/app && npm run release",
+                "cd packages/app && npx rstest run a.test.ts",
+                "cd packages/app && ddev exec composer test",
+                "cd packages/app && node --test ../../tools/run.js",
+                "cd packages/app && bash -c true",
+                // The greenfield bare-node allowance is judged at the root.
+                "cd tools && node run.js",
+            ]
+            const specs = translateDeclaredTests(
+                dir,
+                commands.map((command) => ({ storyId: "S1", command })),
+                [{ manager: "npm" }, { manager: "npm", cwd: workspace }],
+            )
+            for (const [index, spec] of specs.entries()) {
+                assert.notEqual(spec.incompleteReason, undefined, commands[index])
+                assert.deepEqual(spec.args, [], commands[index])
+            }
+        })
+    })
+
     it("names the php-ecosystem routes in the catch-all message", async () => {
         await withTempDir("baro-verify-declared-catch-all-", async (dir) => {
             const [spec] = translateDeclaredTests(

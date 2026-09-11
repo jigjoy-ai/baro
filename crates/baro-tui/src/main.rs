@@ -1249,7 +1249,9 @@ async fn run_app(
         std::env::set_var("BARO_CONTINUE", "1");
     }
     let mut entered_resume = false;
-    if prd_path.exists() {
+    // The operator has no run of its own to resume; a prd.json here belongs to
+    // a run it delegated (or one killed midway, whose branch may be gone).
+    if prd_path.exists() && !cli.operator {
         let initial = std::fs::read_to_string(&prd_path)
             .map_err(|error| error.to_string())
             .and_then(|contents| {

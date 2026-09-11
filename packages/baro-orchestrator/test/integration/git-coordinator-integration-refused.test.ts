@@ -270,4 +270,45 @@ describe("GitCoordinator integration_refused", () => {
             )
         })
     })
+
+    it("does not queue a recovery when the host checkout blocked the merge", async () => {
+        await withTempDir("git-refused-host-dirty-", async (dir) => {
+            let prepared = 0
+            const worktrees = {
+                mergeBack: async () => {
+                    throw new WorktreeRefusalError(
+                        "host_checkout_dirty",
+                        "story S1 cannot land: the host checkout has uncommitted changes on [a.txt]",
+                    )
+                },
+                branchName: () => "baro-wt/run/S1",
+                prepareConflictRetry: async () => {
+                    prepared += 1
+                    return "baro-recovery/run/S1/1"
+                },
+                activePath: () => "/tmp/wt/S1",
+                recoveryRef: () => null,
+            } as unknown as WorktreeManager
+            const coordinator = coordinatorFor(dir, worktrees)
+            const env = joinWithCapture(coordinator)
+
+            requestIntegration(env)
+            await coordinator.idle()
+
+            assert.equal(prepared, 0, "the intact story branch is not released for a re-run")
+            const refused = env.events.filter(IntegrationRefused.is)
+            assert.equal(refused.length, 1)
+            assert.equal(refused[0]!.data.invariant, "host_checkout_dirty")
+            assert.equal(refused[0]!.data.retryable, false)
+            assert.equal(refused[0]!.data.branch, "baro-wt/run/S1")
+            assert.equal(refused[0]!.data.recoveryRef, null)
+            assert.equal(refused[0]!.data.worktreeRetained, true)
+
+            const failure = env.events.find(StoryMergeFailed.is)
+            assert.ok(failure)
+            assert.equal(failure.data.retryable, false)
+            assert.match(failure.data.error, /uncommitted changes on \[a\.txt\]/)
+            assert.doesNotMatch(failure.data.error, /recovery preparation failed/)
+        })
+    })
 })
