@@ -21,13 +21,21 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import type { VerificationCommandOutput } from "../events/verification.js"
 import { execFileCli } from "../harness/exec-file-cli.js"
 import { emit, type BaroEvent } from "../tui-protocol.js"
+import { MAX_DECLARED_VERIFY_COMMANDS } from "./declared-test-budget.js"
 import {
-    MAX_DECLARED_VERIFY_COMMANDS,
     revalidateContainedPaths,
     translateDeclaredTests,
 } from "./declared-verification.js"
 
-export { MAX_DECLARED_VERIFY_COMMANDS } from "./declared-verification.js"
+export {
+    MAX_DECLARED_VERIFY_COMMANDS,
+    MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
+} from "./declared-test-budget.js"
+export type {
+    DeclaredBudgetDecision,
+    DeclaredBudgetEvidence,
+    DeclaredTestBudgetRequest,
+} from "./declared-test-budget.js"
 
 // Max silence, not max duration: a test runner streaming progress may run
 // far longer; only a command with no output for the whole window is killed.

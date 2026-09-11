@@ -22,6 +22,13 @@ import {
     translateDeclaredTests,
 } from "../../src/verification/declared-verification.js"
 import { readAuthoritativeDeclaredTests } from "../../src/verification/prd-declared-tests.js"
+import { MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS } from "../../src/verification/verify.js"
+import {
+    formatDeclaredBudgetEvidence,
+    judgeTestBudget,
+    MAX_DECLARED_VERIFY_COMMANDS as LEAF_MAX_DECLARED_VERIFY_COMMANDS,
+    resolveDeclaredBudget,
+} from "../../src/verification/declared-test-budget.js"
 import { withTempDir } from "../execution/helpers.js"
 
 describe("declared verification policy", () => {
@@ -2192,5 +2199,148 @@ describe("greenfield bare node declarations", () => {
         } finally {
             rmSync(traversal, { recursive: true, force: true })
         }
+    })
+})
+
+describe("declared test budget negotiation", () => {
+    const OBJECT_SHAPE =
+        "testBudget must be an object with integer commands and a non-empty reason"
+
+    it("keeps the default at 8 and exports the ceiling of 24", () => {
+        assert.equal(LEAF_MAX_DECLARED_VERIFY_COMMANDS, 8)
+        assert.equal(MAX_DECLARED_VERIFY_COMMANDS, 8)
+        assert.equal(MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS, 24)
+    })
+
+    it("rejects each invalid request with the first failing reason", () => {
+        const cases: Array<[unknown, string]> = [
+            [undefined, OBJECT_SHAPE],
+            [null, OBJECT_SHAPE],
+            [12, OBJECT_SHAPE],
+            ["12", OBJECT_SHAPE],
+            [[12, "x"], OBJECT_SHAPE],
+            [{ commands: 12 }, "testBudget.reason must be a non-empty string"],
+            [
+                { commands: 12, reason: "   " },
+                "testBudget.reason must be a non-empty string",
+            ],
+            [
+                { commands: 12.5, reason: 7 },
+                "testBudget.reason must be a non-empty string",
+            ],
+            [
+                { commands: 12.5, reason: "x" },
+                "testBudget.commands must be an integer",
+            ],
+            [
+                { commands: "12", reason: "x" },
+                "testBudget.commands must be an integer",
+            ],
+            [
+                { commands: 8, reason: "x" },
+                "testBudget.commands must be above the default 8",
+            ],
+            [
+                { commands: 25, reason: "x" },
+                "testBudget.commands must be at most 24",
+            ],
+        ]
+        for (const [value, rejection] of cases) {
+            assert.deepEqual(judgeTestBudget(value), {
+                accepted: false,
+                rejection,
+            })
+        }
+    })
+
+    it("accepts 9 and 24 with a trimmed reason and ignores extra keys", () => {
+        assert.deepEqual(
+            judgeTestBudget({ commands: 9, reason: "  many suites  " }),
+            { accepted: true, commands: 9, reason: "many suites" },
+        )
+        assert.deepEqual(
+            judgeTestBudget({ commands: 24, reason: "\tall crates\n", x: 1 }),
+            { accepted: true, commands: 24, reason: "all crates" },
+        )
+    })
+
+    it("falls back to the default when nothing is accepted", () => {
+        const empty = resolveDeclaredBudget([])
+        assert.deepEqual(empty, {
+            defaultLimit: 8,
+            ceiling: 24,
+            effectiveLimit: 8,
+            negotiatedBy: null,
+            decisions: [],
+        })
+        assert.deepEqual(formatDeclaredBudgetEvidence(empty), [])
+
+        const rejected = resolveDeclaredBudget([
+            { storyId: "S1", testBudget: { commands: 25, reason: "x" } },
+            { storyId: "S2", testBudget: null },
+        ])
+        assert.equal(rejected.defaultLimit, 8)
+        assert.equal(rejected.ceiling, 24)
+        assert.equal(rejected.effectiveLimit, 8)
+        assert.equal(rejected.negotiatedBy, null)
+        assert.deepEqual(rejected.decisions, [
+            {
+                storyId: "S1",
+                status: "rejected",
+                commands: 25,
+                detail: "testBudget.commands must be at most 24",
+            },
+            {
+                storyId: "S2",
+                status: "rejected",
+                commands: null,
+                detail: OBJECT_SHAPE,
+            },
+        ])
+        assert.deepEqual(formatDeclaredBudgetEvidence(rejected), [
+            "testBudget rejected for story S1: testBudget.commands must be at most 24; effective limit 8",
+            `testBudget rejected for story S2: ${OBJECT_SHAPE}; effective limit 8`,
+        ])
+    })
+
+    it("takes the largest accepted request, first story winning a tie", () => {
+        const evidence = resolveDeclaredBudget([
+            { storyId: "S0", testBudget: { commands: 10, reason: "a" } },
+            { storyId: "S1", testBudget: { commands: 12, reason: "b" } },
+            { storyId: "S2", testBudget: { commands: 12, reason: "c" } },
+            { storyId: "S3", testBudget: { commands: 30, reason: "d" } },
+        ])
+        assert.equal(evidence.effectiveLimit, 12)
+        assert.equal(evidence.negotiatedBy, "S1")
+        assert.deepEqual(
+            evidence.decisions.map((d) => [d.storyId, d.status, d.commands]),
+            [
+                ["S0", "accepted", 10],
+                ["S1", "accepted", 12],
+                ["S2", "accepted", 12],
+                ["S3", "rejected", 30],
+            ],
+        )
+        assert.deepEqual(formatDeclaredBudgetEvidence(evidence), [
+            "testBudget accepted for story S0: 10 commands (a); effective limit 12",
+            "testBudget accepted for story S1: 12 commands (b); effective limit 12",
+            "testBudget accepted for story S2: 12 commands (c); effective limit 12",
+            "testBudget rejected for story S3: testBudget.commands must be at most 24; effective limit 12",
+        ])
+    })
+
+    it("bounds accepted reason evidence to one sanitized line", () => {
+        const evidence = resolveDeclaredBudget([
+            {
+                storyId: "S1",
+                testBudget: {
+                    commands: 12,
+                    reason: "  a b\nc`d" + "x".repeat(300) + "  ",
+                },
+            },
+        ])
+        const [decision] = evidence.decisions
+        assert.equal(decision?.detail.length, 200)
+        assert.ok(decision?.detail.startsWith("a b?c?dx"))
     })
 })
