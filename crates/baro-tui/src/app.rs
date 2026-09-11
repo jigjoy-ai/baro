@@ -333,6 +333,7 @@ pub struct ReviewStory {
     pub writes: Option<Vec<String>>,
     pub completed: bool,
     pub model: Option<String>,
+    pub test_budget: Option<serde_json::Value>,
 }
 
 pub struct App {

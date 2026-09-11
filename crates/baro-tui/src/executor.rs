@@ -115,6 +115,10 @@ pub struct PrdStory {
         skip_serializing_if = "Option::is_none"
     )]
     pub merge_commit_sha: Option<String>,
+    /// Planner-authored, per-story declared-test admission budget. Opaque to
+    /// Rust; the TS orchestrator judges and admits it.
+    #[serde(rename = "testBudget", default, skip_serializing_if = "Option::is_none")]
+    pub test_budget: Option<serde_json::Value>,
 }
 
 fn default_retries() -> u32 {
@@ -352,6 +356,7 @@ fn prd_story_from_review(story: &ReviewStory) -> PrdStory {
         completed_at: None,
         duration_secs: None,
         model: story.model.clone(),
+        test_budget: story.test_budget.clone(),
         ..Default::default()
     }
 }
@@ -444,6 +449,7 @@ mod tests {
             writes: None,
             completed: false,
             model: Some("heavy".to_string()),
+            test_budget: None,
         }];
 
         let prd = prd_from_review(
@@ -469,6 +475,42 @@ mod tests {
         );
         assert_eq!(story.tests, ["cargo test -p baro-tui"]);
         assert_eq!(story.model.as_deref(), Some("heavy"));
+    }
+
+    #[test]
+    fn test_budget_round_trips_opaquely_and_is_omitted_when_absent() {
+        let raw = serde_json::json!({
+            "project": "p",
+            "branchName": "baro/p",
+            "userStories": [
+                {
+                    "id": "S1", "priority": 1, "title": "Negotiates",
+                    "description": "wants a bigger budget", "dependsOn": [],
+                    "retries": 2, "acceptance": [], "tests": [],
+                    "testBudget": {"commands": 12, "reason": "x"}
+                },
+                {
+                    "id": "S2", "priority": 2, "title": "Default budget",
+                    "description": "no override", "dependsOn": [],
+                    "retries": 2, "acceptance": [], "tests": []
+                }
+            ]
+        });
+        let prd: PrdFile = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            prd.user_stories[0].test_budget,
+            Some(serde_json::json!({"commands": 12, "reason": "x"}))
+        );
+        assert_eq!(prd.user_stories[1].test_budget, None);
+
+        let out = serde_json::to_string(&prd).unwrap();
+        let parsed: PrdFile = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed.user_stories[0].test_budget, prd.user_stories[0].test_budget);
+
+        let s1_out = serde_json::to_value(&prd.user_stories[0]).unwrap();
+        assert_eq!(s1_out["testBudget"], serde_json::json!({"commands": 12, "reason": "x"}));
+        let s2_out = serde_json::to_value(&prd.user_stories[1]).unwrap();
+        assert!(!s2_out.as_object().unwrap().contains_key("testBudget"));
     }
 
     #[test]
@@ -525,6 +567,7 @@ mod tests {
             writes: None,
             completed: true, // untrusted planner output must not grant a pass
             model: Some("light".into()),
+            test_budget: None,
         }];
 
         let merged =
@@ -587,6 +630,7 @@ mod tests {
             writes: None,
             completed: false,
             model: Some("standard".into()),
+            test_budget: None,
         };
 
         let merged =
