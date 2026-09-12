@@ -23,11 +23,25 @@ import { execFileCli } from "../harness/exec-file-cli.js"
 import { emit, type BaroEvent } from "../tui-protocol.js"
 import {
     MAX_DECLARED_VERIFY_COMMANDS,
+    MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
+    resolveDeclaredBudget,
+    type DeclaredBudgetEvidence,
+    type DeclaredTestBudgetRequest,
+} from "./declared-test-budget.js"
+import {
     revalidateContainedPaths,
     translateDeclaredTests,
 } from "./declared-verification.js"
 
-export { MAX_DECLARED_VERIFY_COMMANDS } from "./declared-verification.js"
+export {
+    MAX_DECLARED_VERIFY_COMMANDS,
+    MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
+} from "./declared-test-budget.js"
+export type {
+    DeclaredBudgetDecision,
+    DeclaredBudgetEvidence,
+    DeclaredTestBudgetRequest,
+} from "./declared-test-budget.js"
 
 // Max silence, not max duration: a test runner streaming progress may run
 // far longer; only a command with no output for the whole window is killed.
@@ -48,8 +62,10 @@ const OUTPUT_CAPTURE_CHARS = 2000
 export const MAX_FINAL_ADDED_VERIFY_COMMANDS = 8
 const MAX_COMPACTED_RSTEST_PATHS = 64
 const MAX_COMPACTED_DECLARED_COMMAND_CHARS = 1_000
-const MAX_DECLARED_TRANSLATION_INPUTS =
-    MAX_COMPACTED_RSTEST_PATHS * MAX_DECLARED_VERIFY_COMMANDS
+
+export function maxDeclaredTranslationInputs(effectiveLimit: number): number {
+    return MAX_COMPACTED_RSTEST_PATHS * effectiveLimit
+}
 
 export interface VerifyResult {
     ran: boolean
@@ -116,6 +132,7 @@ export interface DeclaredTestRequirement {
 export interface VerifyPlanOptions {
     /** Authoritative tests from the PRD snapshot being verified. */
     readonly declaredTests?: readonly DeclaredTestRequirement[]
+    readonly testBudgets?: readonly DeclaredTestBudgetRequest[]
 }
 
 export interface VerifyPlan {
@@ -129,6 +146,8 @@ export interface VerifyPlan {
      * existed yet, so final-added gates cannot switch package managers.
      */
     readonly javascriptPackageManagers?: readonly VerifyJavaScriptPackageManager[]
+    /** Present only when the plan was built with testBudgets. */
+    readonly declaredBudget?: DeclaredBudgetEvidence
 }
 
 export interface VerifyBuildOptions {
@@ -718,6 +737,7 @@ function subsumedByFullScript(
 function boundedDeclaredCommands(
     automatic: readonly VerifyCommandSpec[],
     declared: readonly VerifyCommandSpec[],
+    budget: DeclaredBudgetEvidence,
 ): VerifyCommandSpec[] {
     const commands = dedupeVerifyCommands(automatic)
     const seen = new Set(commands.map(verifyCommandIdentity))
@@ -727,7 +747,7 @@ function boundedDeclaredCommands(
         const identity = verifyCommandIdentity(command)
         if (seen.has(identity)) continue
         seen.add(identity)
-        if (admitted >= MAX_DECLARED_VERIFY_COMMANDS) {
+        if (admitted >= budget.effectiveLimit) {
             // Overflow is only a defect when the dropped command proves
             // something nothing else on the list proves. A path-scoped run
             // whose full suite is already admitted is covered evidence.
@@ -744,7 +764,10 @@ function boundedDeclaredCommands(
             args: [],
             incompleteReason:
                 `${omitted} unique PRD test requirement(s) were not admitted; ` +
-                `the safe limit is ${MAX_DECLARED_VERIFY_COMMANDS}`,
+                `the safe limit is ${budget.effectiveLimit} ` +
+                (budget.negotiatedBy === null
+                    ? "(default; no story negotiated testBudget)"
+                    : `(negotiated by story ${budget.negotiatedBy} testBudget)`),
             origin: "declared",
         })
     }
@@ -774,28 +797,31 @@ export function createVerifyPlan(
     options: VerifyPlanOptions = {},
 ): VerifyPlan {
     const detected = detectCommands(cwd)
+    const budget = resolveDeclaredBudget(options.testBudgets ?? [])
+    const translationLimit = maxDeclaredTranslationInputs(budget.effectiveLimit)
     const declaredInputs = dedupeDeclaredTranslationInputs(
         options.declaredTests ?? [],
     )
     const declaredCommands = translateDeclaredTests(
         cwd,
-        declaredInputs.slice(0, MAX_DECLARED_TRANSLATION_INPUTS),
+        declaredInputs.slice(0, translationLimit),
         detected.javascriptPackageManagers,
     )
-    if (declaredInputs.length > MAX_DECLARED_TRANSLATION_INPUTS) {
+    if (declaredInputs.length > translationLimit) {
         declaredCommands.unshift({
             label: "PRD verification input beyond translation budget",
             tool: "node",
             args: [],
             incompleteReason:
-                `${declaredInputs.length - MAX_DECLARED_TRANSLATION_INPUTS} ` +
+                `${declaredInputs.length - translationLimit} ` +
                 "declared test input(s) were not translated",
             declaredRequirementKey: "<declared-translation-overflow>",
         })
     }
     return freezeVerifyPlan(
-        boundedDeclaredCommands(detected.commands, declaredCommands),
+        boundedDeclaredCommands(detected.commands, declaredCommands, budget),
         detected.javascriptPackageManagers,
+        options.testBudgets !== undefined ? budget : undefined,
     )
 }
 
@@ -816,6 +842,14 @@ export function mergeVerifyPlans(...plans: readonly VerifyPlan[]): VerifyPlan {
     const managerAuthorities = new Map<string, VerifyJavaScriptPackageManager>()
     const packageManagers: VerifyJavaScriptPackageManager[] = []
     const finalPlanIndex = plans.length - 1
+    const finalBudget = plans.at(-1)?.declaredBudget
+    const finalAddedLimit =
+        MAX_FINAL_ADDED_VERIFY_COMMANDS +
+        Math.max(
+            0,
+            (finalBudget?.effectiveLimit ?? MAX_DECLARED_VERIFY_COMMANDS) -
+                MAX_DECLARED_VERIFY_COMMANDS,
+        )
     let finalAddedExecutableCommands = 0
     let omittedFinalCommands = 0
     for (const [planIndex, plan] of plans.entries()) {
@@ -851,7 +885,7 @@ export function mergeVerifyPlans(...plans: readonly VerifyPlan[]): VerifyPlan {
             if (
                 planIndex > 0 &&
                 executable &&
-                finalAddedExecutableCommands >= MAX_FINAL_ADDED_VERIFY_COMMANDS
+                finalAddedExecutableCommands >= finalAddedLimit
             ) {
                 omittedFinalCommands += 1
                 continue
@@ -875,10 +909,10 @@ export function mergeVerifyPlans(...plans: readonly VerifyPlan[]): VerifyPlan {
             args: [],
             incompleteReason:
                 `${omittedFinalCommands} final command(s) were not executed; ` +
-                `the adaptive verification limit is ${MAX_FINAL_ADDED_VERIFY_COMMANDS}`,
+                `the adaptive verification limit is ${finalAddedLimit}`,
         })
     }
-    return freezeVerifyPlan(commands, packageManagers)
+    return freezeVerifyPlan(commands, packageManagers, finalBudget)
 }
 
 const ROOT_PACKAGE_MANAGER_KEY = "<root>"
@@ -1009,6 +1043,7 @@ function verifyCommandIdentity(command: VerifyCommandSpec): string {
 function freezeVerifyPlan(
     commands: readonly VerifyCommandSpec[],
     javascriptPackageManagers: readonly VerifyJavaScriptPackageManager[] = [],
+    declaredBudget?: DeclaredBudgetEvidence,
 ): VerifyPlan {
     return Object.freeze({
         commands: Object.freeze(
@@ -1031,6 +1066,18 @@ function freezeVerifyPlan(
         javascriptPackageManagers: Object.freeze(
             javascriptPackageManagers.map((manager) => Object.freeze({ ...manager })),
         ),
+        ...(declaredBudget
+            ? {
+                  declaredBudget: Object.freeze({
+                      ...declaredBudget,
+                      decisions: Object.freeze(
+                          declaredBudget.decisions.map((decision) =>
+                              Object.freeze({ ...decision }),
+                          ),
+                      ),
+                  }),
+              }
+            : {}),
     })
 }
 
@@ -1064,12 +1111,21 @@ export function recommendedVerifyTimeoutMs(plan: VerifyPlan): number {
  * mergeVerifyPlans can admit. The verifier therefore cannot create a valid
  * bounded plan whose own per-command budgets systematically exceed the Board.
  */
-export function recommendedMergedVerifyTimeoutMs(baseline: VerifyPlan): number {
+export function recommendedMergedVerifyTimeoutMs(
+    baseline: VerifyPlan,
+    declaredLimit: number = MAX_DECLARED_VERIFY_COMMANDS,
+): number {
     const executable = executableCommands(baseline)
     const baselineRetryable = executable.filter(isRunLevelCommand).length
     const declared = executable.length - baselineRetryable
+    // mergeVerifyPlans raises finalAddedLimit by the negotiated excess over 8.
+    const extra = Math.max(
+        0,
+        Math.min(declaredLimit, MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS) -
+            MAX_DECLARED_VERIFY_COMMANDS,
+    )
     // Final-plan additions are detected, so they are retryable too.
-    const retryable = baselineRetryable + MAX_FINAL_ADDED_VERIFY_COMMANDS
+    const retryable = baselineRetryable + MAX_FINAL_ADDED_VERIFY_COMMANDS + extra
     return (
         declared * COMMAND_ATTEMPT_BUDGET_MS +
         retryable * 2 * COMMAND_ATTEMPT_BUDGET_MS +

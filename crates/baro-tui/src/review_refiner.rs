@@ -144,6 +144,7 @@ fn review_plan_json(app: &App) -> serde_json::Value {
                 "goalInvariantIds": story.goal_invariant_ids,
                 "passes": story.completed,
                 "model": story.model,
+                "testBudget": story.test_budget,
             })
         })
         .collect();
@@ -160,6 +161,7 @@ fn review_plan_json(app: &App) -> serde_json::Value {
                 "tests": story.tests,
                 "goalInvariantIds": story.goal_invariant_ids,
                 "passes": true,
+                "testBudget": story.test_budget,
             })
         })
         .collect();
@@ -247,6 +249,7 @@ mod tests {
             writes: None,
             completed,
             model: Some("heavy".into()),
+            test_budget: None,
         }
     }
 

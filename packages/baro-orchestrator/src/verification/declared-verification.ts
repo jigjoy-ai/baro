@@ -23,7 +23,6 @@ import type {
 } from "./verify.js"
 
 const MAX_COMMAND_LENGTH = 1_000
-export const MAX_DECLARED_VERIFY_COMMANDS = 8
 const SAFE_SCRIPT_NAME = /^[A-Za-z0-9_.:-]+$/
 const TRUSTED_PACKAGE_SCRIPTS = new Set(["build", "typecheck", "test", "lint"])
 // Deliberately separate from TRUSTED_PACKAGE_SCRIPTS: `check` is the

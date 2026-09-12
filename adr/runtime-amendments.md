@@ -11,72 +11,63 @@
 ```json
 {
   "graphVersion": 2,
-  "proposalId": "run-progressive-ca5d70d8c7805d67:planner:6214b643f294d02b474f05a856e3d64e71c42bf31f29c3ca65f92d77b9b8b8e7",
-  "sourceStoryId": "planner:planning-ca5d70d8c7805d67-1",
-  "reason": "progressive planner admitted fragment issue-112-invariant-coverage-prefix",
-  "exactMutationSha256": "bba8999637805607901e154887f9c98e2f6dfc1f33f460549e2bfce11b69e5c1",
+  "proposalId": "run-progressive-2593fd50c8203c06:planner:b5e81c10a839cdc1a1e2cae149bd90b1e5b6f0acdf3055653d19a05549ffca23",
+  "sourceStoryId": "planner:planning-2593fd50c8203c06-1",
+  "reason": "progressive planner admitted fragment issue-108-testbudget-full",
+  "exactMutationSha256": "80502791098496e02d6f2bb71df0c93c277952314dcd8305279001a1bc922b35",
   "mutationSummary": {
     "addedStories": [
       {
         "id": "S1",
-        "title": "Repair prompt lists unowned goal invariants with canonical statements",
+        "title": "testBudget story contract and planner/replan gates (issue S3)",
         "dependsOn": [],
         "goalInvariantIds": [
-          "G-A3",
+          "G-A1",
           "G-A6",
-          "G-C2"
+          "G-A7",
+          "G-A8",
+          "G-C4",
+          "G-C5",
+          "G-C6",
+          "G-C7"
         ]
       },
       {
         "id": "S2",
-        "title": "Pass unowned invariants with text at the single finalization repair call site",
-        "dependsOn": [
-          "S1"
-        ],
+        "title": "Negotiated declared-test admission, watchdog sizing and budget evidence (issue S4)",
+        "dependsOn": [],
         "goalInvariantIds": [
-          "G-A1",
           "G-A2",
+          "G-A3",
+          "G-A4",
           "G-A5",
-          "G-A6",
-          "G-C2"
+          "G-A8",
+          "G-C3",
+          "G-C6",
+          "G-C7",
+          {
+            "omittedItems": 1
+          }
         ]
-      }
-    ],
-    "removedStoryIds": [],
-    "modifiedDeps": {}
-  }
-}
-```
-
-## Graph version 3
-
-```json
-{
-  "graphVersion": 3,
-  "proposalId": "run-progressive-ca5d70d8c7805d67:planner:65d5c1a35aa1876c55b775614dd01cbd48cd003087ee0da93992f7377df00daf",
-  "sourceStoryId": "planner:planning-ca5d70d8c7805d67-1",
-  "reason": "progressive planner admitted fragment final-60860158243c096515c5c8dd5e7b4f67d2f902652fed0552a43fdfe7d5f1534b",
-  "exactMutationSha256": "85b17e91c4ad44cf5d3abfcb1acaa6f401609fe50d2e2152f71a43a3f33948a1",
-  "mutationSummary": {
-    "addedStories": [
+      },
       {
         "id": "S3",
-        "title": "Conformance test: claude-lane receipt, repair prompt invariants, notice-before-terminal ordering",
+        "title": "Cross-story contract checks, verification gate and PR for #108",
         "dependsOn": [
           "S1",
           "S2"
         ],
         "goalInvariantIds": [
-          "G-A1",
-          "G-A2",
-          "G-A3",
-          "G-A4",
-          "G-A5",
-          "G-A6",
           "G-A7",
           "G-A8",
+          "G-A9",
+          "G-A10",
+          "G-C1",
+          "G-C2",
+          "G-C3",
+          "G-C8",
           {
-            "omittedItems": 5
+            "omittedItems": 3
           }
         ]
       }

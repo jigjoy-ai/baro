@@ -182,6 +182,7 @@ fn review_stories_from_prd(prd: &executor::PrdFile) -> Vec<ReviewStory> {
             writes: s.writes.clone(),
             completed: s.passes,
             model: s.model.clone(),
+            test_budget: s.test_budget.clone(),
         })
         .collect()
 }

@@ -14,6 +14,7 @@ import type {
     RuntimeReplanAppliedData,
 } from "./semantic-events.js"
 import { runtimeDecisionFingerprintMatches } from "./runtime-graph/fingerprint.js"
+import { judgeTestBudget } from "./verification/declared-test-budget.js"
 import {
     deriveGoalContract,
     normalizeGoalLedgerProjection,
@@ -25,6 +26,11 @@ import {
     type GoalEnvelope,
     validateGoalEnvelope,
 } from "./conversation/session/conversation-contract.js"
+
+export interface PrdTestBudget {
+    commands: number
+    reason: string
+}
 
 export interface PrdStory {
     id: string
@@ -41,6 +47,7 @@ export interface PrdStory {
     /** Stable GoalContract invariant ids this work item is expected to
      * provide evidence for. Optional only for pre-governance PRDs. */
     goalInvariantIds?: string[]
+    testBudget?: PrdTestBudget
     passes: boolean
     completedAt: string | null
     durationSecs: number | null
@@ -79,6 +86,7 @@ export const PRD_STORY_FIELDS = [
     "model",
     "mergeStatus",
     "mergeCommitSha",
+    "testBudget",
 ] as const satisfies readonly (keyof PrdStory)[]
 
 // Compile-time exhaustiveness: adding a PrdStory field without listing it
@@ -106,6 +114,7 @@ export const PLANNER_AUTHORED_STORY_FIELDS = [
     "tests",
     "goalInvariantIds",
     "model",
+    "testBudget",
 ] as const satisfies readonly (keyof PrdStory)[]
 
 /** Intake's (or the user's) execution-mode decision, stamped by run-planner. */
@@ -743,6 +752,7 @@ function validStoredRuntimeStory(value: unknown): boolean {
             "goalInvariantIds",
             "model",
             "writes",
+            "testBudget",
         ])
     ) return false
     return (
@@ -760,7 +770,8 @@ function validStoredRuntimeStory(value: unknown): boolean {
         (value.goalInvariantIds === undefined ||
             (stringArrayValue(value.goalInvariantIds) &&
                 value.goalInvariantIds.every((id) => /^G-[AC][1-9]\d*$/.test(id)))) &&
-        (value.model === undefined || nonBlank(value.model))
+        (value.model === undefined || nonBlank(value.model)) &&
+        (value.testBudget === undefined || judgeTestBudget(value.testBudget).accepted)
     )
 }
 
@@ -841,6 +852,12 @@ function normalizeStory(
               ),
           ]
         : undefined
+    const testBudget = plainRecord(input.testBudget)
+        ? {
+              commands: input.testBudget.commands as number,
+              reason: input.testBudget.reason as string,
+          }
+        : undefined
     const passes = input.passes === true
     const completedAt =
         typeof input.completedAt === "string" ? input.completedAt : null
@@ -866,6 +883,7 @@ function normalizeStory(
         tests,
         ...(writes.length > 0 ? { writes } : {}),
         ...(goalInvariantIds ? { goalInvariantIds } : {}),
+        ...(testBudget ? { testBudget } : {}),
         passes,
         completedAt,
         durationSecs,
@@ -969,6 +987,9 @@ export function applyReplanWithEffectiveDelta(
                     ? { goalInvariantIds: [...applied.goalInvariantIds] }
                     : {}),
                 ...(applied.writes ? { writes: [...applied.writes] } : {}),
+                ...(applied.testBudget
+                    ? { testBudget: { ...applied.testBudget } }
+                    : {}),
                 passes: false,
                 completedAt: null,
                 durationSecs: null,
@@ -1017,6 +1038,7 @@ function cloneReplanStoryAdd(story: ReplanStoryAdd): ReplanStoryAdd {
             ? { goalInvariantIds: [...story.goalInvariantIds] }
             : {}),
         ...(story.writes ? { writes: [...story.writes] } : {}),
+        ...(story.testBudget ? { testBudget: { ...story.testBudget } } : {}),
     }
 }
 

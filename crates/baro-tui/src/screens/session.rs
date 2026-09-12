@@ -1352,6 +1352,7 @@ mod tests {
                 writes: None,
                 completed: false,
                 model: None,
+                test_budget: None,
             }]);
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).unwrap();

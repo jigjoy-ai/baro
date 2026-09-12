@@ -154,6 +154,7 @@ Dependency rules:
     "cargo test env_flag"), never the whole repository suite. The host proves
     the fully-merged tree once after integration; a story-level full suite
     only repeats that proof at load-inflated cost.
+  - Optional "testBudget": {"commands": <integer 9-24>, "reason": "<why this story needs more than 8 declared test commands>"} raises the run's declared-test admission limit (default 8, max 24); use it only when necessary.
   - Decorative chains are bad, but unsafe parallel edits are worse.
 
 Output ONLY valid JSON matching this exact schema (no markdown, no explanation, just JSON):

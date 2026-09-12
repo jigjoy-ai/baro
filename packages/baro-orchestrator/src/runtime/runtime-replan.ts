@@ -16,6 +16,7 @@ import type {
 } from "../semantic-events.js"
 import type { WriteSurfaceOverlapFacts } from "../events/runtime-graph.js"
 import { deriveGoalContract } from "../goal/goal-contract.js"
+import { judgeTestBudget } from "../verification/declared-test-budget.js"
 import {
     architectureObligationsFromDecision,
     obligationMappingsForStories,
@@ -529,6 +530,7 @@ function validateAddedStoryShape(story: ReplanStoryAdd): string | null {
             "model",
             "goalInvariantIds",
             "writes",
+            "testBudget",
         ])
     ) return `added story '${story.id || "(missing)"}' has unknown fields`
     if (!validId(story.id)) return "added story id must be a non-empty, trimmed string"
@@ -577,6 +579,10 @@ function validateAddedStoryShape(story: ReplanStoryAdd): string | null {
     ) {
         return `added story '${story.id}' has invalid writes`
     }
+    if (story.testBudget !== undefined) {
+        const judgement = judgeTestBudget(story.testBudget)
+        if (!judgement.accepted) return `added story '${story.id}' ${judgement.rejection}`
+    }
     return null
 }
 
@@ -623,6 +629,7 @@ function clonePrd(prd: PrdFile): PrdFile {
                 ? { goalInvariantIds: [...story.goalInvariantIds] }
                 : {}),
             ...(story.writes ? { writes: [...story.writes] } : {}),
+            ...(story.testBudget !== undefined ? { testBudget: { ...story.testBudget } } : {}),
         })),
     }
 }
@@ -643,6 +650,7 @@ function toPrdStory(story: ReplanStoryAdd): PrdStory {
         // Shedding this silently un-declares the story's surface: peers'
         // ownership maps never learn its paths, yet the merge gate judges on.
         ...(story.writes !== undefined ? { writes: [...story.writes] } : {}),
+        ...(story.testBudget !== undefined ? { testBudget: { ...story.testBudget } } : {}),
         passes: false,
         completedAt: null,
         durationSecs: null,
@@ -666,6 +674,7 @@ function snapshotStoryAdd(story: ReplanStoryAdd): ReplanStoryAdd {
             ? { goalInvariantIds: [...story.goalInvariantIds] }
             : {}),
         ...(story.writes !== undefined ? { writes: [...story.writes] } : {}),
+        ...(story.testBudget !== undefined ? { testBudget: { ...story.testBudget } } : {}),
         ...(story.model !== undefined ? { model: story.model } : {}),
     }
 }

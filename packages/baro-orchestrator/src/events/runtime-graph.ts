@@ -16,6 +16,7 @@ export interface ReplanStoryAdd {
     goalInvariantIds?: readonly string[]
     /** Files this story will write, used to check its dependency edges. */
     writes?: readonly string[]
+    testBudget?: { readonly commands: number; readonly reason: string }
 }
 
 export interface ReplanData {

@@ -7,6 +7,7 @@
 
 import { readFileSync } from "node:fs"
 
+import type { DeclaredTestBudgetRequest } from "./declared-test-budget.js"
 import type { DeclaredTestRequirement } from "./verify.js"
 
 const MAX_STORIES_INSPECTED = 256
@@ -15,32 +16,56 @@ const MAX_REQUIREMENTS_RETURNED = 64
 export function readAuthoritativeDeclaredTests(
     prdPath: string,
 ): DeclaredTestRequirement[] {
+    return readAuthoritativeVerifyPlanOptions(prdPath).declaredTests
+}
+
+export function readAuthoritativeVerifyPlanOptions(prdPath: string): {
+    declaredTests: DeclaredTestRequirement[]
+    testBudgets: DeclaredTestBudgetRequest[]
+} {
     let raw: unknown
     try {
         raw = JSON.parse(readFileSync(prdPath, "utf8")) as unknown
     } catch (error) {
-        return [issue("final PRD", "<unreadable>", `cannot read final PRD: ${message(error)}`)]
+        return {
+            declaredTests: [
+                issue("final PRD", "<unreadable>", `cannot read final PRD: ${message(error)}`),
+            ],
+            testBudgets: [],
+        }
     }
     if (!isRecord(raw) || !Array.isArray(raw.userStories)) {
-        return [
-            issue(
-                "final PRD",
-                "userStories",
-                "final PRD userStories must be an array",
-            ),
-        ]
+        return {
+            declaredTests: [
+                issue(
+                    "final PRD",
+                    "userStories",
+                    "final PRD userStories must be an array",
+                ),
+            ],
+            testBudgets: [],
+        }
+    }
+
+    const stories = raw.userStories.slice(0, MAX_STORIES_INSPECTED)
+    // Separate pass so requirement overflow below cannot hide a budget request.
+    const testBudgets: DeclaredTestBudgetRequest[] = []
+    for (const [storyIndex, value] of stories.entries()) {
+        if (isRecord(value) && Object.hasOwn(value, "testBudget")) {
+            testBudgets.push({
+                storyId: storyIdOf(value, storyIndex),
+                testBudget: value.testBudget,
+            })
+        }
     }
 
     const requirements: DeclaredTestRequirement[] = []
-    const stories = raw.userStories.slice(0, MAX_STORIES_INSPECTED)
     for (const [storyIndex, value] of stories.entries()) {
         if (requirements.length >= MAX_REQUIREMENTS_RETURNED - 1) {
             requirements.push(inspectionOverflow())
-            return requirements
+            return { declaredTests: requirements, testBudgets }
         }
-        const storyId = isRecord(value) && typeof value.id === "string"
-            ? safeEvidenceText(value.id, 100)
-            : `userStories[${storyIndex}]`
+        const storyId = storyIdOf(value, storyIndex)
         if (!isRecord(value)) {
             requirements.push(
                 issue(storyId, "tests", `${storyId} must be an object with a tests array`),
@@ -56,7 +81,7 @@ export function readAuthoritativeDeclaredTests(
         for (const [testIndex, command] of value.tests.entries()) {
             if (requirements.length >= MAX_REQUIREMENTS_RETURNED - 1) {
                 requirements.push(inspectionOverflow())
-                return requirements
+                return { declaredTests: requirements, testBudgets }
             }
             if (typeof command === "string") {
                 requirements.push({ storyId, command })
@@ -74,7 +99,13 @@ export function readAuthoritativeDeclaredTests(
     if (raw.userStories.length > MAX_STORIES_INSPECTED) {
         requirements.push(inspectionOverflow())
     }
-    return requirements
+    return { declaredTests: requirements, testBudgets }
+}
+
+function storyIdOf(value: unknown, storyIndex: number): string {
+    return isRecord(value) && typeof value.id === "string"
+        ? safeEvidenceText(value.id, 100)
+        : `userStories[${storyIndex}]`
 }
 
 function inspectionOverflow(): DeclaredTestRequirement {
