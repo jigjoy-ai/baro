@@ -209,14 +209,7 @@ pub enum BaroEvent {
 
     /// Full backend-neutral measurement. The current UI keeps using the
     /// compatibility TokenUsage projection while Cloud/audit consume this.
-    ///
-    /// Also carries the diagnostic `suspension_gap_absorbed` line: the `type`
-    /// tag has no catch-all, and adding a variant for one would make
-    /// `App::handle_event` non-exhaustive, so it is aliased onto the one
-    /// variant the UI already drops rather than left to become `[parse-skip]`
-    /// noise. Replace with a real `#[serde(other)]` variant once events.rs and
-    /// app.rs can change together.
-    #[serde(rename = "model_usage", alias = "suspension_gap_absorbed")]
+    #[serde(rename = "model_usage")]
     ModelUsage {
         #[allow(dead_code)]
         #[serde(default)]
@@ -363,6 +356,11 @@ pub enum BaroEvent {
         code: Option<i32>,
         reason: Option<String>,
     },
+
+    /// Any `type` this TUI does not render (e.g. the diagnostic
+    /// `suspension_gap_absorbed` line) is ignored rather than parse-skipped.
+    #[serde(other)]
+    Unrendered,
 }
 
 /// Headless stdout is a machine-readable JSONL stream. A subprocess that
@@ -586,14 +584,14 @@ mod tests {
     }
 
     #[test]
-    fn the_absorbed_gap_line_parses_into_the_variant_the_ui_ignores() {
+    fn a_type_this_tui_does_not_render_is_ignored_rather_than_a_parse_failure() {
         // Tolerated rather than rejected: reaching the client's parse-failure
         // path would render this diagnostic as a `[parse-skip]` log line.
         match parse(
             r#"{"type":"suspension_gap_absorbed","gap_ms":10800000,"budget":"architect-phase",
                 "awake_elapsed_ms":60000,"wall_elapsed_ms":10860000}"#,
         ) {
-            BaroEvent::ModelUsage { .. } => {}
+            BaroEvent::Unrendered => {}
             other => panic!("wrong variant: {:?}", other),
         }
         match parse(r#"{"type":"model_usage","measurement":{"tokens":5}}"#) {

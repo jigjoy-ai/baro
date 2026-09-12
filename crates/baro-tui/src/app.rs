@@ -2134,6 +2134,9 @@ impl App {
                     self.exit_reason = Some(msg);
                 }
             }
+
+            // A type this TUI does not render is deliberately ignored.
+            BaroEvent::Unrendered => {}
         }
     }
 
