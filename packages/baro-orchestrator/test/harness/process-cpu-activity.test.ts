@@ -6,9 +6,11 @@ import {
     CPU_ADVANCE_MIN_DELTA_MS,
     CPU_PROBE_TIMEOUT_MS,
     cpuAdvanced,
+    createDefaultCpuActivityProbe,
     sampleProcessTreeCpu,
     type ProcessCpuRow,
 } from "../../src/harness/process-cpu-activity.js"
+import { createFakeAwakeClock } from "../../src/runtime/awake-clock.js"
 
 const table = (...rows: ProcessCpuRow[]) => async () => rows
 
@@ -118,6 +120,41 @@ describe("process CPU activity sampling", () => {
             )
         },
     )
+
+    it("measures the window in awake time, so a suspend cannot stretch the bar", async () => {
+        const clock = createFakeAwakeClock()
+        const rows = table({ pid: 100, parentPid: 1, cpuMs: 1_000 })
+
+        const before = await sampleProcessTreeCpu(100, rows, clock)
+        clock.suspend(3 * 60 * 60 * 1_000)
+        clock.advance(1_000)
+        const after = await sampleProcessTreeCpu(100, rows, clock)
+
+        assert.equal(after.at - before.at, 1_000, "three slept hours are not window")
+    })
+
+    it("discards a slept-through window instead of reading a busy tree as hung", async () => {
+        const clock = createFakeAwakeClock()
+        const rows = table({ pid: 100, parentPid: 1, cpuMs: 1_000 })
+        const probe = createDefaultCpuActivityProbe(100, clock, rows)
+
+        const idle = await probe(100, null)
+        assert.equal(idle.active, false, "a tree with no CPU advance reads idle")
+
+        clock.suspend(3 * 60 * 60 * 1_000)
+        const slept = await probe(100, idle.sample)
+        assert.equal(slept.active, true, "a slept-through window is no hang evidence")
+        assert.equal(
+            slept.sample.at,
+            clock.awakeNow(),
+            "the discarded window is re-baselined from awake time",
+        )
+
+        // The gap belongs to the discarded window only: the next one judges again.
+        clock.advance(300_000)
+        const after = await probe(100, slept.sample)
+        assert.equal(after.active, false)
+    })
 
     it("bounds the probe with the same window the watchdog races against", () => {
         assert.equal(CPU_PROBE_TIMEOUT_MS, 5_000)
