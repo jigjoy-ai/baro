@@ -210,6 +210,15 @@ export interface AwakeDeadline {
     close(): void
 }
 
+/** Armed deadlines per clock, so an absorbed gap can name the budget it hit.
+ *  Keyed by clock because a fake clock's deadlines must never be attributed to
+ *  the shared one; read by awake-clock-log.ts, which this file cannot import. */
+const armedDeadlines = new WeakMap<AwakeClock, Set<AwakeDeadline>>()
+
+export function armedAwakeDeadlines(clock: AwakeClock): readonly AwakeDeadline[] {
+    return [...(armedDeadlines.get(clock) ?? [])]
+}
+
 export function createAwakeDeadline(input: {
     budget: AwakeBudgetName
     timeoutMs: number
@@ -245,12 +254,21 @@ export function createAwakeDeadline(input: {
         }
         if (expiredFired) return
         expiredFired = true
+        release()
         input.onExpired()
     }
 
-    arm()
+    // Registering here rather than at each adopter is what makes the pairing
+    // impossible to forget: a spent or closed handle reports 0 remaining
+    // forever and would otherwise own every later gap's attribution.
+    function release(): void {
+        const armed = armedDeadlines.get(clock)
+        if (armed === undefined) return
+        armed.delete(deadline)
+        if (armed.size === 0) armedDeadlines.delete(clock)
+    }
 
-    return {
+    const deadline: AwakeDeadline = {
         budget: input.budget,
         timeoutMs: input.timeoutMs,
         awakeRemainingMs,
@@ -259,6 +277,14 @@ export function createAwakeDeadline(input: {
             closed = true
             if (handle !== undefined) clock.clearTimeout(handle)
             handle = undefined
+            release()
         },
     }
+
+    const armed = armedDeadlines.get(clock) ?? new Set<AwakeDeadline>()
+    armed.add(deadline)
+    armedDeadlines.set(clock, armed)
+    arm()
+
+    return deadline
 }

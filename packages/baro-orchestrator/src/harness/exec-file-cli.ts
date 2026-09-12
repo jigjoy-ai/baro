@@ -23,6 +23,7 @@ import {
     POSIX_PROCESS_GROUPS_SUPPORTED,
 } from "./process-tree.js"
 import { sharedAwakeClock, type AwakeClock } from "../runtime/awake-clock.js"
+import { trackAwakeBudget } from "../runtime/awake-clock-log.js"
 
 /**
  * How the timeout and idle watchdogs measure time.
@@ -165,6 +166,7 @@ function execFileCliRaw(
         const probeTimers = new Set<unknown>()
         let terminationError: Error | undefined
         let treeRefreshed = false
+        const budgetReleases: Array<() => void> = []
 
         const finish = (fn: () => void): void => {
             if (settled) return
@@ -173,6 +175,8 @@ function execFileCliRaw(
             if (idleTimer) timers.clearTimeout(idleTimer)
             for (const handle of probeTimers) timers.clearTimeout(handle)
             probeTimers.clear()
+            for (const release of budgetReleases) release()
+            budgetReleases.length = 0
             options.signal?.removeEventListener("abort", onAbort)
             fn()
         }
@@ -231,9 +235,17 @@ function execFileCliRaw(
                 terminate(err)
             }
             timer = timers.setTimeout(onCeiling, timeoutMs)
+            budgetReleases.push(
+                trackAwakeBudget({
+                    budget: "exec-file-cli-absolute",
+                    awakeRemainingMs: () =>
+                        Math.max(0, deadlineAwakeMs - clock.awakeNow()),
+                }),
+            )
         }
         const idleMs = options.idleTimeoutMs
         let cpuSample: CpuActivitySample | null = null
+        let idleDeadlineAwakeMs = 0
         // Bumped by every pet, so a probe that was still in flight when output
         // finally arrived cannot kill the process it was asking about.
         let idleGeneration = 0
@@ -291,6 +303,7 @@ function execFileCliRaw(
             idleGeneration += 1
             const generation = idleGeneration
             const deadlineAwakeMs = clock.awakeNow() + idleMs
+            idleDeadlineAwakeMs = deadlineAwakeMs
             const absorbedAtArmMs = clock.absorbedGapMs()
             const onSilence = (): void => {
                 if (generation !== idleGeneration) return
@@ -302,6 +315,17 @@ function execFileCliRaw(
                 onIdleExpiry(generation)
             }
             idleTimer = timers.setTimeout(onSilence, idleMs)
+        }
+        if (idleMs && idleMs > 0) {
+            // Petting moves this window rather than replacing it, so a single
+            // registration reads whichever deadline is current.
+            budgetReleases.push(
+                trackAwakeBudget({
+                    budget: "exec-file-cli-idle",
+                    awakeRemainingMs: () =>
+                        Math.max(0, idleDeadlineAwakeMs - clock.awakeNow()),
+                }),
+            )
         }
         petIdle()
         options.signal?.addEventListener("abort", onAbort, { once: true })

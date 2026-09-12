@@ -6,7 +6,12 @@
  */
 
 import { emit } from "../tui-protocol.js"
-import { sharedAwakeClock, type AwakeBudgetName, type AwakeClock } from "./awake-clock.js"
+import {
+    armedAwakeDeadlines,
+    sharedAwakeClock,
+    type AwakeBudgetName,
+    type AwakeClock,
+} from "./awake-clock.js"
 
 /** Enough of an AwakeDeadline to name and rank it; keeps the registry usable
  *  from any adopter without importing the handle's full shape. */
@@ -18,8 +23,10 @@ export interface TrackedAwakeBudget {
 const trackedBudgets = new Set<TrackedAwakeBudget>()
 
 /**
- * Registers an armed deadline so a gap can name the budget it hit. The clock
- * knows nothing about its adopters, so an unregistered gap is reported as "*".
+ * Registers a budget that owns no AwakeDeadline — a window armed through
+ * another timer seam. Deadlines register themselves with their clock, so only
+ * these hand-rolled windows need this; anything unregistered when a gap lands
+ * is reported as "*".
  */
 export function trackAwakeBudget(deadline: TrackedAwakeBudget): () => void {
     trackedBudgets.add(deadline)
@@ -31,13 +38,15 @@ export function trackAwakeBudget(deadline: TrackedAwakeBudget): () => void {
 /** The armed budget closest to expiry — the one a gap most endangered. A
  *  handle that is closed or already spent reports 0 remaining forever and
  *  would otherwise win every later attribution, so zero remaining is skipped. */
-function affectedBudget(): string {
+function affectedBudget(clock: AwakeClock): string {
     let affected: TrackedAwakeBudget | undefined
-    for (const tracked of trackedBudgets) {
+    let affectedRemainingMs = Number.POSITIVE_INFINITY
+    for (const tracked of [...armedAwakeDeadlines(clock), ...trackedBudgets]) {
         const remainingMs = tracked.awakeRemainingMs()
         if (remainingMs <= 0) continue
-        if (affected === undefined || remainingMs < affected.awakeRemainingMs()) {
+        if (remainingMs < affectedRemainingMs) {
             affected = tracked
+            affectedRemainingMs = remainingMs
         }
     }
     return affected?.budget ?? "*"
@@ -62,7 +71,7 @@ export function installAwakeGapReporter(
         emit({
             type: "suspension_gap_absorbed",
             gap_ms: gap.gapMs,
-            budget: affectedBudget(),
+            budget: affectedBudget(clock),
             awake_elapsed_ms: wallElapsedMs - absorbedSinceOriginMs,
             wall_elapsed_ms: wallElapsedMs,
         })
