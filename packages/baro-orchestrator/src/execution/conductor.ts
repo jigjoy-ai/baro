@@ -44,6 +44,10 @@ import { BaseObserver, Participant, SemanticEvent } from "../runtime/mozaik.js"
 import { AgenticEnvironment } from "../runtime/mozaik.js"
 import { buildDag } from "../runtime-graph/dag.js"
 import { envNonNegativeInt } from "../runtime/env-int.js"
+import {
+    sharedAwakeClock,
+    type AwakeClock,
+} from "../runtime/awake-clock.js"
 import { validatePrdArchitectureObligationCoverage } from "../planning/domain/architecture-obligation-contract.js"
 import { deriveGoalContract } from "../goal/goal-contract.js"
 import {
@@ -129,6 +133,9 @@ export interface ConductorOptions {
      * control plane sets the env var for cloud runs.
      */
     softDeadlineSecs?: number
+    /** Time base for the soft deadline, so a machine suspend cannot spend the
+     * run. Default: the process-wide awake clock. */
+    awakeClock?: AwakeClock
 }
 
 export interface ConductorRunSummary {
@@ -222,6 +229,7 @@ export class Conductor extends BaseObserver {
     private replansSinceProgress = 0
     private readonly replanProgressBudget: number
     private readonly softDeadlineSecs: number
+    private readonly clock: AwakeClock
 
     private currentLevel: RunningLevelState | null = null
 
@@ -270,6 +278,7 @@ export class Conductor extends BaseObserver {
             envNonNegativeInt("BARO_REPLAN_PROGRESS_BUDGET", 3)
         this.softDeadlineSecs =
             opts.softDeadlineSecs ?? envNonNegativeInt("BARO_RUN_SOFT_DEADLINE_SECS", 0)
+        this.clock = opts.awakeClock ?? sharedAwakeClock()
         this.done = new Promise<ConductorRunSummary>((resolve) => {
             this.resolveDone = resolve
         })
@@ -335,7 +344,7 @@ export class Conductor extends BaseObserver {
     private async handleRunStart(): Promise<void> {
         if (this.phase !== "idle") return
         this.phase = "launching"
-        this.startedAt = Date.now()
+        this.startedAt = this.clock.awakeNow()
 
         this.prd = loadPrd(this.opts.prdPath)
         try {
@@ -803,7 +812,9 @@ export class Conductor extends BaseObserver {
     private terminateRun(success: boolean, abortReason: string | null): void {
         if (this.phase === "done") return
         this.phase = "done"
-        const totalDurationSecs = Math.round((Date.now() - this.startedAt) / 1000)
+        const totalDurationSecs = Math.round(
+            (this.clock.awakeNow() - this.startedAt) / 1000,
+        )
 
         const droppedSegment = this.globalDropped.length > 0
             ? `, ${this.globalDropped.length} dropped`
@@ -903,7 +914,7 @@ export class Conductor extends BaseObserver {
 
     private softDeadlineReason(): string | null {
         if (this.softDeadlineSecs <= 0) return null
-        const elapsedSecs = (Date.now() - this.startedAt) / 1000
+        const elapsedSecs = (this.clock.awakeNow() - this.startedAt) / 1000
         if (elapsedSecs < this.softDeadlineSecs) return null
         return `soft deadline reached (${this.softDeadlineSecs}s) — stopping so completed work can ship`
     }

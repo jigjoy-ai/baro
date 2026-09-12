@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { Conductor } from "../../src/execution/conductor.js"
+import { createFakeAwakeClock } from "../../src/runtime/awake-clock.js"
 import type { PrdFile } from "../../src/prd.js"
 import {
     ConductorState,
@@ -590,6 +591,98 @@ The boundary is independently callable.
             assert.match(completed.data.abortReason ?? "", /soft deadline reached/)
             assert.deepEqual(completed.data.completedStories, ["S1"])
             // S2 was never spawned — the run stopped before the next level.
+            assert.equal(env.events.filter(StorySpawnRequest.is).length, 1)
+        })
+    })
+
+    it("does not spend the soft deadline on a multi-hour suspension, but still trips at the same awake elapsed", async () => {
+        await withTempDir("conductor-awake-suspend-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            const prd = oneStoryPrd()
+            prd.userStories.push(
+                { ...prd.userStories[0], id: "S2", title: "Second", dependsOn: ["S1"] },
+                { ...prd.userStories[0], id: "S3", title: "Third", dependsOn: ["S2"] },
+            )
+            writeFileSync(prdPath, JSON.stringify(prd, null, 2) + "\n")
+
+            const clock = createFakeAwakeClock()
+            const conductor = new Conductor({
+                prdPath,
+                cwd: dir,
+                parallel: 1,
+                timeoutSecs: 45,
+                defaultModel: "sonnet",
+                intraLevelDelaySecs: 0,
+                softDeadlineSecs: 1_800,
+                awakeClock: clock,
+            })
+            const env = joinWithCapture(conductor)
+
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "unit test" }),
+            )
+            await waitForEvents(env.events, StorySpawnRequest.is, 1)
+
+            // Four hours asleep inside a 30-minute budget spends none of it.
+            clock.suspend(4 * 60 * 60_000)
+            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+            const spawned = await waitForEvents(env.events, StorySpawnRequest.is, 2)
+            assert.deepEqual(
+                spawned.map((event) => event.data.storyId),
+                ["S1", "S2"],
+            )
+            assert.equal(env.events.some(RunCompleted.is), false)
+
+            // The same budget, reached as awake time, still stops the run.
+            clock.advance(1_800_000)
+            env.deliverSemanticEvent(source("S2"), passResult("S2"))
+            const completed = await waitForEvent(env.events, RunCompleted.is)
+            assert.equal(completed.data.success, false)
+            assert.match(completed.data.abortReason ?? "", /soft deadline reached/)
+            assert.deepEqual(completed.data.completedStories, ["S1", "S2"])
+            assert.equal(env.events.filter(StorySpawnRequest.is).length, 2)
+        })
+    })
+
+    it("trips the soft deadline at a level boundary on awake elapsed with no suspension", async () => {
+        await withTempDir("conductor-awake-elapsed-", async (dir) => {
+            const prdPath = join(dir, "prd.json")
+            const prd = oneStoryPrd()
+            prd.userStories.push({
+                ...prd.userStories[0],
+                id: "S2",
+                title: "Second",
+                dependsOn: ["S1"],
+            })
+            writeFileSync(prdPath, JSON.stringify(prd, null, 2) + "\n")
+
+            const clock = createFakeAwakeClock()
+            const conductor = new Conductor({
+                prdPath,
+                cwd: dir,
+                parallel: 1,
+                timeoutSecs: 45,
+                defaultModel: "sonnet",
+                intraLevelDelaySecs: 0,
+                softDeadlineSecs: 1_800,
+                awakeClock: clock,
+            })
+            const env = joinWithCapture(conductor)
+
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "unit test" }),
+            )
+            await waitForEvents(env.events, StorySpawnRequest.is, 1)
+
+            clock.advance(1_800_000)
+            env.deliverSemanticEvent(source("S1"), passResult("S1"))
+
+            const completed = await waitForEvent(env.events, RunCompleted.is)
+            assert.equal(completed.data.success, false)
+            assert.match(completed.data.abortReason ?? "", /soft deadline reached/)
+            assert.deepEqual(completed.data.completedStories, ["S1"])
             assert.equal(env.events.filter(StorySpawnRequest.is).length, 1)
         })
     })
