@@ -23,6 +23,13 @@ import {
     goalCompletionFailure,
 } from "../runtime/run-completion.js"
 import { NamedTimers } from "../runtime/named-timers.js"
+import {
+    AWAKE_SPLIT_MAX_DELAY_MS,
+    createAwakeDeadline,
+    sharedAwakeClock,
+    type AwakeClock,
+    type AwakeDeadline,
+} from "../runtime/awake-clock.js"
 import { WorkOfferDesk } from "../market/work-offer-desk.js"
 import {
     RuntimeReplanRetractionTimedOut,
@@ -157,6 +164,9 @@ export interface CollectiveBoardOptions {
      * stores. Production defaults to the PRD atomic writer. */
     runtimeReplanPersist?: (path: string, prd: PrdFile) => void
     softDeadlineSecs?: number
+    /** Time base for every budget on this board, so a machine suspend
+     * cannot spend the run. Default: the process-wide awake clock. */
+    awakeClock?: AwakeClock
     /** Gate a clean completion on objective build/test verification. */
     verifyBeforePush?: boolean
     /** Fail closed if the verifier never answers. Default: 21 minutes. */
@@ -372,11 +382,12 @@ export class CollectiveBoard extends SerializedObserver {
     private stopReason: string | null = null
     private readonly verificationGate: VerificationGoalGate
     private readonly timers = new NamedTimers<
-        | "softDeadline"
         | "operationalRetry"
         | "goalRemediationRetry"
         | "offerRetraction"
     >()
+    private readonly clock: AwakeClock
+    private softDeadline: AwakeDeadline | null = null
     private operationalRetryDueAt: number | null = null
     readonly done: Promise<ConductorRunSummary>
     private resolveDone!: (summary: ConductorRunSummary) => void
@@ -464,6 +475,7 @@ export class CollectiveBoard extends SerializedObserver {
         this.runtimeAdaptationBudget =
             opts.runtimeAdaptationBudget ??
             envNonNegativeInt("BARO_RUNTIME_ADAPTATION_BUDGET", 6)
+        this.clock = opts.awakeClock ?? sharedAwakeClock()
         this.softDeadlineSecs =
             opts.softDeadlineSecs ??
             envNonNegativeInt("BARO_RUN_SOFT_DEADLINE_SECS", 0)
@@ -1065,7 +1077,7 @@ export class CollectiveBoard extends SerializedObserver {
     private start(): void {
         if (this.phase !== "idle") return
         this.phase = "preparing"
-        this.startedAt = Date.now()
+        this.startedAt = this.clock.awakeNow()
         this.prd = this.progressivePlanning.initialize(loadPrd(this.opts.prdPath))
         validatePrdArchitectureObligationCoverage(
             this.prd,
@@ -3055,6 +3067,7 @@ export class CollectiveBoard extends SerializedObserver {
     private requestPush(reason: string | null): void {
         if (this.phase !== "running" && this.phase !== "verifying") return
         this.timers.clearAll()
+        this.clearSoftDeadlineTimer()
         this.operationalRetryDueAt = null
         this.verificationGate.releasePendings()
         this.stopReason = reason
@@ -3142,7 +3155,7 @@ export class CollectiveBoard extends SerializedObserver {
 
     private softDeadlineReason(): string | null {
         if (this.softDeadlineSecs <= 0) return null
-        const elapsedSecs = (Date.now() - this.startedAt) / 1_000
+        const elapsedSecs = (this.clock.awakeNow() - this.startedAt) / 1_000
         return elapsedSecs >= this.softDeadlineSecs
             ? `soft deadline reached (${this.softDeadlineSecs}s) — stopping so completed work can ship`
             : null
@@ -3152,26 +3165,32 @@ export class CollectiveBoard extends SerializedObserver {
         if (this.softDeadlineSecs <= 0) return Number.MAX_SAFE_INTEGER
         return Math.max(
             0,
-            this.startedAt + this.softDeadlineSecs * 1_000 - Date.now(),
+            this.startedAt + this.softDeadlineSecs * 1_000 - this.clock.awakeNow(),
         )
     }
 
     private armSoftDeadlineTimer(): void {
-        this.timers.clear("softDeadline")
+        this.clearSoftDeadlineTimer()
         if (this.softDeadlineSecs <= 0 || this.startedAt <= 0) return
         const startedAt = this.startedAt
-        const delayMs = Math.max(
-            0,
-            Math.min(this.softDeadlineRemainingMs(), 2_147_483_647),
-        )
-        this.timers.arm("softDeadline", delayMs, () => {
-            this.emit(
-                SoftDeadlineReached.create({
-                    runId: this.opts.runId,
-                    startedAt,
-                }),
-            )
+        this.softDeadline = createAwakeDeadline({
+            budget: "board-soft-deadline",
+            timeoutMs: this.softDeadlineRemainingMs(),
+            clock: this.clock,
+            onExpired: () => {
+                this.emit(
+                    SoftDeadlineReached.create({
+                        runId: this.opts.runId,
+                        startedAt,
+                    }),
+                )
+            },
         })
+    }
+
+    private clearSoftDeadlineTimer(): void {
+        this.softDeadline?.close()
+        this.softDeadline = null
     }
 
     private onSoftDeadlineReached(deadline: SoftDeadlineReachedData): void {
@@ -3195,8 +3214,11 @@ export class CollectiveBoard extends SerializedObserver {
     }
 
     private scheduleOperationalRetry(delayMs: number): void {
-        const boundedDelay = Math.max(0, Math.min(delayMs, 2_147_483_647))
-        const dueAt = Date.now() + boundedDelay
+        const boundedDelay = Math.max(
+            0,
+            Math.min(delayMs, AWAKE_SPLIT_MAX_DELAY_MS),
+        )
+        const dueAt = this.clock.awakeNow() + boundedDelay
         if (
             this.timers.isArmed("operationalRetry") &&
             this.operationalRetryDueAt !== null &&
@@ -3243,10 +3265,13 @@ export class CollectiveBoard extends SerializedObserver {
     private terminate(success: boolean, abortReason: string | null): void {
         if (this.phase === "done") return
         this.timers.clearAll()
+        this.clearSoftDeadlineTimer()
         this.verificationGate.releasePendings()
         this.operationalRetryDueAt = null
         this.phase = "done"
-        const totalDurationSecs = Math.round((Date.now() - this.startedAt) / 1_000)
+        const totalDurationSecs = Math.round(
+            (this.clock.awakeNow() - this.startedAt) / 1_000,
+        )
         const failedStories = this.prd
             ? this.prd.userStories
                   .filter((story) => !story.passes)
