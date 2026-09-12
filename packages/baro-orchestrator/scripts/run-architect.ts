@@ -46,6 +46,13 @@ import {
     parseGoalConstraintContract,
 } from "../src/goal/goal-constraint-appendix.js"
 import { runArchitectOpenAI } from "../src/planning/adapters/architect-openai.js"
+import {
+    createAwakeDeadline,
+    sharedAwakeClock,
+    type AwakeBudgetName,
+    type AwakeClock,
+} from "../src/runtime/awake-clock.js"
+import { installAwakeGapReporter } from "../src/runtime/awake-clock-log.js"
 import { runArchitectOpenCode } from "../src/planning/adapters/architect-opencode.js"
 import { runArchitectPi } from "../src/planning/adapters/architect-pi.js"
 import { providerCallTimeoutError } from "../src/harness/openai/runtime.js"
@@ -262,6 +269,10 @@ function logContractNote(note: ContractNote): void {
     process.stderr.write(`[architect] ${note.detail}\n`)
 }
 
+/** Named on the stderr gap line: the only kill-capable awake deadline this
+ *  script arms itself, so a gap outside it is reported as unattributed. */
+let armedAwakeBudget: AwakeBudgetName | null = null
+
 async function main(): Promise<void> {
     const args = parseArgs(process.argv.slice(2))
     const outcomeMode = args.outcomeFile !== undefined
@@ -325,7 +336,17 @@ async function main(): Promise<void> {
             "\n",
     )
 
-    const t0 = Date.now()
+    const clock = sharedAwakeClock()
+    const t0 = clock.awakeNow()
+    // stdout carries the BaroEvent stream only in result/outcome mode; in the
+    // legacy mode it is the decision document and must stay unpolluted.
+    if (process.env.BARO_PLAN_EVENTS === "1") installAwakeGapReporter(clock)
+    clock.onGapAbsorbed((gap) => {
+        process.stderr.write(
+            `[run-architect] awake-clock: absorbed ${gap.gapMs}ms suspension gap ` +
+                `(budget=${armedAwakeBudget ?? "*"})\n`,
+        )
+    })
     const billingRunId = process.env.BARO_RUN_ID ?? `architect-${randomUUID()}`
     let billing: GatewayBillingCoordinator | null = null
     let result = ""
@@ -397,7 +418,7 @@ async function main(): Promise<void> {
         result = await issueDecisionPhase()
         if (
             args.outcomeFile &&
-            Date.now() - t0 >= architectPhaseBudgetMs(args)
+            clock.awakeNow() - t0 >= architectPhaseBudgetMs(args)
         ) {
             throw architectDeadlineError(
                 architectPhaseBudgetMs(args),
@@ -426,7 +447,7 @@ async function main(): Promise<void> {
                         : null
                 if (
                     (!overrun && !contractReason) ||
-                    Date.now() - t0 >= architectPhaseBudgetMs(args)
+                    clock.awakeNow() - t0 >= architectPhaseBudgetMs(args)
                 ) {
                     throw error
                 }
@@ -472,6 +493,7 @@ async function main(): Promise<void> {
                           billing,
                           billingRunId,
                           startedAtMs: t0,
+                          awakeClock: clock,
                           resolvedModel: resolvedArchitectRoute.model,
                           }),
                           decisionOutcome.constraintPredicates,
@@ -508,12 +530,12 @@ async function main(): Promise<void> {
 
     if (failure !== undefined) {
         process.stderr.write(
-            `[run-architect] FAILED after ${Date.now() - t0}ms: ${sanitizeDiagnosticText(describeProviderError(failure)).slice(0, 16_384)}\n`,
+            `[run-architect] FAILED after ${clock.awakeNow() - t0}ms: ${sanitizeDiagnosticText(describeProviderError(failure)).slice(0, 16_384)}\n`,
         )
         process.exitCode = 1
         return
     }
-    process.stderr.write(`[run-architect] ok in ${Date.now() - t0}ms (${result.length} chars)\n`)
+    process.stderr.write(`[run-architect] ok in ${clock.awakeNow() - t0}ms (${result.length} chars)\n`)
     if (args.outcomeFile) {
         writeFileAtomic(args.outcomeFile, JSON.stringify(outcomeTransport!))
         return
@@ -752,10 +774,13 @@ async function compileObligations(input: {
     billing: GatewayBillingCoordinator | null
     billingRunId: string
     startedAtMs: number
+    /** Same instance that stamped startedAtMs: both are awake timestamps. */
+    awakeClock: AwakeClock
     resolvedModel?: string
 }): Promise<string> {
+    const clock = input.awakeClock
     const totalBudgetMs = architectPhaseBudgetMs(input.args)
-    const remainingMs = totalBudgetMs - (Date.now() - input.startedAtMs)
+    const remainingMs = totalBudgetMs - (clock.awakeNow() - input.startedAtMs)
     if (remainingMs < 1) {
         throw architectDeadlineError(totalBudgetMs, "obligation compilation")
     }
@@ -766,7 +791,13 @@ async function compileObligations(input: {
         totalBudgetMs,
         "obligation compilation",
     )
-    const timer = setTimeout(() => controller.abort(timeoutError), remainingMs)
+    armedAwakeBudget = "architect-obligations"
+    const deadline = createAwakeDeadline({
+        budget: "architect-obligations",
+        timeoutMs: remainingMs,
+        onExpired: () => controller.abort(timeoutError),
+        clock,
+    })
     let callOrdinal = 0
     try {
         const responder = createDialogueResponder({
@@ -849,14 +880,15 @@ async function compileObligations(input: {
         // the successful child callback happens to run first.
         if (
             controller.signal.aborted ||
-            Date.now() - input.startedAtMs >= totalBudgetMs
+            clock.awakeNow() - input.startedAtMs >= totalBudgetMs
         ) throw timeoutError
         return compiled.decisionDocument
     } catch (error) {
         if (controller.signal.aborted) throw timeoutError
         throw error
     } finally {
-        clearTimeout(timer)
+        deadline.close()
+        armedAwakeBudget = null
         rmSync(runtimeCwd, { recursive: true, force: true })
     }
 }
