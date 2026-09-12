@@ -1,5 +1,6 @@
 mod app;
 mod architect_runner;
+mod awake_clock;
 mod branch_authority;
 mod cli;
 mod config;
@@ -3208,6 +3209,7 @@ async fn run_app(
             }
             Some(AppEvent::Tick) => {
                 app.tick_count += 1;
+                awake_clock::sample_global();
             }
             None => break,
         }

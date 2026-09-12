@@ -2137,6 +2137,7 @@ impl App {
         }
     }
 
+    // Instant excludes machine suspend by construction, so this is awake time.
     pub fn elapsed_secs(&self) -> u64 {
         if self.done {
             self.total_time_secs
