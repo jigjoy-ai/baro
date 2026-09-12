@@ -6,6 +6,7 @@ import type { FunctionCallOutputItem, Participant, SemanticEvent } from "../runt
 import { AgentResult, ClaudeStreamChunk } from "../events/harness-stream.js"
 import { ClaudeCliParticipant } from "../harness/claude/cli-participant.js"
 import type { HostFunction } from "../harness/lane-adapter.js"
+import { headline } from "./headline.js"
 import { HostToolsRelay, OPERATOR_MCP_SERVER_NAME } from "./host-tools-relay.js"
 import { RunRegistry } from "./run-registry.js"
 import type { OperatorUi, TurnResult } from "./ui.js"
@@ -140,10 +141,10 @@ export async function runOperator(options: OperatorOptions, ui: OperatorUi): Pro
                 const { run, behind } = registry.delegate(goal.trim(), target)
                 ui.runsChanged(registry.rows())
                 if (behind) {
-                    ui.note(`${run.id} · queued behind ${behind.id}: ${run.goal.slice(0, 80)}`)
+                    ui.note(`${run.id} · queued behind ${behind.id}: ${headline(run.goal, 80)}`)
                     return `${run.id} queued behind ${behind.id}: baro allows one run per repository at a time, so it starts automatically the moment ${behind.id} exits. Tell the user it is queued, not running. stop ${behind.id} only if the user asks for that.`
                 }
-                ui.note(`${run.id} · delegated: ${run.goal.slice(0, 90)}`)
+                ui.note(`${run.id} · delegated: ${headline(run.goal, 90)}`)
                 return `${run.id} started in the background (cwd ${run.cwd}). Intake and planning take a few minutes before stories start; ask run_status for progress.`
             },
         },
@@ -337,9 +338,15 @@ export async function runOperator(options: OperatorOptions, ui: OperatorUi): Pro
 
 class Renderer extends BaseObserver {
     /** Tool calls in flight, by content block index; input arrives as JSON deltas. */
-    private readonly toolBlocks = new Map<number, { name: string; json: string }>()
-    /** Claude Code's internal schema loader; neither its call nor its result is news. */
-    private hiddenResults = 0
+    private readonly toolBlocks = new Map<number, { id: string; name: string; json: string }>()
+    /** Calls drawn as a line, by tool_use id. A result whose call was never
+     * drawn is a subagent's internal step (Agent tool) or Claude Code's own
+     * schema loader (ToolSearch); neither is news to the person. */
+    private readonly drawnCalls = new Set<string>()
+    /** A turn spans several model messages (text, tools, text again); the
+     * stream carries no break between them, so one is drawn on demand. */
+    private textInTurn = false
+    private breakPending = false
 
     constructor(
         private readonly ui: OperatorUi,
@@ -349,10 +356,7 @@ class Renderer extends BaseObserver {
     }
 
     override onExternalFunctionCallOutput(_source: Participant, item: FunctionCallOutputItem): void {
-        if (this.hiddenResults > 0) {
-            this.hiddenResults -= 1
-            return
-        }
+        if (!this.drawnCalls.delete(item.callId)) return
         this.ui.toolResult(summarizeToolOutput(item.output))
     }
 
@@ -362,6 +366,8 @@ class Renderer extends BaseObserver {
             return
         }
         if (AgentResult.is(event) && event.data.agentId === AGENT_ID) {
+            this.textInTurn = false
+            this.breakPending = false
             this.onResult({ durationMs: event.data.durationMs, totalCostUsd: event.data.totalCostUsd })
         }
     }
@@ -373,16 +379,31 @@ class Renderer extends BaseObserver {
         const index = typeof inner.index === "number" ? inner.index : -1
         const delta = inner.delta as Record<string, unknown> | undefined
         switch (inner.type) {
+            case "message_start": {
+                this.breakPending = this.textInTurn
+                return
+            }
             case "content_block_start": {
                 const block = inner.content_block as Record<string, unknown> | undefined
                 if (block?.type === "tool_use") {
-                    this.toolBlocks.set(index, { name: String(block.name ?? "tool"), json: "" })
+                    this.toolBlocks.set(index, {
+                        id: String(block.id ?? ""),
+                        name: String(block.name ?? "tool"),
+                        json: "",
+                    })
                 }
                 return
             }
             case "content_block_delta": {
                 if (delta?.type === "text_delta") {
-                    this.ui.stream(String(delta.text ?? ""))
+                    const text = String(delta.text ?? "")
+                    if (!text) return
+                    if (this.breakPending) {
+                        this.ui.stream("\n\n")
+                        this.breakPending = false
+                    }
+                    this.textInTurn = true
+                    this.ui.stream(text)
                 } else if (delta?.type === "input_json_delta") {
                     const pending = this.toolBlocks.get(index)
                     if (pending) pending.json += String(delta.partial_json ?? "")
@@ -399,11 +420,9 @@ class Renderer extends BaseObserver {
                 } catch {
                     input = {}
                 }
-                if (pending.name === "ToolSearch") {
-                    this.hiddenResults += 1
-                    return
-                }
+                if (pending.name === "ToolSearch") return
                 const name = pending.name.replace(`mcp__${OPERATOR_MCP_SERVER_NAME}__`, "baro ")
+                this.drawnCalls.add(pending.id)
                 this.ui.toolCall(name, summarizeToolInput(name, input))
                 return
             }

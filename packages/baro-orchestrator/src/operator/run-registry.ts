@@ -3,6 +3,7 @@ import { existsSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { createInterface } from "node:readline"
 
+import { headline } from "./headline.js"
 import { parseLine } from "./protocol.js"
 import type { RunRow } from "./ui.js"
 import {
@@ -139,7 +140,7 @@ export class RunRegistry {
                 phase: run.startedAt === null ? "queued" : s.phase,
                 completed: s.completed,
                 total: s.total > 0 ? s.total : s.storiesTotal,
-                goal: run.goal,
+                goal: headline(run.goal, 200),
                 elapsed: elapsed(run),
                 startedMs: run.startedAt ?? undefined,
                 finishedMs: run.finishedAt ?? undefined,
@@ -166,7 +167,7 @@ export class RunRegistry {
                 const progress =
                     s.total > 0 ? ` ${s.completed}/${s.total}` : s.storiesTotal ? ` ${s.storiesTotal} stories` : ""
                 const phase = run.startedAt === null ? `queued behind ${this.active.get(run.cwd) ?? "?"}` : s.phase
-                return `${run.id} [${state}] ${phase}${progress} · ${elapsed(run)} · ${run.goal.slice(0, 70)}`
+                return `${run.id} [${state}] ${phase}${progress} · ${elapsed(run)} · ${headline(run.goal, 70)}`
             })
             .join("\n")
     }
