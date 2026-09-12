@@ -8,6 +8,10 @@ import type { PrdFile } from "../../src/prd.js"
 import {
     sharedAbortCode, CollectiveBoard } from "../../src/execution/collective-board.js"
 import {
+    createFakeAwakeClock,
+    type FakeAwakeClock,
+} from "../../src/runtime/awake-clock.js"
+import {
     deriveGoalContract,
     GoalInvariantLedger,
 } from "../../src/goal/goal-contract.js"
@@ -1108,6 +1112,76 @@ describe("CollectiveBoard", () => {
             assert.match(summary.abortReason ?? "", /soft deadline reached/)
             assert.match(summary.abortReason ?? "", /preparation was still pending/)
             assert.equal(env.events.some(RunPushRequested.is), false)
+        })
+    })
+
+    it("does not spend the soft deadline on a multi-hour suspension, but still trips at the same awake elapsed", async () => {
+        await withTempDir("collective-awake-suspend-", async (dir) => {
+            const runId = "run-awake-suspend"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const clock = createFakeAwakeClock()
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                softDeadlineSecs: 1_800,
+                awakeClock: clock,
+            })
+            const env = joinWithCapture(board)
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "test" }),
+            )
+            await waitForArmedDeadline(clock)
+
+            // Four hours asleep inside a 30-minute budget: the timer fires on
+            // wake, re-checks awake time and re-arms instead of expiring.
+            clock.suspend(4 * 60 * 60_000)
+            await flush()
+            assert.equal(env.events.some(isSoftDeadlineReached), false)
+            assert.equal(env.events.some(RunCompleted.is), false)
+            assert.deepEqual(clock.pendingDelays(), [60_000])
+
+            // The same budget, reached as awake time, still stops the run.
+            clock.advance(1_800_000)
+            await waitFor(env.events, RunCompleted.is)
+            assert.equal(env.events.filter(isSoftDeadlineReached).length, 1)
+            const summary = await board.done
+            assert.equal(summary.success, false)
+            assert.match(summary.abortReason ?? "", /soft deadline reached \(1800s\)/)
+            assert.match(summary.abortReason ?? "", /preparation was still pending/)
+        })
+    })
+
+    it("trips the soft deadline on awake elapsed with no suspension", async () => {
+        await withTempDir("collective-awake-elapsed-", async (dir) => {
+            const runId = "run-awake-elapsed"
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify(prd(), null, 2) + "\n")
+            const clock = createFakeAwakeClock()
+            const board = new CollectiveBoard({
+                runId,
+                prdPath,
+                cwd: dir,
+                timeoutSecs: 60,
+                softDeadlineSecs: 1_800,
+                awakeClock: clock,
+            })
+            const env = joinWithCapture(board)
+            env.deliverSemanticEvent(
+                source("operator"),
+                RunStartRequest.create({ reason: "test" }),
+            )
+            await waitForArmedDeadline(clock)
+
+            clock.advance(1_800_000)
+            await waitFor(env.events, RunCompleted.is)
+            assert.equal(env.events.filter(isSoftDeadlineReached).length, 1)
+            const summary = await board.done
+            assert.equal(summary.success, false)
+            assert.match(summary.abortReason ?? "", /soft deadline reached \(1800s\)/)
         })
     })
 
@@ -2647,6 +2721,18 @@ async function waitForCount<T>(
         await flush()
     }
     assert.fail(`timed out waiting for ${count} events`)
+}
+
+function isSoftDeadlineReached(event: unknown): boolean {
+    return (event as { type?: string }).type === "collective_soft_deadline_reached"
+}
+
+async function waitForArmedDeadline(clock: FakeAwakeClock): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (clock.pendingDelays().length > 0) return
+        await flush()
+    }
+    assert.fail("timed out waiting for the soft deadline to be armed")
 }
 
 async function flush(): Promise<void> {

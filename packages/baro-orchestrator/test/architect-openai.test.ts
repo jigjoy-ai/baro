@@ -31,6 +31,7 @@ import {
 } from "../src/harness/openai/runtime.js"
 import { createDialogueResponder } from "../src/conversation/dialogue-responder.js"
 import { createCodebaseTools } from "../src/planning/adapters/codebase-tools.js"
+import { createFakeAwakeClock } from "../src/runtime/awake-clock.js"
 
 const PARALLEL_MODE = {
     mode: "parallel" as const,
@@ -973,7 +974,77 @@ describe("ArchitectOpenAI bounded finalization", () => {
         assert.equal(invokes, 2)
         assert.deepEqual(sequence.toolCounts, [1, 1, 1, 1])
     })
+
+    it("does not spend the phase budget on time the machine was asleep", async () => {
+        const clock = createFakeAwakeClock()
+        const suspendedMs = 4 * 60 * 60 * 1_000
+        let delaysAfterSuspend: readonly number[] = []
+
+        const result = await runArchitectOpenAI({
+            goal: "Survive a laptop suspend inside the phase budget",
+            cwd: "/unused",
+            model: "glm-5.2",
+            modeContract: PARALLEL_MODE,
+            timeoutMs: 1_800_000,
+            awakeClock: clock,
+            testRuntime: {
+                model: new GenericOpenAIModel("glm-5.2"),
+                tools: [],
+                inferRound: async () => {
+                    // The phase deadline is armed only once this round yields,
+                    // so a synchronous suspend here would predate it.
+                    await tick()
+                    clock.suspend(suspendedMs)
+                    delaysAfterSuspend = clock.pendingDelays()
+                    return {
+                        items: [message(DECISION_DOCUMENT)],
+                        usage: undefined,
+                        billingInvocationId: null,
+                    }
+                },
+            },
+        })
+
+        assert.equal(result, DECISION_DOCUMENT)
+        assert.equal(clock.absorbedGapMs(), suspendedMs)
+        assert.deepEqual(
+            delaysAfterSuspend,
+            [60_000],
+            "the deadline must re-arm one hop instead of expiring on the gap",
+        )
+    })
+
+    it("still trips the phase budget at the same awake elapsed without a suspend", async () => {
+        const clock = createFakeAwakeClock()
+
+        await assert.rejects(
+            runArchitectOpenAI({
+                goal: "Spend the phase budget while awake",
+                cwd: "/unused",
+                model: "glm-5.2",
+                modeContract: PARALLEL_MODE,
+                timeoutMs: 1_800_000,
+                awakeClock: clock,
+                testRuntime: {
+                    model: new GenericOpenAIModel("glm-5.2"),
+                    tools: [],
+                    inferRound: async () => {
+                        await tick()
+                        clock.advance(1_800_000)
+                        return await new Promise<never>(() => {})
+                    },
+                },
+            }),
+            /phase timed out after 1800000ms/u,
+        )
+        assert.equal(clock.absorbedGapMs(), 0)
+    })
 })
+
+/** Yields to the macrotask queue so the caller's synchronous setup completes. */
+function tick(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0))
+}
 
 function call(callId: string): ContextItem {
     return FunctionCallItem.rehydrate({
