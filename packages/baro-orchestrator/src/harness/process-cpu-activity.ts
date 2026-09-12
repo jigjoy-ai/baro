@@ -14,8 +14,10 @@ import {
     descendantsFromParentPairs,
     POSIX_PROCESS_GROUPS_SUPPORTED,
 } from "./process-tree.js"
+import { sharedAwakeClock, type AwakeClock } from "../runtime/awake-clock.js"
 
 export interface CpuActivitySample {
+    /** Awake time, so a suspend cannot stretch the window this sample opens. */
     readonly at: number
     readonly totalCpuMs: number | null
     /** False when the platform or the probe could not report CPU time at all. */
@@ -96,6 +98,7 @@ const defaultReadTable: ProcessCpuTableReader = () =>
 export async function sampleProcessTreeCpu(
     rootPid: number,
     readTable: ProcessCpuTableReader = defaultReadTable,
+    clock: AwakeClock = sharedAwakeClock(),
 ): Promise<CpuActivitySample> {
     let rows: readonly ProcessCpuRow[] | null
     try {
@@ -103,7 +106,7 @@ export async function sampleProcessTreeCpu(
     } catch {
         rows = null
     }
-    if (!rows) return { at: Date.now(), totalCpuMs: null, observed: false }
+    if (!rows) return { at: clock.awakeNow(), totalCpuMs: null, observed: false }
 
     const tree = new Set<number>([
         rootPid,
@@ -116,7 +119,7 @@ export async function sampleProcessTreeCpu(
     for (const row of rows) {
         if (tree.has(row.pid)) totalCpuMs += row.cpuMs
     }
-    return { at: Date.now(), totalCpuMs, observed: true }
+    return { at: clock.awakeNow(), totalCpuMs, observed: true }
 }
 
 /** An unobservable tree counts as busy; the absolute ceiling is the backstop. */
@@ -140,14 +143,28 @@ export function cpuAdvanced(
  */
 export function createDefaultCpuActivityProbe(
     rootPid: number | undefined,
+    clock: AwakeClock = sharedAwakeClock(),
+    readTable: ProcessCpuTableReader = defaultReadTable,
 ): CpuActivityProbe {
     const baseline: Promise<CpuActivitySample> =
         rootPid === undefined
-            ? Promise.resolve({ at: Date.now(), totalCpuMs: null, observed: false })
-            : sampleProcessTreeCpu(rootPid)
+            ? Promise.resolve({
+                  at: clock.awakeNow(),
+                  totalCpuMs: null,
+                  observed: false,
+              })
+            : sampleProcessTreeCpu(rootPid, readTable, clock)
+    let windowAbsorbedMs = clock.absorbedGapMs()
     return async (pid, previous) => {
         const reference = previous ?? (await baseline)
-        const current = await sampleProcessTreeCpu(pid)
+        const current = await sampleProcessTreeCpu(pid, readTable, clock)
+        clock.sample()
+        const absorbedMs = clock.absorbedGapMs()
+        const sleptThrough = absorbedMs > windowAbsorbedMs
+        windowAbsorbedMs = absorbedMs
+        // A tree burns no CPU while the machine is asleep, so a window with a
+        // gap in it is no evidence of a hang. Re-baseline from this sample.
+        if (sleptThrough) return { active: true, sample: current }
         return { active: cpuAdvanced(reference, current), sample: current }
     }
 }
