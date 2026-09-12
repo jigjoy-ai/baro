@@ -13,10 +13,16 @@ import {
 } from "../harness/claude/critic.js"
 import {
     GOAL_REVIEW_STABLE_CAPTURE_BUDGET_MS,
+    goalReviewDeadlineNowMs,
     prepareGoalInvariantReview,
     verifyGoalInvariantReviewRepositoryFingerprint,
     type GoalInvariantReviewDeadline,
 } from "./goal-invariant-review-evidence.js"
+import {
+    createAwakeDeadline,
+    sharedAwakeClock,
+    type AwakeClock,
+} from "../runtime/awake-clock.js"
 import {
     GoalAggregateReviewCompleted,
     GoalAggregateReviewRequested,
@@ -128,6 +134,7 @@ export interface GoalInvariantReviewerOptions {
     overallTimeoutMs?: number
     /** Deterministic test/embedding seam; production uses exact Git evidence. */
     evidenceAdapter?: GoalInvariantReviewEvidenceAdapter
+    awakeClock?: AwakeClock
 }
 
 interface CachedReview {
@@ -142,6 +149,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
     private readonly settlementTimeoutMs: number
     private readonly overallTimeoutMs: number
     private readonly evidenceAdapter: GoalInvariantReviewEvidenceAdapter
+    private readonly awakeClock: AwakeClock
     private readonly verifications = new Map<string, RunVerificationCompletedData>()
     private readonly completed = new Map<string, CachedReview>()
     private readonly active = new Map<string, AbortController>()
@@ -188,6 +196,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
         if (this.overallTimeoutMs > MAX_GOAL_REVIEW_ROUND_TIMEOUT_MS) {
             throw new RangeError("goal reviewer overallTimeoutMs exceeds round timer range")
         }
+        this.awakeClock = opts.awakeClock ?? sharedAwakeClock()
         this.evidenceAdapter = opts.evidenceAdapter ?? {
             prepare: prepareGoalInvariantReview,
             verifyRepositoryFingerprint:
@@ -320,6 +329,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
                 const deadline = createGoalReviewDeadline(
                     controller.signal,
                     this.overallTimeoutMs,
+                    this.awakeClock,
                 )
                 try {
                     const data = await this.evaluate(event.data, deadline)
@@ -362,6 +372,7 @@ export class GoalInvariantReviewer extends SerializedObserver {
                 const deadline = createGoalReviewDeadline(
                     controller.signal,
                     this.overallTimeoutMs,
+                    this.awakeClock,
                 )
                 try {
                     let issue = this.currentEvidenceIssue(request)
@@ -790,6 +801,7 @@ class GoalReviewOverallDeadlineExceeded extends Error {
 function createGoalReviewDeadline(
     parentSignal: AbortSignal,
     timeoutMs: number,
+    clock: AwakeClock = sharedAwakeClock(),
 ): ActiveGoalReviewDeadline {
     const effectiveTimeoutMs = Math.max(1, timeoutMs)
     const controller = new AbortController()
@@ -801,16 +813,21 @@ function createGoalReviewDeadline(
     }
     parentSignal.addEventListener("abort", propagateParentAbort, { once: true })
     if (parentSignal.aborted) propagateParentAbort()
-    const timer = setTimeout(() => {
-        controller.abort(
-            new GoalReviewOverallDeadlineExceeded(effectiveTimeoutMs),
-        )
-    }, effectiveTimeoutMs)
-    const deadlineAt = Date.now() + effectiveTimeoutMs
+    const expiry = createAwakeDeadline({
+        budget: "goal-review",
+        timeoutMs: effectiveTimeoutMs,
+        onExpired: () => {
+            controller.abort(
+                new GoalReviewOverallDeadlineExceeded(effectiveTimeoutMs),
+            )
+        },
+        clock,
+    })
+    const deadlineAt = clock.awakeNow() + effectiveTimeoutMs
     let closePromise: Promise<void> | null = null
     const close = (): Promise<void> => {
         closePromise ??= (async () => {
-            clearTimeout(timer)
+            expiry.close()
             parentSignal.removeEventListener("abort", propagateParentAbort)
             await drainGoalReviewCleanup(cleanup)
         })()
@@ -819,6 +836,7 @@ function createGoalReviewDeadline(
     return {
         signal: controller.signal,
         deadlineAt,
+        awakeClock: clock,
         timeoutMs: effectiveTimeoutMs,
         registerCleanup: (operation) => {
             const settled = Promise.resolve(operation).then(
@@ -868,7 +886,7 @@ async function awaitGoalReviewEvidenceOperation<T>(
     operation: () => Promise<T>,
 ): Promise<T> {
     if (deadline.signal.aborted) throw goalReviewDeadlineError(deadline)
-    if (Date.now() >= deadline.deadlineAt) {
+    if (goalReviewDeadlineNowMs(deadline) >= deadline.deadlineAt) {
         throw new GoalReviewOverallDeadlineExceeded(deadline.timeoutMs)
     }
 
@@ -906,7 +924,7 @@ function assertGoalReviewCanDispatch(
             goalReviewInterruptionReason(deadline.signal),
         )
     }
-    if (Date.now() >= deadline.deadlineAt) {
+    if (goalReviewDeadlineNowMs(deadline) >= deadline.deadlineAt) {
         throw new GoalReviewDispatchPrevented(
             new GoalReviewOverallDeadlineExceeded(deadline.timeoutMs).message,
         )
