@@ -34,6 +34,7 @@ import {
 } from "./integration/git.js"
 import { capRunDiff } from "./integration/run-diff-cap.js"
 import { WorktreeManager } from "./integration/worktree.js"
+import { installAwakeGapReporter } from "./runtime/awake-clock-log.js"
 import { StoryOutcomeAuthority } from "./runtime/story-outcome-authority.js"
 import { deriveGoalContract } from "./goal/goal-contract.js"
 import { buildDag } from "./runtime-graph/dag.js"
@@ -1774,6 +1775,9 @@ export async function orchestrate(
     // Emit `init` + `dag` before any agent spawns — without `dag` the TUI's
     // DAG tab sits on "Waiting for DAG data…" forever.
     if (emitTui) {
+        // Absorbed suspension gaps reach the stream from here only; a second
+        // call reuses this subscription, so one gap is never reported twice.
+        installAwakeGapReporter()
         const prd = loadPrd(config.prdPath)
         emit({
             type: "init",

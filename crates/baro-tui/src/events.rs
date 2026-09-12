@@ -209,9 +209,17 @@ pub enum BaroEvent {
 
     /// Full backend-neutral measurement. The current UI keeps using the
     /// compatibility TokenUsage projection while Cloud/audit consume this.
-    #[serde(rename = "model_usage")]
+    ///
+    /// Also carries the diagnostic `suspension_gap_absorbed` line: the `type`
+    /// tag has no catch-all, and adding a variant for one would make
+    /// `App::handle_event` non-exhaustive, so it is aliased onto the one
+    /// variant the UI already drops rather than left to become `[parse-skip]`
+    /// noise. Replace with a real `#[serde(other)]` variant once events.rs and
+    /// app.rs can change together.
+    #[serde(rename = "model_usage", alias = "suspension_gap_absorbed")]
     ModelUsage {
         #[allow(dead_code)]
+        #[serde(default)]
         measurement: serde_json::Value,
     },
 
@@ -573,6 +581,25 @@ mod tests {
         }
         match parse(r#"{"type":"init","project":"p","stories":[],"mode":"focused"}"#) {
             BaroEvent::Init { mode, .. } => assert_eq!(mode.as_deref(), Some("focused")),
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn the_absorbed_gap_line_parses_into_the_variant_the_ui_ignores() {
+        // Tolerated rather than rejected: reaching the client's parse-failure
+        // path would render this diagnostic as a `[parse-skip]` log line.
+        match parse(
+            r#"{"type":"suspension_gap_absorbed","gap_ms":10800000,"budget":"architect-phase",
+                "awake_elapsed_ms":60000,"wall_elapsed_ms":10860000}"#,
+        ) {
+            BaroEvent::ModelUsage { .. } => {}
+            other => panic!("wrong variant: {:?}", other),
+        }
+        match parse(r#"{"type":"model_usage","measurement":{"tokens":5}}"#) {
+            BaroEvent::ModelUsage { measurement } => {
+                assert_eq!(measurement["tokens"], 5);
+            }
             other => panic!("wrong variant: {:?}", other),
         }
     }
