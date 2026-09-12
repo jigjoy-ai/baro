@@ -62,6 +62,11 @@ describe("run-architect awake phase budget", () => {
             const events = gapEvents(run.stdout)
             assert.equal(events.length, 1, run.stdout)
             assert.ok(events[0]!.gap_ms >= SUSPENDED_MS)
+            assert.equal(
+                events[0]!.budget,
+                gaps[0]![2],
+                "the event must name the same budget as its stderr twin",
+            )
         })
     })
 

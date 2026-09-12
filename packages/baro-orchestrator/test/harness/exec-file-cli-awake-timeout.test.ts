@@ -15,6 +15,7 @@ import {
     createFakeAwakeClock,
     type FakeAwakeClock,
 } from "../../src/runtime/awake-clock.js"
+import { installAwakeGapReporter } from "../../src/runtime/awake-clock-log.js"
 import { withTempDir } from "../execution/helpers.js"
 
 const IDLE_MS = 900
@@ -49,6 +50,22 @@ function recordingTimers(clock: FakeAwakeClock): {
         // The CPU probe's race bound is not one of the windows under test.
         windowArms: () => arms.filter((ms) => ms !== CPU_PROBE_TIMEOUT_MS),
     }
+}
+
+/** Captures the protocol lines a synchronous action writes to stdout. */
+function captureStream(action: () => void): Array<Record<string, unknown>> {
+    const written: string[] = []
+    const original = process.stdout.write
+    process.stdout.write = ((chunk: string) => {
+        written.push(String(chunk))
+        return true
+    }) as typeof process.stdout.write
+    try {
+        action()
+    } finally {
+        process.stdout.write = original
+    }
+    return written.map((line) => JSON.parse(line) as Record<string, unknown>)
 }
 
 describe("execFileCli windows across a suspension", () => {
@@ -140,6 +157,63 @@ describe("execFileCli windows across a suspension", () => {
                     )
                     return true
                 },
+            )
+        })
+    })
+
+    it("names the window a gap endangered on the absorbed-gap line", async () => {
+        await withTempDir("baro-exec-awake-budget-", async (dir) => {
+            const bin = writeCli(dir)
+            const clock = createFakeAwakeClock()
+            const { timers } = recordingTimers(clock)
+            const uninstall = installAwakeGapReporter(clock)
+            const run = execFileCli(bin, [], {
+                idleTimeoutMs: IDLE_MS,
+                timeout: CEILING_MS,
+                terminationGraceMs: 75,
+                timers,
+                awakeClock: clock,
+                cpuActivityProbe: async () => ({
+                    active: false,
+                    sample: { at: clock.awakeNow(), totalCpuMs: 0, observed: true },
+                }),
+            })
+
+            try {
+                clock.advance(400)
+                // Both windows arm through the timers seam rather than an
+                // AwakeDeadline, so this proves their hand-rolled registration.
+                const lines = captureStream(() => clock.suspend(SUSPEND_MS))
+
+                assert.equal(lines.length, 1)
+                assert.deepEqual(
+                    {
+                        type: lines[0]!.type,
+                        gap_ms: lines[0]!.gap_ms,
+                        budget: lines[0]!.budget,
+                    },
+                    {
+                        type: "suspension_gap_absorbed",
+                        gap_ms: SUSPEND_MS,
+                        budget: "exec-file-cli-idle",
+                    },
+                    "the idle window was closer to expiry than the ceiling",
+                )
+            } finally {
+                clock.advance(IDLE_MS)
+                await assert.rejects(run)
+            }
+
+            const afterSettle = captureStream(() => {
+                clock.suspend(SUSPEND_MS)
+                clock.sample()
+            })
+            uninstall()
+            assert.equal(afterSettle.length, 1)
+            assert.equal(
+                afterSettle[0]!.budget,
+                "*",
+                "a settled run leaves no registration behind",
             )
         })
     })
