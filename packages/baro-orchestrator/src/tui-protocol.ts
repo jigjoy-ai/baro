@@ -214,6 +214,16 @@ export type BaroEvent =
           message_id: string
           error: string
       }
+    // Diagnostic, not a milestone: a wall-clock budget absorbed the time the
+    // machine spent asleep. `budget` names the armed budget it hit, or "*"
+    // when the gap fell outside any of them.
+    | {
+          type: "suspension_gap_absorbed"
+          gap_ms: number
+          budget: string
+          awake_elapsed_ms: number
+          wall_elapsed_ms: number
+      }
 
 /**
  * Caller must not include trailing newlines in any field. Every line carries
