@@ -355,13 +355,6 @@ pub enum BaroEvent {
         code: Option<i32>,
         reason: Option<String>,
     },
-
-    /// Any `type` this TUI does not render, e.g. the diagnostic
-    /// `suspension_gap_absorbed`. Without this the strict tag would make a
-    /// newer orchestrator's line a parse failure, which the client then shows
-    /// as `[parse-skip]` log noise instead of ignoring it.
-    #[serde(other)]
-    Unrendered,
 }
 
 /// Headless stdout is a machine-readable JSONL stream. A subprocess that
@@ -580,19 +573,6 @@ mod tests {
         }
         match parse(r#"{"type":"init","project":"p","stories":[],"mode":"focused"}"#) {
             BaroEvent::Init { mode, .. } => assert_eq!(mode.as_deref(), Some("focused")),
-            other => panic!("wrong variant: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn a_type_this_tui_does_not_render_is_ignored_rather_than_a_parse_failure() {
-        // The orchestrator's diagnostic gap line must not reach the client's
-        // parse-failure path, which would render it as `[parse-skip]` noise.
-        match parse(
-            r#"{"type":"suspension_gap_absorbed","gap_ms":10800000,"budget":"architect-phase",
-                "awake_elapsed_ms":60000,"wall_elapsed_ms":10860000}"#,
-        ) {
-            BaroEvent::Unrendered => {}
             other => panic!("wrong variant: {:?}", other),
         }
     }
