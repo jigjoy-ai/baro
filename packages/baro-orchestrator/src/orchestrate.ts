@@ -711,14 +711,14 @@ export async function orchestrate(
     const gitGate = new GitGate()
     let baseSha: string | null = null
 
-    // Continue mode: override prd.branchName with the checked-out branch so
-    // createOrCheckoutBranch is a no-op and the Finalizer pushes here — `gh
-    // pr create` then finds the open PR and updates it.
+    // Continue mode: a host on another baro/ branch redirects the goal there so
+    // the Finalizer updates that branch's open PR. A host on its base branch
+    // keeps the prd's goal branch, which the integration worktree reopens.
     if (config.continueRun && useGit) {
         const cur = await getCurrentBranch(repoRoot)
-        if (cur) {
+        if (cur && cur.startsWith("baro/")) {
             const prd = loadPrd(config.prdPath)
-            if (prd.branchName !== cur) {
+            if (normalizeGoalBranchName(prd.branchName) !== cur) {
                 prd.branchName = cur
                 persistPrdPreserving(config.prdPath, prd)
             }
@@ -811,8 +811,7 @@ export async function orchestrate(
             "collective coordination requires isolated git worktrees; unset BARO_NO_WORKTREES or use legacy coordination",
         )
     }
-    // Git refuses to check out one branch in two worktrees, so a host already
-    // on the goal branch (continue mode included) integrates in place.
+    // Git refuses one branch in two worktrees: only --continue on the goal branch integrates in place.
     const goalBranch = useGit
         ? normalizeGoalBranchName(loadPrd(config.prdPath).branchName)
         : ""
@@ -822,7 +821,15 @@ export async function orchestrate(
               return null
           })
         : null
-    if (useGit && worktreesEnabled && goalBranch && hostBranch !== goalBranch) {
+    const hostOnGoalBranch =
+        hostBranch !== null && normalizeGoalBranchName(hostBranch) === goalBranch
+    const integrateInPlace = Boolean(config.continueRun) && hostOnGoalBranch
+    if (useGit && worktreesEnabled && goalBranch && !integrateInPlace) {
+        if (hostOnGoalBranch) {
+            throw new Error(
+                `goal branch ${goalBranch} is checked out in ${repoRoot}; switch the checkout back to its base branch or run with --continue`,
+            )
+        }
         integrationWorktree = new IntegrationWorktree({
             repoRoot,
             gitGate,

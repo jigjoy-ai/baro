@@ -1266,14 +1266,10 @@ async fn run_app(
                     let prd = resume::checkout_and_load_prd(&cwd, &branch_hint.branch_name)
                         .await
                         .map_err(|error| format!("cannot establish resume branch: {error}"))?;
-                    let current_branch = git::get_current_branch(&cwd)
+                    branch_authority::verify_execution_branch(&cwd, &prd.branch_name)
                         .await
                         .map_err(|error| format!("cannot verify resume branch: {error}"))?;
-                    let continuation_branch = branch_authority::verify_continuation_branch(
-                        &current_branch,
-                        Some(&prd.branch_name),
-                    )
-                    .map_err(|error| format!("cannot verify resume branch: {error}"))?;
+                    let continuation_branch = prd.branch_name.clone();
                     app.is_resume = true;
                     // The orchestrator learns to resume only from `--resume` on
                     // its own argv or from this variable, which it inherits;
@@ -2816,9 +2812,18 @@ async fn run_app(
                                                 let actual_full_branch = if let Some(expected) =
                                                     continuation_branch
                                                 {
-                                                    match git::get_current_branch(&branch_cwd).await
-                                                    {
+                                                    // The goal branch normally lives only as a ref;
+                                                    // the orchestrator opens it in its own worktree.
+                                                    let live =
+                                                        git::get_current_branch(&branch_cwd).await;
+                                                    let ref_exists = matches!(
+                                                        git::branch_ref_exists(&branch_cwd, &expected)
+                                                            .await,
+                                                        Ok(true)
+                                                    );
+                                                    match live {
                                                         Ok(name) if name == expected => name,
+                                                        _ if ref_exists => expected,
                                                         Ok(name) => {
                                                             let _ = err_tx.send(AppEvent::BranchError(
                                                                 format!("Follow-up branch changed before execution: expected '{}', got '{}'.", expected, name)
@@ -2964,7 +2969,6 @@ async fn run_app(
                                         continue;
                                     }
                                     let exec_cwd = cwd.clone();
-                                    let branch_cwd = cwd.clone();
                                     let branch_tx = tx.clone();
                                     let err_tx = tx.clone();
                                     let cfg = match executor_config_from_app(&app) {
@@ -2984,29 +2988,18 @@ async fn run_app(
                                     app.start_execution();
                                     let exec_is_resume = app.is_resume;
                                     tokio::spawn(async move {
-                                        if let Err(e) =
-                                            git::checkout_existing_branch(&branch_cwd, &full_branch)
-                                                .await
+                                        if let Err(e) = branch_authority::verify_execution_branch(
+                                            &exec_cwd,
+                                            &full_branch,
+                                        )
+                                        .await
                                         {
-                                            let _ = err_tx.send(AppEvent::BranchError(
-                                                format!("Branch checkout failed: {}. Cannot rerun this checkpoint.", e)
-                                            )).await;
+                                            let _ = err_tx
+                                                .send(AppEvent::BranchError(format!(
+                                                    "{e} Cannot rerun this checkpoint."
+                                                )))
+                                                .await;
                                             return;
-                                        }
-                                        match git::get_current_branch(&exec_cwd).await {
-                                            Ok(ref actual) if actual == &full_branch => {}
-                                            Ok(actual) => {
-                                                let _ = err_tx.send(AppEvent::BranchError(
-                                                    format!("Branch verification failed: expected '{}', got '{}'. Cannot rerun this checkpoint.", full_branch, actual)
-                                                )).await;
-                                                return;
-                                            }
-                                            Err(e) => {
-                                                let _ = err_tx.send(AppEvent::BranchError(
-                                                    format!("Branch verification failed: {}. Cannot rerun this checkpoint.", e)
-                                                )).await;
-                                                return;
-                                            }
                                         }
                                         spawn_executor(
                                             prd,
@@ -4328,8 +4321,16 @@ fn confirm_and_execute(
     let branch_cwd = cwd.to_path_buf();
     tokio::spawn(async move {
         let actual_full_branch = if let Some(expected) = continuation_branch {
-            match git::get_current_branch(&branch_cwd).await {
+            // The goal branch normally lives only as a ref; the orchestrator
+            // opens it in its own worktree.
+            let live = git::get_current_branch(&branch_cwd).await;
+            let ref_exists = matches!(
+                git::branch_ref_exists(&branch_cwd, &expected).await,
+                Ok(true)
+            );
+            match live {
                 Ok(name) if name == expected => name,
+                _ if ref_exists => expected,
                 Ok(name) => {
                     let _ = tx
                         .send(AppEvent::BranchError(format!(
