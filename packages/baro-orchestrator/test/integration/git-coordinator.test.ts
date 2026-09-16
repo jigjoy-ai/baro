@@ -1,13 +1,17 @@
 import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
-import { writeFileSync } from "node:fs"
+import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, it } from "node:test"
 
 import { GitGate } from "../../src/integration/git.js"
 import { GitCoordinator } from "../../src/integration/git-coordinator.js"
+import type { IntegrationWorktree } from "../../src/integration/integration-worktree.js"
 import type { WorktreeManager } from "../../src/integration/worktree.js"
 import {
+    RunPreparationFailed,
+    RunPreparationRequested,
+    RunPrepared,
     RunPushFailed,
     RunPushed,
     RunPushRequested,
@@ -51,7 +55,9 @@ describe("GitCoordinator", () => {
                 },
             } as unknown as WorktreeManager
             const coordinator = new GitCoordinator({
-                cwd: dir,
+                repoRoot: dir,
+                integrationRoot: dir,
+                integrationWorktree: null,
                 gitGate: new GitGate(),
                 worktrees,
                 emitTui: false,
@@ -108,7 +114,9 @@ describe("GitCoordinator", () => {
                 },
             } as unknown as WorktreeManager
             const coordinator = new GitCoordinator({
-                cwd: dir,
+                repoRoot: dir,
+                integrationRoot: dir,
+                integrationWorktree: null,
                 gitGate: new GitGate(),
                 worktrees,
                 emitTui: false,
@@ -162,7 +170,9 @@ describe("GitCoordinator", () => {
                 },
             } as unknown as WorktreeManager
             const coordinator = new GitCoordinator({
-                cwd: dir,
+                repoRoot: dir,
+                integrationRoot: dir,
+                integrationWorktree: null,
                 gitGate: new GitGate(),
                 worktrees,
                 emitTui: false,
@@ -237,7 +247,9 @@ describe("GitCoordinator", () => {
             git(dir, ["remote", "add", "origin", join(dir, "missing-origin.git")])
 
             const coordinator = new GitCoordinator({
-                cwd: dir,
+                repoRoot: dir,
+                integrationRoot: dir,
+                integrationWorktree: null,
                 gitGate: new GitGate(),
                 worktrees: null,
                 emitTui: false,
@@ -278,7 +290,9 @@ describe("GitCoordinator", () => {
                 },
             } as unknown as WorktreeManager
             const coordinator = new GitCoordinator({
-                cwd: dir,
+                repoRoot: dir,
+                integrationRoot: dir,
+                integrationWorktree: null,
                 gitGate: new GitGate(),
                 worktrees,
                 emitTui: false,
@@ -353,7 +367,9 @@ describe("GitCoordinator", () => {
                 branchName: (storyId: string) => `baro-wt/run-preserve/${storyId}`,
             } as unknown as WorktreeManager
             const coordinator = new GitCoordinator({
-                cwd: dir,
+                repoRoot: dir,
+                integrationRoot: dir,
+                integrationWorktree: null,
                 gitGate: new GitGate(),
                 worktrees,
                 emitTui: false,
@@ -427,7 +443,9 @@ describe("GitCoordinator", () => {
                 branchName: (storyId: string) => `baro-wt/run-retained/${storyId}`,
             } as unknown as WorktreeManager
             const coordinator = new GitCoordinator({
-                cwd: dir,
+                repoRoot: dir,
+                integrationRoot: dir,
+                integrationWorktree: null,
                 gitGate: new GitGate(),
                 worktrees,
                 emitTui: false,
@@ -476,7 +494,9 @@ describe("a merge the machine killed, not the repository", () => {
         worktrees: WorktreeManager,
     ): Promise<ReturnType<typeof joinWithCapture>> {
         const coordinator = new GitCoordinator({
-            cwd: dir,
+            repoRoot: dir,
+            integrationRoot: dir,
+            integrationWorktree: null,
             gitGate: new GitGate(),
             worktrees,
             emitTui: false,
@@ -580,6 +600,103 @@ describe("a merge the machine killed, not the repository", () => {
 
             assert.equal(attempts, 1, "a conflict does not get better by repeating")
             assert.equal(env.events.find(StoryMergeFailed.is)?.data.retryable, false)
+        })
+    })
+})
+
+describe("GitCoordinator prepareRun roots", () => {
+    function initRepo(dir: string): void {
+        git(dir, ["init", "-q", "-b", "main"])
+        git(dir, ["config", "user.email", "t@t.t"])
+        git(dir, ["config", "user.name", "t"])
+        writeFileSync(join(dir, "a.txt"), "a\n")
+        git(dir, ["add", "-A"])
+        git(dir, ["commit", "-qm", "init"])
+    }
+
+    async function prepare(opts: {
+        repoRoot: string
+        integrationRoot: string
+        integrationWorktree: IntegrationWorktree | null
+        prdPath?: string
+    }): Promise<ReturnType<typeof joinWithCapture>> {
+        const coordinator = new GitCoordinator({
+            ...opts,
+            gitGate: new GitGate(),
+            worktrees: null,
+            emitTui: false,
+            eventDriven: true,
+            runId: "run-prepare",
+            push: false,
+        })
+        coordinator.setEventAuthority(BOARD)
+        const env = joinWithCapture(coordinator)
+        env.deliverSemanticEvent(BOARD, RunPreparationRequested.create({ runId: "run-prepare" }))
+        await coordinator.idle()
+        return env
+    }
+
+    it("prepares through the integration worktree without checking out in repoRoot", async () => {
+        await withTempDir("git-prepare-isolated-", async (dir) => {
+            const repoRoot = join(dir, "host")
+            const integrationRoot = join(dir, "run")
+            mkdirSync(repoRoot)
+            initRepo(repoRoot)
+            git(repoRoot, ["worktree", "add", "-q", "-b", "baro/goal", integrationRoot])
+            git(integrationRoot, ["commit", "-q", "--allow-empty", "-m", "goal"])
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify({ branchName: "baro/other", userStories: [] }))
+            let prepared = 0
+            const integrationWorktree = {
+                prepare: async () => {
+                    prepared += 1
+                },
+            } as unknown as IntegrationWorktree
+
+            const env = await prepare({ repoRoot, integrationRoot, integrationWorktree, prdPath })
+
+            assert.equal(prepared, 1)
+            const ready = env.events.find(RunPrepared.is)
+            assert.ok(ready)
+            assert.equal(ready.data.baseSha, git(integrationRoot, ["rev-parse", "HEAD"]))
+            assert.equal(git(repoRoot, ["branch", "--show-current"]), "main")
+            assert.equal(git(repoRoot, ["branch", "--list", "baro/other"]), "")
+        })
+    })
+
+    it("checks out the goal branch in integrationRoot when there is no integration worktree", async () => {
+        await withTempDir("git-prepare-shared-", async (dir) => {
+            initRepo(dir)
+            const prdPath = join(dir, "prd.json")
+            writeFileSync(prdPath, JSON.stringify({ branchName: "baro/goal", userStories: [] }))
+
+            const env = await prepare({
+                repoRoot: dir,
+                integrationRoot: dir,
+                integrationWorktree: null,
+                prdPath,
+            })
+
+            const ready = env.events.find(RunPrepared.is)
+            assert.ok(ready, JSON.stringify(env.events.find(RunPreparationFailed.is)?.data))
+            assert.equal(git(dir, ["branch", "--show-current"]), "baro/goal")
+            assert.equal(ready.data.baseSha, git(dir, ["rev-parse", "HEAD"]))
+        })
+    })
+
+    it("reports a failed integration worktree preparation", async () => {
+        await withTempDir("git-prepare-failed-", async (dir) => {
+            initRepo(dir)
+            const integrationWorktree = {
+                prepare: async () => {
+                    throw new Error("worktree add refused")
+                },
+            } as unknown as IntegrationWorktree
+
+            const env = await prepare({ repoRoot: dir, integrationRoot: dir, integrationWorktree })
+
+            assert.equal(env.events.some(RunPrepared.is), false)
+            assert.match(env.events.find(RunPreparationFailed.is)?.data.error ?? "", /worktree add refused/)
         })
     })
 })
