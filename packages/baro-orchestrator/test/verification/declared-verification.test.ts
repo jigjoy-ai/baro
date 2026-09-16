@@ -2667,3 +2667,135 @@ describe("negotiated declared test admission", () => {
         })
     })
 })
+
+function writeMonorepo(
+    dir: string,
+    options: { aTest?: boolean; bTest?: boolean; rootTest?: boolean },
+): void {
+    writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({
+            name: "root",
+            private: true,
+            workspaces: ["packages/*"],
+            ...(options.rootTest ? { scripts: { test: "node -e 0" } } : {}),
+        }),
+    )
+    for (const [name, declares] of [
+        ["a", options.aTest],
+        ["b", options.bTest],
+    ] as const) {
+        mkdirSync(join(dir, "packages", name), { recursive: true })
+        writeFileSync(
+            join(dir, "packages", name, "package.json"),
+            JSON.stringify({
+                name,
+                ...(declares ? { scripts: { test: "node -e 0" } } : {}),
+            }),
+        )
+    }
+}
+
+describe("declared package scripts in npm-workspaces monorepos", () => {
+    const declaredSpec = (
+        dir: string,
+        command: string,
+        changedFiles?: readonly string[],
+    ) => {
+        const requirement = {
+            storyId: "S1",
+            command,
+            ...(changedFiles ? { changedFiles } : {}),
+        }
+        const plan = createVerifyPlan(dir, { declaredTests: [requirement] })
+        // A resolved spec identical to a detected workspace command is deduped
+        // out of the plan, so the translation itself is asserted directly.
+        const [spec] = translateDeclaredTests(
+            dir,
+            [requirement],
+            plan.javascriptPackageManagers,
+        )
+        assert.ok(spec)
+        return { plan, spec }
+    }
+
+    for (const command of ["npm test", "npm run test", "yarn test"]) {
+        it(`runs '${command}' in the only workspace that declares the script`, async () => {
+            await withTempDir("baro-verify-monorepo-one-", async (dir) => {
+                writeMonorepo(dir, { aTest: true })
+                const { plan, spec } = declaredSpec(dir, command)
+                assert.equal(spec.cwd, join(dir, "packages/a"))
+                assert.equal(spec.incompleteReason, undefined)
+                assert.equal(spec.preflightFailure, undefined)
+                assert.match(spec.label, /\(packages\/a\)$/)
+                assert.ok(
+                    plan.commands.some(
+                        (planned) =>
+                            planned.cwd === join(dir, "packages/a") &&
+                            !planned.incompleteReason &&
+                            !planned.preflightFailure,
+                    ),
+                )
+                assert.equal(
+                    plan.commands.some((planned) => planned.incompleteReason),
+                    false,
+                )
+            })
+        })
+    }
+
+    it("selects the workspace containing the story's changed files", async () => {
+        await withTempDir("baro-verify-monorepo-changed-", async (dir) => {
+            writeMonorepo(dir, { aTest: true, bTest: true })
+            const { spec } = declaredSpec(dir, "npm test", ["packages/b/src/x.ts"])
+            assert.equal(spec.cwd, join(dir, "packages/b"))
+            assert.equal(spec.incompleteReason, undefined)
+            assert.equal(spec.preflightFailure, undefined)
+        })
+    })
+
+    it("fails explicitly when several workspaces declare the script and nothing selects one", async () => {
+        await withTempDir("baro-verify-monorepo-ambiguous-", async (dir) => {
+            writeMonorepo(dir, { aTest: true, bTest: true })
+            const { spec } = declaredSpec(dir, "npm test")
+            assert.match(spec.preflightFailure ?? "", /multiple workspaces/)
+            assert.match(spec.preflightFailure ?? "", /packages\/a, packages\/b/)
+            assert.equal(spec.incompleteReason, undefined)
+            assert.equal(spec.cwd, undefined)
+        })
+    })
+
+    it("fails, not skips, when no workspace declares the script", async () => {
+        await withTempDir("baro-verify-monorepo-none-", async (dir) => {
+            writeMonorepo(dir, {})
+            const { plan, spec } = declaredSpec(dir, "npm test")
+            assert.match(
+                spec.preflightFailure ?? "",
+                /no workspace declares script 'test'; inspected workspaces: packages\/a, packages\/b/,
+            )
+            assert.equal(spec.incompleteReason, undefined)
+            const planned = plan.commands.find(
+                (command) => command.origin === "declared",
+            )
+            assert.equal(planned?.preflightFailure, spec.preflightFailure)
+
+            const result = await verifyBuild(dir, { plan, emitActivity: () => {} })
+            const outcome = result.commands.find(
+                (command) => command.command === spec.label,
+            )
+            assert.equal(outcome?.status, "failed")
+            assert.match(outcome?.tail ?? "", /inspected workspaces: packages\/a, packages\/b/)
+            assert.equal(result.ok, false)
+        })
+    })
+
+    it("keeps a root-declared script at the repository root", async () => {
+        await withTempDir("baro-verify-monorepo-root-", async (dir) => {
+            writeMonorepo(dir, { aTest: true, rootTest: true })
+            const { spec } = declaredSpec(dir, "npm test")
+            assert.equal(spec.cwd, undefined)
+            assert.equal(spec.incompleteReason, undefined)
+            assert.equal(spec.preflightFailure, undefined)
+        })
+    })
+})

@@ -285,6 +285,21 @@ function incomplete(
     requirement: DeclaredTestRequirement,
     reason: string,
 ): VerifyCommandSpec {
+    return { ...declaredEvidence(requirement, reason), incompleteReason: reason }
+}
+
+// Unlike `incomplete`, this is a failed verdict: runCmd never reports it as skipped.
+function declaredFailure(
+    requirement: DeclaredTestRequirement,
+    reason: string,
+): VerifyCommandSpec {
+    return { ...declaredEvidence(requirement, reason), preflightFailure: reason }
+}
+
+function declaredEvidence(
+    requirement: DeclaredTestRequirement,
+    reason: string,
+): VerifyCommandSpec {
     const normalizedRequirement = typeof requirement.command === "string"
         ? requirement.command.length > MAX_COMMAND_LENGTH
             ? `<overlong command:${requirement.command.length}>`
@@ -310,7 +325,6 @@ function incomplete(
             (command || "(empty test)"),
         tool: "node",
         args: [],
-        incompleteReason: reason,
         declaredRequirementKey: createHash("sha256")
             .update(JSON.stringify([normalizedRequirement, reason]))
             .digest("hex"),
@@ -540,12 +554,80 @@ function resolveWorkspaceAuthority(
     }
 }
 
+type ScriptWorkspace =
+    | { readonly authority: VerifyJavaScriptPackageManager; readonly rel: string }
+    | { readonly failure: string }
+
+// Candidates are the workspaces detectCommands already discovered; null means
+// the repo has none, so the root-only behavior stays in force.
+function resolveScriptWorkspace(
+    cwd: string,
+    script: string,
+    managers: readonly VerifyJavaScriptPackageManager[],
+    changedFiles: readonly string[] | undefined,
+): ScriptWorkspace | null {
+    const candidates = managers
+        .filter((manager) => manager.cwd !== undefined)
+        .map((manager) => ({
+            authority: manager,
+            rel: relative(resolve(cwd), resolve(manager.cwd!)).replace(/\\/g, "/"),
+        }))
+        .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
+    if (candidates.length === 0) return null
+    const declaring = candidates.filter(
+        (candidate) =>
+            typeof readManifest(join(candidate.authority.cwd!, "package.json"))
+                ?.scripts?.[script] === "string",
+    )
+    if (declaring.length === 1) return declaring[0]!
+    if (declaring.length === 0) {
+        return {
+            failure:
+                `no workspace declares script '${script}'; inspected workspaces: ` +
+                candidates.map((candidate) => candidate.rel).join(", "),
+        }
+    }
+    const files = (changedFiles ?? [])
+        .filter((file): file is string => typeof file === "string")
+        .map((file) => file.replace(/\\/g, "/").replace(/^\.\//, ""))
+        .filter(
+            (file) =>
+                file !== "" &&
+                !isAbsolute(file) &&
+                !/^[A-Za-z]:\//.test(file) &&
+                !file.split("/").includes(".."),
+        )
+    const touched = declaring.filter((candidate) =>
+        files.some(
+            (file) => file === candidate.rel || file.startsWith(`${candidate.rel}/`),
+        ),
+    )
+    if (touched.length === 1) return touched[0]!
+    return {
+        failure:
+            `multiple workspaces declare script '${script}' and the story's changed files do not select exactly one: ` +
+            declaring.map((candidate) => candidate.rel).join(", "),
+    }
+}
+
 function translatePackage(
     cwd: string,
     requirement: DeclaredTestRequirement,
     parsed: DeclaredTokens,
     managers: readonly VerifyJavaScriptPackageManager[],
 ): VerifyCommandSpec {
+    const yarnScript = parsed.tokens[1]
+    if (
+        parsed.tokens[0] === "yarn" &&
+        yarnScript !== undefined &&
+        yarnScript !== "test" &&
+        yarnScript !== "run" &&
+        !yarnScript.startsWith("-") &&
+        SAFE_SCRIPT_NAME.test(yarnScript)
+    ) {
+        const tokens = ["yarn", "run", ...parsed.tokens.slice(1)]
+        parsed = { normalized: tokens.join(" "), tokens }
+    }
     const operation = parsed.tokens[1]
     if (operation !== "test" && operation !== "run") {
         return incomplete(
@@ -621,13 +703,39 @@ function translatePackage(
                 : "declared package test requires a valid root package.json",
         )
     }
+    let resolvedRel: string | undefined
     if (typeof manifest.scripts?.[script] !== "string") {
-        return incomplete(
-            requirement,
-            workspace
-                ? `workspace '${selector.name}' package.json does not declare script '${script}'`
-                : `package.json does not declare script '${script}'`,
-        )
+        const resolved = workspace
+            ? null
+            : resolveScriptWorkspace(
+                  cwd,
+                  script,
+                  managers,
+                  requirement.changedFiles,
+              )
+        if (resolved === null) {
+            return incomplete(
+                requirement,
+                workspace
+                    ? `workspace '${selector.name}' package.json does not declare script '${script}'`
+                    : `package.json does not declare script '${script}'`,
+            )
+        }
+        if ("failure" in resolved) {
+            return declaredFailure(requirement, resolved.failure)
+        }
+        if (
+            focusedArgs.some(
+                (argument) => !safeFocusedArg(resolved.authority.cwd!, argument),
+            )
+        ) {
+            return incomplete(
+                requirement,
+                "package-script arguments contain an unsafe or escaping value",
+            )
+        }
+        workspace = resolved.authority
+        resolvedRel = resolved.rel
     }
     if (!TRUSTED_PACKAGE_SCRIPTS.has(script)) {
         return incomplete(
@@ -645,13 +753,15 @@ function translatePackage(
     }
     const containedPaths = focusedArgs.map(focusedPathRequirement)
     return {
-        label: [
-            authority.manager,
-            "run",
-            script,
-            ...(selector.declared ?? []),
-            ...trailingArgs,
-        ].join(" "),
+        label: resolvedRel !== undefined
+            ? `${authority.manager} run ${script}${trailingArgs.length ? " " + trailingArgs.join(" ") : ""} (${resolvedRel})`
+            : [
+                  authority.manager,
+                  "run",
+                  script,
+                  ...(selector.declared ?? []),
+                  ...trailingArgs,
+              ].join(" "),
         ...packageCommand(authority, script, trailingArgs),
         ...(workspace ? { cwd: workspace.cwd } : {}),
         ...(containedPaths.length > 0 ? { containedPaths } : {}),
