@@ -884,6 +884,8 @@ describe("WorktreeManager — host checkout", () => {
 
 describe("WorktreeManager — isolated integration tree", () => {
     async function isolatedManager(): Promise<string> {
+        // baro-tui creates the goal ref without checking it out.
+        git(repo, "branch", "baro/goal", "HEAD")
         const { integrationRoot } = await new IntegrationWorktree({
             repoRoot: repo,
             gitGate: gate,
@@ -916,6 +918,7 @@ describe("WorktreeManager — isolated integration tree", () => {
         assert.equal(await mgr.mergeBack("S1"), true)
         assert.equal(readFileSync(join(integrationRoot, "a.txt"), "utf8"), "story\nline2\nline3\n")
         assert.match(git(integrationRoot, "log", "--oneline", "-1"), /merge story S1/)
+        assert.match(git(repo, "log", "--oneline", "-1", "baro/goal"), /merge story S1/)
         assert.equal(git(repo, "branch", "--show-current"), "main")
         assert.equal(git(repo, "rev-parse", "HEAD"), hostHead)
         assert.equal(readFileSync(join(repo, "a.txt"), "utf8"), "host\nline2\nline3\n")
