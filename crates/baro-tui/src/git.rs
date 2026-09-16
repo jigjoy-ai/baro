@@ -122,23 +122,25 @@ async fn create_fresh_branch_with_publish(
     let suffix = stamp % 100_000;
     let branch_name = format!("{}-{}", base_name, suffix);
 
+    // `git branch` rather than `checkout -b`: the person's checkout must keep
+    // its HEAD; the orchestrator opens the goal branch in its own worktree.
     let create = Command::new("git")
-        .args(["checkout", "-b", &branch_name])
+        .args(["branch", &branch_name, "HEAD"])
         .current_dir(cwd)
         .output()
         .await
-        .map_err(|e| format!("Failed to run git checkout -b: {}", e))?;
+        .map_err(|e| format!("Failed to run git branch: {}", e))?;
 
     if !create.status.success() {
         // Same-second name collision: retry once with a randomised
         // suffix, then surface the failure.
         let extra = format!("{}-x{:x}", branch_name, (stamp ^ 0xdeadbeef) & 0xffff);
         let retry = Command::new("git")
-            .args(["checkout", "-b", &extra])
+            .args(["branch", &extra, "HEAD"])
             .current_dir(cwd)
             .output()
             .await
-            .map_err(|e| format!("Failed to retry git checkout -b: {}", e))?;
+            .map_err(|e| format!("Failed to retry git branch: {}", e))?;
         if !retry.status.success() {
             let stderr = String::from_utf8_lossy(&retry.stderr).trim().to_string();
             return Err(format!(
@@ -163,20 +165,14 @@ async fn create_fresh_branch_with_publish(
     Ok(branch_name)
 }
 
-/// Checkout the exact branch a prior run persisted in `prd.json`
-/// (same suffix) so resume picks up where the agents left off.
-pub async fn checkout_existing_branch(cwd: &Path, branch_name: &str) -> BaroResult<()> {
-    let checkout = Command::new("git")
-        .args(["checkout", branch_name])
+pub(crate) async fn branch_ref_exists(cwd: &Path, name: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{name}")])
         .current_dir(cwd)
         .output()
         .await
-        .map_err(|e| format!("Failed to run git checkout: {}", e))?;
-    if !checkout.status.success() {
-        let stderr = String::from_utf8_lossy(&checkout.stderr).trim().to_string();
-        return Err(format!("Failed to checkout branch '{}': {}", branch_name, stderr).into());
-    }
-    Ok(())
+        .map_err(|e| format!("Failed to run git show-ref: {}", e))?;
+    Ok(output.status.success())
 }
 
 async fn push_branch_best_effort(cwd: &Path, branch_name: &str) -> BaroResult<()> {
@@ -225,7 +221,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::create_fresh_branch_with_publish;
+    use super::{branch_ref_exists, create_fresh_branch_with_publish};
 
     fn git(cwd: &Path, args: &[&str]) -> String {
         let output = StdCommand::new("git")
@@ -270,7 +266,47 @@ mod tests {
             .await
             .expect("local branch");
 
-        assert_eq!(git(&repo, &["branch", "--show-current"]), branch);
+        assert_eq!(git(&repo, &["branch", "--show-current"]), "main");
+        assert_eq!(
+            git(&repo, &["rev-parse", &branch]),
+            git(&repo, &["rev-parse", "main"])
+        );
         assert_eq!(git(&origin, &["for-each-ref", "--format=%(refname)"]), "");
+    }
+
+    #[tokio::test]
+    async fn fresh_branch_collision_retries_without_checkout() {
+        let root = tempdir().expect("temp root");
+        let repo = root.path().join("repo");
+        fs::create_dir(&repo).expect("repo dir");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Baro Test"]);
+        git(&repo, &["config", "user.email", "baro@test.invalid"]);
+        fs::write(repo.join("README.md"), "base\n").expect("seed file");
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "base"]);
+
+        // Pre-create every name the first attempt could pick this second or the next.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        for stamp in now..now + 3 {
+            git(&repo, &["branch", &format!("baro/clash-{}", stamp % 100_000)]);
+        }
+
+        let branch = create_fresh_branch_with_publish(&repo, "baro/clash", false)
+            .await
+            .expect("retry branch");
+
+        let suffix = branch.rsplit_once("-x").expect("retry suffix").1;
+        assert!(!suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(branch_ref_exists(&repo, &branch).await.expect("show-ref"));
+        assert!(!branch_ref_exists(&repo, "baro/missing").await.expect("show-ref"));
+        assert_eq!(git(&repo, &["branch", "--show-current"]), "main");
+        assert_eq!(
+            git(&repo, &["rev-parse", &branch]),
+            git(&repo, &["rev-parse", "main"])
+        );
     }
 }
