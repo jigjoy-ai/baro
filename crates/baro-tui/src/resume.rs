@@ -31,23 +31,15 @@ pub(crate) fn should_accept_refine_result(
     screen == Screen::Review && refining && active_generation == Some(result_generation)
 }
 
-/// Establish the saved branch before its repository files or PRD become
-/// resume authority. The post-checkout reload prevents a stale copy from the
-/// previously checked-out branch overwriting newer completion/runtime state.
+/// Load the saved PRD once its goal ref exists; no checkout happens.
 pub(crate) async fn checkout_and_load_prd(
     cwd: &Path,
     saved_branch_name: &str,
 ) -> Result<executor::PrdFile, String> {
     let expected_branch = canonical_branch(saved_branch_name)?;
-    git::checkout_existing_branch(cwd, &expected_branch)
-        .await
-        .map_err(|error| format!("failed to checkout saved branch '{expected_branch}': {error}"))?;
-    let actual_branch = git::get_current_branch(cwd)
-        .await
-        .map_err(|error| format!("failed to verify resume branch: {error}"))?;
-    if actual_branch != expected_branch {
+    if !git::branch_ref_exists(cwd, &expected_branch).await? {
         return Err(format!(
-            "resume branch mismatch: expected '{expected_branch}', got '{actual_branch}'"
+            "cannot establish resume branch '{expected_branch}': branch does not exist"
         ));
     }
 
@@ -69,8 +61,80 @@ pub(crate) async fn checkout_and_load_prd(
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_branch, should_accept_refine_result};
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    use tempfile::tempdir;
+
+    use super::{canonical_branch, checkout_and_load_prd, should_accept_refine_result};
     use crate::app::Screen;
+
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command should start");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn repo_on_main(root: &Path) -> std::path::PathBuf {
+        let repo = root.join("repo");
+        fs::create_dir(&repo).expect("repo dir");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Baro Test"]);
+        git(&repo, &["config", "user.email", "baro@test.invalid"]);
+        fs::write(repo.join("README.md"), "base\n").expect("seed file");
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "base"]);
+        repo
+    }
+
+    #[tokio::test]
+    async fn resume_loads_existing_goal_branch_without_checkout() {
+        let root = tempdir().expect("temp root");
+        let repo = repo_on_main(root.path());
+        git(&repo, &["branch", "baro/run-1"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        fs::write(
+            repo.join("prd.json"),
+            r#"{"project":"p","branchName":"run-1","userStories":[]}"#,
+        )
+        .expect("prd");
+
+        let prd = checkout_and_load_prd(&repo, "run-1")
+            .await
+            .expect("resume should load");
+
+        assert_eq!(prd.branch_name, "baro/run-1");
+        assert_eq!(git(&repo, &["branch", "--show-current"]), "main");
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head);
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_missing_goal_branch() {
+        let root = tempdir().expect("temp root");
+        let repo = repo_on_main(root.path());
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+
+        let error = checkout_and_load_prd(&repo, "baro/gone")
+            .await
+            .expect_err("missing ref must fail");
+
+        assert_eq!(
+            error,
+            "cannot establish resume branch 'baro/gone': branch does not exist"
+        );
+        assert_eq!(git(&repo, &["branch", "--show-current"]), "main");
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head);
+    }
 
     #[test]
     fn branch_names_are_canonical_before_persistence() {

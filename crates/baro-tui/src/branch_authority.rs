@@ -10,27 +10,22 @@ use crate::git;
 
 const PROTECTED_BRANCHES: [&str; 5] = ["main", "master", "trunk", "develop", "development"];
 
-/// Re-read the checkout immediately before handing work to the orchestrator.
-///
-/// Branch creation/checkout and executor spawn are separated by asynchronous
-/// persistence and event delivery. Treat the branch name returned by the git
-/// setup step as authority, but never assume it is still the active checkout.
+/// Confirm the goal branch ref exists before spawning the executor. The host
+/// checkout is deliberately not compared: the orchestrator integrates the goal
+/// branch in its own worktree and leaves the person's HEAD alone.
 pub(crate) async fn verify_execution_branch(cwd: &Path, expected: &str) -> Result<(), String> {
-    let actual = git::get_current_branch(cwd).await.map_err(|error| {
-        format!(
-            "Branch verification failed for expected '{expected}': {error}. Refusing to start the executor."
-        )
-    })?;
-    verify_execution_branch_name(expected, &actual)
-}
-
-fn verify_execution_branch_name(expected: &str, actual: &str) -> Result<(), String> {
-    if actual == expected {
-        return Ok(());
+    let expected = expected.trim();
+    if expected.is_empty() || expected == "HEAD" {
+        return Err(format!(
+            "Branch verification failed: '{expected}' is not a named goal branch. Refusing to start the executor."
+        ));
     }
-    Err(format!(
-        "Branch verification failed: expected '{expected}', got '{actual}'. Refusing to start the executor."
-    ))
+    match git::branch_ref_exists(cwd, expected).await {
+        Ok(true) => Ok(()),
+        _ => Err(format!(
+            "Branch verification failed: goal branch '{expected}' does not exist. Refusing to start the executor."
+        )),
+    }
 }
 
 pub(crate) fn verify_continuation_branch(
@@ -125,17 +120,8 @@ mod tests {
         assert!(verify_continuation_branch("baro/other", Some("baro/auth")).is_err());
     }
 
-    #[test]
-    fn execution_branch_name_requires_an_exact_match() {
-        assert!(verify_execution_branch_name("baro/auth-2", "baro/auth-2").is_ok());
-        assert_eq!(
-            verify_execution_branch_name("baro/auth-2", "main").unwrap_err(),
-            "Branch verification failed: expected 'baro/auth-2', got 'main'. Refusing to start the executor."
-        );
-    }
-
     #[tokio::test]
-    async fn execution_branch_guard_reads_the_live_checkout() {
+    async fn execution_branch_guard_checks_the_ref_without_the_checkout() {
         let root = tempdir().expect("temp root");
         let repo = root.path().join("repo");
         fs::create_dir(&repo).expect("repo dir");
@@ -145,16 +131,22 @@ mod tests {
         fs::write(repo.join("README.md"), "base\n").expect("seed file");
         git(&repo, &["add", "README.md"]);
         git(&repo, &["commit", "-m", "base"]);
-        git(&repo, &["checkout", "-b", "baro/expected"]);
+        git(&repo, &["branch", "baro/x"]);
 
-        verify_execution_branch(&repo, "baro/expected")
+        verify_execution_branch(&repo, "baro/x")
             .await
-            .expect("expected checkout should pass");
+            .expect("existing goal ref should pass while HEAD is on main");
+        assert_eq!(git(&repo, &["branch", "--show-current"]), "main");
 
-        git(&repo, &["checkout", "main"]);
-        let error = verify_execution_branch(&repo, "baro/expected")
+        let error = verify_execution_branch(&repo, "baro/missing")
             .await
-            .expect_err("changed checkout must fail closed");
-        assert!(error.contains("expected 'baro/expected', got 'main'"));
+            .expect_err("missing goal ref must fail closed");
+        assert_eq!(
+            error,
+            "Branch verification failed: goal branch 'baro/missing' does not exist. Refusing to start the executor."
+        );
+        assert!(verify_execution_branch(&repo, "HEAD").await.is_err());
+        assert!(verify_execution_branch(&repo, " ").await.is_err());
+        assert_eq!(git(&repo, &["branch", "--show-current"]), "main");
     }
 }
