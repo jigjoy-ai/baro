@@ -822,7 +822,9 @@ export async function orchestrate(
     // merge-back.
     const gitCoordinator = useGit
         ? new GitCoordinator({
-              cwd: config.cwd,
+              repoRoot: config.cwd,
+              integrationRoot: config.cwd,
+              integrationWorktree: null,
               gitGate,
               worktrees,
               emitTui,
@@ -1205,7 +1207,7 @@ export async function orchestrate(
     }
     const finalizer = useGit && hasOrigin && publishRemote
         ? new Finalizer({
-              cwd: config.cwd,
+              integrationRoot: config.cwd,
               prdPath: config.prdPath,
               runId,
               outcomeAuthority,
