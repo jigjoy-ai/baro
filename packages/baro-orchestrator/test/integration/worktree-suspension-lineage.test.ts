@@ -6,6 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { GitGate } from "../../src/integration/git.js"
+import { IntegrationWorktree } from "../../src/integration/integration-worktree.js"
 import { captureCriticRepositoryFingerprint } from "../../src/acceptance/critic-evidence.js"
 import {
     WorktreeManager,
@@ -65,15 +66,25 @@ let gate: GitGate
 let logs: string[]
 let mgr: WorktreeManager
 let runId: string
+let integrationRoot: string
 
-beforeEach(() => {
+beforeEach(async () => {
     repo = initRepo()
     gate = new GitGate()
     logs = []
     runId = uniqueRunId("run-resume-test")
+    ;({ integrationRoot } = await new IntegrationWorktree({
+        repoRoot: repo,
+        gitGate: gate,
+        runId,
+        goalBranch: "baro/goal",
+        push: false,
+        onLog: (l) => logs.push(l),
+    }).prepare())
     mgr = new WorktreeManager(repo, gate, runId, {
         onLog: (l) => logs.push(l),
         resolveConflictsWithTheirs: false,
+        integrationRoot,
     })
 })
 
@@ -88,12 +99,13 @@ afterEach(async () => {
 describe("WorktreeManager — host-owned suspension resume", () => {
     it("recreates the worktree on the moved run branch and records that base", async () => {
         await mgr.create("S1")
-        const moved = integrateOnRunBranch(repo, "dep.txt", "integrated\n")
+        const moved = integrateOnRunBranch(integrationRoot, "dep.txt", "integrated\n")
 
         const update = await mgr.resumeFromSuspension("S1")
 
         assert.equal(update.mode, "recreated")
         assert.equal(update.baseSha, moved)
+        assert.notEqual(moved, git(repo, "rev-parse", "HEAD"), "the base is the integration tree HEAD, not the host's")
         assert.equal(mgr.creationSha("S1"), moved)
 
         const path = mgr.activePath("S1")!
@@ -102,7 +114,7 @@ describe("WorktreeManager — host-owned suspension resume", () => {
 
         assert.equal(await mgr.mergeBack("S1", seal), true)
         assert.equal(
-            readFileSync(join(repo, "story.txt"), "utf8"),
+            readFileSync(join(integrationRoot, "story.txt"), "utf8"),
             "honest post-resume work\n",
         )
     })
@@ -117,7 +129,7 @@ describe("WorktreeManager — host-owned suspension resume", () => {
         assert.match(preserved!, RECOVERY_REF)
         const preservedSha = git(repo, "rev-parse", preserved!)
 
-        const moved = integrateOnRunBranch(repo, "dep.txt", "integrated\n")
+        const moved = integrateOnRunBranch(integrationRoot, "dep.txt", "integrated\n")
 
         const update = await mgr.resumeFromSuspension("S1", {
             restoreFrom: preserved!,
@@ -155,17 +167,17 @@ describe("WorktreeManager — host-owned suspension resume", () => {
 
         assert.equal(await mgr.mergeBack("S1", seal), true)
         assert.equal(
-            readFileSync(join(repo, "story.txt"), "utf8"),
+            readFileSync(join(integrationRoot, "story.txt"), "utf8"),
             "work before suspension\nand after\n",
         )
-        assert.equal(readFileSync(join(repo, "dep.txt"), "utf8"), "integrated\n")
+        assert.equal(readFileSync(join(integrationRoot, "dep.txt"), "utf8"), "integrated\n")
     })
 
     it("still refuses a candidate whose history a non-host actor rewrote", async () => {
         const path = (await mgr.create("S1"))!
         commitInWorktree(path, "story.txt", "work before suspension\n")
         const preserved = (await mgr.cleanupFailed("S1", true))!
-        integrateOnRunBranch(repo, "dep.txt", "integrated\n")
+        integrateOnRunBranch(integrationRoot, "dep.txt", "integrated\n")
 
         await mgr.resumeFromSuspension("S1")
         const resumed = mgr.activePath("S1")!
@@ -187,14 +199,14 @@ describe("WorktreeManager — host-owned suspension resume", () => {
                 return true
             },
         )
-        assert.equal(existsSync(join(repo, "story.txt")), false)
+        assert.equal(existsSync(join(integrationRoot, "story.txt")), false)
     })
 
     it("leaves recovery material for prepareConflictRetry when integration fails post-suspension", async () => {
         const path = (await mgr.create("S1"))!
         commitInWorktree(path, "story.txt", "work before suspension\n")
         const preserved = (await mgr.cleanupFailed("S1", true))!
-        integrateOnRunBranch(repo, "dep.txt", "integrated\n")
+        integrateOnRunBranch(integrationRoot, "dep.txt", "integrated\n")
 
         await mgr.resumeFromSuspension("S1", { restoreFrom: preserved })
         const resumed = mgr.activePath("S1")!
@@ -221,7 +233,7 @@ describe("WorktreeManager — host-owned suspension resume", () => {
         const preserved = (await mgr.cleanupFailed("S1", true))!
         const preservedSha = git(repo, "rev-parse", preserved)
         // The dependency touched the same line, so the replay cannot apply.
-        const moved = integrateOnRunBranch(repo, "a.txt", "dependency rewrite\nline2\nline3\n")
+        const moved = integrateOnRunBranch(integrationRoot, "a.txt", "dependency rewrite\nline2\nline3\n")
 
         await assert.rejects(
             () => mgr.resumeFromSuspension("S1", { restoreFrom: preserved }),
@@ -233,7 +245,7 @@ describe("WorktreeManager — host-owned suspension resume", () => {
         assert.equal(mgr.activePath("S1"), null)
         assert.equal(mgr.recoveryRef("S1"), preserved)
         assert.equal(git(repo, "rev-parse", "--verify", preserved), preservedSha)
-        assert.equal(git(repo, "rev-parse", "HEAD"), moved, "the run branch is untouched")
+        assert.equal(git(integrationRoot, "rev-parse", "HEAD"), moved, "the run branch is untouched")
 
         const recovered = await mgr.prepareConflictRetry("S1")
         assert.equal(recovered, preserved)
