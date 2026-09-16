@@ -6,6 +6,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { GitGate } from "../../src/integration/git.js"
+import {
+    INTEGRATION_WORKTREE_DIRNAME,
+    IntegrationWorktree,
+    integrationWorktreePath,
+} from "../../src/integration/integration-worktree.js"
 import { captureCriticRepositoryFingerprint } from "../../src/acceptance/critic-evidence.js"
 import { WorktreeManager, WorktreeRefusalError } from "../../src/integration/worktree.js"
 import {
@@ -53,6 +58,7 @@ beforeEach(() => {
     runId = uniqueRunId("run-test")
     mgr = new WorktreeManager(repo, gate, runId, {
         onLog: (l) => logs.push(l),
+        integrationRoot: repo,
     })
 })
 
@@ -873,5 +879,98 @@ describe("WorktreeManager — host checkout", () => {
         assert.equal(await mgr.mergeBack("S1"), true)
         assert.equal(readFileSync(join(repo, "b.txt"), "utf8"), "story\n")
         assert.equal(readFileSync(join(repo, "a.txt"), "utf8"), "host\nline2\nline3\n")
+    })
+})
+
+describe("WorktreeManager — isolated integration tree", () => {
+    async function isolatedManager(): Promise<string> {
+        const { integrationRoot } = await new IntegrationWorktree({
+            repoRoot: repo,
+            gitGate: gate,
+            runId,
+            goalBranch: "baro/goal",
+            push: false,
+            onLog: (l) => logs.push(l),
+        }).prepare()
+        mgr = new WorktreeManager(repo, gate, runId, {
+            onLog: (l) => logs.push(l),
+            integrationRoot,
+        })
+        return integrationRoot
+    }
+
+    it("branches stories from and merges them into integrationRoot, leaving the host checkout alone", async () => {
+        const integrationRoot = await isolatedManager()
+        writeFileSync(join(integrationRoot, "goal.txt"), "goal\n")
+        git(integrationRoot, "add", "-A")
+        git(integrationRoot, "commit", "-m", "goal work")
+        const goalHead = git(integrationRoot, "rev-parse", "HEAD")
+        const hostHead = git(repo, "rev-parse", "HEAD")
+
+        const p1 = (await mgr.create("S1"))!
+        assert.equal(mgr.creationSha("S1"), goalHead)
+        assert.equal(git(p1, "rev-parse", "HEAD"), goalHead)
+        commitInWorktree(p1, "a.txt", "story\nline2\nline3\n")
+        writeFileSync(join(repo, "a.txt"), "host\nline2\nline3\n")
+
+        assert.equal(await mgr.mergeBack("S1"), true)
+        assert.equal(readFileSync(join(integrationRoot, "a.txt"), "utf8"), "story\nline2\nline3\n")
+        assert.match(git(integrationRoot, "log", "--oneline", "-1"), /merge story S1/)
+        assert.equal(git(repo, "branch", "--show-current"), "main")
+        assert.equal(git(repo, "rev-parse", "HEAD"), hostHead)
+        assert.equal(readFileSync(join(repo, "a.txt"), "utf8"), "host\nline2\nline3\n")
+    })
+
+    it("still refuses host_checkout_dirty when integrationRoot itself is dirty", async () => {
+        const integrationRoot = await isolatedManager()
+        const p1 = (await mgr.create("S1"))!
+        commitInWorktree(p1, "a.txt", "story\nline2\nline3\n")
+        writeFileSync(join(integrationRoot, "a.txt"), "stray\nline2\nline3\n")
+
+        await assert.rejects(
+            () => mgr.mergeBack("S1"),
+            (e: unknown) =>
+                e instanceof WorktreeRefusalError &&
+                e.invariant === "host_checkout_dirty" &&
+                /uncommitted changes on \[a\.txt\]/.test(e.message),
+        )
+        assert.notEqual(git(repo, "branch", "--list", `baro-wt/${runId}/S1`), "", "story branch intact")
+    })
+
+    it("cleanupAll removes story dirs but never the integration worktree", async () => {
+        const integrationRoot = await isolatedManager()
+        const p1 = (await mgr.create("S1"))!
+
+        await mgr.cleanupAll()
+
+        assert.equal(existsSync(p1), false)
+        assert.equal(existsSync(integrationRoot), true)
+        assert.equal(git(integrationRoot, "branch", "--show-current"), "baro/goal")
+        assert.equal(mgr.hasRetainedWorktrees(), false)
+    })
+
+    it("reports retained story worktrees after cleanupAll", async () => {
+        await isolatedManager()
+        await mgr.create("S-live")
+
+        await mgr.cleanupAll({ retainStoryIds: new Set(["S-live"]) })
+
+        assert.equal(mgr.hasRetainedWorktrees(), true)
+        await mgr.cleanup("S-live")
+    })
+
+    it("refuses a story id that collides with the integration worktree directory", async () => {
+        const integrationRoot = await isolatedManager()
+        assert.equal(integrationRoot, integrationWorktreePath(runId))
+
+        await assert.rejects(
+            () => mgr.create(INTEGRATION_WORKTREE_DIRNAME),
+            /story id collides with the integration worktree directory/,
+        )
+        await assert.rejects(
+            () => mgr.resumeFromSuspension(INTEGRATION_WORKTREE_DIRNAME),
+            /story id collides with the integration worktree directory/,
+        )
+        assert.equal(git(integrationRoot, "branch", "--show-current"), "baro/goal")
     })
 })
