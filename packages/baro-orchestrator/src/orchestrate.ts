@@ -592,6 +592,7 @@ export async function orchestrate(
     // identity and, at teardown, delete the running run's worktree root. The
     // entry point that legitimately inherits the id passes it in.
     const runId = resolveOrchestrationRunId(config.runId, undefined)
+    const repoRoot = config.cwd
     const outcomeAuthority = coordinationMode === "collective"
         ? new StoryOutcomeAuthority(runId)
         : undefined
@@ -674,7 +675,7 @@ export async function orchestrate(
     operator.join(env)
 
     if (config.greenfieldInit !== false) {
-        await ensureGreenfieldRepo(config.cwd, (line) =>
+        await ensureGreenfieldRepo(repoRoot, (line) =>
             process.stderr.write(`${line}\n`),
         ).catch(() => {})
     }
@@ -685,12 +686,12 @@ export async function orchestrate(
         const listed = await runRepositoryCommand(
             "git",
             ["ls-files", "-z"],
-            { cwd: config.cwd },
+            { cwd: repoRoot },
         )
         reportGoalPreconditions(
             loadPrd(config.prdPath).decisionDocument,
             {
-                cwd: config.cwd,
+                cwd: repoRoot,
                 files: listed.stdout.split("\0").filter(Boolean),
             },
             // Run 11 wrote this to stderr, which lands in a file under
@@ -706,7 +707,6 @@ export async function orchestrate(
     } catch {
         // A goal we cannot read here is one the Architect still sees.
     }
-    const repoRoot = config.cwd
     const useGit = config.withGit ?? (await isInsideGitRepo(repoRoot))
     const gitGate = new GitGate()
     let baseSha: string | null = null
@@ -1288,7 +1288,7 @@ export async function orchestrate(
     if (coordinationMode === "legacy") {
         const conductor = new Conductor({
             prdPath: config.prdPath,
-            cwd: config.cwd,
+            cwd: repoRoot,
             parallel: effectiveParallel,
             timeoutSecs: effectiveStoryTimeoutSecs,
             overrideModel: config.overrideModel ?? undefined,
@@ -1540,7 +1540,7 @@ export async function orchestrate(
         const board = collectiveBoard = new CollectiveBoard({
             runId,
             prdPath: config.prdPath,
-            cwd: config.cwd,
+            cwd: repoRoot,
             timeoutSecs: effectiveStoryTimeoutSecs,
             overrideModel: config.overrideModel ?? undefined,
             defaultModel: defaultStorySelector,
@@ -1633,7 +1633,7 @@ export async function orchestrate(
     // Join workers after the coordinator/projector so nested executor events
     // are ordered behind the lease that authorized them.
     const factoryBase = {
-        cwd: config.cwd,
+        cwd: repoRoot,
         coordinationMode,
         runId,
         worktrees: worktrees ?? undefined,
@@ -1895,7 +1895,7 @@ export async function orchestrate(
                 const seededPlanning = busPrd.runtimeGraph?.planning
                 busPlannerDone = runPlannerBusSession({
                     runId,
-                    cwd: config.cwd,
+                    cwd: repoRoot,
                     env,
                     feed,
                     goalEnvelope: busPrd.goalEnvelope,
