@@ -7,6 +7,8 @@ import { describe, it } from "node:test"
 
 import { GoalInvariantReviewer } from "../../src/goal/goal-invariant-reviewer.js"
 import { createGoalAggregateReviewBasis } from "../../src/runtime/goal-aggregate-review.js"
+import { createFakeAwakeClock } from "../../src/runtime/awake-clock.js"
+import type { GoalInvariantReviewDeadline } from "../../src/goal/goal-invariant-review-evidence.js"
 import {
     DialogueResponderInvocationError,
     DialogueResponderNotDispatchedError,
@@ -745,6 +747,87 @@ describe("GoalInvariantReviewer", () => {
             assert.match(
                 completed?.data.invariants[0]?.reason ?? "",
                 /overall deadline exceeded after 20ms/,
+            )
+            assert.equal(await reviewer.shutdown(), true)
+        } finally {
+            rmSync(repo.path, { recursive: true, force: true })
+        }
+    })
+
+    it("defers the review deadline across a suspension and expires it at the original awake elapsed", async () => {
+        const repo = createRepository()
+        try {
+            const runId = "run-aggregate-awake-deadline"
+            const guardian = source("goal-guardian")
+            const verifier = source("run-verifier")
+            const repository = source("repository")
+            const clock = createFakeAwakeClock()
+            const overallTimeoutMs = 30 * 60_000
+            const suspensionMs = 4 * 60 * 60_000
+            let calls = 0
+            let announcePreparationEntered!: () => void
+            const preparationEntered = new Promise<void>((resolve) => {
+                announcePreparationEntered = resolve
+            })
+            let captured!: GoalInvariantReviewDeadline
+            const reviewer = new GoalInvariantReviewer({
+                runId,
+                cwd: repo.path,
+                modelUsed: "fake-reviewer",
+                timeoutMs: 10_000,
+                maxAttempts: 1,
+                overallTimeoutMs,
+                awakeClock: clock,
+                evidenceAdapter: {
+                    prepare: async (
+                        _cwd,
+                        _baseSha,
+                        _request,
+                        _verification,
+                        deadline,
+                    ) => {
+                        captured = deadline
+                        announcePreparationEntered()
+                        await new Promise<void>((resolve) => {
+                            deadline.signal.addEventListener(
+                                "abort",
+                                () => resolve(),
+                                { once: true },
+                            )
+                            if (deadline.signal.aborted) resolve()
+                        })
+                        throw deadline.signal.reason
+                    },
+                    verifyRepositoryFingerprint: async () => null,
+                },
+                responder: async () => {
+                    calls += 1
+                    return passVerdict()
+                },
+            })
+            reviewer.setRequestAuthority(guardian)
+            reviewer.setVerificationAuthority(verifier)
+            reviewer.setRepositoryAuthority(repository)
+            const env = joinWithCapture(reviewer)
+            deliverEvidence(env, repository, verifier, runId, repo.baseSha)
+
+            env.deliverSemanticEvent(guardian, aggregateRequest(runId))
+            await preparationEntered
+
+            clock.suspend(suspensionMs)
+            assert.equal(captured.signal.aborted, false)
+            clock.advance(overallTimeoutMs - 1)
+            assert.equal(captured.signal.aborted, false)
+            clock.advance(1)
+            assert.equal(captured.signal.aborted, true)
+
+            await reviewer.idle()
+            const completed = env.events.find(GoalAggregateReviewCompleted.is)
+            assert.equal(calls, 0)
+            assert.equal(completed?.data.status, "inconclusive")
+            assert.match(
+                completed?.data.invariants[0]?.reason ?? "",
+                /overall deadline exceeded after 1800000ms/,
             )
             assert.equal(await reviewer.shutdown(), true)
         } finally {

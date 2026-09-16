@@ -65,7 +65,11 @@ impl OperatorRun {
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(started)
         });
-        let secs = end.saturating_sub(started) / 1000;
+        // Wall epoch millis count machine suspend; subtract it to match app.rs.
+        let secs = end
+            .saturating_sub(started)
+            .saturating_sub(crate::awake_clock::absorbed_gap_ms_since_global(started))
+            / 1000;
         if secs < 60 {
             format!("{secs}s")
         } else {

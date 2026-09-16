@@ -2134,9 +2134,13 @@ impl App {
                     self.exit_reason = Some(msg);
                 }
             }
+
+            // A type this TUI does not render is deliberately ignored.
+            BaroEvent::Unrendered => {}
         }
     }
 
+    // Instant excludes machine suspend by construction, so this is awake time.
     pub fn elapsed_secs(&self) -> u64 {
         if self.done {
             self.total_time_secs

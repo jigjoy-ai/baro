@@ -12,6 +12,7 @@ import type {
     RunVerificationCompletedData,
 } from "../semantic-events.js"
 import type { GoalAggregateReviewBasis } from "../runtime/goal-aggregate-review.js"
+import { sharedAwakeClock, type AwakeClock } from "../runtime/awake-clock.js"
 
 const GIT_TIMEOUT_MS = 10_000
 const MAX_REPOSITORY_EVIDENCE_BYTES = 256 * 1024
@@ -25,9 +26,17 @@ export const GOAL_REVIEW_STABLE_CAPTURE_BUDGET_MS = 30_000
 
 export interface GoalInvariantReviewDeadline {
     signal: AbortSignal
+    /** Awake time: measured and compared only against {@link awakeClock}. */
     deadlineAt: number
     /** Reviewer-owned drain for operations that acquire resources after abort. */
     registerCleanup?(cleanup: Promise<unknown>): void
+    awakeClock?: AwakeClock
+}
+
+export function goalReviewDeadlineNowMs(
+    deadline: GoalInvariantReviewDeadline,
+): number {
+    return (deadline.awakeClock ?? sharedAwakeClock()).awakeNow()
 }
 
 export type GoalInvariantReviewPreparation =
@@ -478,7 +487,7 @@ async function captureUntrackedFiles(
             const close = handle.close()
             if (
                 deadline.signal.aborted ||
-                Date.now() >= deadline.deadlineAt
+                goalReviewDeadlineNowMs(deadline) >= deadline.deadlineAt
             ) {
                 // The reviewer drains this outside the work deadline with a
                 // separate bound; a late close remains rejection-safe.
@@ -697,7 +706,9 @@ function remainingReviewDeadlineMs(
     deadline: GoalInvariantReviewDeadline,
 ): number {
     assertReviewDeadline(deadline)
-    const remaining = Math.ceil(deadline.deadlineAt - Date.now())
+    const remaining = Math.ceil(
+        deadline.deadlineAt - goalReviewDeadlineNowMs(deadline),
+    )
     if (remaining < MIN_GIT_BUDGET_MS) {
         throw new Error(
             "aggregate evidence capture budget is exhausted: less than " +
@@ -709,7 +720,7 @@ function remainingReviewDeadlineMs(
 
 function assertReviewDeadline(deadline: GoalInvariantReviewDeadline): void {
     if (deadline.signal.aborted) throw reviewDeadlineError(deadline)
-    if (Date.now() >= deadline.deadlineAt) {
+    if (goalReviewDeadlineNowMs(deadline) >= deadline.deadlineAt) {
         throw new Error("aggregate review overall deadline expired")
     }
 }

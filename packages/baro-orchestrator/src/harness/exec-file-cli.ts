@@ -22,6 +22,8 @@ import {
     ManagedProcessTree,
     POSIX_PROCESS_GROUPS_SUPPORTED,
 } from "./process-tree.js"
+import { sharedAwakeClock, type AwakeClock } from "../runtime/awake-clock.js"
+import { trackAwakeBudget } from "../runtime/awake-clock-log.js"
 
 /**
  * How the timeout and idle watchdogs measure time.
@@ -71,6 +73,10 @@ export interface ExecFileCliOptions {
     onStdoutData?: (chunk: Buffer) => void
     /** Defaults to the real clock; see {@link ExecFileCliTimers}. */
     timers?: ExecFileCliTimers
+    /** Decides expiry when a window's timer fires. Windows are still armed
+     *  through {@link timers}; the clock only says how much of the armed delay
+     *  was slept through rather than spent. */
+    awakeClock?: AwakeClock
 }
 
 export interface ExecFileCliBufferResult {
@@ -137,8 +143,10 @@ function execFileCliRaw(
             stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
             detached: POSIX_PROCESS_GROUPS_SUPPORTED,
         } as SpawnOptions)
+        const clock = options.awakeClock ?? sharedAwakeClock()
         const cpuActivityProbe =
-            options.cpuActivityProbe ?? createDefaultCpuActivityProbe(child.pid)
+            options.cpuActivityProbe ??
+            createDefaultCpuActivityProbe(child.pid, clock)
         const processTree = new ManagedProcessTree(child, {
             terminationGraceMs,
             pollIntervalMs: 25,
@@ -158,6 +166,7 @@ function execFileCliRaw(
         const probeTimers = new Set<unknown>()
         let terminationError: Error | undefined
         let treeRefreshed = false
+        const budgetReleases: Array<() => void> = []
 
         const finish = (fn: () => void): void => {
             if (settled) return
@@ -166,6 +175,8 @@ function execFileCliRaw(
             if (idleTimer) timers.clearTimeout(idleTimer)
             for (const handle of probeTimers) timers.clearTimeout(handle)
             probeTimers.clear()
+            for (const release of budgetReleases) release()
+            budgetReleases.length = 0
             options.signal?.removeEventListener("abort", onAbort)
             fn()
         }
@@ -195,17 +206,46 @@ function execFileCliRaw(
 
         const onAbort = (): void => terminate(abortError(command))
 
+        /** A fired timer proves the wall delay elapsed, not that the window was
+         *  spent: a suspend absorbs it. Give back what was slept through, capped
+         *  by the awake time actually left, so sleep can neither kill the child
+         *  early nor buy it a longer silence than the caller asked for. */
+        const sleptThroughMs = (
+            deadlineAwakeMs: number,
+            absorbedAtArmMs: number,
+        ): number => {
+            const remainingMs = deadlineAwakeMs - clock.awakeNow()
+            return Math.min(remainingMs, clock.absorbedGapMs() - absorbedAtArmMs)
+        }
+
         if (options.timeout && options.timeout > 0) {
-            timer = timers.setTimeout(() => {
+            const timeoutMs = options.timeout
+            const deadlineAwakeMs = clock.awakeNow() + timeoutMs
+            const absorbedAtArmMs = clock.absorbedGapMs()
+            const onCeiling = (): void => {
+                const creditMs = sleptThroughMs(deadlineAwakeMs, absorbedAtArmMs)
+                if (creditMs > 0) {
+                    timer = timers.setTimeout(onCeiling, creditMs)
+                    return
+                }
                 const err = new Error(
-                    `${command} timed out after ${options.timeout}ms — exceeded the absolute command ceiling`,
+                    `${command} timed out after ${timeoutMs}ms — exceeded the absolute command ceiling`,
                 ) as Error & { killed: boolean }
                 err.killed = true
                 terminate(err)
-            }, options.timeout)
+            }
+            timer = timers.setTimeout(onCeiling, timeoutMs)
+            budgetReleases.push(
+                trackAwakeBudget({
+                    budget: "exec-file-cli-absolute",
+                    awakeRemainingMs: () =>
+                        Math.max(0, deadlineAwakeMs - clock.awakeNow()),
+                }),
+            )
         }
         const idleMs = options.idleTimeoutMs
         let cpuSample: CpuActivitySample | null = null
+        let idleDeadlineAwakeMs = 0
         // Bumped by every pet, so a probe that was still in flight when output
         // finally arrived cannot kill the process it was asking about.
         let idleGeneration = 0
@@ -262,7 +302,30 @@ function execFileCliRaw(
             if (idleTimer) timers.clearTimeout(idleTimer)
             idleGeneration += 1
             const generation = idleGeneration
-            idleTimer = timers.setTimeout(() => onIdleExpiry(generation), idleMs)
+            const deadlineAwakeMs = clock.awakeNow() + idleMs
+            idleDeadlineAwakeMs = deadlineAwakeMs
+            const absorbedAtArmMs = clock.absorbedGapMs()
+            const onSilence = (): void => {
+                if (generation !== idleGeneration) return
+                const creditMs = sleptThroughMs(deadlineAwakeMs, absorbedAtArmMs)
+                if (creditMs > 0) {
+                    idleTimer = timers.setTimeout(onSilence, creditMs)
+                    return
+                }
+                onIdleExpiry(generation)
+            }
+            idleTimer = timers.setTimeout(onSilence, idleMs)
+        }
+        if (idleMs && idleMs > 0) {
+            // Petting moves this window rather than replacing it, so a single
+            // registration reads whichever deadline is current.
+            budgetReleases.push(
+                trackAwakeBudget({
+                    budget: "exec-file-cli-idle",
+                    awakeRemainingMs: () =>
+                        Math.max(0, idleDeadlineAwakeMs - clock.awakeNow()),
+                }),
+            )
         }
         petIdle()
         options.signal?.addEventListener("abort", onAbort, { once: true })

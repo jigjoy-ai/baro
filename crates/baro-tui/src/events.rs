@@ -212,6 +212,7 @@ pub enum BaroEvent {
     #[serde(rename = "model_usage")]
     ModelUsage {
         #[allow(dead_code)]
+        #[serde(default)]
         measurement: serde_json::Value,
     },
 
@@ -355,6 +356,11 @@ pub enum BaroEvent {
         code: Option<i32>,
         reason: Option<String>,
     },
+
+    /// Any `type` this TUI does not render (e.g. the diagnostic
+    /// `suspension_gap_absorbed` line) is ignored rather than parse-skipped.
+    #[serde(other)]
+    Unrendered,
 }
 
 /// Headless stdout is a machine-readable JSONL stream. A subprocess that
@@ -573,6 +579,25 @@ mod tests {
         }
         match parse(r#"{"type":"init","project":"p","stories":[],"mode":"focused"}"#) {
             BaroEvent::Init { mode, .. } => assert_eq!(mode.as_deref(), Some("focused")),
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_type_this_tui_does_not_render_is_ignored_rather_than_a_parse_failure() {
+        // Tolerated rather than rejected: reaching the client's parse-failure
+        // path would render this diagnostic as a `[parse-skip]` log line.
+        match parse(
+            r#"{"type":"suspension_gap_absorbed","gap_ms":10800000,"budget":"architect-phase",
+                "awake_elapsed_ms":60000,"wall_elapsed_ms":10860000}"#,
+        ) {
+            BaroEvent::Unrendered => {}
+            other => panic!("wrong variant: {:?}", other),
+        }
+        match parse(r#"{"type":"model_usage","measurement":{"tokens":5}}"#) {
+            BaroEvent::ModelUsage { measurement } => {
+                assert_eq!(measurement["tokens"], 5);
+            }
             other => panic!("wrong variant: {:?}", other),
         }
     }

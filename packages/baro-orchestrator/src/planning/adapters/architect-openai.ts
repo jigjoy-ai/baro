@@ -34,6 +34,12 @@ import type { GoalEnvelope } from "../../conversation/session/conversation-contr
 
 import { withTransientRetry } from "../../harness/transient-retry.js"
 import {
+    createAwakeDeadline,
+    sharedAwakeClock,
+    type AwakeClock,
+    type AwakeDeadline,
+} from "../../runtime/awake-clock.js"
+import {
     ARCHITECT_DECISION_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_OUTCOME_SYSTEM_PROMPT,
     ARCHITECT_SYSTEM_PROMPT,
@@ -81,6 +87,9 @@ export interface RunArchitectOpenAIOptions {
     billingCoordinator?: GatewayBillingCoordinator
     /** Deterministic no-network seam used by the architect state-machine tests. */
     testRuntime?: ArchitectOpenAITestRuntime
+    /** Time base for every budget here, so a machine suspend cannot spend the
+     * phase. Default: the process-wide awake clock. */
+    awakeClock?: AwakeClock
     /** Host continuation hook for reusing the exact phase-one model. */
     onArchitectModelResolved?: (modelName: string) => void
     /** Optional observational telemetry emitted once per completed inference round. */
@@ -113,7 +122,8 @@ export async function runArchitectOpenAI(
         )
     }
 
-    const startedAt = Date.now()
+    const clock = opts.awakeClock ?? sharedAwakeClock()
+    const startedAt = clock.awakeNow()
     const deadlineAt = startedAt + opts.timeoutMs
     const controller = new AbortController()
     const phase = runArchitectOpenAIWithinBudget(
@@ -122,19 +132,24 @@ export async function runArchitectOpenAI(
         deadlineAt,
     )
     const timeoutError = architectPhaseTimeoutError(opts.timeoutMs)
-    let timer: ReturnType<typeof setTimeout> | undefined
+    let deadline: AwakeDeadline | undefined
     const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-            reject(timeoutError)
-            controller.abort(timeoutError)
-        }, Math.max(0, deadlineAt - Date.now()))
+        deadline = createAwakeDeadline({
+            budget: "architect-phase",
+            timeoutMs: opts.timeoutMs!,
+            onExpired: () => {
+                reject(timeoutError)
+                controller.abort(timeoutError)
+            },
+            clock,
+        })
     })
     const result = await Promise.race([phase, timeout]).finally(() =>
-        clearTimeout(timer),
+        deadline?.close(),
     )
     // Promise timers cannot fire while a synchronous adapter blocks the event
     // loop. The absolute clock remains authoritative after either branch wins.
-    if (controller.signal.aborted || Date.now() >= deadlineAt) {
+    if (controller.signal.aborted || clock.awakeNow() >= deadlineAt) {
         controller.abort(timeoutError)
         throw timeoutError
     }
@@ -144,8 +159,10 @@ export async function runArchitectOpenAI(
 async function runArchitectOpenAIWithinBudget(
     opts: RunArchitectOpenAIOptions,
     phaseSignal?: AbortSignal,
+    /** Awake timestamp — comparable only against the same clock, never Date.now(). */
     phaseDeadlineAt?: number,
 ): Promise<string> {
+    const clock = opts.awakeClock ?? sharedAwakeClock()
     // Intake first (cheap classifier via BARO_INTAKE_MODEL), then route the
     // architect model off the resolved mode — a pre-decided contract skips intake.
     let invocationSequence = 0
@@ -313,20 +330,22 @@ async function runArchitectOpenAIWithinBudget(
                               }
                             : {}),
                     })
-                    let timer: ReturnType<typeof setTimeout> | undefined
+                    let roundDeadline: AwakeDeadline | undefined
                     return (perRoundTimeoutMs === undefined
                         ? roundPromise
                         : Promise.race([
                               roundPromise,
                               new Promise<never>((_, reject) => {
-                                  timer = setTimeout(
-                                      () => reject(new Error(
+                                  roundDeadline = createAwakeDeadline({
+                                      budget: "architect-round",
+                                      timeoutMs: perRoundTimeoutMs,
+                                      onExpired: () => reject(new Error(
                                           `round ${round} timed out after ${perRoundTimeoutMs}ms`,
                                       )),
-                                      perRoundTimeoutMs,
-                                  )
+                                      clock,
+                                  })
                               }),
-                          ]).finally(() => clearTimeout(timer))
+                          ]).finally(() => roundDeadline?.close())
                     ).catch((error: unknown) => {
                         // Each dead dispatch stays visible: a retried round
                         // that reported nothing is still a round we paid for.
@@ -343,7 +362,7 @@ async function runArchitectOpenAIWithinBudget(
                         !isRunnerTimeoutError(error) &&
                         // Sleeping through the rest of the phase budget trades
                         // a named provider failure for an unnamed deadline one.
-                        retryFitsInPhase(phaseDeadlineAt),
+                        retryFitsInPhase(phaseDeadlineAt, clock),
                     notice: (message) =>
                         process.stderr.write(
                             `[architect-openai] round ${round} ${message}\n`,
@@ -351,7 +370,7 @@ async function runArchitectOpenAIWithinBudget(
                 },
             )
             failureObserved = false
-            assertArchitectPhaseDeadline(opts.timeoutMs, phaseDeadlineAt)
+            assertArchitectPhaseDeadline(opts.timeoutMs, phaseDeadlineAt, clock)
         } catch (error) {
             if (!failureObserved) observeRoundFailure(error)
             throw error
@@ -515,19 +534,23 @@ function architectPhaseTimeoutError(timeoutMs: number): Error {
  */
 const MIN_RETRY_HEADROOM_MS = 30_000
 
-function retryFitsInPhase(deadlineAt: number | undefined): boolean {
+function retryFitsInPhase(
+    deadlineAt: number | undefined,
+    clock: AwakeClock,
+): boolean {
     if (deadlineAt === undefined) return true
-    return deadlineAt - Date.now() > MIN_RETRY_HEADROOM_MS
+    return deadlineAt - clock.awakeNow() > MIN_RETRY_HEADROOM_MS
 }
 
 function assertArchitectPhaseDeadline(
     timeoutMs: number | undefined,
     deadlineAt: number | undefined,
+    clock: AwakeClock,
 ): void {
     if (
         timeoutMs !== undefined &&
         deadlineAt !== undefined &&
-        Date.now() >= deadlineAt
+        clock.awakeNow() >= deadlineAt
     ) {
         throw architectPhaseTimeoutError(timeoutMs)
     }

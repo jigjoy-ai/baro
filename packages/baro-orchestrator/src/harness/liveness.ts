@@ -6,6 +6,13 @@
  * only signal that distinguishes "thinking long" from "dead".
  */
 
+import {
+    createAwakeDeadline,
+    sharedAwakeClock,
+    type AwakeClock,
+    type AwakeDeadline,
+} from "../runtime/awake-clock.js"
+
 function envSecs(name: string, fallbackSecs: number): number {
     const raw = process.env[name]
     if (raw !== undefined) {
@@ -29,29 +36,36 @@ export function commandIdleTimeoutMs(): number {
 
 /** Re-armable idle timer for call sites that don't go through execFileCli.
  *  `pet()` on every proof of life; `onIdle` fires only after a full silent
- *  window. Inert after dispose(). */
+ *  window. Inert after dispose(). The window is measured in awake time, so a
+ *  suspended laptop is not silence the subprocess is answerable for. */
 export class IdleWatchdog {
-    private timer: ReturnType<typeof setTimeout> | undefined
+    private deadline: AwakeDeadline | undefined
     private disposed = false
 
     constructor(
         private readonly idleMs: number,
         private readonly onIdle: () => void,
+        private readonly clock: AwakeClock = sharedAwakeClock(),
     ) {
         this.pet()
     }
 
     pet(): void {
         if (this.disposed || this.idleMs <= 0) return
-        if (this.timer) clearTimeout(this.timer)
-        this.timer = setTimeout(() => {
-            if (!this.disposed) this.onIdle()
-        }, this.idleMs)
+        this.deadline?.close()
+        this.deadline = createAwakeDeadline({
+            budget: "harness-liveness",
+            timeoutMs: this.idleMs,
+            onExpired: () => {
+                if (!this.disposed) this.onIdle()
+            },
+            clock: this.clock,
+        })
     }
 
     dispose(): void {
         this.disposed = true
-        if (this.timer) clearTimeout(this.timer)
-        this.timer = undefined
+        this.deadline?.close()
+        this.deadline = undefined
     }
 }

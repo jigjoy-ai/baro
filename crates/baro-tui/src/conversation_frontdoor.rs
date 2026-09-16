@@ -318,6 +318,7 @@ pub(crate) fn spawn_conversation_architect_validation(
                 Ok::<_, subprocess::ProcessRunError>((repository_context, transport))
             };
             tokio::pin!(validation);
+            // tokio::time::sleep is Instant-based: it already pauses across suspend.
             let deadline = tokio::time::sleep(validation_timeout);
             tokio::pin!(deadline);
 

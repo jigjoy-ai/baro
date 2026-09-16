@@ -14,7 +14,13 @@ import type { SemanticEvent } from "../runtime/mozaik.js"
 import type { PrdCollectiveProtocolState, PrdFile } from "../prd.js"
 import { deriveGoalContract } from "../goal/goal-contract.js"
 import { envNonNegativeInt } from "../runtime/env-int.js"
-import { NamedTimers } from "../runtime/named-timers.js"
+import {
+    createAwakeDeadline,
+    sharedAwakeClock,
+    type AwakeBudgetName,
+    type AwakeClock,
+    type AwakeDeadline,
+} from "../runtime/awake-clock.js"
 import {
     ConductorState,
     GoalCompletionCheckRequested,
@@ -39,6 +45,13 @@ export const GoalCompletionCheckTimedOut =
         "goal_completion_check_timed_out",
     )
 
+const WATCHDOG_BUDGETS = {
+    verification: "verification-gate",
+    goalCompletion: "goal-completion-gate",
+} as const satisfies Record<string, AwakeBudgetName>
+
+type WatchdogName = keyof typeof WATCHDOG_BUDGETS
+
 export interface VerificationGoalGateHost {
     emit(event: SemanticEvent<unknown>): void
     phase(): string
@@ -57,6 +70,7 @@ export interface VerificationGoalGateOptions {
     goalCompletionTimeoutMs?: number
     hasGoalCompletionAuthority: boolean
     host: VerificationGoalGateHost
+    awakeClock?: AwakeClock
 }
 
 export class VerificationGoalGate {
@@ -72,9 +86,41 @@ export class VerificationGoalGate {
     } | null = null
     private verificationStatus: "passed" | "failed" | "skipped" | undefined
     private verificationEvidence: RunVerificationEvidence | undefined
-    private readonly timers = new NamedTimers<"verification" | "goalCompletion">()
+    private readonly watchdogs = new Map<WatchdogName, AwakeDeadline>()
+    private readonly clock: AwakeClock
 
-    constructor(private readonly opts: VerificationGoalGateOptions) {}
+    constructor(private readonly opts: VerificationGoalGateOptions) {
+        this.clock = opts.awakeClock ?? sharedAwakeClock()
+    }
+
+    /** A suspend absorbs the armed delay, so expiry is decided by re-reading
+     *  awake time on every fire rather than by the delay that was armed. */
+    private armWatchdog(
+        name: WatchdogName,
+        timeoutMs: number,
+        onExpired: () => void,
+    ): void {
+        this.clearWatchdog(name)
+        this.watchdogs.set(
+            name,
+            createAwakeDeadline({
+                budget: WATCHDOG_BUDGETS[name],
+                timeoutMs,
+                onExpired,
+                clock: this.clock,
+            }),
+        )
+    }
+
+    private clearWatchdog(name: WatchdogName): void {
+        this.watchdogs.get(name)?.close()
+        this.watchdogs.delete(name)
+    }
+
+    private clearWatchdogs(): void {
+        for (const watchdog of this.watchdogs.values()) watchdog.close()
+        this.watchdogs.clear()
+    }
 
     private get host(): VerificationGoalGateHost {
         return this.opts.host
@@ -95,7 +141,7 @@ export class VerificationGoalGate {
     /** Push/terminate settlement: drop watchdogs and correlation state but
      * keep the verification outcome for the run summary. */
     releasePendings(): void {
-        this.timers.clearAll()
+        this.clearWatchdogs()
         this.pendingVerificationId = null
         this.pendingGoalCheck = null
     }
@@ -125,7 +171,7 @@ export class VerificationGoalGate {
             this.opts.verificationTimeoutMs ??
             envNonNegativeInt("BARO_RUN_VERIFICATION_TIMEOUT_SECS", 21 * 60) * 1_000
         if (timeoutMs > 0) {
-            this.timers.arm("verification", timeoutMs, () => {
+            this.armWatchdog("verification", timeoutMs, () => {
                 this.host.emit(
                     RunVerificationTimedOut.create({
                         runId: this.opts.runId,
@@ -151,7 +197,7 @@ export class VerificationGoalGate {
     }
 
     onVerificationCompleted(result: RunVerificationCompletedData): void {
-        this.timers.clear("verification")
+        this.clearWatchdog("verification")
         this.pendingVerificationId = null
         const hasPassedCommand = result.commands.some(
             (command) => command.status === "passed",
@@ -215,7 +261,7 @@ export class VerificationGoalGate {
 
     onVerificationTimedOut(verificationId: string, timeoutMs: number): void {
         const reason = `verification timed out after ${Math.ceil(timeoutMs / 1_000)}s`
-        this.timers.clear("verification")
+        this.clearWatchdog("verification")
         this.verificationStatus = "failed"
         this.verificationEvidence = {
             verificationId,
@@ -264,7 +310,7 @@ export class VerificationGoalGate {
             Math.min(configuredTimeoutMs, 2_147_483_647),
         )
         const pending = this.pendingGoalCheck
-        this.timers.arm("goalCompletion", timeoutMs, () => {
+        this.armWatchdog("goalCompletion", timeoutMs, () => {
             this.host.emit(
                 GoalCompletionCheckTimedOut.create({
                     runId: this.opts.runId,
@@ -307,7 +353,7 @@ export class VerificationGoalGate {
             attestation.contractId !== pending.contractId ||
             attestation.verificationId !== pending.verificationId
         ) return
-        this.timers.clear("goalCompletion")
+        this.clearWatchdog("goalCompletion")
         if (attestation.contractId !== null) {
             const protocol = this.host.prd()?.runtimeGraph?.protocol
             if (
@@ -361,7 +407,7 @@ export class VerificationGoalGate {
             timeout.contractId !== pending.contractId ||
             timeout.verificationId !== pending.verificationId
         ) return
-        this.timers.clear("goalCompletion")
+        this.clearWatchdog("goalCompletion")
         this.host.requestPush(
             `goal completion attestation timed out after ` +
                 `${Math.ceil(timeout.timeoutMs / 1_000)}s`,
