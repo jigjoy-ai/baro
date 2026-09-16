@@ -139,11 +139,7 @@ export async function createOrCheckoutBranch(
     onLog?: (line: string) => void,
     push = true,
 ): Promise<void> {
-    // Strip accidental double-prefixes ("baro/baro/foo") — a caller already
-    // on a baro-prefixed branch can prepend "baro/" again.
-    while (branchName.startsWith("baro/baro/")) {
-        branchName = branchName.slice("baro/".length)
-    }
+    branchName = normalizeGoalBranchName(branchName)
     try {
         await exec("git", ["checkout", "-b", branchName], { cwd })
     } catch (error) {
@@ -162,7 +158,24 @@ export async function createOrCheckoutBranch(
         onLog?.(`[git] local-only; not pushing ${branchName}`)
         return
     }
+    await pushBranchUpstream(cwd, branchName, onLog)
+}
 
+/** Strip accidental double-prefixes ("baro/baro/foo") — a caller already on a
+ * baro-prefixed branch can prepend "baro/" again. */
+export function normalizeGoalBranchName(name: string): string {
+    while (name.startsWith("baro/baro/")) {
+        name = name.slice("baro/".length)
+    }
+    return name
+}
+
+/** Best-effort `push -u origin <branch>`; failures (no remote yet, etc.) are logged. */
+export async function pushBranchUpstream(
+    cwd: string,
+    branchName: string,
+    onLog?: (line: string) => void,
+): Promise<void> {
     try {
         await exec("git", ["push", "-u", "origin", branchName], { cwd })
         onLog?.(`[git] pushed -u origin ${branchName}`)

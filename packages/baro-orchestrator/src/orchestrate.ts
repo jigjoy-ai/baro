@@ -31,7 +31,9 @@ import {
     hasRemoteOrigin,
     ensureGreenfieldRepo,
     isInsideGitRepo,
+    normalizeGoalBranchName,
 } from "./integration/git.js"
+import { IntegrationWorktree } from "./integration/integration-worktree.js"
 import { capRunDiff } from "./integration/run-diff-cap.js"
 import { WorktreeManager } from "./integration/worktree.js"
 import { installAwakeGapReporter } from "./runtime/awake-clock-log.js"
@@ -109,7 +111,10 @@ import { Sentry } from "./execution/sentry.js"
 import { StoryFactory } from "./market/story-factory.js"
 import { WorkContextProvider } from "./market/work-context-provider.js"
 import { reportGoalPreconditions } from "./goal/goal-precondition-report.js"
-import { runRepositoryCommand } from "./integration/repository-command.js"
+import {
+    isRepositoryCommandTimeout,
+    runRepositoryCommand,
+} from "./integration/repository-command.js"
 import { type StoryAgent } from "./harness/claude/story-agent.js"
 import {
     type PrdSnapshot,
@@ -587,6 +592,7 @@ export async function orchestrate(
     // identity and, at teardown, delete the running run's worktree root. The
     // entry point that legitimately inherits the id passes it in.
     const runId = resolveOrchestrationRunId(config.runId, undefined)
+    const repoRoot = config.cwd
     const outcomeAuthority = coordinationMode === "collective"
         ? new StoryOutcomeAuthority(runId)
         : undefined
@@ -669,7 +675,7 @@ export async function orchestrate(
     operator.join(env)
 
     if (config.greenfieldInit !== false) {
-        await ensureGreenfieldRepo(config.cwd, (line) =>
+        await ensureGreenfieldRepo(repoRoot, (line) =>
             process.stderr.write(`${line}\n`),
         ).catch(() => {})
     }
@@ -680,12 +686,12 @@ export async function orchestrate(
         const listed = await runRepositoryCommand(
             "git",
             ["ls-files", "-z"],
-            { cwd: config.cwd },
+            { cwd: repoRoot },
         )
         reportGoalPreconditions(
             loadPrd(config.prdPath).decisionDocument,
             {
-                cwd: config.cwd,
+                cwd: repoRoot,
                 files: listed.stdout.split("\0").filter(Boolean),
             },
             // Run 11 wrote this to stderr, which lands in a file under
@@ -701,7 +707,7 @@ export async function orchestrate(
     } catch {
         // A goal we cannot read here is one the Architect still sees.
     }
-    const useGit = config.withGit ?? (await isInsideGitRepo(config.cwd))
+    const useGit = config.withGit ?? (await isInsideGitRepo(repoRoot))
     const gitGate = new GitGate()
     let baseSha: string | null = null
 
@@ -709,7 +715,7 @@ export async function orchestrate(
     // createOrCheckoutBranch is a no-op and the Finalizer pushes here — `gh
     // pr create` then finds the open PR and updates it.
     if (config.continueRun && useGit) {
-        const cur = await getCurrentBranch(config.cwd)
+        const cur = await getCurrentBranch(repoRoot)
         if (cur) {
             const prd = loadPrd(config.prdPath)
             if (prd.branchName !== cur) {
@@ -754,6 +760,7 @@ export async function orchestrate(
     let cleanupDialogue: (() => void) | null = null
     let shutdownStoryFactories: StoryFactory[] = []
     let shutdownWorktrees: WorktreeManager | null = null
+    let integrationWorktree: IntegrationWorktree | null = null
     let continuousGate: ContinuousGateRunner | null = null
     let mergeAwareness: MergeAwarenessRunner | null = null
     let overlapAwareness: OverlapAwarenessRunner | null = null
@@ -792,7 +799,7 @@ export async function orchestrate(
         requireQuiescenceBarrier: coordinationMode === "collective",
     })
     agentTurnProjector.join(env)
-    const hasOrigin = useGit ? await hasRemoteOrigin(config.cwd) : false
+    const hasOrigin = useGit ? await hasRemoteOrigin(repoRoot) : false
     const pushRemote = publishRemote && hasOrigin
 
     // BARO_NO_WORKTREES is NO_COLOR-style: ANY value, including empty,
@@ -804,11 +811,39 @@ export async function orchestrate(
             "collective coordination requires isolated git worktrees; unset BARO_NO_WORKTREES or use legacy coordination",
         )
     }
+    // Git refuses to check out one branch in two worktrees, so a host already
+    // on the goal branch (continue mode included) integrates in place.
+    const goalBranch = useGit
+        ? normalizeGoalBranchName(loadPrd(config.prdPath).branchName)
+        : ""
+    const hostBranch = useGit
+        ? await getCurrentBranch(repoRoot).catch((error: unknown) => {
+              if (isRepositoryCommandTimeout(error)) throw error
+              return null
+          })
+        : null
+    if (useGit && worktreesEnabled && goalBranch && hostBranch !== goalBranch) {
+        integrationWorktree = new IntegrationWorktree({
+            repoRoot,
+            gitGate,
+            runId,
+            goalBranch,
+            push: pushRemote,
+            onLog: (line) => {
+                process.stderr.write(`${line}\n`)
+                if (emitTui) emit({ type: "story_log", id: "_git", line })
+            },
+        })
+        await integrationWorktree.prepare()
+    }
+    const integrationRoot = integrationWorktree?.integrationRoot ?? repoRoot
     const worktrees =
         useGit && worktreesEnabled
-            ? new WorktreeManager(config.cwd, gitGate, runId, {
+            ? new WorktreeManager(repoRoot, gitGate, runId, {
+                  integrationRoot,
                   linkDepDirs: config.worktreeLinkDepDirs ?? true,
-                  allowSharedFallback: coordinationMode === "legacy",
+                  allowSharedFallback:
+                      coordinationMode === "legacy" && integrationWorktree === null,
                   resolveConflictsWithTheirs: coordinationMode === "legacy",
                   onLog: (line) =>
                       emitTui && emit({ type: "story_log", id: "_git", line }),
@@ -822,7 +857,9 @@ export async function orchestrate(
     // merge-back.
     const gitCoordinator = useGit
         ? new GitCoordinator({
-              cwd: config.cwd,
+              repoRoot,
+              integrationRoot,
+              integrationWorktree,
               gitGate,
               worktrees,
               emitTui,
@@ -1205,7 +1242,7 @@ export async function orchestrate(
     }
     const finalizer = useGit && hasOrigin && publishRemote
         ? new Finalizer({
-              cwd: config.cwd,
+              integrationRoot,
               prdPath: config.prdPath,
               runId,
               outcomeAuthority,
@@ -1251,7 +1288,7 @@ export async function orchestrate(
     if (coordinationMode === "legacy") {
         const conductor = new Conductor({
             prdPath: config.prdPath,
-            cwd: config.cwd,
+            cwd: repoRoot,
             parallel: effectiveParallel,
             timeoutSecs: effectiveStoryTimeoutSecs,
             overrideModel: config.overrideModel ?? undefined,
@@ -1259,16 +1296,18 @@ export async function orchestrate(
             intraLevelDelaySecs: config.intraLevelDelaySecs,
             onRunStart: useGit
                 ? async (prd) => {
-                      await excludeBaroArtifacts(config.cwd)
-                      if (prd.branchName) {
+                      await excludeBaroArtifacts(repoRoot)
+                      if (integrationWorktree) {
+                          await integrationWorktree.prepare()
+                      } else if (prd.branchName) {
                           await createOrCheckoutBranch(
-                              config.cwd,
+                              integrationRoot,
                               prd.branchName,
                               (line) => emitTui && emit({ type: "story_log", id: "_git", line }),
                               pushRemote,
                           )
                       }
-                      baseSha = await getHeadSha(config.cwd)
+                      baseSha = await getHeadSha(integrationRoot)
                       await worktrees?.cleanupStaleOnStart()
                   }
                 : undefined,
@@ -1318,10 +1357,10 @@ export async function orchestrate(
                 "[orchestrate] collective non-git run is serialized because isolated worktrees are unavailable\n",
             )
         }
-        const verifyPlan = createVerifyPlan(config.cwd)
+        const verifyPlan = createVerifyPlan(integrationRoot)
         runVerifier = new RunVerifier({
             runId,
-            cwd: config.cwd,
+            cwd: integrationRoot,
             plan: verifyPlan,
             createFinalPlan: (cwd) => {
                 // Full PRD validation remains authoritative for graph state;
@@ -1459,7 +1498,7 @@ export async function orchestrate(
             }
             goalInvariantReviewer = new GoalInvariantReviewer({
                 runId,
-                cwd: config.cwd,
+                cwd: integrationRoot,
                 responder,
                 modelUsed: goalReviewModelName(criticLlm, config.criticModel),
                 timeoutMs: goalReviewTimeoutMs,
@@ -1501,7 +1540,7 @@ export async function orchestrate(
         const board = collectiveBoard = new CollectiveBoard({
             runId,
             prdPath: config.prdPath,
-            cwd: config.cwd,
+            cwd: repoRoot,
             timeoutSecs: effectiveStoryTimeoutSecs,
             overrideModel: config.overrideModel ?? undefined,
             defaultModel: defaultStorySelector,
@@ -1594,11 +1633,13 @@ export async function orchestrate(
     // Join workers after the coordinator/projector so nested executor events
     // are ordered behind the lease that authorized them.
     const factoryBase = {
-        cwd: config.cwd,
+        cwd: repoRoot,
         coordinationMode,
         runId,
         worktrees: worktrees ?? undefined,
-        requireWorktree: coordinationMode === "collective" && worktrees !== null,
+        requireWorktree:
+            worktrees !== null &&
+            (coordinationMode === "collective" || integrationWorktree !== null),
         collaboration:
             collaborationConfig && collaborationBridge
                 ? {
@@ -1854,7 +1895,7 @@ export async function orchestrate(
                 const seededPlanning = busPrd.runtimeGraph?.planning
                 busPlannerDone = runPlannerBusSession({
                     runId,
-                    cwd: config.cwd,
+                    cwd: repoRoot,
                     env,
                     feed,
                     goalEnvelope: busPrd.goalEnvelope,
@@ -1999,14 +2040,15 @@ export async function orchestrate(
     // Await the PR before the TUI `done` event so the completion screen has
     // the PR URL the moment it renders instead of after a race.
     if (finalizer) await finalizer.complete()
+    await integrationWorktree?.syncHostCheckout()
 
     let filesCreated = 0
     let filesModified = 0
     let totalCommits = 0
     if (useGit && baseSha) {
         const [stats, commitCount] = await Promise.all([
-            getGitFileStats(config.cwd, baseSha),
-            getCommitCount(config.cwd, baseSha),
+            getGitFileStats(integrationRoot, baseSha),
+            getCommitCount(integrationRoot, baseSha),
         ])
         filesCreated = stats.created
         filesModified = stats.modified
@@ -2016,7 +2058,7 @@ export async function orchestrate(
         // can be missed on the shared-tree fallback). The TUI dedupes files
         // by path, so this is harmless when they already landed.
         if (emitTui) {
-            const runDiff = await getDiff(config.cwd, baseSha, "HEAD")
+            const runDiff = await getDiff(integrationRoot, baseSha, "HEAD")
             if (runDiff.files.length) {
                 emit({
                     type: "story_diff",
@@ -2027,6 +2069,9 @@ export async function orchestrate(
             }
         }
     }
+    await integrationWorktree?.remove({
+        keepIfRetained: worktrees?.hasRetainedWorktrees() ?? false,
+    })
 
     if (emitTui) {
         emit({
@@ -2084,6 +2129,9 @@ export async function orchestrate(
             )
         }
         await shutdownCollaborationBridge?.shutdown()
+        await integrationWorktree?.remove({
+            keepIfRetained: shutdownWorktrees?.hasRetainedWorktrees() ?? false,
+        })
         if (dialogueRuntimeCwd) {
             rmSync(dialogueRuntimeCwd, { recursive: true, force: true })
         }

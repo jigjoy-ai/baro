@@ -15,12 +15,14 @@ import {
     readFileSync,
     readdirSync,
     rmSync,
+    rmdirSync,
     symlinkSync,
 } from "fs"
 import { tmpdir } from "os"
 import { join, resolve } from "path"
 
 import { GitGate } from "./git.js"
+import { INTEGRATION_WORKTREE_DIRNAME } from "./integration-worktree.js"
 import {
     RepositoryCommandError,
     isRepositoryCommandTimeout,
@@ -56,6 +58,8 @@ export interface WorktreeManagerOptions {
     allowSharedFallback?: boolean
     /** Resolve merge conflicts by retrying with `-X theirs`. Default true. */
     resolveConflictsWithTheirs?: boolean
+    /** Tree with the run branch checked out: story bases and merges happen here. Default repoRoot. */
+    integrationRoot?: string
 }
 
 /** Reviewed identity which must still describe the exact commit selected for
@@ -131,6 +135,7 @@ export class WorktreeManager {
     private readonly linkDepDirs: boolean
     private readonly allowSharedFallback: boolean
     private readonly resolveConflictsWithTheirs: boolean
+    private readonly integrationRoot: string
     private readonly log: (line: string) => void
     private depExcludesReady = false
     /** One-way run shutdown latch. No worktree may appear after the final
@@ -139,6 +144,8 @@ export class WorktreeManager {
     /** Whether this manager ever put a worktree under `baseDir`; teardown may
      * only remove a directory it filled. */
     private createdWorktree = false
+    private readonly createdPaths = new Set<string>()
+    private retainedAfterCleanup = false
 
     constructor(
         private readonly repoRoot: string,
@@ -150,6 +157,7 @@ export class WorktreeManager {
         this.linkDepDirs = opts.linkDepDirs ?? true
         this.allowSharedFallback = opts.allowSharedFallback ?? true
         this.resolveConflictsWithTheirs = opts.resolveConflictsWithTheirs ?? true
+        this.integrationRoot = opts.integrationRoot ?? repoRoot
         this.log =
             opts.onLog ?? ((line) => process.stderr.write(`[worktree] ${line}\n`))
     }
@@ -271,7 +279,11 @@ export class WorktreeManager {
     }
 
     private pathOf(storyId: string): string {
-        return join(this.baseDir, sanitize(storyId))
+        const name = sanitize(storyId)
+        if (name === INTEGRATION_WORKTREE_DIRNAME) {
+            throw new Error("story id collides with the integration worktree directory")
+        }
+        return join(this.baseDir, name)
     }
 
     /** Seal the manager before factories drain. An already-running create
@@ -287,9 +299,9 @@ export class WorktreeManager {
      */
     async create(storyId: string): Promise<string | null> {
         if (this.shutdownStarted) return null
+        const path = this.pathOf(storyId)
         const release = await this.gate.acquire()
         const branch = this.branchOf(storyId)
-        const path = this.pathOf(storyId)
         try {
             if (this.shutdownStarted) return null
             await this.secureRecoveryMaterial(storyId, "create_reclaim")
@@ -304,13 +316,15 @@ export class WorktreeManager {
             await this.removeWorktreeQuiet(path, "create:clear-leftover")
             await this.deleteBranchQuiet(branch)
 
-            const { stdout: baseSha } = await exec("git", ["rev-parse", "HEAD"], {
-                cwd: this.repoRoot,
+            const { stdout: rawBase } = await exec("git", ["rev-parse", "HEAD"], {
+                cwd: this.integrationRoot,
             })
+            const baseSha = rawBase.trim()
 
+            this.createdPaths.add(path)
             await exec(
                 "git",
-                ["worktree", "add", "-b", branch, path, "HEAD"],
+                ["worktree", "add", "-b", branch, path, baseSha],
                 { cwd: this.repoRoot },
             )
             if (this.linkDepDirs) {
@@ -318,7 +332,7 @@ export class WorktreeManager {
                 this.symlinkDepDirs(path)
             }
             this.paths.set(storyId, path)
-            this.baseShas.set(storyId, baseSha.trim())
+            this.baseShas.set(storyId, baseSha)
             this.createdWorktree = true
             this.log(`created ${branch} at ${path}`)
             return path
@@ -388,9 +402,9 @@ export class WorktreeManager {
         storyId: string,
         opts: { restoreFrom?: string } = {},
     ): Promise<ResumeBaseUpdate> {
+        const path = this.pathOf(storyId)
         const release = await this.gate.acquire()
         const branch = this.branchOf(storyId)
-        const path = this.pathOf(storyId)
         const previousBaseSha = this.baseShas.get(storyId) ?? null
         const resumesKnownStory =
             previousBaseSha !== null ||
@@ -417,7 +431,7 @@ export class WorktreeManager {
             // Read once, under the gate: the run branch cannot move between
             // this read, the worktree creation and the base write below.
             const { stdout: rawBase } = await exec("git", ["rev-parse", "HEAD"], {
-                cwd: this.repoRoot,
+                cwd: this.integrationRoot,
             })
             const baseSha = rawBase.trim()
             if (!baseSha) {
@@ -426,6 +440,7 @@ export class WorktreeManager {
                 )
             }
 
+            this.createdPaths.add(path)
             await exec(
                 "git",
                 ["worktree", "add", "-b", branch, path, baseSha],
@@ -781,7 +796,7 @@ export class WorktreeManager {
             const mergeTarget = candidateSeal
                 ? await this.sealedMergeTarget(storyId, path, candidateSeal)
                 : branch
-            const blocked = await this.hostCheckoutBlocks(mergeTarget)
+            const blocked = await this.integrationTreeBlocks(mergeTarget)
             if (blocked.length) {
                 this.markPreserved(storyId)
                 throw new WorktreeRefusalError(
@@ -794,7 +809,7 @@ export class WorktreeManager {
             const msg = `baro: merge story ${storyId}`
             try {
                 await exec("git", ["merge", "--no-ff", "-m", msg, mergeTarget], {
-                    cwd: this.repoRoot,
+                    cwd: this.integrationRoot,
                 })
                 return true
             } catch (error) {
@@ -842,7 +857,7 @@ export class WorktreeManager {
                             msg,
                             mergeTarget,
                         ],
-                        { cwd: this.repoRoot },
+                        { cwd: this.integrationRoot },
                     )
                     return true
                 } catch (e) {
@@ -962,7 +977,7 @@ export class WorktreeManager {
      */
     private async abortMerge(storyId: string): Promise<void> {
         try {
-            await exec("git", ["merge", "--abort"], { cwd: this.repoRoot })
+            await exec("git", ["merge", "--abort"], { cwd: this.integrationRoot })
         } catch (e) {
             this.log(
                 `WARNING: 'git merge --abort' failed after story ${storyId} ` +
@@ -1053,16 +1068,26 @@ export class WorktreeManager {
                 this.baseShas.clear()
             }
             await execQuiet("git", ["worktree", "prune"], this.repoRoot)
+            this.retainedAfterCleanup = keptDirtyRecovery
             // Only the manager that put worktrees there may take the directory
             // away. Run ids are meant to be unique per process, but they travel
             // in the environment, so one that arrives by inheritance can name a
             // live run's directory — and this line would delete every story's
             // work in it. Having created nothing is reason enough to remove
-            // nothing.
-            if (!keptDirtyRecovery && this.createdWorktree) rmSyncQuiet(this.baseDir)
+            // nothing. baseDir/__run belongs to the run, not to this manager.
+            if (!keptDirtyRecovery && this.createdWorktree) {
+                for (const path of this.createdPaths) rmSyncQuiet(path)
+                this.createdPaths.clear()
+                rmdirIfEmpty(this.baseDir)
+            }
         } finally {
             release()
         }
+    }
+
+    /** Whether the last cleanupAll left a story worktree in place. */
+    hasRetainedWorktrees(): boolean {
+        return this.retainedAfterCleanup
     }
 
     /**
@@ -1418,16 +1443,17 @@ export class WorktreeManager {
         this.preserved.delete(storyId)
     }
 
-    /** Tracked paths dirty in the host checkout that the merge would also
-     * write. git refuses such a merge outright; reported as a conflict it
-     * sent two recoveries after the same wall on the first self-hosting run. */
-    private async hostCheckoutBlocks(mergeTarget: string): Promise<string[]> {
+    /** Tracked paths dirty in the integration tree (the host checkout when
+     * they coincide) that the merge would also write. git refuses such a merge
+     * outright; reported as a conflict it sent two recoveries after the same
+     * wall on the first self-hosting run. */
+    private async integrationTreeBlocks(mergeTarget: string): Promise<string[]> {
         const [{ stdout: status }, { stdout: touched }] = await Promise.all([
             exec("git", ["status", "--porcelain", "--untracked-files=no"], {
-                cwd: this.repoRoot,
+                cwd: this.integrationRoot,
             }),
             exec("git", ["diff", "--name-only", "HEAD", mergeTarget], {
-                cwd: this.repoRoot,
+                cwd: this.integrationRoot,
             }),
         ])
         const dirty = new Set(
@@ -1444,7 +1470,7 @@ export class WorktreeManager {
             const { stdout } = await exec(
                 "git",
                 ["diff", "--name-only", "--diff-filter=U"],
-                { cwd: this.repoRoot },
+                { cwd: this.integrationRoot },
             )
             return stdout.split("\n").map((l) => l.trim()).filter(Boolean)
         } catch (error) {
@@ -1543,6 +1569,14 @@ async function execQuiet(
         // cleanup sites. A timeout is different: treating it as success could
         // release logical state after an unproven repository mutation.
         if (isRepositoryCommandTimeout(error)) throw error
+        /* best-effort */
+    }
+}
+
+function rmdirIfEmpty(path: string): void {
+    try {
+        if (readdirSync(path).length === 0) rmdirSync(path)
+    } catch {
         /* best-effort */
     }
 }

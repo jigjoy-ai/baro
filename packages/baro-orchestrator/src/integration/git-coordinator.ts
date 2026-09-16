@@ -21,6 +21,7 @@ import {
     gitPushWithRetry,
     safePullRebase,
 } from "./git.js"
+import type { IntegrationWorktree } from "./integration-worktree.js"
 import { loadPrd } from "../prd.js"
 import {
     IntegrationRefused,
@@ -59,7 +60,9 @@ const MERGE_SIGNAL_BACKOFF_MS = 5_000
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 export interface GitCoordinatorOptions {
-    cwd: string
+    repoRoot: string
+    integrationRoot: string
+    integrationWorktree: IntegrationWorktree | null
     gitGate: GitGate
     worktrees: WorktreeManager | null
     /** Mirror progress/diffs to the TUI protocol. Default: true. */
@@ -305,19 +308,21 @@ export class GitCoordinator extends SerializedObserver {
 
     private async prepareRun(runId: string): Promise<void> {
         try {
-            await excludeBaroArtifacts(this.opts.cwd)
-            if (this.opts.prdPath) {
+            await excludeBaroArtifacts(this.opts.repoRoot)
+            if (this.opts.integrationWorktree) {
+                await this.opts.integrationWorktree.prepare()
+            } else if (this.opts.prdPath) {
                 const prd = loadPrd(this.opts.prdPath)
                 if (prd.branchName) {
                     await createOrCheckoutBranch(
-                        this.opts.cwd,
+                        this.opts.integrationRoot,
                         prd.branchName,
                         (line) => this.log("_git", line),
                         this.opts.push ?? true,
                     )
                 }
             }
-            const baseSha = await getHeadSha(this.opts.cwd)
+            const baseSha = await getHeadSha(this.opts.integrationRoot)
             this.preparedBaseSha = baseSha
             await this.opts.worktrees?.cleanupStaleOnStart()
             this.emitBus(RunPrepared.create({ runId, baseSha }))
@@ -379,10 +384,10 @@ export class GitCoordinator extends SerializedObserver {
     /** Best-effort run-branch HEAD for a landed merge. A sha we cannot read is
      * not a merge failure, so the field is simply omitted. */
     private async mergeCommitShaField(
-        cwd: string,
+        integrationRoot: string,
     ): Promise<{ mergeCommitSha?: string }> {
         try {
-            const sha = await getHeadSha(cwd)
+            const sha = await getHeadSha(integrationRoot)
             return sha ? { mergeCommitSha: sha } : {}
         } catch {
             return {}
@@ -431,11 +436,11 @@ export class GitCoordinator extends SerializedObserver {
         requestedSeal?: CandidateSealRequest,
     ): Promise<void> {
         const emitTui = this.opts.emitTui ?? true
-        const { cwd, worktrees, gitGate } = this.opts
+        const { integrationRoot, worktrees, gitGate } = this.opts
         const log = (line: string) => this.log(storyId, line)
         // Run-branch HEAD before this story merges, so we can diff exactly
         // what the story added once merge-back lands.
-        const beforeMerge = emitTui ? await getHeadSha(cwd) : null
+        const beforeMerge = emitTui ? await getHeadSha(integrationRoot) : null
         // Merge-back happens on the critical path (fast, local) so the next
         // DAG level sees it. mergeBack returns false when the story had no
         // worktree — that story still needs the shared-tree reconciliation
@@ -523,7 +528,7 @@ export class GitCoordinator extends SerializedObserver {
                 // is cleaned up.
                 if (emitTui && beforeMerge) {
                     try {
-                        const d = await getDiff(cwd, beforeMerge, "HEAD")
+                        const d = await getDiff(integrationRoot, beforeMerge, "HEAD")
                         if (d.files.length) {
                             emit({
                                 type: "story_diff",
@@ -546,7 +551,7 @@ export class GitCoordinator extends SerializedObserver {
                         storyId,
                         mode: "worktree",
                         ...correlation,
-                        ...(await this.mergeCommitShaField(cwd)),
+                        ...(await this.mergeCommitShaField(integrationRoot)),
                     }),
                 )
                 if (emitTui) {
@@ -578,21 +583,21 @@ export class GitCoordinator extends SerializedObserver {
             // the non-worktree path below.
         }
         if (this.opts.push ?? true) {
-            await safePullRebase(cwd, log, gitGate)
+            await safePullRebase(integrationRoot, log, gitGate)
         }
         this.emitBus(
             StoryMerged.create({
                 storyId,
                 mode: "shared-tree",
                 ...correlation,
-                ...(await this.mergeCommitShaField(cwd)),
+                ...(await this.mergeCommitShaField(integrationRoot)),
             }),
         )
         if (!(this.opts.push ?? true)) return
         this.storyPushes.push(
             (async () => {
                 try {
-                    await gitPushWithRetry(gitGate, { cwd, onLog: log })
+                    await gitPushWithRetry(gitGate, { cwd: integrationRoot, onLog: log })
                     if (emitTui) {
                         emit({ type: "push_status", id: storyId, success: true, error: null })
                     }
@@ -634,7 +639,7 @@ export class GitCoordinator extends SerializedObserver {
         const emitTui = this.opts.emitTui ?? true
         const log = (line: string) => this.log("_git", line)
         try {
-            await gitPushWithRetry(this.opts.gitGate, { cwd: this.opts.cwd, onLog: log })
+            await gitPushWithRetry(this.opts.gitGate, { cwd: this.opts.integrationRoot, onLog: log })
             if (emitTui) emit({ type: "push_status", id: "_git", success: true, error: null })
         } catch (e) {
             this.pushError = (e as Error)?.message ?? String(e)

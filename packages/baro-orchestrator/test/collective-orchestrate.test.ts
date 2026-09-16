@@ -2518,7 +2518,10 @@ describe("orchestrate collective mode", () => {
                     })
 
                     assert.equal(result.summary.success, true)
-                    assert.equal(git(dir, ["branch", "--show-current"]), input.branchName)
+                    assert.equal(git(dir, ["branch", "--show-current"]), "main")
+                    assert.doesNotThrow(() =>
+                        git(dir, ["show-ref", "--verify", "--quiet", `refs/heads/${input.branchName}`]),
+                    )
                     assert.equal(git(origin, ["for-each-ref", "--format=%(refname)"]), "")
                 } finally {
                     rmSync(origin, { recursive: true, force: true })
