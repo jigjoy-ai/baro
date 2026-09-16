@@ -11,28 +11,45 @@
 ```json
 {
   "graphVersion": 2,
-  "proposalId": "run-progressive-a5a59543c8470291:planner:44db32c30ac4cf279e3f5a29122ca539803f4e98b169c3d7ae7e01f43b9c3661",
-  "sourceStoryId": "planner:planning-a5a59543c8470291-1",
-  "reason": "progressive planner admitted fragment language-mirroring-rule-f1",
-  "exactMutationSha256": "c1a636933b5001d6c6dfea33ab5db80bd82f409bcaac4392598e6084620990c1",
+  "proposalId": "run-progressive-1154bc86578a6a8b:planner:f9fb99c384dd790e8c7613f1696673ab5c137025698a67df39d10ca08508adbd",
+  "sourceStoryId": "planner:planning-1154bc86578a6a8b-1",
+  "reason": "progressive planner admitted fragment issue-153-all",
+  "exactMutationSha256": "76cdb29872c63f0da789b93b11d035af20cf2d5d90b091f420888468abcc87e5",
   "mutationSummary": {
     "addedStories": [
       {
         "id": "S1",
-        "title": "Add language-mirroring rule to operator systemPrompt, export it, and test it",
+        "title": "Rust: create goal branch without checkout; narrow branch guards, resume, rerun, follow-up",
         "dependsOn": [],
         "goalInvariantIds": [
           "G-A1",
           "G-A2",
-          "G-A3",
-          "G-A4",
-          "G-A5",
           "G-C1",
-          "G-C2",
           "G-C3",
-          {
-            "omittedItems": 1
-          }
+          "G-C4"
+        ]
+      },
+      {
+        "id": "S2",
+        "title": "Orchestrator: always build IntegrationWorktree on plain runs; update worktree integration tests",
+        "dependsOn": [],
+        "goalInvariantIds": [
+          "G-A1",
+          "G-A2",
+          "G-C2"
+        ]
+      },
+      {
+        "id": "S3",
+        "title": "Regression test: real orchestrate() run leaves host checkout untouched",
+        "dependsOn": [
+          "S2"
+        ],
+        "goalInvariantIds": [
+          "G-A1",
+          "G-A3",
+          "G-C2",
+          "G-C5"
         ]
       }
     ],
