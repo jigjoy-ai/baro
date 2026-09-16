@@ -20,7 +20,9 @@ const BROKER = source("broker")
 
 function coordinatorFor(dir: string, worktrees: WorktreeManager) {
     const coordinator = new GitCoordinator({
-        cwd: dir,
+        repoRoot: dir,
+        integrationRoot: dir,
+        integrationWorktree: null,
         gitGate: new GitGate(),
         worktrees,
         emitTui: false,

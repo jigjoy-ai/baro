@@ -61,7 +61,7 @@ import {
 } from "../verification/verify.js"
 
 export interface FinalizerOptions {
-    cwd: string
+    integrationRoot: string
     prdPath: string
     /** Optional explicit base SHA. If omitted, captured from RunStartedItem flow. */
     baseSha?: string | null
@@ -132,13 +132,13 @@ export class Finalizer extends BaseObserver {
     constructor(opts: FinalizerOptions) {
         super()
         this.opts = {
-            cwd: opts.cwd,
+            integrationRoot: opts.integrationRoot,
             prdPath: opts.prdPath,
             createPr: opts.createPr ?? true,
             onLog: opts.onLog,
         }
         this.baseSha = opts.baseSha ?? null
-        this.baselineVerifyPlan = createVerifyPlan(opts.cwd)
+        this.baselineVerifyPlan = createVerifyPlan(opts.integrationRoot)
         this.runId = opts.runId?.trim() || null
         this.outcomeAuthority = opts.outcomeAuthority ?? null
         if (
@@ -188,7 +188,7 @@ export class Finalizer extends BaseObserver {
             // produced by the run regardless of how many branches Conductor
             // ends up on.
             if (this.baseSha == null) {
-                this.baseSha = await getHeadSha(this.opts.cwd)
+                this.baseSha = await getHeadSha(this.opts.integrationRoot)
             }
             const prd = this.safeLoadPrd()
             this.branchName = prd?.branchName ?? null
@@ -493,7 +493,7 @@ export class Finalizer extends BaseObserver {
                         "final PRD is missing, malformed, or failed validation",
                 })
             }
-            const finalVerifyPlan: VerifyPlan = createVerifyPlan(this.opts.cwd, {
+            const finalVerifyPlan: VerifyPlan = createVerifyPlan(this.opts.integrationRoot, {
                 declaredTests: options.declaredTests,
                 testBudgets: options.testBudgets,
             })
@@ -502,7 +502,7 @@ export class Finalizer extends BaseObserver {
                     this.log(`[finalizer] ${line}`)
                 }
             }
-            verify = await verifyBuild(this.opts.cwd, {
+            verify = await verifyBuild(this.opts.integrationRoot, {
                 plan: mergeVerifyPlans(this.baselineVerifyPlan, finalVerifyPlan),
             })
         }
@@ -594,7 +594,7 @@ export class Finalizer extends BaseObserver {
         const runtimeAmendments = renderRuntimeAmendments(prd)
         if (adrs.length === 0 && !runtimeAmendments) return
         try {
-            const dir = join(this.opts.cwd, "adr")
+            const dir = join(this.opts.integrationRoot, "adr")
             mkdirSync(dir, { recursive: true })
             const generatedPaths: string[] = []
             for (const a of adrs) {
@@ -619,7 +619,7 @@ export class Finalizer extends BaseObserver {
             await execFileAsync(
                 "git",
                 ["add", "-f", "--", ...generatedPaths],
-                { cwd: this.opts.cwd },
+                { cwd: this.opts.integrationRoot },
             )
             try {
                 const subject = runtimeAmendments
@@ -635,7 +635,7 @@ export class Finalizer extends BaseObserver {
                         "--",
                         ...generatedPaths,
                     ],
-                    { cwd: this.opts.cwd },
+                    { cwd: this.opts.integrationRoot },
                 )
                 this.log(
                     `[finalizer] wrote ${adrs.length} ADR(s)` +
@@ -711,7 +711,7 @@ export class Finalizer extends BaseObserver {
             const { stdout } = await execFileAsync(
                 "git",
                 ["log", `${this.baseSha}..HEAD`, "--pretty=format:%H%x09%s"],
-                { cwd: this.opts.cwd },
+                { cwd: this.opts.integrationRoot },
             )
             return stdout
                 .split("\n")
@@ -734,7 +734,7 @@ export class Finalizer extends BaseObserver {
             const { stdout } = await execFileAsync(
                 "git",
                 ["diff", "--name-status", this.baseSha, "HEAD"],
-                { cwd: this.opts.cwd },
+                { cwd: this.opts.integrationRoot },
             )
             let created = 0
             let modified = 0
@@ -757,7 +757,7 @@ export class Finalizer extends BaseObserver {
             const { stdout } = await execFileAsync(
                 "git",
                 ["rev-list", "--count", `${this.baseSha}..${ref}`],
-                { cwd: this.opts.cwd },
+                { cwd: this.opts.integrationRoot },
             )
             return parseInt(stdout.trim(), 10) > 0
         } catch {
@@ -771,7 +771,7 @@ export class Finalizer extends BaseObserver {
     private async fastForwardTo(ref: string): Promise<boolean> {
         try {
             await execFileAsync("git", ["merge", "--ff-only", ref], {
-                cwd: this.opts.cwd,
+                cwd: this.opts.integrationRoot,
             })
             return true
         } catch {
@@ -784,7 +784,7 @@ export class Finalizer extends BaseObserver {
             const { stdout } = await execFileAsync(
                 "git",
                 ["branch", "--show-current"],
-                { cwd: this.opts.cwd },
+                { cwd: this.opts.integrationRoot },
             )
             return stdout.trim() || null
         } catch {
@@ -799,7 +799,7 @@ export class Finalizer extends BaseObserver {
             const { stdout } = await execFileAsync(
                 "gh",
                 ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"],
-                { cwd: this.opts.cwd },
+                { cwd: this.opts.integrationRoot },
             )
             const name = stdout.trim()
             if (name) return name
@@ -810,7 +810,7 @@ export class Finalizer extends BaseObserver {
             const { stdout } = await execFileAsync(
                 "git",
                 ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-                { cwd: this.opts.cwd },
+                { cwd: this.opts.integrationRoot },
             )
             const ref = stdout.trim()
             if (ref.startsWith("origin/")) return ref.slice("origin/".length)
@@ -996,7 +996,7 @@ export class Finalizer extends BaseObserver {
 
     private async hasGhBinary(): Promise<boolean> {
         try {
-            await execFileAsync("gh", ["--version"], { cwd: this.opts.cwd })
+            await execFileAsync("gh", ["--version"], { cwd: this.opts.integrationRoot })
             return true
         } catch {
             return false
@@ -1009,7 +1009,7 @@ export class Finalizer extends BaseObserver {
     // surfaces the real outcome.
     private async pushBranch(branch: string): Promise<void> {
         try {
-            await execFileAsync("git", ["push", "origin", branch], { cwd: this.opts.cwd })
+            await execFileAsync("git", ["push", "origin", branch], { cwd: this.opts.integrationRoot })
         } catch (e) {
             const detail = ((e as { stderr?: string }).stderr ?? (e as Error).message).split("\n")[0]?.trim()
             this.log(`[finalizer] pre-PR push: ${detail}`)
@@ -1037,7 +1037,7 @@ export class Finalizer extends BaseObserver {
                     "--body",
                     args.body,
                 ],
-                { cwd: this.opts.cwd },
+                { cwd: this.opts.integrationRoot },
             )
             const url = stdout.trim().split("\n").pop() ?? ""
             return url || null
