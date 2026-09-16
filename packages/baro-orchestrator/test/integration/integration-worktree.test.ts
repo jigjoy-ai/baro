@@ -5,6 +5,16 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import type { AgenticEnvironment } from "../../src/runtime/mozaik.js"
+import type {
+    StoryExecOpts,
+    StoryExecution,
+    StoryExecutor,
+} from "../../src/execution/story-executor.js"
+import type { StoryRoute } from "../../src/market/routing.js"
+import { orchestrate } from "../../src/orchestrate.js"
+import type { PrdFile } from "../../src/prd.js"
+import { StoryResult, type StorySpawnRequestData } from "../../src/semantic-events.js"
 import { GitGate } from "../../src/integration/git.js"
 import {
     IntegrationWorktree,
@@ -143,6 +153,188 @@ describe("IntegrationWorktree — prepare + WorktreeManager merge", () => {
         )
 
         await mgr.cleanup("S1")
+    })
+})
+
+describe("IntegrationWorktree — pre-created goal branch", () => {
+    it("checks out an existing goal ref in __run and fast-forwards the host only at the end", async () => {
+        const { repo, runId, gate, logs } = setupRun()
+        const goalBranch = "baro/goal-1"
+        git(repo, "branch", goalBranch, "HEAD")
+        const mainSha = git(repo, "rev-parse", "main")
+        const iw = new IntegrationWorktree({
+            repoRoot: repo,
+            gitGate: gate,
+            runId,
+            goalBranch,
+            push: false,
+            onLog: (l) => logs.push(l),
+        })
+
+        const prepared = await iw.prepare()
+
+        assert.equal(git(prepared.integrationRoot, "branch", "--show-current"), goalBranch)
+        assert.equal(prepared.baseSha, mainSha)
+        assert.equal(prepared.hostBranchAtStart, "main")
+        assert.equal(git(repo, "branch", "--show-current"), "main")
+        assert.equal(git(repo, "rev-parse", "HEAD"), mainSha)
+
+        commitInWorktree(prepared.integrationRoot, "goal.txt", "goal\n")
+        const goalSha = git(repo, "rev-parse", `refs/heads/${goalBranch}`)
+        assert.equal(git(repo, "rev-parse", "HEAD"), mainSha, "host untouched until sync")
+
+        const result = await iw.syncHostCheckout()
+
+        assert.equal(result.kind, "fast_forwarded")
+        assert.equal(git(repo, "rev-parse", "HEAD"), goalSha)
+        assert.equal(git(repo, "branch", "--show-current"), "main")
+    })
+})
+
+class WritingExecutor implements StoryExecutor {
+    readonly cwds: string[] = []
+
+    start(
+        request: StorySpawnRequestData,
+        _route: StoryRoute,
+        cwd: string,
+        environment: AgenticEnvironment,
+        options: StoryExecOpts,
+    ): StoryExecution {
+        this.cwds.push(cwd)
+        writeFileSync(join(cwd, `${request.storyId}.txt`), `${request.storyId}\n`)
+        const resultSource = { agentId: request.storyId } as never
+        options.registerResultAuthority?.(resultSource)
+        setImmediate(() => {
+            environment.deliverSemanticEvent(
+                resultSource,
+                StoryResult.create({
+                    storyId: request.storyId,
+                    success: true,
+                    attempts: 1,
+                    durationSecs: 1,
+                    error: null,
+                    runId: request.runId,
+                    leaseId: request.leaseId,
+                    generation: request.generation,
+                }),
+            )
+        })
+        return { dispose: () => {} }
+    }
+}
+
+function goalPrd(branchName: string): PrdFile {
+    return {
+        project: "Integration gate",
+        branchName,
+        description: "exercise the integration worktree gate",
+        userStories: [
+            {
+                id: "S1",
+                priority: 1,
+                title: "S1",
+                description: "Implement S1",
+                dependsOn: [],
+                retries: 1,
+                acceptance: ["S1 works"],
+                tests: [],
+                passes: false,
+                completedAt: null,
+                durationSecs: null,
+                model: "standard",
+            },
+        ],
+    }
+}
+
+describe("orchestrate — integration worktree gate", () => {
+    const goalBranch = "baro/goal-1"
+
+    function orchestrateRepo(): { repo: string; runId: string; prdPath: string; baseSha: string } {
+        const { repo, runId } = setupRun()
+        writeFileSync(
+            join(repo, "package.json"),
+            JSON.stringify({ name: "gate-fixture", private: true, scripts: { test: "node -e \"process.exit(0)\"" } }) + "\n",
+        )
+        git(repo, "add", "package.json")
+        git(repo, "commit", "-m", "manifest")
+        git(repo, "branch", goalBranch, "HEAD")
+        const prdPath = join(repo, "prd.json")
+        writeFileSync(prdPath, JSON.stringify(goalPrd(goalBranch), null, 2) + "\n")
+        return { repo, runId, prdPath, baseSha: git(repo, "rev-parse", "HEAD") }
+    }
+
+    function run(repo: string, runId: string, prdPath: string, continueRun: boolean, executor = new WritingExecutor()) {
+        return orchestrate({
+            prdPath,
+            cwd: repo,
+            runId,
+            continueRun,
+            coordinationMode: "legacy",
+            publishRemote: false,
+            withGit: true,
+            withWorktrees: true,
+            emitTuiEvents: false,
+            withLibrarian: false,
+            withMemory: false,
+            withSentry: false,
+            withCritic: false,
+            withSurgeon: false,
+            withSupervisor: false,
+            intraLevelDelaySecs: 0,
+            executor,
+        })
+    }
+
+    for (const continueRun of [false, true]) {
+        it(`integrates in __run while the host stays on main (continueRun=${continueRun})`, async () => {
+            const { repo, runId, prdPath, baseSha } = orchestrateRepo()
+            const executor = new WritingExecutor()
+            const hostBranches: string[] = []
+            const start = executor.start.bind(executor)
+            executor.start = (...args) => {
+                hostBranches.push(git(repo, "branch", "--show-current"))
+                return start(...args)
+            }
+
+            const result = await run(repo, runId, prdPath, continueRun, executor)
+
+            assert.equal(result.summary.success, true)
+            assert.deepEqual(hostBranches, ["main"])
+            assert.equal(git(repo, "branch", "--show-current"), "main")
+            assert.equal(JSON.parse(readFileSync(prdPath, "utf8")).branchName, goalBranch)
+            assert.ok(git(repo, "ls-tree", "-r", "--name-only", goalBranch).split("\n").includes("S1.txt"))
+            assert.ok(
+                [baseSha, git(repo, "rev-parse", goalBranch)].includes(git(repo, "rev-parse", "HEAD")),
+            )
+        })
+    }
+
+    it("refuses a plain run while the host checkout is on the goal branch", async () => {
+        const { repo, runId, prdPath, baseSha } = orchestrateRepo()
+        git(repo, "checkout", goalBranch)
+        const executor = new WritingExecutor()
+
+        await assert.rejects(
+            () => run(repo, runId, prdPath, false, executor),
+            /goal branch baro\/goal-1 is checked out in .*; switch the checkout back to its base branch or run with --continue/,
+        )
+
+        assert.deepEqual(executor.cwds, [])
+        assert.equal(git(repo, "branch", "--show-current"), goalBranch)
+        assert.equal(git(repo, "rev-parse", "HEAD"), baseSha)
+    })
+
+    it("integrates in place when --continue runs on the goal branch", async () => {
+        const { repo, runId, prdPath } = orchestrateRepo()
+        git(repo, "checkout", goalBranch)
+
+        const result = await run(repo, runId, prdPath, true)
+
+        assert.equal(result.summary.success, true)
+        assert.equal(git(repo, "branch", "--show-current"), goalBranch)
+        assert.ok(git(repo, "ls-tree", "-r", "--name-only", "HEAD").split("\n").includes("S1.txt"))
     })
 })
 
