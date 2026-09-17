@@ -62,6 +62,8 @@ import {
 
 export interface FinalizerOptions {
     integrationRoot: string
+    /** The host checkout, not the integration root. */
+    hostRepoRoot: string
     prdPath: string
     /** Optional explicit base SHA. If omitted, captured from RunStartedItem flow. */
     baseSha?: string | null
@@ -133,6 +135,7 @@ export class Finalizer extends BaseObserver {
         super()
         this.opts = {
             integrationRoot: opts.integrationRoot,
+            hostRepoRoot: opts.hostRepoRoot,
             prdPath: opts.prdPath,
             createPr: opts.createPr ?? true,
             onLog: opts.onLog,
@@ -504,6 +507,7 @@ export class Finalizer extends BaseObserver {
             }
             verify = await verifyBuild(this.opts.integrationRoot, {
                 plan: mergeVerifyPlans(this.baselineVerifyPlan, finalVerifyPlan),
+                hostRepoRoot: this.opts.hostRepoRoot,
             })
         }
         const verificationIncomplete =

@@ -21,6 +21,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path"
 import type { VerificationCommandOutput } from "../events/verification.js"
 import { execFileCli } from "../harness/exec-file-cli.js"
 import { emit, type BaroEvent } from "../tui-protocol.js"
+import { cargoEnvFor } from "./cargo-env.js"
 import {
     MAX_DECLARED_VERIFY_COMMANDS,
     MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
@@ -165,6 +166,8 @@ export interface VerifyBuildOptions {
     plan?: VerifyPlan
     /** Defaults to the process-wide TUI stream; injected only by tests. */
     readonly emitActivity?: (event: BaroEvent) => void
+    /** The host checkout, not the run cwd; defaults to cwd. */
+    hostRepoRoot?: string
 }
 
 interface PackageManifest {
@@ -1172,6 +1175,7 @@ function captureCommandOutput(
 async function runCmd(
     cwd: string,
     c: VerifyCommandSpec,
+    hostRepoRoot: string,
     signal?: AbortSignal,
 ): Promise<CmdOutcome> {
     const startedAt = Date.now()
@@ -1214,6 +1218,7 @@ async function runCmd(
     try {
         const result = await execFileCli(c.tool, c.args, {
             cwd: commandCwd,
+            ...(c.tool === "cargo" ? { env: cargoEnvFor(hostRepoRoot) } : {}),
             idleTimeoutMs: IDLE_TIMEOUT_MS,
             timeout: ABSOLUTE_COMMAND_TIMEOUT_MS,
             terminationGraceMs: COMMAND_SETTLEMENT_GRACE_MS,
@@ -1266,6 +1271,7 @@ export async function verifyBuild(
     const commands: VerifyCommandResult[] = []
     let ran = false
     const plan = options.plan ?? createVerifyPlan(cwd)
+    const hostRepoRoot = options.hostRepoRoot ?? cwd
     const emitActivity = options.emitActivity ?? emit
     // A gate run against a tree that predates the manifests judges the
     // install, not the work. Refresh first and keep it in the evidence.
@@ -1281,7 +1287,7 @@ export async function verifyBuild(
             kind: "warn",
             text: `refreshing dependencies before verification: ${stale.join("; ")}`,
         })
-        const outcome = await runCmd(cwd, install, options.signal)
+        const outcome = await runCmd(cwd, install, hostRepoRoot, options.signal)
         commands.push({
             command: install.label,
             status: outcome.status,
@@ -1296,7 +1302,7 @@ export async function verifyBuild(
     }
     for (const c of plan.commands) {
         throwIfAborted(options.signal)
-        let outcome = await runCmd(cwd, c, options.signal)
+        let outcome = await runCmd(cwd, c, hostRepoRoot, options.signal)
         let firstFailureTail: string | undefined
         // A preflight failure never spawned anything and cannot flake, so it
         // is excluded here exactly as it is from the two-attempt budget above.
@@ -1321,7 +1327,7 @@ export async function verifyBuild(
                     `verification command retried once: ${c.label} — ` +
                     `first attempt failed: ${firstFailureTail.replace(/[\r\n]+/gu, " ")}`,
             })
-            outcome = await runCmd(cwd, c, options.signal)
+            outcome = await runCmd(cwd, c, hostRepoRoot, options.signal)
         }
         commands.push({
             command: c.label,
