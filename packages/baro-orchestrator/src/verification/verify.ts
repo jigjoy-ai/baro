@@ -15,7 +15,7 @@
  *   - ok=false   only when a build/test that ACTUALLY RAN returned non-zero.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 
 import type { VerificationCommandOutput } from "../events/verification.js"
@@ -274,7 +274,7 @@ function readPackageManifest(path: string): PackageManifest | null {
     }
 }
 
-function workspacePatterns(workspaces: unknown): string[] {
+export function workspacePatterns(workspaces: unknown): string[] {
     if (Array.isArray(workspaces)) {
         return workspaces.filter((value): value is string => typeof value === "string")
     }
@@ -291,7 +291,7 @@ function workspacePatterns(workspaces: unknown): string[] {
     return []
 }
 
-function pnpmWorkspacePatterns(cwd: string): string[] {
+export function pnpmWorkspacePatterns(cwd: string): string[] {
     const path = join(cwd, "pnpm-workspace.yaml")
     if (!existsSync(path)) return []
     const patterns: string[] = []
@@ -316,7 +316,7 @@ function pnpmWorkspacePatterns(cwd: string): string[] {
  * a glob dependency. Nested/complex patterns are deliberately ignored instead
  * of guessing which directories are executable packages.
  */
-function workspacePackageDirs(cwd: string, workspaces: unknown): string[] {
+export function workspacePackageDirs(cwd: string, workspaces: unknown): string[] {
     const root = resolve(cwd)
     const dirs = new Set<string>()
     const addIfPackage = (candidate: string): void => {
@@ -531,6 +531,9 @@ export function staleDependencyReasons(cwd: string): string[] {
         }
         return reasons
     }
+    // A node_modules linked out of the tree belongs to whoever installed it
+    // (the host checkout), so its markers date that install, not this one.
+    if (linkedOutOfTree(nodeModules, cwd)) return []
     for (const dir of workspaceDirs) {
         const name = readPackageManifest(join(dir, "package.json"))?.name
         if (typeof name !== "string" || !name) continue
@@ -557,6 +560,16 @@ export function staleDependencyReasons(cwd: string): string[] {
         }
     }
     return reasons
+}
+
+function linkedOutOfTree(nodeModules: string, cwd: string): boolean {
+    try {
+        if (!lstatSync(nodeModules).isSymbolicLink()) return false
+        const fromCwd = relative(realpathSync(cwd), realpathSync(nodeModules))
+        return fromCwd === ".." || fromCwd.startsWith(`..${sep}`) || isAbsolute(fromCwd)
+    } catch {
+        return false
+    }
 }
 
 function hasEntries(value: unknown): boolean {

@@ -1,7 +1,9 @@
 import {
     existsSync,
+    lstatSync,
     mkdirSync,
     readFileSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs"
 import { join } from "node:path"
@@ -808,6 +810,35 @@ describe("dependency refresh before the gate", () => {
 
             mkdirSync(join(dir, "node_modules"), { recursive: true })
             assert.deepEqual(staleDependencyReasons(dir), ["workspace @t/core is not linked in node_modules"])
+        })
+    })
+
+    it("treats a node_modules linked out of the tree as the host's install", async () => {
+        await withTempDir("baro-verify-deps-link-", async (root) => {
+            const host = join(root, "host")
+            const run = join(root, "run")
+            mkdirSync(join(host, "node_modules"), { recursive: true })
+            mkdirSync(run, { recursive: true })
+            writeFileSync(
+                join(host, "node_modules", ".package-lock.json"),
+                JSON.stringify({ lockfileVersion: 3 }),
+            )
+            writeFileSync(
+                join(run, "package.json"),
+                JSON.stringify({ name: "root", private: true, dependencies: { left: "1.0.0" } }),
+            )
+            // The install marker predates the lockfile, which is what would
+            // normally be reported as stale.
+            await delay(1_100)
+            writeFileSync(join(run, "package-lock.json"), JSON.stringify({ lockfileVersion: 3 }))
+            symlinkSync(join(host, "node_modules"), join(run, "node_modules"), "dir")
+
+            assert.equal(lstatSync(join(run, "node_modules")).isSymbolicLink(), true)
+            assert.deepEqual(
+                staleDependencyReasons(run),
+                [],
+                "the materializer owns the freshness of a linked tree",
+            )
         })
     })
 
