@@ -1,0 +1,6 @@
+# ADR-0002: Link host node_modules into __run with a directory symlink, never a recursive copy
+
+**Status:** Accepted
+**Context:** Acceptance allows symlink or hardlink copy. worktree.ts:1203-1222 already establishes symlinking node_modules as the house pattern for worktrees; a recursive hardlink copy of node_modules is slow and would diverge from that precedent.
+**Decision:** In dependency-materializer.ts, linking is `symlinkSync(hostNodeModules, join(d, "node_modules"), process.platform === "win32" ? "junction" : "dir")`, where `hostNodeModules = join(h, "node_modules")`. Link the `node_modules` directory itself, not its entries. If `symlinkSync` throws EEXIST, treat as `action: "skipped"`, reason `"node_modules already present"`. If it throws EPERM/ENOSYS (Windows without symlink rights), fall back to `runInstall(d)` and record `action: "installed"`, reason `"symlink unsupported"`. Only `node_modules` is linked here — do NOT link `.venv` or `vendor`, and do NOT modify worktree.ts:1203-1222 or its story-worktree callers.
+**Consequences:** Builds inside __run write through to the host's node_modules (.bin, .cache, .vite). That is accepted for this run; agents must not add pruning or copy-on-write logic. Teardown of __run must never `rm -rf` through the link — removal is by `git worktree remove` today (integration-worktree.ts:90-96) and stays unchanged.
