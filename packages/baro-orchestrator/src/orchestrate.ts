@@ -1259,6 +1259,7 @@ export async function orchestrate(
     const finalizer = useGit && hasOrigin && publishRemote
         ? new Finalizer({
               integrationRoot,
+              hostRepoRoot: repoRoot,
               prdPath: config.prdPath,
               runId,
               outcomeAuthority,
@@ -1377,6 +1378,7 @@ export async function orchestrate(
         runVerifier = new RunVerifier({
             runId,
             cwd: integrationRoot,
+            hostRepoRoot: repoRoot,
             plan: verifyPlan,
             createFinalPlan: (cwd) => {
                 // Full PRD validation remains authoritative for graph state;
@@ -1405,6 +1407,7 @@ export async function orchestrate(
         if (continuousGateEnabled()) {
             continuousGate = new ContinuousGateRunner({
                 runId,
+                hostRepoRoot: repoRoot,
                 plan: verifyPlan,
                 resolveTarget: (storyId) =>
                     resolveCriticRepositoryTarget(worktrees, storyId),

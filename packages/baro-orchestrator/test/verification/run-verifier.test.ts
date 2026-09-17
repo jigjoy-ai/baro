@@ -25,6 +25,7 @@ describe("RunVerifier", () => {
         const verifier = new RunVerifier({
             runId: "run-unbound",
             cwd: "/repo",
+            hostRepoRoot: "/repo",
             verify: async () => {
                 calls += 1
                 return { ran: true, ok: true, failures: [], commands: [] }
@@ -51,6 +52,7 @@ describe("RunVerifier", () => {
         const verifier = new RunVerifier({
             runId: "run-authority",
             cwd: "/repo",
+            hostRepoRoot: "/repo",
             verify: async () => {
                 calls += 1
                 return {
@@ -99,6 +101,7 @@ describe("RunVerifier", () => {
         const verifier = new RunVerifier({
             runId: "run-1",
             cwd: "/repo",
+            hostRepoRoot: "/repo",
             verify: async () => {
                 calls += 1
                 return {
@@ -144,6 +147,7 @@ describe("RunVerifier", () => {
             const verifier = new RunVerifier({
                 runId: "run-skip",
                 cwd: dir,
+                hostRepoRoot: dir,
             })
             verifier.setRequestAuthority(BOARD)
             const env = joinWithCapture(verifier)
@@ -166,6 +170,7 @@ describe("RunVerifier", () => {
         const verifier = new RunVerifier({
             runId: "run-partial-skip",
             cwd: "/repo",
+            hostRepoRoot: "/repo",
             verify: async () => ({
                 ran: true,
                 ok: true,
@@ -214,6 +219,7 @@ describe("RunVerifier", () => {
             const verifier = new RunVerifier({
                 runId: "run-final-plan",
                 cwd: dir,
+                hostRepoRoot: dir,
             })
             verifier.setRequestAuthority(BOARD)
             const env = joinWithCapture(verifier)
@@ -266,6 +272,7 @@ describe("RunVerifier", () => {
             const verifier = new RunVerifier({
                 runId: "run-authoritative-prd",
                 cwd: dir,
+                hostRepoRoot: dir,
                 createFinalPlan: (cwd) =>
                     createVerifyPlan(cwd, {
                         declaredTests: finalRequirements,
@@ -350,6 +357,7 @@ describe("RunVerifier", () => {
             const verifier = new RunVerifier({
                 runId: "run-a13-final-plan",
                 cwd: dir,
+                hostRepoRoot: dir,
                 createFinalPlan: (cwd) =>
                     createVerifyPlan(cwd, { declaredTests }),
             })
@@ -389,6 +397,7 @@ describe("RunVerifier", () => {
         const verifier = new RunVerifier({
             runId: "run-fail",
             cwd: "/repo",
+            hostRepoRoot: "/repo",
             verify: async () => {
                 throw new Error("verifier exploded")
             },
@@ -418,6 +427,7 @@ describe("RunVerifier", () => {
         const verifier = new RunVerifier({
             runId: "run-timeout",
             cwd: "/repo",
+            hostRepoRoot: "/repo",
             verify: async (_cwd, signal) =>
                 new Promise((_resolve, reject) => {
                     markStarted()

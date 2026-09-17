@@ -48,6 +48,7 @@ describe("Finalizer", () => {
             const logs: string[] = []
             const finalizer = new Finalizer({
                 integrationRoot: dir,
+                hostRepoRoot: dir,
                 prdPath: join(dir, "prd.json"),
                 createPr: false,
                 onLog: (line) => logs.push(line),
@@ -142,6 +143,7 @@ describe("Finalizer", () => {
 
             const finalizer = new Finalizer({
                 integrationRoot: dir,
+                hostRepoRoot: dir,
                 prdPath: join(dir, "prd.json"),
                 baseSha: "base-sha",
                 createPr: false,
@@ -316,6 +318,7 @@ describe("Finalizer", () => {
         await withTempDir("baro-finalizer-recovery-", async (dir) => {
             const finalizer = new Finalizer({
                 integrationRoot: dir,
+                hostRepoRoot: dir,
                 prdPath: join(dir, "prd.json"),
                 createPr: false,
             })
@@ -355,6 +358,7 @@ describe("Finalizer", () => {
             const logs: string[] = []
             const finalizer = new Finalizer({
                 integrationRoot: dir,
+                hostRepoRoot: dir,
                 prdPath,
                 baseSha: "base-sha",
                 onLog: (line) => logs.push(line),
@@ -407,6 +411,7 @@ describe("Finalizer", () => {
 
             const finalizer = new Finalizer({
                 integrationRoot: dir,
+                hostRepoRoot: dir,
                 prdPath,
                 baseSha: "base-sha",
                 createPr: false,
@@ -489,6 +494,7 @@ describe("Finalizer", () => {
             try {
                 const finalizer = new Finalizer({
                     integrationRoot: dir,
+                    hostRepoRoot: dir,
                     prdPath,
                     baseSha: "base-sha",
                 })
@@ -638,7 +644,7 @@ describe("Finalizer", () => {
         process.env.PATH = `${binDir}:${originalPath ?? ""}`
         process.env.GH_ARGS_LOG = argsPath
         try {
-            const finalizer = new Finalizer({ integrationRoot: dir, prdPath, baseSha: "base-sha" })
+            const finalizer = new Finalizer({ integrationRoot: dir, hostRepoRoot: dir, prdPath, baseSha: "base-sha" })
             joinWithCapture(finalizer)
             await finalizer.onExternalEvent(
                 source("conductor"),
@@ -933,7 +939,7 @@ describe("Finalizer", () => {
             process.env.PATH = `${binDir}:${originalPath ?? ""}`
             process.env.GH_ARGS_LOG = argsPath
             try {
-                const finalizer = new Finalizer({ integrationRoot: dir, prdPath, baseSha })
+                const finalizer = new Finalizer({ integrationRoot: dir, hostRepoRoot: dir, prdPath, baseSha })
                 const env = joinWithCapture(finalizer)
 
                 await finalizer.onExternalEvent(source("conductor"), RunStarted.create({ project: "Salvage", storyCount: 1 }))

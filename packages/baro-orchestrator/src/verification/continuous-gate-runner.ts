@@ -36,6 +36,8 @@ export interface ContinuousGateTarget {
 
 export interface ContinuousGateRunnerOptions {
     readonly runId: string
+    /** The host checkout, not the story worktree the gate runs in. */
+    readonly hostRepoRoot?: string
     /** Same port the Critic uses to find a story's worktree. */
     resolveTarget(agentId: string): ContinuousGateTarget | null
     /** Snapshotted before agents mutate the repo, exactly as RunVerifier uses it. */
@@ -179,6 +181,7 @@ export class ContinuousGateRunner extends BaseObserver {
         const result = await verifyBuild(cwd, {
             signal: this.controller.signal,
             ...(this.opts.plan ? { plan: this.opts.plan } : {}),
+            ...(this.opts.hostRepoRoot ? { hostRepoRoot: this.opts.hostRepoRoot } : {}),
         })
         // A command we killed (no exit status) says nothing about the agent's
         // work. Reporting it as a failure once told an agent its tests were
