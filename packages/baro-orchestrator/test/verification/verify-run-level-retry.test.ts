@@ -15,6 +15,7 @@ import {
     type VerifyCommandSpec,
     type VerifyPlan,
 } from "../../src/verification/verify.js"
+import { RETRY_BACKOFF_MS } from "../../src/verification/command-cwd.js"
 import { withTempDir } from "../execution/helpers.js"
 
 const ATTEMPT_BUDGET_MS = 10 * 60_000 + 5_000 + 3_000
@@ -59,6 +60,7 @@ describe("run-level verification retry", () => {
 
             const result = await verifyBuild(dir, {
                 emitActivity,
+                sleep: async () => {},
                 plan: planOf({
                     // Deliberately not labelled "test": provenance, not wording,
                     // is what earns the retry now.
@@ -97,6 +99,7 @@ describe("run-level verification retry", () => {
 
             const result = await verifyBuild(dir, {
                 emitActivity,
+                sleep: async () => {},
                 plan: planOf({
                     label: "npm run test (fixture)",
                     tool: process.execPath,
@@ -255,7 +258,7 @@ describe("run-level verification retry", () => {
             assert.equal(executable.length, 2)
             assert.equal(
                 recommendedVerifyTimeoutMs(plan),
-                2 * 2 * ATTEMPT_BUDGET_MS + 60_000,
+                2 * (2 * ATTEMPT_BUDGET_MS + RETRY_BACKOFF_MS) + 60_000,
             )
 
             const mixed = planOf(
@@ -264,12 +267,13 @@ describe("run-level verification retry", () => {
             )
             assert.equal(
                 recommendedVerifyTimeoutMs(mixed),
-                ATTEMPT_BUDGET_MS + 2 * ATTEMPT_BUDGET_MS + 60_000,
+                ATTEMPT_BUDGET_MS + (2 * ATTEMPT_BUDGET_MS + RETRY_BACKOFF_MS) + 60_000,
             )
             assert.equal(
                 recommendedMergedVerifyTimeoutMs(mixed),
                 ATTEMPT_BUDGET_MS +
-                    (1 + MAX_FINAL_ADDED_VERIFY_COMMANDS) * 2 * ATTEMPT_BUDGET_MS +
+                    (1 + MAX_FINAL_ADDED_VERIFY_COMMANDS) *
+                        (2 * ATTEMPT_BUDGET_MS + RETRY_BACKOFF_MS) +
                     60_000,
             )
         })

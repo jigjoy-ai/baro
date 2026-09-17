@@ -31,6 +31,7 @@ import {
     resolveDeclaredBudget,
 } from "../../src/verification/declared-test-budget.js"
 import { withTempDir } from "../execution/helpers.js"
+import { RETRY_BACKOFF_MS } from "../../src/verification/command-cwd.js"
 
 describe("declared verification policy", () => {
     it("routes a declaration matching a trusted script body through that script", async () => {
@@ -1158,10 +1159,11 @@ describe("declared verification policy", () => {
                 /final command\(s\) were not executed/,
             )
             // An empty baseline, so the whole budget is the retryable final
-            // delta at two attempts each.
+            // delta at two attempts plus a backoff each.
             assert.equal(
                 recommendedMergedVerifyTimeoutMs(baseline),
-                MAX_FINAL_ADDED_VERIFY_COMMANDS * 2 * (10 * 60_000 + 5_000 + 3_000) +
+                MAX_FINAL_ADDED_VERIFY_COMMANDS *
+                    (2 * (10 * 60_000 + 5_000 + 3_000) + RETRY_BACKOFF_MS) +
                     60_000,
             )
         })
