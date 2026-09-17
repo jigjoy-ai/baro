@@ -127,6 +127,8 @@ export interface DeclaredTestRequirement {
     readonly command: string
     /** Raw-schema defect that must remain explicit instead of normalizing away. */
     readonly declarationError?: string
+    /** Repo-relative, `/`-separated; selects a workspace when several declare the script. */
+    readonly changedFiles?: readonly string[]
 }
 
 export interface VerifyPlanOptions {
