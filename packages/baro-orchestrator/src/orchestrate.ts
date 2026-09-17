@@ -33,6 +33,7 @@ import {
     isInsideGitRepo,
     normalizeGoalBranchName,
 } from "./integration/git.js"
+import { materializeDependencies } from "./integration/dependency-materializer.js"
 import { IntegrationWorktree } from "./integration/integration-worktree.js"
 import { capRunDiff } from "./integration/run-diff-cap.js"
 import { WorktreeManager } from "./integration/worktree.js"
@@ -844,6 +845,14 @@ export async function orchestrate(
         await integrationWorktree.prepare()
     }
     const integrationRoot = integrationWorktree?.integrationRoot ?? repoRoot
+    try {
+        await materializeDependencies({ hostRoot: repoRoot, integrationRoot })
+    } catch (error) {
+        // Verification's own dependency refresh is still the safety net.
+        const line = `warn: could not reuse host dependencies: ${error instanceof Error ? error.message : String(error)}`
+        process.stderr.write(`${line}\n`)
+        if (emitTui) emit({ type: "story_log", id: "_git", line })
+    }
     const worktrees =
         useGit && worktreesEnabled
             ? new WorktreeManager(repoRoot, gitGate, runId, {
@@ -1250,6 +1259,7 @@ export async function orchestrate(
     const finalizer = useGit && hasOrigin && publishRemote
         ? new Finalizer({
               integrationRoot,
+              hostRepoRoot: repoRoot,
               prdPath: config.prdPath,
               runId,
               outcomeAuthority,
@@ -1368,6 +1378,7 @@ export async function orchestrate(
         runVerifier = new RunVerifier({
             runId,
             cwd: integrationRoot,
+            hostRepoRoot: repoRoot,
             plan: verifyPlan,
             createFinalPlan: (cwd) => {
                 // Full PRD validation remains authoritative for graph state;
@@ -1396,6 +1407,7 @@ export async function orchestrate(
         if (continuousGateEnabled()) {
             continuousGate = new ContinuousGateRunner({
                 runId,
+                hostRepoRoot: repoRoot,
                 plan: verifyPlan,
                 resolveTarget: (storyId) =>
                     resolveCriticRepositoryTarget(worktrees, storyId),

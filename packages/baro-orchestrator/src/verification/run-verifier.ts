@@ -21,6 +21,8 @@ import {
 export interface RunVerifierOptions {
     runId: string
     cwd: string
+    /** The host checkout, not the run cwd. */
+    hostRepoRoot: string
     /** Test seam and future custom-command policy hook. */
     verify?: (cwd: string, signal: AbortSignal) => Promise<VerifyResult>
     /** Optional externally trusted plan; defaults to a constructor-time snapshot. */
@@ -59,6 +61,7 @@ export class RunVerifier extends SerializedObserver {
                         baselinePlan,
                         createFinalPlan(cwd),
                     ),
+                    hostRepoRoot: opts.hostRepoRoot,
                     signal,
                 }))
     }

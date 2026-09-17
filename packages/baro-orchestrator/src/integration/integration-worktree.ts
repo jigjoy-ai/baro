@@ -261,7 +261,7 @@ async function gitQuiet(args: readonly string[], cwd: string): Promise<void> {
 
 /** tmpdir() can sit behind a symlink (/var → /private/var) that git resolves,
  * and a pruned-but-listed path may no longer exist. */
-function canonicalPath(path: string): string {
+export function canonicalPath(path: string): string {
     const absolute = resolve(path)
     try {
         return realpathSync(absolute)

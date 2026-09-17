@@ -15,12 +15,14 @@
  *   - ok=false   only when a build/test that ACTUALLY RAN returned non-zero.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { isAbsolute, join, relative, resolve, sep } from "node:path"
 
 import type { VerificationCommandOutput } from "../events/verification.js"
 import { execFileCli } from "../harness/exec-file-cli.js"
 import { emit, type BaroEvent } from "../tui-protocol.js"
+import { cargoEnvFor } from "./cargo-env.js"
+import { defaultSleep, resolveCommandCwd, RETRY_BACKOFF_MS } from "./command-cwd.js"
 import {
     MAX_DECLARED_VERIFY_COMMANDS,
     MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
@@ -84,6 +86,8 @@ export interface VerifyCommandResult {
     retriedAfterFailure?: true
     /** Evidence of the first attempt when a retry decided the status. */
     firstFailureTail?: string
+    /** False forbids the single retry: re-running cannot change the verdict. */
+    retryable?: boolean
 }
 
 export interface VerifyCommandSpec {
@@ -165,6 +169,10 @@ export interface VerifyBuildOptions {
     plan?: VerifyPlan
     /** Defaults to the process-wide TUI stream; injected only by tests. */
     readonly emitActivity?: (event: BaroEvent) => void
+    /** The host checkout, not the run cwd; defaults to cwd. */
+    hostRepoRoot?: string
+    /** Waits out the retry backoff; injected by tests to skip the real wait. */
+    sleep?: (ms: number) => Promise<void>
 }
 
 interface PackageManifest {
@@ -274,7 +282,7 @@ function readPackageManifest(path: string): PackageManifest | null {
     }
 }
 
-function workspacePatterns(workspaces: unknown): string[] {
+export function workspacePatterns(workspaces: unknown): string[] {
     if (Array.isArray(workspaces)) {
         return workspaces.filter((value): value is string => typeof value === "string")
     }
@@ -291,7 +299,7 @@ function workspacePatterns(workspaces: unknown): string[] {
     return []
 }
 
-function pnpmWorkspacePatterns(cwd: string): string[] {
+export function pnpmWorkspacePatterns(cwd: string): string[] {
     const path = join(cwd, "pnpm-workspace.yaml")
     if (!existsSync(path)) return []
     const patterns: string[] = []
@@ -316,7 +324,7 @@ function pnpmWorkspacePatterns(cwd: string): string[] {
  * a glob dependency. Nested/complex patterns are deliberately ignored instead
  * of guessing which directories are executable packages.
  */
-function workspacePackageDirs(cwd: string, workspaces: unknown): string[] {
+export function workspacePackageDirs(cwd: string, workspaces: unknown): string[] {
     const root = resolve(cwd)
     const dirs = new Set<string>()
     const addIfPackage = (candidate: string): void => {
@@ -531,6 +539,9 @@ export function staleDependencyReasons(cwd: string): string[] {
         }
         return reasons
     }
+    // A node_modules linked out of the tree belongs to whoever installed it
+    // (the host checkout), so its markers date that install, not this one.
+    if (linkedOutOfTree(nodeModules, cwd)) return []
     for (const dir of workspaceDirs) {
         const name = readPackageManifest(join(dir, "package.json"))?.name
         if (typeof name !== "string" || !name) continue
@@ -557,6 +568,16 @@ export function staleDependencyReasons(cwd: string): string[] {
         }
     }
     return reasons
+}
+
+function linkedOutOfTree(nodeModules: string, cwd: string): boolean {
+    try {
+        if (!lstatSync(nodeModules).isSymbolicLink()) return false
+        const fromCwd = relative(realpathSync(cwd), realpathSync(nodeModules))
+        return fromCwd === ".." || fromCwd.startsWith(`..${sep}`) || isAbsolute(fromCwd)
+    } catch {
+        return false
+    }
 }
 
 function hasEntries(value: unknown): boolean {
@@ -1103,7 +1124,7 @@ export function recommendedVerifyTimeoutMs(plan: VerifyPlan): number {
     const declared = executable.length - retryable
     return (
         declared * COMMAND_ATTEMPT_BUDGET_MS +
-        retryable * 2 * COMMAND_ATTEMPT_BUDGET_MS +
+        retryable * (2 * COMMAND_ATTEMPT_BUDGET_MS + RETRY_BACKOFF_MS) +
         60_000
     )
 }
@@ -1130,14 +1151,20 @@ export function recommendedMergedVerifyTimeoutMs(
     const retryable = baselineRetryable + MAX_FINAL_ADDED_VERIFY_COMMANDS + extra
     return (
         declared * COMMAND_ATTEMPT_BUDGET_MS +
-        retryable * 2 * COMMAND_ATTEMPT_BUDGET_MS +
+        retryable * (2 * COMMAND_ATTEMPT_BUDGET_MS + RETRY_BACKOFF_MS) +
         60_000
     )
 }
 
 type CmdOutcome =
     | { status: "passed"; durationMs: number; output?: VerificationCommandOutput }
-    | { status: "failed"; durationMs: number; tail: string; output?: VerificationCommandOutput }
+    | {
+          status: "failed"
+          durationMs: number
+          tail: string
+          output?: VerificationCommandOutput
+          retryable?: boolean
+      }
     | { status: "skipped"; durationMs: number; tail: string }
 
 /** Tail-bound both streams once, at capture, with honest elision markers. */
@@ -1159,6 +1186,7 @@ function captureCommandOutput(
 async function runCmd(
     cwd: string,
     c: VerifyCommandSpec,
+    hostRepoRoot: string,
     signal?: AbortSignal,
 ): Promise<CmdOutcome> {
     const startedAt = Date.now()
@@ -1176,12 +1204,13 @@ async function runCmd(
             tail: c.preflightFailure,
         }
     }
-    const commandCwd = c.cwd ?? cwd
+    const commandCwd = resolveCommandCwd(cwd, c.cwd)
     if (!existsSync(commandCwd)) {
         return {
             status: "failed",
             durationMs: 0,
             tail: `verification working directory is missing: ${commandCwd}`,
+            retryable: false,
         }
     }
     throwIfAborted(signal)
@@ -1201,6 +1230,7 @@ async function runCmd(
     try {
         const result = await execFileCli(c.tool, c.args, {
             cwd: commandCwd,
+            ...(c.tool === "cargo" ? { env: cargoEnvFor(hostRepoRoot) } : {}),
             idleTimeoutMs: IDLE_TIMEOUT_MS,
             timeout: ABSOLUTE_COMMAND_TIMEOUT_MS,
             terminationGraceMs: COMMAND_SETTLEMENT_GRACE_MS,
@@ -1253,6 +1283,7 @@ export async function verifyBuild(
     const commands: VerifyCommandResult[] = []
     let ran = false
     const plan = options.plan ?? createVerifyPlan(cwd)
+    const hostRepoRoot = options.hostRepoRoot ?? cwd
     const emitActivity = options.emitActivity ?? emit
     // A gate run against a tree that predates the manifests judges the
     // install, not the work. Refresh first and keep it in the evidence.
@@ -1268,7 +1299,7 @@ export async function verifyBuild(
             kind: "warn",
             text: `refreshing dependencies before verification: ${stale.join("; ")}`,
         })
-        const outcome = await runCmd(cwd, install, options.signal)
+        const outcome = await runCmd(cwd, install, hostRepoRoot, options.signal)
         commands.push({
             command: install.label,
             status: outcome.status,
@@ -1283,12 +1314,13 @@ export async function verifyBuild(
     }
     for (const c of plan.commands) {
         throwIfAborted(options.signal)
-        let outcome = await runCmd(cwd, c, options.signal)
+        let outcome = await runCmd(cwd, c, hostRepoRoot, options.signal)
         let firstFailureTail: string | undefined
         // A preflight failure never spawned anything and cannot flake, so it
         // is excluded here exactly as it is from the two-attempt budget above.
         if (
             outcome.status === "failed" &&
+            outcome.retryable !== false &&
             !c.preflightFailure &&
             isRunLevelCommand(c)
         ) {
@@ -1308,7 +1340,9 @@ export async function verifyBuild(
                     `verification command retried once: ${c.label} — ` +
                     `first attempt failed: ${firstFailureTail.replace(/[\r\n]+/gu, " ")}`,
             })
-            outcome = await runCmd(cwd, c, options.signal)
+            await (options.sleep ?? defaultSleep)(RETRY_BACKOFF_MS)
+            throwIfAborted(options.signal)
+            outcome = await runCmd(cwd, c, hostRepoRoot, options.signal)
         }
         commands.push({
             command: c.label,
@@ -1317,6 +1351,9 @@ export async function verifyBuild(
             ...("tail" in outcome && outcome.tail ? { tail: outcome.tail } : {}),
             ...("output" in outcome && outcome.output
                 ? { output: outcome.output }
+                : {}),
+            ...("retryable" in outcome && outcome.retryable !== undefined
+                ? { retryable: outcome.retryable }
                 : {}),
             ...(firstFailureTail !== undefined
                 ? { retriedAfterFailure: true as const, firstFailureTail }

@@ -1,0 +1,6 @@
+# ADR-0008: Give the single retry attempt a fixed injectable backoff
+
+**Status:** Accepted
+**Context:** The one retry at verify.ts:1311 fires immediately, so an npm network timeout or a git index lock is retried within the same second. Budgets at verify.ts:1099-1109,1116-1136 already assume 2 attempts and must absorb the extra wall time.
+**Decision:** In src/verification/verify.ts add `const RETRY_BACKOFF_MS = 2000;` next to COMMAND_ATTEMPT_BUDGET_MS (verify.ts:1087-1090). Add `sleep?: (ms: number) => Promise<void>` to the verifyBuild options bag, defaulting to `(ms) => new Promise((r) => setTimeout(r, ms).unref?.())`. Between the retry warn activity (verify.ts:1303-1310) and attempt 2 (verify.ts:1311), `await options.sleep?.(RETRY_BACKOFF_MS) ?? defaultSleep(RETRY_BACKOFF_MS)`, then `throwIfAborted(options.signal)` again immediately after the wait. Add `RETRY_BACKOFF_MS` once per retryable command to both `recommendedVerifyTimeoutMs` and `recommendedMergedVerifyTimeoutMs`. Do not introduce exponential backoff, a retry count above 2, or a jitter helper.
+**Consequences:** Tests inject `sleep: async () => {}` to stay fast; the abort check after the wait keeps cancellation responsive. Recommended timeouts grow by 2s per retryable command, which callers of those two functions inherit automatically.

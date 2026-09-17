@@ -1,7 +1,9 @@
 import {
     existsSync,
+    lstatSync,
     mkdirSync,
     readFileSync,
+    symlinkSync,
     writeFileSync,
 } from "node:fs"
 import { join } from "node:path"
@@ -18,6 +20,7 @@ import {
     verifyBuild,
 } from "../../src/verification/verify.js"
 import { withTempDir } from "../execution/helpers.js"
+import { RETRY_BACKOFF_MS } from "../../src/verification/command-cwd.js"
 
 // Uses real `npm run <script>` so the gate is exercised end-to-end (no lockfile
 // → npm is the detected package manager). Timeouts are generous, so these run in
@@ -780,10 +783,11 @@ setTimeout(() => process.exit(0), 120_000).unref?.(); setInterval(() => {}, 10_0
             )
             const plan = createVerifyPlan(dir)
 
-            // Two run-level commands, each budgeted for both of its attempts.
+            // Two run-level commands, each budgeted for both of its
+            // attempts and the backoff between them.
             assert.equal(
                 recommendedVerifyTimeoutMs(plan),
-                2 * 2 * (10 * 60_000 + 5_000 + 3_000) + 60_000,
+                2 * (2 * (10 * 60_000 + 5_000 + 3_000) + RETRY_BACKOFF_MS) + 60_000,
             )
         })
     })
@@ -808,6 +812,35 @@ describe("dependency refresh before the gate", () => {
 
             mkdirSync(join(dir, "node_modules"), { recursive: true })
             assert.deepEqual(staleDependencyReasons(dir), ["workspace @t/core is not linked in node_modules"])
+        })
+    })
+
+    it("treats a node_modules linked out of the tree as the host's install", async () => {
+        await withTempDir("baro-verify-deps-link-", async (root) => {
+            const host = join(root, "host")
+            const run = join(root, "run")
+            mkdirSync(join(host, "node_modules"), { recursive: true })
+            mkdirSync(run, { recursive: true })
+            writeFileSync(
+                join(host, "node_modules", ".package-lock.json"),
+                JSON.stringify({ lockfileVersion: 3 }),
+            )
+            writeFileSync(
+                join(run, "package.json"),
+                JSON.stringify({ name: "root", private: true, dependencies: { left: "1.0.0" } }),
+            )
+            // The install marker predates the lockfile, which is what would
+            // normally be reported as stale.
+            await delay(1_100)
+            writeFileSync(join(run, "package-lock.json"), JSON.stringify({ lockfileVersion: 3 }))
+            symlinkSync(join(host, "node_modules"), join(run, "node_modules"), "dir")
+
+            assert.equal(lstatSync(join(run, "node_modules")).isSymbolicLink(), true)
+            assert.deepEqual(
+                staleDependencyReasons(run),
+                [],
+                "the materializer owns the freshness of a linked tree",
+            )
         })
     })
 
@@ -883,7 +916,7 @@ describe("negotiated declared budget timeouts", () => {
             assert.equal(
                 recommendedMergedVerifyTimeoutMs(baseline, 12) -
                     recommendedMergedVerifyTimeoutMs(baseline),
-                4 * 2 * 608_000,
+                4 * (2 * 608_000 + RETRY_BACKOFF_MS),
             )
         })
     })
