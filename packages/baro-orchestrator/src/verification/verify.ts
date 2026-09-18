@@ -34,6 +34,7 @@ import {
     revalidateContainedPaths,
     translateDeclaredTests,
 } from "./declared-verification.js"
+import { coalesceNodeTestScripts } from "./node-test-script.js"
 
 export {
     MAX_DECLARED_VERIFY_COMMANDS,
@@ -842,7 +843,10 @@ export function createVerifyPlan(
         })
     }
     return freezeVerifyPlan(
-        boundedDeclaredCommands(detected.commands, declaredCommands, budget),
+        coalesceNodeTestScripts(
+            boundedDeclaredCommands(detected.commands, declaredCommands, budget),
+            (commandCwd) => readPackageManifest(join(commandCwd ?? cwd, "package.json")),
+        ),
         detected.javascriptPackageManagers,
         options.testBudgets !== undefined ? budget : undefined,
     )
@@ -963,13 +967,14 @@ function registerPackageManagerAuthorities(
     }
 }
 
-interface JavaScriptCommandDetails {
+export interface JavaScriptCommandDetails {
     manager: JavaScriptPackageManager
     script: string
     trailingArgs: readonly string[]
 }
 
-function javascriptCommandDetails(
+/** Identifies the `<manager> run <script>` shape shared by declared and detected commands. */
+export function javascriptCommandDetails(
     command: VerifyCommandSpec,
 ): JavaScriptCommandDetails | null {
     if (
