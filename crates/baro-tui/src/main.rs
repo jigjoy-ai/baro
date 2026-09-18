@@ -4,6 +4,7 @@ mod awake_clock;
 mod baro_home;
 mod branch_authority;
 mod cli;
+mod clipboard;
 mod config;
 mod constants;
 mod context;
@@ -1495,6 +1496,8 @@ async fn run_app(
     // Scroll frames render from the session cache, so they can run at
     // ~120fps; content frames keep the 30fps flood throttle.
     let mut scroll_frame = false;
+    // Matches the EnableMouseCapture issued before this loop starts.
+    let mut mouse_captured = true;
     loop {
         app.sync_transcript_seqs();
         let min_gap = if scroll_frame {
@@ -1503,6 +1506,15 @@ async fn run_app(
             Duration::from_millis(33)
         };
         if let Some(t) = terminal.as_deref_mut() {
+            let want_captured = mouse_capture_should_be_enabled(app.screen, app.workbench_overlay);
+            if want_captured != mouse_captured {
+                if want_captured {
+                    execute!(t.backend_mut(), crossterm::event::EnableMouseCapture)?;
+                } else {
+                    execute!(t.backend_mut(), crossterm::event::DisableMouseCapture)?;
+                }
+                mouse_captured = want_captured;
+            }
             if dirty && last_draw.elapsed() >= min_gap {
                 let drill_in = (
                     app.focused_story.clone(),
@@ -2304,6 +2316,27 @@ async fn run_app(
                                 };
                                 app.focused_story = ids.get(next).cloned();
                                 app.focus_scroll_back = 0;
+                            }
+                        }
+                        KeyCode::Char('y')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            if let Some(turn) = app
+                                .conversation
+                                .transcript()
+                                .iter()
+                                .rev()
+                                .find(|turn| turn.role == conversation::TranscriptRole::Assistant)
+                            {
+                                let payload = clipboard::last_code_block(&turn.text)
+                                    .unwrap_or_else(|| turn.text.clone());
+                                print!("{}", clipboard::osc52_sequence(&payload));
+                                let _ = io::stdout().flush();
+                                app.session_feed.push(
+                                    crate::session_feed::SessionBlock::Note {
+                                        text: "copied".to_string(),
+                                    },
+                                );
                             }
                         }
                         KeyCode::Tab => {
@@ -3443,6 +3476,15 @@ fn open_in_browser(url: &str) {
         .spawn();
 }
 
+/// Mouse capture stays on except while the conversation composer has focus
+/// (Screen::Conversation with the workbench overlay closed) — released there
+/// so a click-drag runs the terminal's native text selection instead of a
+/// captured synthetic mouse event. Mirrors the MouseScroll dispatch
+/// condition; the two must not diverge or wheel routing breaks.
+fn mouse_capture_should_be_enabled(screen: Screen, workbench_overlay: bool) -> bool {
+    !(screen == Screen::Conversation && !workbench_overlay)
+}
+
 fn conversation_intent(app: &App) -> conversation_runner::ConversationIntent {
     if matches!(
         app.conversation.phase(),
@@ -3532,6 +3574,14 @@ fn apply_operator_event(app: &mut App, event: operator_client::OperatorEvent) {
                 std::mem::take(&mut state.reply)
             };
             if !reply.trim().is_empty() {
+                let timestamp = events::now_iso8601();
+                if let Ok(Some(path)) =
+                    clipboard::append_last_commands(&baro_home::baro_home(), &timestamp, &reply)
+                {
+                    let _ = app
+                        .conversation
+                        .record_system_turn(format!("commands saved to {}", path.display()));
+                }
                 let _ = app.conversation.record_assistant_turn(reply);
             }
             let facts: Vec<String> = [
@@ -4758,10 +4808,12 @@ mod tests {
     use super::{
         apply_primary_provider_choice, coordination_has_runtime_dialogue, delete_prev_word,
         fixed_mode_contract, headless_failure_reason, message_command_line,
-        preferred_jigjoy_gateway_key, preferred_jigjoy_gateway_url,
-        reconcile_jigjoy_phase_overrides, resolve_parallel_limit, App, JIGJOY_CHEAP_STORY_MODEL,
-        JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL, JIGJOY_STRONG_MODEL,
+        mouse_capture_should_be_enabled, preferred_jigjoy_gateway_key,
+        preferred_jigjoy_gateway_url, reconcile_jigjoy_phase_overrides, resolve_parallel_limit,
+        App, JIGJOY_CHEAP_STORY_MODEL, JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL,
+        JIGJOY_STRONG_MODEL,
     };
+    use crate::app::Screen;
 
     #[test]
     fn after_help_epilogue_matches_pre_clap_usage() {
@@ -4779,6 +4831,27 @@ mod tests {
             usage::LOGS_SUMMARY,
         ] {
             assert!(help.contains(summary), "epilogue drifted from {summary}:\n{help}");
+        }
+    }
+
+    // Nested so every test's full path carries `mouse_capture`, letting
+    // `cargo test -p baro-tui mouse_capture` catch all three by itself.
+    mod mouse_capture {
+        use super::{mouse_capture_should_be_enabled, Screen};
+
+        #[test]
+        fn mouse_capture_releases_when_conversation_input_has_focus() {
+            assert!(!mouse_capture_should_be_enabled(Screen::Conversation, false));
+        }
+
+        #[test]
+        fn mouse_capture_stays_enabled_when_workbench_overlay_is_open() {
+            assert!(mouse_capture_should_be_enabled(Screen::Conversation, true));
+        }
+
+        #[test]
+        fn mouse_capture_stays_enabled_outside_the_conversation_screen() {
+            assert!(mouse_capture_should_be_enabled(Screen::Welcome, false));
         }
     }
 
