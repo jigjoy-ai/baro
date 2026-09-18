@@ -15,4 +15,12 @@ describe("systemPrompt", () => {
         assert.ok(prompt.includes("file contents"))
         assert.ok(prompt.includes("identifiers"))
     })
+
+    it("does not describe delivery: no push, PR, or publish instructions", () => {
+        const prompt = systemPrompt("/tmp/project")
+        assert.doesNotMatch(prompt, /\bpush(e[sd]|ing)?\b/iu)
+        assert.doesNotMatch(prompt, /\bpublish(e[sd]|ing)?\b/iu)
+        assert.doesNotMatch(prompt, /pull request/iu)
+        assert.doesNotMatch(prompt, /\bPR\b/u)
+    })
 })

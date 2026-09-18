@@ -1,5 +1,6 @@
 import type { PrdFile, PrdStory } from "../../prd.js"
 import type { GoalContract } from "../../goal/goal-contract.js"
+import { deliveryObligationViolation } from "./delivery-obligation.js"
 
 export const ARCHITECTURE_OBLIGATION_SCHEMA_VERSION = 1 as const
 export const ARCHITECTURE_OBLIGATION_FENCE = "baro-obligations-v1"
@@ -73,6 +74,7 @@ export type ArchitectureObligationViolationKind =
     | "duplicate_owner"
     | "missing_parent_invariants"
     | "unowned_obligation"
+    | "delivery_obligation"
 
 export interface ArchitectureObligationViolation {
     readonly kind: ArchitectureObligationViolationKind
@@ -147,12 +149,30 @@ export function parseArchitectureObligationContract(
     return validateArchitectureObligationContract(value)
 }
 
+/** Delivery is the user's to perform; a story must never be asked to do it. */
+function rejectDeliveryObligation(obligation: ArchitectureObligationV1): void {
+    const sentence = deliveryObligationViolation(
+        [obligation.subject, obligation.scenario, obligation.expectedOutcome].join(". "),
+    )
+    if (!sentence) return
+    const detail = `architecture obligation ${obligation.id} describes delivery, which stories must not perform: ${sentence}`
+    throw new ArchitectureObligationContractError(detail, [], [
+        {
+            kind: "delivery_obligation",
+            storyId: "",
+            obligationId: obligation.id,
+            detail,
+        },
+    ])
+}
+
 /** Validate parent ids against the host-owned goal, never provider JSON. */
 export function bindArchitectureObligationContract(
     contract: ArchitectureObligationContractV1 | null,
     goal: GoalContract | null | undefined,
 ): ArchitectureObligationContractV1 | null {
     if (!contract || !goal) return null
+    for (const obligation of contract.obligations) rejectDeliveryObligation(obligation)
     const known = new Set(goal.invariants.map(({ id }) => id))
     const covered = new Set<string>()
     for (const obligation of contract.obligations) {
@@ -399,6 +419,7 @@ export function validateArchitectureObligationCoverage(
     if (!contract) {
         return { coveredObligationIds: [], missingObligationIds: [] }
     }
+    for (const obligation of contract.obligations) rejectDeliveryObligation(obligation)
     const byCriterion = new Map(
         contract.obligations.map((obligation) => [
             renderArchitectureObligationCriterion(obligation),
