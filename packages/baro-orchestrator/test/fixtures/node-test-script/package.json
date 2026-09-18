@@ -1,0 +1,7 @@
+{
+    "name": "node-test-script-fixture",
+    "private": true,
+    "scripts": {
+        "test": "node --import tsx --test --test-concurrency=2 \"test/**/*.test.ts\""
+    }
+}
