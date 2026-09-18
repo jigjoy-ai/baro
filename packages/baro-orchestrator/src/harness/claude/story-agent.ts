@@ -6,6 +6,8 @@
  * cap closes stdin to end the session.
  */
 
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
 import { setTimeout as setTimeoutPromise } from "timers/promises"
 
 import { BaseObserver, Participant, SemanticEvent } from "../../runtime/mozaik.js"
@@ -17,6 +19,7 @@ import {
     AgentTargetedMessage,
     ClaudeRateLimit,
     Critique,
+    StoryCommandRefused,
     StoryResult,
     type AgentPhase,
     type AgentResultData,
@@ -35,6 +38,8 @@ import {
 } from "./cli-participant.js"
 import { killedWorkerFailure } from "../cli-story-failure.js"
 import { IdleWatchdog } from "../liveness.js"
+import { materializePublishGuardHooks } from "./hook-bridge.js"
+import { drainGuardRefusals } from "../../execution/publish-guard.js"
 import {
     correlationOf,
     type StoryOutcome,
@@ -85,6 +90,7 @@ export class StoryAgent extends BaseObserver {
 
     /** Wired up per attempt and detached when that process settles. */
     private turnLifecycle: StreamingTurnLifecycle | null = null
+    private settingsPath: string | null = null
 
     constructor(spec: StorySpec) {
         super()
@@ -292,6 +298,7 @@ export class StoryAgent extends BaseObserver {
 
                 attempts = attempt
                 const result = await this.runOneAttempt(attempt)
+                this.drainCommandRefusals()
                 lastSummary = result.summary
                 lastError = result.error
                 lastFailure = result.failure
@@ -417,11 +424,14 @@ export class StoryAgent extends BaseObserver {
         // failure from an earlier retry taint a fresh attempt.
         this.currentProviderCapacitySignal = undefined
 
+        this.settingsPath ??=
+            this.spec.cliSettingsPath ??
+            materializePublishGuardHooks(
+                join(tmpdir(), `baro-hooks-${this.spec.id}-${process.pid}`),
+            )
         const claude = new ClaudeCliParticipant(this.spec.id, {
             cwd: this.spec.cwd,
-            ...(this.spec.cliSettingsPath
-                ? { extraArgs: ["--settings", this.spec.cliSettingsPath] }
-                : {}),
+            extraArgs: ["--settings", this.settingsPath],
             model: this.spec.model,
             effort: this.spec.effort,
             claudeBin: this.spec.claudeBin,
@@ -574,6 +584,21 @@ export class StoryAgent extends BaseObserver {
         })
         this.turnLifecycle = lifecycle
         return lifecycle
+    }
+
+    /** The Bash PreToolUse hook records each deny; they become story events here. */
+    private drainCommandRefusals(): void {
+        if (!this.settingsPath) return
+        for (const refusal of drainGuardRefusals(dirname(this.settingsPath))) {
+            this.envRef?.deliverSemanticEvent(
+                this,
+                StoryCommandRefused.create({
+                    storyId: this.spec.id,
+                    ...refusal,
+                    harness: "claude",
+                }),
+            )
+        }
     }
 
     private emitStoryResult(

@@ -13,6 +13,7 @@ import * as path from "path"
 
 import { type Tool } from "../../runtime/mozaik.js"
 
+import { publishCommandRefusal } from "../../execution/publish-guard.js"
 import { execFileCli } from "../../harness/exec-file-cli.js"
 import { STORY_SHELL_BUDGET_MS } from "../../harness/environment.js"
 
@@ -144,6 +145,9 @@ export interface CodebaseToolOptions {
      * repository-wide suite commands are refused at the shell, because the
      * announced rule alone was measured being ignored for a full hour. */
     scopedVerification?: boolean
+    /** Story lanes: refuse push, gh and GitHub API calls before any other guard. */
+    denyPublish?: boolean
+    onCommandRefused?: (command: string, reason: string) => void
     /**
      * Exact manager-owned transport used by collective StoryAgents. The shell
      * guard recognizes only the helper executable. The loopback endpoint and
@@ -922,6 +926,13 @@ async function runBash(
     options: CodebaseToolOptions,
     signal?: AbortSignal,
 ): Promise<string> {
+    if (options.denyPublish === true) {
+        const refusal = publishCommandRefusal(command)
+        if (refusal) {
+            options.onCommandRefused?.(command, refusal)
+            return `Error: bash command rejected: ${refusal}`
+        }
+    }
     const access = shellAccessContext(cwd, options)
     const rejection = bashContainmentRejection(cwd, command, access)
     if (rejection) {
