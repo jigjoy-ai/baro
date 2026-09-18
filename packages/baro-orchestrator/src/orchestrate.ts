@@ -213,6 +213,8 @@ export interface OrchestrateConfig {
     greenfieldInit?: boolean
     prdPath: string
     cwd: string
+    /** Start the run's goal branch from this ref instead of the host HEAD. */
+    baseRef?: string
     /** Stable authority/correlation identity shared with planning and billing. */
     runId?: string
     parallel?: number
@@ -837,6 +839,7 @@ export async function orchestrate(
             runId,
             goalBranch,
             push: pushRemote,
+            ...(config.baseRef ? { baseRef: config.baseRef } : {}),
             onLog: (line) => {
                 process.stderr.write(`${line}\n`)
                 if (emitTui) emit({ type: "story_log", id: "_git", line })

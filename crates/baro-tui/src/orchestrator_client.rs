@@ -28,6 +28,8 @@ pub struct OrchestratorConfig {
     pub conversation_context: Option<ConversationContextSnapshot>,
     pub prd_path: PathBuf,
     pub cwd: PathBuf,
+    /// `--base`: the orchestrator starts the goal branch from this ref.
+    pub base_ref: Option<String>,
     /// Enables the collective-only private Planner stream. Absence preserves
     /// the historical complete-PRD startup path.
     pub progressive_planning_id: Option<String>,
@@ -450,6 +452,9 @@ fn build_command(
     };
     cmd.arg("--prd").arg(&cfg.prd_path);
     cmd.arg("--cwd").arg(&cfg.cwd);
+    if let Some(base) = &cfg.base_ref {
+        cmd.arg("--base").arg(base);
+    }
     if cfg.is_resume {
         cmd.arg("--resume");
     }
@@ -576,6 +581,7 @@ mod tests {
             conversation_context: None,
             prd_path: "prd.json".into(),
             cwd: ".".into(),
+            base_ref: None,
             progressive_planning_id: None,
             parallel: 1,
             timeout_secs: 60,
@@ -668,6 +674,16 @@ mod tests {
         assert_eq!(count(&args, "--with-surgeon"), 0);
         assert_eq!(count(&args, "--surgeon-use-llm"), 1);
         assert_eq!(count(&args, "--no-surgeon-llm"), 0);
+    }
+
+    #[test]
+    fn forwards_base_ref_only_when_given() {
+        let mut cfg = config(true, true);
+        assert_eq!(count(&command_args(&cfg), "--base"), 0);
+        cfg.base_ref = Some("main".to_string());
+        let args = command_args(&cfg);
+        let position = args.iter().position(|arg| arg == "--base").expect("base flag");
+        assert_eq!(args.get(position + 1).map(String::as_str), Some("main"));
     }
 
     #[test]

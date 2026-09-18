@@ -22,6 +22,9 @@ pub struct RunState {
     pub checkout: String,
     pub branch: String,
     pub status: RunStatus,
+    // A --base run never touches the checkout, so it is never resumed from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     #[serde(skip)]
     dir: PathBuf,
 }
@@ -93,6 +96,7 @@ pub(crate) fn create_run_in(
         checkout,
         branch: branch.to_string(),
         status: RunStatus::Active,
+        base: None,
     };
     state.save()?;
     Ok(state)
@@ -115,7 +119,9 @@ pub(crate) fn find_resumable_in(home: &Path, cwd: &Path) -> Option<RunState> {
             let raw = std::fs::read_to_string(&file).ok()?;
             let mut state: RunState = serde_json::from_str(&raw).ok()?;
             state.dir = dir;
-            (state.checkout == checkout && state.status != RunStatus::Finished)
+            (state.checkout == checkout
+                && state.status != RunStatus::Finished
+                && state.base.is_none())
                 .then_some((modified, state))
         })
         .collect();
@@ -156,6 +162,30 @@ pub fn activate(state: RunState) {
 
 pub fn activate_legacy() {
     *active() = Some(Location::Checkout);
+}
+
+/// Creates and activates a `--base` run up front so its lock can live in its
+/// state dir; returns that dir.
+pub fn begin_base_run(cwd: &Path, base: &str) -> io::Result<PathBuf> {
+    let run_id = new_run_id(&canonical_checkout(cwd));
+    let state = create_base_run_in(&baro_home(), cwd, base, run_id)?;
+    let dir = state.dir.clone();
+    activate(state);
+    Ok(dir)
+}
+
+fn create_base_run_in(home: &Path, cwd: &Path, base: &str, run_id: String) -> io::Result<RunState> {
+    let mut state = create_run_in(home, cwd, "", run_id)?;
+    state.base = Some(base.to_string());
+    state.save()?;
+    Ok(state)
+}
+
+pub fn active_base() -> Option<String> {
+    match active().as_ref() {
+        Some(Location::Run(state)) => state.base.clone(),
+        _ => None,
+    }
 }
 
 /// Directory that receives this run's prd.json, creating the run on first use.
@@ -304,6 +334,24 @@ mod tests {
         discard(&first).unwrap();
         assert!(!first.dir.exists());
         assert!(find_resumable_in(&home, &repo).is_none());
+    }
+
+    #[test]
+    fn run_state_base_run_locks_in_state_dir_and_is_never_resumed_from_checkout() {
+        let root = tempdir().unwrap();
+        let home = root.path().join("baro-home");
+        let repo = repo(root.path());
+
+        let state = create_base_run_in(&home, &repo, "main", "run-base".into()).unwrap();
+        let lock = SessionLock::acquire(&state.dir).expect("lock");
+        assert!(state.dir.join("baro.lock").is_file());
+        assert_eq!(git(&repo, &["status", "--porcelain", "--ignored"]), "");
+        let saved: RunState =
+            serde_json::from_str(&fs::read_to_string(state.dir.join("run.json")).unwrap()).unwrap();
+        assert_eq!(saved.base.as_deref(), Some("main"));
+        assert!(find_resumable_in(&home, &repo).is_none());
+        drop(lock);
+        assert!(!state.dir.join("baro.lock").exists());
     }
 
     #[test]

@@ -51,6 +51,10 @@ pub struct Cli {
     #[arg(long)]
     pub local_only: bool,
 
+    /// Start the run's branch from REF in its own worktree, leaving this checkout untouched.
+    #[arg(long, value_name = "REF")]
+    pub base: Option<String>,
+
     /// JSON file containing opt-in collective worker candidates and their bids.
     #[arg(long, env = "BARO_COLLECTIVE_WORKERS_FILE")]
     pub collective_workers: Option<String>,
@@ -316,9 +320,15 @@ pub fn parse() -> Result<(Cli, Option<SessionLock>), Error> {
 
     let cwd = fs::canonicalize(&cli.cwd)?;
 
+    // A --base run never touches the checkout, so it must not hold the checkout's lock.
+    let lock_dir = match cli.base.as_deref() {
+        Some(base) if !cli.doctor => crate::run_state::begin_base_run(&cwd, base)
+            .map_err(|e| cmd.error(ErrorKind::Io, format!("could not create run state: {e}")))?,
+        _ => cwd.clone(),
+    };
     let lock = if !cli.doctor {
         Some(
-            SessionLock::acquire(&cwd).map_err(|msg| {
+            SessionLock::acquire(&lock_dir).map_err(|msg| {
                 cmd.error(
                     ErrorKind::ValueValidation,
                     format!("Failed to acquire session lock: {msg}"),
@@ -387,6 +397,13 @@ mod tests {
             Some("ship it".to_string())
         );
         assert_eq!(resolve_goal(None, None, unreachable_read).unwrap(), None);
+    }
+
+    #[test]
+    fn cli_base_ref_is_optional() {
+        let cli = Cli::try_parse_from(["baro", "--base", "main", "goal"]).unwrap();
+        assert_eq!(cli.base.as_deref(), Some("main"));
+        assert_eq!(Cli::try_parse_from(["baro", "goal"]).unwrap().base, None);
     }
 
     #[test]
