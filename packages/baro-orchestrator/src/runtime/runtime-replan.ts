@@ -7,6 +7,7 @@ import {
     type PrdStory,
 } from "../prd.js"
 import { writeSurfaceOf } from "../planning/domain/dependency-evidence.js"
+import { isActiveOwner, surfacesOverlap } from "../execution/write-surface.js"
 import { isVerificationOnlyStory } from "../planning/domain/verification-stories.js"
 import { validateGoalContractCoverage } from "../planning/domain/goal-contract-coverage.js"
 import type {
@@ -444,7 +445,7 @@ function findWriteSurfaceOverlap(
 ): { addedStoryId: string; ownerStoryId: string; paths: string[] } | undefined {
     const added = new Set(addedStoryIds)
     const owners = candidate.userStories.filter(
-        (story) => !added.has(story.id) && story.passes !== true,
+        (story) => !added.has(story.id) && isActiveOwner(story),
     )
     if (owners.length === 0) return undefined
 
@@ -453,12 +454,10 @@ function findWriteSurfaceOverlap(
             (story) => story.id === addedStoryId,
         )
         if (!subject) continue
-        const subjectWrites = new Set(writeSurfaceOf(subject))
-        if (subjectWrites.size === 0) continue
+        const subjectWrites = writeSurfaceOf(subject)
+        if (subjectWrites.length === 0) continue
         for (const owner of owners) {
-            const shared = writeSurfaceOf(owner)
-                .filter((path) => subjectWrites.has(path))
-                .sort()
+            const shared = surfacesOverlap(subjectWrites, writeSurfaceOf(owner))
             if (shared.length > 0) {
                 return { addedStoryId, ownerStoryId: owner.id, paths: shared }
             }
@@ -484,15 +483,14 @@ function collectWriteSurfaceOverlapFacts(
     if (!subject) return undefined
     const subjectWrites = writeSurfaceOf(subject)
     if (subjectWrites.length === 0) return undefined
-    const subjectSet = new Set(subjectWrites)
 
     const owners: WriteSurfaceOverlapFacts["owners"] = []
     const collided = new Set<string>()
     for (const owner of candidate.userStories) {
         if (owner.id === candidateStoryId) continue
-        if (added.has(owner.id) || owner.passes === true) continue
+        if (added.has(owner.id) || !isActiveOwner(owner)) continue
         const ownedFiles = writeSurfaceOf(owner).sort()
-        const collidingPaths = ownedFiles.filter((path) => subjectSet.has(path))
+        const collidingPaths = surfacesOverlap(subjectWrites, ownedFiles)
         if (collidingPaths.length === 0) continue
         for (const path of collidingPaths) collided.add(path)
         owners.push({ storyId: owner.id, ownedFiles, collidingPaths })
