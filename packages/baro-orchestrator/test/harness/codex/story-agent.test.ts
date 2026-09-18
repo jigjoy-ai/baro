@@ -781,10 +781,13 @@ setInterval(() => {}, 1_000)
 
             assert.equal(outcome.success, false)
             assert.equal(outcome.attempts, 1)
-            // `bfd1b63` replaced the wall-clock attempt deadline with an idle
-            // one: a provider that keeps emitting is never cut off, and this
-            // fixture is killed for saying nothing, not for taking long.
-            assert.match(outcome.error ?? "", /attempt 1 produced no output/)
+            // An explicit `timeoutSecs` is now an awake-clock wall bound
+            // (#163), so this fixture is killed for exceeding it, not for
+            // the idle window that would otherwise cover a silent provider.
+            assert.match(
+                outcome.error ?? "",
+                /attempt 1 exceeded its 0\.05s timeout/,
+            )
             assert.deepEqual(outcome.failure, {
                 kind: "infrastructure",
                 code: "command_timeout",

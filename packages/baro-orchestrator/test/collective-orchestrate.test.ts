@@ -21,6 +21,7 @@ import {
     resolveGoalReviewTimeoutMs,
     storyTimeoutSecs,
 } from "../src/orchestrate.js"
+import { activityIdleTimeoutMs } from "../src/harness/liveness.js"
 import { GOAL_REVIEW_STABLE_CAPTURE_BUDGET_MS } from "../src/goal/goal-invariant-review-evidence.js"
 import {
     GOAL_REVIEW_BOARD_SLACK_MS,
@@ -998,26 +999,20 @@ class DialogueRunTrigger extends BaseObserver {
 describe("orchestrate collective mode", () => {
     it("derives the default goal-review timeout from the effective story timeout", () => {
         // `bfd1b63` made silence the only clock: effort no longer buys a
-        // longer wall-clock leash, so every effort derives the same budget.
-        for (const [effort, expectedSecs] of [
-            [undefined, 600],
-            ["high", 600],
-            ["xhigh", 600],
-            ["max", 600],
-        ] as const) {
+        // longer wall-clock leash, and an unset story timeout falls back to
+        // the shared activity idle window rather than a fixed 600s.
+        for (const effort of [undefined, "high", "xhigh", "max"] as const) {
             const storyTimeout = storyTimeoutSecs(undefined, effort)
-            assert.equal(storyTimeout, expectedSecs)
+            assert.equal(storyTimeout, undefined)
+            const expectedMs = activityIdleTimeoutMs()
             assert.equal(
                 resolveGoalReviewTimeoutMs(undefined, storyTimeout),
-                expectedSecs * 1_000,
+                expectedMs,
             )
-            const roundTimeout = goalReviewRoundTimeoutMs(
-                expectedSecs * 1_000,
-                2,
-            )
+            const roundTimeout = goalReviewRoundTimeoutMs(expectedMs, 2)
             assert.equal(
                 roundTimeout,
-                expectedSecs * 2_000 +
+                expectedMs * 2 +
                     GOAL_REVIEW_STABLE_CAPTURE_BUDGET_MS * 5 +
                     10_000,
             )
