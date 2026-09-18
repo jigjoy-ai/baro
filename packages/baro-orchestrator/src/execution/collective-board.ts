@@ -1602,6 +1602,7 @@ export class CollectiveBoard extends SerializedObserver {
         this.operationalRecovery.forget(storyId)
         this.recoveryDecided.delete(storyId)
         this.leases.delete(storyId)
+        this.announceRevisedSurfaces(this.runtimeReplans.graphVersion)
         this.pendingQuality.delete(storyId)
         this.healingActionsSinceProgress = 0
         this.runtimeAdaptationsSinceProgress = 0

@@ -76,7 +76,7 @@ const WRITE_SURFACE: GateDisclosure = {
     id: "write-surface",
     enforcedBy: "src/integration/git-coordinator.ts",
     summary:
-        "A diff reaching outside the story's declared writes is refused at integration.",
+        "A write to a path an active peer owns is refused at the write.",
     announce: (ctx) => {
         const surface = ctx.surface
         if (!surface || surface.writes.length === 0) return null
