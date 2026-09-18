@@ -2059,7 +2059,11 @@ export async function orchestrate(
     // Await the PR before the TUI `done` event so the completion screen has
     // the PR URL the moment it renders instead of after a race.
     if (finalizer) await finalizer.complete()
-    await integrationWorktree?.syncHostCheckout()
+    await integrationWorktree?.syncHostCheckout({
+        verified: finalizer
+            ? finalizer.checkpoint === false
+            : summary.success && summary.verificationStatus === "passed",
+    })
 
     let filesCreated = 0
     let filesModified = 0

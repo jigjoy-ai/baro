@@ -42,6 +42,7 @@ export type HostCheckoutSyncResult =
               | "not_fast_forward"
               | "up_to_date"
               | "not_prepared"
+              | "verification_failed"
               | "error"
           detail: string
       }
@@ -169,9 +170,12 @@ export class IntegrationWorktree {
     }
 
     /** Best-effort fast-forward of the user's checkout; never throws and logs
-     * exactly one line. A dirty tree is the non-retryable host_checkout_dirty fuse. */
-    async syncHostCheckout(): Promise<HostCheckoutSyncResult> {
-        const result = await this.syncHostCheckoutOnce()
+     * exactly one line. A dirty tree is the non-retryable host_checkout_dirty fuse.
+     * An unverified run never moves the host branch. */
+    async syncHostCheckout(opts: { verified: boolean }): Promise<HostCheckoutSyncResult> {
+        const result = opts.verified
+            ? await this.syncHostCheckoutOnce()
+            : untouched("verification_failed", "run finished as an unverified checkpoint")
         const branch = this.prepared?.hostBranchAtStart ?? "(none)"
         try {
             this.log(

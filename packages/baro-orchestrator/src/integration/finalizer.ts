@@ -128,6 +128,7 @@ export class Finalizer extends BaseObserver {
      * in the completion screen instead of after it.
      */
     private finalizePromise: Promise<void> | null = null
+    private lastCheckpoint: boolean | undefined
     /** Reuse the collective pre-completion gate instead of running it twice. */
     private objectiveVerification: { runId: string; result: VerifyResult } | null = null
 
@@ -332,6 +333,11 @@ export class Finalizer extends BaseObserver {
         }
     }
 
+    /** undefined until finalize() reaches its verdict (early exits never do). */
+    get checkpoint(): boolean | undefined {
+        return this.lastCheckpoint
+    }
+
     /**
      * Resolves once Finalizer has finished handling RunCompletedItem
      * (PR opened, skipped, or failed). Resolves immediately if no run
@@ -531,6 +537,7 @@ export class Finalizer extends BaseObserver {
             !verify.ok ||
             verificationIncomplete ||
             this.mergeFailed.size > 0
+        this.lastCheckpoint = checkpoint
         const title = this.buildPrTitle(prd, passed.length, orderedStories.length, checkpoint)
         const body = this.buildPrBody({
             prd,

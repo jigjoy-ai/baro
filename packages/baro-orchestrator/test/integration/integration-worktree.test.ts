@@ -183,7 +183,7 @@ describe("IntegrationWorktree — pre-created goal branch", () => {
         const goalSha = git(repo, "rev-parse", `refs/heads/${goalBranch}`)
         assert.equal(git(repo, "rev-parse", "HEAD"), mainSha, "host untouched until sync")
 
-        const result = await iw.syncHostCheckout()
+        const result = await iw.syncHostCheckout({ verified: true })
 
         assert.equal(result.kind, "fast_forwarded")
         assert.equal(git(repo, "rev-parse", "HEAD"), goalSha)
@@ -388,7 +388,7 @@ describe("IntegrationWorktree — syncHostCheckout", () => {
         const hostHeadBefore = git(repo, "rev-parse", "HEAD")
         const before = countHostCheckoutLogs(logs)
 
-        const result = await iw.syncHostCheckout()
+        const result = await iw.syncHostCheckout({ verified: true })
 
         assert.equal(result.kind, "fast_forwarded")
         if (result.kind !== "fast_forwarded") throw new Error("unreachable")
@@ -404,13 +404,29 @@ describe("IntegrationWorktree — syncHostCheckout", () => {
         assert.equal(countHostCheckoutLogs(logs) - before, 1, "exactly one host-checkout log line")
     })
 
+    it("leaves the host checkout untouched when verification failed", async () => {
+        const { repo, logs, goalBranch, iw } = await goalAheadOfHost()
+        const headBefore = git(repo, "rev-parse", "HEAD")
+        assert.notEqual(git(repo, "rev-parse", `refs/heads/${goalBranch}`), headBefore)
+        const before = countHostCheckoutLogs(logs)
+
+        const result = await iw.syncHostCheckout({ verified: false })
+
+        assert.equal(result.kind, "untouched")
+        if (result.kind !== "untouched") throw new Error("unreachable")
+        assert.equal(result.reason, "verification_failed")
+        assert.equal(git(repo, "rev-parse", "HEAD"), headBefore, "host HEAD unchanged")
+        assert.equal(git(repo, "branch", "--show-current"), "main")
+        assert.equal(countHostCheckoutLogs(logs) - before, 1)
+    })
+
     it("leaves a dirty host checkout untouched", async () => {
         const { repo, logs, iw } = await goalAheadOfHost()
         const headBefore = git(repo, "rev-parse", "HEAD")
         writeFileSync(join(repo, "a.txt"), "dirty host edit\n")
         const before = countHostCheckoutLogs(logs)
 
-        const result = await iw.syncHostCheckout()
+        const result = await iw.syncHostCheckout({ verified: true })
 
         assert.equal(result.kind, "untouched")
         if (result.kind !== "untouched") throw new Error("unreachable")
@@ -426,7 +442,7 @@ describe("IntegrationWorktree — syncHostCheckout", () => {
         git(repo, "checkout", "-b", "other")
         const before = countHostCheckoutLogs(logs)
 
-        const result = await iw.syncHostCheckout()
+        const result = await iw.syncHostCheckout({ verified: true })
 
         assert.equal(result.kind, "untouched")
         if (result.kind !== "untouched") throw new Error("unreachable")
