@@ -10,6 +10,14 @@ import {
     validateRepositoryBriefV1,
     type RepositoryBriefV1,
 } from "./repository-brief.js"
+import {
+    activityIdleTimeoutMs,
+    startActivityWatchdog,
+} from "../../harness/liveness.js"
+import {
+    createAwakeDeadline,
+    type AwakeDeadline,
+} from "../../runtime/awake-clock.js"
 
 export const CONVERSATION_HISTORY_PROMPT_MAX_BYTES = 64 * 1024
 
@@ -78,9 +86,12 @@ export interface ConversationResponderResult {
 
 export interface ConversationResponder {
     readonly backend: ConversationResponderBackend
+    /** Call `onActivity` per streamed chunk; a turn ends only after a silent
+     *  idle window. */
     respond(
         input: ConversationResponderInput,
         signal: AbortSignal,
+        onActivity?: () => void,
     ): Promise<string | ConversationResponderResult>
 }
 
@@ -110,7 +121,9 @@ export interface ConversationIntakeSnapshot {
 export interface ConversationIntakeOptions {
     sessionId: string
     responder: ConversationResponder
+    /** Opt-in wall bound per turn; unset means only the idle window applies. */
     timeoutMs?: number
+    idleTimeoutMs?: number
     /** Prompt projection only; the request-id replay registry remains intact. */
     historyLimit?: number
     /**
@@ -154,7 +167,8 @@ export class ConversationIntake {
     private readonly controllers = new Set<AbortController>()
     private readonly historicalRequestIds = new Set<string>()
     private tail: Promise<void> = Promise.resolve()
-    private readonly timeoutMs: number
+    private readonly timeoutMs: number | undefined
+    private readonly idleTimeoutMs: number
     private readonly historyLimit: number
     private closed = false
 
@@ -163,9 +177,13 @@ export class ConversationIntake {
         if (!options.responder?.backend || typeof options.responder.respond !== "function") {
             throw new TypeError("conversation responder is invalid")
         }
-        this.timeoutMs = boundedPositiveInteger(
-            options.timeoutMs ?? 60_000,
-            "timeoutMs",
+        this.timeoutMs =
+            options.timeoutMs === undefined
+                ? undefined
+                : boundedPositiveInteger(options.timeoutMs, "timeoutMs")
+        this.idleTimeoutMs = boundedPositiveInteger(
+            options.idleTimeoutMs ?? activityIdleTimeoutMs(),
+            "idleTimeoutMs",
         )
         this.historyLimit = boundedPositiveInteger(
             options.historyLimit ?? 24,
@@ -284,29 +302,50 @@ export class ConversationIntake {
         }
         const controller = new AbortController()
         this.controllers.add(controller)
-        let timer: ReturnType<typeof setTimeout> | undefined
+        let rejectTimeout!: (error: Error) => void
+        const timeout = new Promise<never>((_, reject) => {
+            rejectTimeout = reject
+        })
+        let expired = false
+        const expire = (message: string): void => {
+            if (expired) return
+            expired = true
+            const error = new Error(message)
+            // Settle the authoritative watchdog first. Abort listeners run
+            // synchronously and must not race an incidental provider
+            // AbortError ahead of this outward error.
+            rejectTimeout(error)
+            controller.abort(error)
+        }
+        const watchdog = startActivityWatchdog({
+            idleMs: this.idleTimeoutMs,
+            onIdle: () =>
+                expire(
+                    `conversation response produced no activity for ${this.idleTimeoutMs}ms`,
+                ),
+        })
+        const timeoutMs = this.timeoutMs
+        let wallBound: AwakeDeadline | undefined
         try {
-            const timeout = new Promise<never>((_, reject) => {
-                timer = setTimeout(() => {
-                    const error = new Error(
-                        `conversation response timed out after ${this.timeoutMs}ms`,
-                    )
-                    // Settle the authoritative watchdog first. Abort listeners
-                    // run synchronously and must not race an incidental
-                    // provider AbortError ahead of this outward error.
-                    reject(error)
-                    controller.abort(error)
-                }, this.timeoutMs)
-                timer.unref?.()
-            })
+            if (timeoutMs !== undefined) {
+                wallBound = createAwakeDeadline({
+                    budget: "harness-liveness",
+                    timeoutMs,
+                    onExpired: () =>
+                        expire(
+                            `conversation response timed out after ${timeoutMs}ms`,
+                        ),
+                })
+            }
             // A contract violation is a fixable mistake, not a dead turn: the
             // model answered in prose or drifted from the v1 shape. Reissue
             // once with the exact rejection reason. Everything else (provider
             // failures, the repository-context signal) still fails closed, and
-            // the turn watchdog above bounds both attempts together.
+            // the watchdogs above span both attempts.
             let repairReason: string | undefined
             let response: ConversationResponse | undefined
             for (const attempt of [1, 2] as const) {
+                watchdog.pet()
                 const output = await Promise.race([
                     this.options.responder.respond(
                         {
@@ -321,6 +360,7 @@ export class ConversationIntake {
                             attempt,
                         },
                         controller.signal,
+                        () => watchdog.pet(),
                     ),
                     timeout,
                 ])
@@ -355,7 +395,8 @@ export class ConversationIntake {
             })
             return response
         } finally {
-            if (timer) clearTimeout(timer)
+            watchdog.stop()
+            wallBound?.close()
             this.controllers.delete(controller)
         }
     }

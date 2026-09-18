@@ -69,3 +69,29 @@ export class IdleWatchdog {
         this.deadline = undefined
     }
 }
+
+/** One silence window for every long activity (stories, intake,
+ *  verification): it ends only after this long without a file change, tool
+ *  call, test start or message. */
+export function activityIdleTimeoutMs(): number {
+    return envSecs("BARO_ACTIVITY_IDLE_TIMEOUT_SECS", 600)
+}
+
+export interface ActivityWatchdog {
+    pet(): void
+    stop(): void
+}
+
+export function startActivityWatchdog(opts: {
+    idleMs: number
+    onIdle: () => void
+    awakeClock?: AwakeClock
+}): ActivityWatchdog {
+    const watchdog = new IdleWatchdog(opts.idleMs, opts.onIdle, opts.awakeClock)
+    return {
+        pet: () => watchdog.pet(),
+        stop: () => watchdog.dispose(),
+    }
+}
+
+export class StoryAttemptTimeoutError extends Error {}
