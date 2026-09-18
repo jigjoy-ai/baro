@@ -361,11 +361,13 @@ fn prd_story_from_review(story: &ReviewStory) -> PrdStory {
     }
 }
 
-/// Write a PrdFile as `prd.json` inside `cwd`.
-pub fn write_prd(prd: &PrdFile, cwd: &Path) -> std::io::Result<()> {
-    let prd_path = cwd.join("prd.json");
+/// Write a PrdFile as `prd.json` inside `dir`: the run's state dir, or the
+/// checkout only for a legacy resume.
+pub fn write_prd(prd: &PrdFile, dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let prd_path = dir.join("prd.json");
     let content = serde_json::to_string_pretty(prd).map_err(std::io::Error::other)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(cwd)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
     temporary.write_all(format!("{}\n", content).as_bytes())?;
     temporary.as_file().sync_all()?;
     temporary.persist(&prd_path).map_err(|error| error.error)?;
@@ -373,7 +375,7 @@ pub fn write_prd(prd: &PrdFile, cwd: &Path) -> std::io::Result<()> {
     // Opening directories as files is not portable to Windows, where
     // NamedTempFile::persist still provides the same-directory replacement.
     #[cfg(unix)]
-    std::fs::File::open(cwd)?.sync_all()?;
+    std::fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
 

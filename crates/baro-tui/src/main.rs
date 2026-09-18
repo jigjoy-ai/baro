@@ -1,6 +1,7 @@
 mod app;
 mod architect_runner;
 mod awake_clock;
+mod baro_home;
 mod branch_authority;
 mod cli;
 mod config;
@@ -34,6 +35,7 @@ mod provider_ownership;
 mod repository_brief;
 mod resume;
 mod review_refiner;
+mod run_state;
 mod screens;
 mod service;
 mod session_feed;
@@ -447,6 +449,18 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut cli, _lock) = cli::cli::parse()?;
 
+    if !cli.operator {
+        let cwd = std::path::Path::new(&cli.cwd);
+        if let resume::ResumeDetection::MissingBranch { run_id, branch } =
+            resume::detect_resume(cwd).await
+        {
+            // Returning (not process::exit) lets `_lock` drop and remove baro.lock.
+            if !resume::resolve_missing_branch(&cli, &run_id, &branch)? {
+                return Ok(());
+            }
+        }
+    }
+
     // Detach re-execs this argv headless in a child and hands the run over to
     // it, so the parent must leave before it registers or touches the terminal.
     if cli.detach {
@@ -466,7 +480,11 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     // new one. Decided here because the notice must reach a plain terminal —
     // below, the alternate screen would swallow it.
     let inferred = {
-        let prd = std::fs::read_to_string(std::path::Path::new(&cli.cwd).join("prd.json"))
+        let cwd = std::path::Path::new(&cli.cwd);
+        let prd_path = run_state::find_resumable(cwd)
+            .map(|state| state.prd_path())
+            .unwrap_or_else(|| cwd.join("prd.json"));
+        let prd = std::fs::read_to_string(prd_path)
             .ok()
             .and_then(|raw| serde_json::from_str::<executor::PrdFile>(&raw).ok());
         let has_incomplete = prd
@@ -549,6 +567,11 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     // _lock is dropped here, removing baro.lock
 
     result
+}
+
+/// Writes the PRD into this run's state dir (or the checkout for a legacy resume).
+fn write_run_prd(prd: &executor::PrdFile, cwd: &Path) -> std::io::Result<()> {
+    executor::write_prd(prd, &run_state::prd_dir(cwd, &prd.branch_name)?)
 }
 
 /// The alternate screen around `run_app`, restored whatever the run did.
@@ -1228,7 +1251,18 @@ async fn run_app(
     // branch hint. Establish that branch and reload its own PRD before showing
     // Review, otherwise refinement could inspect one branch while executing
     // and overwriting another.
-    let prd_path = cwd.join("prd.json");
+    let resumable = if cli.operator {
+        None
+    } else {
+        match resume::detect_resume(&cwd).await {
+            resume::ResumeDetection::Resumable(state) => Some(state),
+            _ => None,
+        }
+    };
+    let prd_path = resumable
+        .as_ref()
+        .map(|state| state.prd_path())
+        .unwrap_or_else(|| cwd.join("prd.json"));
     if cli.continue_run {
         let prd_branch_hint = std::fs::read_to_string(&prd_path)
             .ok()
@@ -1263,9 +1297,17 @@ async fn run_app(
             Ok(branch_hint) => {
                 let has_incomplete = branch_hint.user_stories.iter().any(|story| !story.passes);
                 if cli.resume || (has_incomplete && cli.goal.is_none()) {
-                    let prd = resume::checkout_and_load_prd(&cwd, &branch_hint.branch_name)
-                        .await
-                        .map_err(|error| format!("cannot establish resume branch: {error}"))?;
+                    let prd = resume::checkout_and_load_prd(
+                        &cwd,
+                        &prd_path,
+                        &branch_hint.branch_name,
+                    )
+                    .await
+                    .map_err(|error| format!("cannot establish resume branch: {error}"))?;
+                    match resumable.clone() {
+                        Some(state) => run_state::activate(state),
+                        None => run_state::activate_legacy(),
+                    }
                     branch_authority::verify_execution_branch(&cwd, &prd.branch_name)
                         .await
                         .map_err(|error| format!("cannot verify resume branch: {error}"))?;
@@ -1526,6 +1568,9 @@ async fn run_app(
                 }
                 if is_done || is_exit {
                     finish_conversation_run(&mut app, is_done, &cwd);
+                }
+                if is_done && app.exit_reason.is_none() {
+                    run_state::finish_active();
                 }
                 // Headless: events already stream to stdout via echo_raw;
                 // orchestrator exit means the run is done.
@@ -2678,6 +2723,7 @@ async fn run_app(
                                         tokio::spawn(async move {
                                             let original_prd = match resume::checkout_and_load_prd(
                                                 &exec_cwd,
+                                                &run_state::prd_path(&exec_cwd),
                                                 &resume_branch,
                                             )
                                             .await
@@ -2710,7 +2756,7 @@ async fn run_app(
                                                 }
                                             };
                                             stamp_goal_fingerprint(&mut prd, exec_goal.as_deref());
-                                            if let Err(error) = executor::write_prd(&prd, &exec_cwd)
+                                            if let Err(error) = write_run_prd(&prd, &exec_cwd)
                                             {
                                                 let _ = err_tx
                                                     .send(AppEvent::BranchError(format!(
@@ -2746,7 +2792,7 @@ async fn run_app(
                                             app.planning_error = Some(message);
                                             continue;
                                         }
-                                        if let Err(e) = executor::write_prd(&prd, &cwd) {
+                                        if let Err(e) = write_run_prd(&prd, &cwd) {
                                             app.planning_error =
                                                 Some(format!("Failed to write prd.json: {}", e));
                                         } else {
@@ -2873,7 +2919,7 @@ async fn run_app(
                                                 let mut exec_prd = exec_prd;
                                                 exec_prd.branch_name = actual_full_branch.clone();
                                                 if let Err(e) =
-                                                    executor::write_prd(&exec_prd, &exec_cwd)
+                                                    write_run_prd(&exec_prd, &exec_cwd)
                                                 {
                                                     let _ = err_tx.send(AppEvent::BranchError(
                                                 format!("Failed to persist suffixed branch in prd.json: {}", e)
@@ -2941,7 +2987,7 @@ async fn run_app(
                             app.open_dialogue();
                         }
                         KeyCode::Char('r') if app.done && app.exit_reason.is_some() => {
-                            let prd_path = cwd.join("prd.json");
+                            let prd_path = run_state::prd_path(&cwd);
                             match std::fs::read_to_string(&prd_path)
                                 .map_err(|e| e.to_string())
                                 .and_then(|c| {
@@ -4267,7 +4313,7 @@ fn confirm_and_execute(
         let _ = tx.try_send(AppEvent::BranchError(message));
         return;
     }
-    if let Err(e) = executor::write_prd(&prd, cwd) {
+    if let Err(e) = write_run_prd(&prd, cwd) {
         let _ = tx.try_send(AppEvent::BranchError(format!(
             "Failed to write prd.json: {}",
             e
@@ -4371,7 +4417,7 @@ fn confirm_and_execute(
         }
         let mut exec_prd = prd;
         exec_prd.branch_name = actual_full_branch.clone();
-        if let Err(e) = executor::write_prd(&exec_prd, &exec_cwd) {
+        if let Err(e) = write_run_prd(&exec_prd, &exec_cwd) {
             let _ = tx
                 .send(AppEvent::BranchError(format!(
                     "Failed to persist branch in prd.json: {}",
@@ -4441,7 +4487,7 @@ async fn begin_progressive_execution(
     branch_authority::verify_execution_branch(cwd, &actual_branch).await?;
     bootstrap.branch_name = actual_branch.clone();
     prd_write_guard::guard_fresh_plan_write(app.is_resume)?;
-    executor::write_prd(&bootstrap, cwd)
+    write_run_prd(&bootstrap, cwd)
         .map_err(|error| format!("could not persist progressive bootstrap PRD: {error}"))?;
 
     app.project = bootstrap.project.clone();
@@ -4589,7 +4635,7 @@ fn spawn_executor(
     }
 
     let orch_cfg = orchestrator_client::OrchestratorConfig {
-        prd_path: cwd.join("prd.json"),
+        prd_path: run_state::prd_path(&cwd),
         cwd,
         progressive_planning_id,
         parallel: config.parallel,
