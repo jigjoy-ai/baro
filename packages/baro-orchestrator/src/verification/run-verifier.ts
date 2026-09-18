@@ -1,5 +1,6 @@
 import type { Participant, SemanticEvent } from "../runtime/mozaik.js"
 
+import { StoryResult, StorySpawned } from "../events/execution.js"
 import {
     RunVerificationCompleted,
     RunVerificationRequested,
@@ -33,6 +34,8 @@ export interface RunVerifierOptions {
      * survive merely because they existed before execution began.
      */
     createFinalPlan?: (cwd: string) => VerifyPlan
+    /** Defaults to stories spawned on the bus without a StoryResult yet. */
+    storyExecutorsActive?: () => boolean
 }
 
 /**
@@ -46,6 +49,7 @@ export class RunVerifier extends SerializedObserver {
     private readonly handled = new Set<string>()
     private readonly completed = new Map<string, RunVerificationCompletedData>()
     private readonly active = new Map<string, AbortController>()
+    private readonly runningStories = new Set<string>()
     private readonly verify: (cwd: string, signal: AbortSignal) => Promise<VerifyResult>
     private requestAuthority: Participant | null = null
 
@@ -53,6 +57,8 @@ export class RunVerifier extends SerializedObserver {
         super()
         const baselinePlan = opts.plan ?? createVerifyPlan(opts.cwd)
         const createFinalPlan = opts.createFinalPlan ?? createVerifyPlan
+        const storyExecutorsActive =
+            opts.storyExecutorsActive ?? (() => this.runningStories.size > 0)
         this.verify =
             opts.verify ??
             ((cwd, signal) =>
@@ -63,6 +69,7 @@ export class RunVerifier extends SerializedObserver {
                     ),
                     hostRepoRoot: opts.hostRepoRoot,
                     signal,
+                    storyExecutorsActive,
                 }))
     }
 
@@ -77,6 +84,14 @@ export class RunVerifier extends SerializedObserver {
         context: SerializedEventContext,
     ): Promise<void> {
         const { event, source } = context
+        if (StorySpawned.is(event)) {
+            this.runningStories.add(event.data.storyId)
+            return
+        }
+        if (StoryResult.is(event)) {
+            this.runningStories.delete(event.data.storyId)
+            return
+        }
         if (
             RunVerificationTimedOut.is(event) &&
             event.data.runId === this.opts.runId
