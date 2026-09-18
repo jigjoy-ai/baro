@@ -188,7 +188,7 @@ interface RunningLevelState {
 
 export class Conductor extends BaseObserver {
     private readonly opts: Required<
-        Pick<ConductorOptions, "parallel" | "timeoutSecs" | "defaultModel">
+        Pick<ConductorOptions, "parallel" | "defaultModel">
     > &
         ConductorOptions
 
@@ -264,7 +264,6 @@ export class Conductor extends BaseObserver {
         super()
         this.opts = {
             parallel: 0,
-            timeoutSecs: 600,
             defaultModel: "sonnet",
             intraLevelDelaySecs: 10,
             ...opts,
@@ -648,7 +647,8 @@ export class Conductor extends BaseObserver {
                 prompt,
                 model,
                 retries: story.retries,
-                timeoutSecs: this.opts.timeoutSecs,
+                // 0 on the wire: no wall bound, only the activity watchdog.
+                timeoutSecs: this.opts.timeoutSecs ?? 0,
                 surface: this.surfaceFor(story),
             }),
         )

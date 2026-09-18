@@ -20,6 +20,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path"
 
 import type { VerificationCommandOutput } from "../events/verification.js"
 import { execFileCli } from "../harness/exec-file-cli.js"
+import { activityIdleTimeoutMs } from "../harness/liveness.js"
 import { emit, type BaroEvent } from "../tui-protocol.js"
 import { cargoEnvFor } from "./cargo-env.js"
 import { defaultSleep, resolveCommandCwd, RETRY_BACKOFF_MS } from "./command-cwd.js"
@@ -53,9 +54,6 @@ export type {
     DeclaredTestBudgetRequest,
 } from "./declared-test-budget.js"
 
-// Max silence, not max duration: a test runner streaming progress may run
-// far longer; only a command with no output for the whole window is killed.
-const IDLE_TIMEOUT_MS = 5 * 60_000
 const COMMAND_SETTLEMENT_GRACE_MS = 5_000
 const COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS = 3_000
 const TAIL_BYTES = 1500
@@ -1287,7 +1285,9 @@ async function runCmd(
         const result = await execFileCli(c.tool, c.args, {
             cwd: commandCwd,
             ...(c.tool === "cargo" ? { env: cargoEnvFor(hostRepoRoot) } : {}),
-            idleTimeoutMs: IDLE_TIMEOUT_MS,
+            // execFileCli's awake-clock window is the only one that sees
+            // stderr chunks and the CPU probe, so the shared N is set there.
+            idleTimeoutMs: activityIdleTimeoutMs(),
             timeout: ceiling.ceilingMs,
             terminationGraceMs: COMMAND_SETTLEMENT_GRACE_MS,
             maxBuffer: 8 * 1024 * 1024,

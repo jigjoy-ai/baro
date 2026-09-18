@@ -23,7 +23,7 @@ import {
     materializePublishGuardBin,
 } from "../../execution/publish-guard.js"
 import { PROCESS_TREE_CAPABILITIES } from "../process-tree.js"
-import { IdleWatchdog } from "../liveness.js"
+import { raceWithStoryActivity, wallBoundMs } from "../activity-monitor.js"
 import {
     AgentState,
     OneShotAttemptFinalized,
@@ -55,7 +55,7 @@ export interface OneShotStoryCoreSpec {
     targetedMessageAuthority?: Participant
     /** Number of *additional* attempts after the first. */
     retries?: number
-    /** Per-attempt timeout in seconds. */
+    /** Opt-in per-attempt wall bound in seconds; idleness is the default limit. */
     timeoutSecs?: number
     retryDelayMs?: number
     /** Hard cap in seconds for the whole story across all attempts; <= 0 disables. */
@@ -120,7 +120,6 @@ type NormalizedCoreSpec = Required<
     Pick<
         OneShotStoryCoreSpec,
         | "retries"
-        | "timeoutSecs"
         | "retryDelayMs"
         | "hardTimeoutSecs"
         | "requiresQualityReview"
@@ -165,7 +164,6 @@ export abstract class OneShotStoryAgent<
         super()
         this.spec = {
             retries: 2,
-            timeoutSecs: 600,
             retryDelayMs: 1500,
             hardTimeoutSecs: 0,
             ...core,
@@ -563,11 +561,11 @@ export abstract class OneShotStoryAgent<
 
         let summary: TSummary
         try {
-            summary = await raceWithIdleTimeout(
-                runner,
-                this.spec.timeoutSecs * 1000,
-                `attempt ${attempt} produced no output for ${this.spec.timeoutSecs}s`,
-            )
+            summary = await raceWithStoryActivity(runner, {
+                cwd: this.spec.cwd,
+                wallMs: wallBoundMs(this.spec.timeoutSecs),
+                label: `attempt ${attempt}`,
+            })
         } catch (e) {
             this.currentProcessQuiesced = await this.quiesceCurrentRunner()
             const error = e instanceof Error ? e.message : String(e)
@@ -810,26 +808,4 @@ export abstract class OneShotStoryAgent<
             )
         }
     }
-}
-
-/** Rejects only after the runner has been silent for `ms`: output on either
- *  stream resets the clock, so a visibly working agent is never killed. */
-function raceWithIdleTimeout<T>(
-    source: { done: Promise<T>; onActivity: (() => void) | null },
-    ms: number,
-    label: string,
-): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-        const watchdog = new IdleWatchdog(ms, () => reject(new Error(label)))
-        source.onActivity = () => watchdog.pet()
-        const settle = (fn: () => void): void => {
-            watchdog.dispose()
-            source.onActivity = null
-            fn()
-        }
-        source.done.then(
-            (value) => settle(() => resolve(value)),
-            (error: unknown) => settle(() => reject(error)),
-        )
-    })
 }

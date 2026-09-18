@@ -73,6 +73,7 @@ import { CriticCodex } from "./harness/codex/critic.js"
 import { CriticOpenAI } from "./harness/openai/critic.js"
 import { CriticOpenCode } from "./harness/opencode/critic.js"
 import { CriticPi } from "./harness/pi/critic.js"
+import { activityIdleTimeoutMs } from "./harness/liveness.js"
 import {
     DialogueAgent,
     type DialogueResponder,
@@ -451,24 +452,23 @@ export type GatewayBillingConfig = Omit<
 >
 
 /**
- * Per-story silence window (seconds). `--timeout N` is an absolute override
- * in both directions (the Rust CLI sends 0 to mean "auto"). Story agents now
- * measure silence, not elapsed time — output resets the clock — so effort no
- * longer needs to scale this: thinking longer is not the same as hanging.
+ * Opt-in per-story wall bound (seconds); undefined when unset or 0 (the Rust
+ * CLI sends 0 to mean "auto"), leaving only the activity watchdog.
  */
 export function storyTimeoutSecs(
     configured: number | undefined,
     effort: string | undefined,
-): number {
+): number | undefined {
     if (typeof configured === "number" && configured > 0) return configured
-    return 600
+    return undefined
 }
 
 export function resolveGoalReviewTimeoutMs(
     configured: number | undefined,
-    effectiveStoryTimeoutSecs: number,
+    effectiveStoryTimeoutSecs: number | undefined,
 ): number {
     if (configured !== undefined) return configured
+    if (effectiveStoryTimeoutSecs === undefined) return activityIdleTimeoutMs()
     return Math.min(
         2_147_483_647,
         Math.ceil(effectiveStoryTimeoutSecs * 1_000),
@@ -1560,7 +1560,7 @@ export async function orchestrate(
             runId,
             prdPath: config.prdPath,
             cwd: repoRoot,
-            timeoutSecs: effectiveStoryTimeoutSecs,
+            timeoutSecs: effectiveStoryTimeoutSecs ?? 0,
             overrideModel: config.overrideModel ?? undefined,
             defaultModel: defaultStorySelector,
             expectRecoveryDecisions: config.withSurgeon ?? false,
