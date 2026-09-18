@@ -1132,6 +1132,7 @@ fn footer_line(app: &App, scrolled_back: bool) -> Paragraph<'static> {
                 spans.extend(hint("esc", "back"));
             }
             spans.extend(hint("⇞⇟", "scroll"));
+            spans.extend(hint("ctrl+y", "copy"));
             spans.extend(hint("ctrl+c ×2", "quit"));
             return Paragraph::new(Line::from(spans));
         }
@@ -1154,6 +1155,8 @@ fn footer_line(app: &App, scrolled_back: bool) -> Paragraph<'static> {
         Span::styled(" history  ", Style::default().fg(theme::MUTED)),
         Span::styled("⇞⇟", Style::default().fg(theme::ACCENT)),
         Span::styled(" scroll  ", Style::default().fg(theme::MUTED)),
+        Span::styled("ctrl+y", Style::default().fg(theme::ACCENT)),
+        Span::styled(" copy  ", Style::default().fg(theme::MUTED)),
         Span::styled(
             if focused { "esc" } else { "ctrl+c ×2" },
             Style::default().fg(theme::ACCENT),
@@ -1309,6 +1312,25 @@ mod tests {
 
 
 
+
+    #[test]
+    fn footer_line_shows_the_ctrl_y_copy_clipboard_hint() {
+        let app = App::new();
+        let backend = TestBackend::new(200, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(footer_line(&app, false), frame.area()))
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("ctrl+y"), "footer: {rendered}");
+        assert!(rendered.contains("copy"), "footer: {rendered}");
+    }
 
     #[test]
     fn session_renders_conversation_and_run_blocks_at_all_sizes() {
