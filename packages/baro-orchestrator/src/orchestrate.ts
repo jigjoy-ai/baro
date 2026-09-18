@@ -1585,7 +1585,12 @@ export async function orchestrate(
             outcomeAuthority,
             verifyBeforePush: true,
             verificationTimeoutMs:
-                config.collectiveVerificationTimeoutMs ?? recommendedMergedVerifyTimeoutMs(verifyPlan, MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS),
+                config.collectiveVerificationTimeoutMs ??
+                recommendedMergedVerifyTimeoutMs(
+                    verifyPlan,
+                    MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
+                    { cwd: integrationRoot, hostRepoRoot: repoRoot },
+                ),
             goalCompletionTimeoutMs:
                 goalInvariantReviewer &&
                 goalReviewOverallTimeoutMs !== undefined

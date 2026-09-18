@@ -24,6 +24,13 @@ import { emit, type BaroEvent } from "../tui-protocol.js"
 import { cargoEnvFor } from "./cargo-env.js"
 import { defaultSleep, resolveCommandCwd, RETRY_BACKOFF_MS } from "./command-cwd.js"
 import {
+    ABSOLUTE_COMMAND_TIMEOUT_MS,
+    createCeilingResolver,
+    declaredTimeoutsSecs,
+    recordTiming,
+    type CommandCeiling,
+} from "./command-timing.js"
+import {
     MAX_DECLARED_VERIFY_COMMANDS,
     MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
     resolveDeclaredBudget,
@@ -49,9 +56,6 @@ export type {
 // Max silence, not max duration: a test runner streaming progress may run
 // far longer; only a command with no output for the whole window is killed.
 const IDLE_TIMEOUT_MS = 5 * 60_000
-// Silence alone no longer kills a command, so every command also carries a
-// hard wall-clock ceiling; without it a silent-but-busy process is unbounded.
-const ABSOLUTE_COMMAND_TIMEOUT_MS = 10 * 60_000
 const COMMAND_SETTLEMENT_GRACE_MS = 5_000
 const COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS = 3_000
 const TAIL_BYTES = 1500
@@ -89,6 +93,8 @@ export interface VerifyCommandResult {
     firstFailureTail?: string
     /** False forbids the single retry: re-running cannot change the verdict. */
     retryable?: boolean
+    /** Killed at its hard ceiling rather than failing on its own. */
+    timedOut?: true
 }
 
 export interface VerifyCommandSpec {
@@ -174,6 +180,16 @@ export interface VerifyBuildOptions {
     hostRepoRoot?: string
     /** Waits out the retry backoff; injected by tests to skip the real wait. */
     sleep?: (ms: number) => Promise<void>
+    /** A timeout under story load is retried only once this reports false. */
+    storyExecutorsActive?: () => boolean
+    /** Test seam: lowers the ABSOLUTE_COMMAND_TIMEOUT_MS ceiling floor. */
+    ceilingFloorMs?: number
+}
+
+/** Where declared ceilings and measured durations are looked up. */
+export interface VerifyCeilingContext {
+    cwd: string
+    hostRepoRoot?: string
 }
 
 interface PackageManifest {
@@ -1110,10 +1126,39 @@ function freezeVerifyPlan(
 }
 
 /** One attempt's worst case: the hard ceiling plus its teardown tail. */
-const COMMAND_ATTEMPT_BUDGET_MS =
-    ABSOLUTE_COMMAND_TIMEOUT_MS +
-    COMMAND_SETTLEMENT_GRACE_MS +
-    COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS
+function attemptBudgetMs(ceilingMs: number): number {
+    return (
+        ceilingMs +
+        COMMAND_SETTLEMENT_GRACE_MS +
+        COMMAND_PROCESS_TREE_QUIESCENCE_BUDGET_MS
+    )
+}
+
+function ceilingOf(
+    context: VerifyCeilingContext | undefined,
+): (command: VerifyCommandSpec) => number {
+    if (!context) return () => ABSOLUTE_COMMAND_TIMEOUT_MS
+    const resolve = createCeilingResolver(
+        context.cwd,
+        context.hostRepoRoot ?? context.cwd,
+    )
+    return (command) => resolve(command).ceilingMs
+}
+
+function commandsBudgetMs(
+    commands: readonly VerifyCommandSpec[],
+    ceiling: (command: VerifyCommandSpec) => number,
+): number {
+    let total = 0
+    for (const command of commands) {
+        const attempt = attemptBudgetMs(ceiling(command))
+        // Run-level commands are budgeted for two attempts; declared ones for one.
+        total += isRunLevelCommand(command)
+            ? 2 * attempt + RETRY_BACKOFF_MS
+            : attempt
+    }
+    return total
+}
 
 function executableCommands(plan: VerifyPlan): readonly VerifyCommandSpec[] {
     return plan.commands.filter(
@@ -1122,16 +1167,11 @@ function executableCommands(plan: VerifyPlan): readonly VerifyCommandSpec[] {
 }
 
 /** Worst-case command budget plus one minute for mailbox/process teardown. */
-export function recommendedVerifyTimeoutMs(plan: VerifyPlan): number {
-    const executable = executableCommands(plan)
-    // Run-level commands are budgeted for two attempts; declared ones for one.
-    const retryable = executable.filter(isRunLevelCommand).length
-    const declared = executable.length - retryable
-    return (
-        declared * COMMAND_ATTEMPT_BUDGET_MS +
-        retryable * (2 * COMMAND_ATTEMPT_BUDGET_MS + RETRY_BACKOFF_MS) +
-        60_000
-    )
+export function recommendedVerifyTimeoutMs(
+    plan: VerifyPlan,
+    ceilings?: VerifyCeilingContext,
+): number {
+    return commandsBudgetMs(executableCommands(plan), ceilingOf(ceilings)) + 60_000
 }
 
 /**
@@ -1142,21 +1182,30 @@ export function recommendedVerifyTimeoutMs(plan: VerifyPlan): number {
 export function recommendedMergedVerifyTimeoutMs(
     baseline: VerifyPlan,
     declaredLimit: number = MAX_DECLARED_VERIFY_COMMANDS,
+    ceilings?: VerifyCeilingContext,
 ): number {
     const executable = executableCommands(baseline)
-    const baselineRetryable = executable.filter(isRunLevelCommand).length
-    const declared = executable.length - baselineRetryable
+    const ceiling = ceilingOf(ceilings)
     // mergeVerifyPlans raises finalAddedLimit by the negotiated excess over 8.
     const extra = Math.max(
         0,
         Math.min(declaredLimit, MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS) -
             MAX_DECLARED_VERIFY_COMMANDS,
     )
+    // Final-plan additions are unknown yet, so each gets the largest ceiling
+    // the baseline or the repository declaration could give it.
+    const addedCeilingMs = Math.max(
+        ABSOLUTE_COMMAND_TIMEOUT_MS,
+        ...executable.map(ceiling),
+        ...(ceilings
+            ? Object.values(declaredTimeoutsSecs(ceilings.cwd)).map((secs) => secs * 1000)
+            : []),
+    )
     // Final-plan additions are detected, so they are retryable too.
-    const retryable = baselineRetryable + MAX_FINAL_ADDED_VERIFY_COMMANDS + extra
+    const added = MAX_FINAL_ADDED_VERIFY_COMMANDS + extra
     return (
-        declared * COMMAND_ATTEMPT_BUDGET_MS +
-        retryable * (2 * COMMAND_ATTEMPT_BUDGET_MS + RETRY_BACKOFF_MS) +
+        commandsBudgetMs(executable, ceiling) +
+        added * (2 * attemptBudgetMs(addedCeilingMs) + RETRY_BACKOFF_MS) +
         60_000
     )
 }
@@ -1169,6 +1218,7 @@ type CmdOutcome =
           tail: string
           output?: VerificationCommandOutput
           retryable?: boolean
+          timedOut?: true
       }
     | { status: "skipped"; durationMs: number; tail: string }
 
@@ -1192,6 +1242,7 @@ async function runCmd(
     cwd: string,
     c: VerifyCommandSpec,
     hostRepoRoot: string,
+    ceiling: CommandCeiling,
     signal?: AbortSignal,
 ): Promise<CmdOutcome> {
     const startedAt = Date.now()
@@ -1237,14 +1288,20 @@ async function runCmd(
             cwd: commandCwd,
             ...(c.tool === "cargo" ? { env: cargoEnvFor(hostRepoRoot) } : {}),
             idleTimeoutMs: IDLE_TIMEOUT_MS,
-            timeout: ABSOLUTE_COMMAND_TIMEOUT_MS,
+            timeout: ceiling.ceilingMs,
             terminationGraceMs: COMMAND_SETTLEMENT_GRACE_MS,
             maxBuffer: 8 * 1024 * 1024,
             signal,
         })
+        const durationMs = Date.now() - startedAt
+        try {
+            recordTiming(hostRepoRoot, ceiling.key, durationMs)
+        } catch {
+            // A read-only ~/.baro costs only the next run's measured ceiling.
+        }
         return {
             status: "passed",
-            durationMs: Date.now() - startedAt,
+            durationMs,
             output: captureCommandOutput(result.stdout, result.stderr),
         }
     } catch (e) {
@@ -1257,13 +1314,23 @@ async function runCmd(
                 tail: `${c.tool} is not installed`,
             }
         }
-        const err = e as { stdout?: string; stderr?: string; message?: string }
+        const err = e as {
+            stdout?: string
+            stderr?: string
+            message?: string
+            killed?: boolean
+        }
         const combined = `${err.stdout ?? ""}${err.stderr ?? ""}`.trim() || err.message || ""
+        // The idle kill also sets `killed`; only the hard ceiling names itself.
+        const timedOut =
+            err.killed === true &&
+            /exceeded the absolute command ceiling/u.test(err.message ?? "")
         return {
             status: "failed",
             durationMs: Date.now() - startedAt,
             tail: combined.slice(-TAIL_BYTES),
             output: captureCommandOutput(err.stdout ?? "", err.stderr ?? ""),
+            ...(timedOut ? { timedOut: true as const } : {}),
         }
     }
 }
@@ -1290,6 +1357,7 @@ export async function verifyBuild(
     const plan = options.plan ?? createVerifyPlan(cwd)
     const hostRepoRoot = options.hostRepoRoot ?? cwd
     const emitActivity = options.emitActivity ?? emit
+    const ceilingFor = createCeilingResolver(cwd, hostRepoRoot, options.ceilingFloorMs)
     // A gate run against a tree that predates the manifests judges the
     // install, not the work. Refresh first and keep it in the evidence.
     const stale = dependencyRefreshEnabled(options) && plan.commands.length > 0
@@ -1304,7 +1372,13 @@ export async function verifyBuild(
             kind: "warn",
             text: `refreshing dependencies before verification: ${stale.join("; ")}`,
         })
-        const outcome = await runCmd(cwd, install, hostRepoRoot, options.signal)
+        const outcome = await runCmd(
+            cwd,
+            install,
+            hostRepoRoot,
+            ceilingFor(install),
+            options.signal,
+        )
         commands.push({
             command: install.label,
             status: outcome.status,
@@ -1319,8 +1393,27 @@ export async function verifyBuild(
     }
     for (const c of plan.commands) {
         throwIfAborted(options.signal)
-        let outcome = await runCmd(cwd, c, hostRepoRoot, options.signal)
+        const ceiling = ceilingFor(c)
+        let outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal)
         let firstFailureTail: string | undefined
+        const warnTimeout = (): void =>
+            emitActivity({
+                type: "activity",
+                id: "_verify",
+                kind: "warn",
+                text:
+                    `verification timeout: ${c.label} hit ceiling ` +
+                    `${Math.round(ceiling.ceilingMs / 1000)}s (last measured ` +
+                    `${ceiling.lastMs !== undefined ? `${Math.round(ceiling.lastMs / 1000)}s` : "none"})`,
+            })
+        if (outcome.status === "failed" && outcome.timedOut) {
+            warnTimeout()
+            // Re-running a timeout while stories still load the machine only
+            // doubles the wait; an unknown load counts as busy.
+            if (options.storyExecutorsActive?.() !== false) {
+                outcome = { ...outcome, retryable: false }
+            }
+        }
         // A preflight failure never spawned anything and cannot flake, so it
         // is excluded here exactly as it is from the two-attempt budget above.
         if (
@@ -1347,7 +1440,8 @@ export async function verifyBuild(
             })
             await (options.sleep ?? defaultSleep)(RETRY_BACKOFF_MS)
             throwIfAborted(options.signal)
-            outcome = await runCmd(cwd, c, hostRepoRoot, options.signal)
+            outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal)
+            if (outcome.status === "failed" && outcome.timedOut) warnTimeout()
         }
         commands.push({
             command: c.label,
@@ -1360,6 +1454,7 @@ export async function verifyBuild(
             ...("retryable" in outcome && outcome.retryable !== undefined
                 ? { retryable: outcome.retryable }
                 : {}),
+            ...("timedOut" in outcome && outcome.timedOut ? { timedOut: true as const } : {}),
             ...(firstFailureTail !== undefined
                 ? { retriedAfterFailure: true as const, firstFailureTail }
                 : {}),
