@@ -16,16 +16,21 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { surfaceRemedyLines } from "../../execution/gate-registry.js"
+import {
+    GUARD_REFUSALS_FILE,
+    publishCommandRefusal,
+} from "../../execution/publish-guard.js"
 
 export interface StoryHookSurface {
     writes: readonly string[]
     ownedElsewhere: Readonly<Record<string, string>>
 }
 
+// The __name shim covers bundlers that wrap serialized functions with keepNames.
 const HOOK_SCRIPT = `#!/usr/bin/env node
 // Materialized by baro (hook-bridge.ts). A hook must never break the agent:
 // every path ends in exit 0, and a malformed input is treated as no input.
-import { readFileSync } from "node:fs"
+import { appendFileSync, readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -50,6 +55,32 @@ if (mode === "post-bash") {
                 hookEventName: "PostToolUse",
                 additionalContext:
                     "[gate:evidence-capture] This command's output was captured automatically as verification evidence, bound to the current bytes. One shaped run suffices — do not re-run it to reformat, slice, or archive the output.",
+            },
+        }))
+    }
+    process.exit(0)
+}
+
+if (mode === "pre-bash") {
+    const __name = (fn) => fn
+    const publishCommandRefusal = ${publishCommandRefusal.toString()}
+    const command = String(toolInput.command ?? "")
+    const reason = publishCommandRefusal(command)
+    if (reason) {
+        try {
+            const here = dirname(fileURLToPath(import.meta.url))
+            appendFileSync(
+                join(here, "${GUARD_REFUSALS_FILE}"),
+                JSON.stringify({ command, reason }) + "\\n",
+            )
+        } catch {}
+        process.stdout.write(JSON.stringify({
+            decision: "block",
+            reason,
+            hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                permissionDecision: "deny",
+                permissionDecisionReason: reason,
             },
         }))
     }
@@ -93,7 +124,8 @@ process.exit(0)
 /**
  * Writes hook.mjs, surface.json and settings.json into `dir` and returns the
  * settings path for the CLI's --settings flag. Returns null for a story with
- * no declared surface — a hook that guards nothing is noise.
+ * no declared surface — the Claude story agent then installs
+ * materializePublishGuardHooks on its own.
  */
 export function materializeStoryHooks(
     dir: string,
@@ -102,8 +134,6 @@ export function materializeStoryHooks(
 ): string | null {
     if (!surface || surface.writes.length === 0) return null
     mkdirSync(dir, { recursive: true })
-    const hookPath = join(dir, "hook.mjs")
-    writeFileSync(hookPath, HOOK_SCRIPT, { mode: 0o755 })
     writeFileSync(
         join(dir, "surface.json"),
         JSON.stringify(
@@ -116,30 +146,43 @@ export function materializeStoryHooks(
             2,
         ),
     )
+    return writeHookSettings(dir, true)
+}
+
+/** Publish-command denial alone, for a Claude story with no write surface. */
+export function materializePublishGuardHooks(dir: string): string {
+    mkdirSync(dir, { recursive: true })
+    return writeHookSettings(dir, false)
+}
+
+function writeHookSettings(dir: string, guardWrites: boolean): string {
+    const hookPath = join(dir, "hook.mjs")
+    writeFileSync(hookPath, HOOK_SCRIPT, { mode: 0o755 })
     const settingsPath = join(dir, "settings.json")
-    const hook = (mode: string) => [
-        {
-            hooks: [
-                {
-                    type: "command",
-                    command: `node ${JSON.stringify(hookPath)} ${mode}`,
-                },
-            ],
-        },
-    ]
+    const hook = (mode: string) => ({
+        hooks: [
+            {
+                type: "command",
+                command: `node ${JSON.stringify(hookPath)} ${mode}`,
+            },
+        ],
+    })
     writeFileSync(
         settingsPath,
         JSON.stringify(
             {
                 hooks: {
-                    PostToolUse: [
-                        { ...hook("post-bash")[0], matcher: "Bash" },
-                    ],
+                    PostToolUse: [{ ...hook("post-bash"), matcher: "Bash" }],
                     PreToolUse: [
-                        {
-                            ...hook("pre-write")[0],
-                            matcher: "Write|Edit|MultiEdit",
-                        },
+                        ...(guardWrites
+                            ? [
+                                  {
+                                      ...hook("pre-write"),
+                                      matcher: "Write|Edit|MultiEdit",
+                                  },
+                              ]
+                            : []),
+                        { ...hook("pre-bash"), matcher: "Bash" },
                     ],
                 },
             },

@@ -47,6 +47,7 @@ import {
     RuntimeReplanApplied,
     RuntimeReplanProposed,
     RuntimeReplanRejected,
+    StoryCommandRefused,
     StoryResult,
     type AgentPhase,
     type RuntimeReplanAppliedData,
@@ -324,6 +325,17 @@ export class OpenAIStoryAgent extends BaseObserver {
         this.tools = [
             ...createStoryTools(spec.cwd, {
                 collaboration: opts.collaboration,
+                denyPublish: true,
+                onCommandRefused: (command, reason) =>
+                    this.envRef?.deliverSemanticEvent(
+                        this,
+                        StoryCommandRefused.create({
+                            storyId: this.spec.id,
+                            command,
+                            reason,
+                            harness: "openai",
+                        }),
+                    ),
                 ...(this.liveSurface ? { surface: this.liveSurface } : {}),
                 ...(opts.scopedVerification === true
                     ? { scopedVerification: true }

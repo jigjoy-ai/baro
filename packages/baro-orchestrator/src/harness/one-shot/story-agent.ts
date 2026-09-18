@@ -7,6 +7,8 @@
  * positive success evidence its harness needs beyond exit 0.
  */
 
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { setTimeout as setTimeoutPromise } from "timers/promises"
 
 import {
@@ -16,11 +18,16 @@ import {
     SemanticEvent,
 } from "../../runtime/mozaik.js"
 
+import {
+    drainGuardRefusals,
+    materializePublishGuardBin,
+} from "../../execution/publish-guard.js"
 import { PROCESS_TREE_CAPABILITIES } from "../process-tree.js"
 import { IdleWatchdog } from "../liveness.js"
 import {
     AgentState,
     OneShotAttemptFinalized,
+    StoryCommandRefused,
     StoryResult,
     type AgentPhase,
     type StoryFailureData,
@@ -147,6 +154,7 @@ export abstract class OneShotStoryAgent<
     private currentProcessQuiesced = false
     private currentProcessOwnedGroup = false
     private currentProcessSpawned = false
+    private publishGuardDir: string | null = null
     private resolveDone!: (outcome: OneShotStoryOutcome<TSummary>) => void
     public readonly done: Promise<OneShotStoryOutcome<TSummary>>
 
@@ -326,6 +334,7 @@ export abstract class OneShotStoryAgent<
                 needsRetryDelay = false
                 this.turnReview.beginCandidate()
                 const result = await this.runOneAttempt(attempts, prompt)
+                this.drainCommandRefusals()
                 lastSummary = result.summary
                 lastError = result.error
                 lastFailure = result.failure
@@ -548,7 +557,7 @@ export abstract class OneShotStoryAgent<
         this.currentRunner = runner
         this.terminalSourceRegistrar?.(runner)
         runner.join(this.envRef)
-        runner.start(this.envRef)
+        this.startWithPublishGuard(runner, this.envRef)
         this.currentProcessOwnedGroup = runner.hasOwnedProcessGroup()
         this.currentProcessSpawned = runner.hasSpawnedProcess()
 
@@ -636,6 +645,54 @@ export abstract class OneShotStoryAgent<
         }
 
         return { success: true, summary, error: null }
+    }
+
+    /** The runner spawns synchronously from process.env, so the guard dir is
+     * on PATH for exactly that spawn and never for the orchestrator itself. */
+    private startWithPublishGuard(
+        runner: OneShotStoryRunner<TSummary>,
+        env: AgenticEnvironment,
+    ): void {
+        if (process.platform === "win32") {
+            runner.start(env)
+            return
+        }
+        const originalPath = process.env.PATH
+        try {
+            if (!this.publishGuardDir) {
+                const dir = join(
+                    tmpdir(),
+                    `baro-publish-guard-${this.spec.id}-${process.pid}`,
+                )
+                materializePublishGuardBin(dir, originalPath ?? "")
+                this.publishGuardDir = dir
+            }
+            process.env.PATH = originalPath
+                ? `${this.publishGuardDir}:${originalPath}`
+                : this.publishGuardDir
+        } catch {
+            // An unwritable tmpdir must not keep the story from running.
+        }
+        try {
+            runner.start(env)
+        } finally {
+            if (originalPath === undefined) delete process.env.PATH
+            else process.env.PATH = originalPath
+        }
+    }
+
+    private drainCommandRefusals(): void {
+        if (!this.publishGuardDir || !this.envRef) return
+        for (const refusal of drainGuardRefusals(this.publishGuardDir)) {
+            this.envRef.deliverSemanticEvent(
+                this,
+                StoryCommandRefused.create({
+                    storyId: this.spec.id,
+                    ...refusal,
+                    harness: this.backend.name,
+                }),
+            )
+        }
     }
 
     private emitStoryResult(
