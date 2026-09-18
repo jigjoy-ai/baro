@@ -729,7 +729,8 @@ async fn run_login() -> Result<(), Box<dyn std::error::Error>> {
 /// which pairs with the control plane and runs each dispatched goal via
 /// `baro --headless` over the user's subscription.
 async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut token = std::env::var("RUNNER_TOKEN").ok();
+    let mut token_flag: Option<String> = None;
+    let mut token_from_argv = false;
     let mut workspace = std::env::var("WORKSPACE_DIR").ok();
     let mut control_url = std::env::var("CONTROL_URL").ok();
     let mut install = false;
@@ -749,7 +750,8 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 i += 1;
             }
             "--token" => {
-                token = args.get(i + 1).cloned();
+                token_flag = args.get(i + 1).cloned();
+                token_from_argv = true;
                 i += 2;
             }
             "--workspace" | "--cwd" => {
@@ -780,6 +782,17 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
+    // A `--token` on argv is visible to `ps`/process listings. Re-exec with it
+    // scrubbed and passed via BARO_RUNNER_TOKEN instead, before any other work
+    // (install, uninstall, or connecting) happens.
+    if token_from_argv {
+        let scrubbed = cli::runner_token::scrub_token_args(args);
+        let token = token_flag.unwrap_or_default();
+        return reexec_connect_without_token(&scrubbed, &token);
+    }
+
+    let token = cli::runner_token::resolve_runner_token(None);
+
     // Uninstall is independent of token/workspace.
     if uninstall {
         return service::uninstall();
@@ -789,16 +802,19 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let cwd = std::fs::canonicalize(&workspace)
         .map_err(|e| format!("workspace '{}' not found: {}", workspace, e))?;
 
-    // Install the background service (token + workspace baked in) and exit —
-    // the service itself runs `baro connect` for real, in the background.
+    // Install the background service (workspace baked in) and exit — the
+    // service itself runs `baro connect` for real, in the background, reading
+    // the token from the file this just wrote instead of from argv.
     if install {
         let exe =
             std::env::current_exe().map_err(|e| format!("cannot resolve baro binary: {e}"))?;
-        let token =
-            token.ok_or("--install-service needs --token <rt_…> (get one from the dashboard)")?;
+        let token = token.ok_or(
+            "--install-service needs a token: pass --token <rt_…> once (get one from the dashboard) or set BARO_RUNNER_TOKEN",
+        )?;
+        cli::runner_token::write_token_file(&token)
+            .map_err(|e| format!("failed to save runner token: {e}"))?;
         return service::install(&service::ServiceConfig {
             exe,
-            token,
             workspace: cwd,
             control_url,
         });
@@ -857,6 +873,40 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         .map_err(|e| format!("failed to start runner: {e}"))?
         .wait()
         .await?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Re-exec `baro connect <scrubbed-args>` with the token passed via
+/// `BARO_RUNNER_TOKEN` instead of argv, so this process's command line (as
+/// seen by `ps`) never contains it. On unix this replaces the process image;
+/// elsewhere it spawns a child, waits, and exits with its status.
+#[cfg(unix)]
+fn reexec_connect_without_token(
+    scrubbed_args: &[String],
+    token: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().map_err(|e| format!("cannot resolve baro binary: {e}"))?;
+    let error = std::process::Command::new(exe)
+        .arg("connect")
+        .args(scrubbed_args)
+        .env("BARO_RUNNER_TOKEN", token)
+        .exec();
+    Err(format!("failed to re-exec baro connect: {error}").into())
+}
+
+#[cfg(not(unix))]
+fn reexec_connect_without_token(
+    scrubbed_args: &[String],
+    token: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot resolve baro binary: {e}"))?;
+    let status = std::process::Command::new(exe)
+        .arg("connect")
+        .args(scrubbed_args)
+        .env("BARO_RUNNER_TOKEN", token)
+        .status()
+        .map_err(|e| format!("failed to re-exec baro connect: {e}"))?;
     std::process::exit(status.code().unwrap_or(1));
 }
 
