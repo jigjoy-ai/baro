@@ -52,6 +52,7 @@ import {
     parseArchitectureObligationContract,
     renderArchitectureObligationCriterion,
 } from "../domain/architecture-obligation-contract.js"
+import { objectiveLine } from "../domain/goal-objective.js"
 
 export type {
     PlannerOpenAIPlanFragmentEvent,
@@ -520,7 +521,7 @@ export function fallbackPrdJson(
     goalEnvelope?: GoalEnvelope,
     decisionDocument?: string,
 ): string {
-    const title = oneLine(goal).slice(0, 80) || "Implement requested change"
+    const title = oneLine(objectiveLine(goal)).slice(0, 80) || "Implement requested change"
     const goalInvariantIds = deriveGoalContract(goalEnvelope)
         ?.invariants.map(({ id }) => id) ?? []
     const obligationAcceptance = parseArchitectureObligationContract(
