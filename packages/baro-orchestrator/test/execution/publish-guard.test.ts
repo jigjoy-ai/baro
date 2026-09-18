@@ -24,6 +24,13 @@ import { OpenAIStoryAgent } from "../../src/harness/openai/story-agent.js"
 import { StoryAgent } from "../../src/harness/claude/story-agent.js"
 import { StoryCommandRefused } from "../../src/semantic-events.js"
 import { captureEnv, FIXTURE_TIMEOUT_SECS, withTempDir } from "./helpers.js"
+import {
+    ArchitectureObligationContractError,
+    bindArchitectureObligationContract,
+    validateArchitectureObligationCoverage,
+    type ArchitectureObligationContractV1,
+} from "../../src/planning/domain/architecture-obligation-contract.js"
+import { deriveGoalContract } from "../../src/goal/goal-contract.js"
 
 describe("publishCommandRefusal", () => {
     for (const command of [
@@ -224,5 +231,91 @@ describe("one-shot lane guard bin", { skip: process.platform === "win32" }, () =
             ])
             assert.deepEqual(drainGuardRefusals(guard), [])
         })
+    })
+})
+
+describe("obligation admission rejects delivery", () => {
+    function deliveryContract(): ArchitectureObligationContractV1 {
+        return {
+            schemaVersion: 1,
+            obligations: [
+                {
+                    id: "O-001",
+                    invariantIds: ["G-A1"],
+                    subject: "the story lane",
+                    scenario: "a story finishes its change",
+                    expectedOutcome: "Push the branch and publish a PR",
+                    evidence: ["a delivery regression test"],
+                },
+            ],
+        }
+    }
+
+    function negatedConstraintContract(): ArchitectureObligationContractV1 {
+        return {
+            schemaVersion: 1,
+            obligations: [
+                {
+                    id: "O-001",
+                    invariantIds: ["G-A1"],
+                    subject: "story lanes",
+                    scenario: "a story issues a shell command",
+                    expectedOutcome: "stories do not run git push",
+                    evidence: ["the publish-guard regression test"],
+                },
+            ],
+        }
+    }
+
+    const deliveryGoal = deriveGoalContract({
+        objective: "Close the delivery obligation defect.",
+        acceptanceCriteria: ["Delivery never happens inside a story."],
+        constraints: [],
+        nonGoals: [],
+        assumptions: [],
+    })!
+
+    const negatedGoal = deriveGoalContract({
+        objective: "Close the delivery obligation defect.",
+        acceptanceCriteria: ["stories do not run git push"],
+        constraints: [],
+        nonGoals: [],
+        assumptions: [],
+    })!
+
+    it("bindArchitectureObligationContract rejects a delivery obligation with code delivery_obligation", () => {
+        assert.throws(
+            () => bindArchitectureObligationContract(deliveryContract(), deliveryGoal),
+            (error: unknown) => {
+                assert.ok(error instanceof ArchitectureObligationContractError)
+                assert.equal(error.violations[0]?.kind, "delivery_obligation")
+                return true
+            },
+        )
+    })
+
+    it("validateArchitectureObligationCoverage rejects a delivery obligation with code delivery_obligation", () => {
+        assert.throws(
+            () =>
+                validateArchitectureObligationCoverage(deliveryContract(), [], "partial"),
+            (error: unknown) => {
+                assert.ok(error instanceof ArchitectureObligationContractError)
+                assert.equal(error.violations[0]?.kind, "delivery_obligation")
+                return true
+            },
+        )
+    })
+
+    it("both admission paths admit a negated delivery constraint", () => {
+        assert.doesNotThrow(() =>
+            bindArchitectureObligationContract(negatedConstraintContract(), negatedGoal),
+        )
+        assert.doesNotThrow(() =>
+            validateArchitectureObligationCoverage(
+                negatedConstraintContract(),
+                [],
+                "partial",
+            ),
+        )
     })
 })
