@@ -450,7 +450,7 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut cli, _lock) = cli::cli::parse()?;
 
-    if !cli.operator {
+    if !cli.operator && cli.base.is_none() {
         let cwd = std::path::Path::new(&cli.cwd);
         if let resume::ResumeDetection::MissingBranch { run_id, branch } =
             resume::detect_resume(cwd).await
@@ -1302,7 +1302,7 @@ async fn run_app(
     // branch hint. Establish that branch and reload its own PRD before showing
     // Review, otherwise refinement could inspect one branch while executing
     // and overwriting another.
-    let resumable = if cli.operator {
+    let resumable = if cli.operator || cli.base.is_some() {
         None
     } else {
         match resume::detect_resume(&cwd).await {
@@ -4736,6 +4736,7 @@ fn spawn_executor(
 
     let orch_cfg = orchestrator_client::OrchestratorConfig {
         prd_path: run_state::prd_path(&cwd),
+        base_ref: run_state::active_base(),
         cwd,
         progressive_planning_id,
         parallel: config.parallel,

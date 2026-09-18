@@ -22,7 +22,9 @@ import {
    baro holds one session lock per repository, so a second goal for the same
    cwd is queued here and started when the first one exits — run-2 of the
    first live session died in 0s on that lock. Disjoint-write concurrency
-   within one repository is baro's to grant, not this registry's to assume. */
+   within one repository is baro's to grant, not this registry's to assume.
+   A run given a base ref never touches the checkout (its own integration
+   worktree and state-dir lock), so it starts at once and is keyed per run. */
 
 export type RunState = "queued" | "running" | "finished"
 
@@ -30,6 +32,7 @@ export interface RunRecord {
     readonly id: string
     readonly goal: string
     readonly cwd: string
+    readonly base?: string
     readonly queuedAt: number
     startedAt: number | null
     finishedAt: number | null
@@ -62,12 +65,13 @@ export class RunRegistry {
     constructor(private readonly options: RunRegistryOptions = {}) {}
 
     /** Starts the run, or queues it behind the run holding this repository. */
-    delegate(goal: string, cwd: string): { run: RunRecord; behind: RunRecord | null } {
+    delegate(goal: string, cwd: string, base?: string): { run: RunRecord; behind: RunRecord | null } {
         this.sequence += 1
         const record: RunRecord = {
             id: `run-${this.sequence}`,
             goal,
             cwd,
+            ...(base ? { base } : {}),
             queuedAt: Date.now(),
             startedAt: null,
             finishedAt: null,
@@ -77,6 +81,10 @@ export class RunRegistry {
             stderrTail: [],
         }
         this.runs.set(record.id, record)
+        if (base) {
+            this.start(record)
+            return { run: record, behind: null }
+        }
         const holder = this.active.get(cwd)
         const behind = holder ? (this.runs.get(holder) ?? null) : null
         if (behind) {
@@ -189,16 +197,29 @@ export class RunRegistry {
         return `${head}\n\n${body}${stderr}`
     }
 
+    /** Keys of the runs currently holding a slot, for tests and diagnostics. */
+    activeKeys(): string[] {
+        return [...this.active.keys()]
+    }
+
     private start(record: RunRecord): void {
         record.startedAt = Date.now()
-        this.active.set(record.cwd, record.id)
+        const slot = activeKey(record)
+        this.active.set(slot, record.id)
 
         const env = { ...process.env }
         // A child that inherits the parent's run id believes it is that run.
         delete env.BARO_RUN_ID
         const child = spawn(
             resolveBaroBin(this.options.baroBin),
-            [record.goal, "--headless", "--cwd", record.cwd, ...(this.options.baroArgs ?? [])],
+            [
+                record.goal,
+                "--headless",
+                "--cwd",
+                record.cwd,
+                ...(record.base ? ["--base", record.base] : []),
+                ...(this.options.baroArgs ?? []),
+            ],
             {
                 cwd: record.cwd,
                 env,
@@ -231,9 +252,9 @@ export class RunRegistry {
             const summary = record.tracker.summary()
             record.terminal = resolveTerminal(record.terminal === "aborted", code, summary.done)
             this.children.delete(record.id)
-            if (this.active.get(record.cwd) === record.id) this.active.delete(record.cwd)
+            if (this.active.get(slot) === record.id) this.active.delete(slot)
             this.options.onFinished?.(record, renderOutcome(summary, record.terminal))
-            this.startNext(record.cwd)
+            if (!record.base) this.startNext(record.cwd)
         })
     }
 
@@ -244,6 +265,10 @@ export class RunRegistry {
         this.start(next)
         this.options.onStarted?.(next, null)
     }
+}
+
+function activeKey(run: RunRecord): string {
+    return run.base ? `${run.cwd}#${run.id}` : run.cwd
 }
 
 function resolveBaroBin(explicit: string | undefined): string {
