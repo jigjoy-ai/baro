@@ -5,9 +5,8 @@ import type { PrdStory } from "../prd.js"
 /**
  * What this story may write, and who owns what it may not.
  *
- * The merge gate has always refused a diff that reaches outside the story's
- * declared writes; this is the same boundary said out loud, early enough to
- * act on. It must be computed wherever stories are dispatched — a coordinator
+ * Only active peers own paths: a story that integrated releases its surface.
+ * It must be computed wherever stories are dispatched — a coordinator
  * that omits it silently returns the agent to learning the rule by breaking
  * it, an hour of work later.
  *
@@ -23,13 +22,32 @@ export function storyWriteSurface(
     if (writes.length === 0) return undefined
     const ownedElsewhere: Record<string, string> = {}
     for (const peer of stories) {
-        if (peer.id === story.id) continue
+        if (peer.id === story.id || !isActiveOwner(peer)) continue
         for (const path of writeSurfaceOf(peer)) {
             if (writes.includes(path)) continue
             ownedElsewhere[path] ??= peer.id
         }
     }
     return { writes, ownedElsewhere }
+}
+
+/** The one ownership rule shared by replan admission and the per-write gates. */
+export function isActiveOwner(story: PrdStory): boolean {
+    return story.passes !== true
+}
+
+export function surfacesOverlap(
+    a: readonly string[],
+    b: readonly string[],
+): string[] {
+    const left = new Set(a.map(normalizeSurfacePath))
+    return [...new Set(b.map(normalizeSurfacePath))]
+        .filter((path) => path && left.has(path))
+        .sort()
+}
+
+function normalizeSurfacePath(path: string): string {
+    return path.trim().replace(/^\.\//u, "").replace(/^\/+/u, "")
 }
 
 /** Order-independent identity, so a re-computation that changed nothing is

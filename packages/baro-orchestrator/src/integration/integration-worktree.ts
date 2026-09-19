@@ -21,6 +21,8 @@ export interface IntegrationWorktreeOptions {
     runId: string
     goalBranch: string
     push: boolean
+    /** Start the goal branch here instead of the host HEAD; the host checkout is never synced. */
+    baseRef?: string
     onLog?: (line: string) => void
 }
 
@@ -42,6 +44,8 @@ export type HostCheckoutSyncResult =
               | "not_fast_forward"
               | "up_to_date"
               | "not_prepared"
+              | "verification_failed"
+              | "base_ref_run"
               | "error"
           detail: string
       }
@@ -75,6 +79,9 @@ export class IntegrationWorktree {
             const hostBranchAtStart =
                 (await git(["branch", "--show-current"], repoRoot)) || null
             const hostHeadAtStart = await git(["rev-parse", "HEAD"], repoRoot)
+            const startPoint = this.opts.baseRef
+                ? await git(["rev-parse", "--verify", `${this.opts.baseRef}^{commit}`], repoRoot)
+                : hostHeadAtStart
 
             const registered = await this.isRegistered()
             let reused = false
@@ -107,7 +114,7 @@ export class IntegrationWorktree {
                 await git(
                     branchExists
                         ? ["worktree", "add", integrationRoot, goalBranch]
-                        : ["worktree", "add", "-b", goalBranch, integrationRoot, hostHeadAtStart],
+                        : ["worktree", "add", "-b", goalBranch, integrationRoot, startPoint],
                     repoRoot,
                 )
             }
@@ -169,9 +176,14 @@ export class IntegrationWorktree {
     }
 
     /** Best-effort fast-forward of the user's checkout; never throws and logs
-     * exactly one line. A dirty tree is the non-retryable host_checkout_dirty fuse. */
-    async syncHostCheckout(): Promise<HostCheckoutSyncResult> {
-        const result = await this.syncHostCheckoutOnce()
+     * exactly one line. A dirty tree is the non-retryable host_checkout_dirty fuse.
+     * An unverified run never moves the host branch. */
+    async syncHostCheckout(opts: { verified: boolean }): Promise<HostCheckoutSyncResult> {
+        const result = this.opts.baseRef
+            ? untouched("base_ref_run", `run started from ${this.opts.baseRef}, not from this checkout`)
+            : opts.verified
+              ? await this.syncHostCheckoutOnce()
+              : untouched("verification_failed", "run finished as an unverified checkpoint")
         const branch = this.prepared?.hostBranchAtStart ?? "(none)"
         try {
             this.log(

@@ -419,6 +419,16 @@ export interface StoryResultData {
 
 export const StoryResult = defineSemanticEvent<StoryResultData>("story_result")
 
+export interface StoryCommandRefusedData {
+    storyId: string
+    command: string
+    reason: string
+    harness: string
+}
+
+export const StoryCommandRefused =
+    defineSemanticEvent<StoryCommandRefusedData>("story_command_refused")
+
 /**
  * A participant (Supervisor today) requests intervention on a RUNNING story.
  * StoryFactory consumes "abort": the story settles as a failed StoryResult,

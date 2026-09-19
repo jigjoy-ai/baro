@@ -154,7 +154,9 @@ pub(crate) fn deterministic_bootstrap_metadata(
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "workspace".to_string());
     let branch_slug = {
-        let goal_slug = ascii_slug(&description, BRANCH_SLUG_CHARS);
+        // Slug the raw goal, not `description`: normalize_goal already
+        // collapsed newlines, which would erase the "Objective:" line.
+        let goal_slug = ascii_slug(planning_objective(goal), BRANCH_SLUG_CHARS);
         if goal_slug.is_empty() {
             let project_slug = ascii_slug(&project, BRANCH_SLUG_CHARS);
             if project_slug.is_empty() {
@@ -176,6 +178,30 @@ pub(crate) fn deterministic_bootstrap_metadata(
         branch_name: format!("baro/{branch_slug}-{suffix:08x}"),
         description,
     })
+}
+
+/// The rendered planning prompt leads with a header line, not the objective;
+/// slugging it verbatim produces a branch name from boilerplate. Pull the
+/// Objective line out instead, falling back to the goal for any other shape.
+fn planning_objective(goal: &str) -> &str {
+    const HEADER: &str = "Goal envelope (confirmed before planning)";
+    let trimmed_goal = goal.trim();
+    if !trimmed_goal.starts_with(HEADER) {
+        return goal;
+    }
+    let mut lines = trimmed_goal.lines();
+    for line in &mut lines {
+        if line.trim() == "Objective:" {
+            for next in lines {
+                let candidate = next.trim();
+                if !candidate.is_empty() {
+                    return candidate;
+                }
+            }
+            break;
+        }
+    }
+    goal
 }
 
 fn normalize_goal(goal: &str) -> Result<String, ProgressivePlanningBootstrapError> {
@@ -385,7 +411,7 @@ mod tests {
         progressive_planning_enabled_with_env, PrivateProgressiveBootstrapFile,
         ProgressiveBootstrapInput, ProgressivePlanningIds,
     };
-    use crate::conversation::GoalEnvelope;
+    use crate::conversation::{render_planning_prompt, GoalEnvelope};
     use crate::executor::PrdFile;
 
     #[test]
@@ -466,6 +492,32 @@ mod tests {
                 .unwrap()
                 .branch_name
         );
+    }
+
+    #[test]
+    fn branch_slug_derives_from_objective_not_the_envelope_header() {
+        let envelope = GoalEnvelope {
+            objective: "Add a conversation-first entry point".to_string(),
+            constraints: vec!["Keep legacy startup unchanged".to_string()],
+            acceptance_criteria: vec!["First fragment executes early".to_string()],
+            non_goals: vec!["TUI redesign".to_string()],
+            assumptions: vec!["Collective mode".to_string()],
+        };
+        let rendered = render_planning_prompt(&envelope).unwrap();
+
+        let metadata =
+            deterministic_bootstrap_metadata(Path::new("/tmp/My Repository"), &rendered).unwrap();
+
+        assert!(
+            metadata
+                .branch_name
+                .starts_with("baro/add-a-conversation-first-entry-point-"),
+            "unexpected branch name: {}",
+            metadata.branch_name
+        );
+        assert!(!metadata
+            .branch_name
+            .starts_with("baro/goal-envelope-confirmed-before-planning"));
     }
 
     #[test]

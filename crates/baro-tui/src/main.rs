@@ -1,8 +1,10 @@
 mod app;
 mod architect_runner;
 mod awake_clock;
+mod baro_home;
 mod branch_authority;
 mod cli;
+mod clipboard;
 mod config;
 mod constants;
 mod context;
@@ -34,6 +36,7 @@ mod provider_ownership;
 mod repository_brief;
 mod resume;
 mod review_refiner;
+mod run_state;
 mod screens;
 mod service;
 mod session_feed;
@@ -447,6 +450,18 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut cli, _lock) = cli::cli::parse()?;
 
+    if !cli.operator && cli.base.is_none() {
+        let cwd = std::path::Path::new(&cli.cwd);
+        if let resume::ResumeDetection::MissingBranch { run_id, branch } =
+            resume::detect_resume(cwd).await
+        {
+            // Returning (not process::exit) lets `_lock` drop and remove baro.lock.
+            if !resume::resolve_missing_branch(&cli, &run_id, &branch)? {
+                return Ok(());
+            }
+        }
+    }
+
     // Detach re-execs this argv headless in a child and hands the run over to
     // it, so the parent must leave before it registers or touches the terminal.
     if cli.detach {
@@ -466,7 +481,11 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     // new one. Decided here because the notice must reach a plain terminal —
     // below, the alternate screen would swallow it.
     let inferred = {
-        let prd = std::fs::read_to_string(std::path::Path::new(&cli.cwd).join("prd.json"))
+        let cwd = std::path::Path::new(&cli.cwd);
+        let prd_path = run_state::find_resumable(cwd)
+            .map(|state| state.prd_path())
+            .unwrap_or_else(|| cwd.join("prd.json"));
+        let prd = std::fs::read_to_string(prd_path)
             .ok()
             .and_then(|raw| serde_json::from_str::<executor::PrdFile>(&raw).ok());
         let has_incomplete = prd
@@ -549,6 +568,11 @@ async fn run_main() -> Result<(), Box<dyn std::error::Error>> {
     // _lock is dropped here, removing baro.lock
 
     result
+}
+
+/// Writes the PRD into this run's state dir (or the checkout for a legacy resume).
+fn write_run_prd(prd: &executor::PrdFile, cwd: &Path) -> std::io::Result<()> {
+    executor::write_prd(prd, &run_state::prd_dir(cwd, &prd.branch_name)?)
 }
 
 /// The alternate screen around `run_app`, restored whatever the run did.
@@ -705,7 +729,8 @@ async fn run_login() -> Result<(), Box<dyn std::error::Error>> {
 /// which pairs with the control plane and runs each dispatched goal via
 /// `baro --headless` over the user's subscription.
 async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut token = std::env::var("RUNNER_TOKEN").ok();
+    let mut token_flag: Option<String> = None;
+    let mut token_from_argv = false;
     let mut workspace = std::env::var("WORKSPACE_DIR").ok();
     let mut control_url = std::env::var("CONTROL_URL").ok();
     let mut install = false;
@@ -725,7 +750,8 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 i += 1;
             }
             "--token" => {
-                token = args.get(i + 1).cloned();
+                token_flag = args.get(i + 1).cloned();
+                token_from_argv = true;
                 i += 2;
             }
             "--workspace" | "--cwd" => {
@@ -756,6 +782,17 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
+    // A `--token` on argv is visible to `ps`/process listings. Re-exec with it
+    // scrubbed and passed via BARO_RUNNER_TOKEN instead, before any other work
+    // (install, uninstall, or connecting) happens.
+    if token_from_argv {
+        let scrubbed = cli::runner_token::scrub_token_args(args);
+        let token = token_flag.unwrap_or_default();
+        return reexec_connect_without_token(&scrubbed, &token);
+    }
+
+    let token = cli::runner_token::resolve_runner_token(None);
+
     // Uninstall is independent of token/workspace.
     if uninstall {
         return service::uninstall();
@@ -765,16 +802,19 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let cwd = std::fs::canonicalize(&workspace)
         .map_err(|e| format!("workspace '{}' not found: {}", workspace, e))?;
 
-    // Install the background service (token + workspace baked in) and exit —
-    // the service itself runs `baro connect` for real, in the background.
+    // Install the background service (workspace baked in) and exit — the
+    // service itself runs `baro connect` for real, in the background, reading
+    // the token from the file this just wrote instead of from argv.
     if install {
         let exe =
             std::env::current_exe().map_err(|e| format!("cannot resolve baro binary: {e}"))?;
-        let token =
-            token.ok_or("--install-service needs --token <rt_…> (get one from the dashboard)")?;
+        let token = token.ok_or(
+            "--install-service needs a token: pass --token <rt_…> once (get one from the dashboard) or set BARO_RUNNER_TOKEN",
+        )?;
+        cli::runner_token::write_token_file(&token)
+            .map_err(|e| format!("failed to save runner token: {e}"))?;
         return service::install(&service::ServiceConfig {
             exe,
-            token,
             workspace: cwd,
             control_url,
         });
@@ -833,6 +873,40 @@ async fn run_connect(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         .map_err(|e| format!("failed to start runner: {e}"))?
         .wait()
         .await?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Re-exec `baro connect <scrubbed-args>` with the token passed via
+/// `BARO_RUNNER_TOKEN` instead of argv, so this process's command line (as
+/// seen by `ps`) never contains it. On unix this replaces the process image;
+/// elsewhere it spawns a child, waits, and exits with its status.
+#[cfg(unix)]
+fn reexec_connect_without_token(
+    scrubbed_args: &[String],
+    token: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().map_err(|e| format!("cannot resolve baro binary: {e}"))?;
+    let error = std::process::Command::new(exe)
+        .arg("connect")
+        .args(scrubbed_args)
+        .env("BARO_RUNNER_TOKEN", token)
+        .exec();
+    Err(format!("failed to re-exec baro connect: {error}").into())
+}
+
+#[cfg(not(unix))]
+fn reexec_connect_without_token(
+    scrubbed_args: &[String],
+    token: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot resolve baro binary: {e}"))?;
+    let status = std::process::Command::new(exe)
+        .arg("connect")
+        .args(scrubbed_args)
+        .env("BARO_RUNNER_TOKEN", token)
+        .status()
+        .map_err(|e| format!("failed to re-exec baro connect: {e}"))?;
     std::process::exit(status.code().unwrap_or(1));
 }
 
@@ -1228,7 +1302,18 @@ async fn run_app(
     // branch hint. Establish that branch and reload its own PRD before showing
     // Review, otherwise refinement could inspect one branch while executing
     // and overwriting another.
-    let prd_path = cwd.join("prd.json");
+    let resumable = if cli.operator || cli.base.is_some() {
+        None
+    } else {
+        match resume::detect_resume(&cwd).await {
+            resume::ResumeDetection::Resumable(state) => Some(state),
+            _ => None,
+        }
+    };
+    let prd_path = resumable
+        .as_ref()
+        .map(|state| state.prd_path())
+        .unwrap_or_else(|| cwd.join("prd.json"));
     if cli.continue_run {
         let prd_branch_hint = std::fs::read_to_string(&prd_path)
             .ok()
@@ -1263,9 +1348,17 @@ async fn run_app(
             Ok(branch_hint) => {
                 let has_incomplete = branch_hint.user_stories.iter().any(|story| !story.passes);
                 if cli.resume || (has_incomplete && cli.goal.is_none()) {
-                    let prd = resume::checkout_and_load_prd(&cwd, &branch_hint.branch_name)
-                        .await
-                        .map_err(|error| format!("cannot establish resume branch: {error}"))?;
+                    let prd = resume::checkout_and_load_prd(
+                        &cwd,
+                        &prd_path,
+                        &branch_hint.branch_name,
+                    )
+                    .await
+                    .map_err(|error| format!("cannot establish resume branch: {error}"))?;
+                    match resumable.clone() {
+                        Some(state) => run_state::activate(state),
+                        None => run_state::activate_legacy(),
+                    }
                     branch_authority::verify_execution_branch(&cwd, &prd.branch_name)
                         .await
                         .map_err(|error| format!("cannot verify resume branch: {error}"))?;
@@ -1453,6 +1546,8 @@ async fn run_app(
     // Scroll frames render from the session cache, so they can run at
     // ~120fps; content frames keep the 30fps flood throttle.
     let mut scroll_frame = false;
+    // Matches the EnableMouseCapture issued before this loop starts.
+    let mut mouse_captured = true;
     loop {
         app.sync_transcript_seqs();
         let min_gap = if scroll_frame {
@@ -1461,6 +1556,15 @@ async fn run_app(
             Duration::from_millis(33)
         };
         if let Some(t) = terminal.as_deref_mut() {
+            let want_captured = mouse_capture_should_be_enabled(app.screen, app.workbench_overlay);
+            if want_captured != mouse_captured {
+                if want_captured {
+                    execute!(t.backend_mut(), crossterm::event::EnableMouseCapture)?;
+                } else {
+                    execute!(t.backend_mut(), crossterm::event::DisableMouseCapture)?;
+                }
+                mouse_captured = want_captured;
+            }
             if dirty && last_draw.elapsed() >= min_gap {
                 let drill_in = (
                     app.focused_story.clone(),
@@ -1526,6 +1630,9 @@ async fn run_app(
                 }
                 if is_done || is_exit {
                     finish_conversation_run(&mut app, is_done, &cwd);
+                }
+                if is_done && app.exit_reason.is_none() {
+                    run_state::finish_active();
                 }
                 // Headless: events already stream to stdout via echo_raw;
                 // orchestrator exit means the run is done.
@@ -2261,6 +2368,27 @@ async fn run_app(
                                 app.focus_scroll_back = 0;
                             }
                         }
+                        KeyCode::Char('y')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            if let Some(turn) = app
+                                .conversation
+                                .transcript()
+                                .iter()
+                                .rev()
+                                .find(|turn| turn.role == conversation::TranscriptRole::Assistant)
+                            {
+                                let payload = clipboard::last_code_block(&turn.text)
+                                    .unwrap_or_else(|| turn.text.clone());
+                                print!("{}", clipboard::osc52_sequence(&payload));
+                                let _ = io::stdout().flush();
+                                app.session_feed.push(
+                                    crate::session_feed::SessionBlock::Note {
+                                        text: "copied".to_string(),
+                                    },
+                                );
+                            }
+                        }
                         KeyCode::Tab => {
                             app.workbench_overlay = true;
                         }
@@ -2678,6 +2806,7 @@ async fn run_app(
                                         tokio::spawn(async move {
                                             let original_prd = match resume::checkout_and_load_prd(
                                                 &exec_cwd,
+                                                &run_state::prd_path(&exec_cwd),
                                                 &resume_branch,
                                             )
                                             .await
@@ -2710,7 +2839,7 @@ async fn run_app(
                                                 }
                                             };
                                             stamp_goal_fingerprint(&mut prd, exec_goal.as_deref());
-                                            if let Err(error) = executor::write_prd(&prd, &exec_cwd)
+                                            if let Err(error) = write_run_prd(&prd, &exec_cwd)
                                             {
                                                 let _ = err_tx
                                                     .send(AppEvent::BranchError(format!(
@@ -2746,7 +2875,7 @@ async fn run_app(
                                             app.planning_error = Some(message);
                                             continue;
                                         }
-                                        if let Err(e) = executor::write_prd(&prd, &cwd) {
+                                        if let Err(e) = write_run_prd(&prd, &cwd) {
                                             app.planning_error =
                                                 Some(format!("Failed to write prd.json: {}", e));
                                         } else {
@@ -2873,7 +3002,7 @@ async fn run_app(
                                                 let mut exec_prd = exec_prd;
                                                 exec_prd.branch_name = actual_full_branch.clone();
                                                 if let Err(e) =
-                                                    executor::write_prd(&exec_prd, &exec_cwd)
+                                                    write_run_prd(&exec_prd, &exec_cwd)
                                                 {
                                                     let _ = err_tx.send(AppEvent::BranchError(
                                                 format!("Failed to persist suffixed branch in prd.json: {}", e)
@@ -2941,7 +3070,7 @@ async fn run_app(
                             app.open_dialogue();
                         }
                         KeyCode::Char('r') if app.done && app.exit_reason.is_some() => {
-                            let prd_path = cwd.join("prd.json");
+                            let prd_path = run_state::prd_path(&cwd);
                             match std::fs::read_to_string(&prd_path)
                                 .map_err(|e| e.to_string())
                                 .and_then(|c| {
@@ -3397,6 +3526,15 @@ fn open_in_browser(url: &str) {
         .spawn();
 }
 
+/// Mouse capture stays on except while the conversation composer has focus
+/// (Screen::Conversation with the workbench overlay closed) — released there
+/// so a click-drag runs the terminal's native text selection instead of a
+/// captured synthetic mouse event. Mirrors the MouseScroll dispatch
+/// condition; the two must not diverge or wheel routing breaks.
+fn mouse_capture_should_be_enabled(screen: Screen, workbench_overlay: bool) -> bool {
+    !(screen == Screen::Conversation && !workbench_overlay)
+}
+
 fn conversation_intent(app: &App) -> conversation_runner::ConversationIntent {
     if matches!(
         app.conversation.phase(),
@@ -3486,6 +3624,14 @@ fn apply_operator_event(app: &mut App, event: operator_client::OperatorEvent) {
                 std::mem::take(&mut state.reply)
             };
             if !reply.trim().is_empty() {
+                let timestamp = events::now_iso8601();
+                if let Ok(Some(path)) =
+                    clipboard::append_last_commands(&baro_home::baro_home(), &timestamp, &reply)
+                {
+                    let _ = app
+                        .conversation
+                        .record_system_turn(format!("commands saved to {}", path.display()));
+                }
                 let _ = app.conversation.record_assistant_turn(reply);
             }
             let facts: Vec<String> = [
@@ -4267,7 +4413,7 @@ fn confirm_and_execute(
         let _ = tx.try_send(AppEvent::BranchError(message));
         return;
     }
-    if let Err(e) = executor::write_prd(&prd, cwd) {
+    if let Err(e) = write_run_prd(&prd, cwd) {
         let _ = tx.try_send(AppEvent::BranchError(format!(
             "Failed to write prd.json: {}",
             e
@@ -4371,7 +4517,7 @@ fn confirm_and_execute(
         }
         let mut exec_prd = prd;
         exec_prd.branch_name = actual_full_branch.clone();
-        if let Err(e) = executor::write_prd(&exec_prd, &exec_cwd) {
+        if let Err(e) = write_run_prd(&exec_prd, &exec_cwd) {
             let _ = tx
                 .send(AppEvent::BranchError(format!(
                     "Failed to persist branch in prd.json: {}",
@@ -4441,7 +4587,7 @@ async fn begin_progressive_execution(
     branch_authority::verify_execution_branch(cwd, &actual_branch).await?;
     bootstrap.branch_name = actual_branch.clone();
     prd_write_guard::guard_fresh_plan_write(app.is_resume)?;
-    executor::write_prd(&bootstrap, cwd)
+    write_run_prd(&bootstrap, cwd)
         .map_err(|error| format!("could not persist progressive bootstrap PRD: {error}"))?;
 
     app.project = bootstrap.project.clone();
@@ -4589,7 +4735,8 @@ fn spawn_executor(
     }
 
     let orch_cfg = orchestrator_client::OrchestratorConfig {
-        prd_path: cwd.join("prd.json"),
+        prd_path: run_state::prd_path(&cwd),
+        base_ref: run_state::active_base(),
         cwd,
         progressive_planning_id,
         parallel: config.parallel,
@@ -4712,10 +4859,12 @@ mod tests {
     use super::{
         apply_primary_provider_choice, coordination_has_runtime_dialogue, delete_prev_word,
         fixed_mode_contract, headless_failure_reason, message_command_line,
-        preferred_jigjoy_gateway_key, preferred_jigjoy_gateway_url,
-        reconcile_jigjoy_phase_overrides, resolve_parallel_limit, App, JIGJOY_CHEAP_STORY_MODEL,
-        JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL, JIGJOY_STRONG_MODEL,
+        mouse_capture_should_be_enabled, preferred_jigjoy_gateway_key,
+        preferred_jigjoy_gateway_url, reconcile_jigjoy_phase_overrides, resolve_parallel_limit,
+        App, JIGJOY_CHEAP_STORY_MODEL, JIGJOY_GATEWAY_URL, JIGJOY_HEAVY_STORY_MODEL,
+        JIGJOY_STRONG_MODEL,
     };
+    use crate::app::Screen;
 
     #[test]
     fn after_help_epilogue_matches_pre_clap_usage() {
@@ -4733,6 +4882,27 @@ mod tests {
             usage::LOGS_SUMMARY,
         ] {
             assert!(help.contains(summary), "epilogue drifted from {summary}:\n{help}");
+        }
+    }
+
+    // Nested so every test's full path carries `mouse_capture`, letting
+    // `cargo test -p baro-tui mouse_capture` catch all three by itself.
+    mod mouse_capture {
+        use super::{mouse_capture_should_be_enabled, Screen};
+
+        #[test]
+        fn mouse_capture_releases_when_conversation_input_has_focus() {
+            assert!(!mouse_capture_should_be_enabled(Screen::Conversation, false));
+        }
+
+        #[test]
+        fn mouse_capture_stays_enabled_when_workbench_overlay_is_open() {
+            assert!(mouse_capture_should_be_enabled(Screen::Conversation, true));
+        }
+
+        #[test]
+        fn mouse_capture_stays_enabled_outside_the_conversation_screen() {
+            assert!(mouse_capture_should_be_enabled(Screen::Welcome, false));
         }
     }
 

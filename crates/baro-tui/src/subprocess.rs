@@ -561,12 +561,14 @@ exit 0
         let directory = tempfile::tempdir().unwrap();
         let descendant_pid = directory.path().join("descendant-pid");
         let mut cmd = Command::new("sh");
+        // The root busy-waits on the pid file so the descendant's TERM trap is
+        // installed (via its own `sh -c`, not a snapshot of `$!`) before the
+        // root exits — otherwise the kill race is nondeterministic.
         cmd.env("BARO_TEST_DESCENDANT_PID", &descendant_pid)
             .arg("-c")
             .arg(
-                "(trap '' TERM; sleep 30) \
-                 & \
-                 echo \"$!\" > \"$BARO_TEST_DESCENDANT_PID\"; exit 7",
+                "sh -c 'trap \"\" TERM; echo $$ > \"$BARO_TEST_DESCENDANT_PID\"; exec sleep 30' & \
+                 while [ ! -s \"$BARO_TEST_DESCENDANT_PID\" ]; do :; done; exit 7",
             );
 
         // The claim is ONLY that the nonzero root is observed without waiting

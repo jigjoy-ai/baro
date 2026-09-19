@@ -60,6 +60,7 @@ interface CliArgs {
     collectiveMaxCostUsd?: number
     collectiveMaxLatencyMs?: number
     localOnly: boolean
+    baseRef?: string
     model?: string
     noGit: boolean
     continueRun: boolean
@@ -158,6 +159,9 @@ function parseArgs(argv: string[]): CliArgs {
                 break
             case "--local-only":
                 args.localOnly = true
+                break
+            case "--base":
+                args.baseRef = required(argv, ++i, "--base")
                 break
             case "--collective-workers":
                 args.collectiveWorkersFile = required(argv, ++i, "--collective-workers")
@@ -387,6 +391,7 @@ function printHelp(): void {
             "  --coordination <mode> Coordination engine: collective|legacy (default: collective)",
             "  --progressive-planning <id>  Open a private Planner stream and dispatch dependency-closed fragments early",
             "  --local-only          Disable Baro-owned pushes/PRs (use a remote-free clone for hard isolation)",
+            "  --base <ref>          Start the goal branch from <ref> instead of the checkout's HEAD",
             "  --collective-workers <json>  Candidate array file for opt-in worker bidding",
             "  --collective-bid-window-ms <N>  Local bid collection window (default: 50)",
             "  --collective-min-success <0..1>  Reject lower-confidence bids",
@@ -758,6 +763,7 @@ async function main(): Promise<void> {
     const config: OrchestrateConfig = {
         prdPath,
         cwd,
+        ...(args.baseRef ? { baseRef: args.baseRef } : {}),
         // This process is the run the host started, so inheriting its identity
         // is correct here and only here.
         ...(process.env.BARO_RUN_ID ? { runId: process.env.BARO_RUN_ID } : {}),

@@ -110,6 +110,31 @@ describe("PlannerOpenAI fallback PRD", () => {
             ["G-A1", "G-A2", "G-C1"],
         )
     })
+
+    it("slugs the branch from the Objective line, not the envelope header", () => {
+        const renderedPrompt = [
+            "Goal envelope (confirmed before planning)",
+            "",
+            "Objective:",
+            "Add a conversation-first entry point",
+            "",
+            "Constraints:",
+            "- Keep Board authority separate",
+            "",
+            "Acceptance criteria:",
+            "- Ambiguous goals cause a question",
+            "",
+            "Non-goals:",
+            "- Do not change model routing",
+            "",
+            "Assumptions:",
+            "- The repository is already selected",
+        ].join("\n")
+
+        const prd = JSON.parse(fallbackPrdJson(renderedPrompt, "test"))
+
+        assert.equal(prd.branchName, "baro/add-a-conversation-first-entry-point")
+    })
 })
 
 describe("PlannerOpenAI complexity routing", () => {

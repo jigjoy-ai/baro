@@ -36,6 +36,11 @@ import {
     runInferenceRound,
 } from "./runtime.js"
 import { createStoryTools } from "../../planning/adapters/story-tools.js"
+import {
+    startStoryActivityGuard,
+    wallBoundMs,
+    type StoryActivityGuard,
+} from "../activity-monitor.js"
 import { SPAWN_GATES, announceGates } from "../../execution/gate-registry.js"
 import {
     AgentResult,
@@ -47,6 +52,7 @@ import {
     RuntimeReplanApplied,
     RuntimeReplanProposed,
     RuntimeReplanRejected,
+    StoryCommandRefused,
     StoryResult,
     type AgentPhase,
     type RuntimeReplanAppliedData,
@@ -189,7 +195,6 @@ export class OpenAIStoryAgent extends BaseObserver {
         Pick<
             StorySpec,
             | "retries"
-            | "timeoutSecs"
             | "retryDelayMs"
             | "quietTimeoutMs"
             | "maxTurns"
@@ -237,6 +242,7 @@ export class OpenAIStoryAgent extends BaseObserver {
     private readonly inFlightTools = new Set<Promise<string>>()
     private readonly suspension: CooperativeSuspension
     private attemptsMade = 0
+    private activity: StoryActivityGuard | null = null
 
     /**
      * The write surface as a live object: the story tools read it at every
@@ -261,7 +267,6 @@ export class OpenAIStoryAgent extends BaseObserver {
         super()
         this.spec = {
             retries: 2,
-            timeoutSecs: 600,
             retryDelayMs: 1500,
             quietTimeoutMs: 2000,
             maxTurns: 4,
@@ -324,6 +329,17 @@ export class OpenAIStoryAgent extends BaseObserver {
         this.tools = [
             ...createStoryTools(spec.cwd, {
                 collaboration: opts.collaboration,
+                denyPublish: true,
+                onCommandRefused: (command, reason) =>
+                    this.envRef?.deliverSemanticEvent(
+                        this,
+                        StoryCommandRefused.create({
+                            storyId: this.spec.id,
+                            command,
+                            reason,
+                            harness: "openai",
+                        }),
+                    ),
                 ...(this.liveSurface ? { surface: this.liveSurface } : {}),
                 ...(opts.scopedVerification === true
                     ? { scopedVerification: true }
@@ -519,10 +535,18 @@ export class OpenAIStoryAgent extends BaseObserver {
 
             attempts += 1
             this.attemptsMade = attempts
-            // No attempt-level wall clock: every inference round is already
-            // individually bounded (perRoundTimeoutSecs) and round count is
-            // capped per turn, so a hung provider call cannot stall forever —
-            // while a long, visibly progressing attempt is never killed.
+            // Idleness, not duration, ends an attempt; a wall bound exists
+            // only when the story was given an explicit --timeout.
+            this.activity = startStoryActivityGuard({
+                cwd: this.spec.cwd,
+                wallMs: wallBoundMs(this.spec.timeoutSecs),
+                label: `attempt ${attempts}`,
+                onTimeout: (error) =>
+                    this.abortWithReason(error.message, {
+                        kind: "infrastructure",
+                        code: "command_timeout",
+                    }),
+            })
             try {
                 const result = await this.runOneAttempt(attempts)
                 if (this.currentPhase === "done") {
@@ -545,6 +569,9 @@ export class OpenAIStoryAgent extends BaseObserver {
                     : detail || "OpenAI story attempt failed"
                 this.transition("failed", lastError)
                 if (boardOwnsRecovery(lastFailure)) break
+            } finally {
+                this.activity.stop()
+                this.activity = null
             }
         }
 
@@ -1128,7 +1155,10 @@ export class OpenAIStoryAgent extends BaseObserver {
         // Every chunk pushes this round's silence deadline out. Without it the
         // deadline measured duration, and a model that writes fifteen thousand
         // tokens in a round was cut off for working.
-        const onActivity = () => progress?.()
+        const onActivity = () => {
+            progress?.()
+            this.activity?.pet()
+        }
         return runInferenceRound(
             context,
             this.model,
@@ -1215,6 +1245,7 @@ export class OpenAIStoryAgent extends BaseObserver {
         // suspension is requested no further invocation may begin, so what is
         // already running is all there will ever be.
         if (this.suspension.blocksNewWork) return this.suspendedToolOutput()
+        this.activity?.pet()
         const invocation = invokeTool(
             this.tools,
             { name: call.name, args: call.args },
@@ -1225,6 +1256,7 @@ export class OpenAIStoryAgent extends BaseObserver {
         this.inFlightTools.add(invocation)
         const settled = (): void => {
             this.inFlightTools.delete(invocation)
+            this.activity?.pet()
         }
         invocation.then(settled, settled)
         return invocation

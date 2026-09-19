@@ -73,6 +73,7 @@ import { CriticCodex } from "./harness/codex/critic.js"
 import { CriticOpenAI } from "./harness/openai/critic.js"
 import { CriticOpenCode } from "./harness/opencode/critic.js"
 import { CriticPi } from "./harness/pi/critic.js"
+import { activityIdleTimeoutMs } from "./harness/liveness.js"
 import {
     DialogueAgent,
     type DialogueResponder,
@@ -212,6 +213,8 @@ export interface OrchestrateConfig {
     greenfieldInit?: boolean
     prdPath: string
     cwd: string
+    /** Start the run's goal branch from this ref instead of the host HEAD. */
+    baseRef?: string
     /** Stable authority/correlation identity shared with planning and billing. */
     runId?: string
     parallel?: number
@@ -451,24 +454,23 @@ export type GatewayBillingConfig = Omit<
 >
 
 /**
- * Per-story silence window (seconds). `--timeout N` is an absolute override
- * in both directions (the Rust CLI sends 0 to mean "auto"). Story agents now
- * measure silence, not elapsed time — output resets the clock — so effort no
- * longer needs to scale this: thinking longer is not the same as hanging.
+ * Opt-in per-story wall bound (seconds); undefined when unset or 0 (the Rust
+ * CLI sends 0 to mean "auto"), leaving only the activity watchdog.
  */
 export function storyTimeoutSecs(
     configured: number | undefined,
     effort: string | undefined,
-): number {
+): number | undefined {
     if (typeof configured === "number" && configured > 0) return configured
-    return 600
+    return undefined
 }
 
 export function resolveGoalReviewTimeoutMs(
     configured: number | undefined,
-    effectiveStoryTimeoutSecs: number,
+    effectiveStoryTimeoutSecs: number | undefined,
 ): number {
     if (configured !== undefined) return configured
+    if (effectiveStoryTimeoutSecs === undefined) return activityIdleTimeoutMs()
     return Math.min(
         2_147_483_647,
         Math.ceil(effectiveStoryTimeoutSecs * 1_000),
@@ -837,6 +839,7 @@ export async function orchestrate(
             runId,
             goalBranch,
             push: pushRemote,
+            ...(config.baseRef ? { baseRef: config.baseRef } : {}),
             onLog: (line) => {
                 process.stderr.write(`${line}\n`)
                 if (emitTui) emit({ type: "story_log", id: "_git", line })
@@ -1560,7 +1563,7 @@ export async function orchestrate(
             runId,
             prdPath: config.prdPath,
             cwd: repoRoot,
-            timeoutSecs: effectiveStoryTimeoutSecs,
+            timeoutSecs: effectiveStoryTimeoutSecs ?? 0,
             overrideModel: config.overrideModel ?? undefined,
             defaultModel: defaultStorySelector,
             expectRecoveryDecisions: config.withSurgeon ?? false,
@@ -1585,7 +1588,12 @@ export async function orchestrate(
             outcomeAuthority,
             verifyBeforePush: true,
             verificationTimeoutMs:
-                config.collectiveVerificationTimeoutMs ?? recommendedMergedVerifyTimeoutMs(verifyPlan, MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS),
+                config.collectiveVerificationTimeoutMs ??
+                recommendedMergedVerifyTimeoutMs(
+                    verifyPlan,
+                    MAX_NEGOTIATED_DECLARED_VERIFY_COMMANDS,
+                    { cwd: integrationRoot, hostRepoRoot: repoRoot },
+                ),
             goalCompletionTimeoutMs:
                 goalInvariantReviewer &&
                 goalReviewOverallTimeoutMs !== undefined
@@ -2059,7 +2067,11 @@ export async function orchestrate(
     // Await the PR before the TUI `done` event so the completion screen has
     // the PR URL the moment it renders instead of after a race.
     if (finalizer) await finalizer.complete()
-    await integrationWorktree?.syncHostCheckout()
+    await integrationWorktree?.syncHostCheckout({
+        verified: finalizer
+            ? finalizer.checkpoint === false
+            : summary.success && summary.verificationStatus === "passed",
+    })
 
     let filesCreated = 0
     let filesModified = 0
