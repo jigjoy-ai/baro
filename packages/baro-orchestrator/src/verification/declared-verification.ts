@@ -38,6 +38,55 @@ const SAFE_TOKEN = /^[A-Za-z0-9_./:@+=,-]+$/
 const SAFE_CARGO_VALUE = /^[A-Za-z0-9_+.-]+(?:,[A-Za-z0-9_+.-]+)*$/
 const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/
 
+/**
+ * Flags the named runner owns. Without this a leading "-" reads as an
+ * escaping path and `node --test --import tsx <file>` is refused outright.
+ * Only the listed spellings are exempt from the path check; every other
+ * token stays a path candidate.
+ */
+export const RUNNER_FLAGS: Readonly<Record<string, readonly string[]>> =
+    Object.freeze({
+        node: Object.freeze([
+            "--import",
+            "--test",
+            "--test-concurrency",
+            "--test-reporter",
+            "--test-name-pattern",
+        ]),
+    })
+
+// The value of a module-specifier flag is resolved by the runner, so it is
+// never containment-checked; it is still pinned to a reviewed spelling.
+const NODE_FLAG_VALUE: Readonly<Record<string, RegExp>> = Object.freeze({
+    "--import": /^tsx$/,
+    "--test-concurrency": /^[0-9]+$/,
+    "--test-reporter": /^[A-Za-z0-9_.@/-]+$/,
+    "--test-name-pattern": /^[A-Za-z0-9_.@/,:+-]+$/,
+})
+
+function runnerFlagName(runner: string, token: string): string | null {
+    const allowed = RUNNER_FLAGS[runner]
+    if (!allowed || !token.startsWith("-")) return null
+    const name = token.includes("=") ? token.slice(0, token.indexOf("=")) : token
+    return allowed.includes(name) ? name : null
+}
+
+/** The single classification shared by translation and the pre-spawn re-check. */
+export function isRunnerFlagToken(runner: string, token: string): boolean {
+    return runnerFlagName(runner, token) !== null
+}
+
+function unsafeNodeFlagValue(flag: string, value: string): string | null {
+    const pattern = NODE_FLAG_VALUE[flag]
+    if (!pattern) return `node flag '${flag}' does not take a value`
+    if (!SAFE_TOKEN.test(value) || isAbsolute(value) || hasParentTraversal(value)) {
+        return `unsafe value '${value}' for node flag '${flag}'`
+    }
+    return pattern.test(value)
+        ? null
+        : `unsupported value '${value}' for node flag '${flag}'`
+}
+
 interface PackageManifest {
     name?: unknown
     scripts?: Record<string, unknown>
@@ -328,6 +377,9 @@ function declaredEvidence(
         declaredRequirementKey: createHash("sha256")
             .update(JSON.stringify([normalizedRequirement, reason]))
             .digest("hex"),
+        // Carried so verifyBuild can credit a requirement a green command
+        // already executed instead of reporting it incomplete.
+        declaredRequirement: requirement,
     }
 }
 
@@ -816,6 +868,8 @@ function escapesRoot(cwd: string, candidate: string): boolean {
 }
 
 function safeFocusedArg(cwd: string, value: string): boolean {
+    // A bare allowlisted runner flag is a flag, not a path operand.
+    if (!value.includes("=") && isRunnerFlagToken("node", value)) return true
     const contextOverrides = [
         "--cwd",
         "--prefix",
@@ -1095,14 +1149,38 @@ function translateNode(
     // below by naming a subdirectory that happens to lack package.json.
     manifestRoot: string = cwd,
 ): VerifyCommandSpec {
-    // Only the literal two-token pair `--import tsx` is skipped over; any
-    // other loader value, path or spelling falls through to the mode gate
-    // below and is rejected there.
-    const hasTsxLoader =
-        parsed.tokens[1] === "--import" && parsed.tokens[2] === "tsx"
-    const loaderArgs: readonly string[] = hasTsxLoader ? ["--import", "tsx"] : []
-    const rest = parsed.tokens.slice(1 + loaderArgs.length)
-    const mode = rest[0]
+    const flagArgs: string[] = []
+    const candidates: string[] = []
+    let mode: string | undefined
+    const rest = parsed.tokens.slice(1)
+    for (let index = 0; index < rest.length; index += 1) {
+        const token = rest[index]!
+        if (token === "--test" || token === "--check") {
+            if (mode !== undefined) {
+                return incomplete(
+                    requirement,
+                    "node declarations name exactly one of '--check' or '--test'",
+                )
+            }
+            mode = token
+            continue
+        }
+        const flag = runnerFlagName("node", token)
+        if (flag === null) {
+            candidates.push(token)
+            continue
+        }
+        const inlineValue = token.includes("=")
+            ? token.slice(token.indexOf("=") + 1)
+            : rest[index + 1]
+        if (inlineValue === undefined) {
+            return incomplete(requirement, `node flag '${flag}' requires a value`)
+        }
+        const unsafe = unsafeNodeFlagValue(flag, inlineValue)
+        if (unsafe) return incomplete(requirement, unsafe)
+        flagArgs.push(flag, inlineValue)
+        if (!token.includes("=")) index += 1
+    }
     // Greenfield allowance: with no package.json there is no manifest to
     // anchor a trusted script, so a bare `node <contained file>` is the
     // same trust class the manifest route grants elsewhere — repo content
@@ -1110,29 +1188,27 @@ function translateNode(
     // after the merge. Repos WITH a manifest keep the strict rule: declare
     // the script there instead.
     if (
-        rest.length === 1 &&
-        typeof mode === "string" &&
-        !mode.startsWith("-") &&
+        mode === undefined &&
+        candidates.length === 1 &&
         !existsSync(join(cwd, "package.json")) &&
         !existsSync(join(manifestRoot, "package.json"))
     ) {
-        const contained = containedPath(cwd, mode, true)
+        const contained = containedPath(cwd, candidates[0]!, true)
         if (!contained.path) {
             return incomplete(
                 requirement,
-                contained.reason ?? `unsafe node path '${mode}'`,
+                contained.reason ?? `unsafe node path '${candidates[0]}'`,
             )
         }
         return {
-            label: ["node", ...loaderArgs, contained.path].join(" "),
+            label: ["node", ...flagArgs, contained.path].join(" "),
             tool: "node",
-            args: [...loaderArgs, contained.path],
+            args: [...flagArgs, contained.path],
             containedPaths: [{ path: contained.path, requireFile: true }],
         }
     }
-    const candidates = rest.slice(1)
     if (
-        !/^(--check|--test)$/.test(mode ?? "") ||
+        mode === undefined ||
         candidates.length === 0 ||
         (mode === "--check" && candidates.length !== 1)
     ) {
@@ -1153,9 +1229,9 @@ function translateNode(
         paths.push(contained.path)
     }
     return {
-        label: ["node", ...loaderArgs, mode!, ...paths].join(" "),
+        label: ["node", ...flagArgs, mode, ...paths].join(" "),
         tool: "node",
-        args: [...loaderArgs, mode!, ...paths],
+        args: [...flagArgs, mode, ...paths],
         containedPaths: paths.map((path) => ({
             path,
             requireFile: mode === "--check",
@@ -1380,8 +1456,14 @@ function translateDdev(
 export function revalidateContainedPaths(
     cwd: string,
     paths: readonly VerifyContainedPath[],
+    runner?: string,
 ): string | null {
     for (const requirement of paths) {
+        // Same classification translation used, so the pre-spawn re-check
+        // cannot refuse an argv translation already admitted.
+        if (runner !== undefined && isRunnerFlagToken(runner, requirement.path)) {
+            continue
+        }
         // Contained-binary routes spawn absolute (cross-spawn would otherwise
         // resolve a relative command through PATH), so an entry may already be
         // absolute. Re-express it relative to cwd and let the unchanged checks
