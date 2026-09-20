@@ -8,6 +8,7 @@ import {
     PeerHelpRequested,
     RunVerificationCompleted,
     RunVerificationRequested,
+    RunVerificationRetryClassified,
     RunVerificationTimedOut,
     StoryIntervention,
     StoryQualityCompleted,
@@ -163,6 +164,21 @@ export class CoordinationForwarder extends BaseObserver {
                 type: "story_log",
                 id: "_verify",
                 line: `[verify/${event.data.status}] ${commands || "no build/test command detected"}`,
+            })
+            return
+        }
+        if (RunVerificationRetryClassified.is(event)) {
+            if (!this.matchesCollective(source, "verifier")) return
+            // A refusal is already in the evidence; only an actual retry owes
+            // the operator a line explaining why the gate ran twice.
+            if (!event.data.retried) return
+            emit({
+                type: "activity",
+                id: "_verify",
+                kind: "warn",
+                text:
+                    `verification retry: ${event.data.command} ` +
+                    `(${event.data.bucket} \u2192 ${event.data.remedy})`,
             })
             return
         }
