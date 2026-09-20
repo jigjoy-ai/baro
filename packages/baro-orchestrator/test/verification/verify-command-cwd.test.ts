@@ -241,7 +241,7 @@ describe("verifyBuild working-directory resolution", () => {
             assert.equal(command.status, "failed")
             assert.equal(
                 command.tail,
-                `verification working directory is missing: ${ghost}`,
+                `verification cwd missing: ${ghost}`,
             )
             assert.equal(command.retryable, false)
             assert.equal(command.retriedAfterFailure, undefined)

@@ -23,7 +23,8 @@ import { execFileCli } from "../harness/exec-file-cli.js"
 import { activityIdleTimeoutMs } from "../harness/liveness.js"
 import { emit, type BaroEvent } from "../tui-protocol.js"
 import { cargoEnvFor } from "./cargo-env.js"
-import { defaultSleep, resolveCommandCwd, RETRY_BACKOFF_MS } from "./command-cwd.js"
+import { defaultSleep, resolveCommandCwd, RETRY_BACKOFF_MS, spawnRunCwd } from "./command-cwd.js"
+import type { VerifyCwdResolver } from "./command-cwd.js"
 import {
     ABSOLUTE_COMMAND_TIMEOUT_MS,
     createCeilingResolver,
@@ -97,6 +98,9 @@ export interface VerifyCommandResult {
     retryable?: boolean
     /** Killed at its hard ceiling rather than failing on its own. */
     timedOut?: true
+    /** The harness, not the patch, broke: classification must bucket this as
+     *  environment instead of re-deriving a regression from the tail. */
+    environment?: true
 }
 
 export interface VerifyCommandSpec {
@@ -188,6 +192,8 @@ export interface VerifyBuildOptions {
     storyExecutorsActive?: () => boolean
     /** Test seam: lowers the ABSOLUTE_COMMAND_TIMEOUT_MS ceiling floor. */
     ceilingFloorMs?: number
+    /** Overrides `cwd`, re-read per spawn; see command-cwd.ts `spawnRunCwd`. */
+    resolveRunCwd?: VerifyCwdResolver
 }
 
 /** Where declared ceilings and measured durations are looked up. */
@@ -1237,6 +1243,7 @@ type CmdOutcome =
           output?: VerificationCommandOutput
           retryable?: boolean
           timedOut?: true
+          environment?: true
       }
     | { status: "skipped"; durationMs: number; tail: string }
 
@@ -1262,6 +1269,7 @@ async function runCmd(
     hostRepoRoot: string,
     ceiling: CommandCeiling,
     signal?: AbortSignal,
+    resolveRunCwd?: VerifyCwdResolver,
 ): Promise<CmdOutcome> {
     const startedAt = Date.now()
     if (c.incompleteReason) {
@@ -1278,13 +1286,16 @@ async function runCmd(
             tail: c.preflightFailure,
         }
     }
-    const commandCwd = resolveCommandCwd(cwd, c.cwd)
+    const commandCwd = resolveCommandCwd(spawnRunCwd(cwd, hostRepoRoot, resolveRunCwd), c.cwd)
     if (!existsSync(commandCwd)) {
+        // The tree vanished under us (a story worktree removed at merge, or the
+        // integration worktree torn down): the harness broke, not the patch.
         return {
             status: "failed",
             durationMs: 0,
-            tail: `verification working directory is missing: ${commandCwd}`,
+            tail: `verification cwd missing: ${commandCwd}`,
             retryable: false,
+            environment: true,
         }
     }
     throwIfAborted(signal)
@@ -1399,6 +1410,7 @@ export async function verifyBuild(
             hostRepoRoot,
             ceilingFor(install),
             options.signal,
+            options.resolveRunCwd,
         )
         commands.push({
             command: install.label,
@@ -1415,7 +1427,7 @@ export async function verifyBuild(
     for (const c of plan.commands) {
         throwIfAborted(options.signal)
         const ceiling = ceilingFor(c)
-        let outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal)
+        let outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal, options.resolveRunCwd)
         let firstFailureTail: string | undefined
         const warnTimeout = (): void =>
             emitActivity({
@@ -1461,7 +1473,7 @@ export async function verifyBuild(
             })
             await (options.sleep ?? defaultSleep)(RETRY_BACKOFF_MS)
             throwIfAborted(options.signal)
-            outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal)
+            outcome = await runCmd(cwd, c, hostRepoRoot, ceiling, options.signal, options.resolveRunCwd)
             if (outcome.status === "failed" && outcome.timedOut) warnTimeout()
         }
         commands.push({
@@ -1476,6 +1488,7 @@ export async function verifyBuild(
                 ? { retryable: outcome.retryable }
                 : {}),
             ...("timedOut" in outcome && outcome.timedOut ? { timedOut: true as const } : {}),
+            ...("environment" in outcome && outcome.environment ? { environment: true as const } : {}),
             ...(firstFailureTail !== undefined
                 ? { retriedAfterFailure: true as const, firstFailureTail }
                 : {}),
