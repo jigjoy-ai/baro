@@ -84,7 +84,12 @@ describe("gate registry — enforced means announced", () => {
         assert.equal(altitude.length, 1, "altitude is registered once, in BASE_GATES")
         assert.deepEqual(
             BASE_GATES.map((gate) => gate.id),
-            ["evidence-capture", "build-before-commit", "altitude"],
+            [
+                "evidence-capture",
+                "build-before-commit",
+                "shell-containment",
+                "altitude",
+            ],
         )
         // The rule needs no spawn context, so SPAWN_GATES must not carry it —
         // and ALL_GATES stays the plain concatenation it already was.

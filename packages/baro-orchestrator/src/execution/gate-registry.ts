@@ -133,6 +133,38 @@ export function surfaceRemedyLines(
     ]
 }
 
+/** The sanctioned scratch location, named by the rule and by its refusal. */
+export const SHELL_SCRATCH_DIRNAME = ".baro-scratch"
+
+/**
+ * Kept next to the disclosure and serialized into the Claude lane's hook, so
+ * a refused command and the announced rule offer the same way out.
+ */
+export function shellContainmentRemedyLine(scratchDir: string): string {
+    return (
+        `Remedy: create scratch checkouts under \`<worktree>/${scratchDir}/\`, ` +
+        "which is inside the worktree and is not part of your write surface " +
+        "for the merge gate."
+    )
+}
+
+const SHELL_CONTAINMENT: GateDisclosure = {
+    id: "shell-containment",
+    enforcedBy: "src/execution/shell-containment.ts",
+    summary:
+        "Shell commands must stay inside your worktree; scratch checkouts go under .baro-scratch/.",
+    announce: () =>
+        [
+            "SHELL CONTAINMENT (enforced at the command, in every lane) [gate:shell-containment]:",
+            "- A shell command that leaves your worktree is refused before it runs.",
+            "  The refused shapes are: `cd` to a directory outside the worktree,",
+            "  absolute paths outside it, parent (`..`) or home (`~`) traversal,",
+            "  nested shell evaluation (`sh -c`, `eval`, command substitution), and",
+            "  redirection through a symlink that escapes the worktree.",
+            `- ${shellContainmentRemedyLine(SHELL_SCRATCH_DIRNAME)}`,
+        ].join("\n"),
+}
+
 const ALTITUDE: GateDisclosure = {
     id: "altitude",
     enforcedBy: "src/acceptance/altitude.ts",
@@ -154,6 +186,7 @@ const ALTITUDE: GateDisclosure = {
 export const BASE_GATES: readonly GateDisclosure[] = [
     EVIDENCE_CAPTURE,
     BUILD_BEFORE_COMMIT,
+    SHELL_CONTAINMENT,
     ALTITUDE,
 ]
 
