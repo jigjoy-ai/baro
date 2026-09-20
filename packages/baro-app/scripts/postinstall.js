@@ -11,11 +11,26 @@ import { fileURLToPath } from "url"
 import { createRequire } from "module"
 import * as https from "https"
 import * as os from "os"
+import { execFileSync } from "child_process"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
 const PACKAGE_ROOT = path.resolve(__dirname, "..")
-const BARO_HOME = path.join(os.homedir(), ".baro", "bin")
+// Under `sudo npm i -g`, os.homedir() is root's: the bundles would land where
+// the person's `baro` never looks, and their old copy keeps running (#176).
+function installHome() {
+    const sudoUser = process.env.SUDO_USER
+    if (sudoUser && typeof process.getuid === "function" && process.getuid() === 0) {
+        try {
+            const home = execFileSync("sh", ["-c", `eval echo ~${sudoUser}`], { encoding: "utf8" }).trim()
+            if (home && home !== "/" && fs.existsSync(home)) return home
+        } catch {
+            /* fall through to root's home */
+        }
+    }
+    return os.homedir()
+}
+const BARO_HOME = path.join(installHome(), ".baro", "bin")
 const BINARY_NAME = process.platform === "win32" ? "baro.exe" : "baro"
 const REPO = "jigjoy-ai/baro"
 
@@ -114,15 +129,43 @@ async function main() {
     } catch (err) {
         console.warn(`Warning: could not read ${distDir}: ${err.message}`)
     }
+    let staged = 0
     for (const name of bundles) {
         const src = path.join(distDir, name)
         const dst = path.join(BARO_HOME, name)
         try {
             fs.copyFileSync(src, dst)
+            staged += 1
             console.log(`${name} installed to ${dst}`)
         } catch (err) {
             console.warn(`Warning: Could not stage ${name}: ${err.message}`)
         }
+    }
+    if (process.env.SUDO_UID && process.env.SUDO_GID && typeof process.getuid === "function" && process.getuid() === 0) {
+        try {
+            const uid = Number(process.env.SUDO_UID)
+            const gid = Number(process.env.SUDO_GID)
+            for (const name of fs.readdirSync(BARO_HOME)) fs.lchownSync(path.join(BARO_HOME, name), uid, gid)
+            fs.chownSync(BARO_HOME, uid, gid)
+        } catch (err) {
+            console.warn(`Warning: could not hand ${BARO_HOME} back to ${process.env.SUDO_USER}: ${err.message}`)
+        }
+    }
+    // The Rust host compares this stamp with its own version before it runs a
+    // bundle, so a binary paired with bundles from another release refuses to
+    // start instead of silently running old code (#176).
+    if (staged === bundles.length && bundles.length > 0) {
+        try {
+            const pkg = JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT, "package.json"), "utf8"))
+            fs.writeFileSync(
+                path.join(BARO_HOME, "bundle-version.json"),
+                JSON.stringify({ version: pkg.version, stagedAt: new Date().toISOString() }) + "\n",
+            )
+        } catch (err) {
+            console.warn(`Warning: Could not write bundle-version.json: ${err.message}`)
+        }
+    } else if (bundles.length > 0) {
+        console.warn(`Warning: only ${staged}/${bundles.length} bundles staged; baro will refuse to run until \`npm install -g baro-ai\` completes`)
     }
 
     wireMemoryDeps()
