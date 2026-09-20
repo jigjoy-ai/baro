@@ -22,6 +22,8 @@ export function readAuthoritativeDeclaredTests(
 export function readAuthoritativeVerifyPlanOptions(prdPath: string): {
     declaredTests: DeclaredTestRequirement[]
     testBudgets: DeclaredTestBudgetRequest[]
+    /** Stories the run never executed; their tests are not requirements of this tree. */
+    notStartedStoryIds: string[]
 } {
     let raw: unknown
     try {
@@ -32,6 +34,7 @@ export function readAuthoritativeVerifyPlanOptions(prdPath: string): {
                 issue("final PRD", "<unreadable>", `cannot read final PRD: ${message(error)}`),
             ],
             testBudgets: [],
+            notStartedStoryIds: [],
         }
     }
     if (!isRecord(raw) || !Array.isArray(raw.userStories)) {
@@ -44,10 +47,27 @@ export function readAuthoritativeVerifyPlanOptions(prdPath: string): {
                 ),
             ],
             testBudgets: [],
+            notStartedStoryIds: [],
         }
     }
 
-    const stories = raw.userStories.slice(0, MAX_STORIES_INSPECTED)
+    // A story the progressive planner never admitted (replanned in after the
+    // run stopped, or removed) contributed no code, so its declared tests are
+    // not requirements of this tree; counting them made a green tree
+    // "incomplete" (#175). Executed stories are always kept.
+    const admitted = admittedStoryIds(raw)
+    const notStartedStoryIds: string[] = []
+    const stories = raw.userStories.slice(0, MAX_STORIES_INSPECTED).filter((value, index) => {
+        if (admitted === null || !isRecord(value)) return true
+        const id = storyIdOf(value, index)
+        const executed =
+            value.passes === true ||
+            typeof value.mergeStatus === "string" ||
+            typeof value.completedAt === "string"
+        if (executed || admitted.has(id)) return true
+        notStartedStoryIds.push(id)
+        return false
+    })
     // Separate pass so requirement overflow below cannot hide a budget request.
     const testBudgets: DeclaredTestBudgetRequest[] = []
     for (const [storyIndex, value] of stories.entries()) {
@@ -63,7 +83,7 @@ export function readAuthoritativeVerifyPlanOptions(prdPath: string): {
     for (const [storyIndex, value] of stories.entries()) {
         if (requirements.length >= MAX_REQUIREMENTS_RETURNED - 1) {
             requirements.push(inspectionOverflow())
-            return { declaredTests: requirements, testBudgets }
+            return { declaredTests: requirements, testBudgets, notStartedStoryIds }
         }
         const storyId = storyIdOf(value, storyIndex)
         if (!isRecord(value)) {
@@ -81,7 +101,7 @@ export function readAuthoritativeVerifyPlanOptions(prdPath: string): {
         for (const [testIndex, command] of value.tests.entries()) {
             if (requirements.length >= MAX_REQUIREMENTS_RETURNED - 1) {
                 requirements.push(inspectionOverflow())
-                return { declaredTests: requirements, testBudgets }
+                return { declaredTests: requirements, testBudgets, notStartedStoryIds }
             }
             if (typeof command === "string") {
                 requirements.push({ storyId, command })
@@ -99,7 +119,17 @@ export function readAuthoritativeVerifyPlanOptions(prdPath: string): {
     if (raw.userStories.length > MAX_STORIES_INSPECTED) {
         requirements.push(inspectionOverflow())
     }
-    return { declaredTests: requirements, testBudgets }
+    return { declaredTests: requirements, testBudgets, notStartedStoryIds }
+}
+
+/** The progressive planner's admission ledger, or null when this PRD has none
+ *  (legacy complete-plan runs execute every story). */
+function admittedStoryIds(raw: Record<string, unknown>): Set<string> | null {
+    const graph = raw.runtimeGraph
+    if (!isRecord(graph) || !isRecord(graph.planning)) return null
+    const ids = graph.planning.admittedStoryIds
+    if (!Array.isArray(ids)) return null
+    return new Set(ids.filter((id): id is string => typeof id === "string"))
 }
 
 function storyIdOf(value: unknown, storyIndex: number): string {

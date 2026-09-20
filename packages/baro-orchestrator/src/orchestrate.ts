@@ -1388,10 +1388,13 @@ export async function orchestrate(
                 // raw inspection prevents its legacy normalization from
                 // erasing malformed `tests` fields at the objective gate.
                 loadPrd(config.prdPath)
-                const plan = createVerifyPlan(
-                    cwd,
-                    readAuthoritativeVerifyPlanOptions(config.prdPath),
-                )
+                const verifyOptions = readAuthoritativeVerifyPlanOptions(config.prdPath)
+                if (verifyOptions.notStartedStoryIds.length > 0) {
+                    process.stderr.write(
+                        `[orchestrate] declared tests of ${verifyOptions.notStartedStoryIds.join(", ")} are not requirements: the run never started those stories\n`,
+                    )
+                }
+                const plan = createVerifyPlan(cwd, verifyOptions)
                 if (plan.declaredBudget) {
                     for (const line of formatDeclaredBudgetEvidence(plan.declaredBudget)) {
                         process.stderr.write(`[orchestrate] ${line}\n`)
