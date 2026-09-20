@@ -65,7 +65,14 @@ let token = process.env.RUNNER_TOKEN
 const httpBase = canonicalControlHttpOrigin(url)
 const credsPath = join(homedir(), ".baro", "credentials.json")
 
-const VERSION = "0.74.12"
+// Stamped by tsup from baro-ai's package.json; under tsx there is no stamp and
+// no published version to compare against, so the update check stays off.
+declare const __BARO_PACKAGE_VERSION__: string | undefined
+const VERSION = typeof __BARO_PACKAGE_VERSION__ === "string" ? __BARO_PACKAGE_VERSION__ : "0.0.0-dev"
+export const RUNNER_VERSION = VERSION
+// A hosted worker (`--once`) runs an image that already pins its version; a
+// dev checkout has nothing to update to.
+const selfUpdateEnabled = VERSION !== "0.0.0-dev" && process.env.BARO_RUN_ONCE !== "1" && process.env.BARO_NO_SELF_UPDATE !== "1"
 export const RUNNER_PROTOCOL_VERSION = 2
 export const RUNNER_PROTOCOL_FEATURES = Object.freeze([
     "run_scoped_commands",
@@ -1266,7 +1273,7 @@ async function main() {
     // not the cache — starts are rare enough that one npm hit is fine. BARO_UPDATED
     // marks the post-update re-exec: skip the check so a bad publish that still
     // reports an old version can't loop update→restart forever.
-    if (process.env.BARO_UPDATED !== "1") {
+    if (selfUpdateEnabled && process.env.BARO_UPDATED !== "1") {
         try {
             const latest = await getLatest(true)
             if (latest && semverLt(VERSION, latest)) {
@@ -1287,7 +1294,7 @@ async function main() {
     }
     // A service stays up for weeks; recheck every 6h and restart into updates
     // (launchd/systemd/schtasks relaunch it) — but never yank a machine mid-run.
-    if (isService) {
+    if (isService && selfUpdateEnabled) {
         setInterval(() => {
             void (async () => {
                 try {

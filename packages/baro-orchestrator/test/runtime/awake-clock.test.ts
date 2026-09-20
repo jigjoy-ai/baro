@@ -4,6 +4,7 @@ import { describe, it } from "node:test"
 import {
     AWAKE_SPLIT_MAX_DELAY_MS,
     SUSPENSION_GAP_THRESHOLD_MS,
+    TIMER_LAG_GAP_THRESHOLD_MS,
     createAwakeDeadline,
     createFakeAwakeClock,
     type AwakeClock,
@@ -247,5 +248,62 @@ describe("createAwakeDeadline", () => {
         clock.advance(5_000)
         clock.runPending()
         assert.equal(expiries.length, 1)
+    })
+})
+
+describe("awake clock where the monotonic clock runs through a suspend (macOS libuv)", () => {
+    const mac = () =>
+        createFakeAwakeClock({ startWallMs: START_WALL_MS, monotonicRunsThroughSuspend: true })
+
+    it("(e) drift alone sees nothing, so a bare sample() absorbs nothing", () => {
+        const clock = mac()
+        clock.suspend(HOUR_MS)
+        assert.equal(clock.sample(), null)
+        assert.equal(clock.absorbedGapMs(), 0)
+    })
+
+    it("(f) a deadline survives a five-hour lid-closed sleep because its hop fires late", () => {
+        const clock = mac()
+        let expired = 0
+        const deadline = createAwakeDeadline({
+            budget: "harness-liveness",
+            timeoutMs: 10 * 60_000,
+            onExpired: () => {
+                expired += 1
+            },
+            clock,
+        })
+        clock.advance(1_000)
+        clock.suspend(5 * HOUR_MS)
+
+        assert.equal(expired, 0)
+        assert.ok(clock.absorbedGapMs() >= 5 * HOUR_MS - AWAKE_SPLIT_MAX_DELAY_MS)
+        assert.ok(clock.absorbedGapMs() <= 5 * HOUR_MS)
+        assert.ok(deadline.awakeRemainingMs() >= 10 * 60_000 - 1_000 - AWAKE_SPLIT_MAX_DELAY_MS)
+        assertNeverAheadOfWall(clock, 0)
+
+        clock.advance(10 * 60_000)
+        assert.equal(expired, 1)
+        deadline.close()
+    })
+
+    it("(g) two hops firing on the same wake count the sleep once", () => {
+        const clock = mac()
+        const a = createAwakeDeadline({ budget: "verification-gate", timeoutMs: HOUR_MS, onExpired: () => {}, clock })
+        const b = createAwakeDeadline({ budget: "goal-review", timeoutMs: HOUR_MS, onExpired: () => {}, clock })
+        clock.advance(500)
+        clock.suspend(2 * HOUR_MS)
+        assert.ok(clock.absorbedGapMs() <= 2 * HOUR_MS)
+        assert.ok(clock.absorbedGapMs() >= 2 * HOUR_MS - AWAKE_SPLIT_MAX_DELAY_MS)
+        a.close()
+        b.close()
+    })
+
+    it("(h) a hop that is merely late by a busy loop absorbs nothing", () => {
+        const clock = mac()
+        const deadline = createAwakeDeadline({ budget: "cpu-activity", timeoutMs: HOUR_MS, onExpired: () => {}, clock })
+        clock.advance(AWAKE_SPLIT_MAX_DELAY_MS + TIMER_LAG_GAP_THRESHOLD_MS - 1)
+        assert.equal(clock.absorbedGapMs(), 0)
+        deadline.close()
     })
 })

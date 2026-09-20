@@ -33,6 +33,7 @@ pub fn locate_script(
             let sibling = parent.join(bundle_name);
             if sibling.exists() {
                 check_staged_dependency_link(parent)?;
+                check_staged_bundle_version(parent, env!("CARGO_PKG_VERSION"))?;
                 return Ok(ScriptEntry::NodeJs(sibling));
             }
         }
@@ -88,6 +89,47 @@ pub fn check_staged_dependency_link(staged_dir: &Path) -> Result<(), String> {
         link.display(),
         target.display(),
     ))
+}
+
+/// postinstall writes this next to the bundles it stages.
+pub const BUNDLE_VERSION_FILE: &str = "bundle-version.json";
+
+/// A binary that self-updated, or an install whose postinstall could not
+/// write into this directory, leaves bundles from another release beside the
+/// binary; the host then runs an orchestrator it does not match (#176). An
+/// absent stamp is tolerated (installs that predate it, dev copies); a
+/// disagreeing one is not.
+pub fn check_staged_bundle_version(staged_dir: &Path, binary_version: &str) -> Result<(), String> {
+    let path = staged_dir.join(BUNDLE_VERSION_FILE);
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let Some(staged) = staged_bundle_version(&raw) else {
+        return Ok(());
+    };
+    if staged == binary_version {
+        return Ok(());
+    }
+    Err(format!(
+        "the orchestrator bundles in {} are from baro-ai {} but this binary is {}. \
+         Re-run `npm install -g baro-ai@{}` so postinstall restages them, or remove \
+         the stale copy; running mismatched halves silently reverts fixes.",
+        staged_dir.display(),
+        staged,
+        binary_version,
+        binary_version,
+    ))
+}
+
+fn staged_bundle_version(raw: &str) -> Option<String> {
+    // {"version":"0.116.0",...}: a full JSON parser is not worth a dependency here.
+    let key = "\"version\"";
+    let start = raw.find(key)? + key.len();
+    let rest = raw[start..].trim_start().strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let version = rest[..end].trim();
+    (!version.is_empty()).then(|| version.to_string())
 }
 
 /// Walk upward from the running binary (fallback: `cwd`) to the first
@@ -149,5 +191,33 @@ mod tests {
     fn no_link_at_all_is_not_a_failure() {
         let dir = tempfile::tempdir().unwrap();
         assert!(check_staged_dependency_link(dir.path()).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod bundle_version_tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_stamp_postinstall_writes() {
+        let raw = "{\"version\":\"0.116.0\",\"stagedAt\":\"2026-09-20T13:00:00.000Z\"}\n";
+        assert_eq!(staged_bundle_version(raw).as_deref(), Some("0.116.0"));
+        assert_eq!(staged_bundle_version("{}"), None);
+        assert_eq!(staged_bundle_version("{\"version\": \"\"}"), None);
+    }
+
+    #[test]
+    fn mismatched_bundles_are_refused_and_missing_stamp_is_tolerated() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(check_staged_bundle_version(dir.path(), "0.116.0").is_ok());
+        std::fs::write(
+            dir.path().join(BUNDLE_VERSION_FILE),
+            "{\"version\":\"0.116.0\"}",
+        )
+        .unwrap();
+        assert!(check_staged_bundle_version(dir.path(), "0.116.0").is_ok());
+        let err = check_staged_bundle_version(dir.path(), "0.117.0").unwrap_err();
+        assert!(err.contains("0.116.0") && err.contains("0.117.0"), "{err}");
+        assert!(err.contains("npm install -g baro-ai@0.117.0"), "{err}");
     }
 }

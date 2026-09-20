@@ -1,9 +1,13 @@
 /**
- * Wall-clock budgets must not count the time a laptop spent asleep. Comparing
- * a wall reading against a monotonic one exposes that gap: only wall time
- * advances across a suspend, so the difference between the two deltas is the
- * sleep. Absorbed gaps are subtracted from every derived deadline, which can
- * only push an expiry later in wall time, never earlier.
+ * Wall-clock budgets must not count the time a laptop spent asleep. Two signals
+ * expose a suspend, and the larger one wins:
+ *  - drift: only wall time advances across a suspend on Linux, so the wall delta
+ *    minus the monotonic delta is the sleep;
+ *  - timer lag: on macOS Node's monotonic clock (libuv mach_continuous_time)
+ *    keeps running while the machine sleeps, so drift stays zero. A timer hop
+ *    that fires far later than it was armed is the only trace left.
+ * Absorbed gaps are subtracted from every derived deadline, which can only push
+ * an expiry later in wall time, never earlier.
  *
  * Imports nothing from this repository so any module may depend on it.
  */
@@ -11,6 +15,10 @@
 import { performance } from "node:perf_hooks"
 
 export const SUSPENSION_GAP_THRESHOLD_MS = 2_000
+
+/** A hop this late was not a busy event loop; it slept. Generous enough that a
+ *  synchronous git call cannot fake a suspend. */
+export const TIMER_LAG_GAP_THRESHOLD_MS = 15_000
 
 /** Deadlines are split into hops so each fire re-checks the clock instead of
  *  trusting a delay that a suspend may have silently absorbed. */
@@ -67,21 +75,36 @@ function createClock(time: TimeSource, timers: TimerBackend): AwakeClock {
     let absorbedMs = 0
     const listeners = new Set<(gap: SuspensionGap) => void>()
 
-    const sample = (): SuspensionGap | null => {
-        const wallMs = time.wallMs()
-        const monotonicMs = time.monotonicMs()
-        const drift = wallMs - lastWallMs - (monotonicMs - lastMonotonicMs)
-        lastWallMs = wallMs
-        lastMonotonicMs = monotonicMs
-        if (drift < SUSPENSION_GAP_THRESHOLD_MS) return null
-        // performance.now() is fractional; keep the absorbed total an integer
-        // so awake timestamps stay in the same shape as Date.now().
-        const gapMs = Math.round(drift)
+    const absorb = (gapMs: number, wallMs: number): SuspensionGap => {
         absorbedMs += gapMs
         const gap: SuspensionGap = { gapMs, detectedAtWallMs: wallMs }
         for (const listener of [...listeners]) listener(gap)
         return gap
     }
+
+    // `overdueMs` is how late a timer fired past its armed delay; sample()
+    // itself has no timer and passes 0.
+    const take = (overdueMs: number): SuspensionGap | null => {
+        const wallMs = time.wallMs()
+        const monotonicMs = time.monotonicMs()
+        const unaccounted = wallMs - lastWallMs
+        const drift = unaccounted - (monotonicMs - lastMonotonicMs)
+        lastWallMs = wallMs
+        lastMonotonicMs = monotonicMs
+        const byDrift = drift >= SUSPENSION_GAP_THRESHOLD_MS ? drift : 0
+        const byLag = overdueMs >= TIMER_LAG_GAP_THRESHOLD_MS ? overdueMs : 0
+        // Both signals describe the same sleep; the wall time since the last
+        // sample bounds it so two hops firing on the same wake cannot count
+        // the gap twice.
+        // Date.now() truncates and performance.now() is fractional, so a
+        // suspend of S ms measures anywhere in (S-1, S+1). Round up: naming a
+        // sleep one millisecond short made the absorbed gap flake below the
+        // suspend it came from, and an extra millisecond only defers a deadline.
+        const gapMs = Math.min(unaccounted, Math.ceil(Math.max(byDrift, byLag)))
+        if (gapMs <= 0) return null
+        return absorb(gapMs, wallMs)
+    }
+    const sample = (): SuspensionGap | null => take(0)
 
     return {
         wallNow: () => time.wallMs(),
@@ -99,7 +122,13 @@ function createClock(time: TimeSource, timers: TimerBackend): AwakeClock {
                 listeners.delete(listener)
             }
         },
-        setTimeout: (callback, ms) => timers.setTimeout(callback, ms),
+        setTimeout: (callback, ms) => {
+            const armedWallMs = time.wallMs()
+            return timers.setTimeout(() => {
+                take(time.wallMs() - armedWallMs - ms)
+                callback()
+            }, ms)
+        },
         clearTimeout: (handle) => timers.clearTimeout(handle),
     }
 }
@@ -121,7 +150,8 @@ export function sharedAwakeClock(): AwakeClock {
 export interface FakeAwakeClock extends AwakeClock {
     /** Moves wall and monotonic together: elapsed awake time, no gap. */
     advance(ms: number): void
-    /** Moves wall only: the next sample() sees a suspension gap. */
+    /** A suspend. Moves wall only, or both when the fake models a platform
+     *  whose monotonic clock runs through sleep (macOS). */
     suspend(ms: number): void
     runPending(): void
     pendingDelays(): readonly number[]
@@ -130,7 +160,7 @@ export interface FakeAwakeClock extends AwakeClock {
 const DEFAULT_FAKE_START_WALL_MS = 1_700_000_000_000
 
 export function createFakeAwakeClock(
-    options: { startWallMs?: number } = {},
+    options: { startWallMs?: number; monotonicRunsThroughSuspend?: boolean } = {},
 ): FakeAwakeClock {
     let wallMs = options.startWallMs ?? DEFAULT_FAKE_START_WALL_MS
     let monotonicMs = 0
@@ -186,15 +216,32 @@ export function createFakeAwakeClock(
         },
     )
 
+    // Awake time passes the way it does on a running machine: every timer
+    // fires at its due instant, not in one late batch at the end of the jump.
+    // Only suspend() may leave timers overdue, because that is what a sleep does.
+    const advance = (ms: number): void => {
+        const targetWallMs = wallMs + ms
+        for (;;) {
+            const next = [...pending.values()]
+                .filter((timer) => timer.dueWallMs <= targetWallMs)
+                .sort((a, b) => a.dueWallMs - b.dueWallMs || a.id - b.id)[0]
+            if (next === undefined) break
+            const step = Math.max(0, next.dueWallMs - wallMs)
+            wallMs += step
+            monotonicMs += step
+            drain()
+        }
+        const rest = targetWallMs - wallMs
+        wallMs += rest
+        monotonicMs += rest
+    }
+
     return {
         ...clock,
-        advance: (ms) => {
-            wallMs += ms
-            monotonicMs += ms
-            drain()
-        },
+        advance,
         suspend: (ms) => {
             wallMs += ms
+            if (options.monotonicRunsThroughSuspend) monotonicMs += ms
             drain()
         },
         runPending: () => drain(),

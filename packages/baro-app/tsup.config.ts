@@ -1,4 +1,11 @@
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { defineConfig } from "tsup"
+
+// Stamped into every bundle so a runner or host can compare itself with the
+// package it shipped in; a hardcoded constant drifted 40 releases behind (#171).
+// tsup runs from the package directory.
+const PACKAGE_VERSION = (JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { version: string }).version
 
 /**
  * Bundles shipped in baro-ai's dist/ and spawned by the Rust runners
@@ -36,6 +43,7 @@ const sharedBundleConfig = {
     ],
     clean: false,
     sourcemap: true,
+    define: { __BARO_PACKAGE_VERSION__: JSON.stringify(PACKAGE_VERSION) },
     // Some transitive CJS deps call require() at load time (google-auth-library
     // via @mozaik-ai/core). esbuild's __require helper throws "Dynamic require
     // not supported" unless a real `require` is in scope — createRequire in
