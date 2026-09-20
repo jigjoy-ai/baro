@@ -2,15 +2,18 @@
  * Where a verification command actually runs, and how long the one retry waits.
  *
  * A spec cwd captured before the merge can name a story worktree that
- * `git worktree remove` has since deleted. Retrying against an absent path
- * only burns the budget, so resolution happens once, here, and the caller
- * treats a missing directory as terminal.
+ * `git worktree remove` has since deleted. Resolution therefore happens at
+ * spawn time, not when the plan was built, and the caller treats a missing
+ * directory as terminal rather than retrying against an absent path.
  */
 
 import { existsSync } from "node:fs"
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 
-import { canonicalPath } from "../integration/integration-worktree.js"
+import {
+    canonicalPath,
+    INTEGRATION_WORKTREE_DIRNAME,
+} from "../integration/integration-worktree.js"
 import { pathAliases } from "../runtime/worktree-path.js"
 
 export const RETRY_BACKOFF_MS = 2000
@@ -39,6 +42,38 @@ function siblingWorktreeRoot(runCwd: string, candidate: string): string | null {
     if (at < 0 || parts.length < at + 3) return null
     const root = parts.slice(0, at + 3).join(sep)
     return sameDirectory(dirname(root), dirname(runCwd)) ? root : null
+}
+
+/** Re-read at spawn time, so a root removed since planning is never reused. */
+export type VerifyCwdResolver = () => string
+
+/**
+ * The run's integration worktree, falling back to the host checkout once it is
+ * gone. Verification must never land in a story worktree: those are removed at
+ * merge, while the host checkout outlives every one of them.
+ */
+export function integrationCwdResolver(
+    integrationRoot: string,
+    repoRoot: string,
+): VerifyCwdResolver {
+    return () => (existsSync(integrationRoot) ? integrationRoot : repoRoot)
+}
+
+/**
+ * The root a command spawns in, re-read on every attempt. Absent an explicit
+ * resolver, only the run's integration worktree gets the host-checkout
+ * fallback: a story gate whose own worktree disappeared must fail rather than
+ * quietly re-run against the host tree and grade the wrong code.
+ */
+export function spawnRunCwd(
+    cwd: string,
+    hostRepoRoot: string,
+    resolveRunCwd?: VerifyCwdResolver,
+): string {
+    if (resolveRunCwd) return resolveRunCwd()
+    return basename(resolve(cwd)) === INTEGRATION_WORKTREE_DIRNAME
+        ? integrationCwdResolver(cwd, hostRepoRoot)()
+        : cwd
 }
 
 export function resolveCommandCwd(
